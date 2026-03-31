@@ -1,0 +1,587 @@
+"""SQLite episodic store for anneal-memory.
+
+The episodic store is the substrate layer — fast, indexed, append-heavy.
+It stores typed episodes and serves as citation evidence for graduation.
+The continuity file (markdown) is the human-readable layer.
+
+Zero dependencies beyond Python stdlib.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from .types import Episode, EpisodeType, RecallResult, StoreStatus, Tombstone
+
+# Schema version — increment on breaking changes
+_SCHEMA_VERSION = 1
+
+_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS episodes (
+    id TEXT PRIMARY KEY,
+    timestamp TEXT NOT NULL,
+    type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'agent',
+    session_id TEXT,
+    metadata TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_episodes_timestamp ON episodes(timestamp);
+CREATE INDEX IF NOT EXISTS idx_episodes_type ON episodes(type);
+CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
+CREATE INDEX IF NOT EXISTS idx_episodes_source ON episodes(source);
+
+CREATE TABLE IF NOT EXISTS tombstones (
+    id TEXT PRIMARY KEY,
+    timestamp TEXT NOT NULL,
+    type TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    pruned_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS wraps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wrapped_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    episodes_compressed INTEGER,
+    graduations_validated INTEGER DEFAULT 0,
+    graduations_demoted INTEGER DEFAULT 0,
+    citation_reuse_max INTEGER DEFAULT 0,
+    continuity_chars INTEGER,
+    patterns_extracted INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"""
+
+_DEFAULT_METADATA = {
+    "format_version": str(_SCHEMA_VERSION),
+    "project_name": "Agent",
+    "wrap_started_at": "",
+    "citations_seen": "false",
+}
+
+
+def _now_utc() -> str:
+    """Current time as ISO 8601 UTC string."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _episode_id(content: str, timestamp: str) -> str:
+    """Generate 8-char hex ID from content + timestamp."""
+    raw = f"{content}{timestamp}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:8]
+
+
+def _content_hash(content: str) -> str:
+    """SHA256 hash of content for tombstones."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+class Store:
+    """SQLite-backed episodic store.
+
+    Args:
+        path: Path to the SQLite database file. Created if it doesn't exist.
+        retention_days: Optional. Prune episodes older than N days. None = keep all.
+        keep_tombstones: When pruning, preserve audit trail (ID, timestamp, hash). Default True.
+        project_name: Name for the continuity file header. Default "Agent".
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        retention_days: int | None = None,
+        keep_tombstones: bool = True,
+        project_name: str | None = None,
+    ) -> None:
+        self._path = Path(path)
+        self._retention_days = retention_days
+        self._keep_tombstones = keep_tombstones
+        self._project_name = project_name or "Agent"
+
+        # Ensure parent directory exists
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+
+        self._conn = sqlite3.connect(str(self._path))
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA foreign_keys=ON")
+
+        self._init_schema()
+
+    def _init_schema(self) -> None:
+        """Initialize database schema and default metadata."""
+        self._conn.executescript(_SCHEMA_SQL)
+
+        # Insert default metadata (ignore if already exists)
+        defaults = {**_DEFAULT_METADATA, "project_name": self._project_name}
+        for key, value in defaults.items():
+            self._conn.execute(
+                "INSERT OR IGNORE INTO metadata (key, value) VALUES (?, ?)",
+                (key, value),
+            )
+        self._conn.commit()
+
+    # -- Core API --
+
+    def record(
+        self,
+        content: str,
+        type: EpisodeType | str,
+        source: str = "agent",
+        metadata: dict[str, Any] | None = None,
+        timestamp: str | None = None,
+    ) -> Episode:
+        """Record a new episode.
+
+        Args:
+            content: The episode content.
+            type: Episode type (EpisodeType enum or string).
+            source: Agent/source attribution.
+            metadata: Optional JSON-serializable metadata.
+            timestamp: Optional ISO 8601 UTC timestamp. Defaults to now.
+
+        Returns:
+            The recorded Episode.
+        """
+        if isinstance(type, str):
+            type = EpisodeType(type)
+
+        ts = timestamp or _now_utc()
+        ep_id = _episode_id(content, ts)
+        session_id = self._current_session_id()
+        meta_json = json.dumps(metadata) if metadata else None
+
+        self._conn.execute(
+            """INSERT INTO episodes (id, timestamp, type, content, source, session_id, metadata)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (ep_id, ts, type.value, content, source, session_id, meta_json),
+        )
+        self._conn.commit()
+
+        return Episode(
+            id=ep_id,
+            timestamp=ts,
+            type=type,
+            content=content,
+            source=source,
+            session_id=session_id,
+            metadata=metadata,
+        )
+
+    def get(self, episode_id: str) -> Episode | None:
+        """Get a single episode by ID.
+
+        Args:
+            episode_id: The 8-char hex episode ID.
+
+        Returns:
+            The Episode, or None if not found.
+        """
+        row = self._conn.execute(
+            "SELECT * FROM episodes WHERE id = ?", (episode_id,)
+        ).fetchone()
+        if not row:
+            return None
+        return self._row_to_episode(row)
+
+    def recall(
+        self,
+        since: str | None = None,
+        until: str | None = None,
+        type: EpisodeType | str | None = None,
+        source: str | None = None,
+        keyword: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> RecallResult:
+        """Query episodes with filters.
+
+        Args:
+            since: ISO 8601 timestamp — episodes after this time.
+            until: ISO 8601 timestamp — episodes before this time.
+            type: Filter by episode type.
+            source: Filter by source/agent.
+            keyword: Search content (LIKE %keyword%).
+            limit: Max episodes to return.
+            offset: Skip first N matching episodes.
+
+        Returns:
+            RecallResult with matching episodes and total count.
+        """
+        conditions: list[str] = []
+        params: list[Any] = []
+
+        if since:
+            conditions.append("timestamp >= ?")
+            params.append(since)
+        if until:
+            conditions.append("timestamp <= ?")
+            params.append(until)
+        if type:
+            if isinstance(type, str):
+                type = EpisodeType(type)
+            conditions.append("type = ?")
+            params.append(type.value)
+        if source:
+            conditions.append("source = ?")
+            params.append(source)
+        if keyword:
+            conditions.append("content LIKE ?")
+            params.append(f"%{keyword}%")
+
+        where = " AND ".join(conditions) if conditions else "1=1"
+
+        # Get total count
+        count_row = self._conn.execute(
+            f"SELECT COUNT(*) FROM episodes WHERE {where}", params
+        ).fetchone()
+        total = count_row[0]
+
+        # Get episodes
+        rows = self._conn.execute(
+            f"""SELECT * FROM episodes WHERE {where}
+                ORDER BY timestamp DESC LIMIT ? OFFSET ?""",
+            [*params, limit, offset],
+        ).fetchall()
+
+        episodes = [self._row_to_episode(row) for row in rows]
+
+        return RecallResult(
+            episodes=episodes,
+            total_matching=total,
+            query_params={
+                k: v
+                for k, v in {
+                    "since": since,
+                    "until": until,
+                    "type": type.value if isinstance(type, EpisodeType) else type,
+                    "source": source,
+                    "keyword": keyword,
+                    "limit": limit,
+                    "offset": offset,
+                }.items()
+                if v is not None
+            },
+        )
+
+    def episodes_since_wrap(self) -> list[Episode]:
+        """Get all episodes since the last completed wrap.
+
+        This is the compression window — what the LLM needs to see
+        when producing the next continuity file.
+
+        Uses session IDs (not timestamps) for precision — avoids
+        same-second boundary issues.
+        """
+        last_wrap = self._conn.execute(
+            "SELECT id FROM wraps ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
+        if last_wrap:
+            # Episodes with session_id > last wrap's ID are post-wrap.
+            # Also include any with NULL session_id (shouldn't happen, but safe).
+            rows = self._conn.execute(
+                """SELECT * FROM episodes
+                   WHERE CAST(session_id AS INTEGER) > ? OR session_id IS NULL
+                   ORDER BY timestamp ASC""",
+                (last_wrap["id"],),
+            ).fetchall()
+        else:
+            # No wraps yet — all episodes are in the compression window
+            rows = self._conn.execute(
+                "SELECT * FROM episodes ORDER BY timestamp ASC"
+            ).fetchall()
+
+        return [self._row_to_episode(row) for row in rows]
+
+    def status(self) -> StoreStatus:
+        """Get store status snapshot."""
+        total = self._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+        since_wrap = len(self.episodes_since_wrap())
+        total_wraps = self._conn.execute("SELECT COUNT(*) FROM wraps").fetchone()[0]
+        tombstone_count = self._conn.execute(
+            "SELECT COUNT(*) FROM tombstones"
+        ).fetchone()[0]
+
+        last_wrap_row = self._conn.execute(
+            "SELECT wrapped_at FROM wraps ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        last_wrap_at = last_wrap_row["wrapped_at"] if last_wrap_row else None
+
+        wrap_started = self._get_metadata("wrap_started_at")
+        wrap_in_progress = bool(wrap_started)
+
+        # Episodes by type
+        type_rows = self._conn.execute(
+            "SELECT type, COUNT(*) as count FROM episodes GROUP BY type"
+        ).fetchall()
+        episodes_by_type = {row["type"]: row["count"] for row in type_rows}
+
+        # Continuity file size
+        continuity_path = self.continuity_path
+        continuity_chars = None
+        if continuity_path.exists():
+            continuity_chars = len(continuity_path.read_text(encoding="utf-8"))
+
+        return StoreStatus(
+            total_episodes=total,
+            episodes_since_wrap=since_wrap,
+            total_wraps=total_wraps,
+            last_wrap_at=last_wrap_at,
+            wrap_in_progress=wrap_in_progress,
+            tombstone_count=tombstone_count,
+            continuity_chars=continuity_chars,
+            episodes_by_type=episodes_by_type,
+        )
+
+    # -- Wrap lifecycle --
+
+    def wrap_started(self) -> None:
+        """Mark that a wrap has been initiated (prepare_wrap called)."""
+        self._set_metadata("wrap_started_at", _now_utc())
+
+    def wrap_completed(
+        self,
+        episodes_compressed: int,
+        continuity_chars: int,
+        graduations_validated: int = 0,
+        graduations_demoted: int = 0,
+        citation_reuse_max: int = 0,
+        patterns_extracted: int = 0,
+    ) -> None:
+        """Record a completed wrap and clear the in-progress flag."""
+        self._conn.execute(
+            """INSERT INTO wraps
+               (episodes_compressed, continuity_chars, graduations_validated,
+                graduations_demoted, citation_reuse_max, patterns_extracted)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                episodes_compressed,
+                continuity_chars,
+                graduations_validated,
+                graduations_demoted,
+                citation_reuse_max,
+                patterns_extracted,
+            ),
+        )
+        # Update session_id for episodes in this wrap cycle
+        last_wrap = self._conn.execute(
+            "SELECT id FROM wraps ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if last_wrap:
+            session_id = str(last_wrap["id"])
+            self._conn.execute(
+                "UPDATE episodes SET session_id = ? WHERE session_id IS NULL",
+                (session_id,),
+            )
+        self._set_metadata("wrap_started_at", "")
+        self._conn.commit()
+
+    # -- Pruning --
+
+    def prune(self, older_than_days: int | None = None) -> int:
+        """Prune old episodes, optionally creating tombstones.
+
+        Args:
+            older_than_days: Override retention_days for this call.
+                            Uses instance retention_days if None.
+
+        Returns:
+            Number of episodes pruned.
+        """
+        days = older_than_days or self._retention_days
+        if days is None:
+            return 0
+
+        cutoff = datetime.now(timezone.utc)
+        # Calculate cutoff by subtracting days
+        from datetime import timedelta
+
+        cutoff = (cutoff - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Find episodes to prune
+        rows = self._conn.execute(
+            "SELECT * FROM episodes WHERE timestamp < ?", (cutoff,)
+        ).fetchall()
+
+        if not rows:
+            return 0
+
+        pruned = 0
+        for row in rows:
+            if self._keep_tombstones:
+                self._conn.execute(
+                    """INSERT OR IGNORE INTO tombstones
+                       (id, timestamp, type, content_hash)
+                       VALUES (?, ?, ?, ?)""",
+                    (
+                        row["id"],
+                        row["timestamp"],
+                        row["type"],
+                        _content_hash(row["content"]),
+                    ),
+                )
+            self._conn.execute("DELETE FROM episodes WHERE id = ?", (row["id"],))
+            pruned += 1
+
+        self._conn.commit()
+        return pruned
+
+    # -- Continuity file I/O --
+
+    @property
+    def continuity_path(self) -> Path:
+        """Path to the continuity sidecar file.
+
+        Pattern: ./memory.db -> ./memory.continuity.md
+        """
+        return self._path.parent / f"{self._path.stem}.continuity.md"
+
+    @property
+    def meta_path(self) -> Path:
+        """Path to the continuity metadata sidecar.
+
+        Pattern: ./memory.db -> ./memory.continuity.meta.json
+        """
+        return self._path.parent / f"{self._path.stem}.continuity.meta.json"
+
+    def load_continuity(self) -> str | None:
+        """Load the current continuity file.
+
+        Returns:
+            The continuity text, or None if no continuity file exists.
+        """
+        if not self.continuity_path.exists():
+            return None
+        return self.continuity_path.read_text(encoding="utf-8")
+
+    def save_continuity(self, text: str) -> str:
+        """Save continuity text to the sidecar file. Atomic write.
+
+        Returns:
+            The path where the file was saved.
+        """
+        path = self.continuity_path
+        tmp_path = path.with_suffix(".md.tmp")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            tmp_path.replace(path)
+        except Exception:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            raise
+        return str(path)
+
+    def load_meta(self) -> dict:
+        """Load continuity metadata from the JSON sidecar."""
+        defaults = {"sessions_produced": 0, "citations_seen": False, "format_version": 1}
+        if not self.meta_path.exists():
+            return defaults
+        try:
+            data = json.loads(self.meta_path.read_text(encoding="utf-8"))
+            return {**defaults, **data}
+        except (json.JSONDecodeError, OSError):
+            return defaults
+
+    def save_meta(self, meta: dict) -> str:
+        """Save continuity metadata. Atomic write."""
+        path = self.meta_path
+        tmp_path = path.with_suffix(".json.tmp")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2, sort_keys=True)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            tmp_path.replace(path)
+        except Exception:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            raise
+        return str(path)
+
+    # -- Properties --
+
+    @property
+    def path(self) -> Path:
+        """Path to the SQLite database."""
+        return self._path
+
+    @property
+    def project_name(self) -> str:
+        """Project name for continuity file headers."""
+        return self._project_name
+
+    # -- Internal helpers --
+
+    def _current_session_id(self) -> str | None:
+        """Get current session ID (last wrap ID + 1, or None if no wraps)."""
+        last_wrap = self._conn.execute(
+            "SELECT id FROM wraps ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if last_wrap:
+            return str(last_wrap["id"] + 1)
+        return None
+
+    def _get_metadata(self, key: str) -> str:
+        """Get a metadata value."""
+        row = self._conn.execute(
+            "SELECT value FROM metadata WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else ""
+
+    def _set_metadata(self, key: str, value: str) -> None:
+        """Set a metadata value."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        self._conn.commit()
+
+    @staticmethod
+    def _row_to_episode(row: sqlite3.Row) -> Episode:
+        """Convert a database row to an Episode."""
+        meta = None
+        if row["metadata"]:
+            try:
+                meta = json.loads(row["metadata"])
+            except json.JSONDecodeError:
+                pass
+        return Episode(
+            id=row["id"],
+            timestamp=row["timestamp"],
+            type=EpisodeType(row["type"]),
+            content=row["content"],
+            source=row["source"],
+            session_id=row["session_id"],
+            metadata=meta,
+        )
+
+    def close(self) -> None:
+        """Close the database connection."""
+        self._conn.close()
+
+    def __enter__(self) -> Store:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.close()

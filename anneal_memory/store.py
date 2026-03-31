@@ -13,11 +13,11 @@ import hashlib
 import json
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .types import Episode, EpisodeType, RecallResult, StoreStatus, Tombstone
+from .types import Episode, EpisodeType, RecallResult, StoreStatus, Tombstone, WrapResult
 
 # Schema version — increment on breaking changes
 _SCHEMA_VERSION = 1
@@ -73,13 +73,18 @@ _DEFAULT_METADATA = {
 
 
 def _now_utc() -> str:
-    """Current time as ISO 8601 UTC string."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """Current time as ISO 8601 UTC string with microsecond precision."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def _episode_id(content: str, timestamp: str) -> str:
-    """Generate 8-char hex ID from content + timestamp."""
-    raw = f"{content}{timestamp}".encode("utf-8")
+def _episode_id(content: str, timestamp: str, nonce: int = 0) -> str:
+    """Generate 8-char hex ID from content + timestamp + optional nonce.
+
+    Uses 8 hex chars (32 bits). Birthday collision expected around ~65k episodes.
+    The nonce parameter handles same-content-same-timestamp edge cases.
+    Microsecond-precision timestamps make natural collisions extremely unlikely.
+    """
+    raw = f"{content}{timestamp}{nonce}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:8]
 
 
@@ -90,6 +95,14 @@ def _content_hash(content: str) -> str:
 
 class Store:
     """SQLite-backed episodic store.
+
+    Thread safety: The underlying SQLite connection uses the default
+    ``check_same_thread=True``. All access must happen from the thread
+    that created the Store instance. For async or multi-threaded MCP
+    servers, create a Store per thread or add external synchronization.
+
+    Use as a context manager (``with Store(...) as s:``) to ensure the
+    connection is closed properly.
 
     Args:
         path: Path to the SQLite database file. Created if it doesn't exist.
@@ -114,11 +127,14 @@ class Store:
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
         self._conn = sqlite3.connect(str(self._path))
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
-
-        self._init_schema()
+        try:
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA foreign_keys=ON")
+            self._init_schema()
+        except Exception:
+            self._conn.close()
+            raise
 
     def _init_schema(self) -> None:
         """Initialize database schema and default metadata."""
@@ -138,7 +154,7 @@ class Store:
     def record(
         self,
         content: str,
-        type: EpisodeType | str,
+        episode_type: EpisodeType | str,
         source: str = "agent",
         metadata: dict[str, Any] | None = None,
         timestamp: str | None = None,
@@ -147,7 +163,7 @@ class Store:
 
         Args:
             content: The episode content.
-            type: Episode type (EpisodeType enum or string).
+            episode_type: Episode type (EpisodeType enum or string).
             source: Agent/source attribution.
             metadata: Optional JSON-serializable metadata.
             timestamp: Optional ISO 8601 UTC timestamp. Defaults to now.
@@ -155,25 +171,34 @@ class Store:
         Returns:
             The recorded Episode.
         """
-        if isinstance(type, str):
-            type = EpisodeType(type)
+        if isinstance(episode_type, str):
+            episode_type = EpisodeType(episode_type)
 
         ts = timestamp or _now_utc()
-        ep_id = _episode_id(content, ts)
         session_id = self._current_session_id()
         meta_json = json.dumps(metadata) if metadata else None
 
-        self._conn.execute(
-            """INSERT INTO episodes (id, timestamp, type, content, source, session_id, metadata)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (ep_id, ts, type.value, content, source, session_id, meta_json),
-        )
-        self._conn.commit()
+        # Retry with incrementing nonce on ID collision (birthday or duplicate content)
+        max_retries = 3
+        for nonce in range(max_retries):
+            ep_id = _episode_id(content, ts, nonce)
+            try:
+                self._conn.execute(
+                    """INSERT INTO episodes (id, timestamp, type, content, source, session_id, metadata)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (ep_id, ts, episode_type.value, content, source, session_id, meta_json),
+                )
+                self._conn.commit()
+                break
+            except sqlite3.IntegrityError:
+                if nonce == max_retries - 1:
+                    raise
+                continue
 
         return Episode(
             id=ep_id,
             timestamp=ts,
-            type=type,
+            type=episode_type,
             content=content,
             source=source,
             session_id=session_id,
@@ -196,11 +221,41 @@ class Store:
             return None
         return self._row_to_episode(row)
 
+    def delete(self, episode_id: str) -> bool:
+        """Delete a single episode by ID.
+
+        For corrections, mistakes, or privacy (right to erasure).
+        Optionally creates a tombstone if keep_tombstones is enabled.
+
+        Args:
+            episode_id: The 8-char hex episode ID.
+
+        Returns:
+            True if the episode was found and deleted, False if not found.
+        """
+        row = self._conn.execute(
+            "SELECT * FROM episodes WHERE id = ?", (episode_id,)
+        ).fetchone()
+        if not row:
+            return False
+
+        if self._keep_tombstones:
+            self._conn.execute(
+                """INSERT OR IGNORE INTO tombstones
+                   (id, timestamp, type, content_hash)
+                   VALUES (?, ?, ?, ?)""",
+                (row["id"], row["timestamp"], row["type"], _content_hash(row["content"])),
+            )
+
+        self._conn.execute("DELETE FROM episodes WHERE id = ?", (episode_id,))
+        self._conn.commit()
+        return True
+
     def recall(
         self,
         since: str | None = None,
         until: str | None = None,
-        type: EpisodeType | str | None = None,
+        episode_type: EpisodeType | str | None = None,
         source: str | None = None,
         keyword: str | None = None,
         limit: int = 100,
@@ -211,9 +266,9 @@ class Store:
         Args:
             since: ISO 8601 timestamp — episodes after this time.
             until: ISO 8601 timestamp — episodes before this time.
-            type: Filter by episode type.
+            episode_type: Filter by episode type.
             source: Filter by source/agent.
-            keyword: Search content (LIKE %keyword%).
+            keyword: Search content (LIKE %keyword%). Wildcards % and _ are escaped.
             limit: Max episodes to return.
             offset: Skip first N matching episodes.
 
@@ -229,17 +284,19 @@ class Store:
         if until:
             conditions.append("timestamp <= ?")
             params.append(until)
-        if type:
-            if isinstance(type, str):
-                type = EpisodeType(type)
+        if episode_type is not None:
+            if isinstance(episode_type, str):
+                episode_type = EpisodeType(episode_type)
             conditions.append("type = ?")
-            params.append(type.value)
+            params.append(episode_type.value)
         if source:
             conditions.append("source = ?")
             params.append(source)
         if keyword:
-            conditions.append("content LIKE ?")
-            params.append(f"%{keyword}%")
+            # Escape LIKE wildcards so % and _ are treated as literals
+            escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            conditions.append("content LIKE ? ESCAPE '\\'")
+            params.append(f"%{escaped}%")
 
         where = " AND ".join(conditions) if conditions else "1=1"
 
@@ -266,7 +323,7 @@ class Store:
                 for k, v in {
                     "since": since,
                     "until": until,
-                    "type": type.value if isinstance(type, EpisodeType) else type,
+                    "type": episode_type.value if isinstance(episode_type, EpisodeType) else episode_type,
                     "source": source,
                     "keyword": keyword,
                     "limit": limit,
@@ -309,7 +366,7 @@ class Store:
     def status(self) -> StoreStatus:
         """Get store status snapshot."""
         total = self._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
-        since_wrap = len(self.episodes_since_wrap())
+        since_wrap = self._count_episodes_since_wrap()
         total_wraps = self._conn.execute("SELECT COUNT(*) FROM wraps").fetchone()[0]
         tombstone_count = self._conn.execute(
             "SELECT COUNT(*) FROM tombstones"
@@ -360,8 +417,12 @@ class Store:
         graduations_demoted: int = 0,
         citation_reuse_max: int = 0,
         patterns_extracted: int = 0,
-    ) -> None:
-        """Record a completed wrap and clear the in-progress flag."""
+    ) -> WrapResult:
+        """Record a completed wrap and clear the in-progress flag.
+
+        Returns:
+            WrapResult with the wrap metrics.
+        """
         self._conn.execute(
             """INSERT INTO wraps
                (episodes_compressed, continuity_chars, graduations_validated,
@@ -389,6 +450,17 @@ class Store:
         self._set_metadata("wrap_started_at", "")
         self._conn.commit()
 
+        return WrapResult(
+            saved=True,
+            chars=continuity_chars,
+            section_sizes={},
+            graduations_validated=graduations_validated,
+            graduations_demoted=graduations_demoted,
+            citation_reuse_max=citation_reuse_max,
+            patterns_extracted=patterns_extracted,
+            episodes_compressed=episodes_compressed,
+        )
+
     # -- Pruning --
 
     def prune(self, older_than_days: int | None = None) -> int:
@@ -401,15 +473,13 @@ class Store:
         Returns:
             Number of episodes pruned.
         """
-        days = older_than_days or self._retention_days
+        days = older_than_days if older_than_days is not None else self._retention_days
         if days is None:
             return 0
 
-        cutoff = datetime.now(timezone.utc)
-        # Calculate cutoff by subtracting days
-        from datetime import timedelta
-
-        cutoff = (cutoff - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
 
         # Find episodes to prune
         rows = self._conn.execute(
@@ -533,6 +603,23 @@ class Store:
 
     # -- Internal helpers --
 
+    def _count_episodes_since_wrap(self) -> int:
+        """Count episodes since last wrap without loading them into memory."""
+        last_wrap = self._conn.execute(
+            "SELECT id FROM wraps ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
+        if last_wrap:
+            row = self._conn.execute(
+                """SELECT COUNT(*) FROM episodes
+                   WHERE CAST(session_id AS INTEGER) > ? OR session_id IS NULL""",
+                (last_wrap["id"],),
+            ).fetchone()
+        else:
+            row = self._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()
+
+        return row[0]
+
     def _current_session_id(self) -> str | None:
         """Get current session ID (last wrap ID + 1, or None if no wraps)."""
         last_wrap = self._conn.execute(
@@ -565,7 +652,11 @@ class Store:
             try:
                 meta = json.loads(row["metadata"])
             except json.JSONDecodeError:
-                pass
+                import sys
+                print(
+                    f"[anneal-memory] WARNING: corrupt metadata JSON for episode {row['id']}",
+                    file=sys.stderr,
+                )
         return Episode(
             id=row["id"],
             timestamp=row["timestamp"],

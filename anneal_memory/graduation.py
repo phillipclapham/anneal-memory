@@ -13,7 +13,7 @@ Zero dependencies beyond Python stdlib.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 # Matches graduated patterns (2x or 3x) WITH [evidence: <id> "explanation"] citations.
@@ -52,6 +52,8 @@ class GraduationResult:
     demoted: int  # Citations that failed -> demoted
     citation_reuse_max: int  # Max times any single node was cited
     bare_demoted: int  # Bare graduations demoted (no evidence tag)
+    citation_counts: dict[str, int] = field(default_factory=dict)  # ep_id -> times cited
+    gaming_suspects: list[str] = field(default_factory=list)  # IDs cited >= threshold
 
 
 @dataclass
@@ -136,15 +138,16 @@ def validate_graduations(
             # Check 1: at least one cited ID exists
             ids_valid = bool(cited_ids & valid_ids)
 
-            # Check 2: explanation references cited episode content
+            # Check 2: explanation references ANY cited episode's content
             explanation_valid = True
             if ids_valid and explanation and node_content_map:
-                matched_id = next(iter(cited_ids & valid_ids))
-                node_content = node_content_map.get(matched_id, "")
-                if node_content:
-                    explanation_valid = check_explanation_overlap(
-                        explanation, node_content
-                    )
+                # Check all valid cited IDs — pass if ANY has content overlap
+                explanation_valid = False
+                for cid in cited_ids & valid_ids:
+                    node_content = node_content_map.get(cid, "")
+                    if node_content and check_explanation_overlap(explanation, node_content):
+                        explanation_valid = True
+                        break
 
             if ids_valid and explanation_valid:
                 validated += 1
@@ -174,6 +177,7 @@ def validate_graduations(
         lines[i] = line.replace(old_marker, new_marker + " (needs-evidence)")
 
     reuse_max = max(citation_counts.values()) if citation_counts else 0
+    gaming_suspects = detect_citation_gaming(citation_counts)
 
     return GraduationResult(
         text="\n".join(lines),
@@ -181,6 +185,8 @@ def validate_graduations(
         demoted=demoted,
         citation_reuse_max=reuse_max,
         bare_demoted=bare_demoted,
+        citation_counts=dict(citation_counts),
+        gaming_suspects=gaming_suspects,
     )
 
 

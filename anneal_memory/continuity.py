@@ -17,6 +17,7 @@ Zero dependencies beyond Python stdlib.
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Any
 
 from .graduation import detect_stale_patterns
@@ -42,7 +43,7 @@ def validate_structure(text: str) -> bool:
     for line in text_lower.split("\n"):
         if line.startswith("##"):
             for section in _REQUIRED_SECTIONS:
-                if section in line:
+                if re.search(rf"\b{section}\b", line):
                     found.add(section)
     return found == _REQUIRED_SECTIONS
 
@@ -130,7 +131,6 @@ def prepare_wrap_package(
         Dict with keys: episodes, continuity, stale_patterns, instructions, today, max_chars
     """
     if today is None:
-        from datetime import date
         today = date.today().isoformat()
 
     # Format episodes for the agent

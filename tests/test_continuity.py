@@ -108,6 +108,23 @@ Some context.
 """
         assert validate_structure(text) is True
 
+    def test_substring_false_positive_rejected(self):
+        """A header like '## Interstate' should NOT match 'state'."""
+        text = """## Interstate Commerce
+Working.
+
+## Patterns
+Some patterns.
+
+## Decisions
+Some decisions.
+
+## Context
+Some context.
+"""
+        # Missing a real "## State" section — should fail
+        assert validate_structure(text) is False
+
 
 # -- measure_sections --
 

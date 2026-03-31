@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from anneal_memory.store import Store
-from anneal_memory.types import EpisodeType, StoreStatus
+from anneal_memory.types import EpisodeType, StoreStatus, WrapResult
 
 
 @pytest.fixture
@@ -172,13 +172,13 @@ class TestRecall:
         store.record("Obs 1", EpisodeType.OBSERVATION)
         store.record("Dec 1", EpisodeType.DECISION)
         store.record("Obs 2", EpisodeType.OBSERVATION)
-        result = store.recall(type=EpisodeType.OBSERVATION)
+        result = store.recall(episode_type=EpisodeType.OBSERVATION)
         assert result.total_matching == 2
         assert all(ep.type == EpisodeType.OBSERVATION for ep in result.episodes)
 
     def test_recall_by_string_type(self, store):
         store.record("Dec", EpisodeType.DECISION)
-        result = store.recall(type="decision")
+        result = store.recall(episode_type="decision")
         assert result.total_matching == 1
 
     def test_recall_by_source(self, store):
@@ -229,7 +229,7 @@ class TestRecall:
         store.record("DB observation", EpisodeType.OBSERVATION, source="agent")
         store.record("DB decision", EpisodeType.DECISION, source="agent")
         store.record("API observation", EpisodeType.OBSERVATION, source="daemon")
-        result = store.recall(type=EpisodeType.OBSERVATION, source="agent")
+        result = store.recall(episode_type=EpisodeType.OBSERVATION, source="agent")
         assert result.total_matching == 1
         assert result.episodes[0].content == "DB observation"
 
@@ -246,7 +246,7 @@ class TestRecall:
         assert result.episodes[1].content == "Old"
 
     def test_recall_query_params_captured(self, store):
-        result = store.recall(type=EpisodeType.DECISION, keyword="test", limit=5)
+        result = store.recall(episode_type=EpisodeType.DECISION, keyword="test", limit=5)
         assert result.query_params["type"] == "decision"
         assert result.query_params["keyword"] == "test"
         assert result.query_params["limit"] == 5
@@ -455,3 +455,104 @@ class TestStatus:
         status = store.status()
         assert status.total_wraps == 1
         assert status.last_wrap_at is not None
+
+
+# -- Delete --
+
+
+class TestDelete:
+    def test_delete_existing(self, store):
+        ep = store.record("Delete me", EpisodeType.OBSERVATION)
+        assert store.delete(ep.id) is True
+        assert store.get(ep.id) is None
+
+    def test_delete_nonexistent(self, store):
+        assert store.delete("00000000") is False
+
+    def test_delete_creates_tombstone(self, store):
+        ep = store.record("Tombstone test", EpisodeType.DECISION)
+        store.delete(ep.id)
+        row = store._conn.execute(
+            "SELECT * FROM tombstones WHERE id = ?", (ep.id,)
+        ).fetchone()
+        assert row is not None
+        assert row["type"] == "decision"
+
+    def test_delete_without_tombstone(self, tmp_db):
+        s = Store(tmp_db, keep_tombstones=False)
+        ep = s.record("No tombstone", EpisodeType.OBSERVATION)
+        s.delete(ep.id)
+        row = s._conn.execute(
+            "SELECT * FROM tombstones WHERE id = ?", (ep.id,)
+        ).fetchone()
+        assert row is None
+        s.close()
+
+    def test_delete_reduces_count(self, store):
+        store.record("One", EpisodeType.OBSERVATION)
+        ep2 = store.record("Two", EpisodeType.OBSERVATION)
+        store.delete(ep2.id)
+        assert store.status().total_episodes == 1
+
+
+# -- ID Collision Handling --
+
+
+class TestIDCollision:
+    def test_duplicate_content_same_timestamp_gets_different_id(self, store):
+        """Same content + same timestamp should get different IDs via nonce retry."""
+        ts = "2026-03-31T12:00:00.000000Z"
+        ep1 = store.record("Identical content", EpisodeType.OBSERVATION, timestamp=ts)
+        ep2 = store.record("Identical content", EpisodeType.OBSERVATION, timestamp=ts)
+        assert ep1.id != ep2.id
+        assert store.get(ep1.id) is not None
+        assert store.get(ep2.id) is not None
+
+
+# -- Prune Edge Cases --
+
+
+class TestPruneEdgeCases:
+    def test_prune_zero_days(self, store):
+        """prune(older_than_days=0) should prune everything."""
+        store.record("Recent", EpisodeType.OBSERVATION)
+        pruned = store.prune(older_than_days=0)
+        assert pruned == 1
+        assert store.status().total_episodes == 0
+
+
+# -- Wrap Returns WrapResult --
+
+
+class TestWrapResult:
+    def test_wrap_completed_returns_result(self, store):
+        result = store.wrap_completed(
+            episodes_compressed=3,
+            continuity_chars=2000,
+            graduations_validated=2,
+            graduations_demoted=1,
+        )
+        assert isinstance(result, WrapResult)
+        assert result.saved is True
+        assert result.chars == 2000
+        assert result.episodes_compressed == 3
+        assert result.graduations_validated == 2
+        assert result.graduations_demoted == 1
+
+
+# -- LIKE Wildcard Escaping --
+
+
+class TestKeywordEscaping:
+    def test_percent_in_keyword(self, store):
+        store.record("100% complete", EpisodeType.OBSERVATION)
+        store.record("Not matching", EpisodeType.OBSERVATION)
+        result = store.recall(keyword="100%")
+        assert result.total_matching == 1
+        assert "100%" in result.episodes[0].content
+
+    def test_underscore_in_keyword(self, store):
+        store.record("file_name.py", EpisodeType.OBSERVATION)
+        store.record("filename.py", EpisodeType.OBSERVATION)
+        result = store.recall(keyword="file_name")
+        assert result.total_matching == 1

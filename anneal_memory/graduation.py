@@ -13,6 +13,7 @@ Zero dependencies beyond Python stdlib.
 from __future__ import annotations
 
 import re
+from datetime import datetime as _datetime
 from dataclasses import dataclass, field
 
 
@@ -193,16 +194,19 @@ def validate_graduations(
 def check_explanation_overlap(explanation: str, episode_content: str) -> bool:
     """Check if an explanation references actual content from the cited episode.
 
-    Uses word overlap (excluding stop words). At least one meaningful word
-    from the explanation must appear in the episode content. Prevents
-    generic explanations like "confirms pattern" while allowing paraphrasing.
+    Uses word overlap (excluding stop words). At least 2 meaningful words
+    from the explanation must appear in the episode content. Single-word
+    overlap is too easy to game (e.g., "database" matching any DB-related
+    episode). Two words provide meaningful grounding while still allowing
+    paraphrasing.
 
     Args:
         explanation: The quoted explanation from the evidence tag.
         episode_content: The full content of the cited episode.
+        min_overlap: Minimum number of overlapping meaningful words. Default 2.
 
     Returns:
-        True if the explanation references the episode content.
+        True if the explanation sufficiently references the episode content.
     """
     def meaningful_words(text: str) -> set[str]:
         return {
@@ -212,7 +216,7 @@ def check_explanation_overlap(explanation: str, episode_content: str) -> bool:
 
     explanation_words = meaningful_words(explanation)
     episode_words = meaningful_words(episode_content)
-    return bool(explanation_words & episode_words)
+    return len(explanation_words & episode_words) >= 2
 
 
 def detect_stale_patterns(text: str, today: str, staleness_days: int = 7) -> list[StalenessInfo]:
@@ -229,9 +233,7 @@ def detect_stale_patterns(text: str, today: str, staleness_days: int = 7) -> lis
     Returns:
         List of StalenessInfo for patterns exceeding the staleness threshold.
     """
-    from datetime import datetime
-
-    today_dt = datetime.strptime(today, "%Y-%m-%d")
+    today_dt = _datetime.strptime(today, "%Y-%m-%d")
     stale: list[StalenessInfo] = []
 
     lines = text.split("\n")
@@ -252,7 +254,7 @@ def detect_stale_patterns(text: str, today: str, staleness_days: int = 7) -> lis
         date_str = match.group(2)
 
         try:
-            pattern_dt = datetime.strptime(date_str, "%Y-%m-%d")
+            pattern_dt = _datetime.strptime(date_str, "%Y-%m-%d")
         except ValueError:
             continue
 
@@ -293,7 +295,12 @@ def detect_citation_gaming(citation_counts: dict[str, int], threshold: int = 3) 
 
 
 def _demote_line(line: str, match: re.Match, level: int) -> str:
-    """Demote a graduated pattern line (3x->2x or 2x->1x) and mark ungrounded."""
+    """Demote a graduated pattern line (3x->2x or 2x->1x) and mark ungrounded.
+
+    Uses positional replacement via match span to avoid fragility
+    from str.replace on LLM-generated text that might contain
+    duplicate marker-like substrings.
+    """
     old_marker = match.group(0)
     new_marker = old_marker.replace(f"| {level}x", f"| {level - 1}x")
     # Replace evidence tag with ungrounded marker
@@ -301,4 +308,6 @@ def _demote_line(line: str, match: re.Match, level: int) -> str:
         r'\[evidence:\s*[a-fA-F0-9][a-fA-F0-9, ]*(?:\s+"[^"]*")?\s*\]',
         "(ungrounded)", new_marker
     )
-    return line.replace(old_marker, new_marker)
+    # Positional replacement — immune to duplicate marker text elsewhere in line
+    start, end = match.span()
+    return line[:start] + new_marker + line[end:]

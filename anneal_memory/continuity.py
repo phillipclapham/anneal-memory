@@ -41,7 +41,7 @@ def validate_structure(text: str) -> bool:
     text_lower = text.lower()
     found: set[str] = set()
     for line in text_lower.split("\n"):
-        if line.startswith("##"):
+        if line.startswith("## "):
             for section in _REQUIRED_SECTIONS:
                 if re.search(rf"\b{section}\b", line):
                     found.add(section)

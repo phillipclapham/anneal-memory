@@ -171,12 +171,15 @@ class Store:
         Returns:
             The recorded Episode.
         """
+        if not content or not content.strip():
+            raise ValueError("Episode content cannot be empty")
+
         if isinstance(episode_type, str):
             episode_type = EpisodeType(episode_type)
 
         ts = timestamp or _now_utc()
         session_id = self._current_session_id()
-        meta_json = json.dumps(metadata) if metadata else None
+        meta_json = json.dumps(metadata) if metadata is not None else None
 
         # Retry with incrementing nonce on ID collision (birthday or duplicate content)
         max_retries = 3
@@ -425,10 +428,11 @@ class Store:
         """
         self._conn.execute(
             """INSERT INTO wraps
-               (episodes_compressed, continuity_chars, graduations_validated,
+               (wrapped_at, episodes_compressed, continuity_chars, graduations_validated,
                 graduations_demoted, citation_reuse_max, patterns_extracted)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
+                _now_utc(),
                 episodes_compressed,
                 continuity_chars,
                 graduations_validated,
@@ -476,6 +480,8 @@ class Store:
         days = older_than_days if older_than_days is not None else self._retention_days
         if days is None:
             return 0
+        if days < 0:
+            raise ValueError(f"older_than_days must be >= 0, got {days}")
 
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ"
@@ -621,7 +627,18 @@ class Store:
         return row[0]
 
     def _current_session_id(self) -> str | None:
-        """Get current session ID (last wrap ID + 1, or None if no wraps)."""
+        """Get current session ID (last wrap ID + 1, or None if no wraps).
+
+        SESSION ID LIFECYCLE (cross-reference — these 4 methods form a state machine):
+        1. _current_session_id(): Returns str(last_wrap_id + 1) or None before first wrap.
+           Called during record() to assign session_id at episode creation time.
+        2. wrap_completed(): UPDATEs episodes with session_id IS NULL to str(wrap_id).
+           Only matters for the first wrap cycle (pre-first-wrap episodes have NULL).
+        3. episodes_since_wrap(): Uses CAST(session_id AS INTEGER) > last_wrap_id.
+           Finds episodes belonging to the current (unwrapped) session.
+        4. _count_episodes_since_wrap(): Same query as #3 but SELECT COUNT(*).
+           Must stay in sync with #3.
+        """
         last_wrap = self._conn.execute(
             "SELECT id FROM wraps ORDER BY id DESC LIMIT 1"
         ).fetchone()

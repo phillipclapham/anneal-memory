@@ -134,7 +134,7 @@ Nothing.
 
     def test_multiple_cited_ids(self):
         text = """## Patterns
-  thought: test | 2x (2026-03-31) [evidence: abc12345, def67890 "PostgreSQL and pooling"]
+  thought: test | 2x (2026-03-31) [evidence: abc12345, def67890 "PostgreSQL ACID compliance chosen"]
 """
         result = validate_graduations(
             text, VALID_IDS, TODAY, NODE_CONTENT_MAP
@@ -189,6 +189,13 @@ class TestExplanationOverlap:
             "PostgreSQL chosen for compliance",
             "We chose PostgreSQL for its strong ACID compliance guarantees"
         ) is True
+
+    def test_single_word_overlap_insufficient(self):
+        """Single word overlap is too easy to game — requires 2+."""
+        assert check_explanation_overlap(
+            "database performance",
+            "The database handles ACID transactions efficiently"
+        ) is False  # only "database" overlaps
 
     def test_no_overlap_fails(self):
         assert check_explanation_overlap(

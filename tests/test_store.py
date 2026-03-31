@@ -128,6 +128,19 @@ class TestRecord:
         with pytest.raises(ValueError):
             store.record("Bad type", "not_a_type")
 
+    def test_empty_content_raises(self, store):
+        with pytest.raises(ValueError, match="cannot be empty"):
+            store.record("", EpisodeType.OBSERVATION)
+
+    def test_whitespace_only_content_raises(self, store):
+        with pytest.raises(ValueError, match="cannot be empty"):
+            store.record("   ", EpisodeType.OBSERVATION)
+
+    def test_empty_dict_metadata_round_trips(self, store):
+        ep = store.record("With empty meta", EpisodeType.OBSERVATION, metadata={})
+        retrieved = store.get(ep.id)
+        assert retrieved.metadata == {}
+
 
 # -- Get --
 
@@ -519,6 +532,10 @@ class TestPruneEdgeCases:
         pruned = store.prune(older_than_days=0)
         assert pruned == 1
         assert store.status().total_episodes == 0
+
+    def test_prune_negative_days_raises(self, store):
+        with pytest.raises(ValueError, match="must be >= 0"):
+            store.prune(older_than_days=-1)
 
 
 # -- Wrap Returns WrapResult --

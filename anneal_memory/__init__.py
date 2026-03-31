@@ -6,19 +6,26 @@ from .store import Store
 from .types import Episode, EpisodeType, RecallResult, StoreStatus, Tombstone, WrapResult
 from .continuity import validate_structure, prepare_wrap_package, build_engine_prompt
 from .graduation import validate_graduations, check_explanation_overlap, detect_stale_patterns
+from .integrity import TOOLS, RESOURCES, verify_integrity, generate_integrity_file
+from .server import Server
 
 __all__ = [
     "Store",
+    "Server",
     "Episode",
     "EpisodeType",
     "RecallResult",
     "StoreStatus",
     "Tombstone",
     "WrapResult",
+    "TOOLS",
+    "RESOURCES",
     "validate_structure",
     "prepare_wrap_package",
     "build_engine_prompt",
     "validate_graduations",
     "check_explanation_overlap",
     "detect_stale_patterns",
+    "verify_integrity",
+    "generate_integrity_file",
 ]

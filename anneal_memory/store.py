@@ -297,8 +297,10 @@ class Store:
             params.append(source)
         if keyword:
             # Escape LIKE wildcards so % and _ are treated as literals
-            escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            conditions.append("content LIKE ? ESCAPE '\\'")
+            # Case-insensitive via LOWER() — agents need to find episodes
+            # regardless of casing for citation during graduation
+            escaped = keyword.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            conditions.append("LOWER(content) LIKE ? ESCAPE '\\'")
             params.append(f"%{escaped}%")
 
         where = " AND ".join(conditions) if conditions else "1=1"

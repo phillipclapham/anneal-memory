@@ -87,11 +87,44 @@ The continuity file uses a simplified marker set for density:
 
 ## MCP Server
 
-MCP server implementation coming soon. The library provides the foundation; the server will expose 5 tools (`record`, `recall`, `prepare_wrap`, `save_continuity`, `status`) and 1 resource (`anneal://continuity`).
+The MCP server exposes 5 tools and 1 resource over stdio (JSON-RPC 2.0). Zero external dependencies — no `mcp` SDK required.
+
+**Tools:** `record`, `recall`, `prepare_wrap`, `save_continuity`, `status`
+**Resource:** `anneal://continuity` (current continuity file, auto-loaded)
+
+### Claude Desktop / Claude Code
+
+```json
+{
+  "mcpServers": {
+    "anneal-memory": {
+      "command": "anneal-memory",
+      "args": ["--db", "/path/to/memory.db", "--project-name", "MyAgent"]
+    }
+  }
+}
+```
+
+### Usage
+
+```bash
+anneal-memory --db ./memory.db --project-name "MyAgent"
+anneal-memory --generate-integrity  # Generate tool-integrity.json
+anneal-memory --help
+```
+
+### Wrap Flow
+
+1. Agent records episodes during a session via `record`
+2. At session boundary, agent calls `prepare_wrap` → gets episodes + instructions
+3. Agent compresses episodes into continuity markdown (this IS the cognition)
+4. Agent calls `save_continuity` → server validates structure, citations, and saves
 
 ## Security
 
-anneal-memory includes tool description integrity verification. A `tool-integrity.json` file contains SHA256 hashes of all tool descriptions, verified at server startup. This prevents tool description poisoning — a class of attack where manipulated descriptions alter LLM behavior.
+anneal-memory includes tool description integrity verification. A `tool-integrity.json` file contains SHA256 hashes of all tool descriptions, verified at server startup. This detects post-install modification of tool descriptions — a class of attack where manipulated descriptions alter LLM behavior without changing tool functionality.
+
+Generate the integrity file with `anneal-memory --generate-integrity`. The server exits on hash mismatch unless `--skip-integrity` is passed.
 
 ## License
 

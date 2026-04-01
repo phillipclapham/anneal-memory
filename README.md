@@ -98,6 +98,28 @@ anneal-memory takes a different approach: **memory as a living system, not a fil
 | **Tools** | 5 + 1 resource | 6 | Varies | 15+ | ~6 |
 | **Orchestration snippet** | Yes (first-class) | No | No | Wiki pattern | No |
 
+## Session Hygiene
+
+Session wraps are the most important thing your agent does with this system. Think of them like sleep.
+
+Neuroscience calls it memory consolidation: during slow-wave sleep, the hippocampus replays the day's experiences while the neocortex integrates them into long-term knowledge. Skip sleep and memories degrade — experiences accumulate without being processed, patterns go unrecognized, and older knowledge doesn't get reinforced or pruned.
+
+anneal-memory works the same way. During a session, episodes accumulate in the episodic store (the hippocampus). At session end, the wrap compresses those episodes into the continuity file (the neocortex). This is where the real thinking happens — the agent recognizes patterns, promotes validated knowledge, and lets stale information fade. Without wraps, you just have a growing pile of raw episodes and no intelligence.
+
+**The wrap sequence:**
+
+1. **`prepare_wrap`** — gathers recent episodes, current continuity, stale pattern warnings, and compression instructions
+2. **Agent compresses** — this IS the cognition. Patterns emerge during compression that weren't visible in the raw episodes
+3. **`save_continuity`** — server validates structure, checks citation evidence, saves the result
+
+**Rules of thumb:**
+- Always wrap before ending a session. An unwrapped session is like an all-nighter — the experiences happened but they weren't consolidated
+- The [CLAUDE.md snippet](examples/CLAUDE.md.example) handles this automatically — it teaches the agent to detect session-end signals ("let's wrap up," "we're done") and run the full sequence
+- Short sessions (3-5 episodes) still benefit from wraps. Even a small amount of compression builds the continuity file
+- If `prepare_wrap` says "no episodes" — nothing to compress. That's fine, skip it
+
+The graduation system depends on wraps to function. Patterns can only be promoted (1x → 2x → 3x) during compression, citations can only be validated against episode IDs during wraps, and stale patterns can only be detected when the agent reviews what it knows against what it recently experienced. No wraps = no immune system.
+
 ## MCP Tools
 
 | Tool | When to call |
@@ -180,6 +202,23 @@ Tool description integrity verification is included. `tool-integrity.json` ships
 anneal-memory --generate-integrity  # Regenerate after description changes
 anneal-memory --skip-integrity      # Bypass for development
 ```
+
+## Compliance and Audit (Coming Soon)
+
+The episodic store is a natural audit trail. Every decision, tension, and outcome is timestamped, typed, and append-only — exactly what regulators want to see when they ask "why did the AI do that?"
+
+**What exists today:**
+- Typed episodes capture decisions with rationale, tradeoffs, outcomes, and context
+- Append-only episodic store with optional tombstones (no silent deletion)
+- Human-readable continuity file shows the agent's current understanding
+- Tool description integrity verification (tamper detection)
+
+**What's coming:**
+- **JSONL audit sidecar** — append-only, rotatable export alongside the SQLite store. Readable with `cat` and `jq`, no special tooling required
+- **Hash-chained episodes** — each entry's hash includes the previous entry's hash, creating a cryptographically tamper-evident chain. Modify or delete an episode and the chain breaks
+- **Multi-agent shared memory** — shared episodic pool with per-agent continuity. Full cross-agent audit trail showing which agent made which decision and why
+
+The two-layer architecture means compliance and intelligence don't compete: the episodic layer preserves everything (audit), while the continuity layer compresses intelligently (memory). Different layers for different readers.
 
 ## License
 

@@ -1,4 +1,9 @@
 <!-- mcp-name: io.github.phillipclapham/anneal-memory -->
+
+<p align="center">
+  <img src="logo-400.png" alt="anneal-memory logo" width="200">
+</p>
+
 # anneal-memory
 
 **Two-layer memory for AI agents. Episodes compress into identity.**

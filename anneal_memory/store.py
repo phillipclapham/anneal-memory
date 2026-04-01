@@ -68,7 +68,6 @@ _DEFAULT_METADATA = {
     "format_version": str(_SCHEMA_VERSION),
     "project_name": "Agent",
     "wrap_started_at": "",
-    "citations_seen": "false",
 }
 
 
@@ -463,6 +462,11 @@ class Store:
             )
         self._set_metadata("wrap_started_at", "")
         self._conn.commit()
+
+        # Auto-prune old episodes if retention_days is configured
+        pruned = 0
+        if self._retention_days is not None:
+            pruned = self.prune()
 
         return WrapResult(
             saved=True,

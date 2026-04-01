@@ -1,15 +1,19 @@
 """Tests for anneal_memory.server — MCP server tool handlers and protocol.
 
 Tests the Server class by calling handler methods directly (not via stdio).
-The stdio transport layer (_read_message/_write_message) is thin enough to
-verify manually or in integration tests.
+Transport layer tests (_read_message) use mocked stdin/stdout.
 """
 
+import io
 import json
 import pytest
 from pathlib import Path
+from unittest.mock import patch
 
-from anneal_memory.server import Server, _tool_result, _response, _error_response
+from anneal_memory.server import (
+    Server, _tool_result, _response, _error_response,
+    _read_message, _write_message, _EOF, _MAX_MESSAGE_SIZE,
+)
 from anneal_memory.store import Store
 from anneal_memory.integrity import TOOLS, RESOURCES
 
@@ -625,3 +629,67 @@ class TestResponseHelpers:
         assert resp["id"] == 42
         assert resp["error"]["code"] == -32601
         assert resp["error"]["message"] == "Method not found"
+
+
+# -- Transport Layer --
+
+
+def _make_stdin(content_length: int, body: bytes = b"") -> io.BufferedIOBase:
+    """Build a mock stdin.buffer with Content-Length header + body."""
+    header = f"Content-Length: {content_length}\r\n\r\n".encode()
+    return io.BytesIO(header + body)
+
+
+class TestReadMessageBombGuard:
+    """Tests for Content-Length bomb guard (server.py:68-69)."""
+
+    def test_oversized_content_length_rejected(self):
+        huge = _MAX_MESSAGE_SIZE + 1
+        mock_stdin = _make_stdin(huge)
+        with patch("sys.stdin", new_callable=lambda: type(
+            "MockStdin", (), {"buffer": mock_stdin}
+        )):
+            result = _read_message()
+        assert isinstance(result, str)
+        assert "too large" in result.lower()
+        assert str(huge) in result
+
+    def test_exactly_max_size_accepted(self):
+        """Exactly _MAX_MESSAGE_SIZE should not trigger the guard."""
+        body = json.dumps({"jsonrpc": "2.0", "method": "ping"}).encode()
+        mock_stdin = _make_stdin(len(body), body)
+        with patch("sys.stdin", new_callable=lambda: type(
+            "MockStdin", (), {"buffer": mock_stdin}
+        )):
+            result = _read_message()
+        assert isinstance(result, dict)
+        assert result["method"] == "ping"
+
+
+class TestNotificationHandling:
+    """Tests for MCP notification path (messages without id)."""
+
+    def test_notification_produces_no_response(self, server, store):
+        """A JSON-RPC notification (no id field) should not produce a response."""
+        notification = {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        }
+        body = json.dumps(notification).encode()
+        eof = b""  # Empty read = EOF after notification
+
+        header = f"Content-Length: {len(body)}\r\n\r\n".encode()
+        mock_stdin = io.BytesIO(header + body + eof)
+
+        output = io.BytesIO()
+
+        with patch("sys.stdin", new_callable=lambda: type(
+            "MockStdin", (), {"buffer": mock_stdin}
+        )):
+            with patch("sys.stdout", new_callable=lambda: type(
+                "MockStdout", (), {"buffer": output, "flush": lambda self: None}
+            )):
+                server.run()
+
+        # No output should have been written for the notification
+        assert output.getvalue() == b""

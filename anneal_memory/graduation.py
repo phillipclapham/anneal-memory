@@ -203,7 +203,6 @@ def check_explanation_overlap(explanation: str, episode_content: str) -> bool:
     Args:
         explanation: The quoted explanation from the evidence tag.
         episode_content: The full content of the cited episode.
-        min_overlap: Minimum number of overlapping meaningful words. Default 2.
 
     Returns:
         True if the explanation sufficiently references the episode content.

@@ -341,8 +341,7 @@ class Server:
             return _tool_result("Error: text is required", is_error=True)
 
         # Check if prepare_wrap was called first
-        wrap_started = self._store._get_metadata("wrap_started_at")
-        skipped_prepare = not wrap_started
+        skipped_prepare = not self._store.status().wrap_in_progress
 
         # Validate structure (4 required sections)
         if not validate_structure(text):

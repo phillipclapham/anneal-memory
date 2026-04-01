@@ -104,7 +104,7 @@ class Engine:
         *,
         llm: Callable[[str], str] | None = None,
         api_key: str | None = None,
-        model: str = "claude-sonnet-4-20250514",
+        model: str = "claude-sonnet-4-6",
         max_tokens: int = 8192,
         max_chars: int = 20000,
     ) -> None:

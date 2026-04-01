@@ -331,6 +331,29 @@ class TestWrapLifecycle:
         status = store.status()
         assert status.total_wraps == 2
 
+    def test_wrap_completed_auto_prunes_when_retention_set(self, tmp_db):
+        """wrap_completed auto-prunes old episodes when retention_days is set."""
+        s = Store(tmp_db, retention_days=30)
+        s.record("Old episode", EpisodeType.OBSERVATION, timestamp="2020-01-01T00:00:00Z")
+        s.record("Recent episode", EpisodeType.OBSERVATION)
+        assert s.status().total_episodes == 2
+
+        s.wrap_completed(episodes_compressed=2, continuity_chars=100)
+
+        # Old episode pruned, recent kept
+        assert s.status().total_episodes == 1
+        s.close()
+
+    def test_wrap_completed_no_prune_without_retention(self, store):
+        """wrap_completed does NOT prune when retention_days is not set."""
+        store.record("Old episode", EpisodeType.OBSERVATION, timestamp="2020-01-01T00:00:00Z")
+        store.record("Recent episode", EpisodeType.OBSERVATION)
+
+        store.wrap_completed(episodes_compressed=2, continuity_chars=100)
+
+        # Both episodes still present (no auto-prune)
+        assert store.status().total_episodes == 2
+
 
 # -- Pruning --
 

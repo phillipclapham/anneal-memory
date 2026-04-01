@@ -30,6 +30,9 @@ htmlcov/
 .env
 .env.*
 
+# Registry tokens
+.mcpregistry_*
+
 # Memory files (test artifacts)
 *.db
 *.continuity.md

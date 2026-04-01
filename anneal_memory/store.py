@@ -414,6 +414,14 @@ class Store:
         """Mark that a wrap has been initiated (prepare_wrap called)."""
         self._set_metadata("wrap_started_at", _now_utc())
 
+    def wrap_cancelled(self) -> None:
+        """Clear wrap-in-progress flag without recording a completed wrap.
+
+        Use when a wrap is abandoned (no episodes, LLM failure, validation
+        failure with fallback). Prevents stale-wrap detection from false-firing.
+        """
+        self._set_metadata("wrap_started_at", "")
+
     def wrap_completed(
         self,
         episodes_compressed: int,

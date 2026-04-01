@@ -573,3 +573,14 @@ class TestKeywordEscaping:
         store.record("filename.py", EpisodeType.OBSERVATION)
         result = store.recall(keyword="file_name")
         assert result.total_matching == 1
+
+    def test_case_insensitive_keyword(self, store):
+        store.record("SQLite is the right choice", EpisodeType.OBSERVATION)
+        store.record("Redis is fast", EpisodeType.OBSERVATION)
+        # Search lowercase should find uppercase content
+        result = store.recall(keyword="sqlite")
+        assert result.total_matching == 1
+        assert "SQLite" in result.episodes[0].content
+        # Search uppercase should also work
+        result2 = store.recall(keyword="SQLITE")
+        assert result2.total_matching == 1

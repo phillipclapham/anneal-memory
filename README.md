@@ -120,6 +120,37 @@ anneal-memory --help
 3. Agent compresses episodes into continuity markdown (this IS the cognition)
 4. Agent calls `save_continuity` → server validates structure, citations, and saves
 
+## Engine (Programmatic Compression)
+
+For automated pipelines, cron jobs, or any use case where an interactive agent isn't driving the compression:
+
+```python
+from anneal_memory import Engine, Store
+
+with Store("./memory.db", project_name="MyAgent") as store:
+    # Record episodes during your application's session
+    store.record("Observed pattern in data", "observation")
+    store.record("Chose approach X over Y", "decision")
+
+    # Compress with a single call
+    engine = Engine(store, api_key="sk-ant-...")  # or llm=my_callable
+    result = engine.wrap()
+
+    print(f"Compressed {result.episodes_compressed} episodes")
+    print(f"Continuity: {result.chars} chars, {result.patterns_extracted} patterns")
+    print(result.continuity_text)  # The compressed markdown
+```
+
+The Engine does everything: gathers episodes since last wrap, builds the compression prompt (including stale pattern detection), calls the LLM, validates structure and graduation citations, truncates if over budget, and saves. If the LLM produces invalid output, it falls back to existing continuity (or rejects on first session — episodes stay in the store for retry).
+
+**Custom LLM callable** (zero additional dependencies):
+
+```python
+engine = Engine(store, llm=lambda prompt: my_llm(prompt))
+```
+
+The callable takes a prompt string and returns a string. Works with any LLM.
+
 ## Security
 
 anneal-memory includes tool description integrity verification. A `tool-integrity.json` file contains SHA256 hashes of all tool descriptions, verified at server startup. This detects post-install modification of tool descriptions — a class of attack where manipulated descriptions alter LLM behavior without changing tool functionality.

@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -294,7 +295,7 @@ class Server:
 
         if not episodes:
             # Clear any stale wrap_in_progress flag from an abandoned previous wrap
-            self._store._set_metadata("wrap_started_at", "")
+            self._store.wrap_cancelled()
             return _tool_result(
                 "No episodes since last wrap. Nothing to compress."
             )
@@ -352,9 +353,10 @@ class Server:
             )
 
         # Get current session's episodes for citation validation
+        # Lowercase IDs to match graduation.py's normalization of cited IDs
         episodes = self._store.episodes_since_wrap()
-        valid_ids = {ep.id for ep in episodes}
-        node_content_map = {ep.id: ep.content for ep in episodes}
+        valid_ids = {ep.id[:8].lower() for ep in episodes}
+        node_content_map = {ep.id[:8].lower(): ep.content for ep in episodes}
 
         # Check if citations have been seen before (bare graduation sunset)
         meta = self._store.load_meta()
@@ -381,13 +383,14 @@ class Server:
 
         # Record wrap completion in the store
         sections = measure_sections(grad_result.text)
+        patterns = len(re.findall(r"\|\s*\d+x", grad_result.text))
         self._store.wrap_completed(
             episodes_compressed=len(episodes),
             continuity_chars=len(grad_result.text),
             graduations_validated=grad_result.validated,
             graduations_demoted=grad_result.demoted + grad_result.bare_demoted,
             citation_reuse_max=grad_result.citation_reuse_max,
-            patterns_extracted=0,
+            patterns_extracted=patterns,
         )
 
         # Build response

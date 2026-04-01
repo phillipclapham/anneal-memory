@@ -171,6 +171,7 @@ def build_engine_prompt(
     project_name: str,
     max_chars: int,
     today: str,
+    stale_patterns_section: str = "",
 ) -> str:
     """Build the full LLM prompt for automated compression (engine mode).
 
@@ -183,6 +184,8 @@ def build_engine_prompt(
         project_name: Name for the continuity file header.
         max_chars: Maximum continuity size in characters.
         today: Today's date as YYYY-MM-DD.
+        stale_patterns_section: Optional pre-formatted stale patterns section
+            to inject before output instructions.
 
     Returns:
         The full prompt string for the compression LLM.
@@ -216,7 +219,7 @@ form of thinking — extract what matters, discard what doesn't.
 <session_data>
 {session_summary}
 </session_data>
-{existing_section}
+{existing_section}{stale_patterns_section}
 ## Output Format
 
 Produce a markdown file with EXACTLY these 4 section headers (use these headers VERBATIM):

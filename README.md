@@ -1,170 +1,185 @@
 # anneal-memory
 
-Two-layer memory for AI agents. Episodes compress into identity.
+**Two-layer memory for AI agents. Episodes compress into identity.**
 
-## What This Is
+The only MCP memory server with an immune system. Patterns earn permanence through evidence, false knowledge gets caught and demoted, and stale information fades — so your agent's memory gets smarter over time, not just bigger.
 
-A memory system built on how memory actually works: fast accumulation of experiences (episodic layer) compressed into durable knowledge (continuity layer) at session boundaries. The act of compression is itself cognition — it forces pattern recognition, abstraction, and judgment. The system develops over time, getting smarter rather than just bigger.
-
-**Two layers:**
-- **Episodic store** (SQLite) — timestamped, typed episodes. Fast writes, indexed queries. The raw material.
-- **Continuity file** (Markdown) — compressed session memory. 4 sections: State, Patterns, Decisions, Context. Always loaded. Human-readable and human-editable.
-
-**What makes it different:**
-- **Temporal graduation** — patterns earn permanence through evidence (1x → 2x → 3x). Citations must reference real episodes.
-- **Anti-inbreeding defense** — explanation overlap checking prevents the LLM from confirming its own hallucinated patterns.
-- **Principle demotion** — graduated knowledge that stops being reinforced by new episodes fades over time. Living memory, not archive.
-- **Intelligent forgetting** — stale patterns are detected and flagged. The system doesn't just grow; it develops.
-
-## Install
-
-```bash
-pip install anneal-memory
-```
-
-Zero runtime dependencies (Python stdlib only). Requires Python 3.10+.
-
-For automated LLM compression (programmatic use without an interactive agent):
-
-```bash
-pip install anneal-memory[engine]
-```
+Zero dependencies. 5 tools. Works with any MCP client.
 
 ## Quick Start
 
-```python
-from anneal_memory import Store, EpisodeType
+**1. Run the server** (no install required):
 
-# Create a store (SQLite database + markdown continuity sidecar)
-with Store("./agent_memory.db", project_name="MyAgent") as store:
-
-    # Record episodes during a session
-    store.record("User prefers PostgreSQL for ACID compliance", EpisodeType.OBSERVATION)
-    store.record("Chose connection pooling over query caching", EpisodeType.DECISION)
-    store.record("Latency vs consistency tradeoff", EpisodeType.TENSION)
-
-    # Query episodes
-    result = store.recall(episode_type=EpisodeType.DECISION, keyword="pooling")
-
-    # At session end: get the compression package
-    from anneal_memory import prepare_wrap_package
-    episodes = store.episodes_since_wrap()
-    package = prepare_wrap_package(episodes, store.load_continuity(), "MyAgent")
-    # package contains: episodes, continuity, stale_patterns, instructions, today
-
-    # After compression (by the agent or an LLM engine):
-    # store.save_continuity(compressed_text)
-    # store.wrap_completed(episodes_compressed=3, continuity_chars=len(compressed_text))
-```
-
-## Episode Types
-
-| Type | Purpose |
-|------|---------|
-| `observation` | Pattern noticed, insight, general learning |
-| `decision` | Committed choice with rationale |
-| `tension` | Conflict, tradeoff, opposing forces |
-| `question` | Open question needing resolution |
-| `outcome` | Result of an action (success or failure) |
-| `context` | Environmental/state information |
-
-## Architecture
-
-```
-Session N episodes  ──→  prepare_wrap  ──→  LLM compression  ──→  save_continuity
-       │                      │                    │                      │
-  SQLite store          episodes +            Compression           Validated +
-  (fast, indexed)    existing continuity    as cognition           saved markdown
-                     + instructions        (the agent thinks      (4 sections)
-                                           by compressing)
-```
-
-The continuity file uses a simplified marker set for density:
-- `? question` / `thought: insight` / `✓ completed`
-- `A -> B` (causation) / `A ><[axis] B` (tension)
-- `[decided(rationale, on)]` / `[blocked(reason, since)]`
-- `| Nx (date) [evidence: id "explanation"]` (temporal graduation)
-
-## MCP Server
-
-The MCP server exposes 5 tools and 1 resource over stdio (JSON-RPC 2.0). Zero external dependencies — no `mcp` SDK required.
-
-**Tools:** `record`, `recall`, `prepare_wrap`, `save_continuity`, `status`
-**Resource:** `anneal://continuity` (current continuity file, auto-loaded)
-
-### Setup (3 steps)
-
-**1. Add to your editor's MCP config:**
-
-Claude Code (`.claude/settings.json`) or Claude Desktop:
 ```json
 {
   "mcpServers": {
     "anneal-memory": {
-      "command": "anneal-memory",
-      "args": ["--db", "/path/to/memory.db", "--project-name", "MyAgent"]
+      "command": "uvx",
+      "args": ["anneal-memory", "--db", "./memory.db", "--project-name", "MyProject"]
     }
   }
 }
 ```
 
-**2. Add the CLAUDE.md snippet to your project:**
+Add this to `.mcp.json` in your project root (Claude Code) or your editor's MCP config.
 
-Copy [`examples/CLAUDE.md.example`](examples/CLAUDE.md.example) into your project's `CLAUDE.md`. This teaches the agent when and how to use the memory tools — without it, the tools are available but the agent won't know the workflow.
+> **Alternative:** `pip install anneal-memory` if you prefer a pinned install, then use `"command": "anneal-memory"` directly.
 
-**3. Restart your editor.** The 5 tools and `anneal://continuity` resource are now available.
+**2. Add the orchestration snippet** to your project's `CLAUDE.md`:
 
-### CLI
+Copy the contents of [`examples/CLAUDE.md.example`](examples/CLAUDE.md.example) into your project's `CLAUDE.md`. This teaches the agent *when* and *how* to use the memory tools throughout a session — recording episodes during work, checking prior context before decisions, and running the full compression sequence at session end.
 
-```bash
-anneal-memory --db ./memory.db --project-name "MyAgent"
-anneal-memory --generate-integrity  # Generate tool-integrity.json
-anneal-memory --help
+Without this snippet, the tools are available but the agent won't know the workflow. This is the most important setup step.
+
+**3. Restart your editor.** That's it. The agent now records, recalls, and compresses memory across sessions.
+
+## Why This Exists
+
+Every MCP memory server we tested has the same problem: memory grows forever and nothing validates what it knows.
+
+The Anthropic official server stores everything in a growing JSONL file with no pruning. Mem0 requires Docker and cloud for its best features. Others expose 15-33 tools that eat your context window. And none of them can tell you whether what they "remember" is still true.
+
+anneal-memory takes a different approach: **memory as a living system, not a filing cabinet.**
+
+- Episodes accumulate fast (append-only SQLite, typed by kind)
+- At session boundaries, the agent compresses episodes into a continuity file — and the compression step IS the thinking, where patterns emerge
+- Validated patterns strengthen. Stale patterns fade. False patterns get caught.
+- The continuity file stays bounded and always-loaded, not growing linearly
+
+## What Makes It Different
+
+### The immune system (nobody else has this)
+
+**Citation-validated graduation.** Patterns start at 1x. To graduate to 2x or 3x, they must cite specific episode IDs as evidence. The server verifies those IDs exist and the explanation connects to the cited episode. No evidence, no promotion.
+
+**Anti-inbreeding defense.** Explanation overlap checking prevents the agent from confirming its own hallucinated patterns — the cited episode must contain meaningfully different content from the graduation claim itself.
+
+**Principle demotion.** Graduated knowledge that stops being reinforced by new episodes gets flagged as stale and can be demoted. Memory actively forgets what's no longer relevant.
+
+### Architecture
+
+```
+  Episodes (fast)              Continuity (compressed)
+  ┌─────────────┐             ┌──────────────────────┐
+  │ observation  │             │ ## State             │
+  │ decision     │─── wrap ──→│ ## Patterns (1x→3x)  │
+  │ tension      │  compress  │ ## Decisions          │
+  │ question     │             │ ## Context            │
+  │ outcome      │             └──────────────────────┘
+  │ context      │               always loaded, bounded
+  └─────────────┘               human-readable markdown
+   SQLite, indexed
 ```
 
-### Wrap Flow
+**Two layers, like how memory actually works:**
+- **Episodic store** (SQLite) — timestamped, typed episodes. Fast writes, indexed queries. Cheap to accumulate.
+- **Continuity file** (Markdown) — compressed session memory. 4 sections. Always loaded at session start. Rewritten (not appended) at each session boundary.
 
-1. Agent records episodes during a session via `record`
-2. At session boundary, agent calls `prepare_wrap` → gets episodes + instructions
-3. Agent compresses episodes into continuity markdown (this IS the cognition)
-4. Agent calls `save_continuity` → server validates structure, citations, and saves
+**Six episode types** give the immune system richer signal:
 
-## Engine (Programmatic Compression)
+| Type | Purpose | Example |
+|------|---------|---------|
+| `observation` | Pattern or insight | "Connection pool is the real bottleneck" |
+| `decision` | Committed choice | "Chose Postgres because ACID > raw speed" |
+| `tension` | Tradeoff identified | "Latency vs consistency — can't optimize both" |
+| `question` | Needs resolution | "Should we shard or add read replicas?" |
+| `outcome` | Result of action | "Migration done, 3x improvement on hot path" |
+| `context` | Environmental state | "Production DB at 80% capacity, growing 5%/week" |
 
-For automated pipelines, cron jobs, or any use case where an interactive agent isn't driving the compression:
+### Comparison
+
+| | anneal-memory | Anthropic Official | Mem0 | mcp-memory-service | Hmem |
+|---|---|---|---|---|---|
+| **Architecture** | Episodic + continuity | Knowledge graph | Vector + graph | KG + vectors | 5-level hierarchy |
+| **Compression** | Session-boundary rewrite | None | One-pass extraction | Dream consolidation | Hierarchical summary |
+| **Quality mechanism** | Immune system | None | None | Conflict detection | None |
+| **Graduation** | 1x→2x→3x with citations | None | None | None | None |
+| **Dependencies** | Zero (Python stdlib) | Node.js | Docker + cloud | Embeddings model | Zero (Go binary) |
+| **Tools** | 5 + 1 resource | 6 | Varies | 15+ | ~6 |
+| **Orchestration snippet** | Yes (first-class) | No | No | Wiki pattern | No |
+
+## MCP Tools
+
+| Tool | When to call |
+|------|-------------|
+| `record` | When something important happens — a decision, observation, tension, question, outcome, or context change |
+| `recall` | Before making decisions that might have prior context. Query by time, type, keyword, or ID |
+| `prepare_wrap` | At session end — returns episodes + current continuity + compression instructions |
+| `save_continuity` | After compressing — server validates structure, citations, and saves |
+| `status` | Check memory health: episode counts, wrap history, continuity size |
+
+**Resource:** `anneal://continuity` — the current continuity file, auto-loaded at session start.
+
+## Continuity Markers
+
+The continuity file uses a simplified marker set for density:
+
+```
+? question needing resolution
+thought: insight worth preserving
+✓ completed item
+
+A -> B                          causation
+A ><[axis] B                    tension on an axis
+
+[decided(rationale, on)]        committed decision
+[blocked(reason, since)]        external dependency
+
+| 1x (2026-04-01)              first observation
+| 2x (2026-04-01) [evidence: abc123 "explanation"]   validated pattern
+```
+
+## Python API
+
+```python
+from anneal_memory import Store, EpisodeType
+
+with Store("./memory.db", project_name="MyAgent") as store:
+    store.record("User prefers PostgreSQL for ACID", EpisodeType.OBSERVATION)
+    store.record("Chose pooling over caching", EpisodeType.DECISION)
+
+    result = store.recall(episode_type=EpisodeType.DECISION, keyword="pooling")
+
+    episodes = store.episodes_since_wrap()
+    from anneal_memory import prepare_wrap_package
+    package = prepare_wrap_package(episodes, store.load_continuity(), "MyAgent")
+    # → episodes, continuity, stale_patterns, instructions, today
+```
+
+## Engine (Automated Compression)
+
+For pipelines, cron jobs, or programmatic use without an interactive agent:
+
+```bash
+pip install anneal-memory[engine]
+```
 
 ```python
 from anneal_memory import Engine, Store
 
 with Store("./memory.db", project_name="MyAgent") as store:
-    # Record episodes during your application's session
     store.record("Observed pattern in data", "observation")
     store.record("Chose approach X over Y", "decision")
 
-    # Compress with a single call
     engine = Engine(store, api_key="sk-ant-...")  # or llm=my_callable
     result = engine.wrap()
 
     print(f"Compressed {result.episodes_compressed} episodes")
     print(f"Continuity: {result.chars} chars, {result.patterns_extracted} patterns")
-    print(result.continuity_text)  # The compressed markdown
 ```
 
-The Engine does everything: gathers episodes since last wrap, builds the compression prompt (including stale pattern detection), calls the LLM, validates structure and graduation citations, truncates if over budget, and saves. If the LLM produces invalid output, it falls back to existing continuity (or rejects on first session — episodes stay in the store for retry).
+The Engine gathers episodes, builds the compression prompt, calls the LLM, validates structure and citations, truncates if over budget, and saves — all in one call. Falls back to existing continuity on invalid LLM output (or rejects on first session — episodes stay for retry).
 
-**Custom LLM callable** (zero additional dependencies):
-
-```python
-engine = Engine(store, llm=lambda prompt: my_llm(prompt))
-```
-
-The callable takes a prompt string and returns a string. Works with any LLM.
+**Custom LLM** (zero additional dependencies): `Engine(store, llm=lambda prompt: my_llm(prompt))`
 
 ## Security
 
-anneal-memory includes tool description integrity verification. A `tool-integrity.json` file contains SHA256 hashes of all tool descriptions, verified at server startup. This detects post-install modification of tool descriptions — a class of attack where manipulated descriptions alter LLM behavior without changing tool functionality.
+Tool description integrity verification is included. `tool-integrity.json` ships with the package containing SHA256 hashes of all tool descriptions, verified at server startup. This detects post-install modification of tool descriptions — a vector where manipulated descriptions alter LLM behavior without changing tool functionality.
 
-Generate the integrity file with `anneal-memory --generate-integrity`. The server exits on hash mismatch unless `--skip-integrity` is passed.
+```bash
+anneal-memory --generate-integrity  # Regenerate after description changes
+anneal-memory --skip-integrity      # Bypass for development
+```
 
 ## License
 

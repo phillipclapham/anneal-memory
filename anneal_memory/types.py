@@ -58,6 +58,7 @@ class WrapResult:
     citation_reuse_max: int = 0  # Max times any single node was cited
     patterns_extracted: int = 0
     episodes_compressed: int = 0
+    pruned_count: int = 0  # Episodes pruned by auto-prune after wrap
     continuity_text: str | None = None  # The compressed continuity text (Engine only)
 
 

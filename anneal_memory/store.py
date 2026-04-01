@@ -477,6 +477,7 @@ class Store:
             citation_reuse_max=citation_reuse_max,
             patterns_extracted=patterns_extracted,
             episodes_compressed=episodes_compressed,
+            pruned_count=pruned,
         )
 
     # -- Pruning --

@@ -1,8 +1,8 @@
 """MCP server for anneal-memory.
 
-Implements the Model Context Protocol over stdio transport (JSON-RPC 2.0
-with Content-Length framing). 5 tools + 1 resource. Zero dependencies
-beyond Python stdlib.
+Implements the Model Context Protocol over stdio transport (JSON-RPC 2.0,
+newline-delimited). 5 tools + 1 resource. Zero dependencies beyond Python
+stdlib.
 
 Usage:
     anneal-memory --db /path/to/memory.db [--project-name "My Agent"]
@@ -30,11 +30,11 @@ logger = logging.getLogger("anneal-memory")
 # MCP protocol version
 _PROTOCOL_VERSION = "2024-11-05"
 
-# Maximum message size (10MB) — prevents memory exhaustion from malformed Content-Length
+# Maximum message size (10MB) — prevents memory exhaustion from oversized lines
 _MAX_MESSAGE_SIZE = 10 * 1024 * 1024
 
 
-# -- Stdio Transport (Content-Length framing) --
+# -- Stdio Transport (newline-delimited JSON per MCP 2024-11-05 spec) --
 
 
 # Sentinel to distinguish EOF from parse errors in _read_message
@@ -42,48 +42,33 @@ _EOF = object()
 
 
 def _read_message() -> dict[str, Any] | object:
-    """Read a JSON-RPC message from stdin using Content-Length framing.
+    """Read a JSON-RPC message from stdin (newline-delimited).
 
     Returns:
         Parsed dict on success, _EOF sentinel on stdin close,
         or a string error message on parse failure.
     """
-    # Read headers until empty line
-    content_length = -1
     while True:
-        line = sys.stdin.buffer.readline()
+        line = sys.stdin.readline()
         if not line:
             return _EOF
-        decoded = line.decode("utf-8").rstrip("\r\n")
-        if not decoded:
-            break  # Empty line = end of headers
-        if decoded.lower().startswith("content-length:"):
-            try:
-                content_length = int(decoded.split(":", 1)[1].strip())
-            except (ValueError, IndexError):
-                return "Invalid Content-Length header"
+        line = line.strip()
+        if not line:
+            continue  # Skip blank lines
 
-    if content_length <= 0:
-        return "Missing or invalid Content-Length"
-    if content_length > _MAX_MESSAGE_SIZE:
-        return f"Message too large ({content_length} bytes, max {_MAX_MESSAGE_SIZE})"
+        if len(line) > _MAX_MESSAGE_SIZE:
+            return f"Message too large ({len(line)} bytes, max {_MAX_MESSAGE_SIZE})"
 
-    body = sys.stdin.buffer.read(content_length)
-    if len(body) < content_length:
-        return _EOF  # Truncated read = stream closed
-
-    try:
-        return json.loads(body.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        return f"JSON parse error: {e}"
+        try:
+            return json.loads(line)
+        except (json.JSONDecodeError, ValueError) as e:
+            return f"JSON parse error: {e}"
 
 
 def _write_message(msg: dict[str, Any]) -> None:
-    """Write a JSON-RPC message to stdout using Content-Length framing."""
-    body = json.dumps(msg).encode("utf-8")
-    header = f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8")
-    sys.stdout.buffer.write(header + body)
-    sys.stdout.buffer.flush()
+    """Write a JSON-RPC message to stdout (newline-delimited)."""
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
 
 
 def _response(msg_id: int | str | None, result: Any) -> dict[str, Any]:

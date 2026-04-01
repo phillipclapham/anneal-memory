@@ -340,6 +340,7 @@ def _truncate_to_sections(text: str, max_chars: int) -> str:
     result_lines: list[str] = list(lines[: section_starts[0]])
 
     # Add complete sections until the next one would exceed the limit
+    sections_included = 0
     for idx, start in enumerate(section_starts):
         end = (
             section_starts[idx + 1]
@@ -354,5 +355,13 @@ def _truncate_to_sections(text: str, max_chars: int) -> str:
             break
 
         result_lines.extend(section_lines)
+        sections_included += 1
+
+    if sections_included == 0:
+        _log(
+            f"WARNING: max_chars ({max_chars}) too small to fit even the "
+            f"first section — all sections dropped. Result will fail "
+            f"validate_structure on next wrap."
+        )
 
     return "\n".join(result_lines)

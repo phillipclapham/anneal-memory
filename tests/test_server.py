@@ -634,33 +634,29 @@ class TestResponseHelpers:
 # -- Transport Layer --
 
 
-def _make_stdin(content_length: int, body: bytes = b"") -> io.BufferedIOBase:
-    """Build a mock stdin.buffer with Content-Length header + body."""
-    header = f"Content-Length: {content_length}\r\n\r\n".encode()
-    return io.BytesIO(header + body)
+def _make_stdin(line: str) -> io.StringIO:
+    """Build a mock stdin with a newline-delimited JSON line."""
+    return io.StringIO(line + "\n")
 
 
 class TestReadMessageBombGuard:
-    """Tests for Content-Length bomb guard (server.py:68-69)."""
+    """Tests for message size bomb guard."""
 
-    def test_oversized_content_length_rejected(self):
-        huge = _MAX_MESSAGE_SIZE + 1
-        mock_stdin = _make_stdin(huge)
-        with patch("sys.stdin", new_callable=lambda: type(
-            "MockStdin", (), {"buffer": mock_stdin}
-        )):
+    def test_oversized_message_rejected(self):
+        huge_line = '{"method":"x","x":"' + "a" * (_MAX_MESSAGE_SIZE + 1) + '"}'
+        with patch("sys.stdin", _make_stdin(huge_line)):
             result = _read_message()
         assert isinstance(result, str)
         assert "too large" in result.lower()
-        assert str(huge) in result
 
     def test_exactly_max_size_accepted(self):
         """Exactly _MAX_MESSAGE_SIZE should not trigger the guard."""
-        body = json.dumps({"jsonrpc": "2.0", "method": "ping"}).encode()
-        mock_stdin = _make_stdin(len(body), body)
-        with patch("sys.stdin", new_callable=lambda: type(
-            "MockStdin", (), {"buffer": mock_stdin}
-        )):
+        base = json.dumps({"jsonrpc": "2.0", "method": "ping"})
+        padding_needed = _MAX_MESSAGE_SIZE - len(base) - 1  # -1 for closing }
+        # Pad with a long string value inside valid JSON
+        padded = '{"jsonrpc": "2.0", "method": "ping", "pad": "' + "a" * (padding_needed - len(', "pad": ""')) + '"}'
+        assert len(padded) <= _MAX_MESSAGE_SIZE
+        with patch("sys.stdin", _make_stdin(padded)):
             result = _read_message()
         assert isinstance(result, dict)
         assert result["method"] == "ping"
@@ -675,21 +671,12 @@ class TestNotificationHandling:
             "jsonrpc": "2.0",
             "method": "notifications/initialized",
         }
-        body = json.dumps(notification).encode()
-        eof = b""  # Empty read = EOF after notification
+        mock_stdin = io.StringIO(json.dumps(notification) + "\n")
+        output = io.StringIO()
 
-        header = f"Content-Length: {len(body)}\r\n\r\n".encode()
-        mock_stdin = io.BytesIO(header + body + eof)
-
-        output = io.BytesIO()
-
-        with patch("sys.stdin", new_callable=lambda: type(
-            "MockStdin", (), {"buffer": mock_stdin}
-        )):
-            with patch("sys.stdout", new_callable=lambda: type(
-                "MockStdout", (), {"buffer": output, "flush": lambda self: None}
-            )):
+        with patch("sys.stdin", mock_stdin):
+            with patch("sys.stdout", output):
                 server.run()
 
         # No output should have been written for the notification
-        assert output.getvalue() == b""
+        assert output.getvalue() == ""

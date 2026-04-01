@@ -37,9 +37,12 @@ explain the tooling to the user, just work with what you know.
 
   Record the reasoning, not just the fact. "Chose X because Y" is more
   valuable than "using X." Do this proactively without being asked.
-  Aim for 3-8 episodes per session — if you haven't recorded anything
-  in several exchanges, ask yourself: did anything worth remembering
-  happen?
+
+  **Recording cadence:** Default to recording, not to skipping. Episodes
+  are cheap — the compression step sorts out what matters. After each
+  exchange where work happens, record at least one episode. If 3+
+  exchanges pass without recording, something is wrong — review what
+  you missed. Target 5-15 episodes per session.
 
 - **Before decisions:** Call `recall` to check for relevant prior
   episodes — tensions, past decisions, or context that should inform

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.phillipclapham/anneal-memory",
+  "description": "Two-layer memory for AI agents with an immune system. Episodes compress into identity through citation-validated graduation. Zero dependencies.",
+  "repository": {
+    "url": "https://github.com/phillipclapham/anneal-memory",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "anneal-memory",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [],
+      "arguments": [
+        "--db",
+        "./memory.db",
+        "--project-name",
+        "MyProject"
+      ]
+    }
+  ]
+}

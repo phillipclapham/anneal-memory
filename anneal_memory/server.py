@@ -450,10 +450,11 @@ def main() -> None:
         prog="anneal-memory",
         description="Two-layer memory MCP server for AI agents.",
     )
+    default_db = str(Path("~/.anneal-memory/memory.db").expanduser())
     parser.add_argument(
         "--db",
-        default="memory.db",
-        help="Path to the SQLite database file (default: memory.db)",
+        default=default_db,
+        help=f"Path to the SQLite database file (default: {default_db})",
     )
     parser.add_argument(
         "--project-name",
@@ -472,6 +473,9 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    # Expand ~ in db path (user-provided or default)
+    args.db = str(Path(args.db).expanduser())
 
     # Generate integrity file mode
     if args.generate_integrity:

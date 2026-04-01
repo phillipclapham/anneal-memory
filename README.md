@@ -21,13 +21,15 @@ Zero dependencies. 5 tools. Works with any MCP client.
   "mcpServers": {
     "anneal-memory": {
       "command": "uvx",
-      "args": ["anneal-memory", "--db", "./memory.db", "--project-name", "MyProject"]
+      "args": ["anneal-memory", "--project-name", "MyProject"]
     }
   }
 }
 ```
 
 Add this to `.mcp.json` in your project root (Claude Code) or your editor's MCP config.
+
+The database defaults to `~/.anneal-memory/memory.db` (auto-created). Override with `--db /path/to/memory.db` for per-project storage.
 
 > **Alternative:** `pip install anneal-memory` if you prefer a pinned install, then use `"command": "anneal-memory"` directly.
 

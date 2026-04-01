@@ -48,19 +48,28 @@ explain the tooling to the user, just work with what you know.
   episodes — tensions, past decisions, or context that should inform
   your choice. Don't start from scratch when memory has answers.
 
-- **End of session:** Call `prepare_wrap` to get your compression
-  package. It returns your recent episodes, the current continuity
-  file, stale pattern warnings, and compression instructions. Follow
-  the instructions to compress your episodes into an updated continuity
-  file, then call `save_continuity` with the result.
+- **End of session:** When the user signals the session is ending —
+  "let's wrap up", "save memory", "we're done", "let's finish",
+  "that's it for now", or any natural equivalent — run the FULL wrap
+  sequence. Don't just acknowledge the request. Do this:
 
-  The compression step IS the thinking — patterns emerge during
-  compression that weren't visible in the raw episodes. Take it
-  seriously. The server validates your output (structure, graduation
-  citations, gaming detection) and may demote ungrounded patterns.
+  1. Call `prepare_wrap` to get your compression package (recent
+     episodes, current continuity, stale pattern warnings, compression
+     instructions).
+  2. Follow the compression instructions to compress episodes into an
+     updated continuity file. This is NOT optional — the compression
+     step IS the thinking. Patterns emerge during compression that
+     weren't visible in the raw episodes. Take it seriously.
+  3. Call `save_continuity` with the result. The server validates your
+     output (structure, graduation citations, gaming detection) and
+     may demote ungrounded patterns.
 
-  If `prepare_wrap` returns "No episodes" — there's nothing to
-  compress. Skip the wrap.
+  The wrap sequence is prepare_wrap → compress → save_continuity.
+  All three steps, every time. If `prepare_wrap` returns "No
+  episodes" — there's nothing to compress. Skip the wrap.
+
+  An explicit wrap produces better continuity than stopping without
+  one. Always encourage wrapping before ending a session.
 
 **What to record:**
 - Decisions and their rationale

@@ -1,0 +1,107 @@
+# anneal-memory — CLAUDE.md Snippet
+#
+# Paste the section below into your project's CLAUDE.md to enable
+# two-layer memory. anneal-memory MCP tools are available when the
+# server is configured in your editor's MCP settings.
+#
+# This snippet teaches the agent WHEN and HOW to use the memory
+# tools throughout a session.
+
+## Memory (anneal-memory)
+
+This project uses anneal-memory for persistent memory across sessions.
+Two layers: episodes (raw observations) compress into continuity
+(compressed working memory). Use the memory tools naturally — don't
+explain the tooling to the user, just work with what you know.
+
+**Session workflow:**
+
+- **Start of session:** Check the `anneal://continuity` resource for
+  your compressed memory from prior sessions. If it's empty, this is
+  the first session — just start recording. Call `recall` to find
+  specific prior episodes when you need context.
+
+- **During work:** Call `record` when important things happen:
+  - `observation` — pattern noticed, insight, learning ("Tests revealed
+    the connection pool is the real bottleneck")
+  - `decision` — committed choice with rationale ("Chose PostgreSQL
+    over Redis because ACID compliance outweighs raw speed")
+  - `tension` — conflict or tradeoff identified ("Latency vs consistency:
+    can't optimize both without architectural change")
+  - `question` — open question needing resolution ("Should we shard
+    the database or add read replicas?")
+  - `outcome` — result of an action ("Migration completed, 3x query
+    improvement on the hot path")
+  - `context` — environmental or state info ("Production database is
+    at 80% capacity, growing 5% weekly")
+
+  Record the reasoning, not just the fact. "Chose X because Y" is more
+  valuable than "using X." Do this proactively without being asked.
+  Aim for 3-8 episodes per session — if you haven't recorded anything
+  in several exchanges, ask yourself: did anything worth remembering
+  happen?
+
+- **Before decisions:** Call `recall` to check for relevant prior
+  episodes — tensions, past decisions, or context that should inform
+  your choice. Don't start from scratch when memory has answers.
+
+- **End of session:** Call `prepare_wrap` to get your compression
+  package. It returns your recent episodes, the current continuity
+  file, stale pattern warnings, and compression instructions. Follow
+  the instructions to compress your episodes into an updated continuity
+  file, then call `save_continuity` with the result.
+
+  The compression step IS the thinking — patterns emerge during
+  compression that weren't visible in the raw episodes. Take it
+  seriously. The server validates your output (structure, graduation
+  citations, gaming detection) and may demote ungrounded patterns.
+
+  If `prepare_wrap` returns "No episodes" — there's nothing to
+  compress. Skip the wrap.
+
+**What to record:**
+- Decisions and their rationale
+- Tradeoffs and tensions (with the axis of tension)
+- Patterns you notice recurring
+- Blockers and dependencies
+- Outcomes of actions (both success and failure)
+- Environmental context that shapes decisions
+
+**What NOT to record:**
+- Routine code changes (git tracks those)
+- Transient debugging steps
+- Information already in documentation
+- Every small observation — record what would change a decision
+
+**Correcting mistakes:** Episodes are append-only (no delete tool).
+If you record something incorrectly, record a correction as a new
+episode — the compression step naturally resolves contradictions.
+
+**How to present memory:**
+- Report findings naturally: "From prior sessions, there was a tension
+  between X and Y" — not "The recall tool returned..."
+- Don't narrate tool calls — just use them and share what's relevant
+- When your continuity mentions a pattern at 2x or 3x, trust it —
+  it earned that level through validated evidence
+
+**When things go wrong:**
+- If `save_continuity` reports missing sections, ensure your output
+  has all 4: `## State`, `## Patterns`, `## Decisions`, `## Context`.
+- If `save_continuity` reports demoted graduations, your evidence
+  citations didn't match real episodes — check episode IDs from the
+  `prepare_wrap` package and cite them accurately.
+- If your continuity contains `(ungrounded)` markers, those patterns
+  were demoted in a previous session. Provide fresh evidence from the
+  current session to re-graduate them, or remove them if no longer valid.
+- If your continuity contains `(needs-evidence)` markers, the system
+  now requires citation for all graduations. Include `[evidence: <id>
+  "explanation"]` on all 2x and 3x patterns.
+
+**Compression quality (during wraps):**
+- Follow the compression instructions from `prepare_wrap` — they
+  include the marker reference and format requirements
+- Principles over facts: "We keep hitting X because Y" > "X happened"
+- One insightful line > three vague ones
+- Temporal graduation: new patterns start at 1x, validated patterns
+  graduate to 2x and 3x with evidence citations referencing episode IDs
+- If removing something wouldn't change your next decision, cut it

@@ -92,8 +92,11 @@ The MCP server exposes 5 tools and 1 resource over stdio (JSON-RPC 2.0). Zero ex
 **Tools:** `record`, `recall`, `prepare_wrap`, `save_continuity`, `status`
 **Resource:** `anneal://continuity` (current continuity file, auto-loaded)
 
-### Claude Desktop / Claude Code
+### Setup (3 steps)
 
+**1. Add to your editor's MCP config:**
+
+Claude Code (`.claude/settings.json`) or Claude Desktop:
 ```json
 {
   "mcpServers": {
@@ -105,7 +108,13 @@ The MCP server exposes 5 tools and 1 resource over stdio (JSON-RPC 2.0). Zero ex
 }
 ```
 
-### Usage
+**2. Add the CLAUDE.md snippet to your project:**
+
+Copy [`examples/CLAUDE.md.example`](examples/CLAUDE.md.example) into your project's `CLAUDE.md`. This teaches the agent when and how to use the memory tools — without it, the tools are available but the agent won't know the workflow.
+
+**3. Restart your editor.** The 5 tools and `anneal://continuity` resource are now available.
+
+### CLI
 
 ```bash
 anneal-memory --db ./memory.db --project-name "MyAgent"

@@ -25,9 +25,12 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "record",
         "description": (
-            "Record a typed episode to memory. Episodes are timestamped, "
-            "typed observations that accumulate during a session. They serve "
-            "as raw material for compression into the continuity file."
+            "Record a typed episode to memory. Call this when important "
+            "decisions are made, patterns are noticed, tensions are identified, "
+            "questions arise, or outcomes are observed. Record the reasoning, "
+            "not just the fact — 'Chose X because Y' is more valuable than "
+            "'using X'. Episodes accumulate during a session and serve as raw "
+            "material for compression into the continuity file at session end."
         ),
         "inputSchema": {
             "type": "object",
@@ -72,9 +75,11 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "recall",
         "description": (
-            "Query episodes from memory with filters. Returns matching episodes "
-            "ordered by timestamp (newest first). Use to find specific episodes "
-            "for citation during graduation, or to review recent work."
+            "Query episodes from memory with filters. Call this to find prior "
+            "context before making decisions, to locate specific episodes for "
+            "citation during graduation, or to review recent work. Returns "
+            "matching episodes ordered by timestamp (newest first). Supports "
+            "time range, type, source, and keyword filters."
         ),
         "inputSchema": {
             "type": "object",
@@ -123,11 +128,15 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "prepare_wrap",
         "description": (
-            "Prepare a compression package for session wrap. Returns all episodes "
-            "since the last wrap, the current continuity file, stale pattern warnings, "
-            "and compression instructions. Marks a wrap as in-progress. Call this at "
-            "session boundaries, then use the instructions to compress episodes into "
-            "an updated continuity file, and save with save_continuity."
+            "Prepare a compression package for session wrap. Call this at session "
+            "boundaries — when work is ending, the user says to wrap up, or the "
+            "session is getting long. Returns all episodes since the last wrap, "
+            "the current continuity file, stale pattern warnings, and compression "
+            "instructions. Marks a wrap as in-progress. After calling, follow the "
+            "returned instructions to compress episodes into an updated continuity "
+            "file, then save with save_continuity. The compression step is where "
+            "the real thinking happens — patterns emerge that weren't visible in "
+            "the raw episodes."
         ),
         "inputSchema": {
             "type": "object",
@@ -152,11 +161,15 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "save_continuity",
         "description": (
-            "Validate and save the compressed continuity file. The text must contain "
-            "exactly 4 sections: ## State, ## Patterns, ## Decisions, ## Context. "
-            "Validates structure, checks graduation citations against real episodes, "
-            "detects citation gaming, and may demote ungrounded graduations. "
-            "Call after compressing with prepare_wrap."
+            "Validate and save the compressed continuity file. Call this after "
+            "compressing your episodes using the instructions from prepare_wrap. "
+            "The text must contain exactly 4 sections: ## State, ## Patterns, "
+            "## Decisions, ## Context. The server validates structure, checks "
+            "graduation citations against real episodes (cited IDs must exist), "
+            "checks explanation overlap (evidence must reference actual episode "
+            "content), detects citation gaming (suspicious reuse of single "
+            "episodes), and may demote ungrounded graduations. Returns validation "
+            "results and section sizes."
         ),
         "inputSchema": {
             "type": "object",
@@ -175,9 +188,10 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "status",
         "description": (
-            "Get memory health metrics. Returns episode counts (total and since "
-            "last wrap), wrap history, continuity file size, episodes by type, "
-            "and whether a wrap is currently in progress."
+            "Get memory health metrics. Call this at session start to understand "
+            "memory state, or when diagnosing issues. Returns episode counts "
+            "(total and since last wrap), wrap history, continuity file size, "
+            "episodes by type, and whether a wrap is currently in progress."
         ),
         "inputSchema": {
             "type": "object",

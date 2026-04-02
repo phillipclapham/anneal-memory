@@ -1,6 +1,12 @@
 FROM python:3.12-slim
 
-RUN pip install --no-cache-dir anneal-memory mcp-proxy
+RUN pip install --no-cache-dir anneal-memory "mcp-proxy>=0.11.0,<1.0"
+
+RUN useradd --create-home anneal \
+    && mkdir -p /data \
+    && chown anneal:anneal /data
+
+USER anneal
 
 VOLUME /data
 

@@ -1,6 +1,6 @@
 """anneal-memory: Two-layer memory for AI agents. Episodes compress into identity."""
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 from .store import Store
 from .types import Episode, EpisodeType, RecallResult, StoreStatus, Tombstone, WrapResult

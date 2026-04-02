@@ -15,8 +15,9 @@ import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from .audit import AuditTrail
 from .types import Episode, EpisodeType, RecallResult, StoreStatus, Tombstone, WrapResult
 
 # Schema version — increment on breaking changes
@@ -108,6 +109,9 @@ class Store:
         retention_days: Optional. Prune episodes older than N days. None = keep all.
         keep_tombstones: When pruning, preserve audit trail (ID, timestamp, hash). Default True.
         project_name: Name for the continuity file header. Default "Agent".
+        audit: Enable hash-chained JSONL audit trail. Default True.
+        audit_retention_days: Auto-cleanup for rotated audit files. None = keep forever.
+        on_audit_event: Optional callback receiving each audit entry dict after write.
     """
 
     def __init__(
@@ -116,11 +120,23 @@ class Store:
         retention_days: int | None = None,
         keep_tombstones: bool = True,
         project_name: str | None = None,
+        audit: bool = True,
+        audit_retention_days: int | None = None,
+        on_audit_event: Callable | None = None,
     ) -> None:
         self._path = Path(path)
         self._retention_days = retention_days
         self._keep_tombstones = keep_tombstones
         self._project_name = project_name or "Agent"
+
+        # Audit trail — hash-chained JSONL sidecar
+        self._audit: AuditTrail | None = None
+        if audit:
+            self._audit = AuditTrail(
+                self._path,
+                retention_days=audit_retention_days,
+                on_event=on_audit_event,
+            )
 
         # Ensure parent directory exists
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -197,7 +213,7 @@ class Store:
                     raise
                 continue
 
-        return Episode(
+        episode = Episode(
             id=ep_id,
             timestamp=ts,
             type=episode_type,
@@ -206,6 +222,16 @@ class Store:
             session_id=session_id,
             metadata=metadata,
         )
+
+        if self._audit is not None:
+            self._audit.log("record", {
+                "episode_id": ep_id,
+                "type": episode_type.value,
+                "content_hash": _content_hash(content),
+                "source": source,
+            }, actor=source)
+
+        return episode
 
     def get(self, episode_id: str) -> Episode | None:
         """Get a single episode by ID.
@@ -251,6 +277,14 @@ class Store:
 
         self._conn.execute("DELETE FROM episodes WHERE id = ?", (episode_id,))
         self._conn.commit()
+
+        if self._audit is not None:
+            self._audit.log("delete", {
+                "episode_id": row["id"],
+                "type": row["type"],
+                "content_hash": _content_hash(row["content"]),
+            })
+
         return True
 
     def recall(
@@ -413,6 +447,9 @@ class Store:
         """Mark that a wrap has been initiated (prepare_wrap called)."""
         self._set_metadata("wrap_started_at", _now_utc())
 
+        if self._audit is not None:
+            self._audit.log("wrap_started")
+
     def wrap_cancelled(self) -> None:
         """Clear wrap-in-progress flag without recording a completed wrap.
 
@@ -420,6 +457,9 @@ class Store:
         failure with fallback). Prevents stale-wrap detection from false-firing.
         """
         self._set_metadata("wrap_started_at", "")
+
+        if self._audit is not None:
+            self._audit.log("wrap_cancelled")
 
     def wrap_completed(
         self,
@@ -462,6 +502,15 @@ class Store:
             )
         self._set_metadata("wrap_started_at", "")
         self._conn.commit()
+
+        if self._audit is not None:
+            self._audit.log("wrap_completed", {
+                "episodes_compressed": episodes_compressed,
+                "continuity_chars": continuity_chars,
+                "graduations_validated": graduations_validated,
+                "graduations_demoted": graduations_demoted,
+                "patterns_extracted": patterns_extracted,
+            })
 
         # Auto-prune old episodes if retention_days is configured
         pruned = 0
@@ -528,6 +577,13 @@ class Store:
             pruned += 1
 
         self._conn.commit()
+
+        if self._audit is not None and pruned > 0:
+            self._audit.log("prune", {
+                "count": pruned,
+                "older_than_days": days,
+            })
+
         return pruned
 
     # -- Continuity file I/O --
@@ -578,6 +634,13 @@ class Store:
             except OSError:
                 pass
             raise
+
+        if self._audit is not None:
+            self._audit.log("continuity_saved", {
+                "chars": len(text),
+                "content_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            })
+
         return str(path)
 
     def load_meta(self) -> dict:

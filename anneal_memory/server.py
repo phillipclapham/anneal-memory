@@ -471,6 +471,22 @@ def main() -> None:
         action="store_true",
         help="Skip integrity verification on startup",
     )
+    parser.add_argument(
+        "--verify-audit",
+        action="store_true",
+        help="Verify audit trail hash chain integrity and exit",
+    )
+    parser.add_argument(
+        "--no-audit",
+        action="store_true",
+        help="Disable hash-chained JSONL audit trail",
+    )
+    parser.add_argument(
+        "--audit-retention-days",
+        type=int,
+        default=0,
+        help="Auto-cleanup rotated audit files older than N days (default: 0=keep forever)",
+    )
 
     args = parser.parse_args()
 
@@ -482,6 +498,27 @@ def main() -> None:
         out = Path(__file__).parent / "tool-integrity.json"
         generate_integrity_file(out)
         print(f"Generated {out}", file=sys.stderr)
+        return
+
+    # Verify audit trail mode
+    if args.verify_audit:
+        from .audit import AuditTrail as _AT
+        result = _AT.verify(args.db)
+        if result.valid:
+            print(
+                f"Audit trail valid: {result.total_entries} entries "
+                f"across {result.files_verified} file(s)",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Audit trail INVALID: {result.error}", file=sys.stderr)
+            if result.chain_break_at is not None:
+                print(
+                    f"  Chain broke at seq {result.chain_break_at} "
+                    f"in {result.chain_break_file}",
+                    file=sys.stderr,
+                )
+            sys.exit(1)
         return
 
     # Force UTF-8 on stdio — locale encoding can corrupt non-ASCII memories
@@ -511,9 +548,12 @@ def main() -> None:
         # Missing file is not an error — first run or dev mode
 
     # Open store and run server
+    audit_retention = args.audit_retention_days if args.audit_retention_days > 0 else None
     store = Store(
         path=args.db,
         project_name=args.project_name,
+        audit=not args.no_audit,
+        audit_retention_days=audit_retention,
     )
 
     try:

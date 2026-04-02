@@ -484,6 +484,10 @@ def main() -> None:
         print(f"Generated {out}", file=sys.stderr)
         return
 
+    # Force UTF-8 on stdio — locale encoding can corrupt non-ASCII memories
+    sys.stdin.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8")
+
     # Logging to stderr (stdout is the MCP transport)
     logging.basicConfig(
         stream=sys.stderr,

@@ -586,6 +586,226 @@ class TestWrapCancelled:
         store.close()
 
 
+class TestDiogenesBugFixes:
+    """Regression tests for bugs found by Diogenes code review (sweeps 4-7)."""
+
+    def test_double_orphan_prefers_gz_and_removes_jsonl(self, tmp_path):
+        """MEDIUM: If both .gz and .jsonl exist for same period (crash between
+        gzip-complete and sealed_path.unlink()), prefer .gz and remove .jsonl.
+        Without fix: both adopted into manifest → verify() false chain break."""
+        db = tmp_path / "test.db"
+        stem = "test"
+
+        # Create the same content in both .gz and .jsonl for same period
+        entry_json = json.dumps({
+            "v": 1, "seq": 0, "ts": "2026-03-24T12:00:00.000000Z",
+            "event": "record", "actor": "agent",
+            "prev_hash": GENESIS_HASH, "data": {"id": "1"}
+        }, sort_keys=True, separators=(",", ":"))
+
+        # .gz file (gzip completed)
+        gz_path = tmp_path / f"{stem}.audit.2026-W13.jsonl.gz"
+        with gzip.open(gz_path, "wt", encoding="utf-8") as f:
+            f.write(entry_json + "\n")
+
+        # .jsonl file (not yet deleted — crash scenario)
+        jsonl_path = tmp_path / f"{stem}.audit.2026-W13.jsonl"
+        jsonl_path.write_text(entry_json + "\n", encoding="utf-8")
+
+        # Initialize trail — should adopt .gz, remove .jsonl
+        trail = AuditTrail(db)
+        trail.log("record", {"id": "new"})
+
+        # .jsonl duplicate should be gone
+        assert not jsonl_path.exists()
+        assert gz_path.exists()
+
+        # Manifest should have exactly one entry for this period
+        manifest = json.loads(
+            (tmp_path / f"{stem}.audit.manifest.json").read_text(encoding="utf-8")
+        )
+        periods = [f["period"] for f in manifest["files"]]
+        assert periods.count("2026-W13") == 1
+        assert manifest["files"][0]["filename"].endswith(".gz")
+
+        # Chain should verify cleanly
+        result = AuditTrail.verify(db)
+        assert result.valid is True
+
+    def test_init_failure_allows_retry(self, tmp_path):
+        """MEDIUM: _initialized must not be set before init completes.
+        If orphan adoption raises, next log() should retry init, not
+        write with seq=0 + GENESIS_HASH."""
+        db = tmp_path / "test.db"
+        trail = AuditTrail(db)
+
+        # Write some entries so there's state to recover
+        trail.log("record", {"id": "1"})
+        trail.log("record", {"id": "2"})
+
+        # Create a new trail and monkeypatch adoption to fail once
+        trail2 = AuditTrail(db)
+        assert trail2._initialized is False
+
+        call_count = 0
+        original_adopt = trail2._adopt_orphaned_files
+
+        def failing_adopt():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise OSError("Simulated disk full during orphan adoption")
+            return original_adopt()
+
+        trail2._adopt_orphaned_files = failing_adopt
+
+        # First log() attempt: init fails, should propagate the error
+        with pytest.raises(OSError, match="disk full"):
+            trail2.log("record", {"id": "3"})
+
+        # _initialized should still be False after failure
+        assert trail2._initialized is False
+
+        # Second log() attempt: init retries and succeeds
+        entry = trail2.log("record", {"id": "3"})
+        assert trail2._initialized is True
+        assert entry["seq"] == 2  # Continues from where trail1 left off
+
+        # Chain should be valid
+        result = AuditTrail.verify(db)
+        assert result.valid is True
+
+    def test_jsonl_orphan_period_not_mangled(self, tmp_path):
+        """LOW: Uncompressed .jsonl orphan should have clean period field,
+        not ' 2026-W14.jsonl'."""
+        db = tmp_path / "test.db"
+        stem = "test"
+
+        # Create uncompressed orphan (crash before gzip)
+        entry_json = json.dumps({
+            "v": 1, "seq": 0, "ts": "2026-03-31T12:00:00.000000Z",
+            "event": "record", "actor": "agent",
+            "prev_hash": GENESIS_HASH, "data": {"id": "1"}
+        }, sort_keys=True, separators=(",", ":"))
+
+        jsonl_path = tmp_path / f"{stem}.audit.2026-W14.jsonl"
+        jsonl_path.write_text(entry_json + "\n", encoding="utf-8")
+
+        trail = AuditTrail(db)
+        trail.log("record", {"id": "new"})
+
+        manifest = json.loads(
+            (tmp_path / f"{stem}.audit.manifest.json").read_text(encoding="utf-8")
+        )
+        orphan_entry = [f for f in manifest["files"] if "2026-W14" in f["filename"]]
+        assert len(orphan_entry) == 1
+        assert orphan_entry[0]["period"] == "2026-W14"  # Not "2026-W14.jsonl"
+
+    def test_seq_consistent_after_rotation_crash_recovery(self, tmp_path):
+        """LOW: Seq should be 0 after rotation whether via normal path or
+        crash recovery. Manifest must store active_last_seq=0 after rotation."""
+        db = tmp_path / "test.db"
+        trail = AuditTrail(db)
+
+        # Write entries and rotate
+        trail.log("record", {"id": "1"})
+        trail.log("record", {"id": "2"})
+        trail._last_week = "2026-W01"
+        trail.log("record", {"id": "3"})  # Triggers rotation, seq resets to 0
+
+        # Verify manifest has seq=0 (not the pre-rotation value)
+        manifest = json.loads(
+            (tmp_path / "test.audit.manifest.json").read_text(encoding="utf-8")
+        )
+        assert manifest["active_last_seq"] == 0
+
+        # Simulate crash: delete the active file (as if it was never written)
+        active = tmp_path / "test.audit.jsonl"
+        active.unlink()
+
+        # New trail recovers from manifest — should start at seq 0
+        trail2 = AuditTrail(db)
+        entry = trail2.log("record", {"id": "4"})
+        assert entry["seq"] == 0  # Matches normal rotation behavior
+
+        # Chain should still verify
+        result = AuditTrail.verify(db)
+        assert result.valid is True
+
+    def test_cleanup_preserves_files_with_empty_last_ts(self, tmp_path):
+        """LOW: Files with empty last_ts should not be deleted by cleanup.
+        Empty string < any date string in Python → was always deleting."""
+        db = tmp_path / "test.db"
+        trail = AuditTrail(db, retention_days=7)
+
+        # Create a sealed file with empty last_ts (simulates orphan adoption
+        # of file with no valid entries)
+        empty_gz = tmp_path / "test.audit.2026-W13.jsonl.gz"
+        with gzip.open(empty_gz, "wt", encoding="utf-8") as f:
+            f.write("")  # Empty content
+
+        manifest = trail._load_manifest()
+        manifest["files"].append({
+            "filename": "test.audit.2026-W13.jsonl.gz",
+            "period": "2026-W13",
+            "entries": 0,
+            "first_ts": "",
+            "last_ts": "",  # Empty — the bug trigger
+            "last_hash": "",
+            "sha256_file": "",
+        })
+        trail._save_manifest(manifest)
+
+        # Run cleanup — should NOT delete file with empty last_ts
+        removed = trail._cleanup()
+        assert removed == 0
+        assert empty_gz.exists()
+
+    def test_multi_period_orphans_adopted_in_order(self, tmp_path):
+        """Orphans from multiple periods must be adopted in chronological
+        order so active_last_hash reflects the most recent file's chain."""
+        db = tmp_path / "test.db"
+        stem = "test"
+
+        # Create two orphans: W13 and W14, each with one chained entry
+        entry_w13 = json.dumps({
+            "v": 1, "seq": 0, "ts": "2026-03-24T12:00:00.000000Z",
+            "event": "record", "actor": "agent",
+            "prev_hash": GENESIS_HASH, "data": {"id": "w13"}
+        }, sort_keys=True, separators=(",", ":"))
+        # Compute hash of W13 entry for W14's prev_hash
+        w13_hash = "sha256:" + __import__("hashlib").sha256(
+            entry_w13.encode("utf-8")
+        ).hexdigest()
+
+        entry_w14 = json.dumps({
+            "v": 1, "seq": 0, "ts": "2026-03-31T12:00:00.000000Z",
+            "event": "record", "actor": "agent",
+            "prev_hash": w13_hash, "data": {"id": "w14"}
+        }, sort_keys=True, separators=(",", ":"))
+
+        with gzip.open(tmp_path / f"{stem}.audit.2026-W13.jsonl.gz", "wt", encoding="utf-8") as f:
+            f.write(entry_w13 + "\n")
+        with gzip.open(tmp_path / f"{stem}.audit.2026-W14.jsonl.gz", "wt", encoding="utf-8") as f:
+            f.write(entry_w14 + "\n")
+
+        # Initialize — should adopt both in order
+        trail = AuditTrail(db)
+        trail.log("record", {"id": "new"})
+
+        manifest = json.loads(
+            (tmp_path / f"{stem}.audit.manifest.json").read_text(encoding="utf-8")
+        )
+        periods = [f["period"] for f in manifest["files"]]
+        assert "2026-W13" in periods
+        assert "2026-W14" in periods
+
+        # Chain should verify end-to-end
+        result = AuditTrail.verify(db)
+        assert result.valid is True
+        assert result.total_entries == 3  # W13(1) + W14(1) + new(1)
+
+
 class TestStoreIntegration:
     """Audit trail integration with Store."""
 

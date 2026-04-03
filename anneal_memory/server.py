@@ -20,6 +20,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .continuity import measure_sections, prepare_wrap_package, validate_structure
 from .graduation import validate_graduations
 from .integrity import RESOURCES, TOOLS, generate_integrity_file, verify_integrity
@@ -175,7 +176,7 @@ class Server:
             },
             "serverInfo": {
                 "name": "anneal-memory",
-                "version": "0.1.0",
+                "version": __version__,
             },
         }
 

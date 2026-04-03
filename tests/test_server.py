@@ -8,6 +8,8 @@ import io
 import json
 import pytest
 from pathlib import Path
+
+from anneal_memory import __version__
 from unittest.mock import patch
 
 from anneal_memory.server import (
@@ -62,7 +64,7 @@ class TestInitialize:
     def test_returns_server_info(self, server):
         result = server._handle_initialize({})
         assert result["serverInfo"]["name"] == "anneal-memory"
-        assert result["serverInfo"]["version"] == "0.1.0"
+        assert result["serverInfo"]["version"] == __version__
 
 
 class TestPing:

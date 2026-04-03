@@ -279,9 +279,12 @@ class AuditTrail:
         return self._db_path.parent / f"{self._db_path.stem}.audit.manifest.json"
 
     def _initialize(self) -> None:
-        """Lazy init: recover seq and prev_hash from existing audit file."""
-        self._initialized = True
+        """Lazy init: recover seq and prev_hash from existing audit file.
 
+        Sets _initialized only after all recovery steps complete. If any
+        step raises (disk full, permission error during orphan adoption),
+        the next log() call retries init instead of writing with broken state.
+        """
         # Adopt orphaned sealed files — crash between rename and manifest
         # update during rotation leaves .gz files the manifest doesn't know about.
         self._adopt_orphaned_files()
@@ -301,6 +304,7 @@ class AuditTrail:
                 except (json.JSONDecodeError, KeyError):
                     pass
             self._last_week = _iso_week_now()
+            self._initialized = True
             return
 
         # Recover from existing active file — find last valid JSON entry
@@ -326,6 +330,8 @@ class AuditTrail:
         else:
             self._last_week = _iso_week_now()
 
+        self._initialized = True
+
     def _adopt_orphaned_files(self) -> None:
         """Adopt sealed files that the manifest doesn't know about.
 
@@ -334,34 +340,62 @@ class AuditTrail:
         file exists on disk but the manifest has no record of it.
         Scans for both compressed (.gz) and uncompressed (.jsonl) orphans
         — crash can happen before or after gzip compression.
+
+        If both .gz and .jsonl exist for the same period (crash between
+        gzip-complete and sealed_path.unlink()), prefers .gz and removes
+        the .jsonl duplicate to prevent false verify() failures.
         """
         stem = self._db_path.stem
         audit_dir = self._db_path.parent
         active_name = f"{stem}.audit.jsonl"
+        prefix = f"{stem}.audit."
 
         manifest = self._load_manifest()
         known_files = {f["filename"] for f in manifest.get("files", [])}
 
-        orphans = []
-        # Scan for both .gz and uncompressed .jsonl orphans
-        for pattern in [f"{stem}.audit.*.jsonl.gz", f"{stem}.audit.*.jsonl"]:
+        # Collect orphans grouped by period to detect duplicates
+        orphans_by_period: dict[str, list[Path]] = {}
+        for pattern in [f"{prefix}*.jsonl.gz", f"{prefix}*.jsonl"]:
             for path in sorted(audit_dir.glob(pattern)):
                 if path.name == active_name:
                     continue  # Skip the active file
                 if path.name not in known_files:
-                    orphans.append(path)
+                    # Extract period from filename
+                    period = path.name.removeprefix(prefix)
+                    period = period.removesuffix(".jsonl.gz").removesuffix(".jsonl")
+                    orphans_by_period.setdefault(period, []).append(path)
 
-        if not orphans:
+        if not orphans_by_period:
             return
 
-        for gz_path in orphans:
+        # Deduplicate: if both .gz and .jsonl exist for same period,
+        # prefer .gz (gzip completed) and remove the .jsonl duplicate
+        orphans: list[Path] = []
+        for period, paths in orphans_by_period.items():
+            if len(paths) > 1:
+                gz_paths = [p for p in paths if p.name.endswith(".gz")]
+                jsonl_paths = [p for p in paths if not p.name.endswith(".gz")]
+                if gz_paths:
+                    orphans.append(gz_paths[0])
+                    for dup in jsonl_paths:
+                        try:
+                            dup.unlink()
+                            logger.info("Removed duplicate orphan: %s (preferring .gz)", dup.name)
+                        except OSError:
+                            logger.warning("Failed to remove duplicate orphan: %s", dup.name)
+                else:
+                    orphans.append(paths[0])
+            else:
+                orphans.append(paths[0])
+
+        for orphan_path in orphans:
             # Read the orphaned file to get metadata
             entry_count = 0
             first_ts = ""
             last_ts = ""
             last_hash = ""
 
-            for line in _iter_lines(gz_path):
+            for line in _iter_lines(orphan_path):
                 stripped = line.strip()
                 if not stripped:
                     continue
@@ -379,11 +413,12 @@ class AuditTrail:
                     pass
 
             # Extract period from filename (e.g., "memory.audit.2026-W14.jsonl.gz")
-            name_parts = gz_path.name.replace(f"{stem}.audit.", "").replace(".jsonl.gz", "")
+            period = orphan_path.name.removeprefix(prefix)
+            period = period.removesuffix(".jsonl.gz").removesuffix(".jsonl")
 
             manifest["files"].append({
-                "filename": gz_path.name,
-                "period": name_parts,
+                "filename": orphan_path.name,
+                "period": period,
                 "entries": entry_count,
                 "first_ts": first_ts,
                 "last_ts": last_ts,
@@ -394,7 +429,7 @@ class AuditTrail:
             if last_hash:
                 manifest["active_last_hash"] = last_hash
 
-            logger.info("Adopted orphaned audit file: %s (%d entries)", gz_path.name, entry_count)
+            logger.info("Adopted orphaned audit file: %s (%d entries)", orphan_path.name, entry_count)
 
         self._save_manifest(manifest)
 
@@ -458,11 +493,13 @@ class AuditTrail:
             "sha256_file": f"sha256:{file_hash.hexdigest()}",
         })
         manifest["active_last_hash"] = self._prev_hash
+        # Reset seq for new file BEFORE saving manifest, so crash
+        # recovery restores the correct starting seq (0), not the
+        # pre-rotation value.
+        self._seq = 0
         manifest["active_last_seq"] = self._seq
         self._save_manifest(manifest)
 
-        # Reset seq for new file, chain continues via prev_hash
-        self._seq = 0
         self._last_week = current_week
 
         # Auto-cleanup old files
@@ -484,7 +521,14 @@ class AuditTrail:
         removed_last_hash = ""
         remaining_files = []
         for f in manifest.get("files", []):
-            if f.get("last_ts", "") < cutoff_str:
+            last_ts = f.get("last_ts", "")
+            if not last_ts:
+                # No timestamp — preserve file (can't determine age).
+                # Empty last_ts occurs when orphan adoption processes a
+                # file with zero valid JSON entries.
+                remaining_files.append(f)
+                continue
+            if last_ts < cutoff_str:
                 fpath = self._db_path.parent / f["filename"]
                 try:
                     fpath.unlink(missing_ok=True)

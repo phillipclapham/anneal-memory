@@ -251,10 +251,11 @@ class AuditTrail:
                               f"got {actual_prev[:20]}...",
                     )
 
-                # Compute hash of this entry for next check
-                # Re-serialize deterministically to match what was written
-                canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"))
-                expected_hash = cls._compute_hash(canonical)
+                # Compute hash from the line on disk, not a re-serialization.
+                # _compute_hash normalizes whitespace (see its docstring).
+                # Re-serializing via json.dumps would be byte-identical in
+                # CPython today but fragile for cross-language verifiers.
+                expected_hash = cls._compute_hash(line)
                 total_entries += 1
 
             files_verified += 1
@@ -312,11 +313,8 @@ class AuditTrail:
         if last_line:
             last_entry = json.loads(last_line)  # Guaranteed valid by helper
             self._seq = last_entry.get("seq", 0) + 1
-            # Recompute hash from exact bytes on disk
-            canonical = json.dumps(
-                last_entry, sort_keys=True, separators=(",", ":")
-            )
-            self._prev_hash = self._compute_hash(canonical)
+            # Hash the line from disk, not a re-serialization
+            self._prev_hash = self._compute_hash(last_line)
             # Recover week from last entry timestamp
             ts = last_entry.get("ts", "")
             if ts:
@@ -406,9 +404,8 @@ class AuditTrail:
                         first_ts = ts
                     last_ts = ts
                     entry_count += 1
-                    # Compute hash of this entry for chain continuity
-                    canonical = json.dumps(e, sort_keys=True, separators=(",", ":"))
-                    last_hash = self._compute_hash(canonical)
+                    # Hash the line from disk, not a re-serialization
+                    last_hash = self._compute_hash(stripped)
                 except json.JSONDecodeError:
                     pass
 
@@ -453,16 +450,21 @@ class AuditTrail:
         sealed_path = active.parent / sealed_name
         sealed_gz_path = sealed_path.with_suffix(".jsonl.gz")
 
-        # Rename → compress → update manifest
+        # Rename → compress (atomic) → update manifest
         active.rename(sealed_path)
 
-        # Gzip compress
+        # Gzip compress to temp file, then atomic rename.
+        # Crash during gzip write → partial .tmp + complete .jsonl on disk.
+        # Orphan adoption handles the .jsonl; .tmp is harmless dead weight.
+        # Without atomic write, crash → partial .gz + complete .jsonl, and
+        # dedup logic prefers .gz → deletes the good .jsonl copy.
+        tmp_gz_path = Path(str(sealed_gz_path) + ".tmp")
         file_hash = hashlib.sha256()
         entry_count = 0
         first_ts = ""
         last_ts = ""
 
-        with open(sealed_path, "rb") as f_in, gzip.open(sealed_gz_path, "wb") as f_out:
+        with open(sealed_path, "rb") as f_in, gzip.open(tmp_gz_path, "wb") as f_out:
             for line in f_in:
                 file_hash.update(line)
                 f_out.write(line)
@@ -477,6 +479,9 @@ class AuditTrail:
                         last_ts = ts
                     except json.JSONDecodeError:
                         pass
+
+        # Atomic rename — .gz is either complete or doesn't exist
+        tmp_gz_path.replace(sealed_gz_path)
 
         # Remove uncompressed sealed file
         sealed_path.unlink()
@@ -590,7 +595,15 @@ class AuditTrail:
 
     @staticmethod
     def _compute_hash(json_line: str) -> str:
-        """Compute SHA-256 hash of a JSON line (the exact bytes written)."""
+        """Compute SHA-256 hash of a JSON line.
+
+        IMPORTANT: The .strip() call is LOAD-BEARING. Four call sites
+        feed this method with inconsistent whitespace (some pre-stripped,
+        some with trailing newlines from file iterators). The strip()
+        normalizes all inputs to the same canonical form — the JSON
+        content without surrounding whitespace. Removing it will cause
+        silent hash chain verification failures.
+        """
         return "sha256:" + hashlib.sha256(
             json_line.strip().encode("utf-8")
         ).hexdigest()

@@ -309,6 +309,95 @@ class TestWeeklyRotation:
         assert entry["data"]["content"] == "test episode"
 
 
+class TestMultiRotationIntegration:
+    """Multi-rotation → crash → recovery integration tests."""
+
+    def test_multi_rotation_verify_and_recovery(self, tmp_path):
+        """3+ organic rotations, verify after each, new writer, verify again.
+
+        Exercises the full rotation lifecycle end-to-end: multiple week
+        boundaries, chain continuity across rotated files, and recovery
+        from a fresh AuditTrail instance reading the existing state.
+        """
+        db = tmp_path / "test.db"
+        trail = AuditTrail(db)
+
+        # Week 1: write 3 entries
+        trail.log("record", {"id": "w1-1"})
+        trail.log("record", {"id": "w1-2"})
+        trail.log("record", {"id": "w1-3"})
+
+        # Rotate to week 2
+        trail._last_week = "2026-W10"
+        trail.log("record", {"id": "w2-1"})
+        trail.log("record", {"id": "w2-2"})
+
+        result = AuditTrail.verify(db)
+        assert result.valid is True
+        assert result.total_entries == 5
+        assert result.files_verified == 2  # W10.gz + active
+
+        # Rotate to week 3
+        trail._last_week = "2026-W11"
+        trail.log("record", {"id": "w3-1"})
+
+        result = AuditTrail.verify(db)
+        assert result.valid is True
+        assert result.total_entries == 6
+        assert result.files_verified == 3  # W10.gz + W11.gz + active
+
+        # Rotate to week 4
+        trail._last_week = "2026-W12"
+        trail.log("record", {"id": "w4-1"})
+        trail.log("record", {"id": "w4-2"})
+
+        result = AuditTrail.verify(db)
+        assert result.valid is True
+        assert result.total_entries == 8
+        assert result.files_verified == 4  # W10 + W11 + W12 + active
+
+        # Simulate crash: create a brand new AuditTrail instance
+        # This tests recovery from manifest + active file state
+        trail2 = AuditTrail(db)
+        trail2.log("record", {"id": "recovery-1"})
+
+        # Full chain should still verify end-to-end
+        result = AuditTrail.verify(db)
+        assert result.valid is True
+        assert result.total_entries == 9
+        assert result.files_verified == 4  # 3 sealed + active
+
+        # Verify all .gz files exist
+        gz_files = sorted(tmp_path.glob("*.jsonl.gz"))
+        assert len(gz_files) == 3
+        prefix = "test.audit."
+        periods = {
+            f.name.removeprefix(prefix).removesuffix(".jsonl.gz")
+            for f in gz_files
+        }
+        assert periods == {"2026-W10", "2026-W11", "2026-W12"}
+
+    def test_rotation_atomic_gz_no_tmp_residue(self, tmp_path):
+        """Rotation should not leave .tmp files after successful completion."""
+        db = tmp_path / "test.db"
+        trail = AuditTrail(db)
+
+        trail.log("record", {"id": "1"})
+        trail._last_week = "2026-W01"
+        trail.log("record", {"id": "2"})
+
+        # No .tmp files should remain after successful rotation
+        tmp_files = list(tmp_path.glob("*.tmp"))
+        assert len(tmp_files) == 0
+
+        # .gz should exist and be valid
+        gz_files = list(tmp_path.glob("*.jsonl.gz"))
+        assert len(gz_files) == 1
+
+        result = AuditTrail.verify(db)
+        assert result.valid is True
+
+
 class TestRetentionCleanup:
     """Automatic cleanup of old rotated files."""
 

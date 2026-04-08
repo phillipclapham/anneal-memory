@@ -60,6 +60,9 @@ class WrapResult:
     episodes_compressed: int = 0
     pruned_count: int = 0  # Episodes pruned by auto-prune after wrap
     continuity_text: str | None = None  # The compressed continuity text (Engine only)
+    associations_formed: int = 0  # New association links created this wrap
+    associations_strengthened: int = 0  # Existing links reinforced this wrap
+    associations_decayed: int = 0  # Links weakened by decay this wrap
 
 
 @dataclass
@@ -74,6 +77,58 @@ class StoreStatus:
     tombstone_count: int
     continuity_chars: int | None  # Size of current continuity file, None if no file
     episodes_by_type: dict[str, int] = field(default_factory=dict)
+    association_stats: AssociationStats | None = None  # Hebbian network metrics
+
+
+@dataclass
+class AffectiveState:
+    """Agent's self-reported functional state during consolidation.
+
+    Captures the agent's characterization of its internal state at the
+    moment of compression. Free-text tag (emergent > prescriptive) plus
+    numeric intensity. Provides the persistent emotional state tracking
+    that transformers lack natively (Anthropic emotion vectors paper, 2026).
+
+    Tag is normalized to lowercase on creation (prevents clustering
+    fragmentation from casing differences). Intensity is clamped to
+    [0.0, 1.0] at the type level so callers don't need to validate.
+    """
+
+    tag: str  # Free-text functional state (e.g., "engaged", "curious", "uncertain")
+    intensity: float  # 0.0 to 1.0 — how strongly the state was felt
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "tag", self.tag.strip().lower())
+        object.__setattr__(self, "intensity", max(0.0, min(1.0, self.intensity)))
+
+
+@dataclass(frozen=True)
+class AssociationPair:
+    """A Hebbian association between two episodes.
+
+    Episodes are stored in canonical order (episode_a < episode_b)
+    to ensure each pair is represented exactly once.
+    """
+
+    episode_a: str
+    episode_b: str
+    strength: float
+    co_citations: int  # Raw count of co-citation events
+    first_linked: str  # ISO 8601 UTC
+    last_strengthened: str  # ISO 8601 UTC
+    affective_tag: str | None = None  # Most recent functional state during strengthening
+    affective_intensity: float = 0.0  # Most recent intensity (0.0-1.0)
+
+
+@dataclass
+class AssociationStats:
+    """Association network health metrics."""
+
+    total_links: int
+    avg_strength: float
+    max_strength: float
+    density: float  # links / possible_links (cognitive structure metric)
+    strongest_pairs: list[AssociationPair] = field(default_factory=list)
 
 
 @dataclass

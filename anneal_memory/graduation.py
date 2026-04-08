@@ -55,6 +55,8 @@ class GraduationResult:
     bare_demoted: int  # Bare graduations demoted (no evidence tag)
     citation_counts: dict[str, int] = field(default_factory=dict)  # ep_id -> times cited
     gaming_suspects: list[str] = field(default_factory=list)  # IDs cited >= threshold
+    direct_co_citations: list[tuple[str, str]] = field(default_factory=list)  # Pairs from same line
+    all_validated_ids: list[set[str]] = field(default_factory=list)  # Per-line validated ID sets
 
 
 @dataclass
@@ -104,6 +106,8 @@ def validate_graduations(
     demoted = 0
     bare_demoted = 0
     citation_counts: dict[str, int] = {}
+    direct_co_citations: list[tuple[str, str]] = []
+    all_validated_ids: list[set[str]] = []
 
     for i, line in enumerate(lines):
         # Track section boundaries
@@ -152,6 +156,18 @@ def validate_graduations(
 
             if ids_valid and explanation_valid:
                 validated += 1
+                # Extract co-citation pairs for Hebbian associations
+                # Only from VALIDATED citations — immune system protects the graph
+                valid_cited = sorted(cited_ids & valid_ids)
+                if len(valid_cited) >= 2:
+                    for idx_a in range(len(valid_cited)):
+                        for idx_b in range(idx_a + 1, len(valid_cited)):
+                            direct_co_citations.append(
+                                (valid_cited[idx_a], valid_cited[idx_b])
+                            )
+                # Track all validated IDs per line for session co-citation
+                if valid_cited:
+                    all_validated_ids.append(set(valid_cited))
             else:
                 demoted += 1
                 lines[i] = _demote_line(line, match, level)
@@ -188,6 +204,8 @@ def validate_graduations(
         bare_demoted=bare_demoted,
         citation_counts=dict(citation_counts),
         gaming_suspects=gaming_suspects,
+        direct_co_citations=direct_co_citations,
+        all_validated_ids=all_validated_ids,
     )
 
 
@@ -216,6 +234,44 @@ def check_explanation_overlap(explanation: str, episode_content: str) -> bool:
     explanation_words = meaningful_words(explanation)
     episode_words = meaningful_words(episode_content)
     return len(explanation_words & episode_words) >= 2
+
+
+def extract_session_co_citations(
+    all_validated_ids: list[set[str]],
+) -> set[tuple[str, str]]:
+    """Extract session-level co-citation pairs from validated graduation IDs.
+
+    Session co-citations are pairs of episodes cited in DIFFERENT pattern
+    lines during the same wrap. These represent a weaker association signal
+    than direct co-citations (same line).
+
+    Args:
+        all_validated_ids: List of sets, each containing validated episode IDs
+            from a single pattern line.
+
+    Returns:
+        Set of canonical (id_a, id_b) pairs where id_a < id_b.
+    """
+    # Collect all unique IDs across all lines
+    all_ids: set[str] = set()
+    for id_set in all_validated_ids:
+        all_ids.update(id_set)
+
+    # Generate pairs between IDs that appear in DIFFERENT lines
+    pairs: set[tuple[str, str]] = set()
+    id_list = sorted(all_ids)
+    for i in range(len(id_list)):
+        for j in range(i + 1, len(id_list)):
+            id_a, id_b = id_list[i], id_list[j]
+            # Check they appear in different lines (not just same line)
+            # A pair from the same line is a direct co-citation, not session
+            a_lines = {idx for idx, s in enumerate(all_validated_ids) if id_a in s}
+            b_lines = {idx for idx, s in enumerate(all_validated_ids) if id_b in s}
+            if a_lines != b_lines or len(a_lines) > 1:
+                # They appear in at least one different line context
+                pairs.add((id_a, id_b))
+
+    return pairs
 
 
 def detect_stale_patterns(text: str, today: str, staleness_days: int = 7) -> list[StalenessInfo]:

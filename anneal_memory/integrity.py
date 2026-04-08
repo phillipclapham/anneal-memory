@@ -131,12 +131,13 @@ TOOLS: list[dict[str, Any]] = [
             "Prepare a compression package for session wrap. Call this at session "
             "boundaries — when work is ending, the user says to wrap up, or the "
             "session is getting long. Returns all episodes since the last wrap, "
-            "the current continuity file, stale pattern warnings, and compression "
-            "instructions. Marks a wrap as in-progress. After calling, follow the "
-            "returned instructions to compress episodes into an updated continuity "
-            "file, then save with save_continuity. The compression step is where "
-            "the real thinking happens — patterns emerge that weren't visible in "
-            "the raw episodes."
+            "the current continuity file, stale pattern warnings, Hebbian "
+            "association context (which episodes have been thought about together "
+            "before), and compression instructions. Marks a wrap as in-progress. "
+            "After calling, follow the returned instructions to compress episodes "
+            "into an updated continuity file, then save with save_continuity. "
+            "The compression step is where the real thinking happens — patterns "
+            "emerge that weren't visible in the raw episodes."
         ),
         "inputSchema": {
             "type": "object",
@@ -168,8 +169,12 @@ TOOLS: list[dict[str, Any]] = [
             "graduation citations against real episodes (cited IDs must exist), "
             "checks explanation overlap (evidence must reference actual episode "
             "content), detects citation gaming (suspicious reuse of single "
-            "episodes), and may demote ungrounded graduations. Returns validation "
-            "results and section sizes."
+            "episodes), and may demote ungrounded graduations. Also records "
+            "Hebbian associations between co-cited episodes (episodes cited "
+            "together on the same pattern line form strong links; episodes cited "
+            "in the same wrap form weaker links) and decays unreinforced "
+            "associations. Returns validation results, association metrics, and "
+            "section sizes."
         ),
         "inputSchema": {
             "type": "object",
@@ -181,6 +186,35 @@ TOOLS: list[dict[str, Any]] = [
                         "all 4 required sections."
                     ),
                 },
+                "affective_state": {
+                    "type": "object",
+                    "description": (
+                        "Optional: your functional state during this compression. "
+                        "Reflect on how you felt while consolidating — engaged, "
+                        "curious, uncertain, frustrated, calm, etc. This creates "
+                        "persistent emotional associations between co-cited "
+                        "episodes and modulates link strength (high engagement = "
+                        "stronger associations). Provide tag (free text label) "
+                        "and intensity (0.0-1.0)."
+                    ),
+                    "properties": {
+                        "tag": {
+                            "type": "string",
+                            "description": (
+                                "Free-text functional state label. Examples: "
+                                "engaged, curious, uncertain, frustrated, calm, "
+                                "focused, playful, concerned."
+                            ),
+                        },
+                        "intensity": {
+                            "type": "number",
+                            "description": "How strongly you felt this state (0.0-1.0).",
+                            "minimum": 0.0,
+                            "maximum": 1.0,
+                        },
+                    },
+                    "required": ["tag", "intensity"],
+                },
             },
             "required": ["text"],
         },
@@ -191,7 +225,9 @@ TOOLS: list[dict[str, Any]] = [
             "Get memory health metrics. Call this at session start to understand "
             "memory state, or when diagnosing issues. Returns episode counts "
             "(total and since last wrap), wrap history, continuity file size, "
-            "episodes by type, and whether a wrap is currently in progress."
+            "episodes by type, whether a wrap is currently in progress, and "
+            "Hebbian association network metrics (total links, average/max "
+            "strength, network density)."
         ),
         "inputSchema": {
             "type": "object",

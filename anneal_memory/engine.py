@@ -33,6 +33,7 @@ import sys
 from datetime import date
 from typing import Callable
 
+from .associations import process_wrap_associations
 from .continuity import (
     build_engine_prompt,
     format_episodes_for_wrap,
@@ -41,7 +42,7 @@ from .continuity import (
 )
 from .graduation import detect_stale_patterns, validate_graduations
 from .store import Store
-from .types import Episode, WrapResult
+from .types import AffectiveState, Episode, WrapResult
 
 
 def _log(msg: str) -> None:
@@ -107,9 +108,11 @@ class Engine:
         model: str = "claude-sonnet-4-6",
         max_tokens: int = 8192,
         max_chars: int = 20000,
+        characterize_affect: bool = False,
     ) -> None:
         self._store = store
         self._max_chars = max_chars
+        self._characterize_affect = characterize_affect
 
         if llm is not None:
             self._llm = llm
@@ -181,6 +184,33 @@ class Engine:
 
     # -- Internal pipeline --
 
+    def _characterize_affective_state(self) -> AffectiveState | None:
+        """Ask the LLM to characterize its functional state after compression.
+
+        Makes a short second LLM call. Returns None if parsing fails
+        (graceful degradation — associations still form at base strength).
+        """
+        prompt = (
+            "In exactly one line, characterize your functional state during "
+            "that compression. Format: TAG INTENSITY\n"
+            "TAG = one word (engaged, curious, uncertain, frustrated, calm, focused, etc.)\n"
+            "INTENSITY = number 0.0-1.0 (how strongly you felt it)\n"
+            "Example: engaged 0.8\n"
+            "Respond with ONLY the tag and number, nothing else."
+        )
+        try:
+            raw = self._llm(prompt).strip().lower()
+            parts = raw.split()
+            if len(parts) >= 2:
+                tag = parts[0]
+                intensity = float(parts[1])
+                intensity = max(0.0, min(1.0, intensity))
+                _log(f"Affective state: {tag} {intensity:.1f}")
+                return AffectiveState(tag=tag, intensity=intensity)
+        except (ValueError, IndexError, Exception) as e:
+            _log(f"Affective characterization failed (non-fatal): {e}")
+        return None
+
     def _compress_validate_save(
         self,
         episodes: list[Episode],
@@ -208,7 +238,14 @@ class Engine:
                     )
                 stale_section = "\n".join(stale_lines) + "\n"
 
-        # Build compression prompt (stale patterns injected before output instructions)
+        # Build association context for episodes in this wrap window
+        episode_ids = [ep.id for ep in episodes]
+        assoc_context = self._store.get_association_context(episode_ids)
+        assoc_section = ""
+        if assoc_context:
+            assoc_section = "\n" + assoc_context + "\n"
+
+        # Build compression prompt (stale patterns + associations injected)
         prompt = build_engine_prompt(
             session_summary=formatted,
             existing_continuity=existing_continuity,
@@ -216,6 +253,7 @@ class Engine:
             max_chars=self._max_chars,
             today=today,
             stale_patterns_section=stale_section,
+            association_section=assoc_section,
         )
 
         _log(f"Compressing {len(episodes)} episodes (max {self._max_chars} chars)")
@@ -272,6 +310,15 @@ class Engine:
                 f"{grad_result.citation_reuse_max} times"
             )
 
+        # Optionally characterize affective state after compression
+        affective_state = None
+        if self._characterize_affect:
+            affective_state = self._characterize_affective_state()
+
+        # Record Hebbian associations from validated co-citations + decay
+        assoc_formed, assoc_strengthened, assoc_decayed = \
+            process_wrap_associations(self._store, grad_result, affective_state)
+
         # Truncate if over budget
         if len(text) > self._max_chars:
             _log(
@@ -307,6 +354,9 @@ class Engine:
         # Attach fields that wrap_completed doesn't know about
         result.continuity_text = text
         result.section_sizes = section_sizes
+        result.associations_formed = assoc_formed
+        result.associations_strengthened = assoc_strengthened
+        result.associations_decayed = assoc_decayed
         return result
 
 

@@ -172,6 +172,7 @@ def build_engine_prompt(
     max_chars: int,
     today: str,
     stale_patterns_section: str = "",
+    association_section: str = "",
 ) -> str:
     """Build the full LLM prompt for automated compression (engine mode).
 
@@ -186,6 +187,7 @@ def build_engine_prompt(
         today: Today's date as YYYY-MM-DD.
         stale_patterns_section: Optional pre-formatted stale patterns section
             to inject before output instructions.
+        association_section: Optional pre-formatted association context section.
 
     Returns:
         The full prompt string for the compression LLM.
@@ -219,7 +221,7 @@ form of thinking — extract what matters, discard what doesn't.
 <session_data>
 {session_summary}
 </session_data>
-{existing_section}{stale_patterns_section}
+{existing_section}{stale_patterns_section}{association_section}
 ## Output Format
 
 Produce a markdown file with EXACTLY these 4 section headers (use these headers VERBATIM):
@@ -268,6 +270,11 @@ Stay within {max_chars} characters.
 
 **Quality:** One insightful line > three vague ones. If removing something wouldn't
 change your next decision, cut it. Compress principles, not events.
+
+**Affective state:** When saving with save_continuity, optionally include your
+functional state during this compression as `affective_state: {{"tag": "...", "intensity": 0.0-1.0}}`.
+Reflect honestly — were you engaged, curious, uncertain, calm? How strongly (0-1)?
+This creates persistent emotional associations between co-cited episodes.
 
 **Return ONLY the markdown.** No explanation, no code fences."""
 

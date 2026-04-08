@@ -17,8 +17,28 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from .associations import (
+    ASSOCIATIONS_SCHEMA,
+    association_stats as _association_stats,
+    canonical_pair,
+    decay_associations as _decay_associations,
+    get_association_context as _get_association_context,
+    get_associations as _get_associations,
+    migrate_add_affective_columns as _migrate_affective,
+    record_associations as _record_associations,
+)
 from .audit import AuditTrail
-from .types import Episode, EpisodeType, RecallResult, StoreStatus, Tombstone, WrapResult
+from .types import (
+    AffectiveState,
+    AssociationPair,
+    AssociationStats,
+    Episode,
+    EpisodeType,
+    RecallResult,
+    StoreStatus,
+    Tombstone,
+    WrapResult,
+)
 
 # Schema version — increment on breaking changes
 _SCHEMA_VERSION = 1
@@ -64,6 +84,9 @@ CREATE TABLE IF NOT EXISTS metadata (
     value TEXT NOT NULL
 );
 """
+
+# Appended separately so existing DBs get the new table via CREATE IF NOT EXISTS
+_ASSOCIATIONS_SCHEMA_SQL = ASSOCIATIONS_SCHEMA
 
 _DEFAULT_METADATA = {
     "format_version": str(_SCHEMA_VERSION),
@@ -154,6 +177,10 @@ class Store:
     def _init_schema(self) -> None:
         """Initialize database schema and default metadata."""
         self._conn.executescript(_SCHEMA_SQL)
+        self._conn.executescript(_ASSOCIATIONS_SCHEMA_SQL)
+        # Migrate existing associations tables to include affective columns
+        # (safe no-op if columns already exist or table was just created)
+        _migrate_affective(self._conn)
 
         # Insert default metadata (ignore if already exists)
         defaults = {**_DEFAULT_METADATA, "project_name": self._project_name}
@@ -430,6 +457,9 @@ class Store:
         if continuity_path.exists():
             continuity_chars = len(continuity_path.read_text(encoding="utf-8"))
 
+        # Association network metrics
+        assoc_stats = _association_stats(self._conn, total)
+
         return StoreStatus(
             total_episodes=total,
             episodes_since_wrap=since_wrap,
@@ -439,6 +469,7 @@ class Store:
             tombstone_count=tombstone_count,
             continuity_chars=continuity_chars,
             episodes_by_type=episodes_by_type,
+            association_stats=assoc_stats,
         )
 
     # -- Wrap lifecycle --
@@ -528,6 +559,126 @@ class Store:
             episodes_compressed=episodes_compressed,
             pruned_count=pruned,
         )
+
+    # -- Associations (Hebbian) --
+
+    def record_associations(
+        self,
+        direct_pairs: set[tuple[str, str]],
+        session_pairs: set[tuple[str, str]] | None = None,
+        affective_state: "AffectiveState | None" = None,
+    ) -> tuple[int, int]:
+        """Record or strengthen Hebbian association links from co-citation.
+
+        Called during wrap validation after graduation citations are checked.
+        Direct pairs get stronger links than session pairs.
+
+        Args:
+            direct_pairs: Episode ID pairs co-cited on the same pattern line.
+            session_pairs: Episode ID pairs cited in the same wrap, different patterns.
+            affective_state: Optional agent functional state during consolidation.
+                Modulates association strength and is stored on the link.
+
+        Returns:
+            Tuple of (links_formed, links_strengthened).
+        """
+        ts = _now_utc()
+        formed, strengthened = _record_associations(
+            self._conn,
+            direct_pairs,
+            session_pairs or set(),
+            ts,
+            affective_state=affective_state,
+        )
+
+        if self._audit is not None and (formed or strengthened):
+            audit_data: dict = {
+                "formed": formed,
+                "strengthened": strengthened,
+                "direct_pairs": len(direct_pairs),
+                "session_pairs": len(session_pairs) if session_pairs else 0,
+            }
+            if affective_state is not None:
+                audit_data["affective_tag"] = affective_state.tag
+                audit_data["affective_intensity"] = affective_state.intensity
+            self._audit.log("associations_updated", audit_data)
+
+        return formed, strengthened
+
+    def decay_associations(
+        self,
+        strengthened_pairs: set[tuple[str, str]] | None = None,
+        decay_factor: float = 0.9,
+        cleanup_threshold: float = 0.1,
+    ) -> int:
+        """Decay associations not reinforced this wrap.
+
+        Args:
+            strengthened_pairs: Canonical pairs strengthened this wrap (skipped).
+            decay_factor: Multiplier for unreinforced links.
+            cleanup_threshold: Delete links weaker than this.
+
+        Returns:
+            Number of associations decayed (including deleted).
+        """
+        # Canonicalize the pairs (filter out self-pairs)
+        canonical = set()
+        if strengthened_pairs:
+            for pair in strengthened_pairs:
+                cp = canonical_pair(*pair)
+                if cp is not None:
+                    canonical.add(cp)
+
+        decayed = _decay_associations(
+            self._conn, canonical, decay_factor, cleanup_threshold
+        )
+
+        if self._audit is not None and decayed:
+            self._audit.log("associations_decayed", {
+                "decayed": decayed,
+                "decay_factor": decay_factor,
+                "cleanup_threshold": cleanup_threshold,
+            })
+
+        return decayed
+
+    def get_associations(
+        self,
+        episode_ids: list[str],
+        min_strength: float = 0.0,
+        limit: int = 50,
+    ) -> list[AssociationPair]:
+        """Get Hebbian associations for the given episodes.
+
+        Args:
+            episode_ids: Episode IDs to query.
+            min_strength: Minimum strength to include.
+            limit: Maximum results.
+
+        Returns:
+            List of AssociationPair ordered by strength descending.
+        """
+        return _get_associations(self._conn, episode_ids, min_strength, limit)
+
+    def get_association_context(
+        self,
+        episode_ids: list[str],
+        min_strength: float = 0.5,
+        limit: int = 20,
+    ) -> str:
+        """Format association context for a wrap package.
+
+        Returns human-readable text describing which episodes have been
+        thought about together before, or empty string if none.
+        """
+        return _get_association_context(
+            self._conn, episode_ids, min_strength, limit
+        )
+
+    def association_stats(self) -> AssociationStats:
+        """Get Hebbian association network health metrics."""
+        total = self._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+        return _association_stats(self._conn, total)
 
     # -- Pruning --
 

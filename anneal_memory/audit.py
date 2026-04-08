@@ -348,6 +348,17 @@ class AuditTrail:
         active_name = f"{stem}.audit.jsonl"
         prefix = f"{stem}.audit."
 
+        # Clean up stale .tmp files from crashed gzip writes.
+        # Crash during rotation leaves *.jsonl.gz.tmp files that no other
+        # code path catches (orphan adoption looks for .gz and .jsonl only,
+        # _cleanup only removes manifest-tracked files). Pure disk waste.
+        for tmp_path in audit_dir.glob(f"{prefix}*.jsonl.gz.tmp"):
+            try:
+                tmp_path.unlink()
+                logger.info("Cleaned up stale gzip temp file: %s", tmp_path.name)
+            except OSError:
+                logger.warning("Failed to clean up stale temp file: %s", tmp_path.name)
+
         manifest = self._load_manifest()
         known_files = {f["filename"] for f in manifest.get("files", [])}
 
@@ -367,9 +378,13 @@ class AuditTrail:
             return
 
         # Deduplicate: if both .gz and .jsonl exist for same period,
-        # prefer .gz (gzip completed) and remove the .jsonl duplicate
+        # prefer .gz (gzip completed) and remove the .jsonl duplicate.
+        # Sort by period to ensure manifest entries are chronological —
+        # without sorting, two-pass glob inserts all .gz periods before
+        # all .jsonl periods, breaking chronological order in the manifest
+        # when mixed orphan types span non-adjacent periods.
         orphans: list[Path] = []
-        for period, paths in orphans_by_period.items():
+        for period, paths in sorted(orphans_by_period.items()):
             if len(paths) > 1:
                 gz_paths = [p for p in paths if p.name.endswith(".gz")]
                 jsonl_paths = [p for p in paths if not p.name.endswith(".gz")]

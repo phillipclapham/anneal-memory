@@ -895,6 +895,122 @@ class TestDiogenesBugFixes:
         assert result.total_entries == 3  # W13(1) + W14(1) + new(1)
 
 
+class TestDiogenesSweep8Fixes:
+    """Regression tests for Diogenes Sweep 8 bugs (Apr 2026)."""
+
+    def test_orphan_adoption_chronological_order_with_mixed_types(self, tmp_path):
+        """LOW: When mixed .gz and .jsonl orphans span non-adjacent periods,
+        orphan adoption must sort by period before appending to manifest.
+        Without fix: two-pass glob inserts all .gz periods before all .jsonl
+        periods → manifest breaks chronological order → verify() chain break.
+
+        Scenario: W13 exists as .jsonl (crash before gzip), W14 as .gz (normal).
+        Without sort: W14.gz adopted first (glob *.gz runs first), then W13.jsonl.
+        With sort: W13 first, W14 second → correct chain order."""
+        import hashlib as _hl
+
+        db = tmp_path / "test.db"
+        stem = "test"
+
+        # W13 as .jsonl (uncompressed orphan — crash before gzip)
+        entry_w13 = json.dumps({
+            "v": 1, "seq": 0, "ts": "2026-03-24T12:00:00.000000Z",
+            "event": "record", "actor": "agent",
+            "prev_hash": GENESIS_HASH, "data": {"id": "w13"}
+        }, sort_keys=True, separators=(",", ":"))
+        w13_hash = "sha256:" + _hl.sha256(entry_w13.encode("utf-8")).hexdigest()
+
+        # W14 as .gz (normal sealed file)
+        entry_w14 = json.dumps({
+            "v": 1, "seq": 0, "ts": "2026-03-31T12:00:00.000000Z",
+            "event": "record", "actor": "agent",
+            "prev_hash": w13_hash, "data": {"id": "w14"}
+        }, sort_keys=True, separators=(",", ":"))
+
+        # Write .jsonl for W13 (no gzip)
+        jsonl_w13 = tmp_path / f"{stem}.audit.2026-W13.jsonl"
+        jsonl_w13.write_text(entry_w13 + "\n", encoding="utf-8")
+
+        # Write .gz for W14
+        with gzip.open(tmp_path / f"{stem}.audit.2026-W14.jsonl.gz", "wt", encoding="utf-8") as f:
+            f.write(entry_w14 + "\n")
+
+        # Initialize — should adopt W13 first, W14 second (chronological)
+        trail = AuditTrail(db)
+        trail.log("record", {"id": "new"})
+
+        manifest = json.loads(
+            (tmp_path / f"{stem}.audit.manifest.json").read_text(encoding="utf-8")
+        )
+        periods = [f["period"] for f in manifest["files"]]
+        assert periods == ["2026-W13", "2026-W14"], (
+            f"Manifest periods should be chronological, got: {periods}"
+        )
+
+        # Chain should verify end-to-end
+        result = AuditTrail.verify(db)
+        assert result.valid is True
+        assert result.total_entries == 3  # W13(1) + W14(1) + new(1)
+
+    def test_stale_tmp_gz_files_cleaned_on_init(self, tmp_path):
+        """LOW: Crash during gzip write leaves *.jsonl.gz.tmp files forever.
+        These are not caught by orphan adoption (looks for .gz and .jsonl only)
+        and not by _cleanup (only removes manifest-tracked files). Should be
+        cleaned up during _adopt_orphaned_files on next init."""
+        db = tmp_path / "test.db"
+        stem = "test"
+
+        # Create a stale .tmp file (simulates crash during gzip write)
+        tmp_gz = tmp_path / f"{stem}.audit.2026-W12.jsonl.gz.tmp"
+        tmp_gz.write_bytes(b"partial gzip data")
+
+        # Also create a second one to verify all are cleaned
+        tmp_gz2 = tmp_path / f"{stem}.audit.2026-W11.jsonl.gz.tmp"
+        tmp_gz2.write_bytes(b"more partial data")
+
+        assert tmp_gz.exists()
+        assert tmp_gz2.exists()
+
+        # Initialize trail — should clean up .tmp files
+        trail = AuditTrail(db)
+        trail.log("record", {"id": "1"})
+
+        # .tmp files should be gone
+        assert not tmp_gz.exists()
+        assert not tmp_gz2.exists()
+
+        # No .tmp files in manifest either
+        manifest_path = tmp_path / f"{stem}.audit.manifest.json"
+        if manifest_path.exists():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for f in manifest.get("files", []):
+                assert ".tmp" not in f["filename"]
+
+    def test_stale_tmp_cleanup_does_not_affect_active_file(self, tmp_path):
+        """Ensure .tmp cleanup only targets gzip temp files, not the active file
+        or any other files."""
+        db = tmp_path / "test.db"
+        stem = "test"
+
+        # Create stale .tmp
+        tmp_gz = tmp_path / f"{stem}.audit.2026-W12.jsonl.gz.tmp"
+        tmp_gz.write_bytes(b"partial")
+
+        # Initialize and write some entries
+        trail = AuditTrail(db)
+        trail.log("record", {"id": "1"})
+        trail.log("record", {"id": "2"})
+
+        # Active file should still exist and be valid
+        active = tmp_path / f"{stem}.audit.jsonl"
+        assert active.exists()
+
+        # Chain should verify
+        result = AuditTrail.verify(db)
+        assert result.valid is True
+        assert result.total_entries == 2
+
+
 class TestStoreIntegration:
     """Audit trail integration with Store."""
 

@@ -21,10 +21,12 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .associations import process_wrap_associations
 from .continuity import measure_sections, prepare_wrap_package, validate_structure
 from .graduation import validate_graduations
 from .integrity import RESOURCES, TOOLS, generate_integrity_file, verify_integrity
 from .store import Store
+from .types import AffectiveState
 
 logger = logging.getLogger("anneal-memory")
 
@@ -319,12 +321,33 @@ class Server:
                     f" ({sp['days_stale']}d stale)"
                 )
 
+        # Include Hebbian association context
+        episode_ids = [ep.id for ep in episodes]
+        assoc_context = self._store.get_association_context(episode_ids)
+        if assoc_context:
+            parts.append("\n---\n" + assoc_context)
+
         return _tool_result("\n".join(parts))
 
     def _tool_save_continuity(self, args: dict[str, Any]) -> dict[str, Any]:
         text = args.get("text", "")
         if not text:
             return _tool_result("Error: text is required", is_error=True)
+
+        # Parse optional affective state (limbic layer)
+        affective_state = None
+        affect_raw = args.get("affective_state")
+        if affect_raw and isinstance(affect_raw, dict):
+            tag = affect_raw.get("tag", "")
+            try:
+                intensity = float(affect_raw.get("intensity", 0.0))
+            except (ValueError, TypeError):
+                intensity = 0.0
+            if tag and isinstance(tag, str):
+                affective_state = AffectiveState(
+                    tag=tag,
+                    intensity=max(0.0, min(1.0, intensity)),
+                )
 
         # Check if prepare_wrap was called first
         skipped_prepare = not self._store.status().wrap_in_progress
@@ -359,6 +382,10 @@ class Server:
 
         # Save the (possibly modified) continuity text
         path = self._store.save_continuity(grad_result.text)
+
+        # Record Hebbian associations from validated co-citations + decay
+        assoc_formed, assoc_strengthened, assoc_decayed = \
+            process_wrap_associations(self._store, grad_result, affective_state)
 
         # Update metadata
         if grad_result.validated > 0 or grad_result.citation_counts:
@@ -404,6 +431,14 @@ class Server:
                 f"{', '.join(grad_result.gaming_suspects)}"
             )
 
+        if assoc_formed or assoc_strengthened:
+            lines.append(
+                f"Associations: {assoc_formed} formed, "
+                f"{assoc_strengthened} strengthened"
+            )
+        if assoc_decayed:
+            lines.append(f"Associations decayed: {assoc_decayed}")
+
         lines.append("\nSection sizes:")
         for name, chars in sorted(sections.items()):
             lines.append(f"  {name}: {chars} chars")
@@ -441,6 +476,15 @@ class Server:
             lines.append("\nBy type:")
             for type_name, count in sorted(status.episodes_by_type.items()):
                 lines.append(f"  {type_name}: {count}")
+
+        if status.association_stats and status.association_stats.total_links > 0:
+            a = status.association_stats
+            lines.append(
+                f"\nAssociations: {a.total_links} links, "
+                f"avg strength {a.avg_strength:.2f}, "
+                f"max {a.max_strength:.1f}, "
+                f"density {a.density:.4f}"
+            )
 
         return _tool_result("\n".join(lines))
 

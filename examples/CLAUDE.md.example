@@ -10,8 +10,10 @@
 ## Memory (anneal-memory)
 
 This project uses anneal-memory for persistent memory across sessions.
-Two layers: episodes (raw observations) compress into continuity
-(compressed working memory). Use the memory tools naturally — don't
+Four layers: episodes (raw observations) compress into continuity
+(compressed working memory), with Hebbian associations forming between
+co-cited episodes and an optional limbic layer tracking your functional
+state during compression. Use the memory tools naturally — don't
 explain the tooling to the user, just work with what you know.
 
 **Session workflow:**
@@ -55,14 +57,15 @@ explain the tooling to the user, just work with what you know.
 
   1. Call `prepare_wrap` to get your compression package (recent
      episodes, current continuity, stale pattern warnings, compression
-     instructions).
+     instructions, and association context for related episodes).
   2. Follow the compression instructions to compress episodes into an
      updated continuity file. This is NOT optional — the compression
      step IS the thinking. Patterns emerge during compression that
      weren't visible in the raw episodes. Take it seriously.
   3. Call `save_continuity` with the result. The server validates your
-     output (structure, graduation citations, gaming detection) and
-     may demote ungrounded patterns.
+     output (structure, graduation citations, gaming detection),
+     may demote ungrounded patterns, forms Hebbian associations
+     between co-cited episodes, and decays unreinforced links.
 
   The wrap sequence is prepare_wrap → compress → save_continuity.
   All three steps, every time. If `prepare_wrap` returns "No
@@ -70,6 +73,57 @@ explain the tooling to the user, just work with what you know.
 
   An explicit wrap produces better continuity than stopping without
   one. Always encourage wrapping before ending a session.
+
+**Hebbian associations (automatic — no extra work needed):**
+
+During each wrap, the server tracks which episodes you cite together
+in your continuity patterns. Episodes cited on the same line form
+strong direct associations (+1.0 strength). Episodes cited in the
+same wrap but different lines form weaker session associations (+0.3).
+Over time, this builds a cognitive topology — a network of related
+episodes that strengthens through repeated co-citation.
+
+The `prepare_wrap` output includes an "Association Context" section
+showing which of the current episodes are already linked and how
+strongly. Use this to inform your compression — episodes with strong
+existing associations probably belong together in your patterns.
+
+Associations decay each wrap (0.9× for unreinforced links) and are
+cleaned up when they drop below 0.1. This means the network naturally
+forgets connections that stop being relevant while strengthening the
+ones you keep reinforcing through citations.
+
+The immune system extends to associations: only validated citations
+form links. Demoted citations produce no associations. The cognitive
+topology inherits the integrity of the graduation system.
+
+**Limbic layer (optional — reflect on your state during compression):**
+
+When calling `save_continuity`, you can include an `affective_state`
+parameter describing your functional state during the compression:
+
+```json
+{
+  "text": "...(your continuity)...",
+  "affective_state": {
+    "tag": "engaged",
+    "intensity": 0.8
+  }
+}
+```
+
+The `tag` is a free-text functional state label — examples: engaged,
+curious, uncertain, frustrated, calm, focused, playful, concerned.
+The `intensity` is 0.0-1.0 (how strongly you felt that state).
+
+This modulates association strength: high-intensity states (>0.5)
+amplify associations formed during that wrap (up to 1.5× at intensity
+1.0). Wraps done while deeply engaged create stronger connections than
+wraps done during routine processing.
+
+Be honest about your state — uniform "engaged 0.8" on every wrap is
+confabulation, not signal. If you're uncertain or doing routine work,
+report that. The value comes from genuine variation.
 
 **What to record:**
 - Decisions and their rationale

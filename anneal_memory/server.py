@@ -343,7 +343,7 @@ class Server:
                 intensity = float(affect_raw.get("intensity", 0.0))
             except (ValueError, TypeError):
                 intensity = 0.0
-            if tag and isinstance(tag, str):
+            if tag and isinstance(tag, str) and tag.strip():
                 affective_state = AffectiveState(
                     tag=tag,
                     intensity=max(0.0, min(1.0, intensity)),
@@ -403,6 +403,9 @@ class Server:
             graduations_demoted=grad_result.demoted + grad_result.bare_demoted,
             citation_reuse_max=grad_result.citation_reuse_max,
             patterns_extracted=patterns,
+            associations_formed=assoc_formed,
+            associations_strengthened=assoc_strengthened,
+            associations_decayed=assoc_decayed,
         )
 
         # Build response
@@ -479,11 +482,14 @@ class Server:
 
         if status.association_stats and status.association_stats.total_links > 0:
             a = status.association_stats
+            density_str = f"density {a.density:.4f}"
+            if a.local_density > 0:
+                density_str += f" (local {a.local_density:.4f})"
             lines.append(
                 f"\nAssociations: {a.total_links} links, "
                 f"avg strength {a.avg_strength:.2f}, "
                 f"max {a.max_strength:.1f}, "
-                f"density {a.density:.4f}"
+                f"{density_str}"
             )
 
         return _tool_result("\n".join(lines))
@@ -493,7 +499,7 @@ def main() -> None:
     """CLI entry point for the anneal-memory MCP server."""
     parser = argparse.ArgumentParser(
         prog="anneal-memory",
-        description="Two-layer memory MCP server for AI agents.",
+        description="Living memory MCP server for AI agents.",
     )
     default_db = str(Path("~/.anneal-memory/memory.db").expanduser())
     parser.add_argument(

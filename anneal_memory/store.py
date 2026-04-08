@@ -181,6 +181,8 @@ class Store:
         # Migrate existing associations tables to include affective columns
         # (safe no-op if columns already exist or table was just created)
         _migrate_affective(self._conn)
+        # Migrate wraps table to include association metric columns
+        self._migrate_wraps_association_columns()
 
         # Insert default metadata (ignore if already exists)
         defaults = {**_DEFAULT_METADATA, "project_name": self._project_name}
@@ -188,6 +190,29 @@ class Store:
             self._conn.execute(
                 "INSERT OR IGNORE INTO metadata (key, value) VALUES (?, ?)",
                 (key, value),
+            )
+        self._conn.commit()
+
+    def _migrate_wraps_association_columns(self) -> None:
+        """Add association metric columns to existing wraps tables.
+
+        Safe to call on tables that already have the columns (checks first).
+        Added post-Session 9.5 to track per-wrap association activity.
+        """
+        cursor = self._conn.execute("PRAGMA table_info(wraps)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+
+        if "associations_formed" not in existing_cols:
+            self._conn.execute(
+                "ALTER TABLE wraps ADD COLUMN associations_formed INTEGER NOT NULL DEFAULT 0"
+            )
+        if "associations_strengthened" not in existing_cols:
+            self._conn.execute(
+                "ALTER TABLE wraps ADD COLUMN associations_strengthened INTEGER NOT NULL DEFAULT 0"
+            )
+        if "associations_decayed" not in existing_cols:
+            self._conn.execute(
+                "ALTER TABLE wraps ADD COLUMN associations_decayed INTEGER NOT NULL DEFAULT 0"
             )
         self._conn.commit()
 
@@ -500,6 +525,9 @@ class Store:
         graduations_demoted: int = 0,
         citation_reuse_max: int = 0,
         patterns_extracted: int = 0,
+        associations_formed: int = 0,
+        associations_strengthened: int = 0,
+        associations_decayed: int = 0,
     ) -> WrapResult:
         """Record a completed wrap and clear the in-progress flag.
 
@@ -509,8 +537,9 @@ class Store:
         self._conn.execute(
             """INSERT INTO wraps
                (wrapped_at, episodes_compressed, continuity_chars, graduations_validated,
-                graduations_demoted, citation_reuse_max, patterns_extracted)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                graduations_demoted, citation_reuse_max, patterns_extracted,
+                associations_formed, associations_strengthened, associations_decayed)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _now_utc(),
                 episodes_compressed,
@@ -519,6 +548,9 @@ class Store:
                 graduations_demoted,
                 citation_reuse_max,
                 patterns_extracted,
+                associations_formed,
+                associations_strengthened,
+                associations_decayed,
             ),
         )
         # Update session_id for episodes in this wrap cycle
@@ -541,6 +573,9 @@ class Store:
                 "graduations_validated": graduations_validated,
                 "graduations_demoted": graduations_demoted,
                 "patterns_extracted": patterns_extracted,
+                "associations_formed": associations_formed,
+                "associations_strengthened": associations_strengthened,
+                "associations_decayed": associations_decayed,
             })
 
         # Auto-prune old episodes if retention_days is configured
@@ -558,6 +593,9 @@ class Store:
             patterns_extracted=patterns_extracted,
             episodes_compressed=episodes_compressed,
             pruned_count=pruned,
+            associations_formed=associations_formed,
+            associations_strengthened=associations_strengthened,
+            associations_decayed=associations_decayed,
         )
 
     # -- Associations (Hebbian) --

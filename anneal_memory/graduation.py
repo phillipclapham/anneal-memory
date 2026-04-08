@@ -252,24 +252,28 @@ def extract_session_co_citations(
     Returns:
         Set of canonical (id_a, id_b) pairs where id_a < id_b.
     """
-    # Collect all unique IDs across all lines
+    # Pre-build index: episode_id -> set of line indices it appears in
+    # O(n*k) where n = number of lines, k = avg IDs per line
+    id_to_lines: dict[str, set[int]] = {}
     all_ids: set[str] = set()
-    for id_set in all_validated_ids:
-        all_ids.update(id_set)
+    for idx, id_set in enumerate(all_validated_ids):
+        for ep_id in id_set:
+            all_ids.add(ep_id)
+            if ep_id not in id_to_lines:
+                id_to_lines[ep_id] = set()
+            id_to_lines[ep_id].add(idx)
 
     # Generate pairs between IDs that appear in DIFFERENT lines
+    # O(n^2) over unique IDs with O(1) line-set lookups
     pairs: set[tuple[str, str]] = set()
     id_list = sorted(all_ids)
     for i in range(len(id_list)):
+        a_lines = id_to_lines[id_list[i]]
         for j in range(i + 1, len(id_list)):
-            id_a, id_b = id_list[i], id_list[j]
-            # Check they appear in different lines (not just same line)
-            # A pair from the same line is a direct co-citation, not session
-            a_lines = {idx for idx, s in enumerate(all_validated_ids) if id_a in s}
-            b_lines = {idx for idx, s in enumerate(all_validated_ids) if id_b in s}
+            b_lines = id_to_lines[id_list[j]]
             if a_lines != b_lines or len(a_lines) > 1:
                 # They appear in at least one different line context
-                pairs.add((id_a, id_b))
+                pairs.add((id_list[i], id_list[j]))
 
     return pairs
 

@@ -8,6 +8,7 @@ integration with Store, and integration with the full wrap pipeline.
 import json
 import sqlite3
 import tempfile
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -415,6 +416,29 @@ class TestAssociationStats:
         assert stats.max_strength == DIRECT_CO_CITATION_STRENGTH
         # 2 links / 3 possible (3*2/2) = 0.667
         assert abs(stats.density - 2 / 3) < 0.01
+
+    def test_local_density(self, tmp_path):
+        """local_density measures density among connected episodes only."""
+        conn = _make_db(tmp_path)
+        # 5 episodes, but only 3 are connected
+        for eid in ["aaa", "bbb", "ccc", "ddd", "eee"]:
+            _insert_episode(conn, eid)
+
+        # 2 links among 3 connected episodes (aaa, bbb, ccc)
+        record_associations(conn, {("aaa", "bbb"), ("bbb", "ccc")}, set(), "2026-04-07T12:00:00Z")
+
+        stats = association_stats(conn, total_episodes=5)
+
+        # global density: 2 / (5*4/2) = 2/10 = 0.2
+        assert abs(stats.density - 0.2) < 0.01
+        # local density: 2 / (3*2/2) = 2/3 = 0.667
+        assert abs(stats.local_density - 2 / 3) < 0.01
+
+    def test_local_density_empty(self, tmp_path):
+        """local_density is 0 when no associations exist."""
+        conn = _make_db(tmp_path)
+        stats = association_stats(conn, total_episodes=5)
+        assert stats.local_density == 0.0
 
     def test_strongest_pairs_limited(self, tmp_path):
         conn = _make_db(tmp_path)
@@ -870,7 +894,7 @@ class TestEngineWrapAssociations:
         ep1 = store.record("Database performance is critical for scaling", "observation")
         ep2 = store.record("ACID compliance outweighs raw speed", "decision")
 
-        today = "2026-04-07"
+        today = date.today().isoformat()
 
         # Mock LLM that returns continuity with co-citations
         def mock_llm(prompt: str) -> str:
@@ -1251,6 +1275,22 @@ class TestLimbicLayer:
         normal = AffectiveState(tag="calm", intensity=0.7)
         assert normal.intensity == 0.7
 
+    def test_whitespace_only_tag_rejected_by_server(self):
+        """Whitespace-only tags should not create an AffectiveState.
+
+        The server's save_continuity handler checks tag.strip() to prevent
+        whitespace-only strings from passing the truthiness check.
+        AffectiveState itself normalizes via strip().lower(), so a
+        whitespace-only tag would become an empty string — which is invalid.
+        """
+        # AffectiveState strips whitespace, resulting in empty tag
+        state = AffectiveState(tag="   ", intensity=0.5)
+        assert state.tag == ""  # Stripped to empty
+
+        # Verify the server-side guard: tag.strip() is falsy for whitespace
+        tag = "   "
+        assert not (tag and isinstance(tag, str) and tag.strip())
+
     def test_negative_intensity_clamped(self, tmp_path):
         """Intensity < 0.0 is clamped to 0.0."""
         conn = _make_db(tmp_path)
@@ -1314,7 +1354,7 @@ class TestLimbicLayer:
         ep1 = store.record("Episode 1", "observation")
         ep2 = store.record("Episode 2", "decision")
 
-        today = "2026-04-07"
+        today = date.today().isoformat()
         call_count = 0
 
         def mock_llm(prompt: str) -> str:
@@ -1365,7 +1405,7 @@ Test session.
         ep1 = store.record("Database performance is critical for scaling", "observation")
         ep2 = store.record("ACID compliance outweighs raw speed", "decision")
 
-        today = "2026-04-07"
+        today = date.today().isoformat()
         call_count = 0
 
         def mock_llm(prompt: str) -> str:

@@ -205,36 +205,41 @@ def decay_associations(
     Returns:
         Number of associations that decayed (including deleted ones).
     """
-    # Get all associations
-    rows = conn.execute(
-        "SELECT episode_a, episode_b, strength FROM associations"
-    ).fetchall()
+    # Batch decay: update all unreinforced links in two SQL statements
+    # instead of individual UPDATE/DELETE per row (N+1 → 2 queries).
 
-    decayed = 0
-    to_delete: list[tuple[str, str]] = []
-
-    for row in rows:
-        pair = (row[0], row[1])  # Already canonical in DB
-        if pair in strengthened_pairs:
-            continue  # Reinforced this wrap — no decay
-
-        new_strength = row[2] * decay_factor
-        if new_strength < cleanup_threshold:
-            to_delete.append(pair)
-            decayed += 1
-        else:
-            conn.execute(
-                "UPDATE associations SET strength = ? WHERE episode_a = ? AND episode_b = ?",
-                (new_strength, pair[0], pair[1]),
-            )
-            decayed += 1
-
-    # Delete dead links
-    for a, b in to_delete:
-        conn.execute(
-            "DELETE FROM associations WHERE episode_a = ? AND episode_b = ?",
-            (a, b),
+    # Build exclusion list for strengthened pairs
+    if strengthened_pairs:
+        # Filter out strengthened pairs from decay using NOT IN on the pair
+        exclude_clauses = " OR ".join(
+            "(episode_a = ? AND episode_b = ?)" for _ in strengthened_pairs
         )
+        exclude_params: list[str] = []
+        for a, b in strengthened_pairs:
+            exclude_params.extend([a, b])
+        where_unreinforced = f"NOT ({exclude_clauses})"
+    else:
+        where_unreinforced = "1=1"
+        exclude_params = []
+
+    # Count how many will be affected (for return value)
+    count_row = conn.execute(
+        f"SELECT COUNT(*) FROM associations WHERE {where_unreinforced}",
+        exclude_params,
+    ).fetchone()
+    decayed = count_row[0]
+
+    # Delete links that will fall below threshold after decay
+    conn.execute(
+        f"DELETE FROM associations WHERE {where_unreinforced} AND strength * ? < ?",
+        [*exclude_params, decay_factor, cleanup_threshold],
+    )
+
+    # Decay remaining unreinforced links
+    conn.execute(
+        f"UPDATE associations SET strength = strength * ? WHERE {where_unreinforced}",
+        [decay_factor, *exclude_params],
+    )
 
     conn.commit()
     return decayed
@@ -381,10 +386,26 @@ def association_stats(
     avg_strength = row[1]
     max_strength = row[2]
 
-    # Density: links / possible_links
+    # Global density: links / all possible episode pairs
     # possible_links = n*(n-1)/2 for n episodes
+    # Note: this measures over the entire episode space, so density is low
+    # when many episodes have no associations. See local_density below.
     possible = total_episodes * (total_episodes - 1) / 2 if total_episodes > 1 else 1
     density = total_links / possible if possible > 0 else 0.0
+
+    # Local density: links / possible pairs among CONNECTED episodes only
+    # (episodes that have at least one association). More useful for
+    # understanding how densely the active subgraph is wired.
+    connected_row = conn.execute(
+        """SELECT COUNT(DISTINCT id) FROM (
+               SELECT episode_a AS id FROM associations
+               UNION
+               SELECT episode_b AS id FROM associations
+           )"""
+    ).fetchone()
+    connected_episodes = connected_row[0]
+    local_possible = connected_episodes * (connected_episodes - 1) / 2 if connected_episodes > 1 else 1
+    local_density = total_links / local_possible if local_possible > 0 else 0.0
 
     # Top N strongest pairs
     top_rows = conn.execute(
@@ -412,6 +433,7 @@ def association_stats(
         max_strength=max_strength,
         density=density,
         strongest_pairs=strongest,
+        local_density=local_density,
     )
 
 

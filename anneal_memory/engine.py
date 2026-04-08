@@ -350,13 +350,13 @@ class Engine:
             graduations_demoted=total_demoted,
             citation_reuse_max=grad_result.citation_reuse_max,
             patterns_extracted=patterns,
+            associations_formed=assoc_formed,
+            associations_strengthened=assoc_strengthened,
+            associations_decayed=assoc_decayed,
         )
         # Attach fields that wrap_completed doesn't know about
         result.continuity_text = text
         result.section_sizes = section_sizes
-        result.associations_formed = assoc_formed
-        result.associations_strengthened = assoc_strengthened
-        result.associations_decayed = assoc_decayed
         return result
 
 

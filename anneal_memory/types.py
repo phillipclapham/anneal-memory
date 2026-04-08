@@ -80,7 +80,7 @@ class StoreStatus:
     association_stats: AssociationStats | None = None  # Hebbian network metrics
 
 
-@dataclass
+@dataclass(frozen=True)
 class AffectiveState:
     """Agent's self-reported functional state during consolidation.
 
@@ -127,8 +127,9 @@ class AssociationStats:
     total_links: int
     avg_strength: float
     max_strength: float
-    density: float  # links / possible_links (cognitive structure metric)
+    density: float  # Global density: links / all possible episode pairs. Low when many episodes have no associations.
     strongest_pairs: list[AssociationPair] = field(default_factory=list)
+    local_density: float = 0.0  # Density among connected episodes only (episodes with >= 1 association). More useful than global density for network health.
 
 
 @dataclass

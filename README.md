@@ -8,7 +8,11 @@
 
 **Living memory for AI agents. Episodes compress into identity.**
 
-The only MCP memory server with an immune system. Patterns earn permanence through evidence, false knowledge gets caught and demoted, and stale information fades — so your agent's memory gets smarter over time, not just bigger.
+Memory without grounding is amplification infrastructure.
+
+Persistent memory [increases agent sycophancy by 45%](https://arxiv.org/abs/2509.12517). Production deployments [accumulate 97.8% junk entries](https://github.com/mem0ai/mem0/issues/4573) within weeks. Clinical research documents memory [scaffolding delusions across sessions](https://doi.org/10.1016/S2215-0366(25)00396-7). The problem isn't memory — it's memory without an immune system.
+
+anneal-memory is that immune system. Patterns earn permanence through cited evidence, false knowledge gets caught and demoted, stale information fades, and associations form through consolidation. Your agent's memory develops over time, not just accumulates.
 
 Four cognitive layers: episodic store, compressed continuity, Hebbian associations, and affective state tracking. Zero dependencies. 6 tools. Works with any MCP client.
 
@@ -43,19 +47,29 @@ Without this snippet, the tools are available but the agent won't know the workf
 
 ## Why This Exists
 
-Every MCP memory server we tested has the same problem: memory grows forever and nothing validates what it knows.
+Three independent production failures share one root cause: no quality mechanism between memory write and memory read.
 
-The Anthropic official server stores everything in a growing JSONL file with no pruning. Mem0 requires Docker and cloud for its best features. Others expose 15-33 tools that eat your context window. And none of them can tell you whether what they "remember" is still true.
+**Sycophancy amplification.** Agents with persistent memory become up to 45% more sycophantic than memoryless baselines. Memory recalls what the user liked hearing, the agent learns to repeat it, and stored approval patterns compound across sessions ([Jain et al., CHI 2026](https://arxiv.org/abs/2509.12517); measured with user memory profiles across Gemini and Llama).
 
-anneal-memory takes a different approach: **memory as a living system, not a filing cabinet.**
+**Junk accumulation.** A [detailed production audit](https://github.com/mem0ai/mem0/issues/4573) on Mem0's tracker documents a deployment that generated 10,134 memory entries over 32 days — 224 were usable. The rest were duplicates, self-referential loops, and hallucinated entries: recalled memories re-extracted as new memories in a feedback loop that no one designed but nothing prevented.
 
-- Episodes accumulate fast (append-only SQLite, typed by kind)
-- At session boundaries, the agent compresses episodes into a continuity file — and the compression step IS the thinking, where patterns emerge
-- Validated patterns strengthen. Stale patterns fade. False patterns get caught.
-- Episodes that get cited together form lateral associations — a cognitive network that develops through use
-- The continuity file stays bounded and always-loaded, not growing linearly
+**Harmful reinforcement.** Clinical research documents AI systems with persistent memory scaffolding delusional content across sessions — stored context creates feedback loops between recalled memories and generated responses, with cases of documented real-world harm ([Morrin et al., Lancet Psychiatry 2026](https://doi.org/10.1016/S2215-0366(25)00396-7)).
+
+Every existing MCP memory server stores memories and retrieves them. None of them ask: *is this memory still true? Was it ever true? Is it making the agent worse?*
+
+anneal-memory asks all three:
+
+- **Is it true?** Patterns must cite specific episode IDs as evidence to graduate. The server verifies the episodes exist and the explanation connects to the cited content.
+- **Is it still true?** Graduated knowledge that stops being reinforced by new episodes gets flagged as stale and demoted. Memory actively forgets what's no longer relevant.
+- **Is it self-confirming?** Anti-inbreeding detection catches the agent citing its own output as evidence. The cited episode must contain meaningfully different content from the graduation claim.
+
+The result: **memory as a living system, not a filing cabinet.** Episodes accumulate fast, get compressed at session boundaries — and the compression IS the cognition, where patterns emerge and get validated. Co-cited episodes form lateral Hebbian associations, building a cognitive network through use. The continuity file stays bounded and always-loaded, getting denser rather than longer.
 
 ## What Makes It Different
+
+The agent memory ecosystem is converging on consolidation as the right approach — even Anthropic's Claude Code now runs a periodic consolidation pass over accumulated session data. This validates the direction: raw accumulation doesn't scale, and compression at session boundaries is where intelligence emerges.
+
+But consolidation alone doesn't solve the problem. A system that consolidates faithfully and a system that consolidates sycophantically produce the same *kind* of output — compressed, structured, always-loaded. The difference is whether anything checks the quality of what got consolidated. That's the immune system.
 
 ### The immune system (nobody else has this)
 
@@ -144,14 +158,14 @@ This is experimental infrastructure. The associations and strength model work wi
 
 | | anneal-memory | Anthropic Official | Mem0 | Ori-Mnemos | BrainBox |
 |---|---|---|---|---|---|
-| **Architecture** | Episodic + continuity + associations | Knowledge graph | Vector + graph | Retrieval + Hebbian | Memory + Hebbian |
+| **Architecture** | Episodic + continuity + associations | JSONL flat file (graph-shaped) | Vector + graph | Retrieval + Hebbian | Memory + Hebbian |
 | **Compression** | Session-boundary rewrite | None | One-pass extraction | None | None |
 | **Quality mechanism** | Immune system (citations + anti-inbreeding + demotion) | None | None | NPMI normalization | None |
 | **Association formation** | Co-citation during consolidation | None | None | Co-retrieval at runtime | Co-access at runtime |
 | **Affective tracking** | Agent self-report during compression | None | None | None | None |
 | **Audit trail** | Hash-chained JSONL | None | None | None | None |
 | **Dependencies** | Zero (Python stdlib) | Node.js | Docker + cloud | Embeddings model | Not specified |
-| **Tools** | 5 + 1 resource | 6 | Varies | Not MCP | MCP (mcpmarket) |
+| **Tools** | 6 + 2 resources | 6 | Varies | Not MCP | MCP (mcpmarket) |
 
 ## Session Hygiene
 
@@ -221,7 +235,7 @@ store = Store("./memory.db", on_audit_event=lambda entry: send_to_siem(entry))
 | `delete_episode` | Remove content that should not exist (PII, sensitive data). Cascades to associations. Logged in audit trail |
 | `status` | Check memory health: episode counts, wrap history, continuity size, association network metrics |
 
-**Resource:** `anneal://continuity` — the current continuity file, auto-loaded at session start.
+**Resources:** `anneal://continuity` — the current continuity file, auto-loaded at session start. `anneal://integrity/manifest` — SHA-256 hashes for host-side tool description verification.
 
 ## Continuity Markers
 
@@ -298,7 +312,12 @@ The Engine gathers episodes, builds the compression prompt, calls the LLM, valid
 
 ## Security
 
-Tool description integrity verification is included. `tool-integrity.json` ships with the package containing SHA256 hashes of all tool descriptions, verified at server startup. This detects post-install modification of tool descriptions — a vector where manipulated descriptions alter LLM behavior without changing tool functionality.
+Tool description integrity verification detects [description poisoning](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/2402) — where manipulated tool descriptions alter LLM behavior without changing tool functionality.
+
+**Two-layer verification:**
+
+1. **Build-time manifest** (`tool-integrity.json`) — SHA-256 hashes of all tool descriptions, shipped with the package and verified at server startup. Detects post-install modification.
+2. **Host-verifiable resource** (`anneal://integrity/manifest`) — the same hashes exposed as an MCP resource, so editors and hosts can compare tool definitions received via `tools/list` against the server's intended definitions. Detects transport-layer description mutation between server and client — the class of attack where descriptions are modified in transit or by middleware without the server's knowledge.
 
 ```bash
 anneal-memory --generate-integrity  # Regenerate after description changes

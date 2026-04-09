@@ -83,10 +83,11 @@ class TestToolsList:
 
 
 class TestResourcesList:
-    def test_returns_continuity_resource(self, server):
+    def test_returns_resources(self, server):
         result = server._handle_resources_list({})
-        assert len(result["resources"]) == 1
+        assert len(result["resources"]) == 2
         assert result["resources"][0]["uri"] == "anneal://continuity"
+        assert result["resources"][1]["uri"] == "anneal://integrity/manifest"
 
 
 class TestResourcesRead:
@@ -99,6 +100,19 @@ class TestResourcesRead:
         store.save_continuity("# Test\n## State\nActive\n## Patterns\n## Decisions\n## Context\n")
         result = server._handle_resources_read({"uri": "anneal://continuity"})
         assert "# Test" in result["contents"][0]["text"]
+
+    def test_integrity_manifest_returns_hashes(self, server):
+        result = server._handle_resources_read({"uri": "anneal://integrity/manifest"})
+        assert len(result["contents"]) == 1
+        content = result["contents"][0]
+        assert content["mimeType"] == "application/json"
+        import json
+        manifest = json.loads(content["text"])
+        assert manifest["algorithm"] == "SHA-256"
+        assert "tools" in manifest
+        assert "record" in manifest["tools"]
+        assert "delete_episode" in manifest["tools"]
+        assert len(manifest["tools"]) == 6
 
     def test_unknown_uri_returns_empty(self, server):
         result = server._handle_resources_read({"uri": "anneal://unknown"})

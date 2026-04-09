@@ -227,8 +227,10 @@ TOOLS: list[dict[str, Any]] = [
             "wrong recordings. Do NOT use for factual corrections — record a new "
             "episode with the correction instead and let compression resolve it. "
             "Deletion cascades: all Hebbian associations involving the episode are "
-            "removed, and the deletion is logged in the audit trail. This action "
-            "is irreversible."
+            "removed, and the deletion is logged in the audit trail. By default, "
+            "a tombstone is preserved (content-hash only, no original text) as an "
+            "existence proof for audit integrity — content is fully erased but the "
+            "hash chain remains verifiable. This action is irreversible."
         ),
         "inputSchema": {
             "type": "object",
@@ -270,10 +272,21 @@ RESOURCES: list[dict[str, Any]] = [
         ),
         "mimeType": "text/markdown",
     },
+    {
+        "uri": "anneal://integrity/manifest",
+        "name": "Tool Integrity Manifest",
+        "description": (
+            "SHA-256 hashes of all tool definitions for client-side integrity "
+            "verification. Compare these hashes against the tool definitions you "
+            "received to detect transport-layer description mutation. This enables "
+            "host-level verification WITHOUT trusting the server process."
+        ),
+        "mimeType": "application/json",
+    },
 ]
 
 
-def _hash_tool(tool: dict[str, Any]) -> str:
+def hash_tool(tool: dict[str, Any]) -> str:
     """Generate SHA256 hash of a tool's description + schema.
 
     Uses canonical JSON (sorted keys, minimal whitespace) for determinism.
@@ -298,7 +311,7 @@ def generate_integrity_file(path: str | Path) -> Path:
     path = Path(path)
     integrity = {
         "version": 1,
-        "tools": {tool["name"]: _hash_tool(tool) for tool in TOOLS},
+        "tools": {tool["name"]: hash_tool(tool) for tool in TOOLS},
     }
     path.write_text(
         json.dumps(integrity, indent=2, sort_keys=True) + "\n",
@@ -332,7 +345,7 @@ def verify_integrity(path: str | Path) -> tuple[bool, list[str]]:
     for tool in TOOLS:
         name = tool["name"]
         expected = stored_hashes.get(name)
-        actual = _hash_tool(tool)
+        actual = hash_tool(tool)
 
         if expected is None:
             issues.append(f"Tool '{name}' not found in integrity file")

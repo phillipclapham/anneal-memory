@@ -7,7 +7,7 @@ from pathlib import Path
 from anneal_memory.integrity import (
     TOOLS,
     RESOURCES,
-    _hash_tool,
+    hash_tool,
     generate_integrity_file,
     verify_integrity,
 )
@@ -53,12 +53,16 @@ class TestToolDefinitions:
             if "episode_type" in props:
                 assert set(props["episode_type"]["enum"]) == expected
 
-    def test_one_resource_defined(self):
-        assert len(RESOURCES) == 1
+    def test_resources_defined(self):
+        assert len(RESOURCES) == 2
 
-    def test_resource_uri(self):
+    def test_continuity_resource(self):
         assert RESOURCES[0]["uri"] == "anneal://continuity"
         assert RESOURCES[0]["mimeType"] == "text/markdown"
+
+    def test_integrity_manifest_resource(self):
+        assert RESOURCES[1]["uri"] == "anneal://integrity/manifest"
+        assert RESOURCES[1]["mimeType"] == "application/json"
 
 
 class TestHashTool:
@@ -66,12 +70,12 @@ class TestHashTool:
 
     def test_deterministic(self):
         tool = TOOLS[0]
-        assert _hash_tool(tool) == _hash_tool(tool)
+        assert hash_tool(tool) == hash_tool(tool)
 
     def test_different_descriptions_different_hashes(self):
         tool_a = {"description": "Do A", "inputSchema": {"type": "object", "properties": {}}}
         tool_b = {"description": "Do B", "inputSchema": {"type": "object", "properties": {}}}
-        assert _hash_tool(tool_a) != _hash_tool(tool_b)
+        assert hash_tool(tool_a) != hash_tool(tool_b)
 
     def test_different_schemas_different_hashes(self):
         tool_a = {
@@ -82,10 +86,10 @@ class TestHashTool:
             "description": "Same",
             "inputSchema": {"type": "object", "properties": {"y": {"type": "integer"}}},
         }
-        assert _hash_tool(tool_a) != _hash_tool(tool_b)
+        assert hash_tool(tool_a) != hash_tool(tool_b)
 
     def test_hash_is_sha256_hex(self):
-        h = _hash_tool(TOOLS[0])
+        h = hash_tool(TOOLS[0])
         assert len(h) == 64
         assert all(c in "0123456789abcdef" for c in h)
 
@@ -113,7 +117,7 @@ class TestGenerateIntegrityFile:
         generate_integrity_file(path)
         data = json.loads(path.read_text())
         for tool in TOOLS:
-            assert data["tools"][tool["name"]] == _hash_tool(tool)
+            assert data["tools"][tool["name"]] == hash_tool(tool)
 
 
 class TestVerifyIntegrity:

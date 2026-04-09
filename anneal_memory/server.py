@@ -1,7 +1,7 @@
 """MCP server for anneal-memory.
 
 Implements the Model Context Protocol over stdio transport (JSON-RPC 2.0,
-newline-delimited). 6 tools + 1 resource. Zero dependencies beyond Python
+newline-delimited). 6 tools + 2 resources. Zero dependencies beyond Python
 stdlib.
 
 Usage:
@@ -24,7 +24,7 @@ from . import __version__
 from .associations import process_wrap_associations
 from .continuity import measure_sections, prepare_wrap_package, validate_structure
 from .graduation import validate_graduations
-from .integrity import RESOURCES, TOOLS, generate_integrity_file, verify_integrity
+from .integrity import RESOURCES, TOOLS, hash_tool, generate_integrity_file, verify_integrity
 from .store import Store
 from .types import AffectiveState
 
@@ -220,6 +220,22 @@ class Server:
                     }
                 ],
             }
+        if uri == "anneal://integrity/manifest":
+            manifest = {
+                "version": 1,
+                "algorithm": "SHA-256",
+                "canonicalization": "deterministic sorted-keys JSON",
+                "tools": {tool["name"]: hash_tool(tool) for tool in TOOLS},
+            }
+            return {
+                "contents": [
+                    {
+                        "uri": uri,
+                        "mimeType": "application/json",
+                        "text": json.dumps(manifest, indent=2, sort_keys=True),
+                    }
+                ],
+            }
         return {"contents": []}
 
     # -- Tool Implementations --
@@ -255,10 +271,8 @@ class Server:
             return _tool_result("Error: episode_id is required", is_error=True)
 
         # Count associations before delete (CASCADE will remove them)
-        assoc_count = self._store._conn.execute(
-            "SELECT COUNT(*) FROM associations WHERE episode_a = ? OR episode_b = ?",
-            (episode_id, episode_id),
-        ).fetchone()[0]
+        # High limit: we need accurate count, not just top results
+        assoc_count = len(self._store.get_associations([episode_id], limit=10000))
 
         deleted = self._store.delete(episode_id)
         if not deleted:

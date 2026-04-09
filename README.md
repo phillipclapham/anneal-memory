@@ -10,7 +10,7 @@
 
 The only MCP memory server with an immune system. Patterns earn permanence through evidence, false knowledge gets caught and demoted, and stale information fades — so your agent's memory gets smarter over time, not just bigger.
 
-Four cognitive layers: episodic store, compressed continuity, Hebbian associations, and affective state tracking. Zero dependencies. 5 tools. Works with any MCP client.
+Four cognitive layers: episodic store, compressed continuity, Hebbian associations, and affective state tracking. Zero dependencies. 6 tools. Works with any MCP client.
 
 ## Quick Start
 
@@ -218,6 +218,7 @@ store = Store("./memory.db", on_audit_event=lambda entry: send_to_siem(entry))
 | `recall` | Before making decisions that might have prior context. Query by time, type, keyword, or ID |
 | `prepare_wrap` | At session end — returns episodes + current continuity + association context + compression instructions |
 | `save_continuity` | After compressing — server validates structure, citations, records associations, applies decay, and saves |
+| `delete_episode` | Remove content that should not exist (PII, sensitive data). Cascades to associations. Logged in audit trail |
 | `status` | Check memory health: episode counts, wrap history, continuity size, association network metrics |
 
 **Resource:** `anneal://continuity` — the current continuity file, auto-loaded at session start.

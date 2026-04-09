@@ -75,7 +75,7 @@ class TestPing:
 class TestToolsList:
     def test_returns_all_tools(self, server):
         result = server._handle_tools_list({})
-        assert len(result["tools"]) == 5
+        assert len(result["tools"]) == 6
 
     def test_tools_match_integrity_definitions(self, server):
         result = server._handle_tools_list({})
@@ -176,6 +176,68 @@ class TestToolRecord:
             "episode_type": "invalid_type",
         })
         assert _is_error(result)
+
+
+# -- Tool: delete_episode --
+
+
+class TestToolDeleteEpisode:
+    def test_delete_existing_episode(self, server, store):
+        ep = store.record("Test episode", "observation")
+        result = server._tool_delete_episode({"episode_id": ep.id})
+        assert not _is_error(result)
+        assert ep.id in _text_from_result(result)
+        assert "Deleted" in _text_from_result(result)
+        # Verify actually deleted
+        recalled = store.recall(keyword="Test episode")
+        assert len(recalled.episodes) == 0
+
+    def test_delete_nonexistent_episode(self, server):
+        result = server._tool_delete_episode({"episode_id": "deadbeef"})
+        assert _is_error(result)
+        assert "not found" in _text_from_result(result)
+
+    def test_delete_empty_id_fails(self, server):
+        result = server._tool_delete_episode({"episode_id": ""})
+        assert _is_error(result)
+        assert "required" in _text_from_result(result)
+
+    def test_delete_missing_id_fails(self, server):
+        result = server._tool_delete_episode({})
+        assert _is_error(result)
+        assert "required" in _text_from_result(result)
+
+    def test_delete_cascades_associations(self, server, store):
+        ep1 = store.record("Episode one", "observation")
+        ep2 = store.record("Episode two", "observation")
+        ep3 = store.record("Episode three", "observation")
+        store.record_associations(
+            direct_pairs={(ep1.id, ep2.id), (ep1.id, ep3.id)},
+        )
+        # Verify associations exist
+        assocs = store.get_associations([ep1.id])
+        assert len(assocs) == 2
+
+        # Delete ep1 via MCP tool
+        result = server._tool_delete_episode({"episode_id": ep1.id})
+        assert not _is_error(result)
+        assert "2 associated link(s)" in _text_from_result(result)
+
+        # Associations gone
+        assocs = store.get_associations([ep1.id])
+        assert len(assocs) == 0
+
+    def test_delete_no_associations_message(self, server, store):
+        ep = store.record("Solo episode", "decision")
+        result = server._tool_delete_episode({"episode_id": ep.id})
+        text = _text_from_result(result)
+        assert "associated link" not in text
+        assert "audit trail" in text
+
+    def test_delete_whitespace_id_fails(self, server):
+        result = server._tool_delete_episode({"episode_id": "   "})
+        assert _is_error(result)
+        assert "required" in _text_from_result(result)
 
 
 # -- Tool: recall --

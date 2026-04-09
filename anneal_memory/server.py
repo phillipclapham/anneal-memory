@@ -1,7 +1,7 @@
 """MCP server for anneal-memory.
 
 Implements the Model Context Protocol over stdio transport (JSON-RPC 2.0,
-newline-delimited). 5 tools + 1 resource. Zero dependencies beyond Python
+newline-delimited). 6 tools + 1 resource. Zero dependencies beyond Python
 stdlib.
 
 Usage:
@@ -128,6 +128,7 @@ class Server:
             "recall": self._tool_recall,
             "prepare_wrap": self._tool_prepare_wrap,
             "save_continuity": self._tool_save_continuity,
+            "delete_episode": self._tool_delete_episode,
             "status": self._tool_status,
         }
 
@@ -247,6 +248,30 @@ class Server:
         return _tool_result(
             f"Recorded {ep.type.value} ({ep.id}) at {ep.timestamp}"
         )
+
+    def _tool_delete_episode(self, args: dict[str, Any]) -> dict[str, Any]:
+        episode_id = args.get("episode_id", "").strip()
+        if not episode_id:
+            return _tool_result("Error: episode_id is required", is_error=True)
+
+        # Count associations before delete (CASCADE will remove them)
+        assoc_count = self._store._conn.execute(
+            "SELECT COUNT(*) FROM associations WHERE episode_a = ? OR episode_b = ?",
+            (episode_id, episode_id),
+        ).fetchone()[0]
+
+        deleted = self._store.delete(episode_id)
+        if not deleted:
+            return _tool_result(
+                f"Episode {episode_id} not found. Use recall to find valid IDs.",
+                is_error=True,
+            )
+
+        msg = f"Deleted episode {episode_id}"
+        if assoc_count > 0:
+            msg += f" and {assoc_count} associated link(s)"
+        msg += ". This action is logged in the audit trail."
+        return _tool_result(msg)
 
     def _tool_recall(self, args: dict[str, Any]) -> dict[str, Any]:
         result = self._store.recall(

@@ -139,9 +139,15 @@ report that. The value comes from genuine variation.
 - Information already in documentation
 - Every small observation — record what would change a decision
 
-**Correcting mistakes:** Episodes are append-only (no delete tool).
-If you record something incorrectly, record a correction as a new
-episode — the compression step naturally resolves contradictions.
+**Correcting mistakes vs. deleting episodes:**
+- For **factual corrections** (wrong detail, outdated info): record a new
+  episode with the correction. The compression step naturally resolves
+  contradictions — this is the preferred approach.
+- For **content that should not exist** (accidentally recorded PII,
+  sensitive data, fundamentally wrong recordings): use `delete_episode`
+  with the episode ID. Deletion cascades — all Hebbian associations
+  involving that episode are removed, and the deletion is logged in the
+  audit trail. This action is irreversible.
 
 **How to present memory:**
 - Report findings naturally: "From prior sessions, there was a tension

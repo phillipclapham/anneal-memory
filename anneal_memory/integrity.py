@@ -220,6 +220,31 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "delete_episode",
+        "description": (
+            "Delete a single episode by ID. Use this for content that should not "
+            "exist: accidentally recorded PII, sensitive data, or fundamentally "
+            "wrong recordings. Do NOT use for factual corrections — record a new "
+            "episode with the correction instead and let compression resolve it. "
+            "Deletion cascades: all Hebbian associations involving the episode are "
+            "removed, and the deletion is logged in the audit trail. This action "
+            "is irreversible."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "episode_id": {
+                    "type": "string",
+                    "description": (
+                        "The 8-character hex ID of the episode to delete. "
+                        "Use recall or prepare_wrap to find episode IDs."
+                    ),
+                },
+            },
+            "required": ["episode_id"],
+        },
+    },
+    {
         "name": "status",
         "description": (
             "Get memory health metrics. Call this at session start to understand "

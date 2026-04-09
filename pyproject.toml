@@ -44,7 +44,7 @@ Repository = "https://github.com/phillipclapham/anneal-memory"
 Issues = "https://github.com/phillipclapham/anneal-memory/issues"
 
 [project.scripts]
-anneal-memory = "anneal_memory.server:main"
+anneal-memory = "anneal_memory.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["anneal_memory"]

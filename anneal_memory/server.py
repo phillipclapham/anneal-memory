@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import sys
 from datetime import date
@@ -534,13 +535,73 @@ class Server:
         return _tool_result("\n".join(lines))
 
 
+def start_server(
+    *,
+    db_path: str,
+    project_name: str = "Agent",
+    skip_integrity: bool = False,
+    no_audit: bool = False,
+    audit_retention_days: int | None = None,
+) -> None:
+    """Start the MCP server with the given configuration.
+
+    Called by main() (standalone entry point) and by the CLI dispatcher's
+    ``serve`` subcommand. Factored out so callers don't need to reconstruct
+    sys.argv — just pass explicit parameters.
+    """
+    # Force UTF-8 on stdio — locale encoding can corrupt non-ASCII memories
+    sys.stdin.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8")
+
+    # Logging to stderr (stdout is the MCP transport)
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=logging.INFO,
+        format="[anneal-memory] %(levelname)s: %(message)s",
+    )
+
+    # Integrity verification — hard stop on failure (use --skip-integrity for dev)
+    if not skip_integrity:
+        integrity_path = Path(__file__).parent / "tool-integrity.json"
+        if integrity_path.exists():
+            valid, issues = verify_integrity(integrity_path)
+            if not valid:
+                for issue in issues:
+                    logger.error("Integrity: %s", issue)
+                logger.error(
+                    "Tool description integrity check failed. "
+                    "Use --skip-integrity to bypass."
+                )
+                sys.exit(1)
+        # Missing file is not an error — first run or dev mode
+
+    # Open store and run server
+    store = Store(
+        path=db_path,
+        project_name=project_name,
+        audit=not no_audit,
+        audit_retention_days=audit_retention_days,
+    )
+
+    try:
+        server = Server(store)
+        server.run()
+    finally:
+        store.close()
+
+
 def main() -> None:
-    """CLI entry point for the anneal-memory MCP server."""
+    """CLI entry point for the anneal-memory MCP server.
+
+    Parses command-line arguments and delegates to start_server()
+    or handles one-shot modes (--generate-integrity, --verify-audit).
+    """
     parser = argparse.ArgumentParser(
         prog="anneal-memory",
         description="Living memory MCP server for AI agents.",
     )
-    default_db = str(Path("~/.anneal-memory/memory.db").expanduser())
+    env_db = os.environ.get("ANNEAL_MEMORY_DB")
+    default_db = env_db if env_db else str(Path("~/.anneal-memory/memory.db").expanduser())
     parser.add_argument(
         "--db",
         default=default_db,
@@ -611,46 +672,14 @@ def main() -> None:
             sys.exit(1)
         return
 
-    # Force UTF-8 on stdio — locale encoding can corrupt non-ASCII memories
-    sys.stdin.reconfigure(encoding="utf-8")
-    sys.stdout.reconfigure(encoding="utf-8")
-
-    # Logging to stderr (stdout is the MCP transport)
-    logging.basicConfig(
-        stream=sys.stderr,
-        level=logging.INFO,
-        format="[anneal-memory] %(levelname)s: %(message)s",
-    )
-
-    # Integrity verification — hard stop on failure (use --skip-integrity for dev)
-    if not args.skip_integrity:
-        integrity_path = Path(__file__).parent / "tool-integrity.json"
-        if integrity_path.exists():
-            valid, issues = verify_integrity(integrity_path)
-            if not valid:
-                for issue in issues:
-                    logger.error("Integrity: %s", issue)
-                logger.error(
-                    "Tool description integrity check failed. "
-                    "Use --skip-integrity to bypass."
-                )
-                sys.exit(1)
-        # Missing file is not an error — first run or dev mode
-
-    # Open store and run server
     audit_retention = args.audit_retention_days if args.audit_retention_days > 0 else None
-    store = Store(
-        path=args.db,
+    start_server(
+        db_path=args.db,
         project_name=args.project_name,
-        audit=not args.no_audit,
+        skip_integrity=args.skip_integrity,
+        no_audit=args.no_audit,
         audit_retention_days=audit_retention,
     )
-
-    try:
-        server = Server(store)
-        server.run()
-    finally:
-        store.close()
 
 
 if __name__ == "__main__":

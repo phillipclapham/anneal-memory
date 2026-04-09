@@ -3,7 +3,6 @@
 import pytest
 
 from anneal_memory.continuity import (
-    build_engine_prompt,
     format_episodes_for_wrap,
     measure_sections,
     prepare_wrap_package,
@@ -283,51 +282,3 @@ Working.
         assert pkg["max_chars"] == 10000
 
 
-# -- build_engine_prompt --
-
-
-class TestBuildEnginePrompt:
-    def test_includes_session_data(self):
-        prompt = build_engine_prompt(
-            "Some session data", None, "Test", 20000, "2026-03-31"
-        )
-        assert "Some session data" in prompt
-
-    def test_includes_existing_continuity(self):
-        prompt = build_engine_prompt(
-            "Data", VALID_CONTINUITY, "Test", 20000, "2026-03-31"
-        )
-        assert "Working on database architecture" in prompt
-
-    def test_first_session_message(self):
-        prompt = build_engine_prompt(
-            "Data", None, "Test", 20000, "2026-03-31"
-        )
-        assert "first session" in prompt
-
-    def test_includes_marker_reference(self):
-        prompt = build_engine_prompt(
-            "Data", None, "Test", 20000, "2026-03-31"
-        )
-        assert "thought:" in prompt
-        assert "evidence:" in prompt
-        assert "1x" in prompt
-
-    def test_includes_project_name(self):
-        prompt = build_engine_prompt(
-            "Data", None, "MyAgent", 20000, "2026-03-31"
-        )
-        assert "MyAgent" in prompt
-
-    def test_includes_max_chars(self):
-        prompt = build_engine_prompt(
-            "Data", None, "Test", 15000, "2026-03-31"
-        )
-        assert "15000" in prompt
-
-    def test_quality_rules_present(self):
-        prompt = build_engine_prompt(
-            "Data", None, "Test", 20000, "2026-03-31"
-        )
-        assert "PRINCIPLES over facts" in prompt
-        assert "DENSITY over length" in prompt

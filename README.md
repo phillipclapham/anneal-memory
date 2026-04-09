@@ -107,9 +107,8 @@ Pass affective state during a wrap:
 # Via MCP tool
 save_continuity(text="...", affective_state={"tag": "curious", "intensity": 0.8})
 
-# Via Engine (automated characterization)
-engine = Engine(store, api_key="...", characterize_affect=True)
-result = engine.wrap()  # LLM self-reports affect post-compression
+# Via CLI
+anneal-memory save-continuity continuity.md --affect-tag curious --affect-intensity 0.8
 ```
 
 This is experimental infrastructure. The associations and strength model work without it. Affective tagging adds a layer of signal for agents and researchers exploring persistent state.
@@ -281,34 +280,30 @@ with Store("./memory.db", project_name="MyAgent") as store:
         print(f"{a.id_a} <-> {a.id_b} strength={a.strength}")
 ```
 
-## Engine (Automated Compression)
+## CLI (Operator Interface)
 
-For pipelines, cron jobs, or programmatic use without an interactive agent:
+Inspect, debug, and manage agent memory from the command line. 21 subcommands, all with `--json` output.
 
 ```bash
-pip install anneal-memory[engine]
+pip install anneal-memory
+
+# Agent-driven compression workflow (same as MCP)
+anneal-memory prepare-wrap           # Get compression package
+# Agent compresses in its own reasoning...
+anneal-memory save-continuity out.md # Save with validation
+
+# Operator commands (things MCP can't do)
+anneal-memory stats                  # Detailed analytics
+anneal-memory graph --format dot     # Association graph (Graphviz)
+anneal-memory diff --wraps 5         # Wrap metric progression
+anneal-memory audit --since 7d       # Read audit trail
+anneal-memory export --format json   # Full store export
+anneal-memory history                # Wrap timeline
 ```
 
-```python
-from anneal_memory import Engine, Store
+The CLI preserves the same cognitive workflow as MCP — the agent that records episodes is the agent that compresses them. `prepare-wrap` outputs the compression package, the agent applies its own judgment, `save-continuity` validates and records the result. Compression cannot be delegated without breaking the thesis.
 
-with Store("./memory.db", project_name="MyAgent") as store:
-    store.record("Observed pattern in data", "observation")
-    store.record("Chose approach X over Y", "decision")
-
-    engine = Engine(store, api_key="sk-ant-...")  # or llm=my_callable
-    result = engine.wrap()
-
-    print(f"Compressed {result.episodes_compressed} episodes")
-    print(f"Continuity: {result.chars} chars, {result.patterns_extracted} patterns")
-    print(f"Associations: {result.associations_formed} formed, {result.associations_strengthened} strengthened")
-```
-
-The Engine gathers episodes, builds the compression prompt, calls the LLM, validates structure and citations, records associations between co-cited episodes, applies decay, truncates if over budget, and saves — all in one call. Falls back to existing continuity on invalid LLM output (or rejects on first session — episodes stay for retry).
-
-**Affective characterization:** `Engine(store, api_key="...", characterize_affect=True)` — after compression, the LLM self-reports its functional state during the wrap. This gets recorded on associations formed during that wrap. Experimental.
-
-**Custom LLM** (zero additional dependencies): `Engine(store, llm=lambda prompt: my_llm(prompt))`
+See [`examples/CLAUDE.md.cli.example`](examples/CLAUDE.md.cli.example) for the full CLI workflow snippet.
 
 ## Security
 

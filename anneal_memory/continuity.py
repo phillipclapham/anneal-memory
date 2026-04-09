@@ -165,88 +165,6 @@ def prepare_wrap_package(
     }
 
 
-def build_engine_prompt(
-    session_summary: str,
-    existing_continuity: str | None,
-    project_name: str,
-    max_chars: int,
-    today: str,
-    stale_patterns_section: str = "",
-    association_section: str = "",
-) -> str:
-    """Build the full LLM prompt for automated compression (engine mode).
-
-    This is used by the Engine class for programmatic compression.
-    In MCP mode, the agent gets instructions via prepare_wrap_package instead.
-
-    Args:
-        session_summary: Formatted episode summary.
-        existing_continuity: Current continuity text, or None.
-        project_name: Name for the continuity file header.
-        max_chars: Maximum continuity size in characters.
-        today: Today's date as YYYY-MM-DD.
-        stale_patterns_section: Optional pre-formatted stale patterns section
-            to inject before output instructions.
-        association_section: Optional pre-formatted association context section.
-
-    Returns:
-        The full prompt string for the compression LLM.
-    """
-    existing_section = ""
-    if existing_continuity and existing_continuity.strip():
-        existing_section = f"""
-## Existing Continuity File
-(This is the current continuity file from previous sessions. Update it with the new session data.)
-
-<existing_continuity>
-{existing_continuity}
-</existing_continuity>
-"""
-    else:
-        existing_section = """
-## Existing Continuity File
-(No existing continuity — this is the first session. Create a fresh continuity file.)
-"""
-
-    marker_ref = _marker_reference(today)
-
-    return f"""You are a memory compression engine for an AI agent's reasoning memory.
-Your job is to produce a compressed continuity file that captures the PRINCIPLES and
-PATTERNS from this session, not just a summary. The act of compression is itself a
-form of thinking — extract what matters, discard what doesn't.
-
-## Session Data
-(These are the typed episodes from this session's work.)
-
-<session_data>
-{session_summary}
-</session_data>
-{existing_section}{stale_patterns_section}{association_section}
-## Output Format
-
-Produce a markdown file with EXACTLY these 4 section headers (use these headers VERBATIM):
-`## State`, `## Patterns`, `## Decisions`, `## Context`
-Stay within {max_chars} characters total.
-
-{marker_ref}
-
-## Quality Rules
-- PRINCIPLES over facts. "We keep hitting X because Y" > "X happened again"
-- JUDGMENT over mechanical rules. You decide what matters.
-- DENSITY over length. One insightful line > three vague ones.
-- When uncertain whether to keep something, ask: "Would the agent make a worse
-  decision next session without this?" If no, cut it.
-- Do NOT narrate markers in prose ("we noted a thought about..."). Use markers directly.
-- Do NOT include the session data verbatim. Compress it.
-
-## Output
-Return ONLY the markdown continuity file. No explanation, no preamble, no code fences.
-Start directly with `# {project_name} — Memory (v1)`.
-Do NOT add extra headers like `## Summary` or `## Overview`.
-Do NOT wrap the output in markdown code fences.
-Do NOT number the sections."""
-
-
 def _build_wrap_instructions(project_name: str, max_chars: int, today: str) -> str:
     """Build the compression instructions the agent receives via prepare_wrap.
 
@@ -280,7 +198,7 @@ This creates persistent emotional associations between co-cited episodes.
 
 
 def _marker_reference(today: str) -> str:
-    """The marker reference section shared between agent instructions and engine prompt."""
+    """The marker reference section used in agent compression instructions."""
     return f"""### Density Markers (use in ## Patterns)
 - `? question` — open question needing decision
 - `thought: insight` — observation or principle worth preserving

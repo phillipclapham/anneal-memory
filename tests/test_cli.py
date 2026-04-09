@@ -23,14 +23,23 @@ from anneal_memory import Store, __version__
 from anneal_memory.cli import (
     build_parser,
     cmd_associations,
+    cmd_audit,
     cmd_continuity,
     cmd_delete,
+    cmd_diff,
     cmd_episodes,
+    cmd_export,
     cmd_get,
+    cmd_graph,
+    cmd_history,
+    cmd_import,
     cmd_init,
+    cmd_prepare_wrap,
     cmd_prune,
     cmd_record,
+    cmd_save_continuity,
     cmd_search,
+    cmd_stats,
     cmd_status,
     cmd_verify,
     main,
@@ -611,13 +620,6 @@ class TestParser:
         args = parser.parse_args(["status", "--json"])
         assert args.json is True
 
-    def test_wrap_command(self):
-        parser = build_parser()
-        args = parser.parse_args(["wrap", "--model", "claude-haiku-4-5-20251001", "--affect"])
-        assert args.command == "wrap"
-        assert args.model == "claude-haiku-4-5-20251001"
-        assert args.affect is True
-
     def test_init_command(self):
         parser = build_parser()
         args = parser.parse_args(["init"])
@@ -999,30 +1001,919 @@ class TestRecordStdinEmpty:
                 cmd_record(base_args)
 
 
-# -- Wrap ImportError test --
 
-class TestWrapImportError:
-    def test_wrap_without_engine_gives_clear_error(self, base_args, capsys):
-        """Verify the error message is clear when [engine] extra is missing."""
+
+# -- cmd_export tests --
+
+class TestCmdExport:
+    def test_export_json_stdout(self, base_args_with_data, capsys):
+        base_args_with_data.format = "json"
+        base_args_with_data.output = None
+        cmd_export(base_args_with_data)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["anneal_memory_export"] is True
+        assert data["format_version"] == 1
+        assert len(data["episodes"]) == 4
+        assert data["project_name"] == "TestProject"
+        assert "continuity" in data
+        assert "wraps" in data
+
+    def test_export_json_to_file(self, base_args_with_data, tmp_path, capsys):
+        out = str(tmp_path / "export.json")
+        base_args_with_data.format = "json"
+        base_args_with_data.output = out
+        cmd_export(base_args_with_data)
+        assert Path(out).exists()
+        data = json.loads(Path(out).read_text())
+        assert len(data["episodes"]) == 4
+
+    def test_export_json_to_file_json_mode(self, base_args_with_data, tmp_path, capsys):
+        out = str(tmp_path / "export.json")
+        base_args_with_data.json = True
+        base_args_with_data.format = "json"
+        base_args_with_data.output = out
+        cmd_export(base_args_with_data)
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)
+        assert result["format"] == "json"
+        assert result["episodes"] == 4
+
+    def test_export_markdown_stdout(self, base_args_with_data, capsys):
+        base_args_with_data.format = "markdown"
+        base_args_with_data.output = None
+        cmd_export(base_args_with_data)
+        captured = capsys.readouterr()
+        assert "# anneal-memory Export" in captured.out
+        assert "## Episodes" in captured.out
+        assert "Found a pattern" in captured.out
+
+    def test_export_markdown_to_file(self, base_args_with_data, tmp_path, capsys):
+        out = str(tmp_path / "export.md")
+        base_args_with_data.format = "markdown"
+        base_args_with_data.output = out
+        cmd_export(base_args_with_data)
+        assert Path(out).exists()
+        text = Path(out).read_text()
+        assert "## Episodes" in text
+
+    def test_export_sqlite(self, base_args_with_data, tmp_path, capsys):
+        out = str(tmp_path / "copy.db")
+        base_args_with_data.format = "sqlite"
+        base_args_with_data.output = out
+        cmd_export(base_args_with_data)
+        assert Path(out).exists()
+        # Verify the copy is a valid DB with same data
+        with Store(out, project_name="TestProject") as s:
+            assert s.status().total_episodes == 4
+
+    def test_export_sqlite_json(self, base_args_with_data, tmp_path, capsys):
+        out = str(tmp_path / "copy.db")
+        base_args_with_data.json = True
+        base_args_with_data.format = "sqlite"
+        base_args_with_data.output = out
+        cmd_export(base_args_with_data)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["format"] == "sqlite"
+        assert data["size_bytes"] > 0
+
+
+# -- cmd_import tests --
+
+class TestCmdImport:
+    def _make_export(self, store_path, tmp_path):
+        """Create a JSON export file from a store."""
+        with Store(store_path, project_name="TestProject") as store:
+            result = store.recall(limit=100)
+            episodes = [
+                {
+                    "id": ep.id,
+                    "timestamp": ep.timestamp,
+                    "type": ep.type.value,
+                    "content": ep.content,
+                    "source": ep.source,
+                    "metadata": ep.metadata,
+                }
+                for ep in result.episodes
+            ]
+        export_path = tmp_path / "export.json"
+        export_path.write_text(json.dumps({
+            "anneal_memory_export": True,
+            "episodes": episodes,
+        }))
+        return str(export_path)
+
+    def test_import_into_new_store(self, store_with_data, tmp_path, capsys):
+        export_path = self._make_export(store_with_data, tmp_path)
+        new_db = str(tmp_path / "new.db")
+        Store(new_db).close()  # init empty store
+
+        args = Namespace(db=new_db, project_name="Agent", json=False, path=export_path)
+        cmd_import(args)
+        captured = capsys.readouterr()
+        assert "4 imported" in captured.out
+
+        with Store(new_db) as store:
+            assert store.status().total_episodes == 4
+
+    def test_import_skips_duplicates(self, store_with_data, tmp_path, capsys):
+        export_path = self._make_export(store_with_data, tmp_path)
+        # Import into the SAME store — all should be skipped
+        args = Namespace(db=store_with_data, project_name="TestProject", json=False, path=export_path)
+        cmd_import(args)
+        captured = capsys.readouterr()
+        assert "4 skipped" in captured.out
+        assert "0 imported" in captured.out
+
+    def test_import_json_output(self, store_with_data, tmp_path, capsys):
+        export_path = self._make_export(store_with_data, tmp_path)
+        new_db = str(tmp_path / "new.db")
+        Store(new_db).close()
+
+        args = Namespace(db=new_db, project_name="Agent", json=True, path=export_path)
+        cmd_import(args)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["imported"] == 4
+        assert data["skipped"] == 0
+
+    def test_import_invalid_file(self, base_args, tmp_path, capsys):
+        bad_path = str(tmp_path / "bad.json")
+        Path(bad_path).write_text('{"not_an_export": true}')
         Store(base_args.db).close()
-        base_args.api_key = None
-        base_args.model = "claude-sonnet-4-6"
+
+        args = Namespace(db=base_args.db, project_name="Agent", json=False, path=bad_path)
+        with pytest.raises(SystemExit):
+            cmd_import(args)
+
+    def test_import_file_not_found(self, base_args, capsys):
+        args = Namespace(db=base_args.db, project_name="Agent", json=False, path="/nonexistent.json")
+        with pytest.raises(SystemExit):
+            cmd_import(args)
+
+    def test_import_empty_episodes(self, base_args, tmp_path, capsys):
+        export_path = str(tmp_path / "empty.json")
+        Path(export_path).write_text(json.dumps({"anneal_memory_export": True, "episodes": []}))
+        Store(base_args.db).close()
+
+        args = Namespace(db=base_args.db, project_name="Agent", json=False, path=export_path)
+        cmd_import(args)
+        captured = capsys.readouterr()
+        assert "No episodes to import" in captured.out
+
+
+# -- cmd_audit tests --
+
+class TestCmdAudit:
+    def test_audit_shows_entries(self, base_args_with_data, capsys):
+        base_args_with_data.since = None
+        base_args_with_data.event = None
+        base_args_with_data.limit = 50
+        cmd_audit(base_args_with_data)
+        captured = capsys.readouterr()
+        assert "Audit trail:" in captured.out
+        assert "record" in captured.out
+
+    def test_audit_filter_by_event(self, base_args_with_data, capsys):
+        base_args_with_data.since = None
+        base_args_with_data.event = "record"
+        base_args_with_data.limit = 50
+        cmd_audit(base_args_with_data)
+        captured = capsys.readouterr()
+        assert "record" in captured.out
+
+    def test_audit_json(self, base_args_with_data, capsys):
+        base_args_with_data.json = True
+        base_args_with_data.since = None
+        base_args_with_data.event = None
+        base_args_with_data.limit = 50
+        cmd_audit(base_args_with_data)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "entries" in data
+        assert data["total"] > 0
+        assert all(e["event"] for e in data["entries"])
+
+    def test_audit_filter_by_event_json(self, base_args_with_data, capsys):
+        base_args_with_data.json = True
+        base_args_with_data.since = None
+        base_args_with_data.event = "record"
+        base_args_with_data.limit = 50
+        cmd_audit(base_args_with_data)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert all(e["event"] == "record" for e in data["entries"])
+
+    def test_audit_limit(self, base_args_with_data, capsys):
+        base_args_with_data.json = True
+        base_args_with_data.since = None
+        base_args_with_data.event = None
+        base_args_with_data.limit = 2
+        cmd_audit(base_args_with_data)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert len(data["entries"]) <= 2
+        assert data["total"] >= len(data["entries"])
+
+    def test_audit_empty_store(self, base_args, capsys):
+        # No audit files yet
+        base_args.since = None
+        base_args.event = None
+        base_args.limit = 50
+        cmd_audit(base_args)
+        captured = capsys.readouterr()
+        assert "No audit trail files" in captured.out
+
+    def test_audit_since_filter(self, base_args_with_data, capsys):
+        base_args_with_data.json = True
+        base_args_with_data.since = "1h"
+        base_args_with_data.event = None
+        base_args_with_data.limit = 50
+        cmd_audit(base_args_with_data)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # All entries should be recent
+        assert data["total"] > 0
+
+
+# -- cmd_diff tests --
+
+class TestCmdDiff:
+    def test_diff_no_wraps(self, base_args_with_data, capsys):
+        base_args_with_data.wraps = 5
+        cmd_diff(base_args_with_data)
+        captured = capsys.readouterr()
+        assert "No wraps to compare" in captured.out
+
+    def test_diff_no_wraps_json(self, base_args_with_data, capsys):
+        base_args_with_data.json = True
+        base_args_with_data.wraps = 5
+        cmd_diff(base_args_with_data)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["wraps"] == []
+
+    def test_diff_with_wraps(self, tmp_path, capsys):
+        db = str(tmp_path / "test.db")
+        with Store(db) as store:
+            store.record("ep1", episode_type="observation")
+            store.wrap_completed(1, 100)
+            store.record("ep2", episode_type="observation")
+            store.wrap_completed(1, 150, graduations_validated=1)
+
+        args = Namespace(db=db, project_name="Agent", json=False, wraps=5)
+        cmd_diff(args)
+        captured = capsys.readouterr()
+        assert "Wrap progression" in captured.out
+        assert "(+50)" in captured.out  # chars delta
+
+    def test_diff_with_wraps_json(self, tmp_path, capsys):
+        db = str(tmp_path / "test.db")
+        with Store(db) as store:
+            store.record("ep1", episode_type="observation")
+            store.wrap_completed(1, 100)
+            store.record("ep2", episode_type="observation")
+            store.wrap_completed(1, 200)
+
+        args = Namespace(db=db, project_name="Agent", json=True, wraps=5)
+        cmd_diff(args)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert len(data["wraps"]) == 2
+        assert "delta" in data["wraps"][1]
+        assert data["wraps"][1]["delta"]["continuity_chars"] == 100
+
+
+# -- cmd_graph tests --
+
+class TestCmdGraph:
+    def test_graph_empty(self, base_args_with_data, capsys):
+        base_args_with_data.json = True
+        base_args_with_data.format = "json"
+        base_args_with_data.output = None
+        base_args_with_data.min_strength = 0.0
+        cmd_graph(base_args_with_data)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["nodes"] == []
+        assert data["edges"] == []
+
+    def test_graph_with_associations(self, tmp_path, capsys):
+        db = str(tmp_path / "test.db")
+        with Store(db) as store:
+            ep1 = store.record("Episode one", episode_type="observation")
+            ep2 = store.record("Episode two", episode_type="decision")
+            store.record_associations(
+                direct_pairs={(ep1.id, ep2.id)},
+            )
+
+        args = Namespace(db=db, project_name="Agent", json=True, format="json", output=None, min_strength=0.0)
+        cmd_graph(args)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert len(data["nodes"]) == 2
+        assert len(data["edges"]) == 1
+
+    def test_graph_dot_format(self, tmp_path, capsys):
+        db = str(tmp_path / "test.db")
+        with Store(db) as store:
+            ep1 = store.record("Episode one", episode_type="observation")
+            ep2 = store.record("Episode two", episode_type="decision")
+            store.record_associations(
+                direct_pairs={(ep1.id, ep2.id)},
+            )
+
+        args = Namespace(db=db, project_name="Agent", json=False, format="dot", output=None, min_strength=0.0)
+        cmd_graph(args)
+        captured = capsys.readouterr()
+        assert "graph associations" in captured.out
+        assert ep1.id in captured.out
+        assert ep2.id in captured.out
+
+    def test_graph_dot_to_file(self, tmp_path, capsys):
+        db = str(tmp_path / "test.db")
+        with Store(db) as store:
+            ep1 = store.record("Episode one", episode_type="observation")
+            ep2 = store.record("Episode two", episode_type="decision")
+            store.record_associations(direct_pairs={(ep1.id, ep2.id)})
+
+        out = str(tmp_path / "graph.dot")
+        args = Namespace(db=db, project_name="Agent", json=False, format="dot", output=out, min_strength=0.0)
+        cmd_graph(args)
+        assert Path(out).exists()
+        text = Path(out).read_text()
+        assert "graph associations" in text
+
+    def test_graph_min_strength_filter(self, tmp_path, capsys):
+        db = str(tmp_path / "test.db")
+        with Store(db) as store:
+            ep1 = store.record("Episode one", episode_type="observation")
+            ep2 = store.record("Episode two", episode_type="decision")
+            store.record_associations(direct_pairs={(ep1.id, ep2.id)})
+
+        # Set min_strength higher than any edge
+        args = Namespace(db=db, project_name="Agent", json=False, format="json", output=None, min_strength=99.0)
+        cmd_graph(args)
+        captured = capsys.readouterr()
+        assert "No associations above strength" in captured.out
+
+
+# -- cmd_stats tests --
+
+class TestCmdStats:
+    def test_stats_empty(self, base_args, capsys):
+        Store(base_args.db).close()
+        cmd_stats(base_args)
+        captured = capsys.readouterr()
+        assert "Detailed Statistics" in captured.out
+        assert "Total:        0" in captured.out
+
+    def test_stats_with_data(self, base_args_with_data, capsys):
+        cmd_stats(base_args_with_data)
+        captured = capsys.readouterr()
+        assert "Detailed Statistics" in captured.out
+        assert "Total:        4" in captured.out
+        assert "By type:" in captured.out
+        assert "By age:" in captured.out
+        assert "By source:" in captured.out
+
+    def test_stats_json(self, base_args_with_data, capsys):
+        base_args_with_data.json = True
+        cmd_stats(base_args_with_data)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["episodes"]["total"] == 4
+        assert "by_type" in data["episodes"]
+        assert "by_age" in data["episodes"]
+        assert "by_source" in data["episodes"]
+        assert "continuity" in data
+        assert "wraps" in data
+        assert "associations" in data
+
+    def test_stats_with_wraps(self, tmp_path, capsys):
+        db = str(tmp_path / "test.db")
+        with Store(db) as store:
+            store.record("ep1", episode_type="observation")
+            store.wrap_completed(1, 100, graduations_validated=2, graduations_demoted=1)
+            store.record("ep2", episode_type="decision")
+            store.wrap_completed(1, 150)
+
+        args = Namespace(db=db, project_name="Agent", json=True)
+        cmd_stats(args)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["wraps"]["total_wraps"] == 2
+        assert data["wraps"]["total_graduations"] == 2
+        assert data["wraps"]["total_demotions"] == 1
+
+
+# -- cmd_history tests --
+
+class TestCmdHistory:
+    def test_history_no_wraps(self, base_args_with_data, capsys):
+        base_args_with_data.limit = 20
+        cmd_history(base_args_with_data)
+        captured = capsys.readouterr()
+        assert "No wrap history" in captured.out
+
+    def test_history_no_wraps_json(self, base_args_with_data, capsys):
+        base_args_with_data.json = True
+        base_args_with_data.limit = 20
+        cmd_history(base_args_with_data)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["wraps"] == []
+
+    def test_history_with_wraps(self, tmp_path, capsys):
+        db = str(tmp_path / "test.db")
+        with Store(db) as store:
+            store.record("ep1", episode_type="observation")
+            store.wrap_completed(1, 100)
+            store.record("ep2", episode_type="observation")
+            store.wrap_completed(1, 150, associations_formed=3, associations_decayed=1)
+
+        args = Namespace(db=db, project_name="Agent", json=False, limit=20)
+        cmd_history(args)
+        captured = capsys.readouterr()
+        assert "Wrap history" in captured.out
+        assert "Wrap 1" in captured.out
+        assert "Wrap 2" in captured.out
+
+    def test_history_json(self, tmp_path, capsys):
+        db = str(tmp_path / "test.db")
+        with Store(db) as store:
+            store.record("ep1", episode_type="observation")
+            store.wrap_completed(1, 100)
+
+        args = Namespace(db=db, project_name="Agent", json=True, limit=20)
+        cmd_history(args)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert len(data["wraps"]) == 1
+        assert data["wraps"][0]["continuity_chars"] == 100
+
+    def test_history_limit(self, tmp_path, capsys):
+        db = str(tmp_path / "test.db")
+        with Store(db) as store:
+            for i in range(5):
+                store.record(f"ep{i}", episode_type="observation")
+                store.wrap_completed(1, 100 + i * 10)
+
+        args = Namespace(db=db, project_name="Agent", json=True, limit=3)
+        cmd_history(args)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert len(data["wraps"]) == 3
+        # total should reflect ALL wraps, not just the limited window
+        assert data["total"] == 5
+
+
+# -- Parser tests for new commands --
+
+class TestParserNewCommands:
+    def test_export_command(self):
+        parser = build_parser()
+        args = parser.parse_args(["export", "--format", "json", "--output", "out.json"])
+        assert args.command == "export"
+        assert args.format == "json"
+        assert args.output == "out.json"
+
+    def test_export_default_format(self):
+        parser = build_parser()
+        args = parser.parse_args(["export"])
+        assert args.format == "json"
+        assert args.output is None
+
+    def test_import_command(self):
+        parser = build_parser()
+        args = parser.parse_args(["import", "data.json"])
+        assert args.command == "import"
+        assert args.path == "data.json"
+
+    def test_audit_command(self):
+        parser = build_parser()
+        args = parser.parse_args(["audit", "--since", "3d", "--event", "record", "--limit", "10"])
+        assert args.command == "audit"
+        assert args.since == "3d"
+        assert args.event == "record"
+        assert args.limit == 10
+
+    def test_audit_defaults(self):
+        parser = build_parser()
+        args = parser.parse_args(["audit"])
+        assert args.since is None
+        assert args.event is None
+        assert args.limit == 50
+
+    def test_diff_command(self):
+        parser = build_parser()
+        args = parser.parse_args(["diff", "--wraps", "10"])
+        assert args.command == "diff"
+        assert args.wraps == 10
+
+    def test_diff_default_wraps(self):
+        parser = build_parser()
+        args = parser.parse_args(["diff"])
+        assert args.wraps == 5
+
+    def test_graph_command(self):
+        parser = build_parser()
+        args = parser.parse_args(["graph", "--format", "dot", "--output", "g.dot", "--min-strength", "0.5"])
+        assert args.command == "graph"
+        assert args.format == "dot"
+        assert args.output == "g.dot"
+        assert args.min_strength == 0.5
+
+    def test_graph_defaults(self):
+        parser = build_parser()
+        args = parser.parse_args(["graph"])
+        assert args.format == "json"
+        assert args.min_strength == 0.0
+
+    def test_stats_command(self):
+        parser = build_parser()
+        args = parser.parse_args(["stats"])
+        assert args.command == "stats"
+
+    def test_history_command(self):
+        parser = build_parser()
+        args = parser.parse_args(["history", "--limit", "5"])
+        assert args.command == "history"
+        assert args.limit == 5
+
+    def test_history_default_limit(self):
+        parser = build_parser()
+        args = parser.parse_args(["history"])
+        assert args.limit == 20
+
+    def test_json_on_new_subcommands(self):
+        parser = build_parser()
+        for cmd in ["export", "import data.json", "audit", "diff", "graph", "stats", "history"]:
+            args_list = cmd.split() + ["--json"]
+            args = parser.parse_args(args_list)
+            assert args.json is True, f"--json failed for subcommand: {cmd}"
+
+
+# -- Export/Import round-trip integration test --
+
+class TestExportImportRoundTrip:
+    def test_full_round_trip(self, store_with_data, tmp_path, capsys):
+        """Export from one store, import to another, verify data matches."""
+        export_path = str(tmp_path / "roundtrip.json")
+
+        # Export
+        args = Namespace(
+            db=store_with_data, project_name="TestProject", json=False,
+            format="json", output=export_path,
+        )
+        cmd_export(args)
+
+        # Import to new store
+        new_db = str(tmp_path / "imported.db")
+        Store(new_db).close()
+        args = Namespace(db=new_db, project_name="Agent", json=False, path=export_path)
+        cmd_import(args)
+
+        # Verify
+        with Store(new_db) as store:
+            result = store.recall(limit=100)
+            assert result.total_matching == 4
+            types = {ep.type.value for ep in result.episodes}
+            assert "observation" in types
+            assert "decision" in types
+
+
+# -- Additional test coverage from Layer 1+2 review --
+
+class TestImportMalformedData:
+    def test_import_missing_content_key(self, tmp_path, capsys):
+        """Import with episodes missing required fields reports errors."""
+        export_path = str(tmp_path / "bad_episodes.json")
+        Path(export_path).write_text(json.dumps({
+            "anneal_memory_export": True,
+            "episodes": [
+                {"id": "abc12345", "type": "observation"},  # missing content
+                {"id": "def67890", "content": "Valid content", "type": "observation", "timestamp": "2026-04-09T12:00:00.000000Z"},
+            ],
+        }))
+        db = str(tmp_path / "test.db")
+        Store(db).close()
+
+        args = Namespace(db=db, project_name="Agent", json=True, path=export_path)
+        cmd_import(args)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["imported"] == 1
+        assert data["errors"] == 1
+
+    def test_import_invalid_episode_type(self, tmp_path, capsys):
+        """Import with invalid episode type reports errors."""
+        export_path = str(tmp_path / "bad_type.json")
+        Path(export_path).write_text(json.dumps({
+            "anneal_memory_export": True,
+            "episodes": [
+                {"id": "abc12345", "content": "Test", "type": "INVALID_TYPE", "timestamp": "2026-04-09T12:00:00.000000Z"},
+            ],
+        }))
+        db = str(tmp_path / "test.db")
+        Store(db).close()
+
+        args = Namespace(db=db, project_name="Agent", json=True, path=export_path)
+        cmd_import(args)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["errors"] == 1
+        assert data["imported"] == 0
+
+
+class TestAuditGzipPath:
+    def test_audit_reads_gzipped_files(self, tmp_path, capsys):
+        """Verify audit can read gzipped rotated audit files."""
+        import gzip as gz
+
+        db = str(tmp_path / "test.db")
+        stem = "test"
+
+        # Create a store with some audit entries
+        with Store(db) as store:
+            store.record("Episode 1", episode_type="observation")
+            store.record("Episode 2", episode_type="decision")
+
+        # Simulate a rotated audit file by creating a gzipped JSONL
+        sealed_entries = [
+            json.dumps({"v": 1, "seq": 0, "ts": "2026-04-01T00:00:00.000000Z", "event": "record", "actor": "agent", "prev_hash": "sha256:GENESIS", "data": {"episode_id": "old1", "type": "observation"}}),
+            json.dumps({"v": 1, "seq": 1, "ts": "2026-04-01T01:00:00.000000Z", "event": "record", "actor": "test", "prev_hash": "sha256:fake", "data": {"episode_id": "old2", "type": "decision"}}),
+        ]
+        gz_path = tmp_path / f"{stem}.audit.2026-W14.jsonl.gz"
+        with gz.open(gz_path, "wt", encoding="utf-8") as f:
+            for entry in sealed_entries:
+                f.write(entry + "\n")
+
+        # Create a manifest pointing to the gz file
+        manifest = {
+            "version": 1,
+            "db_path": f"{stem}.db",
+            "active_file": f"{stem}.audit.jsonl",
+            "files": [{"filename": gz_path.name, "period": "2026-W14", "entries": 2, "first_ts": "2026-04-01T00:00:00Z", "last_ts": "2026-04-01T01:00:00Z", "last_hash": "", "sha256_file": ""}],
+        }
+        manifest_path = tmp_path / f"{stem}.audit.manifest.json"
+        manifest_path.write_text(json.dumps(manifest))
+
+        # Now read audit — should include entries from both gz and active files
+        args = Namespace(db=db, project_name="Agent", json=True, since=None, event=None, limit=100)
+        cmd_audit(args)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # Should have entries from the gz file AND the active file
+        assert data["total"] >= 4  # 2 from gz + 2+ from active
+        events = [e["event"] for e in data["entries"]]
+        assert "record" in events
+
+
+class TestGraphJsonOutput:
+    def test_graph_json_output_to_file(self, tmp_path, capsys):
+        """Graph JSON to file with --json flag outputs metadata."""
+        db = str(tmp_path / "test.db")
+        with Store(db) as store:
+            ep1 = store.record("Episode one", episode_type="observation")
+            ep2 = store.record("Episode two", episode_type="decision")
+            store.record_associations(direct_pairs={(ep1.id, ep2.id)})
+
+        out = str(tmp_path / "graph.json")
+        args = Namespace(db=db, project_name="Agent", json=True, format="json", output=out, min_strength=0.0)
+        cmd_graph(args)
+        captured = capsys.readouterr()
+        # With --json + --output, should get JSON metadata on stdout
+        meta = json.loads(captured.out)
+        assert meta["format"] == "json"
+        assert meta["nodes"] == 2
+        assert meta["edges"] == 1
+        # And the file should contain the actual graph
+        graph = json.loads(Path(out).read_text())
+        assert len(graph["nodes"]) == 2
+
+
+# -- cmd_prepare_wrap tests --
+
+class TestCmdPrepareWrap:
+    def test_prepare_wrap_no_episodes(self, base_args, capsys):
+        Store(base_args.db).close()
         base_args.max_chars = 20000
-        base_args.affect = False
-        with mock.patch.dict("sys.modules", {"anneal_memory.engine": None}):
-            # This simulates ImportError from the engine module
-            with mock.patch("anneal_memory.cli.cmd_wrap.__module__", "anneal_memory.cli"):
-                # Actually, let's test the ImportError path directly
-                import importlib
-                original_import = __builtins__.__import__ if hasattr(__builtins__, '__import__') else __import__
+        base_args.staleness_days = 7
+        cmd_prepare_wrap(base_args)
+        captured = capsys.readouterr()
+        assert "No episodes since last wrap" in captured.out
 
-                def fake_import(name, *args, **kwargs):
-                    if name == "anneal_memory.engine" or (args and len(args) > 0 and hasattr(args[0], '__name__') and "engine" in str(name)):
-                        raise ImportError("No module named 'anthropic'")
-                    return original_import(name, *args, **kwargs)
+    def test_prepare_wrap_no_episodes_json(self, base_args, capsys):
+        Store(base_args.db).close()
+        base_args.json = True
+        base_args.max_chars = 20000
+        base_args.staleness_days = 7
+        cmd_prepare_wrap(base_args)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["status"] == "empty"
 
-                # Simpler approach: just verify the message format exists in code
-                from anneal_memory.cli import cmd_wrap
-                import inspect
-                source = inspect.getsource(cmd_wrap)
-                assert "pip install anneal-memory[engine]" in source
+    def test_prepare_wrap_with_episodes(self, base_args_with_data, capsys):
+        base_args_with_data.max_chars = 20000
+        base_args_with_data.staleness_days = 7
+        cmd_prepare_wrap(base_args_with_data)
+        captured = capsys.readouterr()
+        # Should contain the compression instructions and episodes
+        assert "Compress your session episodes" in captured.out
+        assert "Episodes This Session (4)" in captured.out
+        assert "Found a pattern" in captured.out
+
+    def test_prepare_wrap_json(self, base_args_with_data, capsys):
+        base_args_with_data.json = True
+        base_args_with_data.max_chars = 20000
+        base_args_with_data.staleness_days = 7
+        cmd_prepare_wrap(base_args_with_data)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["episode_count"] == 4
+        assert "instructions" in data
+        assert "episodes" in data
+
+    def test_prepare_wrap_sets_in_progress(self, base_args_with_data, capsys):
+        base_args_with_data.max_chars = 20000
+        base_args_with_data.staleness_days = 7
+        cmd_prepare_wrap(base_args_with_data)
+        # Verify wrap is marked in progress
+        with Store(base_args_with_data.db, project_name="TestProject") as store:
+            assert store.status().wrap_in_progress is True
+
+
+# -- cmd_save_continuity tests --
+
+class TestCmdSaveContinuity:
+    _VALID_CONTINUITY = (
+        "# Agent — Memory (v1)\n\n"
+        "## State\nTest state\n\n"
+        "## Patterns\nthought: test | 1x (2026-04-09)\n\n"
+        "## Decisions\n[decided(rationale: \"test\", on: \"2026-04-09\")] Test\n\n"
+        "## Context\nTest context\n"
+    )
+
+    def test_save_from_file(self, base_args_with_data, tmp_path, capsys):
+        # First prepare wrap to set the in-progress flag
+        base_args_with_data.max_chars = 20000
+        base_args_with_data.staleness_days = 7
+        cmd_prepare_wrap(base_args_with_data)
+        capsys.readouterr()  # clear
+
+        # Write continuity to a temp file
+        cont_file = tmp_path / "continuity.md"
+        cont_file.write_text(self._VALID_CONTINUITY)
+
+        base_args_with_data.file = str(cont_file)
+        base_args_with_data.affect_tag = None
+        base_args_with_data.affect_intensity = 0.5
+        cmd_save_continuity(base_args_with_data)
+        captured = capsys.readouterr()
+        assert "Continuity saved" in captured.out
+        assert "Episodes compressed: 4" in captured.out
+
+    def test_save_from_stdin(self, base_args_with_data, tmp_path, capsys):
+        base_args_with_data.max_chars = 20000
+        base_args_with_data.staleness_days = 7
+        cmd_prepare_wrap(base_args_with_data)
+        capsys.readouterr()
+
+        base_args_with_data.file = "-"
+        base_args_with_data.affect_tag = None
+        base_args_with_data.affect_intensity = 0.5
+        with mock.patch("sys.stdin", StringIO(self._VALID_CONTINUITY)):
+            cmd_save_continuity(base_args_with_data)
+        captured = capsys.readouterr()
+        assert "Continuity saved" in captured.out
+
+    def test_save_json_output(self, base_args_with_data, tmp_path, capsys):
+        base_args_with_data.max_chars = 20000
+        base_args_with_data.staleness_days = 7
+        cmd_prepare_wrap(base_args_with_data)
+        capsys.readouterr()
+
+        cont_file = tmp_path / "continuity.md"
+        cont_file.write_text(self._VALID_CONTINUITY)
+
+        base_args_with_data.json = True
+        base_args_with_data.file = str(cont_file)
+        base_args_with_data.affect_tag = None
+        base_args_with_data.affect_intensity = 0.5
+        cmd_save_continuity(base_args_with_data)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["saved"] is True
+        assert data["episodes_compressed"] == 4
+        assert "sections" in data
+
+    def test_save_with_affect(self, base_args_with_data, tmp_path, capsys):
+        base_args_with_data.max_chars = 20000
+        base_args_with_data.staleness_days = 7
+        cmd_prepare_wrap(base_args_with_data)
+        capsys.readouterr()
+
+        cont_file = tmp_path / "continuity.md"
+        cont_file.write_text(self._VALID_CONTINUITY)
+
+        base_args_with_data.file = str(cont_file)
+        base_args_with_data.affect_tag = "engaged"
+        base_args_with_data.affect_intensity = 0.8
+        cmd_save_continuity(base_args_with_data)
+        captured = capsys.readouterr()
+        assert "Continuity saved" in captured.out
+
+    def test_save_invalid_structure(self, base_args_with_data, tmp_path, capsys):
+        base_args_with_data.max_chars = 20000
+        base_args_with_data.staleness_days = 7
+        cmd_prepare_wrap(base_args_with_data)
+        capsys.readouterr()
+
+        cont_file = tmp_path / "bad.md"
+        cont_file.write_text("# No sections here\nJust text.")
+
+        base_args_with_data.file = str(cont_file)
+        base_args_with_data.affect_tag = None
+        base_args_with_data.affect_intensity = 0.5
+        with pytest.raises(SystemExit):
+            cmd_save_continuity(base_args_with_data)
+
+    def test_save_warns_without_prepare(self, base_args_with_data, tmp_path, capsys):
+        """Saving without prepare-wrap should warn."""
+        cont_file = tmp_path / "continuity.md"
+        cont_file.write_text(self._VALID_CONTINUITY)
+
+        base_args_with_data.file = str(cont_file)
+        base_args_with_data.affect_tag = None
+        base_args_with_data.affect_intensity = 0.5
+        cmd_save_continuity(base_args_with_data)
+        captured = capsys.readouterr()
+        assert "prepare-wrap was not called first" in captured.out
+
+    def test_save_records_wrap_in_history(self, base_args_with_data, tmp_path, capsys):
+        """After save-continuity, wrap should appear in history."""
+        base_args_with_data.max_chars = 20000
+        base_args_with_data.staleness_days = 7
+        cmd_prepare_wrap(base_args_with_data)
+        capsys.readouterr()
+
+        cont_file = tmp_path / "continuity.md"
+        cont_file.write_text(self._VALID_CONTINUITY)
+
+        base_args_with_data.file = str(cont_file)
+        base_args_with_data.affect_tag = None
+        base_args_with_data.affect_intensity = 0.5
+        cmd_save_continuity(base_args_with_data)
+        capsys.readouterr()
+
+        # Verify wrap appears in history
+        base_args_with_data.json = True
+        base_args_with_data.limit = 20
+        cmd_history(base_args_with_data)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert len(data["wraps"]) == 1
+        assert data["wraps"][0]["episodes_compressed"] == 4
+
+
+# -- Parser tests for new commands --
+
+class TestParserPrepareWrapSaveContinuity:
+    def test_prepare_wrap_command(self):
+        parser = build_parser()
+        args = parser.parse_args(["prepare-wrap", "--max-chars", "10000"])
+        assert args.command == "prepare-wrap"
+        assert args.max_chars == 10000
+
+    def test_prepare_wrap_defaults(self):
+        parser = build_parser()
+        args = parser.parse_args(["prepare-wrap"])
+        assert args.max_chars == 20000
+        assert args.staleness_days == 7
+
+    def test_save_continuity_command(self):
+        parser = build_parser()
+        args = parser.parse_args(["save-continuity", "cont.md"])
+        assert args.command == "save-continuity"
+        assert args.file == "cont.md"
+
+    def test_save_continuity_with_affect(self):
+        parser = build_parser()
+        args = parser.parse_args(["save-continuity", "cont.md", "--affect-tag", "curious", "--affect-intensity", "0.7"])
+        assert args.affect_tag == "curious"
+        assert args.affect_intensity == 0.7
+
+    def test_save_continuity_stdin(self):
+        parser = build_parser()
+        args = parser.parse_args(["save-continuity", "-"])
+        assert args.file == "-"
+
+    def test_json_on_new_commands(self):
+        parser = build_parser()
+        for cmd in ["prepare-wrap", "save-continuity cont.md"]:
+            args_list = cmd.split() + ["--json"]
+            args = parser.parse_args(args_list)
+            assert args.json is True, f"--json failed for: {cmd}"

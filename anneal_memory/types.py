@@ -59,7 +59,6 @@ class WrapResult:
     patterns_extracted: int = 0
     episodes_compressed: int = 0
     pruned_count: int = 0  # Episodes pruned by auto-prune after wrap
-    continuity_text: str | None = None  # The compressed continuity text (Engine only)
     associations_formed: int = 0  # New association links created this wrap
     associations_strengthened: int = 0  # Existing links reinforced this wrap
     associations_decayed: int = 0  # Links weakened by decay this wrap

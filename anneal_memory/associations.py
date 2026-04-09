@@ -444,7 +444,7 @@ def process_wrap_associations(
 ) -> tuple[int, int, int]:
     """Orchestrate the full association pipeline after graduation validation.
 
-    Shared by both MCP server and Engine paths to eliminate duplication.
+    Shared by both MCP server and CLI save-continuity paths.
     Extracts co-citation pairs from graduation results, records associations
     (with optional affective modulation), and triggers decay.
 

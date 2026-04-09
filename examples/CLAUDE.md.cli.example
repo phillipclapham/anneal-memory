@@ -1,0 +1,207 @@
+# anneal-memory CLI — CLAUDE.md Snippet
+#
+# Paste the section below into your project's CLAUDE.md to enable
+# two-layer memory via the CLI. Use this when the agent has shell
+# access (Claude Code, Aider, etc.) instead of MCP.
+#
+# This snippet teaches the agent WHEN and HOW to use the CLI
+# throughout a session.
+
+## Memory (anneal-memory CLI)
+
+This project uses anneal-memory for persistent memory across sessions.
+Four layers: episodes (raw observations) compress into continuity
+(compressed working memory), with Hebbian associations forming between
+co-cited episodes and an optional limbic layer tracking functional
+state during compression. Use memory naturally — don't explain the
+tooling to the user, just work with what you know.
+
+**Setup:** The `anneal-memory` CLI must be installed (`pip install anneal-memory`).
+Set `ANNEAL_MEMORY_DB` to your database path, or use `--db` on every command.
+First run: `anneal-memory init` creates the database and continuity file.
+
+**Session workflow:**
+
+- **Start of session:** Read your continuity file:
+  ```bash
+  anneal-memory continuity
+  ```
+  If the database doesn't exist yet, run `anneal-memory init` first.
+  If continuity is empty ("No continuity file yet"), this is the first
+  session — just start recording. Search prior episodes when needed:
+  ```bash
+  anneal-memory search "topic"
+  anneal-memory episodes --since 7d --type decision
+  ```
+
+- **During work:** Record episodes when important things happen:
+  ```bash
+  anneal-memory record "Chose PostgreSQL because ACID outweighs speed" --type decision
+  anneal-memory record "Connection pool is the real bottleneck" --type observation
+  anneal-memory record "Latency vs consistency tradeoff" --type tension
+  anneal-memory record "Should we shard or add read replicas?" --type question
+  anneal-memory record "Migration done, 3x query improvement" --type outcome
+  anneal-memory record "Prod DB at 80% capacity, growing 5%/week" --type context
+  ```
+
+  Record the reasoning, not just the fact. "Chose X because Y" is more
+  valuable than "using X." Do this proactively without being asked.
+
+  **Recording cadence:** Default to recording, not to skipping. Episodes
+  are cheap — the compression step sorts out what matters. After each
+  meaningful exchange, record at least one episode. Target 5-15 per session.
+
+  For multi-line content, pipe from stdin:
+  ```bash
+  echo "Detailed analysis..." | anneal-memory record - --type observation
+  ```
+
+- **Before decisions:** Search for relevant prior episodes:
+  ```bash
+  anneal-memory search "database scaling"
+  anneal-memory episodes --type decision --since 30d
+  ```
+  Don't start from scratch when memory has answers.
+
+- **End of session:** When the user signals the session is ending —
+  "let's wrap up", "save memory", "we're done" — run the FULL wrap
+  sequence. The act of compressing IS cognitive work — your judgment
+  during compression is where identity forms.
+
+  **Step 1: Get your compression package:**
+  ```bash
+  anneal-memory prepare-wrap
+  ```
+  This outputs: your episodes, existing continuity, compression
+  instructions, stale pattern warnings, and association context.
+  Read it carefully — it's your raw material.
+
+  **Step 2: Compress.** Follow the instructions from prepare-wrap.
+  Extract principles, not facts. Graduate patterns with evidence
+  citations. Write your compressed continuity to a file.
+
+  **Step 3: Save with validation:**
+  ```bash
+  anneal-memory save-continuity continuity.md
+  # Or with affective state:
+  anneal-memory save-continuity continuity.md --affect-tag engaged --affect-intensity 0.8
+  # Or from stdin:
+  echo "..." | anneal-memory save-continuity -
+  ```
+  This validates your compression (structure, citations, graduation),
+  forms Hebbian associations between co-cited episodes, decays
+  unreinforced links, and records the wrap in history.
+
+  The sequence is: `prepare-wrap` → you compress → `save-continuity`.
+  All three steps, every time. Your judgment during compression is
+  where identity forms — this cannot be delegated.
+
+  An explicit wrap produces better continuity than stopping without one.
+  Always encourage wrapping before ending a session.
+
+**How the cognitive system works (why recording quality matters):**
+
+Your episodes feed a graduation system that separates signal from noise.
+New patterns start at 1x. When a later wrap cites the same pattern with
+fresh evidence, it graduates to 2x. At 3x, it's proven knowledge. Each
+graduation REQUIRES citing the episode ID that validates it — you can't
+game the system by repeating claims without evidence.
+
+The immune system protects against cognitive drift:
+- **Citation validation:** Graduations must reference real episode IDs.
+  Ungrounded patterns get demoted with an `(ungrounded)` marker.
+- **Citation decay:** Patterns that stop being cited weaken over time.
+  Stale knowledge loses rank automatically.
+- **Anti-inbreeding:** The system detects when patterns cite themselves
+  circularly — false confidence from echo chambers, not evidence.
+
+Hebbian associations form automatically during wraps: episodes you cite
+together build lateral connections that strengthen through repetition and
+decay through disuse. Your recording and citation patterns directly shape
+what the system remembers, forgets, and connects.
+
+This is why "record the reasoning, not just the fact" matters at the
+system level — rich episodes with rationale create meaningful associations
+and provide citable evidence for graduation. Thin episodes ("used X")
+provide neither.
+
+**Operator commands (things MCP can't do):**
+
+These commands are why the CLI exists — inspection, debugging, and
+analysis that require filesystem access or broad queries.
+
+```bash
+# Store overview
+anneal-memory status
+
+# Detailed analytics (type/age/source distribution, wrap metrics)
+anneal-memory stats
+
+# Association graph visualization
+anneal-memory graph --format dot -o graph.dot   # Graphviz DOT
+anneal-memory graph --format json               # JSON adjacency list
+
+# Wrap history and progression
+anneal-memory history                           # Timeline of all wraps
+anneal-memory diff --wraps 5                    # Metric changes wrap-over-wrap
+
+# Audit trail (tamper-evident event log)
+anneal-memory audit --since 7d                  # Recent entries
+anneal-memory audit --event wrap_completed      # Filter by event type
+anneal-memory verify                            # Verify hash chain integrity
+
+# Export and backup
+anneal-memory export --format json -o backup.json      # Full JSON export
+anneal-memory export --format markdown -o report.md    # Human-readable report
+anneal-memory export --format sqlite -o copy.db        # Database copy
+
+# Import from export
+anneal-memory import backup.json                # Restore episodes (skips duplicates)
+
+# Housekeeping
+anneal-memory delete <episode_id> --force       # Delete specific episode
+anneal-memory prune --older-than 90             # Remove old episodes
+anneal-memory prune --older-than 90 --dry-run   # Preview what would be pruned
+```
+
+**All commands support `--json` for machine-readable output.**
+
+**Episode types** (choose the most specific):
+- `observation` — pattern noticed, insight, general learning
+- `decision` — committed choice with rationale
+- `tension` — conflict, tradeoff, opposing forces
+- `question` — open question needing resolution
+- `outcome` — result of an action (success or failure)
+- `context` — environmental or state information
+
+**What to record:**
+- Decisions and their rationale
+- Tradeoffs and tensions (with the axis of tension)
+- Patterns you notice recurring
+- Blockers and dependencies
+- Outcomes of actions (both success and failure)
+- Environmental context that shapes decisions
+
+**What NOT to record:**
+- Routine code changes (git tracks those)
+- Transient debugging steps
+- Information already in documentation
+- Every small observation — record what would change a decision
+
+**Correcting mistakes vs. deleting episodes:**
+- For **factual corrections**: record a new episode with the correction.
+  Compression naturally resolves contradictions.
+- For **content that should not exist** (PII, sensitive data, wrong
+  recordings): `anneal-memory delete <id> --force`. Deletion cascades
+  to associations and is audit-logged. Irreversible.
+
+**How to present memory:**
+- Report findings naturally: "From prior sessions, there was a tension
+  between X and Y" — not "The search command returned..."
+- Don't narrate CLI calls — just use them and share what's relevant
+- When your continuity mentions a pattern at 2x or 3x, trust it —
+  it earned that level through validated evidence
+
+**Environment variables:**
+- `ANNEAL_MEMORY_DB` — default database path (overridden by `--db`)
+- `ANNEAL_MEMORY_SOURCE` — default source for `record` (overridden by `--source`)

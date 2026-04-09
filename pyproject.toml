@@ -33,11 +33,6 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
-[project.optional-dependencies]
-engine = [
-    "anthropic>=0.40.0",
-]
-
 [project.urls]
 Homepage = "https://github.com/phillipclapham/anneal-memory"
 Repository = "https://github.com/phillipclapham/anneal-memory"

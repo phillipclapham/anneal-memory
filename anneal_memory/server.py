@@ -349,7 +349,12 @@ class Server:
         if not text:
             return _tool_result("Error: text is required", is_error=True)
 
-        # Parse optional affective state (limbic layer)
+        # Parse optional affective state (limbic layer).
+        # JSON-to-float coercion is transport-specific (MCP receives
+        # arbitrary JSON types; CLI's argparse already coerces). Once
+        # we have a Python float, clamping is delegated to
+        # AffectiveState.__post_init__ — the single source of truth
+        # that both transports rely on, matching CLI behavior.
         affective_state: AffectiveState | None = None
         affect_raw = args.get("affective_state")
         if affect_raw and isinstance(affect_raw, dict):
@@ -359,10 +364,7 @@ class Server:
             except (ValueError, TypeError):
                 intensity = 0.0
             if tag and isinstance(tag, str) and tag.strip():
-                affective_state = AffectiveState(
-                    tag=tag,
-                    intensity=max(0.0, min(1.0, intensity)),
-                )
+                affective_state = AffectiveState(tag=tag, intensity=intensity)
 
         try:
             result = _lib_validated_save_continuity(

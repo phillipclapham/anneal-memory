@@ -422,6 +422,8 @@ def validated_save_continuity(
     store: Store,
     text: str,
     affective_state: AffectiveState | None = None,
+    *,
+    today: str | None = None,
 ) -> dict[str, Any]:
     """Save continuity with the full validation pipeline.
 
@@ -458,6 +460,13 @@ def validated_save_continuity(
         store: A Store instance.
         text: The agent-compressed continuity text.
         affective_state: Optional agent functional state during this wrap.
+        today: Optional override for today's date as ``YYYY-MM-DD``.
+            Defaults to ``date.today().isoformat()`` (wall clock). Passing
+            an explicit value makes the function fully deterministic —
+            useful for tests (no wall-clock dependency, no midnight-
+            boundary risk) and for experiments that need reproducible
+            runs against a pinned date. Mirrors the existing ``today``
+            parameter on :func:`prepare_wrap_package`.
 
     Returns:
         Dict with keys:
@@ -517,12 +526,14 @@ def validated_save_continuity(
     meta = store.load_meta()
     citations_seen = meta.get("citations_seen", False)
 
-    # Validate graduations (demotes bad citations in-place)
-    today = date.today().isoformat()
+    # Validate graduations (demotes bad citations in-place).
+    # Caller may pin ``today`` for deterministic test runs; default is
+    # wall-clock. Same pattern prepare_wrap_package already uses.
+    today_str = today if today is not None else date.today().isoformat()
     grad_result = validate_graduations(
         text=text,
         valid_ids=valid_ids,
-        today=today,
+        today=today_str,
         node_content_map=node_content_map,
         citations_seen=citations_seen,
     )
@@ -554,6 +565,7 @@ def validated_save_continuity(
         associations_formed=assoc_formed,
         associations_strengthened=assoc_strengthened,
         associations_decayed=assoc_decayed,
+        section_sizes=sections,
     )
 
     return {

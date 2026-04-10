@@ -529,6 +529,7 @@ class Store:
         associations_formed: int = 0,
         associations_strengthened: int = 0,
         associations_decayed: int = 0,
+        section_sizes: dict[str, int] | None = None,
     ) -> WrapResult:
         """Record a completed wrap and clear the in-progress flag.
 
@@ -587,7 +588,7 @@ class Store:
         return WrapResult(
             saved=True,
             chars=continuity_chars,
-            section_sizes={},
+            section_sizes=dict(section_sizes) if section_sizes else {},
             graduations_validated=graduations_validated,
             graduations_demoted=graduations_demoted,
             citation_reuse_max=citation_reuse_max,

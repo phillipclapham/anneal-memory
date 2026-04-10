@@ -182,3 +182,63 @@ class TestVerifyIntegrity:
         valid, issues = verify_integrity(path)
         assert valid is False
         assert len(issues) == 6  # All 6 tools missing
+
+
+class TestShippedManifest:
+    """Verify the manifest shipped inside the package matches current TOOLS.
+
+    This test would have caught the v0.1.9 staleness that Session 10.5c.1
+    Layer 4 found: ``delete_episode`` was added in v0.1.9 but
+    ``tool-integrity.json`` was last regenerated in v0.1.8, so the shipped
+    manifest had been silently failing host-side verification for one
+    full session and one PyPI release. Without this test, any future tool
+    addition can ship with the same staleness.
+
+    If this test fails after adding, renaming, or editing a tool, run::
+
+        python3 -c "from anneal_memory.integrity import generate_integrity_file; from pathlib import Path; generate_integrity_file(Path('anneal_memory/tool-integrity.json'))"
+
+    and commit the regenerated manifest.
+    """
+
+    def test_shipped_manifest_verifies(self):
+        """The manifest shipped inside the anneal_memory package must
+        pass verify_integrity() against the current TOOLS definitions.
+        """
+        import anneal_memory
+        pkg_root = Path(anneal_memory.__file__).parent
+        manifest = pkg_root / "tool-integrity.json"
+        assert manifest.exists(), (
+            f"Shipped integrity manifest missing at {manifest} — "
+            "regenerate with generate_integrity_file()"
+        )
+        valid, issues = verify_integrity(manifest)
+        assert valid, (
+            f"Shipped tool-integrity.json is out of sync with TOOLS. "
+            f"Issues: {issues}. Regenerate via "
+            f"generate_integrity_file(Path('anneal_memory/tool-integrity.json'))"
+        )
+
+    def test_shipped_manifest_covers_all_current_tools(self):
+        """Every tool in TOOLS must have an entry in the shipped manifest.
+
+        Complements test_shipped_manifest_verifies by failing loudly and
+        specifically when a new tool is added without regenerating, even
+        if verify_integrity's behavior changes in the future.
+        """
+        import anneal_memory
+        pkg_root = Path(anneal_memory.__file__).parent
+        manifest = pkg_root / "tool-integrity.json"
+        data = json.loads(manifest.read_text())
+        manifest_tool_names = set(data["tools"].keys())
+        current_tool_names = {t["name"] for t in TOOLS}
+        missing = current_tool_names - manifest_tool_names
+        extra = manifest_tool_names - current_tool_names
+        assert not missing, (
+            f"Tools in TOOLS but missing from shipped manifest: {missing}. "
+            f"Run generate_integrity_file() and commit."
+        )
+        assert not extra, (
+            f"Tools in shipped manifest but removed from TOOLS: {extra}. "
+            f"Run generate_integrity_file() and commit."
+        )

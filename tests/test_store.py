@@ -899,6 +899,100 @@ class TestValidatedSaveContinuityReturnContract:
             Path(result["path"]).read_text(encoding="utf-8")
         )
 
+    def test_wrap_result_section_sizes_is_populated(self, store):
+        """WrapResult.section_sizes must contain the real section data.
+
+        Prior to the 10.5c.1 cleanup, ``wrap_completed()`` passed
+        ``section_sizes={}`` unconditionally, so library users who
+        accessed ``result["wrap_result"].section_sizes`` got an empty
+        dict — the type definition advertised a field that was
+        structurally always empty. The fix wires ``section_sizes``
+        through from ``validated_save_continuity`` to
+        ``wrap_completed`` so the dataclass field matches reality.
+        """
+        from anneal_memory import validated_save_continuity
+
+        store.record("Observation", EpisodeType.OBSERVATION)
+        store.wrap_started()
+        result = validated_save_continuity(
+            store, _valid_continuity_text(date.today().isoformat())
+        )
+
+        wrap_result = result["wrap_result"]
+        # Populated, not the empty dict of the pre-fix era
+        assert wrap_result.section_sizes
+        assert isinstance(wrap_result.section_sizes, dict)
+        # Must contain the 4 canonical section names (plus _header)
+        assert "State" in wrap_result.section_sizes
+        assert "Patterns" in wrap_result.section_sizes
+        assert "Decisions" in wrap_result.section_sizes
+        assert "Context" in wrap_result.section_sizes
+        # Must match the top-level sections key (same measurement,
+        # two paths to it)
+        assert wrap_result.section_sizes == result["sections"]
+
+    def test_today_parameter_pins_graduation_date(self, store):
+        """Passing an explicit ``today`` pins graduation to that date.
+
+        This removes wall-clock dependency from tests and enables
+        reproducible experiment runs. Without the pin, graduation
+        uses ``date.today()`` internally and a test written with a
+        specific date in the continuity text would silently skip
+        citation validation as time drifts — the exact Diogenes
+        Finding #3 class of bug.
+        """
+        from anneal_memory import validated_save_continuity
+
+        # Use a pinned date that is NOT today's wall clock date.
+        # With the today parameter, graduation must still fire
+        # because the citation date matches the pinned value.
+        pinned_today = "2026-06-15"
+
+        ep1 = store.record("database slow under load", EpisodeType.OBSERVATION)
+        store.wrap_started()
+
+        text = (
+            f"# Test — Memory (v1)\n\n"
+            f"## State\nPinned-date test.\n\n"
+            f"## Patterns\n"
+            f"thought: slow database impacts throughput"
+            f" | 2x ({pinned_today})"
+            f" [evidence: {ep1.id[:8]} \"database slow under load\"]\n\n"
+            f"## Decisions\n"
+            f"[decided(rationale: \"speed\", on: \"{pinned_today}\")] "
+            f"Use caching\n\n"
+            f"## Context\nPinned-date determinism test.\n"
+        )
+
+        result = validated_save_continuity(store, text, today=pinned_today)
+
+        # Graduation fired even though the citation date isn't today's
+        # wall-clock date, because the pipeline used the pinned value.
+        assert result["graduations_validated"] >= 1
+
+    def test_today_parameter_defaults_to_wall_clock(self, store):
+        """Omitting ``today`` falls back to ``date.today().isoformat()``."""
+        from anneal_memory import validated_save_continuity
+
+        ep1 = store.record("fresh observation today", EpisodeType.OBSERVATION)
+        store.wrap_started()
+        today = date.today().isoformat()
+
+        text = (
+            f"# Test — Memory (v1)\n\n"
+            f"## State\nDefault date test.\n\n"
+            f"## Patterns\n"
+            f"thought: fresh observation drives today's decision"
+            f" | 2x ({today})"
+            f" [evidence: {ep1.id[:8]} \"fresh observation today\"]\n\n"
+            f"## Decisions\nNone.\n\n"
+            f"## Context\nDefault wall-clock path.\n"
+        )
+
+        # No today= parameter → falls back to wall clock
+        result = validated_save_continuity(store, text)
+        assert result["graduations_validated"] >= 1
+
     def test_graduations_demoted_includes_bare_demoted(self, store):
         """graduations_demoted must equal demoted + bare_demoted.
 

@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 from argparse import Namespace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 from unittest import mock
@@ -1749,13 +1749,26 @@ class TestCmdPrepareWrap:
 # -- cmd_save_continuity tests --
 
 class TestCmdSaveContinuity:
-    _VALID_CONTINUITY = (
-        "# Agent — Memory (v1)\n\n"
-        "## State\nTest state\n\n"
-        "## Patterns\nthought: test | 1x (2026-04-09)\n\n"
-        "## Decisions\n[decided(rationale: \"test\", on: \"2026-04-09\")] Test\n\n"
-        "## Context\nTest context\n"
-    )
+    @staticmethod
+    def _valid_continuity(today: str | None = None) -> str:
+        """Build a minimal valid 4-section continuity with dynamic date.
+
+        Uses ``date.today().isoformat()`` by default so that
+        ``validated_save_continuity`` — which reads wall-clock ``today``
+        internally — does not silently skip graduation validation on
+        citation date mismatch. Previously a hardcoded ``2026-04-09``
+        string caused this test fixture to decay silently against the
+        pipeline's internal clock (Diogenes Finding #3, Apr 10 2026).
+        """
+        if today is None:
+            today = date.today().isoformat()
+        return (
+            "# Agent — Memory (v1)\n\n"
+            "## State\nTest state\n\n"
+            f"## Patterns\nthought: test | 1x ({today})\n\n"
+            f"## Decisions\n[decided(rationale: \"test\", on: \"{today}\")] Test\n\n"
+            "## Context\nTest context\n"
+        )
 
     def test_save_from_file(self, base_args_with_data, tmp_path, capsys):
         # First prepare wrap to set the in-progress flag
@@ -1766,7 +1779,7 @@ class TestCmdSaveContinuity:
 
         # Write continuity to a temp file
         cont_file = tmp_path / "continuity.md"
-        cont_file.write_text(self._VALID_CONTINUITY)
+        cont_file.write_text(self._valid_continuity())
 
         base_args_with_data.file = str(cont_file)
         base_args_with_data.affect_tag = None
@@ -1785,7 +1798,7 @@ class TestCmdSaveContinuity:
         base_args_with_data.file = "-"
         base_args_with_data.affect_tag = None
         base_args_with_data.affect_intensity = 0.5
-        with mock.patch("sys.stdin", StringIO(self._VALID_CONTINUITY)):
+        with mock.patch("sys.stdin", StringIO(self._valid_continuity())):
             cmd_save_continuity(base_args_with_data)
         captured = capsys.readouterr()
         assert "Continuity saved" in captured.out
@@ -1797,7 +1810,7 @@ class TestCmdSaveContinuity:
         capsys.readouterr()
 
         cont_file = tmp_path / "continuity.md"
-        cont_file.write_text(self._VALID_CONTINUITY)
+        cont_file.write_text(self._valid_continuity())
 
         base_args_with_data.json = True
         base_args_with_data.file = str(cont_file)
@@ -1817,7 +1830,7 @@ class TestCmdSaveContinuity:
         capsys.readouterr()
 
         cont_file = tmp_path / "continuity.md"
-        cont_file.write_text(self._VALID_CONTINUITY)
+        cont_file.write_text(self._valid_continuity())
 
         base_args_with_data.file = str(cont_file)
         base_args_with_data.affect_tag = "engaged"
@@ -1844,7 +1857,7 @@ class TestCmdSaveContinuity:
     def test_save_warns_without_prepare(self, base_args_with_data, tmp_path, capsys):
         """Saving without prepare-wrap should warn."""
         cont_file = tmp_path / "continuity.md"
-        cont_file.write_text(self._VALID_CONTINUITY)
+        cont_file.write_text(self._valid_continuity())
 
         base_args_with_data.file = str(cont_file)
         base_args_with_data.affect_tag = None
@@ -1861,7 +1874,7 @@ class TestCmdSaveContinuity:
         capsys.readouterr()
 
         cont_file = tmp_path / "continuity.md"
-        cont_file.write_text(self._VALID_CONTINUITY)
+        cont_file.write_text(self._valid_continuity())
 
         base_args_with_data.file = str(cont_file)
         base_args_with_data.affect_tag = None

@@ -459,25 +459,37 @@ class TestValidatedSaveContinuity:
     """Tests for the library-level validated_save_continuity function."""
 
     def test_validated_save_runs_full_pipeline(self, store):
-        """validated_save_continuity should validate, save, form associations, and record wrap."""
+        """validated_save_continuity should validate, save, form associations, and record wrap.
+
+        Also serves as the integration test that graduation is not
+        silently bypassed. Prior to Apr 10 2026 this test used a
+        hardcoded ``2026-04-09`` date that drifted out of sync with
+        the pipeline's internal wall-clock ``today``, silently turning
+        any future 2x citation into a no-op (Diogenes Finding #3). Now
+        uses ``date.today().isoformat()`` and cites a real episode so
+        graduation actually runs.
+        """
         from anneal_memory import validated_save_continuity
 
+        today = date.today().isoformat()
+
         # Record some episodes first
-        ep1 = store.record("Database is slow", EpisodeType.OBSERVATION)
-        ep2 = store.record("Chose caching", EpisodeType.DECISION)
+        ep1 = store.record("Database is slow under load", EpisodeType.OBSERVATION)
+        ep2 = store.record("Chose caching to improve latency", EpisodeType.DECISION)
 
         # Mark wrap as in progress
         store.wrap_started()
 
-        # Build continuity with citations to both episodes
+        # Build continuity with a real 2x citation so graduation fires
         text = (
             f"# Test — Memory (v1)\n\n"
             f"## State\nWorking on performance.\n\n"
             f"## Patterns\n"
-            f"thought: caching helps performance "
-            f"| 1x (2026-04-09)\n\n"
+            f"thought: database slow under load triggers caching"
+            f" | 2x ({today})"
+            f" [evidence: {ep1.id[:8]} \"database slow under load\"]\n\n"
             f"## Decisions\n"
-            f"[decided(rationale: \"speed\", on: \"2026-04-09\")] Use caching\n\n"
+            f"[decided(rationale: \"speed\", on: \"{today}\")] Use caching\n\n"
             f"## Context\nOptimizing database layer.\n"
         )
 
@@ -487,6 +499,11 @@ class TestValidatedSaveContinuity:
         assert store.load_continuity() is not None
         assert result["path"] is not None
         assert result["episodes_compressed"] == 2
+
+        # Graduation immune system must have actually fired — this is
+        # the assertion Diogenes wanted: the integration path can no
+        # longer silently bypass graduation validation.
+        assert result["graduations_validated"] >= 1
 
         # Wrap should be recorded
         status = store.status()
@@ -513,16 +530,22 @@ class TestValidatedSaveContinuity:
             validated_save_continuity(store, "")
 
     def test_validated_save_with_affective_state(self, store):
-        """Should accept and pass through affective state."""
+        """Should accept and pass through affective state.
+
+        Focus is affective state passthrough; graduation integration
+        coverage lives in TestValidatedSaveContinuityReturnContract and
+        test_validated_save_runs_full_pipeline above.
+        """
         from anneal_memory import validated_save_continuity, AffectiveState
 
+        today = date.today().isoformat()
         store.record("Interesting finding", EpisodeType.OBSERVATION)
         store.wrap_started()
 
         text = (
             "# Test — Memory (v1)\n\n"
             "## State\nExploring.\n\n"
-            "## Patterns\nthought: interesting | 1x (2026-04-09)\n\n"
+            f"## Patterns\nthought: interesting | 1x ({today})\n\n"
             "## Decisions\nNone yet.\n\n"
             "## Context\nFirst session.\n"
         )

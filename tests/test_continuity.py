@@ -523,3 +523,185 @@ class TestFormatWrapPackageText:
         assert text == "Some status message."
 
 
+# -- Cross-transport parity (the Session 10.5c.1 regression guard) --
+
+
+class TestCrossTransportParity:
+    """Assert that library / MCP / CLI paths produce identical wrap metrics.
+
+    This is the structural regression guard against re-introducing the
+    three-way divergence that Diogenes caught in Session 10.5c (library
+    under-reporting ``bare_demoted`` in the ``graduations_demoted``
+    wrap metric vs. MCP and CLI). After Session 10.5c.1 made the
+    library canonical and reduced MCP and CLI to thin adapters, this
+    test proves all three surfaces produce identical wrap records on
+    identical input. If any future change reintroduces divergence, this
+    test fails loudly — it's the one test that would catch the exact
+    bug class the session was built to eliminate.
+
+    Test methodology: seed three independent stores with the same
+    deterministic episodes, run a full wrap through each transport,
+    then compare ``get_wrap_history()`` across all three. Non-
+    determinstic fields (``id``, ``wrapped_at``) are excluded.
+    """
+
+    @staticmethod
+    def _deterministic_continuity_text(today: str, evidence_id: str) -> str:
+        """Continuity text citing a known episode for graduation to fire."""
+        return (
+            "# ParityTest — Memory (v1)\n\n"
+            "## State\nTesting cross-transport parity.\n\n"
+            "## Patterns\n"
+            f"thought: parity claim about the testing framework"
+            f" | 2x ({today})"
+            f" [evidence: {evidence_id} \"testing framework parity assertion\"]\n\n"
+            "## Decisions\n"
+            f"[decided(rationale: \"identical\", on: \"{today}\")] All three paths match\n\n"
+            "## Context\nSeeded episodes for parity test.\n"
+        )
+
+    @staticmethod
+    def _seed_store(db_path: str) -> tuple[Store, str, str]:
+        """Seed a store with two deterministic episodes.
+
+        Returns ``(store, text, episode_prefix)`` — text is the
+        canonical continuity document citing the first episode by its
+        8-char prefix. Because episode IDs are content-hashed,
+        identical (content, type) inputs produce identical prefixes
+        across all three stores, which is what makes this parity test
+        possible.
+        """
+        from datetime import date as _date
+
+        store = Store(db_path, project_name="ParityTest")
+        ep1 = store.record(
+            "testing framework parity assertion",
+            EpisodeType.OBSERVATION,
+        )
+        store.record("supporting observation for parity", EpisodeType.DECISION)
+        text = TestCrossTransportParity._deterministic_continuity_text(
+            _date.today().isoformat(), ep1.id[:8]
+        )
+        return store, text, ep1.id[:8]
+
+    @staticmethod
+    def _wrap_record_domain_fields(record) -> dict:
+        """Extract only the deterministic domain metrics for comparison.
+
+        Excludes ``id`` (autoincrement, differs across stores) and
+        ``wrapped_at`` (ISO timestamp, differs by microseconds).
+        """
+        return {
+            "episodes_compressed": record.episodes_compressed,
+            "continuity_chars": record.continuity_chars,
+            "graduations_validated": record.graduations_validated,
+            "graduations_demoted": record.graduations_demoted,
+            "citation_reuse_max": record.citation_reuse_max,
+            "patterns_extracted": record.patterns_extracted,
+            "associations_formed": record.associations_formed,
+            "associations_strengthened": record.associations_strengthened,
+            "associations_decayed": record.associations_decayed,
+        }
+
+    def test_library_mcp_cli_produce_identical_wrap_metrics(self, tmp_path):
+        """The three surfaces must emit byte-identical wrap metrics.
+
+        This is the test that would have caught the original Diogenes
+        Finding #1 divergence (library under-reporting
+        ``graduations_demoted`` by missing ``bare_demoted``) directly
+        and automatically — no scheduled review required.
+        """
+        from argparse import Namespace
+        from anneal_memory import validated_save_continuity
+        from anneal_memory.server import Server
+        from anneal_memory.cli import cmd_save_continuity, cmd_prepare_wrap
+
+        # --- Library path ---
+        lib_db = str(tmp_path / "lib.db")
+        lib_store, lib_text, _ = self._seed_store(lib_db)
+        # Library path: call prepare_wrap + validated_save_continuity
+        # directly (this is what framework users would do via the
+        # canonical entry points).
+        prepare_wrap(lib_store)
+        validated_save_continuity(lib_store, lib_text)
+        lib_history = lib_store.get_wrap_history()
+        lib_store.close()
+
+        # --- MCP path ---
+        mcp_db = str(tmp_path / "mcp.db")
+        mcp_store, mcp_text, _ = self._seed_store(mcp_db)
+        mcp_server = Server(mcp_store)
+        mcp_server._tool_prepare_wrap({})
+        mcp_server._tool_save_continuity({"text": mcp_text})
+        mcp_history = mcp_store.get_wrap_history()
+        mcp_store.close()
+
+        # --- CLI path ---
+        cli_db = str(tmp_path / "cli.db")
+        cli_store, cli_text, _ = self._seed_store(cli_db)
+        cli_store.close()  # CLI commands open their own store via args.db
+
+        cli_file = tmp_path / "cli_continuity.md"
+        cli_file.write_text(cli_text)
+
+        cli_args = Namespace(
+            db=cli_db,
+            project_name="ParityTest",
+            json=False,
+            max_chars=20000,
+            staleness_days=7,
+            file=str(cli_file),
+            affect_tag=None,
+            affect_intensity=0.5,
+        )
+        cmd_prepare_wrap(cli_args)
+        cmd_save_continuity(cli_args)
+
+        # Reopen to read history
+        cli_store_read = Store(cli_db, project_name="ParityTest")
+        try:
+            cli_history = cli_store_read.get_wrap_history()
+        finally:
+            cli_store_read.close()
+
+        # --- Assertions ---
+        assert len(lib_history) == 1, "Library path should record exactly one wrap"
+        assert len(mcp_history) == 1, "MCP path should record exactly one wrap"
+        assert len(cli_history) == 1, "CLI path should record exactly one wrap"
+
+        lib_metrics = self._wrap_record_domain_fields(lib_history[0])
+        mcp_metrics = self._wrap_record_domain_fields(mcp_history[0])
+        cli_metrics = self._wrap_record_domain_fields(cli_history[0])
+
+        assert lib_metrics == mcp_metrics, (
+            f"Library and MCP wrap metrics diverged.\n"
+            f"Library: {lib_metrics}\n"
+            f"MCP:     {mcp_metrics}"
+        )
+        assert lib_metrics == cli_metrics, (
+            f"Library and CLI wrap metrics diverged.\n"
+            f"Library: {lib_metrics}\n"
+            f"CLI:     {cli_metrics}"
+        )
+
+        # Specifically assert the Diogenes Finding #1 fields — these are
+        # the exact fields that diverged in 10.5c and must never diverge
+        # again across the three canonical paths.
+        assert (
+            lib_metrics["graduations_demoted"]
+            == mcp_metrics["graduations_demoted"]
+            == cli_metrics["graduations_demoted"]
+        )
+        assert (
+            lib_metrics["citation_reuse_max"]
+            == mcp_metrics["citation_reuse_max"]
+            == cli_metrics["citation_reuse_max"]
+        )
+
+        # Graduation must have actually fired in all three paths (not
+        # silently skipped due to wall-clock drift or upstream bypass).
+        assert lib_metrics["graduations_validated"] >= 1
+        assert mcp_metrics["graduations_validated"] >= 1
+        assert cli_metrics["graduations_validated"] >= 1
+
+

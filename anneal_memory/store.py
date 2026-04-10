@@ -604,11 +604,20 @@ class Store:
 
         Public read API for the wraps table. Replaces ad-hoc ``_conn``
         access in CLI monitoring subcommands (``history``, ``diff``,
-        ``stats``, ``export``). Returns an empty list if no wraps have
-        been recorded or if the wraps table is unreachable.
+        ``stats``, ``export``).
+
+        Returns an empty list only when the wraps table does not exist
+        yet (unmigrated legacy DB). Any other ``sqlite3.OperationalError``
+        (locked database, corruption, connection gone) propagates so
+        callers can surface the real failure instead of silently
+        reporting "no wraps" during an outage.
 
         Returns:
             List of WrapRecord, oldest first.
+
+        Raises:
+            sqlite3.OperationalError: On any database failure other
+                than a missing ``wraps`` table.
         """
         try:
             rows = self._conn.execute(
@@ -619,9 +628,14 @@ class Store:
                           associations_decayed
                    FROM wraps ORDER BY id ASC"""
             ).fetchall()
-        except sqlite3.OperationalError:
-            # Defensive: legacy DBs pre-migration. Post-init this should not fire.
-            return []
+        except sqlite3.OperationalError as exc:
+            # Only swallow "no such table" — every other OperationalError
+            # (database locked, corruption, disk full, connection gone)
+            # indicates a real failure that monitoring subcommands MUST
+            # surface rather than silently report an empty history.
+            if "no such table" in str(exc).lower():
+                return []
+            raise
 
         # Coerce nullable columns (episodes_compressed, continuity_chars)
         # and legacy-default columns to 0 at construction, so the

@@ -19,10 +19,13 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .graduation import detect_stale_patterns, validate_graduations
 from .types import AffectiveState, Episode
+
+if TYPE_CHECKING:
+    from .store import Store
 
 # The 4 required sections
 _REQUIRED_SECTIONS = frozenset({"state", "patterns", "decisions", "context"})
@@ -256,7 +259,7 @@ Use `[decided(rationale: "why", on: "date")] choice` markers.
 
 
 def prepare_wrap(
-    store: Any,
+    store: Store,
     *,
     max_chars: int = 20000,
     staleness_days: int = 7,
@@ -279,6 +282,28 @@ def prepare_wrap(
     package dict without touching the store. Most callers want this
     function; ``prepare_wrap_package`` is for tests and advanced users
     managing their own store state.
+
+    .. warning::
+        **The prepare/save window is not frozen.** The set of episodes
+        returned here is a snapshot taken at call time. If the caller
+        records additional episodes after ``prepare_wrap`` returns but
+        before :func:`validated_save_continuity` is called,
+        ``validated_save_continuity`` will re-fetch and compress the
+        larger set, even though the agent's compression was based on
+        the smaller set shown here. Graduation validation and the
+        ``episodes_compressed`` metric will reflect the expanded set.
+
+        For single-threaded agent workflows (the normal MCP and CLI
+        case), this is not an issue — the agent reasons in one pass
+        between prepare and save and does not record new episodes.
+        For framework integrations where episode recording can
+        interleave with session wrapping, you must serialize
+        ``prepare_wrap`` → compression → ``validated_save_continuity``
+        as a critical section with no intervening ``store.record()``
+        calls.
+
+        A session-handshake token to frozen the window is tracked as
+        a v0.3.0 hardening follow-up.
 
     Args:
         store: A Store instance.
@@ -394,7 +419,7 @@ def format_wrap_package_text(result: dict[str, Any]) -> str:
 
 
 def validated_save_continuity(
-    store: Any,
+    store: Store,
     text: str,
     affective_state: AffectiveState | None = None,
 ) -> dict[str, Any]:
@@ -414,6 +439,20 @@ def validated_save_continuity(
     method is a file write that bypasses graduation, associations, and
     decay. ``validated_save_continuity`` is what you want whenever an
     agent has finished compressing its session.
+
+    .. warning::
+        **The episode set is re-fetched at save time.** This function
+        calls ``store.episodes_since_wrap()`` internally. If the caller
+        recorded additional episodes between :func:`prepare_wrap` and
+        this call, the new episodes are included in validation and
+        metrics even though the agent's compression text was produced
+        from the smaller set that ``prepare_wrap`` showed. For
+        single-threaded agent workflows this is not an issue. For
+        framework integrations that interleave episode recording with
+        session wrapping, you must treat the ``prepare_wrap`` →
+        compression → ``validated_save_continuity`` sequence as a
+        critical section. See :func:`prepare_wrap` for the full
+        discussion.
 
     Args:
         store: A Store instance.

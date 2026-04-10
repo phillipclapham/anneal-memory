@@ -618,17 +618,23 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
     recording to the library, then formats the result dict as text or
     JSON output.
     """
-    # Read continuity text from file or stdin
+    # Read continuity text from file or stdin. NOTE: do NOT .strip() —
+    # that silently mutates user content and produces transport-level
+    # divergence (the same logical text saved via library/MCP keeps its
+    # trailing newline, while CLI users would lose it). The library's
+    # validate_structure() handles whitespace correctly, and we still
+    # need to detect entirely-blank input — but the empty-check uses a
+    # local stripped copy without modifying what we pass downstream.
     if args.file == "-":
-        text = sys.stdin.read().strip()
+        text = sys.stdin.read()
     else:
         file_path = Path(args.file)
         if not file_path.exists():
             print(f"Error: file not found: {file_path}", file=sys.stderr)
             sys.exit(1)
-        text = file_path.read_text(encoding="utf-8").strip()
+        text = file_path.read_text(encoding="utf-8")
 
-    if not text:
+    if not text.strip():
         print("Error: empty continuity text.", file=sys.stderr)
         sys.exit(1)
 

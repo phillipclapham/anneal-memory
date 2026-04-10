@@ -373,7 +373,7 @@ class Server:
 
         # Format the library result dict as the MCP text response
         lines = [
-            f"Continuity saved ({result['wrap_result'].chars} chars) to {result['path']}"
+            f"Continuity saved ({result['chars']} chars) to {result['path']}"
         ]
         if result["skipped_prepare"]:
             lines.append(

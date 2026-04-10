@@ -767,7 +767,8 @@ class TestGetWrapHistory:
         assert record.id == 1
         assert record.wrapped_at  # non-empty ISO timestamp
         assert record.episodes_compressed == 2
-        assert record.continuity_chars is not None
+        # continuity_chars is non-None by type; also must be positive
+        # because we just wrote a real continuity file
         assert record.continuity_chars > 0
         # Counter fields default to 0 when no graduation/association activity
         assert record.graduations_validated >= 0
@@ -856,6 +857,7 @@ class TestValidatedSaveContinuityReturnContract:
 
         # Core pipeline results
         assert "path" in result
+        assert "chars" in result  # top-level convenience key (10.5c.1 review fix)
         assert "episodes_compressed" in result
         assert "wrap_result" in result
         assert "skipped_prepare" in result
@@ -873,6 +875,29 @@ class TestValidatedSaveContinuityReturnContract:
         # Section measurement (used by CLI text output)
         assert "sections" in result
         assert isinstance(result["sections"], dict)
+
+    def test_chars_top_level_matches_wrap_result(self, store):
+        """Top-level chars must match wrap_result.chars and the actual save.
+
+        The chars key was added in the 10.5c.1 review fix to remove a
+        footgun where transports had to reach into the nested
+        wrap_result dataclass for a single field while every other
+        metric was already flattened.
+        """
+        from anneal_memory import validated_save_continuity
+
+        store.record("Observation", EpisodeType.OBSERVATION)
+        store.wrap_started()
+        result = validated_save_continuity(
+            store, _valid_continuity_text(date.today().isoformat())
+        )
+
+        assert result["chars"] == result["wrap_result"].chars
+        # And both should equal the saved file size
+        from pathlib import Path
+        assert result["chars"] == len(
+            Path(result["path"]).read_text(encoding="utf-8")
+        )
 
     def test_graduations_demoted_includes_bare_demoted(self, store):
         """graduations_demoted must equal demoted + bare_demoted.

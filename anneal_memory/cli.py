@@ -649,12 +649,16 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
 
-        chars = result["wrap_result"].chars
+        chars = result["chars"]
         sections = result["sections"]
 
         if args.json:
             # Preserve the pre-10.5c.1 JSON shape for backward compat
-            # with any scripts scraping the output.
+            # with any scripts scraping the output. The demoted split
+            # (demoted + bare_demoted), citation_reuse_max, and
+            # gaming_suspects are added as pure additions — they were
+            # not in the pre-10.5c.1 shape but adding keys is safe for
+            # dict-based scrapers.
             _print_json({
                 "saved": True,
                 "path": result["path"],
@@ -662,11 +666,15 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 "episodes_compressed": result["episodes_compressed"],
                 "graduations_validated": result["graduations_validated"],
                 "graduations_demoted": result["graduations_demoted"],
+                "demoted": result["demoted"],
+                "bare_demoted": result["bare_demoted"],
+                "citation_reuse_max": result["citation_reuse_max"],
+                "gaming_suspects": result["gaming_suspects"],
                 "associations_formed": result["associations_formed"],
                 "associations_strengthened": result["associations_strengthened"],
                 "associations_decayed": result["associations_decayed"],
                 "skipped_prepare": result["skipped_prepare"],
-                "sections": {name: chars for name, chars in sorted(sections.items())},
+                "sections": {name: c for name, c in sorted(sections.items())},
             })
             return
 
@@ -1028,8 +1036,8 @@ def cmd_diff(args: argparse.Namespace) -> None:
                 if i > 0:
                     prev = wraps[i - 1]
                     entry["delta"] = {
-                        "episodes_compressed": (w.episodes_compressed or 0) - (prev.episodes_compressed or 0),
-                        "continuity_chars": (w.continuity_chars or 0) - (prev.continuity_chars or 0),
+                        "episodes_compressed": w.episodes_compressed - prev.episodes_compressed,
+                        "continuity_chars": w.continuity_chars - prev.continuity_chars,
                         "graduations_validated": w.graduations_validated - prev.graduations_validated,
                         "graduations_demoted": w.graduations_demoted - prev.graduations_demoted,
                     }
@@ -1046,8 +1054,8 @@ def cmd_diff(args: argparse.Namespace) -> None:
         for i, w in enumerate(wraps):
             wrap_id = w.id
             when = _format_timestamp(w.wrapped_at)
-            eps = w.episodes_compressed or 0
-            chars = w.continuity_chars or 0
+            eps = w.episodes_compressed
+            chars = w.continuity_chars
             grad = w.graduations_validated
             demoted = w.graduations_demoted
             formed = w.associations_formed
@@ -1056,7 +1064,7 @@ def cmd_diff(args: argparse.Namespace) -> None:
             # Show delta for continuity chars
             chars_delta = ""
             if i > 0:
-                prev_chars = wraps[i - 1].continuity_chars or 0
+                prev_chars = wraps[i - 1].continuity_chars
                 diff = chars - prev_chars
                 if diff > 0:
                     chars_delta = f" (+{diff})"
@@ -1211,7 +1219,7 @@ def cmd_stats(args: argparse.Namespace) -> None:
         # Wrap metrics
         wrap_stats: dict[str, Any] = {}
         if wraps:
-            eps_per_wrap = [w.episodes_compressed or 0 for w in wraps]
+            eps_per_wrap = [w.episodes_compressed for w in wraps]
             wrap_stats = {
                 "total_wraps": len(wraps),
                 "avg_episodes_per_wrap": sum(eps_per_wrap) / len(eps_per_wrap) if eps_per_wrap else 0,
@@ -1334,8 +1342,8 @@ def cmd_history(args: argparse.Namespace) -> None:
         for w in wraps:
             wrap_id = w.id
             when = _format_timestamp(w.wrapped_at)
-            eps = w.episodes_compressed or 0
-            chars = w.continuity_chars or 0
+            eps = w.episodes_compressed
+            chars = w.continuity_chars
             grad = w.graduations_validated
             demoted = w.graduations_demoted
             formed = w.associations_formed

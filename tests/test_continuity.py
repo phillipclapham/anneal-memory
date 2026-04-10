@@ -505,4 +505,21 @@ class TestFormatWrapPackageText:
         text = format_wrap_package_text(result)
         assert "Stale Patterns" not in text
 
+    def test_unknown_status_falls_back_to_message(self):
+        """Any status other than 'ready' renders as the bare message.
+
+        Defensive: a future status value (or a malformed hand-built
+        result dict) should not crash the formatter by trying to read
+        result['package']['instructions'] when package is None.
+        """
+        result = {
+            "status": "future_state_we_dont_know_about",
+            "message": "Some status message.",
+            "episode_count": 0,
+            "package": None,
+            "assoc_context": None,
+        }
+        text = format_wrap_package_text(result)
+        assert text == "Some status message."
+
 

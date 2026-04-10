@@ -623,12 +623,16 @@ class Store:
             # Defensive: legacy DBs pre-migration. Post-init this should not fire.
             return []
 
+        # Coerce nullable columns (episodes_compressed, continuity_chars)
+        # and legacy-default columns to 0 at construction, so the
+        # WrapRecord dataclass can expose non-None int fields and callers
+        # don't need to sprinkle `or 0` guards at every consumption site.
         return [
             WrapRecord(
                 id=row["id"],
                 wrapped_at=row["wrapped_at"],
-                episodes_compressed=row["episodes_compressed"],
-                continuity_chars=row["continuity_chars"],
+                episodes_compressed=row["episodes_compressed"] or 0,
+                continuity_chars=row["continuity_chars"] or 0,
                 graduations_validated=row["graduations_validated"] or 0,
                 graduations_demoted=row["graduations_demoted"] or 0,
                 citation_reuse_max=row["citation_reuse_max"] or 0,
@@ -846,10 +850,43 @@ class Store:
         return self.continuity_path.read_text(encoding="utf-8")
 
     def save_continuity(self, text: str) -> str:
-        """Save continuity text to the sidecar file. Atomic write.
+        """Low-level continuity file write. **Bypasses the immune system.**
+
+        This method writes the continuity text to its sidecar file with
+        an atomic fsync-and-rename and logs a ``continuity_saved`` audit
+        event. It does **not** validate structure, does **not** run
+        graduation citation checking, does **not** form or decay
+        Hebbian associations, does **not** update wrap metadata, and
+        does **not** record a wrap in the wraps table.
+
+        For agent-driven session wraps — the normal case — call
+        :func:`anneal_memory.validated_save_continuity(store, text)`
+        instead. That runs the full canonical pipeline (structure
+        validation → graduation → associations → decay → metadata →
+        wrap completion) which IS anneal-memory's immune system. Using
+        this raw method for session wraps silently degrades the memory
+        system to a flat file write.
+
+        Legitimate uses of this method:
+
+        - Internal orchestration by ``validated_save_continuity``
+          (that is the one place it is safe to call directly — the
+          surrounding pipeline has already validated and will
+          continue after this write).
+        - Test fixtures that seed a continuity file in a known state
+          without exercising the pipeline.
+        - Advanced library users explicitly managing their own
+          wrap lifecycle and replicating the full pipeline by hand.
+
+        If you are not one of those three cases, you want
+        :func:`validated_save_continuity`.
 
         Returns:
             The path where the file was saved.
+
+        Raises:
+            OSError: If the atomic write fails. The stale temp file
+                is cleaned up before re-raising.
         """
         path = self.continuity_path
         tmp_path = path.with_suffix(".md.tmp")

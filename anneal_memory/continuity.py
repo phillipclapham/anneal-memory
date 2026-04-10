@@ -115,9 +115,29 @@ def prepare_wrap_package(
     today: str | None = None,
     staleness_days: int = 7,
 ) -> dict[str, Any]:
-    """Prepare the full wrap package for the agent.
+    """Pure helper — build an agent-facing compression package from pre-fetched inputs.
 
-    This is what the agent receives when calling prepare_wrap.
+    .. warning::
+        **Most callers should use :func:`prepare_wrap` instead.** That
+        function is the canonical store-aware pipeline: it fetches
+        episodes, loads the current continuity, builds this package,
+        marks the wrap in progress (``store.wrap_started()``), and
+        attaches Hebbian association context — the full lifecycle.
+
+        This function does NONE of those things. It is a pure
+        helper that takes episodes and continuity text already in hand
+        and returns a package dict. It does not touch a store.
+        Consequently, calling this function and then calling
+        :func:`validated_save_continuity` on the same store will leave
+        ``skipped_prepare=True`` in the save result, because no wrap
+        lifecycle was ever started.
+
+        This helper is kept public for (a) unit tests of package
+        construction in isolation, and (b) advanced library users
+        who manage their own episode fetching and wrap lifecycle.
+        For the standard session-boundary wrap flow, use
+        :func:`prepare_wrap`.
+
     It contains everything needed to produce a compressed continuity file.
 
     Args:
@@ -295,6 +315,9 @@ def prepare_wrap(
             "assoc_context": None,
         }
 
+    # All store reads and package construction happen BEFORE wrap_started().
+    # If any of them raises, the store is left with no stale wrap-in-progress
+    # flag — symmetric with wrap_cancelled() on the empty path.
     existing = store.load_continuity()
     package = prepare_wrap_package(
         episodes=episodes,
@@ -303,10 +326,11 @@ def prepare_wrap(
         max_chars=max_chars,
         staleness_days=staleness_days,
     )
-    store.wrap_started()
-
     episode_ids = [ep.id for ep in episodes]
     assoc_context = store.get_association_context(episode_ids) or None
+
+    # Mark wrap in progress only after every upstream operation succeeded.
+    store.wrap_started()
 
     return {
         "status": "ready",
@@ -337,7 +361,9 @@ def format_wrap_package_text(result: dict[str, Any]) -> str:
         The formatted text. For an empty result, returns the status
         message unchanged.
     """
-    if result["status"] == "empty":
+    # Any status other than "ready" (empty, or some future state) is
+    # rendered as its bare message. Only "ready" has a package to format.
+    if result["status"] != "ready":
         return result["message"]
 
     package = result["package"]
@@ -397,6 +423,9 @@ def validated_save_continuity(
     Returns:
         Dict with keys:
           - ``path`` (str): path to the saved continuity file
+          - ``chars`` (int): byte count of the saved continuity text
+            (top-level convenience for transports; same as
+            ``wrap_result.chars``)
           - ``episodes_compressed`` (int): count of episodes in this wrap
           - ``graduations_validated`` (int): citations that validated
           - ``graduations_demoted`` (int): citations demoted due to
@@ -415,9 +444,15 @@ def validated_save_continuity(
           - ``skipped_prepare`` (bool): True if ``prepare_wrap`` was not
             called first
           - ``wrap_result`` (WrapResult): the store-level wrap record
+            (contains the same metrics — primarily for library users
+            who want a typed object rather than a dict)
 
     Raises:
         ValueError: If text is empty or missing required sections.
+        OSError: If the filesystem write of the continuity sidecar
+            fails. Not caught by this function; propagates to the
+            caller. MCP and CLI transports currently let it propagate
+            as well — consider handling at your transport boundary.
     """
     from .associations import process_wrap_associations
 
@@ -484,6 +519,7 @@ def validated_save_continuity(
 
     return {
         "path": path,
+        "chars": len(grad_result.text),
         "episodes_compressed": len(episodes),
         "graduations_validated": grad_result.validated,
         "graduations_demoted": total_demoted,

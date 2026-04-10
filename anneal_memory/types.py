@@ -73,15 +73,18 @@ class WrapRecord:
     recorded wrap. ``WrapRecord`` represents a past wrap retrieved from
     storage for monitoring/audit (history, diff, stats CLI subcommands).
 
-    All integer counter fields are non-None (defaults 0 in schema).
-    ``episodes_compressed`` and ``continuity_chars`` are nullable in the
-    wraps table and may be ``None`` for legacy rows.
+    All integer fields are non-None. The underlying schema permits NULL
+    for ``episodes_compressed`` and ``continuity_chars`` on legacy rows
+    predating the current schema, but ``Store.get_wrap_history()``
+    coerces those to 0 at construction so callers never need to guard
+    against ``None``. The remaining counter fields are ``NOT NULL
+    DEFAULT 0`` in the schema and are always populated.
     """
 
     id: int
     wrapped_at: str  # ISO 8601 UTC
-    episodes_compressed: int | None
-    continuity_chars: int | None
+    episodes_compressed: int
+    continuity_chars: int
     graduations_validated: int
     graduations_demoted: int
     citation_reuse_max: int

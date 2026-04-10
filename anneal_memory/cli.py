@@ -47,10 +47,12 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .associations import process_wrap_associations
 from .audit import AuditTrail, _iter_lines as _iter_audit_lines
-from .continuity import measure_sections, prepare_wrap_package, validate_structure
-from .graduation import validate_graduations
+from .continuity import (
+    format_wrap_package_text,
+    prepare_wrap as _lib_prepare_wrap,
+    validated_save_continuity as _lib_validated_save_continuity,
+)
 from .store import Store
 from .types import AffectiveState, AssociationStats, EpisodeType
 
@@ -577,75 +579,44 @@ def cmd_verify(args: argparse.Namespace) -> None:
 def cmd_prepare_wrap(args: argparse.Namespace) -> None:
     """Output the compression package for agent-driven wraps.
 
-    This is the CLI equivalent of the MCP prepare_wrap tool.
-    The agent reads this output, compresses in its own reasoning,
-    then saves via save-continuity. Compression IS cognition —
-    the agent's judgment during compression is where identity forms.
+    Thin CLI adapter over the library ``prepare_wrap`` pipeline. The
+    agent reads the output (text or JSON), compresses in its own
+    reasoning, then saves via ``save-continuity``. Compression IS
+    cognition — the agent's judgment during compression is where
+    identity forms, which is why this command does not delegate
+    compression to any subprocess.
     """
     with _open_store(args) as store:
-        episodes = store.episodes_since_wrap()
-
-        if not episodes:
-            store.wrap_cancelled()
-            if args.json:
-                _print_json({"status": "empty", "message": "No episodes since last wrap"})
-            else:
-                print("No episodes since last wrap. Nothing to compress.")
-            return
-
-        existing = store.load_continuity()
-        package = prepare_wrap_package(
-            episodes=episodes,
-            existing_continuity=existing,
-            project_name=store.project_name,
+        result = _lib_prepare_wrap(
+            store,
             max_chars=args.max_chars,
             staleness_days=args.staleness_days,
         )
 
-        # Mark wrap as in progress
-        store.wrap_started()
-
         if args.json:
-            _print_json(package)
+            if result["status"] == "empty":
+                _print_json(
+                    {"status": "empty", "message": result["message"]}
+                )
+            else:
+                # Preserve the existing JSON shape: emit the package dict
+                # so scripts scraping fields like `instructions`, `episodes`,
+                # `stale_patterns`, `today`, `max_chars` continue to work.
+                _print_json(result["package"])
             return
 
-        # Build readable output for the agent (mirrors MCP prepare_wrap)
-        parts: list[str] = [package["instructions"], "\n---\n"]
-        parts.append(f"## Episodes This Session ({package['episode_count']})")
-        parts.append(package["episodes"])
-
-        if package["continuity"]:
-            parts.append("\n---\n## Current Continuity File")
-            parts.append(package["continuity"])
-        else:
-            parts.append(
-                "\n---\n(No existing continuity file — this is the first wrap.)"
-            )
-
-        if package["stale_patterns"]:
-            parts.append("\n---\n## Stale Patterns (consider removing)")
-            for sp in package["stale_patterns"]:
-                parts.append(
-                    f"- Line {sp['line']}: {sp['content']}"
-                    f" ({sp['days_stale']}d stale)"
-                )
-
-        # Include Hebbian association context
-        episode_ids = [ep.id for ep in episodes]
-        assoc_context = store.get_association_context(episode_ids)
-        if assoc_context:
-            parts.append("\n---\n" + assoc_context)
-
-        print("\n".join(parts))
+        print(format_wrap_package_text(result))
 
 
 def cmd_save_continuity(args: argparse.Namespace) -> None:
     """Save agent-compressed continuity with full validation.
 
-    This is the CLI equivalent of the MCP save_continuity tool.
-    Reads the agent's compressed text from a file or stdin, then runs
-    the same validation pipeline: structure check, graduation citation
-    validation, Hebbian association formation, decay.
+    Thin CLI adapter over the library ``validated_save_continuity``
+    pipeline. Reads the agent's compressed text from a file or stdin,
+    delegates structure validation, graduation citation validation,
+    Hebbian association formation, decay, metadata update, and wrap
+    recording to the library, then formats the result dict as text or
+    JSON output.
     """
     # Read continuity text from file or stdin
     if args.file == "-":
@@ -663,110 +634,70 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
 
     with _open_store(args) as store:
         # Parse optional affective state
-        affective_state = None
+        affective_state: AffectiveState | None = None
         if args.affect_tag:
             affective_state = AffectiveState(
                 tag=args.affect_tag,
                 intensity=args.affect_intensity,
             )
 
-        # Check if prepare-wrap was called first
-        skipped_prepare = not store.status().wrap_in_progress
-
-        # Validate structure (4 required sections)
-        if not validate_structure(text):
-            print(
-                "Error: continuity must contain all 4 sections: "
-                "## State, ## Patterns, ## Decisions, ## Context",
-                file=sys.stderr,
+        try:
+            result = _lib_validated_save_continuity(
+                store, text, affective_state=affective_state
             )
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
 
-        # Get current session's episodes for citation validation
-        episodes = store.episodes_since_wrap()
-        valid_ids = {ep.id[:8].lower() for ep in episodes}
-        node_content_map = {ep.id[:8].lower(): ep.content for ep in episodes}
-
-        # Check citation history
-        meta = store.load_meta()
-        citations_seen = meta.get("citations_seen", False)
-
-        # Validate graduations
-        from datetime import date as _date
-        today = _date.today().isoformat()
-        grad_result = validate_graduations(
-            text=text,
-            valid_ids=valid_ids,
-            today=today,
-            node_content_map=node_content_map,
-            citations_seen=citations_seen,
-        )
-
-        # Save continuity
-        path = store.save_continuity(grad_result.text)
-
-        # Record Hebbian associations + decay
-        assoc_formed, assoc_strengthened, assoc_decayed = \
-            process_wrap_associations(store, grad_result, affective_state)
-
-        # Update metadata
-        if grad_result.validated > 0 or grad_result.citation_counts:
-            meta["citations_seen"] = True
-        meta["sessions_produced"] = meta.get("sessions_produced", 0) + 1
-        store.save_meta(meta)
-
-        # Record wrap completion
-        sections = measure_sections(grad_result.text)
-        patterns = len(re.findall(r"\|\s*\d+x", grad_result.text))
-        wrap_result = store.wrap_completed(
-            episodes_compressed=len(episodes),
-            continuity_chars=len(grad_result.text),
-            graduations_validated=grad_result.validated,
-            graduations_demoted=grad_result.demoted + grad_result.bare_demoted,
-            citation_reuse_max=grad_result.citation_reuse_max,
-            patterns_extracted=patterns,
-            associations_formed=assoc_formed,
-            associations_strengthened=assoc_strengthened,
-            associations_decayed=assoc_decayed,
-        )
+        chars = result["wrap_result"].chars
+        sections = result["sections"]
 
         if args.json:
+            # Preserve the pre-10.5c.1 JSON shape for backward compat
+            # with any scripts scraping the output.
             _print_json({
                 "saved": True,
-                "path": path,
-                "chars": len(grad_result.text),
-                "episodes_compressed": len(episodes),
-                "graduations_validated": grad_result.validated,
-                "graduations_demoted": grad_result.demoted + grad_result.bare_demoted,
-                "associations_formed": assoc_formed,
-                "associations_strengthened": assoc_strengthened,
-                "associations_decayed": assoc_decayed,
-                "skipped_prepare": skipped_prepare,
+                "path": result["path"],
+                "chars": chars,
+                "episodes_compressed": result["episodes_compressed"],
+                "graduations_validated": result["graduations_validated"],
+                "graduations_demoted": result["graduations_demoted"],
+                "associations_formed": result["associations_formed"],
+                "associations_strengthened": result["associations_strengthened"],
+                "associations_decayed": result["associations_decayed"],
+                "skipped_prepare": result["skipped_prepare"],
                 "sections": {name: chars for name, chars in sorted(sections.items())},
             })
             return
 
-        print(f"Continuity saved ({len(grad_result.text):,} chars) to {path}")
-        if skipped_prepare:
+        print(f"Continuity saved ({chars:,} chars) to {result['path']}")
+        if result["skipped_prepare"]:
             print(
                 "Note: prepare-wrap was not called first — "
                 "continuity may not reflect current episodes."
             )
-        print(f"Episodes compressed: {len(episodes)}")
+        print(f"Episodes compressed: {result['episodes_compressed']}")
 
-        if grad_result.validated:
-            print(f"Citations validated: {grad_result.validated}")
-        if grad_result.demoted:
-            print(f"Citations demoted (bad evidence): {grad_result.demoted}")
-        if grad_result.bare_demoted:
-            print(f"Bare graduations demoted (no evidence): {grad_result.bare_demoted}")
-        if grad_result.gaming_suspects:
-            print(f"Citation gaming suspects: {', '.join(grad_result.gaming_suspects)}")
+        if result["graduations_validated"]:
+            print(f"Citations validated: {result['graduations_validated']}")
+        if result["demoted"]:
+            print(f"Citations demoted (bad evidence): {result['demoted']}")
+        if result["bare_demoted"]:
+            print(
+                f"Bare graduations demoted (no evidence): {result['bare_demoted']}"
+            )
+        if result["gaming_suspects"]:
+            print(
+                f"Citation gaming suspects: {', '.join(result['gaming_suspects'])}"
+            )
 
-        if assoc_formed or assoc_strengthened:
-            print(f"Associations: {assoc_formed} formed, {assoc_strengthened} strengthened")
-        if assoc_decayed:
-            print(f"Associations decayed: {assoc_decayed}")
+        if result["associations_formed"] or result["associations_strengthened"]:
+            print(
+                f"Associations: {result['associations_formed']} formed, "
+                f"{result['associations_strengthened']} strengthened"
+            )
+        if result["associations_decayed"]:
+            print(f"Associations decayed: {result['associations_decayed']}")
 
         print("\nSection sizes:")
         for name, chars in sorted(sections.items()):

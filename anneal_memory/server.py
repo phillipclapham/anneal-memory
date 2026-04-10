@@ -15,16 +15,16 @@ import argparse
 import json
 import logging
 import os
-import re
 import sys
-from datetime import date
 from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .associations import process_wrap_associations
-from .continuity import measure_sections, prepare_wrap_package, validate_structure
-from .graduation import validate_graduations
+from .continuity import (
+    format_wrap_package_text,
+    prepare_wrap as _lib_prepare_wrap,
+    validated_save_continuity as _lib_validated_save_continuity,
+)
 from .integrity import RESOURCES, TOOLS, hash_tool, generate_integrity_file, verify_integrity
 from .store import Store
 from .types import AffectiveState
@@ -316,66 +316,41 @@ class Server:
         return _tool_result("\n".join(lines))
 
     def _tool_prepare_wrap(self, args: dict[str, Any]) -> dict[str, Any]:
+        """MCP transport adapter for the library prepare_wrap pipeline.
+
+        Parses max_chars and staleness_days from MCP tool args, delegates
+        to the library canonical pipeline, and formats the returned
+        package as text via format_wrap_package_text. The library
+        handles the full lifecycle (wrap_cancelled on empty,
+        wrap_started on ready) so this function stays transport-only.
+        """
         max_chars = args.get("max_chars", 20000)
         staleness_days = args.get("staleness_days", 7)
 
-        episodes = self._store.episodes_since_wrap()
-
-        if not episodes:
-            # Clear any stale wrap_in_progress flag from an abandoned previous wrap
-            self._store.wrap_cancelled()
-            return _tool_result(
-                "No episodes since last wrap. Nothing to compress."
-            )
-
-        existing = self._store.load_continuity()
-        package = prepare_wrap_package(
-            episodes=episodes,
-            existing_continuity=existing,
-            project_name=self._store.project_name,
+        result = _lib_prepare_wrap(
+            self._store,
             max_chars=max_chars,
             staleness_days=staleness_days,
         )
 
-        # Mark wrap as in progress (clears any stale flag from abandoned wrap)
-        self._store.wrap_started()
-
-        # Build readable output for the agent
-        parts: list[str] = [package["instructions"], "\n---\n"]
-        parts.append(f"## Episodes This Session ({package['episode_count']})")
-        parts.append(package["episodes"])
-
-        if package["continuity"]:
-            parts.append("\n---\n## Current Continuity File")
-            parts.append(package["continuity"])
-        else:
-            parts.append(
-                "\n---\n(No existing continuity file — this is the first wrap.)"
-            )
-
-        if package["stale_patterns"]:
-            parts.append("\n---\n## Stale Patterns (consider removing)")
-            for sp in package["stale_patterns"]:
-                parts.append(
-                    f"- Line {sp['line']}: {sp['content']}"
-                    f" ({sp['days_stale']}d stale)"
-                )
-
-        # Include Hebbian association context
-        episode_ids = [ep.id for ep in episodes]
-        assoc_context = self._store.get_association_context(episode_ids)
-        if assoc_context:
-            parts.append("\n---\n" + assoc_context)
-
-        return _tool_result("\n".join(parts))
+        return _tool_result(format_wrap_package_text(result))
 
     def _tool_save_continuity(self, args: dict[str, Any]) -> dict[str, Any]:
+        """MCP transport adapter for the library validated_save_continuity.
+
+        Parses text and optional affective_state from MCP tool args,
+        delegates the entire save pipeline (structure validation,
+        graduation, associations, decay, metadata, wrap completion) to
+        the library, and formats the returned dict as an MCP text
+        response. ValueError from the library (empty text or missing
+        sections) becomes an is_error=True tool result.
+        """
         text = args.get("text", "")
         if not text:
             return _tool_result("Error: text is required", is_error=True)
 
         # Parse optional affective state (limbic layer)
-        affective_state = None
+        affective_state: AffectiveState | None = None
         affect_raw = args.get("affective_state")
         if affect_raw and isinstance(affect_raw, dict):
             tag = affect_raw.get("tag", "")
@@ -389,101 +364,47 @@ class Server:
                     intensity=max(0.0, min(1.0, intensity)),
                 )
 
-        # Check if prepare_wrap was called first
-        skipped_prepare = not self._store.status().wrap_in_progress
-
-        # Validate structure (4 required sections)
-        if not validate_structure(text):
-            return _tool_result(
-                "Error: continuity must contain all 4 sections: "
-                "## State, ## Patterns, ## Decisions, ## Context",
-                is_error=True,
+        try:
+            result = _lib_validated_save_continuity(
+                self._store, text, affective_state=affective_state
             )
+        except ValueError as exc:
+            return _tool_result(f"Error: {exc}", is_error=True)
 
-        # Get current session's episodes for citation validation
-        # Lowercase IDs to match graduation.py's normalization of cited IDs
-        episodes = self._store.episodes_since_wrap()
-        valid_ids = {ep.id[:8].lower() for ep in episodes}
-        node_content_map = {ep.id[:8].lower(): ep.content for ep in episodes}
-
-        # Check if citations have been seen before (bare graduation sunset)
-        meta = self._store.load_meta()
-        citations_seen = meta.get("citations_seen", False)
-
-        # Validate graduations (demotes bad citations in-place)
-        today = date.today().isoformat()
-        grad_result = validate_graduations(
-            text=text,
-            valid_ids=valid_ids,
-            today=today,
-            node_content_map=node_content_map,
-            citations_seen=citations_seen,
-        )
-
-        # Save the (possibly modified) continuity text
-        path = self._store.save_continuity(grad_result.text)
-
-        # Record Hebbian associations from validated co-citations + decay
-        assoc_formed, assoc_strengthened, assoc_decayed = \
-            process_wrap_associations(self._store, grad_result, affective_state)
-
-        # Update metadata
-        if grad_result.validated > 0 or grad_result.citation_counts:
-            meta["citations_seen"] = True
-        meta["sessions_produced"] = meta.get("sessions_produced", 0) + 1
-        self._store.save_meta(meta)
-
-        # Record wrap completion in the store
-        sections = measure_sections(grad_result.text)
-        patterns = len(re.findall(r"\|\s*\d+x", grad_result.text))
-        self._store.wrap_completed(
-            episodes_compressed=len(episodes),
-            continuity_chars=len(grad_result.text),
-            graduations_validated=grad_result.validated,
-            graduations_demoted=grad_result.demoted + grad_result.bare_demoted,
-            citation_reuse_max=grad_result.citation_reuse_max,
-            patterns_extracted=patterns,
-            associations_formed=assoc_formed,
-            associations_strengthened=assoc_strengthened,
-            associations_decayed=assoc_decayed,
-        )
-
-        # Build response
-        lines = [f"Continuity saved ({len(grad_result.text)} chars) to {path}"]
-        if skipped_prepare:
+        # Format the library result dict as the MCP text response
+        lines = [
+            f"Continuity saved ({result['wrap_result'].chars} chars) to {result['path']}"
+        ]
+        if result["skipped_prepare"]:
             lines.append(
                 "Note: prepare_wrap was not called first — "
                 "continuity may not reflect current episodes."
             )
-        lines.append(f"Episodes compressed: {len(episodes)}")
+        lines.append(f"Episodes compressed: {result['episodes_compressed']}")
 
-        if grad_result.validated:
-            lines.append(f"Citations validated: {grad_result.validated}")
-        if grad_result.demoted:
+        if result["graduations_validated"]:
+            lines.append(f"Citations validated: {result['graduations_validated']}")
+        if result["demoted"]:
+            lines.append(f"Citations demoted (bad evidence): {result['demoted']}")
+        if result["bare_demoted"]:
             lines.append(
-                f"Citations demoted (bad evidence): {grad_result.demoted}"
+                f"Bare graduations demoted (no evidence): {result['bare_demoted']}"
             )
-        if grad_result.bare_demoted:
+        if result["gaming_suspects"]:
             lines.append(
-                f"Bare graduations demoted (no evidence): "
-                f"{grad_result.bare_demoted}"
-            )
-        if grad_result.gaming_suspects:
-            lines.append(
-                f"Citation gaming suspects: "
-                f"{', '.join(grad_result.gaming_suspects)}"
+                f"Citation gaming suspects: {', '.join(result['gaming_suspects'])}"
             )
 
-        if assoc_formed or assoc_strengthened:
+        if result["associations_formed"] or result["associations_strengthened"]:
             lines.append(
-                f"Associations: {assoc_formed} formed, "
-                f"{assoc_strengthened} strengthened"
+                f"Associations: {result['associations_formed']} formed, "
+                f"{result['associations_strengthened']} strengthened"
             )
-        if assoc_decayed:
-            lines.append(f"Associations decayed: {assoc_decayed}")
+        if result["associations_decayed"]:
+            lines.append(f"Associations decayed: {result['associations_decayed']}")
 
         lines.append("\nSection sizes:")
-        for name, chars in sorted(sections.items()):
+        for name, chars in sorted(result["sections"].items()):
             lines.append(f"  {name}: {chars} chars")
 
         return _tool_result("\n".join(lines))

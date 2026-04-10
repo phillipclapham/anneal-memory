@@ -24,7 +24,7 @@ CrewAI's event bus emits structured events at every lifecycle boundary:
 ## Complete Example
 
 ```python
-from anneal_memory import Store, EpisodeType, prepare_wrap_package, validated_save_continuity
+from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
 from crewai import Agent, Crew, Task, Process
 from crewai.events import BaseEventListener
 from crewai.events import (
@@ -79,25 +79,17 @@ class AnnealMemoryListener(BaseEventListener):
         @crewai_event_bus.on(CrewKickoffCompletedEvent)
         def on_crew_done(source, event):
             """Run wrap sequence when crew finishes."""
-            episodes = self.store.episodes_since_wrap()
-            if not episodes:
-                return
-
-            continuity = self.store.load_continuity()
-            package = prepare_wrap_package(
-                episodes, continuity, self.store.project_name
-            )
-
-            # Feed package to an LLM for compression:
-            #
-            # compressed = llm.invoke(
-            #     f"Compress these episodes:\n{package['instructions']}\n"
-            #     f"Episodes:\n{package['episodes']}\n"
-            #     f"Current continuity:\n{package['continuity']}"
-            # )
-            # validated_save_continuity(self.store, compressed.content)
-
-            print(f"Wrap ready: {len(episodes)} episodes to compress")
+            wrap = prepare_wrap(self.store)
+            if wrap["status"] == "ready":
+                package = wrap["package"]
+                # Feed the package to your LLM (CrewAI's `llm` from the
+                # crew config is a natural fit — the agent's own model):
+                compressed = llm.invoke(
+                    f"Compress these episodes:\n{package['instructions']}\n"
+                    f"Episodes:\n{package['episodes']}\n"
+                    f"Current continuity:\n{package['continuity'] or ''}"
+                )
+                validated_save_continuity(self.store, compressed.content)
 
 
 # Instantiate listener (registers automatically)
@@ -158,7 +150,7 @@ crew = Crew(
 
 ```python
 from crewai.project import CrewBase, before_kickoff, after_kickoff, crew
-from anneal_memory import Store, EpisodeType, prepare_wrap_package
+from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
 
 
 @CrewBase
@@ -176,12 +168,12 @@ class MyCrew:
     @after_kickoff
     def save_memory(self, output):
         """Wrap session after crew completes."""
-        episodes = self.store.episodes_since_wrap()
-        if episodes:
-            package = prepare_wrap_package(
-                episodes, self.store.load_continuity(), "my-crew"
-            )
-            # Compress via LLM and save
+        wrap = prepare_wrap(self.store)
+        if wrap["status"] == "ready":
+            package = wrap["package"]
+            # Your LLM compresses the package, then save with the full pipeline:
+            compressed = llm.invoke(package["instructions"] + "\n" + package["episodes"])
+            validated_save_continuity(self.store, compressed.content)
         return output
 
     @crew

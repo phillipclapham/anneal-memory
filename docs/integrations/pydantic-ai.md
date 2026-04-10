@@ -23,7 +23,7 @@ Pydantic AI's `Hooks` capability provides lifecycle hooks at every level:
 ## Complete Example
 
 ```python
-from anneal_memory import Store, EpisodeType, prepare_wrap_package, validated_save_continuity
+from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import Hooks
 from dataclasses import dataclass
@@ -76,13 +76,17 @@ async def record_response(ctx: RunContext[Deps], request_ctx, response):
 async def wrap_session(ctx: RunContext[Deps], result):
     """Run wrap sequence when agent finishes."""
     store = ctx.deps.memory
-    episodes = store.episodes_since_wrap()
-    if episodes:
-        continuity = store.load_continuity()
-        package = prepare_wrap_package(episodes, continuity, store.project_name)
-        # Compress via LLM and save
-        # compressed = await compress_with_llm(package)
-        # validated_save_continuity(store, compressed)
+    wrap = prepare_wrap(store)
+    if wrap["status"] == "ready":
+        package = wrap["package"]
+        # Reuse the agent's model for compression. Any pydantic-ai Agent
+        # with compression instructions works — define a dedicated one
+        # to keep compression deterministic:
+        compressed = await compression_agent.run(
+            f"{package['instructions']}\n\nEpisodes:\n{package['episodes']}\n\nCurrent continuity:\n{package['continuity'] or ''}",
+            deps=ctx.deps,
+        )
+        validated_save_continuity(store, compressed.output)
     return result
 
 
@@ -135,20 +139,27 @@ The `wrap_run` hook gives middleware-style control over the entire run:
 ```python
 @hooks.on.wrap_run
 async def memory_middleware(ctx: RunContext[Deps], handler):
-    """Full middleware — setup before, teardown after."""
-    store = ctx.deps.memory
+    """Full middleware — setup before, teardown after.
 
-    # Before: load memory
-    continuity = store.load_continuity()
+    Memory is loaded into the agent via `memory_instructions()` (see
+    above) or via `deps`, not inside the middleware itself — so this
+    wrapper just runs the agent, then wraps the session at the end.
+    """
+    store = ctx.deps.memory
 
     # Run the agent
     result = await handler(ctx)
 
-    # After: wrap session
-    episodes = store.episodes_since_wrap()
-    if episodes:
-        package = prepare_wrap_package(episodes, continuity, store.project_name)
-        # Compress and save...
+    # After: wrap session. See wrap_session() above for the full
+    # compression + validated_save_continuity pattern.
+    wrap = prepare_wrap(store)
+    if wrap["status"] == "ready":
+        package = wrap["package"]
+        compressed = await compression_agent.run(
+            f"{package['instructions']}\n\n{package['episodes']}",
+            deps=ctx.deps,
+        )
+        validated_save_continuity(store, compressed.output)
 
     return result
 ```

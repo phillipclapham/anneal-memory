@@ -21,7 +21,7 @@ Haystack doesn't have traditional lifecycle hooks. Instead:
 ## Complete Example
 
 ```python
-from anneal_memory import Store, EpisodeType, prepare_wrap_package
+from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
 from haystack import tracing
 from haystack.components.agents import Agent
 from haystack.dataclasses import ChatMessage
@@ -110,12 +110,18 @@ agent = Agent(
 
 result = agent.run(messages=[ChatMessage.from_user("Analyze the dataset")])
 
-# Wrap after run
-episodes = store.episodes_since_wrap()
-if episodes:
-    continuity_text = store.load_continuity()
-    package = prepare_wrap_package(episodes, continuity_text, store.project_name)
-    # Compress via LLM and save
+# Wrap after run — reuse the agent's ChatGenerator for compression:
+wrap = prepare_wrap(store)
+if wrap["status"] == "ready":
+    package = wrap["package"]
+    prompt_msg = ChatMessage.from_user(
+        f"{package['instructions']}\n\n"
+        f"Episodes:\n{package['episodes']}\n\n"
+        f"Current continuity:\n{package['continuity'] or ''}"
+    )
+    result = agent.chat_generator.run(messages=[prompt_msg])
+    compressed = result["replies"][0].text
+    validated_save_continuity(store, compressed)
 
 store.close()
 ```

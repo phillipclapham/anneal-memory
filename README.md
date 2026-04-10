@@ -27,7 +27,7 @@ pip install anneal-memory
 The library is the core product. Import it, use it in any framework or script.
 
 ```python
-from anneal_memory import Store, EpisodeType, prepare_wrap_package, validated_save_continuity
+from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
 
 # Initialize (creates DB + continuity file automatically)
 store = Store("./memory.db", project_name="MyAgent")
@@ -41,12 +41,14 @@ result = store.recall(episode_type=EpisodeType.DECISION, keyword="database")
 for ep in result.episodes:
     print(f"[{ep.type}] {ep.content}")
 
-# Compress at session end (the cognitive act)
-episodes = store.episodes_since_wrap()
-continuity = store.load_continuity()
-package = prepare_wrap_package(episodes, continuity, "MyAgent")
-# Agent compresses package into updated continuity using its own judgment...
-validated_save_continuity(store, compressed_text)  # full immune system pipeline
+# Compress at session end — this is where the cognition happens
+wrap = prepare_wrap(store)  # fetches episodes, marks wrap in progress
+if wrap["status"] == "ready":
+    # Feed wrap["package"] to your LLM. Compression IS the cognition —
+    # patterns emerge from the act of compressing, not from storage.
+    compressed = your_llm.compress(wrap["package"])
+    validated_save_continuity(store, compressed)  # full immune system pipeline
+# "empty" status means no new episodes to wrap — skip
 
 store.close()
 ```
@@ -101,19 +103,19 @@ Add the [orchestration snippet](examples/CLAUDE.md.example) to your project's `C
 
 ### All Three Paths, Same Cognitive Loop
 
-Every access pattern preserves the same workflow: record episodes during work → compress at session boundaries → load continuity at session start. The agent that records is the agent that compresses. Compression cannot be delegated — it IS the cognition.
+CLI and MCP are thin transport adapters over the same library — not separate implementations. Every access pattern calls the same `prepare_wrap(store)` and `validated_save_continuity(store, text)` pipeline under the hood, preserving the same workflow: record episodes during work → compress at session boundaries → load continuity at session start. The agent that records is the agent that compresses. Compression cannot be delegated — it IS the cognition.
 
 | | Library | CLI | MCP |
 |---|---|---|---|
 | **Install** | `pip install anneal-memory` | Same | `uvx anneal-memory` or same |
 | **Record** | `store.record(content, type)` | `anneal-memory record "..." --type T` | `record` tool |
 | **Recall** | `store.recall(keyword=...)` | `anneal-memory search "..."` | `recall` tool |
-| **Compress** | `prepare_wrap_package()` → agent → `validated_save_continuity()` | `prepare-wrap` → agent → `save-continuity` | `prepare_wrap` → agent → `save_continuity` |
+| **Compress** | `prepare_wrap(store)` → agent → `validated_save_continuity(store, text)` | `prepare-wrap` → agent → `save-continuity` | `prepare_wrap` → agent → `save_continuity` |
 | **Best for** | Framework integration, custom agents | Agents with shell access, operators | MCP-enabled editors |
 
 ## Framework Integrations
 
-anneal-memory works with any agent framework through the Python library. Each guide below shows where to call the four core functions — `record()`, `recall()`, `prepare_wrap_package()`, `save_continuity()` — within the framework's lifecycle.
+anneal-memory works with any agent framework through the Python library. Each guide below shows where to call the four core functions — `record()`, `recall()`, `prepare_wrap()`, `validated_save_continuity()` — within the framework's lifecycle.
 
 | Framework | Integration Point | Guide |
 |-----------|------------------|-------|
@@ -191,8 +193,17 @@ Transformers don't natively maintain persistent state between sessions. This lay
 Pass affective state during a wrap:
 
 ```python
-# Via library
-store.save_continuity(text)  # affective state recorded via wrap metadata
+# Via library — pass AffectiveState to validated_save_continuity
+from anneal_memory import prepare_wrap, validated_save_continuity, AffectiveState
+
+wrap = prepare_wrap(store)
+if wrap["status"] == "ready":
+    compressed = your_llm.compress(wrap["package"])
+    validated_save_continuity(
+        store,
+        compressed,
+        affective_state=AffectiveState(tag="curious", intensity=0.8),
+    )
 
 # Via MCP tool
 save_continuity(text="...", affective_state={"tag": "curious", "intensity": 0.8})

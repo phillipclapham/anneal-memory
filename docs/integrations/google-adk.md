@@ -24,7 +24,7 @@ ADK provides callbacks at three levels — agent, model, and tool:
 ## Complete Example
 
 ```python
-from anneal_memory import Store, EpisodeType, prepare_wrap_package, validated_save_continuity
+from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
 from google.adk.agents import Agent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.tools import ToolContext
@@ -89,7 +89,7 @@ For deeper integration, implement ADK's `BaseMemoryService` — this is the desi
 
 ```python
 from google.adk.memory import BaseMemoryService
-from anneal_memory import Store, EpisodeType, prepare_wrap_package, validated_save_continuity
+from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
 
 
 class AnnealMemoryService(BaseMemoryService):
@@ -107,14 +107,14 @@ class AnnealMemoryService(BaseMemoryService):
                 self.store.record(content, EpisodeType.OBSERVATION)
 
         # Trigger wrap
-        episodes = self.store.episodes_since_wrap()
-        if episodes:
-            continuity = self.store.load_continuity()
-            package = prepare_wrap_package(
-                episodes, continuity, self.store.project_name
-            )
-            # Compress via LLM and save
-            # validated_save_continuity(self.store, compressed)
+        wrap = prepare_wrap(self.store)
+        if wrap["status"] == "ready":
+            package = wrap["package"]
+            # Use a Gemini model to compress. Reusing the ADK agent's
+            # own LLM (via the Runner) keeps the compression inside the
+            # model that did the work — compression IS the cognition.
+            compressed = compress_with_gemini(package)  # your compression function
+            validated_save_continuity(self.store, compressed)
 
     def search_memory(self, query):
         """Search long-term memory for relevant episodes."""
@@ -160,4 +160,4 @@ callback_context.state["app:shared_knowledge"] = knowledge
 - **Callbacks vs MemoryService:** Callbacks give per-turn control (record at each step). `MemoryService` handles session-level ingestion. Use both: callbacks for real-time recording, MemoryService for session-end consolidation.
 - **State templating:** ADK's `instruction` parameter supports `{state_key}` templates — `{memory_context}` in the instruction string automatically pulls from `state["memory_context"]`.
 - **Workflow agents:** `SequentialAgent`, `ParallelAgent`, and `LoopAgent` compose sub-agents. Attach callbacks to individual sub-agents for per-agent memory, or to the top-level for aggregate memory.
-- **The cognitive loop:** `add_session_to_memory()` is where the wrap sequence belongs. The compression should involve an LLM — anneal-memory's `prepare_wrap_package()` provides the raw material, your LLM provides the judgment.
+- **The cognitive loop:** `add_session_to_memory()` is where the wrap sequence belongs. The compression should involve an LLM — anneal-memory's `prepare_wrap(store)` provides the raw material, your LLM provides the judgment.

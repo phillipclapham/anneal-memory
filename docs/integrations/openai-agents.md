@@ -23,7 +23,7 @@ The OpenAI Agents SDK provides `RunHooks` (global) and `AgentHooks` (per-agent):
 ## Complete Example
 
 ```python
-from anneal_memory import Store, EpisodeType, prepare_wrap_package, validated_save_continuity
+from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
 from agents import Agent, Runner, RunHooks, RunContextWrapper
 from agents import AgentHookContext, ModelResponse
 from agents.tool import Tool
@@ -102,21 +102,17 @@ class AnnealMemoryHooks(RunHooks):
     ) -> None:
         """Run wrap sequence when agent finishes."""
         store = context.context.memory
-        episodes = store.episodes_since_wrap()
-        if not episodes:
-            return
-
-        continuity = store.load_continuity()
-        package = prepare_wrap_package(episodes, continuity, store.project_name)
-
-        # Feed package to an LLM for compression:
-        #
-        # compressed = await Runner.run(
-        #     compression_agent,
-        #     input=f"Compress:\n{package['instructions']}\n{package['episodes']}",
-        #     context=context.context,
-        # )
-        # validated_save_continuity(store, compressed.final_output)
+        wrap = prepare_wrap(store)
+        if wrap["status"] == "ready":
+            package = wrap["package"]
+            # Feed the package to a compression sub-agent. Reusing
+            # Runner.run keeps the compression inside the same SDK runtime:
+            compressed = await Runner.run(
+                compression_agent,  # a simple Agent() you define with compression instructions
+                input=f"{package['instructions']}\n\nEpisodes:\n{package['episodes']}\n\nCurrent continuity:\n{package['continuity'] or ''}",
+                context=context.context,
+            )
+            validated_save_continuity(store, compressed.final_output)
 
 
 # Dynamic instructions that incorporate memory
@@ -166,9 +162,10 @@ class AnnealMemoryTracer(TracingProcessor):
 
     def on_trace_end(self, trace: Trace) -> None:
         """Entire agent run completed — trigger consolidation."""
-        episodes = self.store.episodes_since_wrap()
-        if episodes:
-            # Wrap sequence here
+        wrap = prepare_wrap(self.store)
+        if wrap["status"] == "ready":
+            # Your compression + validated_save_continuity call here.
+            # See AnnealMemoryHooks.on_agent_end above for the full pattern.
             pass
 
     def on_span_start(self, span: Span) -> None:

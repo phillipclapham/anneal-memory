@@ -22,7 +22,7 @@ Session boundaries are controlled by `run(reset=True/False)`.
 ## Complete Example
 
 ```python
-from anneal_memory import Store, EpisodeType, prepare_wrap_package
+from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
 from smolagents import CodeAgent, ActionStep, PlanningStep, InferenceClientModel
 
 
@@ -75,14 +75,18 @@ agent = CodeAgent(
 # Run
 result = agent.run("Analyze the latest AI memory research papers")
 
-# Wrap after run
-episodes = store.episodes_since_wrap()
-if episodes:
-    continuity = store.load_continuity()
-    package = prepare_wrap_package(episodes, continuity, store.project_name)
-    # Compress via LLM and save
-    # compressed = agent.model(compress_prompt(package))
-    # validated_save_continuity(store, compressed)
+# Wrap after run — reuse the agent's own model for compression so the
+# model that did the work reflects on it:
+wrap = prepare_wrap(store)
+if wrap["status"] == "ready":
+    package = wrap["package"]
+    prompt = (
+        f"{package['instructions']}\n\n"
+        f"Episodes:\n{package['episodes']}\n\n"
+        f"Current continuity:\n{package['continuity'] or ''}"
+    )
+    compressed = agent.model([{"role": "user", "content": prompt}])
+    validated_save_continuity(store, compressed.content)
 
 store.close()
 ```

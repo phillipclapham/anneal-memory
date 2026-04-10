@@ -23,7 +23,7 @@ CAMEL-AI provides hooks at two levels:
 The `WorkforceCallback` is the richest integration surface for multi-agent setups:
 
 ```python
-from anneal_memory import Store, EpisodeType, prepare_wrap_package
+from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
 from camel.societies.workforce import Workforce
 from camel.societies.workforce.workforce_callback import WorkforceCallback
 from camel.societies.workforce.events import (
@@ -94,13 +94,18 @@ class AnnealMemoryCallback(WorkforceCallback):
 
     def log_all_tasks_completed(self, event: AllTasksCompletedEvent) -> None:
         """All tasks done — trigger wrap sequence."""
-        episodes = store.episodes_since_wrap()
-        if episodes:
-            continuity = store.load_continuity()
-            package = prepare_wrap_package(
-                episodes, continuity, store.project_name
+        wrap = prepare_wrap(store)
+        if wrap["status"] == "ready":
+            package = wrap["package"]
+            # Use a ChatAgent to compress, then save with the full pipeline:
+            compressor = ChatAgent(system_message="You compress agent memory.")
+            response = compressor.step(
+                BaseMessage.make_user_message(
+                    role_name="User",
+                    content=f"{package['instructions']}\n\n{package['episodes']}",
+                )
             )
-            # Compress via LLM and save
+            validated_save_continuity(store, response.msgs[0].content)
 
 
 # Create workforce with memory callback

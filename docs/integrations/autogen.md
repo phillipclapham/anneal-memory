@@ -24,7 +24,7 @@ AG2 provides 4 hooks on `ConversableAgent`, firing in this order:
 ## Complete Example
 
 ```python
-from anneal_memory import Store, EpisodeType, prepare_wrap_package
+from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
 from autogen import ConversableAgent, AssistantAgent, UserProxyAgent
 
 
@@ -103,12 +103,24 @@ user_proxy.initiate_chat(
     message="Analyze the latest trends in AI memory systems",
 )
 
-# Wrap after conversation ends
-episodes = store.episodes_since_wrap()
-if episodes:
-    continuity = store.load_continuity()
-    package = prepare_wrap_package(episodes, continuity, store.project_name)
-    # Compress via LLM and save
+# Wrap after conversation ends — use a dedicated compression agent
+# (the assistant's own llm_config works fine):
+wrap = prepare_wrap(store)
+if wrap["status"] == "ready":
+    package = wrap["package"]
+    compressor = AssistantAgent(
+        name="compressor",
+        system_message="You compress agent memory into a continuity file.",
+        llm_config={"config_list": [...]},
+    )
+    reply = compressor.generate_reply(
+        messages=[{
+            "role": "user",
+            "content": f"{package['instructions']}\n\n{package['episodes']}",
+        }]
+    )
+    compressed = reply if isinstance(reply, str) else reply.get("content", "")
+    validated_save_continuity(store, compressed)
 
 store.close()
 ```

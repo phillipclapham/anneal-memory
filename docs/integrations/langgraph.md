@@ -22,7 +22,7 @@ LangGraph's `AgentMiddleware` provides four lifecycle hooks:
 ## Complete Example
 
 ```python
-from anneal_memory import Store, EpisodeType, prepare_wrap_package, validated_save_continuity
+from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
 from langchain.agents.middleware import AgentMiddleware, AgentState
 from langchain.agents import create_agent
 from langgraph.runtime import Runtime
@@ -70,22 +70,20 @@ class AnnealMemoryMiddleware(AgentMiddleware):
 
     def after_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
         """Run the wrap sequence at session end."""
-        episodes = self.store.episodes_since_wrap()
-        if not episodes:
-            return None
-
-        continuity = self.store.load_continuity()
-        package = prepare_wrap_package(episodes, continuity, self.store.project_name)
-
-        # In a real integration, you'd feed this package to an LLM
-        # for compression. Here's the pattern:
-        #
-        # compressed = llm.invoke(
-        #     f"Compress these episodes into continuity:\n{package['instructions']}\n"
-        #     f"Episodes:\n{package['episodes']}\n"
-        #     f"Current continuity:\n{package['continuity']}"
-        # )
-        # validated_save_continuity(self.store, compressed.content)
+        wrap = prepare_wrap(self.store)
+        if wrap["status"] == "ready":
+            package = wrap["package"]
+            # Feed the package to your LLM. Adapt this to your runtime —
+            # any LangChain chat model works. The agent's own LLM is ideal:
+            # compression IS the cognition, so the model that did the work
+            # should be the one reflecting on it.
+            compressed = llm.invoke(
+                f"Compress these episodes into continuity:\n"
+                f"{package['instructions']}\n"
+                f"Episodes:\n{package['episodes']}\n"
+                f"Current continuity:\n{package['continuity'] or ''}"
+            )
+            validated_save_continuity(self.store, compressed.content)
 
         return None
 

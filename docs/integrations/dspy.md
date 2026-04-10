@@ -24,7 +24,7 @@ DSPy's callback system provides hooks at every execution layer:
 ```python
 import dspy
 from dspy.utils.callback import BaseCallback
-from anneal_memory import Store, EpisodeType, prepare_wrap_package
+from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
 
 
 store = Store("./memory.db", project_name="my-dspy-program")
@@ -103,17 +103,16 @@ result = rag(question="What are the trends in AI memory systems?")
 print(result.answer)
 
 # Wrap after program execution
-episodes = store.episodes_since_wrap()
-if episodes:
-    continuity = store.load_continuity()
-    package = prepare_wrap_package(episodes, continuity, store.project_name)
+wrap = prepare_wrap(store)
+if wrap["status"] == "ready":
+    package = wrap["package"]
     # Compress via LLM
     compress_module = dspy.ChainOfThought(
         "episodes, continuity, instructions -> compressed_continuity"
     )
     compressed = compress_module(
         episodes=package["episodes"],
-        continuity=package["continuity"],
+        continuity=package["continuity"] or "",
         instructions=package["instructions"],
     )
     validated_save_continuity(store, compressed.compressed_continuity)
@@ -189,11 +188,20 @@ DSPy's optimizers compile programs using training data. Memory adds context acro
 optimizer = dspy.MIPROv2(metric=my_metric, auto="light")
 optimized = optimizer.compile(rag, trainset=train_data)
 
-# Wrap after optimization to capture what was learned
-episodes = store.episodes_since_wrap()
-if episodes:
-    # Compress the optimization session's learnings
-    pass
+# Wrap after optimization to capture what was learned. Use the same
+# prepare_wrap + validated_save_continuity pattern as the main example:
+wrap = prepare_wrap(store)
+if wrap["status"] == "ready":
+    package = wrap["package"]
+    compress_module = dspy.ChainOfThought(
+        "episodes, continuity, instructions -> compressed_continuity"
+    )
+    compressed = compress_module(
+        episodes=package["episodes"],
+        continuity=package["continuity"] or "",
+        instructions=package["instructions"],
+    )
+    validated_save_continuity(store, compressed.compressed_continuity)
 
 # Save the optimized program
 optimized.save("optimized_rag.json")

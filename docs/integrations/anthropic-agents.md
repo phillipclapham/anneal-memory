@@ -39,24 +39,32 @@ For agents built with the Claude Agent SDK (`claude-agent-sdk`), hooks provide p
 
 ```python
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, query
-from anneal_memory import Store, EpisodeType, prepare_wrap_package
+from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
 
 store = Store("./memory.db", project_name="my-claude-agent")
 
 
 async def on_session_stop(input_data, tool_use_id, context):
     """Trigger wrap when agent finishes."""
-    episodes = store.episodes_since_wrap()
-    if episodes:
-        continuity = store.load_continuity()
-        package = prepare_wrap_package(episodes, continuity, store.project_name)
-        # The agent should compress this — inject as system message
+    wrap = prepare_wrap(store)
+    if wrap["status"] == "ready":
+        package = wrap["package"]
+        # The Claude agent compresses in-conversation by receiving the
+        # package as a system message. The agent's compressed reply is
+        # then passed to validated_save_continuity by a follow-up hook
+        # (or by the main conversation loop) — showing the full pattern:
+        #
+        #   compressed = agent_reply_text  # the agent's compression reply
+        #   validated_save_continuity(store, compressed)
+        #
+        # Never call store.save_continuity() directly — that bypasses
+        # the immune system.
         return {
             "systemMessage": (
                 f"Before you finish, compress your session memory:\n"
                 f"{package['instructions']}\n"
                 f"Episodes:\n{package['episodes']}\n"
-                f"Current continuity:\n{package['continuity']}"
+                f"Current continuity:\n{package['continuity'] or ''}"
             ),
             "continue_": True,
         }
@@ -77,8 +85,10 @@ async def on_tool_use(input_data, tool_use_id, context):
 
 async def on_compact(input_data, tool_use_id, context):
     """Context window pressure — good time to compress."""
-    episodes = store.episodes_since_wrap()
-    if len(episodes) > 10:
+    # store.status() is the read-only peek at store state — use this for
+    # threshold checks, not store.episodes_since_wrap() (that's a
+    # private-ish API; status() is the public surface).
+    if store.status().episodes_since_wrap > 10:
         return {
             "systemMessage": "Context is getting long. Consider wrapping your memory.",
         }

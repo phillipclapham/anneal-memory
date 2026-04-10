@@ -21,7 +21,7 @@ LlamaIndex's instrumentation system (replaces the legacy callback system) provid
 ## Complete Example
 
 ```python
-from anneal_memory import Store, EpisodeType, prepare_wrap_package
+from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
 import llama_index.core.instrumentation as instrument
 from llama_index.core.instrumentation.event_handlers import BaseEventHandler
 from llama_index.core.instrumentation.events import BaseEvent
@@ -87,14 +87,18 @@ agent = FunctionAgent(
 # Run
 result = await agent.run(user_msg="Analyze the dataset")
 
-# Wrap after run
-episodes = store.episodes_since_wrap()
-if episodes:
-    continuity_text = store.load_continuity()
-    package = prepare_wrap_package(episodes, continuity_text, store.project_name)
-    # Compress via LLM and save
-    # compressed = await llm.achat([...compress prompt...])
-    # validated_save_continuity(store, compressed.message.content)
+# Wrap after run — LlamaIndex's llm abstraction compresses the package:
+wrap = prepare_wrap(store)
+if wrap["status"] == "ready":
+    package = wrap["package"]
+    from llama_index.core.llms import ChatMessage
+    prompt = (
+        f"{package['instructions']}\n\n"
+        f"Episodes:\n{package['episodes']}\n\n"
+        f"Current continuity:\n{package['continuity'] or ''}"
+    )
+    compressed = await llm.achat([ChatMessage(role="user", content=prompt)])
+    validated_save_continuity(store, compressed.message.content)
 
 store.close()
 ```

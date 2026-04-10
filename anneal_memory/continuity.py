@@ -3,6 +3,7 @@
 Handles:
 - Structural validation (4 required sections)
 - Wrap package preparation (episodes + continuity + instructions for the agent)
+- Validated save (full pipeline: structure + graduation + associations + decay)
 - Section measurement
 
 The continuity file is a 4-section markdown document:
@@ -20,8 +21,8 @@ import re
 from datetime import date
 from typing import Any
 
-from .graduation import detect_stale_patterns
-from .types import Episode
+from .graduation import detect_stale_patterns, validate_graduations
+from .types import AffectiveState, Episode
 
 # The 4 required sections
 _REQUIRED_SECTIONS = frozenset({"state", "patterns", "decisions", "context"})
@@ -232,3 +233,107 @@ Use `[decided(rationale: "why", on: "date")] choice` markers.
 - Existing decisions still referenced by active State/Patterns → keep
 - 3+ related decisions pointing same direction → extract principle to Patterns, archive individuals
 - Decisions >30 days old referencing nothing active → remove"""
+
+
+def validated_save_continuity(
+    store: Any,
+    text: str,
+    affective_state: AffectiveState | None = None,
+) -> dict[str, Any]:
+    """Save continuity with the full validation pipeline.
+
+    This is the library equivalent of what the MCP server and CLI do:
+    structure validation, graduation citation checking, Hebbian association
+    formation, decay, metadata update, and wrap completion recording.
+
+    Use this instead of bare ``store.save_continuity()`` to get the immune
+    system, associations, and decay — the features that make anneal-memory
+    different from a flat file.
+
+    Args:
+        store: A Store instance.
+        text: The agent-compressed continuity text.
+        affective_state: Optional agent functional state during this wrap.
+
+    Returns:
+        Dict with wrap results: path, episodes_compressed, graduations_validated,
+        graduations_demoted, associations_formed, associations_strengthened,
+        associations_decayed, skipped_prepare.
+
+    Raises:
+        ValueError: If text is empty or missing required sections.
+    """
+    from .associations import process_wrap_associations
+
+    if not text or not text.strip():
+        raise ValueError("Continuity text cannot be empty")
+
+    # Validate structure (4 required sections)
+    if not validate_structure(text):
+        raise ValueError(
+            "Continuity must contain all 4 sections: "
+            "## State, ## Patterns, ## Decisions, ## Context"
+        )
+
+    # Check if prepare_wrap was called first
+    skipped_prepare = not store.status().wrap_in_progress
+
+    # Get current session's episodes for citation validation
+    episodes = store.episodes_since_wrap()
+    valid_ids = {ep.id[:8].lower() for ep in episodes}
+    node_content_map = {ep.id[:8].lower(): ep.content for ep in episodes}
+
+    # Check citation history
+    meta = store.load_meta()
+    citations_seen = meta.get("citations_seen", False)
+
+    # Validate graduations (demotes bad citations in-place)
+    today = date.today().isoformat()
+    grad_result = validate_graduations(
+        text=text,
+        valid_ids=valid_ids,
+        today=today,
+        node_content_map=node_content_map,
+        citations_seen=citations_seen,
+    )
+
+    # Save the (possibly modified) continuity text
+    path = store.save_continuity(grad_result.text)
+
+    # Record Hebbian associations from validated co-citations + decay
+    assoc_formed, assoc_strengthened, assoc_decayed = \
+        process_wrap_associations(store, grad_result, affective_state)
+
+    # Update metadata
+    if grad_result.validated > 0 or grad_result.citation_counts:
+        meta["citations_seen"] = True
+    meta["sessions_produced"] = meta.get("sessions_produced", 0) + 1
+    store.save_meta(meta)
+
+    # Record wrap completion
+    sections = measure_sections(grad_result.text)
+    patterns = len(re.findall(r"\|\s*\d+x", grad_result.text))
+    wrap_result = store.wrap_completed(
+        episodes_compressed=len(episodes),
+        continuity_chars=len(grad_result.text),
+        graduations_validated=grad_result.validated,
+        graduations_demoted=grad_result.demoted,
+        citation_reuse_max=max(grad_result.citation_counts.values())
+        if grad_result.citation_counts else 0,
+        patterns_extracted=patterns,
+        associations_formed=assoc_formed,
+        associations_strengthened=assoc_strengthened,
+        associations_decayed=assoc_decayed,
+    )
+
+    return {
+        "path": path,
+        "episodes_compressed": len(episodes),
+        "graduations_validated": grad_result.validated,
+        "graduations_demoted": grad_result.demoted,
+        "associations_formed": assoc_formed,
+        "associations_strengthened": assoc_strengthened,
+        "associations_decayed": assoc_decayed,
+        "skipped_prepare": skipped_prepare,
+        "wrap_result": wrap_result,
+    }

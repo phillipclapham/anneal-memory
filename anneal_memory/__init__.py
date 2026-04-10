@@ -15,7 +15,7 @@ from .types import (
     WrapResult,
 )
 from .audit import AuditTrail, AuditVerifyResult
-from .continuity import validate_structure, prepare_wrap_package
+from .continuity import validate_structure, prepare_wrap_package, validated_save_continuity
 from .graduation import (
     validate_graduations,
     check_explanation_overlap,
@@ -43,6 +43,7 @@ __all__ = [
     "RESOURCES",
     "validate_structure",
     "prepare_wrap_package",
+    "validated_save_continuity",
     "validate_graduations",
     "check_explanation_overlap",
     "detect_stale_patterns",

@@ -452,6 +452,83 @@ class TestContinuityIO:
         assert meta["format_version"] == 1
 
 
+class TestValidatedSaveContinuity:
+    """Tests for the library-level validated_save_continuity function."""
+
+    def test_validated_save_runs_full_pipeline(self, store):
+        """validated_save_continuity should validate, save, form associations, and record wrap."""
+        from anneal_memory import validated_save_continuity
+
+        # Record some episodes first
+        ep1 = store.record("Database is slow", EpisodeType.OBSERVATION)
+        ep2 = store.record("Chose caching", EpisodeType.DECISION)
+
+        # Mark wrap as in progress
+        store.wrap_started()
+
+        # Build continuity with citations to both episodes
+        text = (
+            f"# Test — Memory (v1)\n\n"
+            f"## State\nWorking on performance.\n\n"
+            f"## Patterns\n"
+            f"thought: caching helps performance "
+            f"| 1x (2026-04-09)\n\n"
+            f"## Decisions\n"
+            f"[decided(rationale: \"speed\", on: \"2026-04-09\")] Use caching\n\n"
+            f"## Context\nOptimizing database layer.\n"
+        )
+
+        result = validated_save_continuity(store, text)
+
+        # Should have saved
+        assert store.load_continuity() is not None
+        assert result["path"] is not None
+        assert result["episodes_compressed"] == 2
+
+        # Wrap should be recorded
+        status = store.status()
+        assert status.total_wraps >= 1
+        assert not status.wrap_in_progress
+
+        # Metadata should be updated
+        meta = store.load_meta()
+        assert meta["sessions_produced"] >= 1
+
+    def test_validated_save_rejects_missing_sections(self, store):
+        """Should raise ValueError for malformed continuity."""
+        from anneal_memory import validated_save_continuity
+
+        store.record("Something", EpisodeType.OBSERVATION)
+        with pytest.raises(ValueError, match="4 sections"):
+            validated_save_continuity(store, "Just some text without sections")
+
+    def test_validated_save_rejects_empty_text(self, store):
+        """Should raise ValueError for empty text."""
+        from anneal_memory import validated_save_continuity
+
+        with pytest.raises(ValueError, match="empty"):
+            validated_save_continuity(store, "")
+
+    def test_validated_save_with_affective_state(self, store):
+        """Should accept and pass through affective state."""
+        from anneal_memory import validated_save_continuity, AffectiveState
+
+        store.record("Interesting finding", EpisodeType.OBSERVATION)
+        store.wrap_started()
+
+        text = (
+            "# Test — Memory (v1)\n\n"
+            "## State\nExploring.\n\n"
+            "## Patterns\nthought: interesting | 1x (2026-04-09)\n\n"
+            "## Decisions\nNone yet.\n\n"
+            "## Context\nFirst session.\n"
+        )
+
+        affect = AffectiveState(tag="curious", intensity=0.8)
+        result = validated_save_continuity(store, text, affective_state=affect)
+        assert result["episodes_compressed"] == 1
+
+
 # -- Status --
 
 

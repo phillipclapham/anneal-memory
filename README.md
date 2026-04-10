@@ -14,11 +14,75 @@ Persistent memory [increases agent sycophancy by 45%](https://arxiv.org/abs/2509
 
 anneal-memory is that immune system. Patterns earn permanence through cited evidence, false knowledge gets caught and demoted, stale information fades, and associations form through consolidation. Your agent's memory develops over time, not just accumulates.
 
-Four cognitive layers: episodic store, compressed continuity, Hebbian associations, and affective state tracking. Zero dependencies. 6 tools. Works with any MCP client.
+Four cognitive layers: episodic store, compressed continuity, Hebbian associations, and affective state tracking. Zero dependencies (Python stdlib only). Works with any agent framework.
 
 ## Quick Start
 
-**1. Run the server** (no install required):
+```
+pip install anneal-memory
+```
+
+### Python Library
+
+The library is the core product. Import it, use it in any framework or script.
+
+```python
+from anneal_memory import Store, EpisodeType, prepare_wrap_package, validated_save_continuity
+
+# Initialize (creates DB + continuity file automatically)
+store = Store("./memory.db", project_name="MyAgent")
+
+# Record episodes during work
+store.record("Connection pool is the real bottleneck", EpisodeType.OBSERVATION)
+store.record("Chose PostgreSQL because ACID outweighs speed", EpisodeType.DECISION)
+
+# Recall before decisions
+result = store.recall(episode_type=EpisodeType.DECISION, keyword="database")
+for ep in result.episodes:
+    print(f"[{ep.type}] {ep.content}")
+
+# Compress at session end (the cognitive act)
+episodes = store.episodes_since_wrap()
+continuity = store.load_continuity()
+package = prepare_wrap_package(episodes, continuity, "MyAgent")
+# Agent compresses package into updated continuity using its own judgment...
+validated_save_continuity(store, compressed_text)  # full immune system pipeline
+
+store.close()
+```
+
+See [Library Quickstart](docs/library-quickstart.md) for the full guide.
+
+### CLI
+
+Inspect, debug, and manage agent memory from the command line. 21 subcommands, all with `--json` output. Agents with shell access (Claude Code, Aider, etc.) can use the CLI directly for the full memory workflow.
+
+```bash
+# Initialize
+anneal-memory init --project-name MyAgent
+
+# Record and recall
+anneal-memory record "Chose PostgreSQL for ACID" --type decision
+anneal-memory search "database"
+
+# Agent-driven compression (same workflow as library and MCP)
+anneal-memory prepare-wrap           # Get compression package
+# Agent compresses...
+anneal-memory save-continuity out.md # Save with validation
+
+# Operator commands (things MCP can't do)
+anneal-memory stats                  # Detailed analytics
+anneal-memory graph --format dot     # Association graph (Graphviz)
+anneal-memory diff --wraps 5         # Wrap metric progression
+anneal-memory audit --since 7d       # Read audit trail
+anneal-memory export --format json   # Full store export
+```
+
+See [`examples/CLAUDE.md.cli.example`](examples/CLAUDE.md.cli.example) for the agent workflow snippet.
+
+### MCP Server
+
+For MCP-enabled editors (Claude Code, Cursor, Windsurf, etc.). Zero-config — add to your MCP settings and go.
 
 ```json
 {
@@ -31,19 +95,42 @@ Four cognitive layers: episodic store, compressed continuity, Hebbian associatio
 }
 ```
 
-Add this to `.mcp.json` in your project root (Claude Code) or your editor's MCP config.
-
-The database defaults to `~/.anneal-memory/memory.db` (auto-created). Override with `--db /path/to/memory.db` for per-project storage.
+Add the [orchestration snippet](examples/CLAUDE.md.example) to your project's `CLAUDE.md` — it teaches the agent *when* and *how* to use the memory tools. Without this snippet, the tools are available but the agent won't know the cognitive workflow.
 
 > **Alternative:** `pip install anneal-memory` if you prefer a pinned install, then use `"command": "anneal-memory"` directly.
 
-**2. Add the orchestration snippet** to your project's `CLAUDE.md`:
+### All Three Paths, Same Cognitive Loop
 
-Copy the contents of [`examples/CLAUDE.md.example`](examples/CLAUDE.md.example) into your project's `CLAUDE.md`. This teaches the agent *when* and *how* to use the memory tools throughout a session — recording episodes during work, checking prior context before decisions, and running the full compression sequence at session end.
+Every access pattern preserves the same workflow: record episodes during work → compress at session boundaries → load continuity at session start. The agent that records is the agent that compresses. Compression cannot be delegated — it IS the cognition.
 
-Without this snippet, the tools are available but the agent won't know the workflow. This is the most important setup step.
+| | Library | CLI | MCP |
+|---|---|---|---|
+| **Install** | `pip install anneal-memory` | Same | `uvx anneal-memory` or same |
+| **Record** | `store.record(content, type)` | `anneal-memory record "..." --type T` | `record` tool |
+| **Recall** | `store.recall(keyword=...)` | `anneal-memory search "..."` | `recall` tool |
+| **Compress** | `prepare_wrap_package()` → agent → `validated_save_continuity()` | `prepare-wrap` → agent → `save-continuity` | `prepare_wrap` → agent → `save_continuity` |
+| **Best for** | Framework integration, custom agents | Agents with shell access, operators | MCP-enabled editors |
 
-**3. Restart your editor.** That's it. The agent now records, recalls, and compresses memory across sessions.
+## Framework Integrations
+
+anneal-memory works with any agent framework through the Python library. Each guide below shows where to call the four core functions — `record()`, `recall()`, `prepare_wrap_package()`, `save_continuity()` — within the framework's lifecycle.
+
+| Framework | Integration Point | Guide |
+|-----------|------------------|-------|
+| **LangGraph / LangChain** | `AgentMiddleware` (before/after agent + model) | [docs/integrations/langgraph.md](docs/integrations/langgraph.md) |
+| **CrewAI** | `BaseEventListener` (event bus) | [docs/integrations/crewai.md](docs/integrations/crewai.md) |
+| **OpenAI Agents SDK** | `RunHooks` (agent lifecycle) | [docs/integrations/openai-agents.md](docs/integrations/openai-agents.md) |
+| **Anthropic Agents SDK** | CLAUDE.md snippet + `Stop` hook | [docs/integrations/anthropic-agents.md](docs/integrations/anthropic-agents.md) |
+| **Google ADK** | Callbacks + custom `MemoryService` | [docs/integrations/google-adk.md](docs/integrations/google-adk.md) |
+| **Pydantic AI** | `AbstractCapability` with `Hooks` | [docs/integrations/pydantic-ai.md](docs/integrations/pydantic-ai.md) |
+| **smolagents** | `step_callbacks` dict | [docs/integrations/smolagents.md](docs/integrations/smolagents.md) |
+| **LlamaIndex** | Instrumentation `BaseEventHandler` | [docs/integrations/llamaindex.md](docs/integrations/llamaindex.md) |
+| **Haystack** | Custom `Tracer` | [docs/integrations/haystack.md](docs/integrations/haystack.md) |
+| **CAMEL-AI** | `WorkforceCallback` | [docs/integrations/camel-ai.md](docs/integrations/camel-ai.md) |
+| **AutoGen / AG2** | `register_hook()` | [docs/integrations/autogen.md](docs/integrations/autogen.md) |
+| **DSPy** | `BaseCallback` | [docs/integrations/dspy.md](docs/integrations/dspy.md) |
+
+These guides show integration patterns based on each framework's current API. The library works with any Python framework — the pattern is always the same: initialize a `Store`, call `record()` at meaningful moments, `recall()` before decisions, and run the wrap sequence at session end. **Don't see your framework?** The [library quickstart](docs/library-quickstart.md) shows the 4-function pattern that works everywhere.
 
 ## Why This Exists
 
@@ -104,6 +191,9 @@ Transformers don't natively maintain persistent state between sessions. This lay
 Pass affective state during a wrap:
 
 ```python
+# Via library
+store.save_continuity(text)  # affective state recorded via wrap metadata
+
 # Via MCP tool
 save_continuity(text="...", affective_state={"tag": "curious", "intensity": 0.8})
 
@@ -163,8 +253,8 @@ This is experimental infrastructure. The associations and strength model work wi
 | **Association formation** | Co-citation during consolidation | None | None | Co-retrieval at runtime | Co-access at runtime |
 | **Affective tracking** | Agent self-report during compression | None | None | None | None |
 | **Audit trail** | Hash-chained JSONL | None | None | None | None |
+| **Access patterns** | Library + CLI + MCP | MCP only | REST API | Python only | MCP only |
 | **Dependencies** | Zero (Python stdlib) | Node.js | Docker + cloud | Embeddings model | Not specified |
-| **Tools** | 6 + 2 resources | 6 | Varies | Not MCP | MCP (mcpmarket) |
 
 ## Session Hygiene
 
@@ -182,11 +272,24 @@ anneal-memory works the same way. During a session, episodes accumulate in the e
 
 **Rules of thumb:**
 - Always wrap before ending a session. An unwrapped session is like an all-nighter — the experiences happened but they weren't consolidated
-- The [CLAUDE.md snippet](examples/CLAUDE.md.example) handles this automatically — it teaches the agent to detect session-end signals ("let's wrap up," "we're done") and run the full sequence
+- The orchestration snippets ([MCP](examples/CLAUDE.md.example), [CLI](examples/CLAUDE.md.cli.example)) handle this automatically — they teach the agent to detect session-end signals and run the full sequence
 - Short sessions (3-5 episodes) still benefit from wraps. Even a small amount of compression builds the continuity file
 - If `prepare_wrap` says "no episodes" — nothing to compress. That's fine, skip it
 
 The graduation system and association network both depend on wraps to function. Patterns can only be promoted (1x -> 2x -> 3x) during compression, citations can only be validated during wraps, associations only form through co-citation during wraps, and stale patterns can only be detected when the agent reviews what it knows against what it recently experienced. No wraps = no immune system, no associations, no cognitive development.
+
+## MCP Tools
+
+| Tool | When to call |
+|------|-------------|
+| `record` | When something important happens — a decision, observation, tension, question, outcome, or context change |
+| `recall` | Before making decisions that might have prior context. Query by time, type, keyword, or ID |
+| `prepare_wrap` | At session end — returns episodes + current continuity + association context + compression instructions |
+| `save_continuity` | After compressing — server validates structure, citations, records associations, applies decay, and saves |
+| `delete_episode` | Remove content that should not exist (PII, sensitive data). Cascades to associations. Logged in audit trail |
+| `status` | Check memory health: episode counts, wrap history, continuity size, association network metrics |
+
+**Resources:** `anneal://continuity` — the current continuity file, auto-loaded at session start. `anneal://integrity/manifest` — SHA-256 hashes for host-side tool description verification.
 
 ## Compliance and Audit
 
@@ -203,13 +306,12 @@ Every memory operation — episode recorded, episode deleted, wrap started, wrap
 - **Crash recovery** — incomplete entries detected and handled on restart
 
 ```python
-from anneal_memory import Store
+from anneal_memory import Store, AuditTrail
 
 # Audit trail is on by default
 store = Store("./memory.db", project_name="MyAgent")
 
 # Verify chain integrity
-from anneal_memory import AuditTrail
 result = AuditTrail.verify("./memory.db")
 print(f"Valid: {result.valid}, Entries: {result.total_entries}")
 
@@ -222,19 +324,6 @@ store = Store("./memory.db", on_audit_event=lambda entry: send_to_siem(entry))
 **What's next:**
 - **Compliance proxy** (Layer 2) — MCP transport-layer interception that captures *all* agent actions (every tool call, every response), not just memory operations. Same store, `source` field distinguishes intentional recording from automatic capture. Memory audit = "here's what the agent learned." Compliance proxy = "here's everything that happened."
 - **Multi-agent shared memory** — shared episodic pool with per-agent continuity and per-agent association topology. Full cross-agent audit trail.
-
-## MCP Tools
-
-| Tool | When to call |
-|------|-------------|
-| `record` | When something important happens — a decision, observation, tension, question, outcome, or context change |
-| `recall` | Before making decisions that might have prior context. Query by time, type, keyword, or ID |
-| `prepare_wrap` | At session end — returns episodes + current continuity + association context + compression instructions |
-| `save_continuity` | After compressing — server validates structure, citations, records associations, applies decay, and saves |
-| `delete_episode` | Remove content that should not exist (PII, sensitive data). Cascades to associations. Logged in audit trail |
-| `status` | Check memory health: episode counts, wrap history, continuity size, association network metrics |
-
-**Resources:** `anneal://continuity` — the current continuity file, auto-loaded at session start. `anneal://integrity/manifest` — SHA-256 hashes for host-side tool description verification.
 
 ## Continuity Markers
 
@@ -255,56 +344,6 @@ A ><[axis] B                    tension on an axis
 | 2x (2026-04-01) [evidence: abc123 "explanation"]   validated pattern
 ```
 
-## Python API
-
-```python
-from anneal_memory import Store, EpisodeType
-
-with Store("./memory.db", project_name="MyAgent") as store:
-    store.record("User prefers PostgreSQL for ACID", EpisodeType.OBSERVATION)
-    store.record("Chose pooling over caching", EpisodeType.DECISION)
-
-    result = store.recall(episode_type=EpisodeType.DECISION, keyword="pooling")
-
-    episodes = store.episodes_since_wrap()
-    from anneal_memory import prepare_wrap_package
-    package = prepare_wrap_package(episodes, store.load_continuity(), "MyAgent")
-    # -> episodes, continuity, stale_patterns, instructions, today
-
-    # Associations
-    stats = store.association_stats()
-    print(f"Links: {stats.total_links}, Avg strength: {stats.avg_strength}")
-
-    assocs = store.get_associations(episode_ids=["abc123"], min_strength=0.5)
-    for a in assocs:
-        print(f"{a.id_a} <-> {a.id_b} strength={a.strength}")
-```
-
-## CLI (Operator Interface)
-
-Inspect, debug, and manage agent memory from the command line. 21 subcommands, all with `--json` output.
-
-```bash
-pip install anneal-memory
-
-# Agent-driven compression workflow (same as MCP)
-anneal-memory prepare-wrap           # Get compression package
-# Agent compresses in its own reasoning...
-anneal-memory save-continuity out.md # Save with validation
-
-# Operator commands (things MCP can't do)
-anneal-memory stats                  # Detailed analytics
-anneal-memory graph --format dot     # Association graph (Graphviz)
-anneal-memory diff --wraps 5         # Wrap metric progression
-anneal-memory audit --since 7d       # Read audit trail
-anneal-memory export --format json   # Full store export
-anneal-memory history                # Wrap timeline
-```
-
-The CLI preserves the same cognitive workflow as MCP — the agent that records episodes is the agent that compresses them. `prepare-wrap` outputs the compression package, the agent applies its own judgment, `save-continuity` validates and records the result. Compression cannot be delegated without breaking the thesis.
-
-See [`examples/CLAUDE.md.cli.example`](examples/CLAUDE.md.cli.example) for the full CLI workflow snippet.
-
 ## Security
 
 Tool description integrity verification detects [description poisoning](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/2402) — where manipulated tool descriptions alter LLM behavior without changing tool functionality.
@@ -321,7 +360,7 @@ anneal-memory --skip-integrity      # Bypass for development
 
 ## Lineage
 
-anneal-memory's architecture grew from [FlowScript](https://github.com/phillipclapham/flowscript) — a typed reasoning notation that explored compression-as-cognition, temporal graduation, and citation-validated patterns. The core insights proved more powerful than the syntax; anneal-memory delivers them as a zero-dependency MCP server where agents use natural language instead of learning notation. The FlowScript notation remains in active daily use for reasoning compression, and a 9-marker subset powers the continuity compression prompts.
+anneal-memory's architecture grew from [FlowScript](https://github.com/phillipclapham/flowscript) — a typed reasoning notation that explored compression-as-cognition, temporal graduation, and citation-validated patterns. The core insights proved more powerful than the syntax; anneal-memory delivers them as a zero-dependency memory system where agents use natural language instead of learning notation. The FlowScript notation remains in active daily use for reasoning compression, and a 9-marker subset powers the continuity compression prompts.
 
 ## License
 

@@ -1,5 +1,6 @@
 {
   "tools": {
+    "delete_episode": "8d88033cee7c1c4dcabdbb16b678ab4ade5dc54e8b4aa9647a3ab8b8230af3b1",
     "prepare_wrap": "d7f0ff2d3d36f069edb9cbf07f8d34b27d296a026f76b2245f6bda7ed284344d",
     "recall": "221dedbf09560b827eabd48a4411e15a22e8c45aa981b5967039a71322492d22",
     "record": "00f640314c4571542584a4122b0750636d01da83dfc8d461ad21a9524d3ac154",

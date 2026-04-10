@@ -37,6 +37,7 @@ from .types import (
     RecallResult,
     StoreStatus,
     Tombstone,
+    WrapRecord,
     WrapResult,
 )
 
@@ -597,6 +598,47 @@ class Store:
             associations_strengthened=associations_strengthened,
             associations_decayed=associations_decayed,
         )
+
+    def get_wrap_history(self) -> list[WrapRecord]:
+        """Return the full wrap history in chronological order.
+
+        Public read API for the wraps table. Replaces ad-hoc ``_conn``
+        access in CLI monitoring subcommands (``history``, ``diff``,
+        ``stats``, ``export``). Returns an empty list if no wraps have
+        been recorded or if the wraps table is unreachable.
+
+        Returns:
+            List of WrapRecord, oldest first.
+        """
+        try:
+            rows = self._conn.execute(
+                """SELECT id, wrapped_at, episodes_compressed, continuity_chars,
+                          graduations_validated, graduations_demoted,
+                          citation_reuse_max, patterns_extracted,
+                          associations_formed, associations_strengthened,
+                          associations_decayed
+                   FROM wraps ORDER BY id ASC"""
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # Defensive: legacy DBs pre-migration. Post-init this should not fire.
+            return []
+
+        return [
+            WrapRecord(
+                id=row["id"],
+                wrapped_at=row["wrapped_at"],
+                episodes_compressed=row["episodes_compressed"],
+                continuity_chars=row["continuity_chars"],
+                graduations_validated=row["graduations_validated"] or 0,
+                graduations_demoted=row["graduations_demoted"] or 0,
+                citation_reuse_max=row["citation_reuse_max"] or 0,
+                patterns_extracted=row["patterns_extracted"] or 0,
+                associations_formed=row["associations_formed"] or 0,
+                associations_strengthened=row["associations_strengthened"] or 0,
+                associations_decayed=row["associations_decayed"] or 0,
+            )
+            for row in rows
+        ]
 
     # -- Associations (Hebbian) --
 

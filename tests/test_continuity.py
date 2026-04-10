@@ -4,10 +4,13 @@ import pytest
 
 from anneal_memory.continuity import (
     format_episodes_for_wrap,
+    format_wrap_package_text,
     measure_sections,
+    prepare_wrap,
     prepare_wrap_package,
     validate_structure,
 )
+from anneal_memory.store import Store
 from anneal_memory.types import Episode, EpisodeType
 
 
@@ -280,5 +283,226 @@ Working.
             SAMPLE_EPISODES, None, "Test", max_chars=10000, today="2026-03-31"
         )
         assert pkg["max_chars"] == 10000
+
+
+# -- prepare_wrap (store-aware library pipeline) --
+
+
+@pytest.fixture
+def wrap_store(tmp_path):
+    """Store fixture for prepare_wrap pipeline tests."""
+    s = Store(str(tmp_path / "wrap_test.db"), project_name="WrapTest")
+    yield s
+    s.close()
+
+
+class TestPrepareWrapLibrary:
+    """Tests for the store-aware library prepare_wrap function.
+
+    This is the canonical pipeline entry point that MCP and CLI
+    transports delegate to. It must handle both the empty case
+    (no episodes → wrap_cancelled) and the ready case (episodes
+    present → wrap_started, package built, association context
+    attached).
+    """
+
+    def test_empty_store_returns_empty_status(self, wrap_store):
+        """No episodes → status 'empty', wrap_cancelled called."""
+        result = prepare_wrap(wrap_store)
+        assert result["status"] == "empty"
+        assert result["episode_count"] == 0
+        assert result["package"] is None
+        assert result["assoc_context"] is None
+        # wrap_started should not be set
+        assert not wrap_store.status().wrap_in_progress
+
+    def test_empty_clears_stale_wrap_in_progress(self, wrap_store):
+        """Empty path must call wrap_cancelled to clear any stale flag.
+
+        A prior abandoned wrap could have left wrap_in_progress=True.
+        prepare_wrap on an empty store must clean it up.
+        """
+        wrap_store.wrap_started()  # Simulate a stale flag
+        assert wrap_store.status().wrap_in_progress
+
+        result = prepare_wrap(wrap_store)
+        assert result["status"] == "empty"
+        assert not wrap_store.status().wrap_in_progress
+
+    def test_ready_status_with_episodes(self, wrap_store):
+        """Episodes present → status 'ready' with populated package."""
+        wrap_store.record("First observation", EpisodeType.OBSERVATION)
+        wrap_store.record("A decision", EpisodeType.DECISION)
+
+        result = prepare_wrap(wrap_store)
+        assert result["status"] == "ready"
+        assert result["episode_count"] == 2
+        assert result["package"] is not None
+        # Package should contain the full prepare_wrap_package output
+        pkg = result["package"]
+        assert "episodes" in pkg
+        assert "continuity" in pkg
+        assert "instructions" in pkg
+        assert "stale_patterns" in pkg
+        assert "today" in pkg
+        assert "max_chars" in pkg
+        assert pkg["episode_count"] == 2
+
+    def test_ready_sets_wrap_in_progress(self, wrap_store):
+        """Ready path must call wrap_started on the store."""
+        wrap_store.record("Observation", EpisodeType.OBSERVATION)
+        assert not wrap_store.status().wrap_in_progress
+        prepare_wrap(wrap_store)
+        assert wrap_store.status().wrap_in_progress
+
+    def test_first_session_no_existing_continuity(self, wrap_store):
+        """First wrap should surface None continuity in the package."""
+        wrap_store.record("Observation", EpisodeType.OBSERVATION)
+        result = prepare_wrap(wrap_store)
+        assert result["package"]["continuity"] is None
+
+    def test_max_chars_and_staleness_days_passed_through(self, wrap_store):
+        """Caller-provided config must reach prepare_wrap_package."""
+        wrap_store.record("Observation", EpisodeType.OBSERVATION)
+        result = prepare_wrap(
+            wrap_store, max_chars=5000, staleness_days=14
+        )
+        assert result["package"]["max_chars"] == 5000
+        # staleness_days is not directly surfaced in the package but
+        # verifying no crash on custom value is sufficient here
+
+    def test_assoc_context_is_none_when_no_associations(self, wrap_store):
+        """No Hebbian links yet → assoc_context is None, not empty string."""
+        wrap_store.record("Observation", EpisodeType.OBSERVATION)
+        result = prepare_wrap(wrap_store)
+        assert result["assoc_context"] is None
+
+
+# -- format_wrap_package_text (canonical display text) --
+
+
+class TestFormatWrapPackageText:
+    """Tests for the canonical wrap-package text formatter.
+
+    This is the display text MCP and CLI transports hand to the agent.
+    Extracting it into a library helper means both transports render
+    identical output — no drift risk between MCP prepare_wrap and
+    CLI prepare-wrap.
+    """
+
+    def test_empty_returns_message_unchanged(self):
+        result = {
+            "status": "empty",
+            "message": "No episodes since last wrap. Nothing to compress.",
+            "episode_count": 0,
+            "package": None,
+            "assoc_context": None,
+        }
+        text = format_wrap_package_text(result)
+        assert text == "No episodes since last wrap. Nothing to compress."
+
+    def test_ready_first_session_includes_first_wrap_notice(self, tmp_path):
+        """Ready path with no existing continuity should note 'first wrap'."""
+        store = Store(str(tmp_path / "fmt_test.db"), project_name="Test")
+        try:
+            store.record("Observation A", EpisodeType.OBSERVATION)
+            result = prepare_wrap(store)
+            text = format_wrap_package_text(result)
+            assert "## Episodes This Session" in text
+            assert "(No existing continuity file — this is the first wrap.)" in text
+            # Compression instructions should lead the output
+            assert text.startswith("Compress your session episodes")
+        finally:
+            store.close()
+
+    def test_ready_with_existing_continuity(self, tmp_path):
+        """Existing continuity should appear under its header."""
+        store = Store(str(tmp_path / "fmt_test2.db"), project_name="Test")
+        try:
+            store.save_continuity(
+                "# Test — Memory (v1)\n\n"
+                "## State\nPrior state.\n\n"
+                "## Patterns\nnone yet\n\n"
+                "## Decisions\nnone\n\n"
+                "## Context\nPrior context.\n"
+            )
+            store.record("New observation", EpisodeType.OBSERVATION)
+            result = prepare_wrap(store)
+            text = format_wrap_package_text(result)
+            assert "## Current Continuity File" in text
+            assert "Prior state." in text
+        finally:
+            store.close()
+
+    def test_stale_patterns_section_appears_when_present(self):
+        """Stale patterns in the package should be rendered as a section."""
+        # Hand-built result to isolate formatting from store state
+        result = {
+            "status": "ready",
+            "message": "Ready.",
+            "episode_count": 1,
+            "package": {
+                "instructions": "Compress your episodes.",
+                "episodes": "(test)",
+                "episode_count": 1,
+                "continuity": None,
+                "stale_patterns": [
+                    {
+                        "line": 42,
+                        "content": "thought: old pattern | 1x (2026-01-01)",
+                        "level": "1x",
+                        "last_date": "2026-01-01",
+                        "days_stale": 90,
+                    }
+                ],
+                "today": "2026-04-10",
+                "max_chars": 20000,
+            },
+            "assoc_context": None,
+        }
+        text = format_wrap_package_text(result)
+        assert "## Stale Patterns (consider removing)" in text
+        assert "Line 42:" in text
+        assert "(90d stale)" in text
+
+    def test_assoc_context_appended_when_present(self):
+        result = {
+            "status": "ready",
+            "message": "Ready.",
+            "episode_count": 1,
+            "package": {
+                "instructions": "Compress.",
+                "episodes": "(test)",
+                "episode_count": 1,
+                "continuity": None,
+                "stale_patterns": [],
+                "today": "2026-04-10",
+                "max_chars": 20000,
+            },
+            "assoc_context": "## Hebbian Association Context\n- some link",
+        }
+        text = format_wrap_package_text(result)
+        assert "## Hebbian Association Context" in text
+        assert "some link" in text
+
+    def test_no_stale_patterns_section_when_absent(self):
+        """Stale patterns header should only appear when there are stale patterns."""
+        result = {
+            "status": "ready",
+            "message": "Ready.",
+            "episode_count": 1,
+            "package": {
+                "instructions": "Compress.",
+                "episodes": "(test)",
+                "episode_count": 1,
+                "continuity": None,
+                "stale_patterns": [],
+                "today": "2026-04-10",
+                "max_chars": 20000,
+            },
+            "assoc_context": None,
+        }
+        text = format_wrap_package_text(result)
+        assert "Stale Patterns" not in text
 
 

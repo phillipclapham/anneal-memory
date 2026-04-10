@@ -235,6 +235,138 @@ Use `[decided(rationale: "why", on: "date")] choice` markers.
 - Decisions >30 days old referencing nothing active → remove"""
 
 
+def prepare_wrap(
+    store: Any,
+    *,
+    max_chars: int = 20000,
+    staleness_days: int = 7,
+) -> dict[str, Any]:
+    """Run the full store-aware prepare_wrap pipeline.
+
+    **This is the canonical prepare_wrap entry point.** The MCP server
+    and the ``prepare-wrap`` CLI subcommand both call this function —
+    they are thin transport adapters that delegate the domain work here
+    and format the returned dict for their output surface.
+
+    Handles the full lifecycle: fetches episodes, detects the empty
+    case (and clears any stale wrap-in-progress flag), builds the
+    agent-facing compression package via :func:`prepare_wrap_package`,
+    marks the wrap as in progress, and attaches Hebbian association
+    context for the episodes being compressed.
+
+    Contrast with :func:`prepare_wrap_package`, which is a pure helper
+    that takes pre-fetched episodes and continuity text and returns the
+    package dict without touching the store. Most callers want this
+    function; ``prepare_wrap_package`` is for tests and advanced users
+    managing their own store state.
+
+    Args:
+        store: A Store instance.
+        max_chars: Maximum target size for the continuity file.
+        staleness_days: Days before flagging stale patterns.
+
+    Returns:
+        Dict with keys:
+          - ``status`` (str): ``"empty"`` (no episodes to wrap) or
+            ``"ready"`` (package built, wrap marked in progress)
+          - ``message`` (str): short human-readable status summary
+          - ``episode_count`` (int): number of episodes in the wrap window
+          - ``package`` (dict | None): the result of
+            :func:`prepare_wrap_package`, or ``None`` if empty
+          - ``assoc_context`` (str | None): Hebbian association context
+            for the episodes being compressed, or ``None`` if empty or
+            no associations exist
+
+    Note:
+        On ``status == "empty"`` the function calls ``wrap_cancelled()``
+        on the store to clear any stale in-progress flag. On
+        ``status == "ready"`` it calls ``wrap_started()``. Either way,
+        the store's wrap lifecycle state is consistent after the call.
+    """
+    episodes = store.episodes_since_wrap()
+
+    if not episodes:
+        store.wrap_cancelled()
+        return {
+            "status": "empty",
+            "message": "No episodes since last wrap. Nothing to compress.",
+            "episode_count": 0,
+            "package": None,
+            "assoc_context": None,
+        }
+
+    existing = store.load_continuity()
+    package = prepare_wrap_package(
+        episodes=episodes,
+        existing_continuity=existing,
+        project_name=store.project_name,
+        max_chars=max_chars,
+        staleness_days=staleness_days,
+    )
+    store.wrap_started()
+
+    episode_ids = [ep.id for ep in episodes]
+    assoc_context = store.get_association_context(episode_ids) or None
+
+    return {
+        "status": "ready",
+        "message": f"Ready to compress {len(episodes)} episode(s).",
+        "episode_count": len(episodes),
+        "package": package,
+        "assoc_context": assoc_context,
+    }
+
+
+def format_wrap_package_text(result: dict[str, Any]) -> str:
+    """Render a :func:`prepare_wrap` result as agent-facing display text.
+
+    This is the canonical text representation used by both MCP and CLI
+    transports. It assembles the compression instructions, episode
+    listing, existing continuity, stale patterns, and Hebbian context
+    into a single markdown-formatted string ready to be handed to the
+    agent doing the compression.
+
+    Transports that want the canonical presentation call this; library
+    users who want to format the package differently can build their
+    own text from the structured dict instead.
+
+    Args:
+        result: The return value of :func:`prepare_wrap`.
+
+    Returns:
+        The formatted text. For an empty result, returns the status
+        message unchanged.
+    """
+    if result["status"] == "empty":
+        return result["message"]
+
+    package = result["package"]
+    parts: list[str] = [package["instructions"], "\n---\n"]
+    parts.append(f"## Episodes This Session ({package['episode_count']})")
+    parts.append(package["episodes"])
+
+    if package["continuity"]:
+        parts.append("\n---\n## Current Continuity File")
+        parts.append(package["continuity"])
+    else:
+        parts.append(
+            "\n---\n(No existing continuity file — this is the first wrap.)"
+        )
+
+    if package["stale_patterns"]:
+        parts.append("\n---\n## Stale Patterns (consider removing)")
+        for sp in package["stale_patterns"]:
+            parts.append(
+                f"- Line {sp['line']}: {sp['content']}"
+                f" ({sp['days_stale']}d stale)"
+            )
+
+    if result["assoc_context"]:
+        parts.append("\n---\n" + result["assoc_context"])
+
+    return "\n".join(parts)
+
+
 def validated_save_continuity(
     store: Any,
     text: str,
@@ -242,13 +374,20 @@ def validated_save_continuity(
 ) -> dict[str, Any]:
     """Save continuity with the full validation pipeline.
 
-    This is the library equivalent of what the MCP server and CLI do:
-    structure validation, graduation citation checking, Hebbian association
-    formation, decay, metadata update, and wrap completion recording.
+    **This is the canonical save_continuity pipeline.** The MCP server and
+    the ``save-continuity`` CLI subcommand both call this function — they
+    are thin transport adapters that parse their inputs, delegate the
+    domain work here, and format their outputs. Library users calling this
+    function get the exact same pipeline as MCP and CLI users.
 
-    Use this instead of bare ``store.save_continuity()`` to get the immune
-    system, associations, and decay — the features that make anneal-memory
-    different from a flat file.
+    The pipeline: structure validation → citation-based graduation
+    validation → save → Hebbian association formation → decay → metadata
+    update → wrap completion. Every stage of the immune system runs.
+
+    Use this instead of bare ``store.save_continuity()`` — the raw store
+    method is a file write that bypasses graduation, associations, and
+    decay. ``validated_save_continuity`` is what you want whenever an
+    agent has finished compressing its session.
 
     Args:
         store: A Store instance.
@@ -256,9 +395,26 @@ def validated_save_continuity(
         affective_state: Optional agent functional state during this wrap.
 
     Returns:
-        Dict with wrap results: path, episodes_compressed, graduations_validated,
-        graduations_demoted, associations_formed, associations_strengthened,
-        associations_decayed, skipped_prepare.
+        Dict with keys:
+          - ``path`` (str): path to the saved continuity file
+          - ``episodes_compressed`` (int): count of episodes in this wrap
+          - ``graduations_validated`` (int): citations that validated
+          - ``graduations_demoted`` (int): citations demoted due to
+            bad/missing evidence, *including* bare graduations
+          - ``demoted`` (int): citations demoted due to bad evidence only
+          - ``bare_demoted`` (int): bare (evidence-free) 2x/3x
+            graduations demoted for missing citations
+          - ``citation_reuse_max`` (int): max times any single episode
+            was cited in this wrap
+          - ``gaming_suspects`` (list[str]): episode IDs flagged for
+            suspicious citation reuse
+          - ``associations_formed`` (int)
+          - ``associations_strengthened`` (int)
+          - ``associations_decayed`` (int)
+          - ``sections`` (dict[str, int]): char count per continuity section
+          - ``skipped_prepare`` (bool): True if ``prepare_wrap`` was not
+            called first
+          - ``wrap_result`` (WrapResult): the store-level wrap record
 
     Raises:
         ValueError: If text is empty or missing required sections.
@@ -313,13 +469,13 @@ def validated_save_continuity(
     # Record wrap completion
     sections = measure_sections(grad_result.text)
     patterns = len(re.findall(r"\|\s*\d+x", grad_result.text))
+    total_demoted = grad_result.demoted + grad_result.bare_demoted
     wrap_result = store.wrap_completed(
         episodes_compressed=len(episodes),
         continuity_chars=len(grad_result.text),
         graduations_validated=grad_result.validated,
-        graduations_demoted=grad_result.demoted,
-        citation_reuse_max=max(grad_result.citation_counts.values())
-        if grad_result.citation_counts else 0,
+        graduations_demoted=total_demoted,
+        citation_reuse_max=grad_result.citation_reuse_max,
         patterns_extracted=patterns,
         associations_formed=assoc_formed,
         associations_strengthened=assoc_strengthened,
@@ -330,10 +486,15 @@ def validated_save_continuity(
         "path": path,
         "episodes_compressed": len(episodes),
         "graduations_validated": grad_result.validated,
-        "graduations_demoted": grad_result.demoted,
+        "graduations_demoted": total_demoted,
+        "demoted": grad_result.demoted,
+        "bare_demoted": grad_result.bare_demoted,
+        "citation_reuse_max": grad_result.citation_reuse_max,
+        "gaming_suspects": list(grad_result.gaming_suspects),
         "associations_formed": assoc_formed,
         "associations_strengthened": assoc_strengthened,
         "associations_decayed": assoc_decayed,
+        "sections": sections,
         "skipped_prepare": skipped_prepare,
         "wrap_result": wrap_result,
     }

@@ -41,6 +41,7 @@ import os
 import re
 import sqlite3
 import sys
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -825,8 +826,8 @@ def cmd_export(args: argparse.Namespace) -> None:
                 for p in pairs
             ]
 
-        # Get wrap history
-        wraps = _query_wraps(store)
+        # Get wrap history (serialize as dicts for JSON export compatibility)
+        wraps = [asdict(w) for w in store.get_wrap_history()]
 
         if fmt == "json":
             export_data = {
@@ -1074,7 +1075,7 @@ def cmd_audit(args: argparse.Namespace) -> None:
 def cmd_diff(args: argparse.Namespace) -> None:
     """Show wrap-over-wrap metric changes."""
     with _open_store(args) as store:
-        wraps = _query_wraps(store)
+        wraps = store.get_wrap_history()
 
         if not wraps:
             if args.json:
@@ -1092,14 +1093,14 @@ def cmd_diff(args: argparse.Namespace) -> None:
             # Include deltas between consecutive wraps
             diffs = []
             for i, w in enumerate(wraps):
-                entry: dict[str, Any] = {**w}
+                entry: dict[str, Any] = asdict(w)
                 if i > 0:
                     prev = wraps[i - 1]
                     entry["delta"] = {
-                        "episodes_compressed": (w.get("episodes_compressed") or 0) - (prev.get("episodes_compressed") or 0),
-                        "continuity_chars": (w.get("continuity_chars") or 0) - (prev.get("continuity_chars") or 0),
-                        "graduations_validated": (w.get("graduations_validated") or 0) - (prev.get("graduations_validated") or 0),
-                        "graduations_demoted": (w.get("graduations_demoted") or 0) - (prev.get("graduations_demoted") or 0),
+                        "episodes_compressed": (w.episodes_compressed or 0) - (prev.episodes_compressed or 0),
+                        "continuity_chars": (w.continuity_chars or 0) - (prev.continuity_chars or 0),
+                        "graduations_validated": w.graduations_validated - prev.graduations_validated,
+                        "graduations_demoted": w.graduations_demoted - prev.graduations_demoted,
                     }
                 diffs.append(entry)
             _print_json({"wraps": diffs})
@@ -1112,19 +1113,19 @@ def cmd_diff(args: argparse.Namespace) -> None:
         print(f"  {'----':>4}  {'----':<20}  {'--------':>8}  {'-------':>7}  {'----':>4}  {'-------':>7}  {'------':>6}  {'-------':>7}")
 
         for i, w in enumerate(wraps):
-            wrap_id = w.get("id", "?")
-            when = _format_timestamp(w.get("wrapped_at"))
-            eps = w.get("episodes_compressed") or 0
-            chars = w.get("continuity_chars") or 0
-            grad = w.get("graduations_validated") or 0
-            demoted = w.get("graduations_demoted") or 0
-            formed = w.get("associations_formed") or 0
-            decayed = w.get("associations_decayed") or 0
+            wrap_id = w.id
+            when = _format_timestamp(w.wrapped_at)
+            eps = w.episodes_compressed or 0
+            chars = w.continuity_chars or 0
+            grad = w.graduations_validated
+            demoted = w.graduations_demoted
+            formed = w.associations_formed
+            decayed = w.associations_decayed
 
             # Show delta for continuity chars
             chars_delta = ""
             if i > 0:
-                prev_chars = wraps[i - 1].get("continuity_chars") or 0
+                prev_chars = wraps[i - 1].continuity_chars or 0
                 diff = chars - prev_chars
                 if diff > 0:
                     chars_delta = f" (+{diff})"
@@ -1248,7 +1249,7 @@ def cmd_stats(args: argparse.Namespace) -> None:
     """Show detailed store statistics."""
     with _open_store(args) as store:
         status = store.status()
-        wraps = _query_wraps(store)
+        wraps = store.get_wrap_history()
 
         # Episode age distribution
         all_eps = store.recall(limit=100000)
@@ -1279,18 +1280,18 @@ def cmd_stats(args: argparse.Namespace) -> None:
         # Wrap metrics
         wrap_stats: dict[str, Any] = {}
         if wraps:
-            eps_per_wrap = [w.get("episodes_compressed") or 0 for w in wraps]
+            eps_per_wrap = [w.episodes_compressed or 0 for w in wraps]
             wrap_stats = {
                 "total_wraps": len(wraps),
                 "avg_episodes_per_wrap": sum(eps_per_wrap) / len(eps_per_wrap) if eps_per_wrap else 0,
-                "total_graduations": sum(w.get("graduations_validated") or 0 for w in wraps),
-                "total_demotions": sum(w.get("graduations_demoted") or 0 for w in wraps),
-                "total_associations_formed": sum(w.get("associations_formed") or 0 for w in wraps),
-                "total_associations_decayed": sum(w.get("associations_decayed") or 0 for w in wraps),
+                "total_graduations": sum(w.graduations_validated for w in wraps),
+                "total_demotions": sum(w.graduations_demoted for w in wraps),
+                "total_associations_formed": sum(w.associations_formed for w in wraps),
+                "total_associations_decayed": sum(w.associations_decayed for w in wraps),
             }
             # First and last wrap timestamps
-            wrap_stats["first_wrap"] = wraps[0].get("wrapped_at")
-            wrap_stats["last_wrap"] = wraps[-1].get("wrapped_at")
+            wrap_stats["first_wrap"] = wraps[0].wrapped_at
+            wrap_stats["last_wrap"] = wraps[-1].wrapped_at
 
         if args.json:
             _print_json({
@@ -1376,7 +1377,7 @@ def cmd_stats(args: argparse.Namespace) -> None:
 def cmd_history(args: argparse.Namespace) -> None:
     """Show wrap history."""
     with _open_store(args) as store:
-        wraps = _query_wraps(store)
+        wraps = store.get_wrap_history()
 
         if not wraps:
             if args.json:
@@ -1393,22 +1394,22 @@ def cmd_history(args: argparse.Namespace) -> None:
             wraps = wraps[-args.limit:]
 
         if args.json:
-            _print_json({"wraps": wraps, "total": total_wraps})
+            _print_json({"wraps": [asdict(w) for w in wraps], "total": total_wraps})
             return
 
         showing = f" (showing last {len(wraps)})" if len(wraps) < total_wraps else ""
         print(f"Wrap history ({total_wraps} wraps){showing}:")
         print()
         for w in wraps:
-            wrap_id = w.get("id", "?")
-            when = _format_timestamp(w.get("wrapped_at"))
-            eps = w.get("episodes_compressed") or 0
-            chars = w.get("continuity_chars") or 0
-            grad = w.get("graduations_validated") or 0
-            demoted = w.get("graduations_demoted") or 0
-            formed = w.get("associations_formed") or 0
-            strengthened = w.get("associations_strengthened") or 0
-            decayed = w.get("associations_decayed") or 0
+            wrap_id = w.id
+            when = _format_timestamp(w.wrapped_at)
+            eps = w.episodes_compressed or 0
+            chars = w.continuity_chars or 0
+            grad = w.graduations_validated
+            demoted = w.graduations_demoted
+            formed = w.associations_formed
+            strengthened = w.associations_strengthened
+            decayed = w.associations_decayed
 
             print(f"  Wrap {wrap_id} — {when}")
             print(f"    Episodes compressed: {eps}")
@@ -1457,41 +1458,6 @@ def cmd_serve(args: argparse.Namespace) -> None:
 def _now_utc_str() -> str:
     """Current time as ISO 8601 UTC string."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
-
-def _query_wraps(store: Store) -> list[dict[str, Any]]:
-    """Query all wraps from the store's database.
-
-    Direct SQL because wraps are a CLI-level concern (history, diff, stats).
-    The Store API doesn't expose wrap history — it's a monitoring concern.
-    """
-    try:
-        rows = store._conn.execute(
-            """SELECT id, wrapped_at, episodes_compressed,
-                      graduations_validated, graduations_demoted,
-                      citation_reuse_max, continuity_chars, patterns_extracted,
-                      associations_formed, associations_strengthened, associations_decayed
-               FROM wraps ORDER BY id ASC"""
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return []
-
-    return [
-        {
-            "id": row["id"],
-            "wrapped_at": row["wrapped_at"],
-            "episodes_compressed": row["episodes_compressed"],
-            "graduations_validated": row["graduations_validated"],
-            "graduations_demoted": row["graduations_demoted"],
-            "citation_reuse_max": row["citation_reuse_max"],
-            "continuity_chars": row["continuity_chars"],
-            "patterns_extracted": row["patterns_extracted"],
-            "associations_formed": row["associations_formed"],
-            "associations_strengthened": row["associations_strengthened"],
-            "associations_decayed": row["associations_decayed"],
-        }
-        for row in rows
-    ]
 
 
 def _assoc_stats_dict(stats: AssociationStats | None) -> dict[str, Any] | None:

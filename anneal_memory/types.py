@@ -64,6 +64,33 @@ class WrapResult:
     associations_decayed: int = 0  # Links weakened by decay this wrap
 
 
+@dataclass(frozen=True)
+class WrapRecord:
+    """A historical wrap record from the wraps table.
+
+    Returned by ``Store.get_wrap_history()``. Distinct from ``WrapResult``:
+    ``WrapResult`` is the return value of ``wrap_completed()`` — the just-
+    recorded wrap. ``WrapRecord`` represents a past wrap retrieved from
+    storage for monitoring/audit (history, diff, stats CLI subcommands).
+
+    All integer counter fields are non-None (defaults 0 in schema).
+    ``episodes_compressed`` and ``continuity_chars`` are nullable in the
+    wraps table and may be ``None`` for legacy rows.
+    """
+
+    id: int
+    wrapped_at: str  # ISO 8601 UTC
+    episodes_compressed: int | None
+    continuity_chars: int | None
+    graduations_validated: int
+    graduations_demoted: int
+    citation_reuse_max: int
+    patterns_extracted: int
+    associations_formed: int
+    associations_strengthened: int
+    associations_decayed: int
+
+
 @dataclass
 class StoreStatus:
     """Status snapshot of the episodic store."""

@@ -12,10 +12,17 @@ from .types import (
     RecallResult,
     StoreStatus,
     Tombstone,
+    WrapRecord,
     WrapResult,
 )
 from .audit import AuditTrail, AuditVerifyResult
-from .continuity import validate_structure, prepare_wrap_package, validated_save_continuity
+from .continuity import (
+    format_wrap_package_text,
+    prepare_wrap,
+    prepare_wrap_package,
+    validate_structure,
+    validated_save_continuity,
+)
 from .graduation import (
     validate_graduations,
     check_explanation_overlap,
@@ -38,11 +45,14 @@ __all__ = [
     "RecallResult",
     "StoreStatus",
     "Tombstone",
+    "WrapRecord",
     "WrapResult",
     "TOOLS",
     "RESOURCES",
     "validate_structure",
+    "prepare_wrap",
     "prepare_wrap_package",
+    "format_wrap_package_text",
     "validated_save_continuity",
     "validate_graduations",
     "check_explanation_overlap",

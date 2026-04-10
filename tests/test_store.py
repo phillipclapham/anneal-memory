@@ -7,8 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from dataclasses import asdict, is_dataclass
+from datetime import date
+
 from anneal_memory.store import Store
-from anneal_memory.types import EpisodeType, StoreStatus, WrapResult
+from anneal_memory.types import EpisodeType, StoreStatus, WrapRecord, WrapResult
 
 
 @pytest.fixture
@@ -684,3 +687,238 @@ class TestKeywordEscaping:
         # Search uppercase should also work
         result2 = store.recall(keyword="SQLITE")
         assert result2.total_matching == 1
+
+
+# -- Wrap history (get_wrap_history + WrapRecord) --
+
+
+def _valid_continuity_text(today: str, evidence: str = "") -> str:
+    """Build a minimal valid 4-section continuity document.
+
+    Uses dynamic today's date so graduation doesn't silently skip
+    same-session citations. Optional evidence tag for graduation tests.
+    """
+    evidence_tag = f" [evidence: {evidence}]" if evidence else ""
+    return (
+        "# Test — Memory (v1)\n\n"
+        "## State\nWorking.\n\n"
+        f"## Patterns\nthought: pattern | 1x ({today}){evidence_tag}\n\n"
+        "## Decisions\nNone.\n\n"
+        "## Context\nFirst pass.\n"
+    )
+
+
+class TestGetWrapHistory:
+    """Tests for Store.get_wrap_history() and the WrapRecord dataclass."""
+
+    def test_empty_store_returns_empty_list(self, store):
+        assert store.get_wrap_history() == []
+
+    def test_returns_wrap_record_instances(self, store):
+        """After a wrap, get_wrap_history should return list[WrapRecord]."""
+        from anneal_memory import validated_save_continuity
+
+        store.record("First observation", EpisodeType.OBSERVATION)
+        store.wrap_started()
+        validated_save_continuity(
+            store, _valid_continuity_text(date.today().isoformat())
+        )
+
+        history = store.get_wrap_history()
+        assert len(history) == 1
+        assert isinstance(history[0], WrapRecord)
+        assert is_dataclass(history[0])
+
+    def test_wrap_record_fields_populated(self, store):
+        """WrapRecord should surface all wrap metrics from the store."""
+        from anneal_memory import validated_save_continuity
+
+        store.record("Episode one", EpisodeType.OBSERVATION)
+        store.record("Episode two", EpisodeType.DECISION)
+        store.wrap_started()
+        validated_save_continuity(
+            store, _valid_continuity_text(date.today().isoformat())
+        )
+
+        record = store.get_wrap_history()[0]
+        assert record.id == 1
+        assert record.wrapped_at  # non-empty ISO timestamp
+        assert record.episodes_compressed == 2
+        assert record.continuity_chars is not None
+        assert record.continuity_chars > 0
+        # Counter fields default to 0 when no graduation/association activity
+        assert record.graduations_validated >= 0
+        assert record.graduations_demoted >= 0
+        assert record.citation_reuse_max >= 0
+        assert record.patterns_extracted >= 0
+        assert record.associations_formed >= 0
+        assert record.associations_strengthened >= 0
+        assert record.associations_decayed >= 0
+
+    def test_multiple_wraps_ordered_by_id(self, store):
+        """Wraps should be returned in chronological (id ASC) order."""
+        from anneal_memory import validated_save_continuity
+
+        today = date.today().isoformat()
+        for i in range(3):
+            store.record(f"Episode {i}", EpisodeType.OBSERVATION)
+            store.wrap_started()
+            validated_save_continuity(store, _valid_continuity_text(today))
+
+        history = store.get_wrap_history()
+        assert len(history) == 3
+        ids = [w.id for w in history]
+        assert ids == sorted(ids)
+        assert ids[0] == 1
+
+    def test_wrap_record_asdict_is_json_serializable(self, store):
+        """asdict(WrapRecord) must round-trip through JSON.
+
+        Used by cmd_export and cmd_history JSON output paths.
+        """
+        from anneal_memory import validated_save_continuity
+
+        store.record("Observation", EpisodeType.OBSERVATION)
+        store.wrap_started()
+        validated_save_continuity(
+            store, _valid_continuity_text(date.today().isoformat())
+        )
+
+        record = store.get_wrap_history()[0]
+        d = asdict(record)
+        assert isinstance(d, dict)
+        # Round-trip through JSON should not raise
+        serialized = json.dumps(d)
+        restored = json.loads(serialized)
+        assert restored["id"] == record.id
+        assert restored["episodes_compressed"] == record.episodes_compressed
+
+    def test_wrap_record_is_frozen(self):
+        """WrapRecord should be frozen (immutable) like other value types."""
+        record = WrapRecord(
+            id=1,
+            wrapped_at="2026-01-01T00:00:00Z",
+            episodes_compressed=5,
+            continuity_chars=1000,
+            graduations_validated=2,
+            graduations_demoted=1,
+            citation_reuse_max=3,
+            patterns_extracted=4,
+            associations_formed=5,
+            associations_strengthened=6,
+            associations_decayed=7,
+        )
+        with pytest.raises((AttributeError, Exception)):
+            record.id = 99  # type: ignore[misc]
+
+
+class TestValidatedSaveContinuityReturnContract:
+    """Tests for the widened validated_save_continuity return dict.
+
+    The library function is the canonical save pipeline — its return
+    contract must expose everything MCP and CLI transports need to
+    format their output. Previously the dict was missing bare_demoted,
+    gaming_suspects, citation_reuse_max, and sections.
+    """
+
+    def test_return_dict_has_all_widened_keys(self, store):
+        from anneal_memory import validated_save_continuity
+
+        store.record("Observation A", EpisodeType.OBSERVATION)
+        store.wrap_started()
+
+        result = validated_save_continuity(
+            store, _valid_continuity_text(date.today().isoformat())
+        )
+
+        # Core pipeline results
+        assert "path" in result
+        assert "episodes_compressed" in result
+        assert "wrap_result" in result
+        assert "skipped_prepare" in result
+        # Graduation breakdown (the Diogenes Finding #1 fix)
+        assert "graduations_validated" in result
+        assert "graduations_demoted" in result
+        assert "demoted" in result
+        assert "bare_demoted" in result
+        assert "citation_reuse_max" in result
+        assert "gaming_suspects" in result
+        # Association metrics
+        assert "associations_formed" in result
+        assert "associations_strengthened" in result
+        assert "associations_decayed" in result
+        # Section measurement (used by CLI text output)
+        assert "sections" in result
+        assert isinstance(result["sections"], dict)
+
+    def test_graduations_demoted_includes_bare_demoted(self, store):
+        """graduations_demoted must equal demoted + bare_demoted.
+
+        This is the exact divergence Diogenes caught: the library used
+        grad_result.demoted only, while MCP and CLI used
+        demoted + bare_demoted. After Session 10.5c.1 the library is
+        canonical — all three produce the same wrap metric.
+        """
+        from anneal_memory import validated_save_continuity
+
+        # Set citations_seen=True so bare graduations get demoted
+        meta = store.load_meta()
+        meta["citations_seen"] = True
+        store.save_meta(meta)
+
+        today = date.today().isoformat()
+
+        # Record one episode so there's at least something to compress
+        store.record("Triggering observation", EpisodeType.OBSERVATION)
+        store.wrap_started()
+
+        # Build a continuity with a bare 2x graduation (no evidence tag)
+        # — should be demoted due to citations_seen=True
+        text = (
+            "# Test — Memory (v1)\n\n"
+            "## State\nWorking.\n\n"
+            "## Patterns\n"
+            f"thought: unsupported claim | 2x ({today})\n\n"
+            "## Decisions\nNone.\n\n"
+            "## Context\nFirst pass.\n"
+        )
+
+        result = validated_save_continuity(store, text)
+
+        # graduations_demoted is the combined total
+        assert result["graduations_demoted"] == (
+            result["demoted"] + result["bare_demoted"]
+        )
+        # At least one bare demotion should have fired
+        assert result["bare_demoted"] >= 1
+
+    def test_wrap_metric_matches_return_dict(self, store):
+        """The wraps table row must match the returned graduations_demoted.
+
+        If the library under-reports to wrap_completed() but over-reports
+        in the return dict (or vice versa), downstream history/diff/stats
+        CLI output diverges from what the caller saw at save time.
+        """
+        from anneal_memory import validated_save_continuity
+
+        # citations_seen=True so bare grads get demoted
+        meta = store.load_meta()
+        meta["citations_seen"] = True
+        store.save_meta(meta)
+
+        store.record("Observation", EpisodeType.OBSERVATION)
+        store.wrap_started()
+        today = date.today().isoformat()
+        text = (
+            "# Test — Memory (v1)\n\n"
+            "## State\nWorking.\n\n"
+            "## Patterns\n"
+            f"thought: bare claim | 2x ({today})\n\n"
+            "## Decisions\nNone.\n\n"
+            "## Context\nFirst pass.\n"
+        )
+        result = validated_save_continuity(store, text)
+
+        history = store.get_wrap_history()
+        assert len(history) == 1
+        assert history[0].graduations_demoted == result["graduations_demoted"]

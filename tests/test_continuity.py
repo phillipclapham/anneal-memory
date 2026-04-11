@@ -328,6 +328,7 @@ class TestTypedDictReturnShapes:
                 "episode_count",
                 "package",
                 "assoc_context",
+                "wrap_token",
             }
             assert set(result["package"].keys()) == {
                 "episodes",
@@ -1020,4 +1021,724 @@ class TestCrossTransportParity:
         assert mcp_metrics["graduations_validated"] >= 1
         assert cli_metrics["graduations_validated"] >= 1
 
+
+# ---------------------------------------------------------------------------
+# 10.5c.4 — Session-handshake token for the prepare/save TOCTOU window
+# ---------------------------------------------------------------------------
+#
+# These tests lock the frozen-snapshot semantics added by the 10.5c.4
+# TOCTOU fix. The structural invariant under test: an episode recorded
+# between prepare_wrap and validated_save_continuity must NOT be
+# absorbed into the in-progress wrap, regardless of whether the caller
+# round-trips the wrap_token or not. The TOCTOU episode must appear in
+# the NEXT wrap's compression window, so no data is lost — it's
+# deferred to the wrap it semantically belongs to.
+#
+# The tests fall into four layers:
+#
+#   1. Token shape / empty-path sanity — the new wrap_token field is
+#      present on ready results and None on empty results.
+#   2. Frozen-snapshot filter — the TOCTOU episode drops out of
+#      graduation validation, episodes_compressed counts, session_id
+#      assignment, and re-appears on the next prepare_wrap call.
+#   3. Token verification — callers that pass wrap_token get
+#      mismatch detection (ValueError on stale/wrong token).
+#   4. Skipped-prepare backward compatibility — callers that bypass
+#      prepare_wrap entirely still see the pre-10.5c.4 behavior.
+#
+# Plus targeted tests for `Store.load_wrap_snapshot` (the primitive
+# validated_save_continuity reads at save time) and for the audit
+# event chain-of-custody enrichment (wrap_token appears in the
+# wrap_started + wrap_completed audit payload, snapshot_episode_ids
+# appears in wrap_started).
+
+
+class TestTOCTOUHandshakeToken:
+    """10.5c.4 — prepare/save TOCTOU window is frozen via snapshot.
+
+    These tests target the canonical library pipeline directly.
+    Transport-level round-trips (MCP wrap_token arg, CLI
+    --wrap-token flag) are covered by the cross-transport parity
+    infrastructure in TestCanonicalPipelineCrossTransport and by
+    new cross-process tests in test_cli.py.
+    """
+
+    @staticmethod
+    def _make_continuity(project_name: str, cited_id: str) -> str:
+        """Build a valid 4-section continuity that cites a specific episode."""
+        return (
+            f"# {project_name} — Memory (v1)\n\n"
+            f"## State\nWorking.\n\n"
+            f"## Patterns\n"
+            f"{{core:\n"
+            f"  thought: snapshot semantics locked "
+            f"| 1x (2026-04-10)\n"
+            f"}}\n\n"
+            f"## Decisions\n"
+            f"[decided(rationale: \"freeze window\", on: \"2026-04-10\")] "
+            f"Use snapshot\n\n"
+            f"## Context\nCited {cited_id}.\n"
+        )
+
+    # -- Layer 1: token shape / empty path sanity --
+
+    def test_prepare_wrap_ready_result_has_wrap_token(self, tmp_path):
+        """Ready path: wrap_token is a 32-char hex string."""
+        store = Store(str(tmp_path / "token.db"), project_name="Token")
+        try:
+            store.record("An observation", EpisodeType.OBSERVATION)
+            result = prepare_wrap(store)
+            assert result["status"] == "ready"
+            token = result["wrap_token"]
+            assert token is not None
+            assert isinstance(token, str)
+            assert len(token) == 32  # uuid4().hex
+            assert all(c in "0123456789abcdef" for c in token)
+        finally:
+            store.close()
+
+    def test_prepare_wrap_empty_result_has_none_token(self, tmp_path):
+        """Empty path: wrap_token is None (no wrap to commit)."""
+        store = Store(str(tmp_path / "empty.db"), project_name="Empty")
+        try:
+            result = prepare_wrap(store)
+            assert result["status"] == "empty"
+            assert result["wrap_token"] is None
+        finally:
+            store.close()
+
+    def test_prepare_wrap_mints_fresh_token_each_call(self, tmp_path):
+        """Each prepare_wrap call mints a unique token. Overlapping
+        prepare calls (e.g. accidental double-prepare) overwrite the
+        earlier snapshot and token — only the latest is valid."""
+        from anneal_memory import validated_save_continuity
+
+        store = Store(str(tmp_path / "fresh.db"), project_name="Fresh")
+        try:
+            store.record("First observation", EpisodeType.OBSERVATION)
+            result1 = prepare_wrap(store)
+            token1 = result1["wrap_token"]
+
+            # Second prepare (caller never called save; overlapping
+            # prepare is a legitimate "restart compression" flow)
+            result2 = prepare_wrap(store)
+            token2 = result2["wrap_token"]
+
+            assert token1 != token2
+
+            # Saving with the stale token1 is now rejected.
+            text = self._make_continuity("Fresh", "aaaaaaaa")
+            with pytest.raises(ValueError, match="wrap_token mismatch"):
+                validated_save_continuity(store, text, wrap_token=token1)
+
+            # Saving with the current token2 works.
+            validated_save_continuity(store, text, wrap_token=token2)
+        finally:
+            store.close()
+
+    # -- Layer 2: frozen-snapshot filter (the load-bearing behavior) --
+
+    def test_toctou_episode_excluded_from_wrap(self, tmp_path):
+        """THE core TOCTOU test. Episode recorded between prepare and
+        save is NOT counted in episodes_compressed, does NOT get the
+        in-progress wrap's session_id, and DOES appear in the next
+        wrap's compression window.
+        """
+        from anneal_memory import validated_save_continuity
+
+        store = Store(str(tmp_path / "toctou.db"), project_name="TOCTOU")
+        try:
+            # Phase 1: record two "snapshot" episodes and call prepare_wrap.
+            ep_a = store.record(
+                "First snapshot episode",
+                EpisodeType.OBSERVATION,
+            )
+            ep_b = store.record(
+                "Second snapshot episode",
+                EpisodeType.OBSERVATION,
+            )
+            prep = prepare_wrap(store)
+            assert prep["status"] == "ready"
+            assert prep["episode_count"] == 2
+            token = prep["wrap_token"]
+
+            # Phase 2: the TOCTOU window — a NEW episode lands between
+            # prepare and save. The agent's compression text was
+            # built against the snapshot only and cites ep_a's ID.
+            ep_toctou = store.record(
+                "TOCTOU episode — must NOT join this wrap",
+                EpisodeType.OBSERVATION,
+            )
+            # Sanity: all three episodes exist and are NULL-session
+            assert store.status().episodes_since_wrap == 3
+
+            # Phase 3: save with the snapshot filter active. Episodes
+            # compressed should still be 2 (snapshot only), not 3.
+            text = self._make_continuity("TOCTOU", ep_a.id)
+            save = validated_save_continuity(store, text, wrap_token=token)
+            assert save["episodes_compressed"] == 2, (
+                "TOCTOU episode leaked into in-progress wrap — snapshot "
+                "filter failed"
+            )
+
+            # Phase 4: session_id assignment. ep_a and ep_b should be
+            # stamped with this wrap's ID; ep_toctou should still be
+            # NULL and ready for the next wrap.
+            row_a = store._conn.execute(
+                "SELECT session_id FROM episodes WHERE id = ?",
+                (ep_a.id,),
+            ).fetchone()
+            row_b = store._conn.execute(
+                "SELECT session_id FROM episodes WHERE id = ?",
+                (ep_b.id,),
+            ).fetchone()
+            row_t = store._conn.execute(
+                "SELECT session_id FROM episodes WHERE id = ?",
+                (ep_toctou.id,),
+            ).fetchone()
+            assert row_a["session_id"] is not None
+            assert row_b["session_id"] is not None
+            assert row_t["session_id"] is None, (
+                "TOCTOU episode was silently stamped with the current "
+                "wrap's session_id — it will be lost to the next wrap's "
+                "compression window"
+            )
+
+            # Phase 5: the next prepare_wrap picks up ONLY the TOCTOU
+            # episode — proof of correct deferral.
+            next_prep = prepare_wrap(store)
+            assert next_prep["status"] == "ready"
+            assert next_prep["episode_count"] == 1
+            assert "TOCTOU episode" in next_prep["package"]["episodes"]
+        finally:
+            store.close()
+
+    def test_frozen_snapshot_applies_without_wrap_token(self, tmp_path):
+        """The snapshot filter runs whenever prepare_wrap was called,
+        regardless of whether the caller passes wrap_token at save
+        time. Token is a verification layer, not the enablement
+        mechanism. Single-process library / CLI users that don't
+        round-trip the token still get TOCTOU safety.
+        """
+        from anneal_memory import validated_save_continuity
+
+        store = Store(str(tmp_path / "implicit.db"), project_name="Implicit")
+        try:
+            ep_a = store.record("Snapshot only", EpisodeType.OBSERVATION)
+            prepare_wrap(store)  # ignore return value
+            store.record("TOCTOU leak attempt", EpisodeType.OBSERVATION)
+
+            text = self._make_continuity("Implicit", ep_a.id)
+            # No wrap_token passed.
+            save = validated_save_continuity(store, text)
+            assert save["episodes_compressed"] == 1
+        finally:
+            store.close()
+
+    def test_toctou_episode_graduation_validation_excluded(self, tmp_path):
+        """The frozen snapshot must also drive citation validation.
+        A graduation marker that cites a TOCTOU episode ID (one the
+        agent could not legitimately have seen) should fail
+        validation — because the snapshot filter means the TOCTOU
+        ID is not in ``valid_ids`` at citation-check time.
+        """
+        from anneal_memory import validated_save_continuity
+
+        store = Store(str(tmp_path / "grad.db"), project_name="Grad")
+        try:
+            ep_a = store.record(
+                "Legitimate snapshot episode",
+                EpisodeType.OBSERVATION,
+            )
+            prep = prepare_wrap(store)
+            token = prep["wrap_token"]
+
+            # TOCTOU episode with a known ID — we need to cite it in
+            # the compression text to check that graduation refuses
+            # to validate against it.
+            ep_toctou = store.record(
+                "TOCTOU episode the agent should not see",
+                EpisodeType.OBSERVATION,
+            )
+
+            # Build a continuity that tries to graduate a pattern with
+            # evidence citing the TOCTOU episode. This should demote:
+            # the ID is not in the snapshot-filtered valid_ids.
+            text = (
+                f"# Grad — Memory (v1)\n\n"
+                f"## State\nTesting citation validation.\n\n"
+                f"## Patterns\n"
+                f"{{verify:\n"
+                f"  thought: snapshot bounds citations "
+                f"| 2x (2026-04-10) "
+                f"[evidence: {ep_toctou.id} \"TOCTOU episode\"]\n"
+                f"}}\n\n"
+                f"## Decisions\n"
+                f"[decided(rationale: \"test\", on: \"2026-04-10\")] ok\n\n"
+                f"## Context\nSnapshot episode {ep_a.id}.\n"
+            )
+            result = validated_save_continuity(
+                store, text, wrap_token=token
+            )
+            # The TOCTOU-citing graduation should have been demoted
+            # specifically through the ``demoted`` counter. The
+            # graduation validator routes unknown-ID citations
+            # through the ``ids_valid`` gate in validate_graduations,
+            # which increments ``demoted`` (not ``bare_demoted`` —
+            # bare is for evidence-less graduations). Pinning the
+            # specific counter catches regressions that misroute
+            # the demotion, rather than a softer ``or`` that would
+            # also pass if a future change accidentally counted the
+            # demotion in an unrelated bucket.
+            assert result["demoted"] >= 1, (
+                "Graduation citing a TOCTOU episode ID was not "
+                "routed through the ``demoted`` counter — snapshot "
+                "filter may not be driving citation validation "
+                f"(full result: {result})"
+            )
+        finally:
+            store.close()
+
+    # -- Layer 3: token verification --
+
+    def test_wrong_token_raises_valueerror(self, tmp_path):
+        """A token that doesn't match the stored one raises ValueError
+        with a descriptive message."""
+        from anneal_memory import validated_save_continuity
+
+        store = Store(str(tmp_path / "wrong.db"), project_name="Wrong")
+        try:
+            ep = store.record("An observation", EpisodeType.OBSERVATION)
+            prepare_wrap(store)
+            text = self._make_continuity("Wrong", ep.id)
+
+            fake_token = "0" * 32  # wrong but shape-valid
+            with pytest.raises(ValueError) as excinfo:
+                validated_save_continuity(
+                    store, text, wrap_token=fake_token
+                )
+            assert "wrap_token mismatch" in str(excinfo.value)
+            assert "stale" in str(excinfo.value).lower() or (
+                "prepare_wrap" in str(excinfo.value)
+            )
+
+            # Wrap is still in progress — the caller can retry with the
+            # correct token without re-running prepare.
+            assert store.status().wrap_in_progress
+        finally:
+            store.close()
+
+    def test_correct_token_completes_wrap(self, tmp_path):
+        """The happy path: correct token, save succeeds, wrap state
+        is cleared."""
+        from anneal_memory import validated_save_continuity
+
+        store = Store(str(tmp_path / "correct.db"), project_name="Correct")
+        try:
+            ep = store.record("An observation", EpisodeType.OBSERVATION)
+            prep = prepare_wrap(store)
+            token = prep["wrap_token"]
+            text = self._make_continuity("Correct", ep.id)
+
+            validated_save_continuity(store, text, wrap_token=token)
+
+            # Wrap state fully cleared.
+            status = store.status()
+            assert not status.wrap_in_progress
+            assert store.load_wrap_snapshot() is None
+        finally:
+            store.close()
+
+    # -- Layer 4: skipped_prepare backward compatibility --
+
+    def test_skipped_prepare_path_unchanged(self, tmp_path):
+        """Calling validated_save_continuity without a prior
+        prepare_wrap call works exactly as before — no snapshot, full
+        re-fetch, skipped_prepare=True in the result."""
+        from anneal_memory import validated_save_continuity
+
+        store = Store(str(tmp_path / "skipped.db"), project_name="Skipped")
+        try:
+            ep = store.record("An observation", EpisodeType.OBSERVATION)
+            # No prepare_wrap call.
+            text = self._make_continuity("Skipped", ep.id)
+            result = validated_save_continuity(store, text)
+            assert result["skipped_prepare"] is True
+            assert result["episodes_compressed"] == 1
+        finally:
+            store.close()
+
+    def test_skipped_prepare_ignores_wrap_token_arg(self, tmp_path):
+        """If there's no snapshot to verify against (skipped_prepare
+        path), passing wrap_token is a no-op — verification only
+        fires when the store actually has a snapshot."""
+        from anneal_memory import validated_save_continuity
+
+        store = Store(str(tmp_path / "skip_tok.db"), project_name="SkipTok")
+        try:
+            ep = store.record("An observation", EpisodeType.OBSERVATION)
+            text = self._make_continuity("SkipTok", ep.id)
+            # Garbage token, but no snapshot — should succeed.
+            result = validated_save_continuity(
+                store, text, wrap_token="ffffffffffffffffffffffffffffffff"
+            )
+            assert result["skipped_prepare"] is True
+        finally:
+            store.close()
+
+    # -- Store primitive: load_wrap_snapshot --
+
+    def test_load_wrap_snapshot_idle_returns_none(self, tmp_path):
+        """No wrap in progress → snapshot is None."""
+        store = Store(str(tmp_path / "idle.db"), project_name="Idle")
+        try:
+            assert store.load_wrap_snapshot() is None
+        finally:
+            store.close()
+
+    def test_load_wrap_snapshot_in_progress_returns_data(self, tmp_path):
+        """After prepare_wrap, load_wrap_snapshot returns the token
+        and the exact episode ID list."""
+        store = Store(str(tmp_path / "loaded.db"), project_name="Loaded")
+        try:
+            ep_a = store.record("A", EpisodeType.OBSERVATION)
+            ep_b = store.record("B", EpisodeType.OBSERVATION)
+            prep = prepare_wrap(store)
+            snap = store.load_wrap_snapshot()
+            assert snap is not None
+            assert snap["token"] == prep["wrap_token"]
+            assert set(snap["episode_ids"]) == {ep_a.id, ep_b.id}
+        finally:
+            store.close()
+
+    def test_load_wrap_snapshot_corrupt_json_raises_store_error(
+        self, tmp_path
+    ):
+        """Corrupt wrap_episode_ids metadata is a store-integrity
+        failure, not silently recovered."""
+        from anneal_memory.store import StoreError
+
+        store = Store(
+            str(tmp_path / "corrupt.db"), project_name="Corrupt"
+        )
+        try:
+            store.record("A", EpisodeType.OBSERVATION)
+            prepare_wrap(store)
+            # Directly corrupt the metadata to simulate a manual edit
+            # or a bug that wrote bad JSON.
+            store._conn.execute(
+                "UPDATE metadata SET value = ? WHERE key = ?",
+                ("{not valid json", "wrap_episode_ids"),
+            )
+            store._conn.commit()
+            with pytest.raises(StoreError) as excinfo:
+                store.load_wrap_snapshot()
+            assert excinfo.value.operation == "load_wrap_snapshot"
+        finally:
+            store.close()
+
+    def test_load_wrap_snapshot_token_without_ids_raises(self, tmp_path):
+        """Token set but episode_ids empty is a malformed state —
+        treat as integrity failure, don't silently return an empty
+        list."""
+        from anneal_memory.store import StoreError
+
+        store = Store(str(tmp_path / "half.db"), project_name="Half")
+        try:
+            store.record("A", EpisodeType.OBSERVATION)
+            prepare_wrap(store)
+            store._conn.execute(
+                "UPDATE metadata SET value = ? WHERE key = ?",
+                ("", "wrap_episode_ids"),
+            )
+            store._conn.commit()
+            with pytest.raises(StoreError) as excinfo:
+                store.load_wrap_snapshot()
+            assert excinfo.value.operation == "load_wrap_snapshot"
+        finally:
+            store.close()
+
+    # -- wrap_cancelled clears snapshot --
+
+    def test_wrap_cancelled_clears_snapshot(self, tmp_path):
+        """wrap_cancelled must clear all three metadata keys so the
+        next prepare_wrap starts from a clean slate."""
+        store = Store(str(tmp_path / "cancel.db"), project_name="Cancel")
+        try:
+            store.record("A", EpisodeType.OBSERVATION)
+            prepare_wrap(store)
+            assert store.load_wrap_snapshot() is not None
+            store.wrap_cancelled()
+            assert store.load_wrap_snapshot() is None
+            # Wrap-in-progress flag also cleared.
+            assert not store.status().wrap_in_progress
+        finally:
+            store.close()
+
+    def test_empty_prepare_wrap_clears_stale_snapshot(self, tmp_path):
+        """If a wrap was in progress and a subsequent prepare_wrap
+        finds zero episodes (because the previous wrap ate them all),
+        the empty path must clear the stale snapshot via
+        wrap_cancelled — same pre-10.5c.4 invariant, extended to the
+        new metadata keys.
+        """
+        from anneal_memory import validated_save_continuity
+
+        store = Store(str(tmp_path / "stale.db"), project_name="Stale")
+        try:
+            ep = store.record("A", EpisodeType.OBSERVATION)
+            prep = prepare_wrap(store)
+            text = self._make_continuity("Stale", ep.id)
+            validated_save_continuity(
+                store, text, wrap_token=prep["wrap_token"]
+            )
+            # Now call prepare_wrap again with no new episodes.
+            empty = prepare_wrap(store)
+            assert empty["status"] == "empty"
+            assert store.load_wrap_snapshot() is None
+        finally:
+            store.close()
+
+    # -- Audit event chain-of-custody enrichment --
+    #
+    # The wrap lifecycle audit events must carry enough context to
+    # reconstruct which episodes went into which wrap without
+    # joining against the DB tables. wrap_started logs the token +
+    # full episode ID list at prepare time; wrap_cancelled logs
+    # the same two fields so the auditor can see exactly what was
+    # abandoned; wrap_completed logs the token so an auditor can
+    # match prepare → complete events by identifier.
+
+    def test_audit_events_carry_wrap_token(self, tmp_path):
+        """wrap_started audit entry must carry the minted token and
+        the full episode ID list; wrap_completed must carry the same
+        token (for chain-of-custody matching).
+        """
+        import json as _json
+        from anneal_memory import validated_save_continuity
+
+        db_path = tmp_path / "audit.db"
+        store = Store(str(db_path), project_name="Audit")
+        try:
+            ep_a = store.record("A", EpisodeType.OBSERVATION)
+            ep_b = store.record("B", EpisodeType.OBSERVATION)
+            prep = prepare_wrap(store)
+            token = prep["wrap_token"]
+            text = self._make_continuity("Audit", ep_a.id)
+            validated_save_continuity(store, text, wrap_token=token)
+        finally:
+            store.close()
+
+        audit_path = tmp_path / "audit.audit.jsonl"
+        assert audit_path.exists()
+        entries = [
+            _json.loads(line)
+            for line in audit_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        events_by_name = {e["event"]: e for e in entries}
+
+        started = events_by_name.get("wrap_started")
+        assert started is not None, "wrap_started event missing from audit"
+        started_data = started.get("data", {})
+        assert started_data.get("wrap_token") == token
+        assert started_data.get("wrap_episode_count") == 2
+        assert set(started_data.get("wrap_episode_ids", [])) == {
+            ep_a.id, ep_b.id
+        }
+
+        completed = events_by_name.get("wrap_completed")
+        assert completed is not None
+        completed_data = completed.get("data", {})
+        assert completed_data.get("wrap_token") == token
+
+    def test_audit_wrap_cancelled_carries_token_and_episode_ids(
+        self, tmp_path
+    ):
+        """Cancelled wraps must log the token AND the full abandoned
+        episode ID list so an auditor can see exactly what was
+        abandoned without cross-joining against the wrap_started
+        event."""
+        import json as _json
+
+        db_path = tmp_path / "audit_cancel.db"
+        store = Store(str(db_path), project_name="AuditCancel")
+        try:
+            ep_a = store.record("A", EpisodeType.OBSERVATION)
+            ep_b = store.record("B", EpisodeType.OBSERVATION)
+            prep = prepare_wrap(store)
+            token = prep["wrap_token"]
+            store.wrap_cancelled()
+        finally:
+            store.close()
+
+        audit_path = tmp_path / "audit_cancel.audit.jsonl"
+        entries = [
+            _json.loads(line)
+            for line in audit_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        cancelled = [e for e in entries if e["event"] == "wrap_cancelled"]
+        # The explicit cancellation event carries the full payload.
+        matching = [
+            c for c in cancelled
+            if c.get("data", {}).get("wrap_token") == token
+        ]
+        assert matching, "cancellation event for token not found"
+        data = matching[0]["data"]
+        assert data.get("wrap_episode_count") == 2
+        assert set(data.get("wrap_episode_ids", [])) == {ep_a.id, ep_b.id}
+
+    # -- State machine tightening: partial wrap state is an integrity failure --
+
+    def test_no_arg_wrap_started_then_canonical_save_raises(self, tmp_path):
+        """L1 H1 convergent finding + L2 M4: a caller bypassing the
+        canonical pipeline (``store.wrap_started()`` with no args)
+        creates a partial in-progress state (timestamp set, token
+        empty). As of the 10.5c.4 fix-pass, ``load_wrap_snapshot``
+        raises StoreError on that state so the silent-bypass window
+        is closed — the canonical pipeline has exactly one valid
+        state machine, and partial states are integrity failures
+        rather than "silently fall back to legacy behavior."
+        """
+        from anneal_memory import validated_save_continuity
+        from anneal_memory.store import StoreError
+
+        store = Store(str(tmp_path / "partial.db"), project_name="Partial")
+        try:
+            store.record("A", EpisodeType.OBSERVATION)
+            # Legacy no-arg wrap_started — writes only the timestamp.
+            # The DeprecationWarning is expected; assert it here so
+            # any future removal of the deprecation path shows up
+            # as a visible test signal rather than silent noise.
+            with pytest.warns(DeprecationWarning, match="legacy call form"):
+                store.wrap_started()
+
+            # load_wrap_snapshot must refuse the partial state.
+            with pytest.raises(StoreError) as excinfo:
+                store.load_wrap_snapshot()
+            assert excinfo.value.operation == "load_wrap_snapshot"
+
+            # The canonical save pipeline propagates the StoreError
+            # because it calls load_wrap_snapshot at the start.
+            text = self._make_continuity("Partial", "deadbeef")
+            with pytest.raises(StoreError):
+                validated_save_continuity(store, text)
+
+            # Recovery: wrap_cancelled clears the partial state, then
+            # the canonical pipeline works again (falls into the
+            # true skipped_prepare branch).
+            store.wrap_cancelled()
+            result = validated_save_continuity(store, text)
+            assert result["skipped_prepare"] is True
+        finally:
+            store.close()
+
+    def test_wrap_started_token_without_ids_raises(self, tmp_path):
+        """Write-side validation: passing a token but omitting
+        episode_ids is a caller contract violation."""
+        store = Store(str(tmp_path / "missing_ids.db"), project_name="Missing")
+        try:
+            with pytest.raises(ValueError, match="episode_ids is None"):
+                store.wrap_started(token="abc")
+        finally:
+            store.close()
+
+    def test_wrap_started_ids_without_token_raises(self, tmp_path):
+        """Write-side validation: passing episode_ids but no token
+        is a caller contract violation."""
+        store = Store(str(tmp_path / "missing_tok.db"), project_name="MissingTok")
+        try:
+            with pytest.raises(ValueError, match="token is"):
+                store.wrap_started(episode_ids=["aaaaaaaa"])
+        finally:
+            store.close()
+
+    # -- Replay-race closure: commit-atomic token CAS in wrap_completed --
+
+    def test_wrap_completed_cas_rejects_replaced_token(self, tmp_path):
+        """Codex Layer 3 HIGH: the pre-fix design verified wrap_token
+        at the start of validated_save_continuity, then did many
+        store operations, then finally called wrap_completed — a
+        concurrent process could have cleared or replaced the token
+        between the verify and the commit, but the commit would
+        proceed anyway. The fix adds a compare-and-swap UPDATE at
+        the top of wrap_completed that's the first DML in the
+        transaction, so the token check and the commit are
+        atomically bound together.
+
+        This test simulates a concurrent replacement by directly
+        mutating the metadata between validated_save_continuity's
+        earlier check and wrap_completed's CAS. The save should
+        abort with a ValueError distinct from the earlier
+        'wrap_token mismatch' message.
+        """
+        from anneal_memory import validated_save_continuity
+        from unittest.mock import patch
+
+        store = Store(str(tmp_path / "cas.db"), project_name="CAS")
+        try:
+            ep = store.record("A", EpisodeType.OBSERVATION)
+            prep = prepare_wrap(store)
+            token = prep["wrap_token"]
+            text = self._make_continuity("CAS", ep.id)
+
+            # Monkey-patch wrap_completed to replace the token in the
+            # metadata table JUST before the real wrap_completed
+            # runs. This simulates a concurrent process replacing
+            # the token between the validated_save_continuity's
+            # early check and the wrap_completed CAS.
+            real_wrap_completed = store.wrap_completed
+
+            def racing_wrap_completed(*args, **kwargs):
+                # Swap the token out from under ourselves, as if a
+                # concurrent process ran a new prepare_wrap.
+                store._conn.execute(
+                    "UPDATE metadata SET value = ? WHERE key = ?",
+                    ("f" * 32, "wrap_token"),
+                )
+                store._conn.commit()
+                return real_wrap_completed(*args, **kwargs)
+
+            with patch.object(store, "wrap_completed", racing_wrap_completed):
+                with pytest.raises(ValueError) as excinfo:
+                    validated_save_continuity(
+                        store, text, wrap_token=token
+                    )
+
+            # The CAS message differs from the earlier mismatch
+            # message so operators can distinguish a client-side
+            # stale token from a concurrent-process interference.
+            assert "cleared or replaced during save" in str(excinfo.value)
+
+            # No wraps row should have been inserted — the CAS
+            # failure rolled back the transaction before the
+            # INSERT INTO wraps ran.
+            row = store._conn.execute(
+                "SELECT COUNT(*) FROM wraps"
+            ).fetchone()
+            assert row[0] == 0, (
+                "CAS failure did not roll back the wraps INSERT — "
+                "partial commit leaked"
+            )
+        finally:
+            store.close()
+
+    def test_wrap_completed_no_cas_when_token_is_none(self, tmp_path):
+        """The CAS only runs when wrap_token is passed. The legacy
+        skipped_prepare path (wrap_token=None) bypasses CAS and
+        proceeds with the unconditional clear, same as pre-10.5c.4.
+        """
+        from anneal_memory import validated_save_continuity
+
+        store = Store(str(tmp_path / "nocas.db"), project_name="NoCAS")
+        try:
+            ep = store.record("A", EpisodeType.OBSERVATION)
+            # No prepare_wrap — legacy skipped path.
+            text = self._make_continuity("NoCAS", ep.id)
+            result = validated_save_continuity(store, text)
+            assert result["skipped_prepare"] is True
+            assert store.status().total_wraps == 1
+        finally:
+            store.close()
 

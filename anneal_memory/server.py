@@ -15,9 +15,19 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
+
+# Module-level wrap-token shape constant. Mirrors the JSON schema
+# pattern in ``integrity.py`` for the ``save_continuity`` tool's
+# ``wrap_token`` field. Kept as a module-level compiled regex so the
+# transport doesn't re-compile on every call AND so a future second
+# transport (WebSocket, gRPC, etc.) can import the same constant
+# instead of duplicating the pattern inline — contrarian Layer 3 F1
+# flagged the inline ``import re`` pattern as a rule-of-three risk.
+_WRAP_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
 
 from . import __version__
 from .continuity import (
@@ -323,6 +333,15 @@ class Server:
         package as text via format_wrap_package_text. The library
         handles the full lifecycle (wrap_cancelled on empty,
         wrap_started on ready) so this function stays transport-only.
+
+        On ``status == "ready"`` the library mints a session-handshake
+        token (``wrap_token``) and persists a frozen snapshot of the
+        episode IDs in store metadata. The token is appended to the
+        agent-facing text so the agent can round-trip it back on the
+        ``save_continuity`` call for explicit mismatch detection. The
+        frozen-snapshot filter at save time applies regardless of
+        whether the token is round-tripped — the token is the
+        verification layer, not the snapshot enabler.
         """
         max_chars = args.get("max_chars", 20000)
         staleness_days = args.get("staleness_days", 7)
@@ -333,7 +352,16 @@ class Server:
             staleness_days=staleness_days,
         )
 
-        return _tool_result(format_wrap_package_text(result))
+        text = format_wrap_package_text(result)
+        if result["status"] == "ready" and result["wrap_token"]:
+            # Surface the token in a stable, machine-parseable line at
+            # the end of the agent-facing text. The agent reads this
+            # and passes it back on save_continuity. Format is
+            # deliberately boring ("Wrap token: <hex>") so a simple
+            # regex or endswith check can extract it; more elaborate
+            # structure would overfit one parsing pattern.
+            text = f"{text}\n\n---\nWrap token: {result['wrap_token']}"
+        return _tool_result(text)
 
     def _tool_save_continuity(self, args: dict[str, Any]) -> dict[str, Any]:
         """MCP transport adapter for the library validated_save_continuity.
@@ -366,9 +394,46 @@ class Server:
             if tag and isinstance(tag, str) and tag.strip():
                 affective_state = AffectiveState(tag=tag, intensity=intensity)
 
+        # Optional session-handshake token. When the agent round-trips
+        # the token from the prior prepare_wrap response, the library
+        # verifies it matches the persisted wrap and rejects stale or
+        # wrong-wrap tokens. Omitting the token is fine for the
+        # single-agent common case — the frozen-snapshot filter still
+        # applies because the library consults the persisted snapshot
+        # whenever it's present.
+        #
+        # Shape validation at the MCP boundary: must be a 32-char
+        # hex string if present. The JSON schema also declares the
+        # pattern but some MCP clients skip schema validation; this
+        # explicit check is belt-and-suspenders so the library stays
+        # free of regex. Uses the module-level ``_WRAP_TOKEN_RE``
+        # constant (shared with any future transport) rather than an
+        # inline pattern.
+        wrap_token = args.get("wrap_token")
+        if wrap_token is not None:
+            if not isinstance(wrap_token, str):
+                return _tool_result(
+                    "Error: wrap_token must be a string if provided",
+                    is_error=True,
+                )
+            if wrap_token == "":
+                # Normalize empty string to None — same as "no token
+                # passed." An empty-string token would fall into the
+                # library's mismatch path with a confusing error.
+                wrap_token = None
+            elif not _WRAP_TOKEN_RE.fullmatch(wrap_token):
+                return _tool_result(
+                    "Error: wrap_token must be a 32-char hex string "
+                    f"(got {len(wrap_token)} chars)",
+                    is_error=True,
+                )
+
         try:
             result = _lib_validated_save_continuity(
-                self._store, text, affective_state=affective_state
+                self._store,
+                text,
+                affective_state=affective_state,
+                wrap_token=wrap_token,
             )
         except ValueError as exc:
             return _tool_result(f"Error: {exc}", is_error=True)

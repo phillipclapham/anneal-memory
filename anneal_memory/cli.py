@@ -585,6 +585,13 @@ def cmd_prepare_wrap(args: argparse.Namespace) -> None:
     cognition — the agent's judgment during compression is where
     identity forms, which is why this command does not delegate
     compression to any subprocess.
+
+    On ``status == "ready"`` the library mints a session-handshake
+    token and freezes the episode ID list in store metadata. The
+    token is surfaced in both text and JSON output so the operator
+    (or a wrapping script) can round-trip it to ``save-continuity``
+    via ``--wrap-token`` for explicit mismatch detection across the
+    CLI process boundary.
     """
     with _open_store(args) as store:
         result = _lib_prepare_wrap(
@@ -595,17 +602,40 @@ def cmd_prepare_wrap(args: argparse.Namespace) -> None:
 
         if args.json:
             if result["status"] == "empty":
-                _print_json(
-                    {"status": "empty", "message": result["message"]}
-                )
+                # Emit wrap_token: null on the empty path so jq-style
+                # scrapers can uniformly access the field without a
+                # missing-key error. Shape consistency across the two
+                # status branches.
+                _print_json({
+                    "status": "empty",
+                    "message": result["message"],
+                    "wrap_token": None,
+                })
             else:
-                # Preserve the existing JSON shape: emit the package dict
-                # so scripts scraping fields like `instructions`, `episodes`,
-                # `stale_patterns`, `today`, `max_chars` continue to work.
-                _print_json(result["package"])
+                # Preserve the pre-10.5c.4 JSON shape: emit the package
+                # dict so scripts scraping fields like `instructions`,
+                # `episodes`, `stale_patterns`, `today`, `max_chars`
+                # continue to work. The wrap_token is added as a new
+                # top-level key alongside the package — additive,
+                # non-breaking for existing scrapers. Note that this
+                # means the JSON shape does NOT exactly match the
+                # internal WrapPackageDict TypedDict (which has no
+                # wrap_token field); the CLI JSON output is its own
+                # shape, documented by the CLI subcommand output
+                # contract rather than by WrapPackageDict.
+                package = dict(result["package"]) if result["package"] else {}
+                package["wrap_token"] = result["wrap_token"]
+                _print_json(package)
             return
 
-        print(format_wrap_package_text(result))
+        text = format_wrap_package_text(result)
+        if result["status"] == "ready" and result["wrap_token"]:
+            # Append the token as a stable "Wrap token: <hex>" trailer
+            # so operators and wrapping scripts can grep/awk it. Same
+            # shape as the MCP transport uses in server.py, so a
+            # universal parser works across both transports.
+            text = f"{text}\n\n---\nWrap token: {result['wrap_token']}"
+        print(text)
 
 
 def cmd_save_continuity(args: argparse.Namespace) -> None:
@@ -647,9 +677,23 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 intensity=args.affect_intensity,
             )
 
+        # Optional session-handshake token from ``prepare-wrap``. The
+        # library verifies it matches the persisted wrap and raises
+        # ValueError on mismatch (stale or wrong-wrap token). Without
+        # the flag the library still applies the frozen-snapshot
+        # filter (the persisted snapshot is consulted whenever it's
+        # present) — the token is a verification layer, not the
+        # snapshot enabler. Operators who want explicit safety pass
+        # ``--wrap-token $(anneal-memory prepare-wrap | ...)``; the
+        # single-user common case needs no ceremony.
+        wrap_token = getattr(args, "wrap_token", None)
+
         try:
             result = _lib_validated_save_continuity(
-                store, text, affective_state=affective_state
+                store,
+                text,
+                affective_state=affective_state,
+                wrap_token=wrap_token,
             )
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
@@ -1583,6 +1627,16 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("file", help="Path to continuity markdown file (use '-' for stdin)")
     sub.add_argument("--affect-tag", help="Affective state tag (e.g. 'engaged', 'uncertain')")
     sub.add_argument("--affect-intensity", type=float, default=0.5, help="Affective intensity 0.0-1.0 (default: 0.5)")
+    sub.add_argument(
+        "--wrap-token",
+        help=(
+            "Session-handshake token from the prior prepare-wrap call "
+            "(the 'Wrap token: <hex>' trailer). When provided, mismatch "
+            "with the persisted wrap raises an error; when omitted, the "
+            "frozen-snapshot filter still applies but no token "
+            "verification runs."
+        ),
+    )
     sub.set_defaults(func=cmd_save_continuity)
 
     # -- serve --

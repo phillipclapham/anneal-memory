@@ -246,6 +246,43 @@ class WrapPackageDict(TypedDict):
     max_chars: int  # Target max size for the compressed continuity
 
 
+class WrapSnapshot(TypedDict):
+    """Frozen wrap-in-progress snapshot persisted in store metadata.
+
+    Written by :meth:`Store.wrap_started` when ``prepare_wrap`` runs,
+    read by :meth:`Store.load_wrap_snapshot` at save time, cleared by
+    :meth:`Store.wrap_completed` and :meth:`Store.wrap_cancelled`.
+
+    The snapshot exists to close the TOCTOU window between
+    ``prepare_wrap`` (which shows the agent a set of episodes for
+    compression) and ``validated_save_continuity`` (which re-fetches
+    the episode set to run graduation validation). Without a frozen
+    snapshot, episodes recorded between those two calls silently join
+    the wrap, even though the agent's compression was produced from
+    the smaller set.
+
+    With a snapshot:
+
+    - ``token`` is a uuid4().hex minted at prepare time. Transports
+      that round-trip the token via their protocol (MCP tool args,
+      CLI ``--wrap-token`` flag) can opt into explicit verification
+      — if the caller passes a token that doesn't match the stored
+      one, the save is rejected with ``ValueError``.
+    - ``episode_ids`` is the list of 8-char episode IDs frozen at
+      prepare time. Even callers that don't pass a token still get
+      frozen semantics: ``validated_save_continuity`` filters its
+      re-fetched set down to exactly these IDs.
+
+    Episodes recorded after ``prepare_wrap`` that are NOT in the
+    snapshot stay with ``session_id IS NULL`` after
+    ``wrap_completed`` runs, so they naturally fall into the next
+    wrap's compression window.
+    """
+
+    token: str  # uuid4().hex minted at prepare_wrap time
+    episode_ids: list[str]  # 8-char episode IDs frozen at prepare time
+
+
 class PrepareWrapResult(TypedDict):
     """Return shape of ``prepare_wrap``.
 
@@ -256,6 +293,14 @@ class PrepareWrapResult(TypedDict):
     offer the two valid status values; callers typoing
     ``result["statuz"]`` or ``result["status"] == "reday"`` get a
     mypy/pyright error instead of silent runtime coercion.
+
+    ``wrap_token`` is the session-handshake token minted by
+    :func:`prepare_wrap` when ``status == "ready"``. Transports that
+    round-trip it back to :func:`validated_save_continuity` get
+    explicit mismatch detection (stale/wrong wrap → ``ValueError``);
+    transports that don't still get frozen-snapshot semantics because
+    the snapshot is always consulted when present. ``None`` on the
+    empty path (no wrap to commit).
     """
 
     status: Literal["empty", "ready"]
@@ -263,6 +308,7 @@ class PrepareWrapResult(TypedDict):
     episode_count: int
     package: WrapPackageDict | None  # None when status == "empty"
     assoc_context: str | None  # Hebbian association context, or None
+    wrap_token: str | None  # Session-handshake token, None when status == "empty"
 
 
 class SaveContinuityResult(TypedDict):

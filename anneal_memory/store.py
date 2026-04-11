@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import warnings
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -39,6 +40,7 @@ from .types import (
     Tombstone,
     WrapRecord,
     WrapResult,
+    WrapSnapshot,
 )
 
 class AnnealMemoryError(Exception):
@@ -91,7 +93,12 @@ class AnnealMemoryError(Exception):
 # alias. When 10.5c.6 adds SQLite-origin operations, if the growth
 # pressure makes this brittle, promote the alias to an ``Enum`` (or
 # enforce statically via mypy once 10.5d ships — either works).
-StoreOperation = Literal["save_continuity", "save_meta"]
+StoreOperation = Literal[
+    "save_continuity",
+    "save_meta",
+    "load_wrap_snapshot",
+    "wrap_completed",
+]
 
 
 class StoreError(AnnealMemoryError):
@@ -261,7 +268,34 @@ _ASSOCIATIONS_SCHEMA_SQL = ASSOCIATIONS_SCHEMA
 _DEFAULT_METADATA = {
     "format_version": str(_SCHEMA_VERSION),
     "project_name": "Agent",
+    # Wrap lifecycle state. ``wrap_started_at`` is the legacy
+    # in-progress flag (ISO 8601 UTC timestamp when prepare_wrap ran,
+    # empty when no wrap in progress). 10.5c.4 added two companions
+    # that form the session-handshake-token snapshot: ``wrap_token``
+    # is a uuid4().hex minted at prepare_wrap time, and
+    # ``wrap_episode_ids`` is a JSON-encoded list of 8-char episode
+    # IDs frozen at prepare time — the exact set the agent was shown
+    # for compression. ``validated_save_continuity`` reads both to
+    # (a) optionally verify the caller passed the right token and
+    # (b) filter ``episodes_since_wrap()`` down to the frozen set
+    # regardless of what's been recorded since. All three are
+    # cleared together in ``wrap_completed`` and ``wrap_cancelled``
+    # inside a single SQL transaction so a mid-clear crash cannot
+    # leave partial state.
+    #
+    # **State machine invariant:** the three keys are canonically
+    # either all zero-length (idle — no wrap in progress) or all
+    # populated (canonical wrap in progress). Any partial state
+    # (e.g. ``wrap_started_at`` set but ``wrap_token`` empty) is a
+    # store-integrity failure and is surfaced as a ``StoreError``
+    # from ``load_wrap_snapshot``. This is the 10.5c.4 fix-pass
+    # tightening: the pre-fix-pass code tolerated the partial state
+    # as a "legacy skipped_prepare" path, which silently bypassed
+    # the snapshot filter. The canonical pipeline has exactly one
+    # valid state machine.
     "wrap_started_at": "",
+    "wrap_token": "",
+    "wrap_episode_ids": "",
 }
 
 
@@ -296,6 +330,30 @@ class Store:
 
     Use as a context manager (``with Store(...) as s:``) to ensure the
     connection is closed properly.
+
+    **Wrap-lifecycle invariants (10.5c.4):** The wrap state machine is
+    tracked across three metadata keys — ``wrap_started_at``,
+    ``wrap_token``, ``wrap_episode_ids`` — that MUST stay in sync:
+
+    - **All zero-length** (idle / no wrap in progress) — canonical
+      state between wraps.
+    - **All populated** (canonical wrap in progress) — a snapshot
+      exists for the current wrap.
+    - **Any partial state** (e.g. timestamp set but token empty) is
+      a store integrity failure and :meth:`load_wrap_snapshot` will
+      raise :class:`StoreError` on it. The canonical pipeline has
+      exactly one valid shape.
+
+    **Rule for contributors:** all metadata writes inside
+    :meth:`wrap_started`, :meth:`wrap_cancelled`, and
+    :meth:`wrap_completed` MUST share a single
+    ``self._conn.commit()`` call. Write the ``INSERT OR REPLACE INTO
+    metadata`` SQL inline — never introduce or reuse a per-key
+    helper inside those methods, because a per-key helper would
+    commit after every write and a crash mid-sequence would leave
+    the state machine in a partial (integrity-failure) state.
+    ``_set_metadata`` was intentionally removed in 10.5c.4 for
+    exactly this reason.
 
     Args:
         path: Path to the SQLite database file. Created if it doesn't exist.
@@ -669,23 +727,319 @@ class Store:
 
     # -- Wrap lifecycle --
 
-    def wrap_started(self) -> None:
-        """Mark that a wrap has been initiated (prepare_wrap called)."""
-        self._set_metadata("wrap_started_at", _now_utc())
+    def wrap_started(
+        self,
+        *,
+        token: str = "",
+        episode_ids: list[str] | None = None,
+    ) -> None:
+        """Mark that a wrap has been initiated (prepare_wrap called).
+
+        **The canonical call form is ``wrap_started(token=<uuid>,
+        episode_ids=<list>)``.** The no-arg form ``wrap_started()`` is
+        legacy — it writes only ``wrap_started_at`` and leaves
+        ``wrap_token`` / ``wrap_episode_ids`` empty, creating a state
+        that :meth:`load_wrap_snapshot` now rejects as a store
+        integrity failure (see the 10.5c.4 fix-pass review for the
+        rationale). The no-arg form is preserved for tests and
+        low-level tooling that only need the ``wrap_in_progress``
+        flag semantics (e.g. ``store.status()`` reads), but emits a
+        :class:`DeprecationWarning` to surface the contract drift.
+
+        Writes the ``wrap_started_at`` flag and, when the caller
+        provides a session-handshake token and frozen episode-ID
+        snapshot, persists them alongside so
+        :meth:`validated_save_continuity` can verify the token and
+        filter its re-fetched episode set to exactly the frozen list.
+
+        The three metadata writes happen inside a single SQL
+        transaction (one ``INSERT OR REPLACE`` per key, one commit at
+        the end) so a crash mid-write cannot leave the store with a
+        timestamp but no token, or a token but no episode list. See
+        the 10.5c.4 design note on ``_DEFAULT_METADATA`` for the
+        invariant.
+
+        Args:
+            token: Session-handshake token (uuid4().hex from
+                :func:`prepare_wrap`). Empty string triggers the
+                legacy flag-only behavior and emits a
+                :class:`DeprecationWarning`. The canonical pipeline
+                always passes a real token.
+            episode_ids: Frozen list of 8-char episode IDs the agent
+                was shown for compression. Required when ``token`` is
+                non-empty; ignored when ``token`` is empty. Stored
+                JSON-encoded in the ``wrap_episode_ids`` metadata key.
+        """
+        if not token and episode_ids is None:
+            # Legacy no-arg form. Emits a DeprecationWarning so any
+            # future caller reaches for the canonical (token,
+            # episode_ids) form. The state produced by this path is
+            # ``wrap_started_at`` set + ``wrap_token`` empty, which
+            # ``load_wrap_snapshot`` now raises StoreError on — so
+            # callers on this path MUST NOT subsequently call
+            # ``validated_save_continuity`` without first clearing
+            # with ``wrap_cancelled``.
+            warnings.warn(
+                "Store.wrap_started() with no arguments is a legacy "
+                "call form. The canonical pipeline is "
+                "wrap_started(token=uuid.uuid4().hex, "
+                "episode_ids=<list>) — see prepare_wrap() in "
+                "anneal_memory.continuity for the reference caller. "
+                "Calling validated_save_continuity after the no-arg "
+                "form will raise StoreError from load_wrap_snapshot "
+                "because the metadata is in a partial "
+                "wrap-in-progress state; call wrap_cancelled() to "
+                "clear it before proceeding.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        # Validate the caller-supplied token/episode_ids combo at the
+        # write boundary. The defensive asymmetry the reviewer caught:
+        # load_wrap_snapshot raises StoreError for a "token present,
+        # ids empty" state, but without this guard the write side
+        # would happily store that exact malformed pair. Surface the
+        # bad-caller early so debugging points at the write site, not
+        # at the next load.
+        if token and episode_ids is None:
+            raise ValueError(
+                "wrap_started: token was provided but episode_ids is "
+                "None. The canonical pipeline must pass both together "
+                "— pass episode_ids=[] explicitly if you really mean "
+                "an empty snapshot."
+            )
+        if episode_ids is not None and not token:
+            raise ValueError(
+                "wrap_started: episode_ids was provided but token is "
+                "empty. Snapshot episode IDs only make sense with a "
+                "handshake token; pass token=uuid.uuid4().hex."
+            )
+
+        # Batch the three metadata writes into a single commit so a
+        # crash mid-write cannot leave the store with a partial
+        # snapshot (e.g. timestamp set but token blank, which would
+        # look like legacy skipped_prepare state and silently bypass
+        # the frozen-snapshot filter at save time — a state
+        # ``load_wrap_snapshot`` now treats as an integrity failure
+        # to catch any code path that slips past the write-side
+        # validation above).
+        self._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("wrap_started_at", _now_utc()),
+        )
+        self._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("wrap_token", token),
+        )
+        # Empty-string encoding means "no snapshot stored" (legacy
+        # path where ``store.wrap_started()`` was called with no
+        # args). An empty list from a validated ``token + episode_ids``
+        # pair encodes as ``"[]"`` JSON so ``load_wrap_snapshot`` can
+        # distinguish "caller explicitly passed an empty snapshot"
+        # from "legacy no-snapshot path."
+        if token:
+            ids_json = json.dumps(list(episode_ids or []))
+        else:
+            ids_json = ""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("wrap_episode_ids", ids_json),
+        )
+        self._conn.commit()
 
         if self._audit is not None:
-            self._audit.log("wrap_started")
+            payload: dict[str, Any] = {}
+            if token:
+                payload["wrap_token"] = token
+            if token and episode_ids:
+                # Record both the count (for fast integrity scans) and
+                # the full ID list (for forensic reconstruction). The
+                # audit trail is the tamper-evident record, so logging
+                # the full list is load-bearing for chain-of-custody
+                # — with this field the audit alone can answer "which
+                # episodes were shown to the agent for wrap #N" without
+                # joining against the wraps + episodes tables. Key
+                # names mirror the metadata keys for vocabulary
+                # consistency (Layer 2 NIT-2).
+                payload["wrap_episode_count"] = len(episode_ids)
+                payload["wrap_episode_ids"] = list(episode_ids)
+            self._audit.log("wrap_started", payload if payload else None)
 
     def wrap_cancelled(self) -> None:
         """Clear wrap-in-progress flag without recording a completed wrap.
 
         Use when a wrap is abandoned (no episodes, LLM failure, validation
         failure with fallback). Prevents stale-wrap detection from false-firing.
+
+        Clears all three wrap-in-progress metadata keys
+        (``wrap_started_at``, ``wrap_token``, ``wrap_episode_ids``) in a
+        single SQL transaction, matching the batched-write invariant
+        :meth:`wrap_started` establishes.
         """
-        self._set_metadata("wrap_started_at", "")
+        # Capture both the token AND the frozen episode ID list
+        # before we clear them, so the audit entry records the full
+        # chain-of-custody context for the abandoned wrap. Layer 1
+        # M3 flagged that cancelled wraps were previously logging
+        # only the token, forcing auditors to cross-join against
+        # the wrap_started event to see which episodes were
+        # abandoned. Logging the ids inline on the cancel event
+        # removes that join.
+        cancelled_token = self._get_metadata("wrap_token")
+        cancelled_ids_raw = self._get_metadata("wrap_episode_ids")
+
+        self._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("wrap_started_at", ""),
+        )
+        self._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("wrap_token", ""),
+        )
+        self._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("wrap_episode_ids", ""),
+        )
+        self._conn.commit()
 
         if self._audit is not None:
-            self._audit.log("wrap_cancelled")
+            if cancelled_token:
+                payload: dict[str, Any] = {"wrap_token": cancelled_token}
+                if cancelled_ids_raw:
+                    # Audit is best-effort: a corrupt JSON here should
+                    # not prevent the cancellation from being recorded.
+                    # The cancellation itself is the important fact;
+                    # the ids field is nice-to-have context.
+                    try:
+                        decoded = json.loads(cancelled_ids_raw)
+                        if isinstance(decoded, list):
+                            payload["wrap_episode_ids"] = decoded
+                            payload["wrap_episode_count"] = len(decoded)
+                    except json.JSONDecodeError:
+                        pass
+                self._audit.log("wrap_cancelled", payload)
+            else:
+                self._audit.log("wrap_cancelled", None)
+
+    def load_wrap_snapshot(self) -> WrapSnapshot | None:
+        """Return the frozen wrap-in-progress snapshot, or None if no wrap is pending.
+
+        Used by :func:`validated_save_continuity` to filter the
+        re-fetched episode set down to exactly what the agent was
+        shown at prepare time, and to verify any caller-provided
+        token. Returns ``None`` in two cases:
+
+        1. **No wrap in progress** — ``wrap_started_at`` metadata is
+           empty. This is the legacy idle state.
+        2. **Legacy prepare path with no token** — ``wrap_started_at``
+           is set but ``wrap_token`` is empty. This shouldn't happen
+           under the canonical 10.5c.4 pipeline but stays a tolerated
+           state for the ``skipped_prepare`` path where callers
+           invoke ``validated_save_continuity`` without having called
+           ``prepare_wrap`` first.
+
+        Returns:
+            :class:`WrapSnapshot` with ``token`` and ``episode_ids`` if
+            a snapshot is stored, else ``None``.
+
+        Raises:
+            StoreError: If the ``wrap_episode_ids`` metadata key is
+                populated but its JSON fails to decode — treated as a
+                store-integrity failure, not silently recovered.
+                ``operation`` is ``"load_wrap_snapshot"``, ``path`` is
+                the store's DB file.
+        """
+        # Codex Layer 3 MEDIUM: batch the three metadata reads into
+        # a single query so concurrent writers can't interleave
+        # between them. Prior pattern called _get_metadata three
+        # times, which is itself TOCTOU-prone inside the TOCTOU
+        # fix. One SELECT reads all three keys atomically.
+        rows = self._conn.execute(
+            "SELECT key, value FROM metadata WHERE key IN (?, ?, ?)",
+            ("wrap_started_at", "wrap_token", "wrap_episode_ids"),
+        ).fetchall()
+        meta = {row["key"]: row["value"] for row in rows}
+
+        wrap_started = meta.get("wrap_started_at", "")
+        if not wrap_started:
+            return None
+
+        token = meta.get("wrap_token", "")
+        if not token:
+            # wrap_started_at is set but wrap_token is empty — this is
+            # a malformed state after 10.5c.4. The canonical path
+            # ``prepare_wrap → store.wrap_started(token=..., episode_ids=...)``
+            # writes all three keys atomically; the only way to reach
+            # "timestamp present, token empty" is (a) a caller invoking
+            # the no-arg ``store.wrap_started()`` form directly (bypass
+            # of the canonical pipeline), (b) a mid-upgrade v0.1.x
+            # database with a pre-existing stale flag, or (c) a manual
+            # metadata edit. Layer 1 review caught this as a silent
+            # bypass of the snapshot filter — surfacing it as a
+            # StoreError is the right move: the canonical pipeline has
+            # one valid state machine, and partial states are integrity
+            # failures, not "try to recover silently."
+            raise StoreError(
+                "wrap_started_at is set but wrap_token is empty — "
+                "store metadata is in a partial wrap-in-progress state. "
+                "This happens if a caller bypasses the canonical "
+                "prepare_wrap pipeline (e.g. by calling "
+                "store.wrap_started() with no arguments) or if a v0.1.x "
+                "database is mid-upgrade with a stale legacy flag. "
+                "Call store.wrap_cancelled() to clear the stale flag, "
+                "then re-run prepare_wrap for a clean snapshot.",
+                operation="load_wrap_snapshot",
+                path=str(self.path),
+            )
+
+        ids_raw = meta.get("wrap_episode_ids", "")
+        if not ids_raw:
+            # Token without episode IDs is a malformed state — the
+            # batched write in wrap_started() should have set both or
+            # neither. Surface as store integrity rather than guess.
+            raise StoreError(
+                "wrap_token is set but wrap_episode_ids is empty — "
+                "store metadata is inconsistent. This indicates a "
+                "wrap-lifecycle state machine bug or manual metadata "
+                "edit. Either clear wrap-in-progress state with "
+                "`wrap_cancelled()` or restore the episode ID list.",
+                operation="load_wrap_snapshot",
+                path=str(self.path),
+            )
+
+        try:
+            episode_ids = json.loads(ids_raw)
+        except json.JSONDecodeError as exc:
+            raise StoreError(
+                f"wrap_episode_ids metadata is not valid JSON: {exc}. "
+                "Either clear wrap-in-progress state with "
+                "`wrap_cancelled()` or restore the snapshot.",
+                operation="load_wrap_snapshot",
+                path=str(self.path),
+            ) from exc
+
+        if not isinstance(episode_ids, list) or not all(
+            isinstance(x, str) for x in episode_ids
+        ):
+            raise StoreError(
+                "wrap_episode_ids metadata decoded to an unexpected "
+                f"shape ({type(episode_ids).__name__}); expected a "
+                "list of 8-char episode ID strings.",
+                operation="load_wrap_snapshot",
+                path=str(self.path),
+            )
+
+        return WrapSnapshot(token=token, episode_ids=episode_ids)
+
+    # SQLite default SQLITE_MAX_VARIABLE_NUMBER is 999 (raised to 32766
+    # in SQLite 3.32.0 from 2020, but many platform builds still ship
+    # the older limit). The 10.5c.4 ``wrap_completed`` builds a
+    # dynamic IN clause from the frozen episode IDs with no chunking,
+    # so we guard against the limit explicitly rather than letting a
+    # bare ``sqlite3.OperationalError: too many SQL variables`` fall
+    # out through the transport. The limit is documented as a
+    # compile-time constant so there's no runtime query for it; we
+    # use 998 (leave one placeholder for the ``session_id`` param).
+    # Chunking is 10.5c.5+ work if anyone ever actually hits this.
+    _MAX_SQL_VARS_IN_CLAUSE = 998
 
     def wrap_completed(
         self,
@@ -699,12 +1053,106 @@ class Store:
         associations_strengthened: int = 0,
         associations_decayed: int = 0,
         section_sizes: dict[str, int] | None = None,
+        *,
+        episode_ids: list[str] | None = None,
+        wrap_token: str | None = None,
     ) -> WrapResult:
         """Record a completed wrap and clear the in-progress flag.
 
+        Args:
+            episode_ids: The exact set of episode IDs that participated
+                in this wrap. When provided, only those episodes get
+                their ``session_id`` stamped with the new wrap's ID —
+                any episode with ``session_id IS NULL`` that is NOT in
+                the list stays null, so it naturally falls into the
+                next wrap's compression window. This is the fix for
+                the 10.5c.4 TOCTOU window: episodes recorded between
+                ``prepare_wrap`` and ``validated_save_continuity`` are
+                preserved for the next wrap instead of being silently
+                absorbed into this one. When ``None`` (the legacy
+                ``skipped_prepare`` path), the UPDATE falls back to
+                the pre-10.5c.4 behavior of stamping every episode
+                with a NULL ``session_id``.
+            wrap_token: The session-handshake token from the prepare
+                event this completion is committing. Passed through
+                to the audit payload as the chain-of-custody link
+                between ``wrap_started`` and ``wrap_completed``
+                events. When ``None`` (legacy or skipped_prepare
+                path), no token field is added to the audit entry.
+                Passed as an explicit parameter rather than re-read
+                from metadata because the 10.5c.4 canonical caller
+                already has the token in hand from ``load_wrap_snapshot``
+                — removes a read and removes a within-method
+                read-before-clear sequence that Layer 1 flagged.
+
         Returns:
             WrapResult with the wrap metrics.
+
+        Raises:
+            StoreError: If ``episode_ids`` exceeds the SQLite variable
+                limit for an IN clause (998 by default). This is a
+                hard guard, not a silent truncation — chunking is
+                10.5c.5+ work.
         """
+        if (
+            episode_ids is not None
+            and len(episode_ids) > self._MAX_SQL_VARS_IN_CLAUSE
+        ):
+            raise StoreError(
+                f"wrap_completed: episode_ids has {len(episode_ids)} "
+                f"entries, which exceeds the SQLite IN-clause limit "
+                f"of {self._MAX_SQL_VARS_IN_CLAUSE} (platform-dependent "
+                f"default). Chunking large wraps is scheduled for "
+                f"10.5c.5+; as a workaround, compress in two passes "
+                f"with fewer episodes per wrap.",
+                operation="wrap_completed",
+                path=str(self.path),
+            )
+
+        # Replay-race closure: if the caller passed a wrap_token (i.e.
+        # they came through the canonical pipeline with a verified
+        # snapshot at save time), re-verify the token inside the write
+        # transaction using a compare-and-swap UPDATE. The CAS UPDATE
+        # is the first DML in this method, which opens SQLite's
+        # deferred transaction and acquires the reserved write lock.
+        # If the UPDATE affects zero rows, the token has changed
+        # (another process ran prepare_wrap / wrap_cancelled /
+        # wrap_completed between validated_save_continuity's earlier
+        # token check and now) — raise and rollback so no partial
+        # wraps row gets inserted.
+        #
+        # Codex Layer 3 HIGH finding: without this CAS, two concurrent
+        # save_continuity calls using the same valid token could both
+        # pass their earlier verification at continuity.py:700 and
+        # both proceed to insert separate wraps rows. In the current
+        # single-process model that race is theoretical, but the
+        # whole point of the 10.5c.4 fix is "TOCTOU structurally
+        # impossible" — leaving a second race open contradicts the
+        # thesis. Closing it costs ~10 lines and one test.
+        if wrap_token is not None:
+            cas_cursor = self._conn.execute(
+                "UPDATE metadata SET value = '' "
+                "WHERE key = 'wrap_token' AND value = ?",
+                (wrap_token,),
+            )
+            if cas_cursor.rowcount != 1:
+                # Roll back the implicit transaction the CAS opened,
+                # then raise. The caller sees a ValueError that's
+                # distinguishable from the earlier mismatch at
+                # continuity.py (different message) so an operator
+                # knows a concurrent process interfered versus a
+                # client-side stale-token bug.
+                self._conn.rollback()
+                raise ValueError(
+                    f"wrap_completed: wrap_token has been cleared or "
+                    f"replaced during save. The persisted token no "
+                    f"longer matches '{wrap_token[:8]}…' — a concurrent "
+                    f"process probably ran prepare_wrap, wrap_cancelled, "
+                    f"or wrap_completed between this session's token "
+                    f"verification and the save commit. Re-run "
+                    f"prepare_wrap to start a fresh wrap."
+                )
+
         self._conn.execute(
             """INSERT INTO wraps
                (wrapped_at, episodes_compressed, continuity_chars, graduations_validated,
@@ -724,21 +1172,76 @@ class Store:
                 associations_decayed,
             ),
         )
-        # Update session_id for episodes in this wrap cycle
+        # Update session_id for episodes in this wrap cycle.
+        #
+        # Pre-10.5c.4 behavior: stamp every NULL-session_id episode
+        # with the new wrap's ID. This still runs on the legacy
+        # ``skipped_prepare`` path when ``episode_ids`` is None.
+        #
+        # 10.5c.4 behavior: when the caller provides the frozen
+        # snapshot ID list, restrict the UPDATE to exactly those IDs.
+        # Any NULL-session_id episodes recorded AFTER prepare_wrap
+        # (the TOCTOU window) are NOT in the list, so they stay NULL
+        # and land in the next wrap's ``episodes_since_wrap()`` result.
+        # Data loss is impossible — new episodes are preserved, just
+        # carried over to the wrap they semantically belong to.
         last_wrap = self._conn.execute(
             "SELECT id FROM wraps ORDER BY id DESC LIMIT 1"
         ).fetchone()
         if last_wrap:
             session_id = str(last_wrap["id"])
-            self._conn.execute(
-                "UPDATE episodes SET session_id = ? WHERE session_id IS NULL",
-                (session_id,),
-            )
-        self._set_metadata("wrap_started_at", "")
+            if episode_ids is None:
+                # Legacy / skipped_prepare path.
+                self._conn.execute(
+                    "UPDATE episodes SET session_id = ? WHERE session_id IS NULL",
+                    (session_id,),
+                )
+            elif episode_ids:
+                # Frozen snapshot path. Build a dynamic IN clause —
+                # SQLite supports up to 999 parameters by default, which
+                # covers the realistic per-session episode count by a
+                # comfortable margin. If a wrap ever exceeds that, the
+                # caller should chunk the ID list and call us per chunk
+                # (we don't do it here because the batching concerns
+                # belong upstream where chunking the compression is also
+                # a relevant choice).
+                placeholders = ",".join("?" for _ in episode_ids)
+                self._conn.execute(
+                    f"UPDATE episodes SET session_id = ? "
+                    f"WHERE session_id IS NULL AND id IN ({placeholders})",
+                    (session_id, *episode_ids),
+                )
+            # If episode_ids is an empty list, skip the UPDATE entirely.
+            # An empty snapshot means "this wrap compressed nothing" —
+            # the prepare_wrap empty path already calls wrap_cancelled
+            # instead of wrap_completed, so the only way to reach here
+            # with an empty list is a library user deliberately
+            # recording a no-op wrap. Do nothing rather than
+            # accidentally stamping all NULL episodes.
+
+        # Clear all three wrap-in-progress metadata keys in the same
+        # SQL transaction as the wraps INSERT + episodes UPDATE so a
+        # mid-clear crash cannot leave partial state (e.g. wraps row
+        # committed but wrap_started_at still set, which would look
+        # like a stuck wrap on the next session's prepare_wrap call).
+        # Using bare ``execute`` instead of ``_set_metadata`` so the
+        # three writes share the single ``commit()`` below.
+        self._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("wrap_started_at", ""),
+        )
+        self._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("wrap_token", ""),
+        )
+        self._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("wrap_episode_ids", ""),
+        )
         self._conn.commit()
 
         if self._audit is not None:
-            self._audit.log("wrap_completed", {
+            audit_payload: dict[str, Any] = {
                 "episodes_compressed": episodes_compressed,
                 "continuity_chars": continuity_chars,
                 "graduations_validated": graduations_validated,
@@ -747,7 +1250,18 @@ class Store:
                 "associations_formed": associations_formed,
                 "associations_strengthened": associations_strengthened,
                 "associations_decayed": associations_decayed,
-            })
+            }
+            # Chain-of-custody link: the token ties this completion
+            # event to the earlier wrap_started audit event that
+            # carried the same token + the full wrap_episode_ids.
+            # An auditor reconstructing a specific wrap walks
+            # wrap_started → (optional wrap_cancelled) → wrap_completed
+            # events by matching ``wrap_token``. The token is passed
+            # in by the caller rather than re-read from metadata to
+            # avoid a within-method read-before-clear sequence.
+            if wrap_token:
+                audit_payload["wrap_token"] = wrap_token
+            self._audit.log("wrap_completed", audit_payload)
 
         # Auto-prune old episodes if retention_days is configured
         pruned = 0
@@ -1233,13 +1747,11 @@ class Store:
         ).fetchone()
         return row["value"] if row else ""
 
-    def _set_metadata(self, key: str, value: str) -> None:
-        """Set a metadata value."""
-        self._conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-            (key, value),
-        )
-        self._conn.commit()
+    # NOTE: ``_set_metadata`` was removed in 10.5c.4. The rationale
+    # and forward-looking rule live in the Store class docstring
+    # ("Wrap-lifecycle invariants"). Do not reintroduce a single-key
+    # helper inside wrap_started/wrap_cancelled/wrap_completed.
+
 
     @staticmethod
     def _row_to_episode(row: sqlite3.Row) -> Episode:

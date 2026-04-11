@@ -1930,3 +1930,239 @@ class TestParserPrepareWrapSaveContinuity:
             args_list = cmd.split() + ["--json"]
             args = parser.parse_args(args_list)
             assert args.json is True, f"--json failed for: {cmd}"
+
+
+# ---------------------------------------------------------------------------
+# 10.5c.4 — CLI cross-process TOCTOU handshake token
+# ---------------------------------------------------------------------------
+#
+# The hard part of the session-handshake token design: CLI subcommands
+# are separate processes. The ``prepare-wrap`` invocation returns the
+# token via stdout, a wrapping script captures it, and the
+# ``save-continuity`` invocation passes it back via ``--wrap-token``.
+# The shared state across the process boundary is the SQLite store
+# metadata — the token and frozen episode ID list are persisted by
+# the first process and read by the second.
+#
+# These tests exercise that cross-process handshake with REAL
+# subprocesses (not in-process calls) to lock the actual ship shape.
+
+
+class TestCLICrossProcessTOCTOU:
+    """10.5c.4 — CLI subprocess handshake across prepare → record → save."""
+
+    # Valid 4-section continuity template — callers fill in the cited ID.
+    # FlowScript braces are doubled so ``str.format(cited=...)`` doesn't
+    # misinterpret them as format fields.
+    _TEMPLATE = (
+        "# CrossProcess — Memory (v1)\n\n"
+        "## State\nCross-process test.\n\n"
+        "## Patterns\n"
+        "{{core:\n"
+        "  thought: token round-trips via --wrap-token "
+        "| 1x (2026-04-10)\n"
+        "}}\n\n"
+        "## Decisions\n"
+        "[decided(rationale: \"test\", on: \"2026-04-10\")] ok\n\n"
+        "## Context\nCited {cited}.\n"
+    )
+
+    @staticmethod
+    def _run(*args, check=True):
+        """Helper: run ``anneal_memory.cli`` as a subprocess."""
+        result = subprocess.run(
+            [sys.executable, "-m", "anneal_memory.cli", *args],
+            capture_output=True,
+            text=True,
+        )
+        if check and result.returncode != 0:
+            raise AssertionError(
+                f"CLI call failed ({result.returncode}):\n"
+                f"args={args}\nstdout={result.stdout}\nstderr={result.stderr}"
+            )
+        return result
+
+    @staticmethod
+    def _extract_token_from_text(stdout: str) -> str:
+        """Pull the 'Wrap token: <hex>' trailer out of prepare-wrap text."""
+        for line in reversed(stdout.splitlines()):
+            if line.startswith("Wrap token:"):
+                return line.split("Wrap token:", 1)[1].strip()
+        raise AssertionError(
+            "No 'Wrap token:' trailer in prepare-wrap output:\n" + stdout
+        )
+
+    def test_prepare_wrap_text_output_has_token_trailer(self, tmp_path):
+        """prepare-wrap text output ends with the 'Wrap token: <hex>'
+        trailer so wrapping scripts can grep/awk the value."""
+        db_path = str(tmp_path / "trailer.db")
+        self._run("--db", db_path, "init")
+        self._run(
+            "--db", db_path,
+            "record", "Trailer test", "--type", "observation",
+        )
+        out = self._run("--db", db_path, "prepare-wrap").stdout
+        token = self._extract_token_from_text(out)
+        assert len(token) == 32
+        assert all(c in "0123456789abcdef" for c in token)
+
+    def test_prepare_wrap_json_output_has_wrap_token(self, tmp_path):
+        """prepare-wrap --json output includes wrap_token as a
+        top-level key on the package dict."""
+        db_path = str(tmp_path / "json_token.db")
+        self._run("--db", db_path, "init")
+        self._run(
+            "--db", db_path,
+            "record", "JSON test", "--type", "observation",
+        )
+        out = self._run("--db", db_path, "prepare-wrap", "--json").stdout
+        payload = json.loads(out)
+        assert "wrap_token" in payload
+        assert len(payload["wrap_token"]) == 32
+
+    def test_frozen_snapshot_holds_across_process_boundary(self, tmp_path):
+        """THE cross-process TOCTOU test. Three separate subprocess
+        invocations: prepare-wrap → record → save-continuity. The
+        recorded episode must NOT be absorbed into the in-progress
+        wrap, regardless of the process boundary between prepare
+        and save.
+        """
+        db_path = str(tmp_path / "cross.db")
+        self._run("--db", db_path, "init")
+        # Record one snapshot episode.
+        rec = self._run(
+            "--db", db_path,
+            "record", "Snapshot-only episode",
+            "--type", "observation",
+        )
+        # Pull the recorded episode ID from the stdout. Format is
+        # "Recorded episode <id>: ..."
+        ep_id = None
+        for line in rec.stdout.splitlines():
+            if line.startswith("Recorded episode"):
+                ep_id = line.split("Recorded episode", 1)[1].split(":")[0].strip()
+                break
+        assert ep_id is not None, f"Could not parse episode id from: {rec.stdout}"
+
+        # Prepare wrap — captures the token.
+        prep = self._run("--db", db_path, "prepare-wrap")
+        token = self._extract_token_from_text(prep.stdout)
+
+        # TOCTOU — another subprocess records a NEW episode between
+        # prepare and save.
+        self._run(
+            "--db", db_path,
+            "record", "TOCTOU leak attempt",
+            "--type", "observation",
+        )
+
+        # Write the continuity file that the agent would have
+        # produced, citing only the snapshot episode.
+        continuity_path = tmp_path / "cross.md"
+        continuity_path.write_text(
+            self._TEMPLATE.format(cited=ep_id), encoding="utf-8"
+        )
+
+        # Save with the token — JSON mode so we can assert exact
+        # metrics.
+        save = self._run(
+            "--db", db_path,
+            "save-continuity", str(continuity_path),
+            "--wrap-token", token,
+            "--json",
+        )
+        result = json.loads(save.stdout)
+        assert result["episodes_compressed"] == 1, (
+            f"TOCTOU episode leaked across process boundary — "
+            f"expected 1 episode compressed, got {result['episodes_compressed']}"
+        )
+
+        # Next prepare-wrap should pick up the TOCTOU episode.
+        next_prep = self._run(
+            "--db", db_path, "prepare-wrap", "--json"
+        )
+        next_payload = json.loads(next_prep.stdout)
+        # Empty status means the TOCTOU episode somehow got absorbed
+        # into the previous wrap — fail loudly.
+        assert next_payload.get("status") != "empty", (
+            "TOCTOU episode did not survive to the next wrap — "
+            "cross-process snapshot filter is broken"
+        )
+        assert "TOCTOU leak attempt" in next_payload.get("episodes", "")
+
+    def test_wrong_token_across_process_boundary_rejected(self, tmp_path):
+        """Passing the wrong --wrap-token across a process boundary
+        fails with a non-zero exit and the in-progress wrap is
+        preserved for retry."""
+        db_path = str(tmp_path / "cross_wrong.db")
+        self._run("--db", db_path, "init")
+        self._run(
+            "--db", db_path,
+            "record", "A real episode",
+            "--type", "observation",
+        )
+        self._run("--db", db_path, "prepare-wrap")
+
+        continuity_path = tmp_path / "cross_wrong.md"
+        continuity_path.write_text(
+            self._TEMPLATE.format(cited="deadbeef"), encoding="utf-8"
+        )
+
+        result = self._run(
+            "--db", db_path,
+            "save-continuity", str(continuity_path),
+            "--wrap-token", "0" * 32,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert "wrap_token mismatch" in result.stderr
+
+        # Wrap is still in progress — retry without token (implicit
+        # snapshot) should succeed.
+        retry = self._run(
+            "--db", db_path,
+            "save-continuity", str(continuity_path),
+            check=False,
+        )
+        assert retry.returncode == 0
+
+    def test_implicit_snapshot_across_process_boundary(self, tmp_path):
+        """Without --wrap-token, the CLI still uses the persisted
+        snapshot because the library consults it whenever it's
+        present. Cross-process single-user common case needs no
+        ceremony.
+        """
+        db_path = str(tmp_path / "implicit_cross.db")
+        self._run("--db", db_path, "init")
+        rec = self._run(
+            "--db", db_path,
+            "record", "Real episode",
+            "--type", "observation",
+        )
+        ep_id = None
+        for line in rec.stdout.splitlines():
+            if line.startswith("Recorded episode"):
+                ep_id = line.split("Recorded episode", 1)[1].split(":")[0].strip()
+                break
+        self._run("--db", db_path, "prepare-wrap")
+
+        # TOCTOU record between processes.
+        self._run(
+            "--db", db_path,
+            "record", "Should be deferred",
+            "--type", "observation",
+        )
+
+        continuity_path = tmp_path / "implicit_cross.md"
+        continuity_path.write_text(
+            self._TEMPLATE.format(cited=ep_id), encoding="utf-8"
+        )
+
+        # Save without --wrap-token.
+        save = self._run(
+            "--db", db_path,
+            "save-continuity", str(continuity_path),
+            "--json",
+        )
+        result = json.loads(save.stdout)
+        assert result["episodes_compressed"] == 1

@@ -847,7 +847,6 @@ class TestValidatedSaveContinuity:
         ep2 = store.record("Chose caching to improve latency", EpisodeType.DECISION)
 
         # Mark wrap as in progress
-        store.wrap_started()
 
         # Build continuity with a real 2x citation so graduation fires
         text = (
@@ -909,7 +908,6 @@ class TestValidatedSaveContinuity:
 
         today = date.today().isoformat()
         store.record("Interesting finding", EpisodeType.OBSERVATION)
-        store.wrap_started()
 
         text = (
             "# Test — Memory (v1)\n\n"
@@ -953,6 +951,10 @@ class TestStatus:
         assert status.continuity_chars == len("Some continuity text here.")
 
     def test_status_wrap_in_progress(self, store):
+        # Legacy no-arg form — this test only checks the
+        # wrap_in_progress flag on status(), which reads
+        # wrap_started_at directly and doesn't call
+        # load_wrap_snapshot, so the partial state is tolerated.
         store.wrap_started()
         status = store.status()
         assert status.wrap_in_progress is True
@@ -1111,7 +1113,6 @@ class TestGetWrapHistory:
         from anneal_memory import validated_save_continuity
 
         store.record("First observation", EpisodeType.OBSERVATION)
-        store.wrap_started()
         validated_save_continuity(
             store, _valid_continuity_text(date.today().isoformat())
         )
@@ -1127,7 +1128,6 @@ class TestGetWrapHistory:
 
         store.record("Episode one", EpisodeType.OBSERVATION)
         store.record("Episode two", EpisodeType.DECISION)
-        store.wrap_started()
         validated_save_continuity(
             store, _valid_continuity_text(date.today().isoformat())
         )
@@ -1155,7 +1155,6 @@ class TestGetWrapHistory:
         today = date.today().isoformat()
         for i in range(3):
             store.record(f"Episode {i}", EpisodeType.OBSERVATION)
-            store.wrap_started()
             validated_save_continuity(store, _valid_continuity_text(today))
 
         history = store.get_wrap_history()
@@ -1172,7 +1171,6 @@ class TestGetWrapHistory:
         from anneal_memory import validated_save_continuity
 
         store.record("Observation", EpisodeType.OBSERVATION)
-        store.wrap_started()
         validated_save_continuity(
             store, _valid_continuity_text(date.today().isoformat())
         )
@@ -1218,7 +1216,6 @@ class TestValidatedSaveContinuityReturnContract:
         from anneal_memory import validated_save_continuity
 
         store.record("Observation A", EpisodeType.OBSERVATION)
-        store.wrap_started()
 
         result = validated_save_continuity(
             store, _valid_continuity_text(date.today().isoformat())
@@ -1259,7 +1256,6 @@ class TestValidatedSaveContinuityReturnContract:
         from anneal_memory import validated_save_continuity
 
         store.record("Observation", EpisodeType.OBSERVATION)
-        store.wrap_started()
         result = validated_save_continuity(
             store, _valid_continuity_text(date.today().isoformat())
         )
@@ -1287,7 +1283,6 @@ class TestValidatedSaveContinuityReturnContract:
         from anneal_memory import validated_save_continuity
 
         store.record("Observation", EpisodeType.OBSERVATION)
-        store.wrap_started()
         result = validated_save_continuity(
             store, _valid_continuity_text(date.today().isoformat())
         )
@@ -1324,7 +1319,6 @@ class TestValidatedSaveContinuityReturnContract:
         pinned_today = "2026-06-15"
 
         ep1 = store.record("database slow under load", EpisodeType.OBSERVATION)
-        store.wrap_started()
 
         text = (
             f"# Test — Memory (v1)\n\n"
@@ -1350,7 +1344,6 @@ class TestValidatedSaveContinuityReturnContract:
         from anneal_memory import validated_save_continuity
 
         ep1 = store.record("fresh observation today", EpisodeType.OBSERVATION)
-        store.wrap_started()
         today = date.today().isoformat()
 
         text = (
@@ -1387,7 +1380,6 @@ class TestValidatedSaveContinuityReturnContract:
 
         # Record one episode so there's at least something to compress
         store.record("Triggering observation", EpisodeType.OBSERVATION)
-        store.wrap_started()
 
         # Build a continuity with a bare 2x graduation (no evidence tag)
         # — should be demoted due to citations_seen=True
@@ -1424,7 +1416,6 @@ class TestValidatedSaveContinuityReturnContract:
         store.save_meta(meta)
 
         store.record("Observation", EpisodeType.OBSERVATION)
-        store.wrap_started()
         today = date.today().isoformat()
         text = (
             "# Test — Memory (v1)\n\n"

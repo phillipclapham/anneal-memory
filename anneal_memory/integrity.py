@@ -133,7 +133,11 @@ TOOLS: list[dict[str, Any]] = [
             "session is getting long. Returns all episodes since the last wrap, "
             "the current continuity file, stale pattern warnings, Hebbian "
             "association context (which episodes have been thought about together "
-            "before), and compression instructions. Marks a wrap as in-progress. "
+            "before), and compression instructions. Marks a wrap as in-progress "
+            "and mints a session-handshake token (shown as 'Wrap token: <hex>' "
+            "at the end of the response) — round-trip that token to "
+            "save_continuity's wrap_token argument so the save call can verify "
+            "it matches the in-progress wrap and catch stale tokens. "
             "After calling, follow the returned instructions to compress episodes "
             "into an updated continuity file, then save with save_continuity. "
             "The compression step is where the real thinking happens — patterns "
@@ -214,6 +218,23 @@ TOOLS: list[dict[str, Any]] = [
                         },
                     },
                     "required": ["tag", "intensity"],
+                },
+                "wrap_token": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{32}$",
+                    "description": (
+                        "Optional: the 32-char hex session-handshake token "
+                        "from the prepare_wrap response (the 'Wrap token: "
+                        "<hex>' line at the end of the text). Pass it back "
+                        "here to verify you are saving the wrap you prepared "
+                        "— a mismatch (stale or wrong token) raises an error "
+                        "instead of silently committing against the wrong "
+                        "wrap. The frozen-snapshot filter automatically "
+                        "applies whenever prepare_wrap established a "
+                        "snapshot; this token argument is the optional "
+                        "explicit verification layer for integration "
+                        "environments that can round-trip the value."
+                    ),
                 },
             },
             "required": ["text"],

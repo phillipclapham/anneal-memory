@@ -18,6 +18,7 @@ Zero dependencies beyond Python stdlib.
 from __future__ import annotations
 
 import re
+import uuid
 import warnings
 from dataclasses import asdict
 from datetime import date
@@ -359,27 +360,32 @@ def prepare_wrap(
     to give v0.1.x callers a warning before removal in v0.3.0; do not
     reach for it in new code.
 
-    .. warning::
-        **The prepare/save window is not frozen.** The set of episodes
-        returned here is a snapshot taken at call time. If the caller
-        records additional episodes after ``prepare_wrap`` returns but
-        before :func:`validated_save_continuity` is called,
-        ``validated_save_continuity`` will re-fetch and compress the
-        larger set, even though the agent's compression was based on
-        the smaller set shown here. Graduation validation and the
-        ``episodes_compressed`` metric will reflect the expanded set.
+    .. note::
+        **The prepare/save window is frozen as of the 10.5c.4 fix**
+        (targeted for v0.2.0). ``prepare_wrap`` mints a unique
+        ``wrap_token`` (``uuid.uuid4().hex``) and persists the frozen
+        list of episode IDs in store metadata before returning.
+        :func:`validated_save_continuity` then filters its re-fetched
+        episode set down to exactly the IDs shown here, regardless of
+        anything the caller records in between. Any episodes recorded
+        in the TOCTOU window stay with ``session_id IS NULL`` and
+        naturally appear in the NEXT wrap's compression window — no
+        data loss, no silent absorption.
 
-        For single-threaded agent workflows (the normal MCP and CLI
-        case), this is not an issue — the agent reasons in one pass
-        between prepare and save and does not record new episodes.
-        For framework integrations where episode recording can
-        interleave with session wrapping, you must serialize
-        ``prepare_wrap`` → compression → ``validated_save_continuity``
-        as a critical section with no intervening ``store.record()``
-        calls.
+        Transports that round-trip the ``wrap_token`` back to
+        :func:`validated_save_continuity` (via the MCP ``save_continuity``
+        tool argument or the CLI ``--wrap-token`` flag) get explicit
+        mismatch detection on top of the snapshot: passing a stale or
+        wrong token raises ``ValueError`` at the save boundary.
+        Transports that don't pass a token still get frozen semantics
+        because the snapshot is consulted whenever it's present.
 
-        A session-handshake token to frozen the window is tracked as
-        a v0.3.0 hardening follow-up.
+        The remaining pipeline-atomicity gap is a mid-pipeline crash
+        between continuity file write and wrap metadata commit —
+        scheduled for the 10.5c.5 two-phase-commit work. Other open
+        concerns (stuck-wrap operator surface, SQLite variable-limit
+        edge cases, store-level SQLite error wrapping) track
+        separately in ``projects/anneal_memory/next.md``.
 
     Args:
         store: A Store instance.
@@ -399,12 +405,19 @@ def prepare_wrap(
           - ``assoc_context`` (str | None): Hebbian association context
             for the episodes being compressed, or ``None`` if empty or
             no associations exist
+          - ``wrap_token`` (str | None): session-handshake token for
+            the pending wrap when ``status == "ready"``, ``None`` on
+            the empty path. Transports should round-trip this back to
+            :func:`validated_save_continuity` to opt into explicit
+            mismatch detection.
 
     Note:
         On ``status == "empty"`` the function calls ``wrap_cancelled()``
         on the store to clear any stale in-progress flag. On
-        ``status == "ready"`` it calls ``wrap_started()``. Either way,
-        the store's wrap lifecycle state is consistent after the call.
+        ``status == "ready"`` it calls ``wrap_started(token=...,
+        episode_ids=...)`` so the frozen snapshot is persisted in one
+        transaction. Either way, the store's wrap lifecycle state is
+        consistent after the call.
     """
     episodes = store.episodes_since_wrap()
 
@@ -416,6 +429,7 @@ def prepare_wrap(
             episode_count=0,
             package=None,
             assoc_context=None,
+            wrap_token=None,
         )
 
     # All store reads and package construction happen BEFORE wrap_started().
@@ -432,8 +446,18 @@ def prepare_wrap(
     episode_ids = [ep.id for ep in episodes]
     assoc_context = store.get_association_context(episode_ids) or None
 
-    # Mark wrap in progress only after every upstream operation succeeded.
-    store.wrap_started()
+    # Mint the handshake token + persist the frozen snapshot in a
+    # single ``wrap_started`` call. The token is a uuid4 hex (no
+    # dashes) — 128 bits of entropy, stdlib-only,
+    # collision-resistant to any realistic wrap volume. The episode
+    # ID list captures exactly what the agent sees in ``package``,
+    # so ``validated_save_continuity`` can filter its re-fetched set
+    # down to this frozen shape regardless of TOCTOU activity. Token
+    # minting happens LAST, after every upstream read and package
+    # build succeeded, so a failure anywhere above leaves the store
+    # in a clean no-wrap-in-progress state.
+    wrap_token = uuid.uuid4().hex
+    store.wrap_started(token=wrap_token, episode_ids=episode_ids)
 
     return PrepareWrapResult(
         status="ready",
@@ -441,6 +465,7 @@ def prepare_wrap(
         episode_count=len(episodes),
         package=package,
         assoc_context=assoc_context,
+        wrap_token=wrap_token,
     )
 
 
@@ -505,6 +530,7 @@ def validated_save_continuity(
     affective_state: AffectiveState | None = None,
     *,
     today: str | None = None,
+    wrap_token: str | None = None,
 ) -> SaveContinuityResult:
     """Save continuity with the full validation pipeline.
 
@@ -523,19 +549,38 @@ def validated_save_continuity(
     decay. ``validated_save_continuity`` is what you want whenever an
     agent has finished compressing its session.
 
-    .. warning::
-        **The episode set is re-fetched at save time.** This function
-        calls ``store.episodes_since_wrap()`` internally. If the caller
-        recorded additional episodes between :func:`prepare_wrap` and
-        this call, the new episodes are included in validation and
-        metrics even though the agent's compression text was produced
-        from the smaller set that ``prepare_wrap`` showed. For
-        single-threaded agent workflows this is not an issue. For
-        framework integrations that interleave episode recording with
-        session wrapping, you must treat the ``prepare_wrap`` →
-        compression → ``validated_save_continuity`` sequence as a
-        critical section. See :func:`prepare_wrap` for the full
-        discussion.
+    .. note::
+        **The episode set is frozen when ``prepare_wrap`` was called.**
+        As of 10.5c.4 this function loads the wrap snapshot persisted
+        by :func:`prepare_wrap` and filters its re-fetched episode set
+        down to exactly the IDs that were shown to the agent at
+        prepare time. Episodes recorded between prepare and save
+        (the TOCTOU window) stay with ``session_id IS NULL`` after
+        this call completes and appear in the NEXT wrap's
+        compression window — no data loss, no silent absorption.
+
+        If the caller passes ``wrap_token``, the stored token is
+        verified against it and a mismatch raises ``ValueError``
+        (wrong wrap, or stale token from a cancelled / completed
+        wrap). If the caller passes ``None``, verification is
+        skipped but the frozen-snapshot filter still applies — the
+        single-process common case (library caller, CLI without
+        ``--wrap-token``, single-threaded MCP agent) needs no
+        ceremony.
+
+        The legacy ``skipped_prepare`` path — calling this function
+        without any prior ``prepare_wrap`` call — is unchanged. With
+        no snapshot present, the function falls back to its
+        pre-10.5c.4 behavior of re-fetching the full episode set
+        since the last completed wrap. Note that this path keeps
+        the TOCTOU window OPEN by design; callers that bypass
+        ``prepare_wrap`` opt out of the fix, and the
+        ``skipped_prepare=True`` flag on the return value surfaces
+        that to the caller. This is a documented foot-gun, not an
+        accidental escape hatch — the canonical path is
+        ``prepare_wrap`` → ``validated_save_continuity``, and the
+        skipped-prepare path exists only for advanced library users
+        who are managing the wrap lifecycle themselves.
 
     .. warning::
         **Partial-failure window (scheduled for 10.5c.5).** The
@@ -566,6 +611,18 @@ def validated_save_continuity(
             boundary risk) and for experiments that need reproducible
             runs against a pinned date. Mirrors the existing ``today``
             parameter on :func:`prepare_wrap`.
+        wrap_token: Optional session-handshake token returned by a
+            prior :func:`prepare_wrap` call for this wrap. When
+            provided, the stored token is verified against it and a
+            mismatch raises ``ValueError`` — this catches stale
+            tokens (from a wrap that was already completed) and
+            wrong-wrap tokens (from a different prepare call). When
+            ``None`` (the default), verification is skipped but the
+            frozen-snapshot filter still applies if a snapshot is
+            stored. Transports that can round-trip the token through
+            their protocol (MCP ``save_continuity`` tool argument,
+            CLI ``--wrap-token`` flag) should pass it for explicit
+            safety; single-process library callers can omit it.
 
     Returns:
         :class:`SaveContinuityResult` — a :class:`TypedDict` with the
@@ -627,11 +684,72 @@ def validated_save_continuity(
             "## State, ## Patterns, ## Decisions, ## Context"
         )
 
-    # Check if prepare_wrap was called first
-    skipped_prepare = not store.status().wrap_in_progress
+    # Load the frozen snapshot persisted by prepare_wrap. None iff
+    # no wrap is currently in progress — either the caller is on
+    # the legacy ``skipped_prepare`` path (calling this function
+    # without having run prepare_wrap first) or the store is idle.
+    # Derive ``skipped_prepare`` from snapshot presence so the
+    # return-value semantics collapse onto a single source of truth:
+    # the persisted snapshot. Eliminates the 10.5c.4 Layer 1 finding
+    # where a caller could reach "wrap_in_progress=True but snapshot
+    # absent" via a direct no-arg ``store.wrap_started()`` call —
+    # load_wrap_snapshot now raises StoreError on that state before
+    # we'd even get here, so the only way ``snapshot is None`` is
+    # the legitimate legacy path.
+    snapshot = store.load_wrap_snapshot()
+    skipped_prepare = snapshot is None
 
-    # Get current session's episodes for citation validation
-    episodes = store.episodes_since_wrap()
+    if snapshot is not None and wrap_token is not None:
+        # Caller opted into explicit token verification. A mismatch
+        # is a caller contract violation (stale token, or wrong
+        # wrap), same category as empty text or missing sections —
+        # raise ValueError so transports can surface a clean error
+        # to the agent without wrapping in StoreError (I/O
+        # semantics are wrong here; nothing on disk has failed).
+        # The error message truncates both tokens to 8 chars for
+        # log readability while still being distinguishable.
+        if snapshot["token"] != wrap_token:
+            raise ValueError(
+                f"wrap_token mismatch: caller passed "
+                f"'{wrap_token[:8]}…' but the in-progress wrap has "
+                f"token '{snapshot['token'][:8]}…'. This usually "
+                f"means the token is stale (the wrap was already "
+                f"completed or cancelled), from a different "
+                f"prepare_wrap call, or from a concurrent process. "
+                f"Re-run prepare_wrap to start a new wrap with a "
+                f"fresh token."
+            )
+
+    # Get current session's episodes for citation validation.
+    #
+    # With a snapshot: re-fetch the full post-last-wrap set and
+    # filter down to exactly the IDs the snapshot froze at prepare
+    # time. Any episodes recorded in the TOCTOU window drop out
+    # here and stay with ``session_id IS NULL`` through the rest
+    # of the pipeline — they land in the next wrap's compression
+    # window on the next ``prepare_wrap`` call.
+    #
+    # Without a snapshot (legitimate ``skipped_prepare`` path,
+    # library caller bypassing prepare_wrap entirely): fall back
+    # to the pre-10.5c.4 behavior of using the full re-fetched
+    # set. Preserves backward compatibility for that path. Note
+    # that this path keeps the TOCTOU window OPEN by design —
+    # callers who bypass prepare_wrap opt out of the fix, and the
+    # ``skipped_prepare=True`` flag in the return surfaces that
+    # to the caller.
+    episodes_all = store.episodes_since_wrap()
+    frozen_episode_ids: list[str] | None
+    if snapshot is not None:
+        snapshot_id_set = set(snapshot["episode_ids"])
+        episodes = [ep for ep in episodes_all if ep.id in snapshot_id_set]
+        # Use the snapshot's ID list directly — the TypedDict
+        # already declares it as list[str] and wrap_completed does
+        # not mutate its argument. The outer ``if snapshot is not
+        # None`` guard means the field access is safe.
+        frozen_episode_ids = snapshot["episode_ids"]
+    else:
+        episodes = episodes_all
+        frozen_episode_ids = None
     valid_ids = {ep.id[:8].lower() for ep in episodes}
     node_content_map = {ep.id[:8].lower(): ep.content for ep in episodes}
 
@@ -679,6 +797,12 @@ def validated_save_continuity(
         associations_strengthened=assoc_strengthened,
         associations_decayed=assoc_decayed,
         section_sizes=sections,
+        episode_ids=frozen_episode_ids,
+        # Pass the token from the snapshot in hand rather than
+        # having wrap_completed re-read metadata. Removes a
+        # within-method SELECT-before-clear sequence that Layer 1
+        # L3 flagged as a TOCTOU-within-TOCTOU-fix pattern.
+        wrap_token=snapshot["token"] if snapshot is not None else None,
     )
 
     return SaveContinuityResult(

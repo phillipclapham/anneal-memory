@@ -482,6 +482,135 @@ class TestToolSaveContinuity:
         assert store.status().total_wraps == 1
 
 
+# -- 10.5c.4: MCP token round-trip --
+
+
+class TestMCPWrapTokenRoundTrip:
+    """The MCP tool contract for wrap_token: prepare_wrap response
+    text ends with a 'Wrap token: <hex>' trailer, save_continuity
+    accepts an optional wrap_token argument, and mismatch detection
+    fires with is_error=True tool results."""
+
+    def test_prepare_wrap_text_includes_token_trailer(self, server):
+        server._tool_record(
+            {"content": "For token trailer", "episode_type": "observation"}
+        )
+        result = server._tool_prepare_wrap({})
+        text = _text_from_result(result)
+        assert "Wrap token:" in text
+        # Extract and validate shape.
+        token = None
+        for line in reversed(text.splitlines()):
+            if line.startswith("Wrap token:"):
+                token = line.split("Wrap token:", 1)[1].strip()
+                break
+        assert token is not None
+        assert len(token) == 32
+        assert all(c in "0123456789abcdef" for c in token)
+
+    def test_save_accepts_correct_token(self, server):
+        """Happy path: token from prepare_wrap round-trips through
+        the save_continuity tool argument and the save completes."""
+        server._tool_record(
+            {"content": "Round-trip test", "episode_type": "observation"}
+        )
+        prep = _text_from_result(server._tool_prepare_wrap({}))
+        token = None
+        for line in reversed(prep.splitlines()):
+            if line.startswith("Wrap token:"):
+                token = line.split("Wrap token:", 1)[1].strip()
+                break
+
+        text = (
+            "# TestProject — Memory (v1)\n"
+            "## State\nToken round-trip validated.\n"
+            "## Patterns\nthought: token works | 1x (2026-04-10)\n"
+            "## Decisions\n"
+            "[decided(rationale: \"test\", on: \"2026-04-10\")] ok\n"
+            "## Context\nRound-tripped through MCP.\n"
+        )
+        result = server._tool_save_continuity(
+            {"text": text, "wrap_token": token}
+        )
+        assert not _is_error(result)
+
+    def test_save_rejects_wrong_token(self, server):
+        """A wrong token produces an is_error=True tool result with
+        a 'wrap_token mismatch' message."""
+        server._tool_record(
+            {"content": "Wrong token test", "episode_type": "observation"}
+        )
+        server._tool_prepare_wrap({})
+
+        text = (
+            "# TestProject — Memory (v1)\n"
+            "## State\nWrong token.\n"
+            "## Patterns\n\n"
+            "## Decisions\n\n"
+            "## Context\nShould fail.\n"
+        )
+        result = server._tool_save_continuity(
+            {"text": text, "wrap_token": "0" * 32}
+        )
+        assert _is_error(result)
+        assert "wrap_token mismatch" in _text_from_result(result)
+
+    def test_save_rejects_non_string_token(self, server):
+        """wrap_token must be a string if provided."""
+        server._tool_record(
+            {"content": "Type test", "episode_type": "observation"}
+        )
+        server._tool_prepare_wrap({})
+
+        text = (
+            "# TestProject — Memory (v1)\n"
+            "## State\nType check.\n"
+            "## Patterns\n\n"
+            "## Decisions\n\n"
+            "## Context\nShould fail on type.\n"
+        )
+        # Integer token — MCP clients could pass the wrong type.
+        result = server._tool_save_continuity(
+            {"text": text, "wrap_token": 12345}
+        )
+        assert _is_error(result)
+        assert "wrap_token must be a string" in _text_from_result(result)
+
+    def test_save_without_token_still_uses_snapshot(self, server, store):
+        """Omitting wrap_token does not disable the snapshot filter —
+        a TOCTOU episode recorded after prepare_wrap must still be
+        deferred to the next wrap."""
+        # Snapshot episode.
+        server._tool_record(
+            {"content": "Snapshot episode", "episode_type": "observation"}
+        )
+        server._tool_prepare_wrap({})
+        # TOCTOU episode — recorded through the record tool between
+        # prepare and save.
+        server._tool_record(
+            {
+                "content": "TOCTOU episode should be deferred",
+                "episode_type": "observation",
+            }
+        )
+        text = (
+            "# TestProject — Memory (v1)\n"
+            "## State\nImplicit snapshot.\n"
+            "## Patterns\n\n"
+            "## Decisions\n\n"
+            "## Context\nSnapshot only.\n"
+        )
+        result = server._tool_save_continuity({"text": text})
+        output = _text_from_result(result)
+        assert not _is_error(result)
+        # Only the snapshot episode should have been compressed.
+        assert "Episodes compressed: 1" in output
+
+        # Next prepare_wrap picks up the TOCTOU episode.
+        next_prep = _text_from_result(server._tool_prepare_wrap({}))
+        assert "TOCTOU episode should be deferred" in next_prep
+
+
 # -- Graduation Validation Through save_continuity --
 
 

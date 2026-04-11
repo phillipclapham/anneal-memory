@@ -10,7 +10,7 @@ import pytest
 from dataclasses import asdict, is_dataclass
 from datetime import date
 
-from anneal_memory.store import Store
+from anneal_memory.store import AnnealMemoryError, Store, StoreError
 from anneal_memory.types import EpisodeType, StoreStatus, WrapRecord, WrapResult
 
 
@@ -455,6 +455,375 @@ class TestContinuityIO:
         assert meta["format_version"] == 1
 
 
+class TestStoreError:
+    """Tests for the StoreError exception class (10.5c.3 + fix pass).
+
+    Locks in the library-level exception hierarchy:
+
+    - ``AnnealMemoryError(Exception)`` is the library boundary class.
+    - ``StoreError(AnnealMemoryError)`` carries ``.operation`` and
+      ``.path`` context so transports can surface clean error messages.
+    - ``StoreError`` round-trips cleanly through pickle and copy —
+      critical for downstream consumers that marshal exceptions
+      (pytest-xdist, ProcessPoolExecutor, logging frameworks, RPC).
+    - ``save_continuity`` and ``save_meta`` raise ``StoreError`` on
+      OSError and preserve the atomic-write invariant (no stale
+      ``.tmp``, original file untouched) on ANY exception class —
+      not just OSError.
+
+    Fault injection targets ``Path.replace`` (not ``builtins.open``).
+    This is the right surface: the tmp file IS successfully created,
+    the rename stage fails, and the cleanup path runs with a real
+    tmp file to delete. Patching ``builtins.open`` crashes before the
+    tmp file exists, making cleanup assertions vacuously true.
+    """
+
+    # -- hierarchy --
+
+    def test_store_error_is_anneal_memory_error_subclass(self):
+        """StoreError subclasses the library base — catching
+        AnnealMemoryError at a transport boundary catches all
+        anneal-memory failures regardless of subsystem."""
+        err = StoreError("boom", operation="save_continuity", path="/tmp/x")
+        assert isinstance(err, AnnealMemoryError)
+        assert isinstance(err, StoreError)
+        assert isinstance(err, Exception)
+        # Explicit non-OSError check — 10.5c.3 dropped the OSError
+        # subclass. Library-level domain errors don't pretend to be
+        # kernel I/O errors; the original OSError lives in __cause__.
+        assert not isinstance(err, OSError)
+
+    def test_anneal_memory_error_catches_store_error(self):
+        """``except AnnealMemoryError`` is the documented library
+        boundary catch. Regression-locks the hierarchy."""
+        try:
+            raise StoreError("io failed", operation="save_continuity")
+        except AnnealMemoryError as caught:
+            assert isinstance(caught, StoreError)
+            assert caught.operation == "save_continuity"
+        else:
+            pytest.fail("AnnealMemoryError handler did not catch StoreError")
+
+    def test_store_error_carries_context(self):
+        err = StoreError(
+            "disk full",
+            operation="save_meta",
+            path="/var/run/anneal/meta.json",
+        )
+        assert err.operation == "save_meta"
+        assert err.path == "/var/run/anneal/meta.json"
+        assert "disk full" in str(err)
+
+    def test_store_error_repr_is_informative(self):
+        err = StoreError(
+            "disk full",
+            operation="save_continuity",
+            path="/tmp/x",
+        )
+        r = repr(err)
+        assert "StoreError" in r
+        assert "disk full" in r
+        assert "save_continuity" in r
+        assert "/tmp/x" in r
+
+    def test_store_error_exported_from_package(self):
+        from anneal_memory import AnnealMemoryError as ExportedBase
+        from anneal_memory import StoreError as ExportedStoreError
+        from anneal_memory.store import AnnealMemoryError as InternalBase
+        from anneal_memory.store import StoreError as InternalStoreError
+        assert ExportedBase is InternalBase
+        assert ExportedStoreError is InternalStoreError
+
+    # -- pickle / copy round-trips --
+
+    def test_store_error_pickle_roundtrip(self):
+        """pytest-xdist, ProcessPoolExecutor, and RPC transports all
+        pickle exceptions across process boundaries. StoreError MUST
+        survive the round-trip with operation/path intact."""
+        import pickle
+        err = StoreError(
+            "injected disk failure",
+            operation="save_continuity",
+            path="/tmp/c.md",
+        )
+        restored = pickle.loads(pickle.dumps(err))
+        assert isinstance(restored, StoreError)
+        assert str(restored) == "injected disk failure"
+        assert restored.operation == "save_continuity"
+        assert restored.path == "/tmp/c.md"
+
+    def test_store_error_copy_roundtrip(self):
+        """copy.copy + copy.deepcopy use the same __reduce__ path."""
+        import copy
+        err = StoreError(
+            "permission denied",
+            operation="save_meta",
+            path="/etc/anneal/meta.json",
+        )
+        shallow = copy.copy(err)
+        deep = copy.deepcopy(err)
+        for other in (shallow, deep):
+            assert isinstance(other, StoreError)
+            assert str(other) == "permission denied"
+            assert other.operation == "save_meta"
+            assert other.path == "/etc/anneal/meta.json"
+
+    def test_store_error_pickle_with_none_path(self):
+        """Path is optional on the constructor; pickle must round-trip
+        the None case."""
+        import pickle
+        err = StoreError("no path given", operation="save_continuity")
+        restored = pickle.loads(pickle.dumps(err))
+        assert restored.path is None
+        assert restored.operation == "save_continuity"
+
+    def test_store_error_pickle_reflects_args_mutation(self):
+        """``__reduce__`` uses ``str(self)`` which reads ``args[0]``.
+        If a caller mutates ``err.args`` after construction (matching
+        stdlib Exception semantics), the pickled instance reflects
+        the mutation. Locks in the stdlib-compatible behavior so
+        a future refactor that caches the message in ``__init__``
+        (instead of re-reading args) fails loudly."""
+        import pickle
+        err = StoreError("original", operation="save_continuity")
+        err.args = ("mutated",)
+        restored = pickle.loads(pickle.dumps(err))
+        assert str(restored) == "mutated"
+        assert restored.operation == "save_continuity"
+
+    # -- save_continuity failure paths --
+
+    def test_save_continuity_raises_store_error_on_replace_failure(
+        self, store, monkeypatch
+    ):
+        """Patch ``Path.replace`` so the tmp file IS created, the
+        atomic rename then fails, and the cleanup path runs on a
+        real tmp file. This is the right fault-injection surface."""
+        real_replace = Path.replace
+
+        def exploding_replace(self, target):
+            raise OSError("injected rename failure")
+
+        monkeypatch.setattr(Path, "replace", exploding_replace)
+
+        with pytest.raises(StoreError) as exc_info:
+            store.save_continuity(
+                "# T — Memory (v1)\n\n## State\nx\n"
+                "\n## Patterns\np\n\n## Decisions\nd\n\n## Context\nc\n"
+            )
+
+        err = exc_info.value
+        assert err.operation == "save_continuity"
+        assert err.path == str(store.continuity_path)
+        assert isinstance(err.__cause__, OSError)
+        assert "injected rename failure" in str(err.__cause__)
+        # Tmp cleanup ran — no stale sidecar on disk.
+        assert not list(store.continuity_path.parent.glob("*.md.tmp"))
+        # Main continuity file UNTOUCHED — the atomic-write
+        # invariant is that the old file survives a failed new write.
+        # First-write case: file never existed, still doesn't exist.
+        assert not store.continuity_path.exists()
+
+    def test_save_continuity_preserves_previous_file_on_failure(
+        self, store, monkeypatch
+    ):
+        """Stronger atomic-write invariant: when a previous continuity
+        file exists and a new write fails, the OLD file survives
+        intact (not truncated, not partially overwritten)."""
+        good_text = (
+            "# T — Memory (v1)\n\n## State\nold state\n"
+            "\n## Patterns\nold\n\n## Decisions\nold\n\n## Context\nold\n"
+        )
+        store.save_continuity(good_text)
+        assert store.load_continuity() == good_text
+
+        def exploding_replace(self, target):
+            raise OSError("injected rename failure")
+
+        monkeypatch.setattr(Path, "replace", exploding_replace)
+
+        with pytest.raises(StoreError):
+            store.save_continuity(
+                "# T — Memory (v1)\n\n## State\nnew state\n"
+                "\n## Patterns\nnew\n\n## Decisions\nnew\n\n## Context\nnew\n"
+            )
+
+        # Previous content survived verbatim.
+        assert store.load_continuity() == good_text
+        assert not list(store.continuity_path.parent.glob("*.md.tmp"))
+
+    def test_save_continuity_cleans_tmp_on_non_oserror(
+        self, store, monkeypatch
+    ):
+        """The atomic-write invariant MUST hold regardless of exception
+        class. Inject a non-OSError failure and verify (a) the
+        exception propagates bare (not wrapped as StoreError — we
+        only wrap OSError), (b) the tmp file is still cleaned up."""
+
+        # Real file gets created; write() then raises a non-OSError.
+        # Use a sentinel subclass so we can catch it specifically
+        # without accidentally masking real exceptions.
+        class InjectedError(Exception):
+            pass
+
+        real_open = open
+
+        def exploding_open(path, *args, **kwargs):
+            f = real_open(path, *args, **kwargs)
+            orig_write = f.write
+
+            def fail_write(data):
+                orig_write(data)  # partial write lands on disk
+                raise InjectedError("not an OSError")
+
+            f.write = fail_write
+            return f
+
+        monkeypatch.setattr("builtins.open", exploding_open)
+
+        with pytest.raises(InjectedError):
+            store.save_continuity(
+                "# T — Memory (v1)\n\n## State\nx\n"
+                "\n## Patterns\np\n\n## Decisions\nd\n\n## Context\nc\n"
+            )
+
+        # Critical: tmp cleanup ran even though exception was not an
+        # OSError. Regression guard for I1 fix.
+        assert not list(store.continuity_path.parent.glob("*.md.tmp"))
+        # Stronger atomic-write invariant: on a first-write failure,
+        # the main continuity file was never created. The replace
+        # stage never ran because write raised before reaching it.
+        assert not store.continuity_path.exists()
+
+    def test_save_continuity_cleans_tmp_on_fsync_failure(
+        self, store, monkeypatch
+    ):
+        """fsync() raises on flaky drives / network filesystems. Verify
+        the cleanup path covers this scenario specifically.
+
+        Intermediate assertion: the tmp file MUST be created before
+        fsync fires (otherwise the 'no stale tmp' assertion at the
+        bottom is vacuously true because there was never a tmp file
+        to clean up). We capture the tmp file's existence at the
+        moment fsync is called, then let the fault raise.
+        """
+        tmp_existed_at_fsync: list[bool] = []
+
+        def exploding_fsync(fd):
+            # At this point ``with open(...) as f`` has already
+            # created the tmp file on disk. Snapshot existence
+            # before raising so the assertion downstream is real.
+            tmp_existed_at_fsync.append(
+                (store.continuity_path.with_suffix(".md.tmp")).exists()
+            )
+            raise OSError("injected fsync failure")
+
+        monkeypatch.setattr(os, "fsync", exploding_fsync)
+
+        with pytest.raises(StoreError) as exc_info:
+            store.save_continuity(
+                "# T — Memory (v1)\n\n## State\nx\n"
+                "\n## Patterns\np\n\n## Decisions\nd\n\n## Context\nc\n"
+            )
+        assert exc_info.value.operation == "save_continuity"
+        assert "injected fsync failure" in str(exc_info.value.__cause__)
+        # Non-vacuous: the tmp file DID exist when fsync fired, and
+        # it was cleaned up afterwards. If fsync had not been reached
+        # for some reason, tmp_existed_at_fsync would be empty.
+        assert tmp_existed_at_fsync == [True], (
+            "fsync fault did not fire after tmp file was created — "
+            "the cleanup assertion below would be vacuously true"
+        )
+        assert not list(store.continuity_path.parent.glob("*.md.tmp"))
+
+    def test_save_continuity_tolerates_unlink_failure_in_cleanup(
+        self, store, monkeypatch
+    ):
+        """The cleanup helper MUST swallow its own OSError so the
+        primary exception is never masked. If unlink fails (e.g.
+        permission denied), the primary StoreError still propagates
+        and is what the user sees — not a confusing
+        'secondary exception from cleanup' chain.
+
+        Also verifies the secondary unlink failure does NOT leak into
+        the raised exception's ``__context__`` chain. Python chains
+        context exceptions by default; ``_safe_unlink``'s bare
+        ``except OSError: pass`` should suppress context propagation.
+        Catches a future refactor where someone adds logging in
+        ``_safe_unlink`` that itself raises.
+        """
+        def exploding_replace(self, target):
+            raise OSError("injected primary failure")
+
+        def exploding_unlink(self, *, missing_ok=False):
+            raise OSError("injected secondary unlink failure")
+
+        monkeypatch.setattr(Path, "replace", exploding_replace)
+        monkeypatch.setattr(Path, "unlink", exploding_unlink)
+
+        with pytest.raises(StoreError) as exc_info:
+            store.save_continuity(
+                "# T — Memory (v1)\n\n## State\nx\n"
+                "\n## Patterns\np\n\n## Decisions\nd\n\n## Context\nc\n"
+            )
+        # Primary error preserved — secondary unlink failure swallowed.
+        assert "injected primary failure" in str(exc_info.value.__cause__)
+        # Secondary unlink failure must NOT leak into the raised
+        # exception's context chain. The __context__ should be the
+        # original OSError (via 'raise ... from exc'), not the
+        # secondary unlink OSError from the cleanup path.
+        ctx = exc_info.value.__context__
+        if ctx is not None:
+            assert "injected secondary unlink failure" not in str(ctx), (
+                "secondary unlink failure leaked into __context__ "
+                "chain — _safe_unlink's suppression broke"
+            )
+
+    # -- save_meta failure paths --
+
+    def test_save_meta_raises_store_error_on_replace_failure(
+        self, store, monkeypatch
+    ):
+        def exploding_replace(self, target):
+            raise OSError("injected meta rename failure")
+
+        monkeypatch.setattr(Path, "replace", exploding_replace)
+
+        with pytest.raises(StoreError) as exc_info:
+            store.save_meta({"sessions_produced": 1})
+
+        err = exc_info.value
+        assert err.operation == "save_meta"
+        assert err.path == str(store.meta_path)
+        assert "injected meta rename failure" in str(err.__cause__)
+        assert not list(store.meta_path.parent.glob("*.json.tmp"))
+
+    def test_save_meta_cleans_tmp_on_type_error(
+        self, store, monkeypatch
+    ):
+        """json.dump raises TypeError on non-JSON-serializable values
+        (e.g. a set or a dataclass). This is not an OSError — it
+        propagates bare — but the tmp cleanup MUST still run."""
+        # Pass a set as a meta value — sets are not JSON-serializable.
+        with pytest.raises(TypeError):
+            store.save_meta({"sessions_produced": 1, "bad": {1, 2, 3}})
+
+        assert not list(store.meta_path.parent.glob("*.json.tmp"))
+
+    # -- happy path --
+
+    def test_successful_save_continuity(self, store):
+        path = store.save_continuity(
+            "# T — Memory (v1)\n\n## State\nx\n"
+            "\n## Patterns\np\n\n## Decisions\nd\n\n## Context\nc\n"
+        )
+        assert Path(path).exists()
+
+    def test_successful_save_meta(self, store):
+        path = store.save_meta({"sessions_produced": 3, "citations_seen": True})
+        assert Path(path).exists()
+
+
 class TestValidatedSaveContinuity:
     """Tests for the library-level validated_save_continuity function."""
 
@@ -877,12 +1246,15 @@ class TestValidatedSaveContinuityReturnContract:
         assert isinstance(result["sections"], dict)
 
     def test_chars_top_level_matches_wrap_result(self, store):
-        """Top-level chars must match wrap_result.chars and the actual save.
+        """Top-level chars must match wrap_result["chars"] and the actual save.
 
         The chars key was added in the 10.5c.1 review fix to remove a
         footgun where transports had to reach into the nested
-        wrap_result dataclass for a single field while every other
-        metric was already flattened.
+        wrap_result for a single field while every other metric was
+        already flattened. As of 10.5c.3 ``wrap_result`` is a plain
+        dict (``asdict(WrapResult)``) so the whole return value is
+        JSON-serializable top-to-bottom — access is via subscript,
+        not attribute.
         """
         from anneal_memory import validated_save_continuity
 
@@ -892,7 +1264,7 @@ class TestValidatedSaveContinuityReturnContract:
             store, _valid_continuity_text(date.today().isoformat())
         )
 
-        assert result["chars"] == result["wrap_result"].chars
+        assert result["chars"] == result["wrap_result"]["chars"]
         # And both should equal the saved file size
         from pathlib import Path
         assert result["chars"] == len(
@@ -900,15 +1272,17 @@ class TestValidatedSaveContinuityReturnContract:
         )
 
     def test_wrap_result_section_sizes_is_populated(self, store):
-        """WrapResult.section_sizes must contain the real section data.
+        """wrap_result["section_sizes"] must contain the real section data.
 
         Prior to the 10.5c.1 cleanup, ``wrap_completed()`` passed
         ``section_sizes={}`` unconditionally, so library users who
-        accessed ``result["wrap_result"].section_sizes`` got an empty
-        dict — the type definition advertised a field that was
+        accessed ``result["wrap_result"]["section_sizes"]`` got an
+        empty dict — the type definition advertised a field that was
         structurally always empty. The fix wires ``section_sizes``
         through from ``validated_save_continuity`` to
-        ``wrap_completed`` so the dataclass field matches reality.
+        ``wrap_completed``. As of 10.5c.3 ``wrap_result`` is a plain
+        dict via ``asdict(WrapResult)``; access is subscript, not
+        attribute.
         """
         from anneal_memory import validated_save_continuity
 
@@ -919,17 +1293,18 @@ class TestValidatedSaveContinuityReturnContract:
         )
 
         wrap_result = result["wrap_result"]
+        section_sizes = wrap_result["section_sizes"]
         # Populated, not the empty dict of the pre-fix era
-        assert wrap_result.section_sizes
-        assert isinstance(wrap_result.section_sizes, dict)
+        assert section_sizes
+        assert isinstance(section_sizes, dict)
         # Must contain the 4 canonical section names (plus _header)
-        assert "State" in wrap_result.section_sizes
-        assert "Patterns" in wrap_result.section_sizes
-        assert "Decisions" in wrap_result.section_sizes
-        assert "Context" in wrap_result.section_sizes
+        assert "State" in section_sizes
+        assert "Patterns" in section_sizes
+        assert "Decisions" in section_sizes
+        assert "Context" in section_sizes
         # Must match the top-level sections key (same measurement,
         # two paths to it)
-        assert wrap_result.section_sizes == result["sections"]
+        assert section_sizes == result["sections"]
 
     def test_today_parameter_pins_graduation_date(self, store):
         """Passing an explicit ``today`` pins graduation to that date.

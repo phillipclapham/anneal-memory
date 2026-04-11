@@ -2,16 +2,20 @@
 
 __version__ = "0.1.9"
 
-from .store import Store
+from .store import AnnealMemoryError, Store, StoreError, StoreOperation
 from .types import (
     AffectiveState,
     AssociationPair,
     AssociationStats,
     Episode,
     EpisodeType,
+    PrepareWrapResult,
     RecallResult,
+    SaveContinuityResult,
+    StalePatternDict,
     StoreStatus,
     Tombstone,
+    WrapPackageDict,
     WrapRecord,
     WrapResult,
 )
@@ -33,7 +37,10 @@ from .integrity import TOOLS, RESOURCES, verify_integrity, generate_integrity_fi
 from .server import Server
 
 __all__ = [
+    "AnnealMemoryError",
     "Store",
+    "StoreError",
+    "StoreOperation",
     "Server",
     "AuditTrail",
     "AuditVerifyResult",
@@ -42,9 +49,13 @@ __all__ = [
     "AssociationStats",
     "Episode",
     "EpisodeType",
+    "PrepareWrapResult",
     "RecallResult",
+    "SaveContinuityResult",
+    "StalePatternDict",
     "StoreStatus",
     "Tombstone",
+    "WrapPackageDict",
     "WrapRecord",
     "WrapResult",
     "TOOLS",

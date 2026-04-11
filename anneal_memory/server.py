@@ -26,7 +26,7 @@ from .continuity import (
     validated_save_continuity as _lib_validated_save_continuity,
 )
 from .integrity import RESOURCES, TOOLS, hash_tool, generate_integrity_file, verify_integrity
-from .store import Store
+from .store import Store, StoreError
 from .types import AffectiveState
 
 logger = logging.getLogger("anneal-memory")
@@ -372,6 +372,15 @@ class Server:
             )
         except ValueError as exc:
             return _tool_result(f"Error: {exc}", is_error=True)
+        except StoreError as exc:
+            # Surface the structured I/O error with operation + path
+            # context so the agent sees which file / what operation
+            # failed rather than a bare traceback.
+            return _tool_result(
+                f"Error: store I/O failure during {exc.operation} "
+                f"at {exc.path}: {exc}",
+                is_error=True,
+            )
 
         # Format the library result dict as the MCP text response
         lines = [

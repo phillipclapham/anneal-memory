@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 
 class EpisodeType(str, Enum):
@@ -168,3 +168,128 @@ class RecallResult:
     episodes: list[Episode]
     total_matching: int  # May differ from len(episodes) if limited
     query_params: dict[str, Any] = field(default_factory=dict)
+
+
+# -- TypedDict return shapes for the canonical pipeline --
+#
+# These describe the dict shapes returned by ``prepare_wrap`` and
+# ``validated_save_continuity`` in ``continuity.py`` (and indirectly
+# by the private ``_build_wrap_package`` helper). They are pure type
+# hints — runtime behavior is unchanged. Library users get
+# autocomplete and mypy-level key-typo detection; transport adapters
+# can annotate their boundaries precisely.
+#
+# **Shape choice — TypedDict over dataclass.** We use ``TypedDict``
+# rather than ``dataclass`` because the canonical pipeline returns
+# plain dicts and library users can serialize them via ``json.dumps``
+# with no extra conversion step. Dataclass returns would force every
+# transport to call ``dataclasses.asdict()`` before serialization,
+# which is exactly the footgun we hit and closed with ``SaveContinuityResult``
+# during 10.5c.3 (``wrap_result`` was initially a dataclass, now a plain
+# dict). The whole canonical pipeline is JSON-serializable all the way
+# down, and TypedDict expresses that at the type level.
+#
+# **Construction idiom.** The functions in ``continuity.py`` construct
+# these at return sites with the *callable* form
+# (``WrapPackageDict(episodes=..., episode_count=...)``) rather than the
+# literal-dict form (``{"episodes": ..., "episode_count": ...}``). Both
+# are valid per PEP 589 and mypy/pyright validate both.
+#
+# **TypedDict does NOT provide runtime validation** — neither the
+# callable form nor the literal form catches key-name typos at
+# runtime. ``WrapPackageDict(episodez=...)`` silently returns a dict
+# with the wrong key. Static type-checkers (mypy, pyright) catch this
+# at type-check time. We rely on the drift-check tests
+# (``test_prepare_wrap_result_has_declared_keys``,
+# ``test_save_continuity_result_has_declared_keys`` in
+# ``tests/test_continuity.py``) as the runtime safety net until
+# mypy-in-CI lands (scheduled in ``projects/anneal_memory/next.md``
+# as a v0.2.0-release-adjacent follow-up).
+#
+# We use the callable form anyway because it's more readable at
+# return sites (keyword arguments make the field names explicit)
+# and because mypy's error messages are slightly clearer on the
+# callable form when a key is missing. This is a readability
+# judgment call, not a runtime safety claim. Either form is fine.
+
+
+class StalePatternDict(TypedDict):
+    """A stale-pattern entry inside ``WrapPackageDict.stale_patterns``.
+
+    Emitted by the wrap-prep pipeline when an existing pattern in the
+    current continuity file has not been validated within the staleness
+    window and should be considered for removal during compression.
+    """
+
+    line: int  # 1-indexed line number in the continuity file
+    content: str  # The pattern line content
+    level: int  # Current graduation level (1x, 2x, 3x)
+    last_date: str  # Last validation date (YYYY-MM-DD)
+    days_stale: int  # Days since last validation
+
+
+class WrapPackageDict(TypedDict):
+    """The agent-facing compression package built by ``_build_wrap_package``.
+
+    Contains everything the agent needs to produce a compressed
+    continuity file: the formatted episode listing, the current
+    continuity text, any stale patterns flagged for review, the
+    compression instructions, and the sizing constraints.
+    """
+
+    episodes: str  # Formatted episode listing (grouped by type)
+    episode_count: int
+    continuity: str | None  # Current continuity text, or None for first wrap
+    stale_patterns: list[StalePatternDict]
+    instructions: str  # Compression instructions for the agent
+    today: str  # YYYY-MM-DD (may be caller-pinned for determinism)
+    max_chars: int  # Target max size for the compressed continuity
+
+
+class PrepareWrapResult(TypedDict):
+    """Return shape of ``prepare_wrap``.
+
+    ``status`` is either ``"empty"`` (no episodes to wrap; ``package``
+    and ``assoc_context`` are ``None``) or ``"ready"`` (package built,
+    wrap marked in progress on the store). The ``Literal`` discriminant
+    gives type checkers a switchable tag and lets IDE autocomplete
+    offer the two valid status values; callers typoing
+    ``result["statuz"]`` or ``result["status"] == "reday"`` get a
+    mypy/pyright error instead of silent runtime coercion.
+    """
+
+    status: Literal["empty", "ready"]
+    message: str  # Short human-readable status summary
+    episode_count: int
+    package: WrapPackageDict | None  # None when status == "empty"
+    assoc_context: str | None  # Hebbian association context, or None
+
+
+class SaveContinuityResult(TypedDict):
+    """Return shape of ``validated_save_continuity``.
+
+    Top-level convenience fields (``path``, ``chars``, etc.) mirror the
+    key entries on the embedded ``wrap_result`` dict for transports
+    that want the flat shape. ``wrap_result`` carries the full
+    :class:`WrapResult` contents as a plain dict (via
+    ``dataclasses.asdict``) so the entire ``SaveContinuityResult`` is
+    JSON-serializable top-to-bottom without the caller needing to
+    touch the dataclass. Library users who want the typed object can
+    reconstruct it via ``WrapResult(**result["wrap_result"])``.
+    """
+
+    path: str  # Filesystem path of the saved continuity sidecar
+    chars: int  # Character count (Python ``len(text)``) of the saved continuity text. NOT a byte count — for non-ASCII content the UTF-8 byte length can be up to 4x this value.
+    episodes_compressed: int
+    graduations_validated: int
+    graduations_demoted: int  # Total: demoted + bare_demoted
+    demoted: int  # Citations demoted due to bad evidence only
+    bare_demoted: int  # Bare (evidence-free) 2x/3x graduations demoted
+    citation_reuse_max: int  # Max times any single episode was cited
+    gaming_suspects: list[str]  # Episode IDs flagged for suspicious reuse
+    associations_formed: int
+    associations_strengthened: int
+    associations_decayed: int
+    sections: dict[str, int]  # Char count per continuity section
+    skipped_prepare: bool  # True if prepare_wrap was not called first
+    wrap_result: dict[str, Any]  # WrapResult-as-dict (JSON-serializable)

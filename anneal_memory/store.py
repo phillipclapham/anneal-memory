@@ -15,7 +15,7 @@ import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from .associations import (
     ASSOCIATIONS_SCHEMA,
@@ -40,6 +40,175 @@ from .types import (
     WrapRecord,
     WrapResult,
 )
+
+class AnnealMemoryError(Exception):
+    """Base class for all anneal-memory library errors.
+
+    Users integrating anneal-memory should catch this at their
+    boundary to handle "something in the memory system broke" as a
+    single category, regardless of which subsystem raised it
+    (store I/O, future SQLite wrapping, future audit integrity,
+    etc.). All domain-specific errors in the library inherit from
+    this class.
+
+    anneal-memory does **not** subclass :class:`OSError` for its
+    domain errors. File-write failures are wrapped in
+    :class:`StoreError` and the original ``OSError`` is preserved via
+    ``__cause__`` chaining (``raise StoreError(...) from exc``).
+    Library-level domain errors belong in a library-level hierarchy;
+    users who need the underlying errno dig via ``err.__cause__``.
+    This mirrors the convention in ``sqlalchemy.exc``, ``httpx``, and
+    other mature library-level Python packages — the boundary is
+    "the library failed," not "a file operation failed."
+
+    Subclasses:
+
+    - :class:`StoreError` — store I/O or integrity failure
+
+    .. note::
+        Currently colocated in ``store.py`` because ``StoreError`` is
+        the only subclass and is raised only from store methods. When
+        the hierarchy grows beyond store-family errors (e.g. future
+        ``PartialCommitError`` from the 10.5c.5 two-phase-commit work
+        would straddle store+continuity), the base class and its
+        subclasses will move to a dedicated ``exceptions.py`` module.
+        Import paths via ``anneal_memory.AnnealMemoryError`` will
+        remain stable across the relocation.
+    """
+
+
+# ``operation`` values are typed as a Literal so callers catching
+# ``StoreError`` can safely switch on them with autocomplete and
+# type-checker coverage.
+#
+# **Enforcement is compile-time only** — this is a soft contract
+# until mypy-in-CI lands (see ``projects/anneal_memory/next.md``
+# Session 10.5d+). Without a static type gate, a new raise site can
+# drift from this alias and only fail at runtime when a user tries
+# exhaustive narrowing. The convention until then: new raise sites
+# MUST add their identifier to the Literal before raising, and
+# reviewers MUST reject diffs that raise with a value not in the
+# alias. When 10.5c.6 adds SQLite-origin operations, if the growth
+# pressure makes this brittle, promote the alias to an ``Enum`` (or
+# enforce statically via mypy once 10.5d ships — either works).
+StoreOperation = Literal["save_continuity", "save_meta"]
+
+
+class StoreError(AnnealMemoryError):
+    """Raised when a store I/O or integrity operation fails.
+
+    Carries operation context (``operation``, ``path``) so transports
+    can surface meaningful errors to agents and users without parsing
+    ``errno``/``strerror`` strings. The underlying exception is
+    always attached as ``__cause__`` (``raise StoreError(...) from exc``),
+    so users who need errno or the original traceback can dig one
+    level deeper.
+
+    Raised by:
+
+    - :meth:`Store.save_continuity` — atomic continuity file write
+    - :meth:`Store.save_meta` — atomic metadata sidecar write
+
+    These are the file-write paths where a transport boundary is
+    expected to translate I/O failures into protocol-level errors.
+
+    **Not currently wrapped** (tracked as follow-up work — see
+    ``projects/anneal_memory/next.md``):
+
+    - ``sqlite3.OperationalError`` and related DB errors from the
+      episode/wrap/associations path. These continue to propagate
+      bare as of 10.5c.3. Wrapping them into
+      ``StoreDatabaseError(StoreError)`` is filed as a scheduled
+      follow-up; doing so is a non-breaking expansion of this
+      hierarchy because both new and old errors will be catchable
+      as ``StoreError`` or ``AnnealMemoryError``.
+
+    **Pickle / copy safety.** ``StoreError`` uses a keyword-only
+    constructor for the context fields but implements ``__reduce__``
+    so the instance round-trips cleanly through ``pickle``,
+    ``copy.copy``, and ``copy.deepcopy``. This matters for downstream
+    consumers that marshal exceptions across process boundaries
+    (``concurrent.futures.ProcessPoolExecutor``, ``pytest-xdist``,
+    logging frameworks that pickle exception context, RPC
+    transports).
+
+    .. note::
+        ``__cause__`` is **not** preserved across pickle/copy round
+        trips. This is a standard Python limitation — the default
+        exception pickling model does not serialize the cause chain,
+        and reconstructing the original exception on the receiving
+        side would require pickling arbitrary exception types. The
+        message on the wrapped ``StoreError`` already embeds the
+        underlying failure text (e.g. ``"Failed to write continuity
+        file to /path: [Errno 28] No space left on device"``), so
+        the human-readable cause survives; only the ``__cause__``
+        attribute chain does not. In-process callers see the full
+        chain via ``err.__cause__`` as normal; cross-process callers
+        should read the message for the cause and treat the chain
+        as locally-scoped.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        operation: StoreOperation,
+        path: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.operation: StoreOperation = operation
+        self.path = path
+
+    def __reduce__(self) -> tuple:
+        """Support pickle / copy round-trips.
+
+        Default ``Exception.__reduce__`` reconstructs via
+        ``type(self)(*self.args)`` which would lose the keyword-only
+        ``operation`` and ``path`` fields (and crash with
+        ``TypeError: missing 1 required keyword-only argument``).
+        We override to pass them through.
+        """
+        return (
+            _reconstruct_store_error,
+            (str(self), self.operation, self.path),
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"StoreError({str(self)!r}, "
+            f"operation={self.operation!r}, path={self.path!r})"
+        )
+
+
+def _reconstruct_store_error(
+    message: str,
+    operation: StoreOperation,
+    path: str | None,
+) -> StoreError:
+    """Module-level reconstructor for :class:`StoreError` under pickle.
+
+    Lives at module scope (not as a ``@classmethod``) because pickle
+    requires the reconstructor to be importable by qualified name.
+    """
+    return StoreError(message, operation=operation, path=path)
+
+
+def _safe_unlink(path: Path) -> None:
+    """Delete ``path`` if it exists, swallowing any OSError.
+
+    Used by atomic-write cleanup paths. The cleanup MUST NOT raise:
+    we're already in an exception-handler or a ``finally`` block
+    where the real error is the reason we're cleaning up. A second
+    failure from the unlink itself (permission denied, file already
+    gone) must not mask the primary exception. Any unlink failure
+    leaves a stale ``.tmp`` sidecar on disk, which is recoverable on
+    next successful write via ``.replace()``.
+    """
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
 
 # Schema version — increment on breaking changes
 _SCHEMA_VERSION = 1
@@ -900,23 +1069,55 @@ class Store:
             The path where the file was saved.
 
         Raises:
-            OSError: If the atomic write fails. The stale temp file
-                is cleaned up before re-raising.
+            StoreError: On file-I/O failure of the atomic write
+                (most common case — disk full, permission denied,
+                cross-device rename). The stale temp file is cleaned
+                up before raising. Users catching ``StoreError`` get
+                ``.operation == "save_continuity"`` and ``.path ==
+                str(continuity_path)`` for clean error messages.
+            Exception: Non-``OSError`` failures (e.g. an exotic
+                ``UnicodeEncodeError`` from malformed agent text)
+                propagate bare. The stale temp file is still cleaned
+                up — the atomic-write invariant is preserved
+                regardless of the exception class — but such
+                failures represent bugs or data-shape problems
+                rather than transport-level I/O errors and should
+                not be masked behind a ``StoreError`` wrapper.
         """
         path = self.continuity_path
         tmp_path = path.with_suffix(".md.tmp")
+        # Success flag gates the cleanup path in the ``finally`` block:
+        # the goal is that the ``.md.tmp`` sidecar never survives,
+        # regardless of which exception class was raised mid-write.
+        # This preserves the atomic-write invariant even for
+        # non-OSError failures (UnicodeEncodeError on malformed agent
+        # text, TypeError from a buggy caller, etc.).
+        #
+        # Single cleanup point: the ``finally`` block runs on EVERY
+        # exit path including the OSError wrap+raise below. We
+        # deliberately do NOT call ``_safe_unlink`` inside the
+        # ``except OSError`` block — that would run cleanup twice on
+        # the OSError path (once explicitly, once via finally), which
+        # is harmless today because ``_safe_unlink`` is idempotent but
+        # is extra I/O and a maintenance trap. One cleanup site, one
+        # source of truth.
+        succeeded = False
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 f.write(text)
                 f.flush()
                 os.fsync(f.fileno())
             tmp_path.replace(path)
-        except Exception:
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-            raise
+            succeeded = True
+        except OSError as exc:
+            raise StoreError(
+                f"Failed to write continuity file to {path}: {exc}",
+                operation="save_continuity",
+                path=str(path),
+            ) from exc
+        finally:
+            if not succeeded:
+                _safe_unlink(tmp_path)
 
         if self._audit is not None:
             self._audit.log("continuity_saved", {
@@ -938,9 +1139,23 @@ class Store:
             return defaults
 
     def save_meta(self, meta: dict) -> str:
-        """Save continuity metadata. Atomic write."""
+        """Save continuity metadata. Atomic write.
+
+        Raises:
+            StoreError: On file-I/O failure of the atomic write.
+                Stale temp file is cleaned up before raising.
+                ``.operation == "save_meta"``, ``.path == str(meta_path)``.
+            Exception: Non-``OSError`` failures (``TypeError`` from a
+                non-JSON-serializable ``meta`` value, etc.) propagate
+                bare. Stale temp file is still cleaned up via the
+                finally block — the atomic-write invariant holds
+                regardless of exception class.
+        """
         path = self.meta_path
         tmp_path = path.with_suffix(".json.tmp")
+        # Single cleanup site — ``finally`` only. See the matching
+        # comment in ``save_continuity`` for rationale.
+        succeeded = False
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(meta, f, indent=2, sort_keys=True)
@@ -948,12 +1163,16 @@ class Store:
                 f.flush()
                 os.fsync(f.fileno())
             tmp_path.replace(path)
-        except Exception:
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-            raise
+            succeeded = True
+        except OSError as exc:
+            raise StoreError(
+                f"Failed to write meta sidecar to {path}: {exc}",
+                operation="save_meta",
+                path=str(path),
+            ) from exc
+        finally:
+            if not succeeded:
+                _safe_unlink(tmp_path)
         return str(path)
 
     # -- Properties --

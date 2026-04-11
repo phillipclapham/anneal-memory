@@ -18,11 +18,20 @@ Zero dependencies beyond Python stdlib.
 from __future__ import annotations
 
 import re
+import warnings
+from dataclasses import asdict
 from datetime import date
 from typing import TYPE_CHECKING, Any
 
 from .graduation import detect_stale_patterns, validate_graduations
-from .types import AffectiveState, Episode
+from .types import (
+    AffectiveState,
+    Episode,
+    PrepareWrapResult,
+    SaveContinuityResult,
+    StalePatternDict,
+    WrapPackageDict,
+)
 
 if TYPE_CHECKING:
     from .store import Store
@@ -110,38 +119,29 @@ def format_episodes_for_wrap(episodes: list[Episode]) -> str:
     return "\n".join(lines)
 
 
-def prepare_wrap_package(
+def _build_wrap_package(
     episodes: list[Episode],
     existing_continuity: str | None,
     project_name: str,
+    *,
     max_chars: int = 20000,
     today: str | None = None,
     staleness_days: int = 7,
-) -> dict[str, Any]:
+) -> WrapPackageDict:
     """Pure helper — build an agent-facing compression package from pre-fetched inputs.
 
-    .. warning::
-        **Most callers should use :func:`prepare_wrap` instead.** That
-        function is the canonical store-aware pipeline: it fetches
-        episodes, loads the current continuity, builds this package,
-        marks the wrap in progress (``store.wrap_started()``), and
-        attaches Hebbian association context — the full lifecycle.
+    **Private.** Called by :func:`prepare_wrap` (the canonical
+    store-aware pipeline) and by :func:`prepare_wrap_package` (the
+    deprecated public wrapper kept for one release cycle to give
+    existing callers a ``DeprecationWarning`` before removal).
 
-        This function does NONE of those things. It is a pure
-        helper that takes episodes and continuity text already in hand
-        and returns a package dict. It does not touch a store.
-        Consequently, calling this function and then calling
-        :func:`validated_save_continuity` on the same store will leave
-        ``skipped_prepare=True`` in the save result, because no wrap
-        lifecycle was ever started.
-
-        This helper is kept public for (a) unit tests of package
-        construction in isolation, and (b) advanced library users
-        who manage their own episode fetching and wrap lifecycle.
-        For the standard session-boundary wrap flow, use
-        :func:`prepare_wrap`.
-
-    It contains everything needed to produce a compressed continuity file.
+    This function does not touch a store. It takes episodes and
+    continuity text already in hand and assembles the agent-facing
+    compression package (episodes listing + stale-pattern diagnostic
+    + compression instructions + sizing constraints). The caller is
+    responsible for wrap lifecycle (``store.wrap_started()``) and
+    Hebbian association context — :func:`prepare_wrap` does that
+    work around this helper.
 
     Args:
         episodes: Episodes since last wrap (the compression window).
@@ -152,7 +152,8 @@ def prepare_wrap_package(
         staleness_days: Days before flagging stale patterns.
 
     Returns:
-        Dict with keys: episodes, continuity, stale_patterns, instructions, today, max_chars
+        WrapPackageDict with episodes, continuity, stale_patterns,
+        instructions, today, max_chars.
     """
     if today is None:
         today = date.today().isoformat()
@@ -161,32 +162,102 @@ def prepare_wrap_package(
     formatted_episodes = format_episodes_for_wrap(episodes)
 
     # Detect stale patterns in existing continuity
-    stale_patterns: list[dict[str, Any]] = []
+    stale_patterns: list[StalePatternDict] = []
     if existing_continuity:
         stale = detect_stale_patterns(existing_continuity, today, staleness_days)
         stale_patterns = [
-            {
-                "line": s.line_number,
-                "content": s.content,
-                "level": s.level,
-                "last_date": s.last_date,
-                "days_stale": s.days_stale,
-            }
+            StalePatternDict(
+                line=s.line_number,
+                content=s.content,
+                level=s.level,
+                last_date=s.last_date,
+                days_stale=s.days_stale,
+            )
             for s in stale
         ]
 
     # Build instructions
     instructions = _build_wrap_instructions(project_name, max_chars, today)
 
-    return {
-        "episodes": formatted_episodes,
-        "episode_count": len(episodes),
-        "continuity": existing_continuity,
-        "stale_patterns": stale_patterns,
-        "instructions": instructions,
-        "today": today,
-        "max_chars": max_chars,
-    }
+    return WrapPackageDict(
+        episodes=formatted_episodes,
+        episode_count=len(episodes),
+        continuity=existing_continuity,
+        stale_patterns=stale_patterns,
+        instructions=instructions,
+        today=today,
+        max_chars=max_chars,
+    )
+
+
+def prepare_wrap_package(
+    episodes: list[Episode],
+    existing_continuity: str | None,
+    project_name: str,
+    max_chars: int = 20000,
+    today: str | None = None,
+    staleness_days: int = 7,
+) -> WrapPackageDict:
+    """Deprecated thin wrapper over :func:`_build_wrap_package`.
+
+    .. deprecated:: 0.2.0
+        ``prepare_wrap_package`` is deprecated since 0.2.0 and will
+        be removed in 0.3.0. Use :func:`prepare_wrap` (the canonical
+        store-aware pipeline) instead. This wrapper exists only to
+        give existing callers a :class:`DeprecationWarning` for one
+        release cycle before the public name is removed.
+
+        If you are an advanced library user who genuinely needs to
+        construct a package from pre-fetched episodes without
+        touching a store (for unit testing package construction in
+        isolation, or for a custom wrap lifecycle), use the private
+        :func:`_build_wrap_package` helper directly — understanding
+        that as a private symbol it has no API stability guarantee.
+
+    The wrapper emits a :class:`DeprecationWarning` with
+    ``stacklevel=2`` so the warning surfaces at the caller's source
+    line, then delegates to the canonical helper without mutating
+    any arguments.
+
+    Args:
+        episodes: Episodes since last wrap (the compression window).
+        existing_continuity: Current continuity text, or None for first session.
+        project_name: Name for the continuity file header.
+        max_chars: Maximum size of the continuity file.
+        today: Override for today's date (YYYY-MM-DD). Defaults to actual today.
+        staleness_days: Days before flagging stale patterns.
+
+    Returns:
+        WrapPackageDict — see :func:`_build_wrap_package`.
+    """
+    # NOTE: this warning intentionally names ``_build_wrap_package``
+    # (a private symbol). The only remaining audience for this
+    # deprecated public wrapper is advanced users managing their
+    # own wrap lifecycle — normal users are already on
+    # ``prepare_wrap``. Naming the private migration target here is
+    # the same pattern Python stdlib uses (e.g. ``logging.warn``
+    # directing advanced callers at ``logging.warning``,
+    # ``asyncio.get_event_loop`` naming ``get_running_loop``). Do not
+    # "clean up" the private symbol out of this message without
+    # reading the 10.5c.3 fix-pass review (Layer 2 N3).
+    warnings.warn(
+        "prepare_wrap_package is deprecated since 0.2.0 and will be "
+        "removed in 0.3.0. Use prepare_wrap(store, ...) for the "
+        "canonical store-aware pipeline, or the private "
+        "_build_wrap_package helper for advanced custom lifecycles. "
+        "See the 'Canonical entry points' section of the library "
+        "quickstart for migration guidance.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return _build_wrap_package(
+        episodes,
+        existing_continuity,
+        project_name,
+        max_chars=max_chars,
+        today=today,
+        staleness_days=staleness_days,
+    )
 
 
 def _build_wrap_instructions(project_name: str, max_chars: int, today: str) -> str:
@@ -263,7 +334,7 @@ def prepare_wrap(
     *,
     max_chars: int = 20000,
     staleness_days: int = 7,
-) -> dict[str, Any]:
+) -> PrepareWrapResult:
     """Run the full store-aware prepare_wrap pipeline.
 
     **This is the canonical prepare_wrap entry point.** The MCP server
@@ -273,15 +344,20 @@ def prepare_wrap(
 
     Handles the full lifecycle: fetches episodes, detects the empty
     case (and clears any stale wrap-in-progress flag), builds the
-    agent-facing compression package via :func:`prepare_wrap_package`,
-    marks the wrap as in progress, and attaches Hebbian association
-    context for the episodes being compressed.
+    agent-facing compression package via the private
+    :func:`_build_wrap_package` helper, marks the wrap as in progress,
+    and attaches Hebbian association context for the episodes being
+    compressed.
 
-    Contrast with :func:`prepare_wrap_package`, which is a pure helper
-    that takes pre-fetched episodes and continuity text and returns the
-    package dict without touching the store. Most callers want this
-    function; ``prepare_wrap_package`` is for tests and advanced users
-    managing their own store state.
+    The separate :func:`_build_wrap_package` helper (private) is the
+    pure-function core that takes pre-fetched episodes and continuity
+    text and returns the package dict without touching the store.
+    Advanced library users managing their own lifecycle can call
+    it directly — understanding that as a private symbol it has no
+    API stability guarantee across versions. The deprecated public
+    wrapper :func:`prepare_wrap_package` exists for one release cycle
+    to give v0.1.x callers a warning before removal in v0.3.0; do not
+    reach for it in new code.
 
     .. warning::
         **The prepare/save window is not frozen.** The set of episodes
@@ -311,13 +387,15 @@ def prepare_wrap(
         staleness_days: Days before flagging stale patterns.
 
     Returns:
-        Dict with keys:
-          - ``status`` (str): ``"empty"`` (no episodes to wrap) or
-            ``"ready"`` (package built, wrap marked in progress)
+        :class:`PrepareWrapResult` — a :class:`TypedDict` with keys:
+          - ``status`` (``Literal["empty", "ready"]``): ``"empty"``
+            means no episodes to wrap; ``"ready"`` means package
+            built and wrap marked in progress on the store
           - ``message`` (str): short human-readable status summary
           - ``episode_count`` (int): number of episodes in the wrap window
-          - ``package`` (dict | None): the result of
-            :func:`prepare_wrap_package`, or ``None`` if empty
+          - ``package`` (:class:`WrapPackageDict` | None): the
+            agent-facing compression package built by
+            :func:`_build_wrap_package`, or ``None`` if empty
           - ``assoc_context`` (str | None): Hebbian association context
             for the episodes being compressed, or ``None`` if empty or
             no associations exist
@@ -332,22 +410,22 @@ def prepare_wrap(
 
     if not episodes:
         store.wrap_cancelled()
-        return {
-            "status": "empty",
-            "message": "No episodes since last wrap. Nothing to compress.",
-            "episode_count": 0,
-            "package": None,
-            "assoc_context": None,
-        }
+        return PrepareWrapResult(
+            status="empty",
+            message="No episodes since last wrap. Nothing to compress.",
+            episode_count=0,
+            package=None,
+            assoc_context=None,
+        )
 
     # All store reads and package construction happen BEFORE wrap_started().
     # If any of them raises, the store is left with no stale wrap-in-progress
     # flag — symmetric with wrap_cancelled() on the empty path.
     existing = store.load_continuity()
-    package = prepare_wrap_package(
-        episodes=episodes,
-        existing_continuity=existing,
-        project_name=store.project_name,
+    package = _build_wrap_package(
+        episodes,
+        existing,
+        store.project_name,
         max_chars=max_chars,
         staleness_days=staleness_days,
     )
@@ -357,16 +435,16 @@ def prepare_wrap(
     # Mark wrap in progress only after every upstream operation succeeded.
     store.wrap_started()
 
-    return {
-        "status": "ready",
-        "message": f"Ready to compress {len(episodes)} episode(s).",
-        "episode_count": len(episodes),
-        "package": package,
-        "assoc_context": assoc_context,
-    }
+    return PrepareWrapResult(
+        status="ready",
+        message=f"Ready to compress {len(episodes)} episode(s).",
+        episode_count=len(episodes),
+        package=package,
+        assoc_context=assoc_context,
+    )
 
 
-def format_wrap_package_text(result: dict[str, Any]) -> str:
+def format_wrap_package_text(result: PrepareWrapResult) -> str:
     """Render a :func:`prepare_wrap` result as agent-facing display text.
 
     This is the canonical text representation used by both MCP and CLI
@@ -386,8 +464,11 @@ def format_wrap_package_text(result: dict[str, Any]) -> str:
         The formatted text. For an empty result, returns the status
         message unchanged.
     """
-    # Any status other than "ready" (empty, or some future state) is
-    # rendered as its bare message. Only "ready" has a package to format.
+    # PrepareWrapResult.status is Literal["empty", "ready"]; on
+    # "empty" the package is None and we just return the message.
+    # Adding a new status value is a deliberate API expansion — the
+    # Literal in types.py is the single source of truth and any new
+    # branch must land there first.
     if result["status"] != "ready":
         return result["message"]
 
@@ -424,7 +505,7 @@ def validated_save_continuity(
     affective_state: AffectiveState | None = None,
     *,
     today: str | None = None,
-) -> dict[str, Any]:
+) -> SaveContinuityResult:
     """Save continuity with the full validation pipeline.
 
     **This is the canonical save_continuity pipeline.** The MCP server and
@@ -456,6 +537,24 @@ def validated_save_continuity(
         critical section. See :func:`prepare_wrap` for the full
         discussion.
 
+    .. warning::
+        **Partial-failure window (scheduled for 10.5c.5).** The
+        internal pipeline runs four write stages in order: continuity
+        file write → Hebbian association write → meta sidecar write
+        → wrap completion record in the DB. If stage 2, 3, or 4
+        raises ``StoreError`` (or any other exception), the stages
+        that already committed are NOT rolled back. The continuity
+        file on disk is the new version; the DB may or may not
+        reflect that fact. Transport adapters catching ``StoreError``
+        at their boundary should NOT assume the wrap was cleanly
+        abandoned — the store's persistent state is partially
+        updated, and the next ``prepare_wrap`` call will see
+        ``wrap_in_progress=True`` until recovery runs. A full
+        two-phase commit (continuity tmp → DB txn → atomic rename)
+        is scheduled for Session 10.5c.5 and will close this gap.
+        Until then, treat any mid-pipeline failure as requiring
+        explicit recovery on the next session start.
+
     Args:
         store: A Store instance.
         text: The agent-compressed continuity text.
@@ -466,14 +565,20 @@ def validated_save_continuity(
             useful for tests (no wall-clock dependency, no midnight-
             boundary risk) and for experiments that need reproducible
             runs against a pinned date. Mirrors the existing ``today``
-            parameter on :func:`prepare_wrap_package`.
+            parameter on :func:`prepare_wrap`.
 
     Returns:
-        Dict with keys:
+        :class:`SaveContinuityResult` — a :class:`TypedDict` with the
+        following keys. The entire return value is JSON-serializable
+        top-to-bottom so transports can ``json.dumps`` without any
+        dataclass conversion step.
+
           - ``path`` (str): path to the saved continuity file
-          - ``chars`` (int): byte count of the saved continuity text
-            (top-level convenience for transports; same as
-            ``wrap_result.chars``)
+          - ``chars`` (int): character count (``len(text)``) of the
+            saved continuity text, NOT a byte count (for non-ASCII
+            content, UTF-8 byte length can be up to 4x this).
+            Top-level convenience for transports; same as
+            ``wrap_result["chars"]``.
           - ``episodes_compressed`` (int): count of episodes in this wrap
           - ``graduations_validated`` (int): citations that validated
           - ``graduations_demoted`` (int): citations demoted due to
@@ -491,16 +596,24 @@ def validated_save_continuity(
           - ``sections`` (dict[str, int]): char count per continuity section
           - ``skipped_prepare`` (bool): True if ``prepare_wrap`` was not
             called first
-          - ``wrap_result`` (WrapResult): the store-level wrap record
-            (contains the same metrics — primarily for library users
-            who want a typed object rather than a dict)
+          - ``wrap_result`` (dict[str, Any]): the store-level wrap
+            record as a plain dict (``dataclasses.asdict`` of the
+            underlying :class:`WrapResult`). Library users who want
+            the typed dataclass can reconstruct it via
+            ``WrapResult(**result["wrap_result"])``.
 
     Raises:
         ValueError: If text is empty or missing required sections.
-        OSError: If the filesystem write of the continuity sidecar
-            fails. Not caught by this function; propagates to the
-            caller. MCP and CLI transports currently let it propagate
-            as well — consider handling at your transport boundary.
+        StoreError: If the filesystem write of the continuity sidecar
+            or meta sidecar fails. ``StoreError`` is a library-level
+            domain error (subclass of :class:`AnnealMemoryError`, NOT
+            of :class:`OSError`). Transports should catch
+            :class:`AnnealMemoryError` as a single library boundary,
+            or :class:`StoreError` specifically to read ``.operation``
+            and ``.path`` for clean error messages. The original
+            ``OSError`` is preserved on ``__cause__`` (we raise
+            ``StoreError(...) from exc``), so callers that need
+            ``errno`` can dig one level deeper.
     """
     from .associations import process_wrap_associations
 
@@ -528,7 +641,7 @@ def validated_save_continuity(
 
     # Validate graduations (demotes bad citations in-place).
     # Caller may pin ``today`` for deterministic test runs; default is
-    # wall-clock. Same pattern prepare_wrap_package already uses.
+    # wall-clock. Same pattern _build_wrap_package already uses.
     today_str = today if today is not None else date.today().isoformat()
     grad_result = validate_graduations(
         text=text,
@@ -568,20 +681,24 @@ def validated_save_continuity(
         section_sizes=sections,
     )
 
-    return {
-        "path": path,
-        "chars": len(grad_result.text),
-        "episodes_compressed": len(episodes),
-        "graduations_validated": grad_result.validated,
-        "graduations_demoted": total_demoted,
-        "demoted": grad_result.demoted,
-        "bare_demoted": grad_result.bare_demoted,
-        "citation_reuse_max": grad_result.citation_reuse_max,
-        "gaming_suspects": list(grad_result.gaming_suspects),
-        "associations_formed": assoc_formed,
-        "associations_strengthened": assoc_strengthened,
-        "associations_decayed": assoc_decayed,
-        "sections": sections,
-        "skipped_prepare": skipped_prepare,
-        "wrap_result": wrap_result,
-    }
+    return SaveContinuityResult(
+        path=path,
+        chars=len(grad_result.text),
+        episodes_compressed=len(episodes),
+        graduations_validated=grad_result.validated,
+        graduations_demoted=total_demoted,
+        demoted=grad_result.demoted,
+        bare_demoted=grad_result.bare_demoted,
+        citation_reuse_max=grad_result.citation_reuse_max,
+        gaming_suspects=list(grad_result.gaming_suspects),
+        associations_formed=assoc_formed,
+        associations_strengthened=assoc_strengthened,
+        associations_decayed=assoc_decayed,
+        sections=sections,
+        skipped_prepare=skipped_prepare,
+        # asdict() makes the full return value JSON-serializable
+        # top-to-bottom. Library users who want the typed object can
+        # do ``WrapResult(**result["wrap_result"])``; everyone else
+        # can ``json.dumps(result)`` with no ceremony.
+        wrap_result=asdict(wrap_result),
+    )

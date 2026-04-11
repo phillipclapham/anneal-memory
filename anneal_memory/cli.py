@@ -53,7 +53,7 @@ from .continuity import (
     prepare_wrap as _lib_prepare_wrap,
     validated_save_continuity as _lib_validated_save_continuity,
 )
-from .store import Store
+from .store import Store, StoreError
 from .types import AffectiveState, AssociationStats, EpisodeType
 
 
@@ -653,6 +653,16 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
             )
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        except StoreError as exc:
+            # Surface the structured I/O error with operation + path
+            # context so operators see which file / what operation
+            # failed rather than a Python traceback.
+            print(
+                f"Error: store I/O failure during {exc.operation} "
+                f"at {exc.path}: {exc}",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
         chars = result["chars"]

@@ -47,6 +47,12 @@ This is the most important part. Wrapping is how raw episodes compress into work
 > lower-level primitives (`prepare_wrap_package()`, `store.save_continuity()`) for
 > test use only — calling them directly bypasses the immune system and leaves
 > `skipped_prepare=True` in the save result.
+>
+> `prepare_wrap_package()` is **deprecated since 0.2.0 and will be removed in 0.3.0.**
+> Calling it emits a `DeprecationWarning` directing you to `prepare_wrap(store, ...)`.
+> Advanced library users managing their own wrap lifecycle can use the private
+> `_build_wrap_package()` helper instead — understanding that as a private symbol
+> it carries no API stability guarantee across versions.
 
 ```python
 from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
@@ -101,7 +107,7 @@ if wrap["status"] == "ready":
 store.close()
 ```
 
-**Why `prepare_wrap(store)` and not `prepare_wrap_package()`?** The store-aware version marks the wrap as in progress so the immune system knows this compression was preceded by a proper prepare step. Calling `prepare_wrap_package()` directly and then `validated_save_continuity()` will leave `skipped_prepare=True` in the save result — a signal the cognitive loop was bypassed. The pure helper exists for unit tests of package construction in isolation; it is not a supported path for agents. Similarly, `store.save_continuity(text)` is the low-level file-write primitive — it bypasses graduation, associations, decay, and wrap metadata. Don't reach for either one.
+**Why `prepare_wrap(store)` and not `prepare_wrap_package()`?** The store-aware version marks the wrap as in progress so the immune system knows this compression was preceded by a proper prepare step. Calling `prepare_wrap_package()` directly and then `validated_save_continuity()` will leave `skipped_prepare=True` in the save result — a signal the cognitive loop was bypassed. As of **0.2.0 `prepare_wrap_package()` is deprecated** and emits a `DeprecationWarning`; it will be removed in 0.3.0. Advanced library users managing their own lifecycle can use the private `_build_wrap_package()` helper (no API stability guarantee). Similarly, `store.save_continuity(text)` is the low-level file-write primitive — it bypasses graduation, associations, decay, and wrap metadata. Don't reach for either one.
 
 ## Affective State
 

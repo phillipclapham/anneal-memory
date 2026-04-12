@@ -814,6 +814,7 @@ def validated_save_continuity(
         demoted=grad_result.demoted,
         bare_demoted=grad_result.bare_demoted,
         citation_reuse_max=grad_result.citation_reuse_max,
+        skipped_non_today=grad_result.skipped_non_today,
         gaming_suspects=list(grad_result.gaming_suspects),
         associations_formed=assoc_formed,
         associations_strengthened=assoc_strengthened,

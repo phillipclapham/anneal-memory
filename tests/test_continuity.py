@@ -1,5 +1,7 @@
 """Tests for continuity validation and wrap package preparation."""
 
+from datetime import date
+
 import pytest
 
 from anneal_memory.continuity import (
@@ -362,6 +364,7 @@ class TestTypedDictReturnShapes:
                 "path", "chars", "episodes_compressed",
                 "graduations_validated", "graduations_demoted",
                 "demoted", "bare_demoted", "citation_reuse_max",
+                "skipped_non_today",
                 "gaming_suspects", "associations_formed",
                 "associations_strengthened", "associations_decayed",
                 "sections", "skipped_prepare", "wrap_result",
@@ -639,7 +642,8 @@ class TestPrepareWrapLibrary:
         A prior abandoned wrap could have left wrap_in_progress=True.
         prepare_wrap on an empty store must clean it up.
         """
-        wrap_store.wrap_started()  # Simulate a stale flag
+        with pytest.warns(DeprecationWarning, match="legacy call form"):
+            wrap_store.wrap_started()  # Simulate a stale flag
         assert wrap_store.status().wrap_in_progress
 
         result = prepare_wrap(wrap_store)
@@ -1264,21 +1268,45 @@ class TestTOCTOUHandshakeToken:
             # Build a continuity that tries to graduate a pattern with
             # evidence citing the TOCTOU episode. This should demote:
             # the ID is not in the snapshot-filtered valid_ids.
+            #
+            # Dates MUST use ``date.today().isoformat()`` — hardcoded
+            # dates drift past wall-clock at midnight and the
+            # graduation format line is then silently skipped as
+            # "carried-forward from prior session," dropping demoted=0
+            # and failing this test with a confusing error. Diogenes
+            # Finding #3 recurred 3x before ``skipped_non_today`` was
+            # added to ``SaveContinuityResult`` as a structural
+            # invariant. The assertion below catches the drift class
+            # explicitly even if a future edit re-introduces a
+            # hardcoded date.
+            today_str = date.today().isoformat()
             text = (
                 f"# Grad — Memory (v1)\n\n"
                 f"## State\nTesting citation validation.\n\n"
                 f"## Patterns\n"
                 f"{{verify:\n"
                 f"  thought: snapshot bounds citations "
-                f"| 2x (2026-04-10) "
+                f"| 2x ({today_str}) "
                 f"[evidence: {ep_toctou.id} \"TOCTOU episode\"]\n"
                 f"}}\n\n"
                 f"## Decisions\n"
-                f"[decided(rationale: \"test\", on: \"2026-04-10\")] ok\n\n"
+                f"[decided(rationale: \"test\", on: \"{today_str}\")] ok\n\n"
                 f"## Context\nSnapshot episode {ep_a.id}.\n"
             )
             result = validated_save_continuity(
                 store, text, wrap_token=token
+            )
+            # Structural invariant: no graduation-format line may be
+            # skipped due to date mismatch in a test that intends to
+            # exercise validation. If this fires, the test author
+            # hardcoded a date that drifted from wall-clock — same
+            # bug class Diogenes flagged 3x (Apr 7, Apr 10, Apr 11).
+            assert result["skipped_non_today"] == 0, (
+                "A graduation-format line was silently skipped because "
+                "its date did not match today. This is the Finding #3 "
+                "test-drift class — check for hardcoded dates in the "
+                "text fixture and use date.today().isoformat() instead "
+                f"(full result: {result})"
             )
             # The TOCTOU-citing graduation should have been demoted
             # specifically through the ``demoted`` counter. The

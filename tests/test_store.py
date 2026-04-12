@@ -300,12 +300,14 @@ class TestEpisodesSinceWrap:
 
 class TestWrapLifecycle:
     def test_wrap_started_sets_flag(self, store):
-        store.wrap_started()
+        with pytest.warns(DeprecationWarning, match="legacy call form"):
+            store.wrap_started()
         status = store.status()
         assert status.wrap_in_progress is True
 
     def test_wrap_completed_clears_flag(self, store):
-        store.wrap_started()
+        with pytest.warns(DeprecationWarning, match="legacy call form"):
+            store.wrap_started()
         store.wrap_completed(episodes_compressed=0, continuity_chars=0)
         status = store.status()
         assert status.wrap_in_progress is False
@@ -955,7 +957,8 @@ class TestStatus:
         # wrap_in_progress flag on status(), which reads
         # wrap_started_at directly and doesn't call
         # load_wrap_snapshot, so the partial state is tolerated.
-        store.wrap_started()
+        with pytest.warns(DeprecationWarning, match="legacy call form"):
+            store.wrap_started()
         status = store.status()
         assert status.wrap_in_progress is True
 

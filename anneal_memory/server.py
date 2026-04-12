@@ -466,6 +466,16 @@ class Server:
             lines.append(
                 f"Bare graduations demoted (no evidence): {result['bare_demoted']}"
             )
+        if result["skipped_non_today"]:
+            # Carried-forward graduations from prior sessions are
+            # normal. A non-zero count alongside a failing test or
+            # unexpected validation gap is the Finding #3 test-drift
+            # class — surfacing it here gives operators parity with
+            # the library return shape.
+            lines.append(
+                f"Graduations skipped (non-today date): "
+                f"{result['skipped_non_today']}"
+            )
         if result["gaming_suspects"]:
             lines.append(
                 f"Citation gaming suspects: {', '.join(result['gaming_suspects'])}"

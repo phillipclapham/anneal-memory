@@ -715,10 +715,10 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
         if args.json:
             # Preserve the pre-10.5c.1 JSON shape for backward compat
             # with any scripts scraping the output. The demoted split
-            # (demoted + bare_demoted), citation_reuse_max, and
-            # gaming_suspects are added as pure additions — they were
-            # not in the pre-10.5c.1 shape but adding keys is safe for
-            # dict-based scrapers.
+            # (demoted + bare_demoted), citation_reuse_max,
+            # gaming_suspects, and skipped_non_today are added as pure
+            # additions — they were not in the pre-10.5c.1 shape but
+            # adding keys is safe for dict-based scrapers.
             _print_json({
                 "saved": True,
                 "path": result["path"],
@@ -729,6 +729,7 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 "demoted": result["demoted"],
                 "bare_demoted": result["bare_demoted"],
                 "citation_reuse_max": result["citation_reuse_max"],
+                "skipped_non_today": result["skipped_non_today"],
                 "gaming_suspects": result["gaming_suspects"],
                 "associations_formed": result["associations_formed"],
                 "associations_strengthened": result["associations_strengthened"],
@@ -753,6 +754,15 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
         if result["bare_demoted"]:
             print(
                 f"Bare graduations demoted (no evidence): {result['bare_demoted']}"
+            )
+        if result["skipped_non_today"]:
+            # Carried-forward graduations from prior sessions are
+            # normal. A non-zero count with no new validations is
+            # usually benign; a non-zero count alongside a failing
+            # test is the Finding #3 test-drift class.
+            print(
+                f"Graduations skipped (non-today date): "
+                f"{result['skipped_non_today']}"
             )
         if result["gaming_suspects"]:
             print(

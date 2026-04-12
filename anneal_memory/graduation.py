@@ -53,6 +53,14 @@ class GraduationResult:
     demoted: int  # Citations that failed -> demoted
     citation_reuse_max: int  # Max times any single node was cited
     bare_demoted: int  # Bare graduations demoted (no evidence tag)
+    # Graduation-format lines whose date != today (carried-forward
+    # patterns from prior sessions, OR a test-authoring bug where a
+    # hardcoded date drifted from wall-clock). Callers that intend
+    # to exercise validation (tests, deterministic experiments) can
+    # assert this is zero as a structural invariant — catches the
+    # Finding #3 class of test drift without any log/warning noise
+    # in production where non-today skips are the normal case.
+    skipped_non_today: int = 0
     citation_counts: dict[str, int] = field(default_factory=dict)  # ep_id -> times cited
     gaming_suspects: list[str] = field(default_factory=list)  # IDs cited >= threshold
     direct_co_citations: list[tuple[str, str]] = field(default_factory=list)  # Pairs from same line
@@ -105,6 +113,7 @@ def validate_graduations(
     validated = 0
     demoted = 0
     bare_demoted = 0
+    skipped_non_today = 0
     citation_counts: dict[str, int] = {}
     direct_co_citations: list[tuple[str, str]] = []
     all_validated_ids: list[set[str]] = []
@@ -125,8 +134,15 @@ def validate_graduations(
             cited_raw = match.group(3)
             explanation = match.group(4)
 
-            # Only validate today's citations
+            # Only validate today's citations. Non-today graduations
+            # are either legitimately carried-forward from a prior
+            # session (normal) or a test-authoring bug where a
+            # hardcoded date drifted from wall-clock (Diogenes
+            # Finding #3 class — recurred 3x before the counter
+            # was added). Increment ``skipped_non_today`` so callers
+            # that care can assert on it; production ignores it.
             if date_str != today:
+                skipped_non_today += 1
                 continue
 
             # Normalize cited IDs
@@ -184,6 +200,7 @@ def validate_graduations(
         bare_level = int(bare_match.group(1))
         bare_date = bare_match.group(2)
         if bare_date != today:
+            skipped_non_today += 1
             continue
 
         bare_demoted += 1
@@ -202,6 +219,7 @@ def validate_graduations(
         demoted=demoted,
         citation_reuse_max=reuse_max,
         bare_demoted=bare_demoted,
+        skipped_non_today=skipped_non_today,
         citation_counts=dict(citation_counts),
         gaming_suspects=gaming_suspects,
         direct_co_citations=direct_co_citations,

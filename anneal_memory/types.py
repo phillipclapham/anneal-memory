@@ -332,6 +332,13 @@ class SaveContinuityResult(TypedDict):
     demoted: int  # Citations demoted due to bad evidence only
     bare_demoted: int  # Bare (evidence-free) 2x/3x graduations demoted
     citation_reuse_max: int  # Max times any single episode was cited
+    # Graduation-format lines whose date != today (carried-forward
+    # from prior sessions, OR a test-authoring bug where a hardcoded
+    # date drifted from wall-clock). Tests and deterministic
+    # experiments that intend to exercise validation should assert
+    # this is zero as a structural invariant. Closes the Diogenes
+    # Finding #3 class permanently.
+    skipped_non_today: int
     gaming_suspects: list[str]  # Episode IDs flagged for suspicious reuse
     associations_formed: int
     associations_strengthened: int

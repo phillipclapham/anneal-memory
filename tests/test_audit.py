@@ -664,7 +664,8 @@ class TestWrapCancelled:
 
         db = tmp_path / "test.db"
         store = Store(db)
-        store.wrap_started()
+        with pytest.warns(DeprecationWarning, match="legacy call form"):
+            store.wrap_started()
         store.wrap_cancelled()
 
         audit_path = tmp_path / "test.audit.jsonl"
@@ -1071,7 +1072,8 @@ class TestStoreIntegration:
         db = tmp_path / "test.db"
         store = Store(db)
         store.record("Episode 1", "observation")
-        store.wrap_started()
+        with pytest.warns(DeprecationWarning, match="legacy call form"):
+            store.wrap_started()
         store.save_continuity("## State\nTest\n## Patterns\n\n## Decisions\n\n## Context\n")
         store.wrap_completed(episodes_compressed=1, continuity_chars=50)
 
@@ -1113,7 +1115,8 @@ class TestStoreIntegration:
 
         store.record("Episode 1", "observation")
         store.record("Episode 2", "decision")
-        store.wrap_started()
+        with pytest.warns(DeprecationWarning, match="legacy call form"):
+            store.wrap_started()
         store.save_continuity("## State\nTest\n## Patterns\n\n## Decisions\n\n## Context\n")
         store.wrap_completed(episodes_compressed=2, continuity_chars=50)
         store.record("Episode 3", "outcome")
@@ -1129,7 +1132,8 @@ class TestStoreIntegration:
         db = tmp_path / "test.db"
         store = Store(db, audit=False)
         store.record("Episode 1", "observation")
-        store.wrap_started()
+        with pytest.warns(DeprecationWarning, match="legacy call form"):
+            store.wrap_started()
         store.save_continuity("## State\nTest\n## Patterns\n\n## Decisions\n\n## Context\n")
         store.wrap_completed(episodes_compressed=1, continuity_chars=50)
 

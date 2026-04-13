@@ -249,9 +249,13 @@ TOOLS: list[dict[str, Any]] = [
             "episode with the correction instead and let compression resolve it. "
             "Deletion cascades: all Hebbian associations involving the episode are "
             "removed, and the deletion is logged in the audit trail. By default, "
-            "a tombstone is preserved (content-hash only, no original text) as an "
-            "existence proof for audit integrity — content is fully erased but the "
-            "hash chain remains verifiable. This action is irreversible."
+            "a tombstone is preserved as an existence proof for audit integrity: "
+            "episode ID, original timestamp, episode type, and SHA-256 content "
+            "hash are retained — the original text is fully erased. Under GDPR "
+            "framing, the retained fields are pseudonymized metadata, not content; "
+            "disable tombstones at Store construction (keep_tombstones=False) if "
+            "even this metadata must not survive. The hash chain remains verifiable "
+            "either way. This action is irreversible."
         ),
         "inputSchema": {
             "type": "object",
@@ -273,9 +277,13 @@ TOOLS: list[dict[str, Any]] = [
             "Get memory health metrics. Call this at session start to understand "
             "memory state, or when diagnosing issues. Returns episode counts "
             "(total and since last wrap), wrap history, continuity file size, "
-            "episodes by type, whether a wrap is currently in progress, and "
+            "episodes by type, whether a wrap is currently in progress, "
             "Hebbian association network metrics (total links, average/max "
-            "strength, network density)."
+            "strength, network density), and audit trail health (enabled/"
+            "disabled, entry count, log path, retention window). Use "
+            "`anneal-memory verify` from the CLI to validate the audit "
+            "hash chain itself — status() only surfaces cheap health "
+            "signals, not integrity proof."
         ),
         "inputSchema": {
             "type": "object",

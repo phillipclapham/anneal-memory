@@ -239,6 +239,12 @@ def cmd_status(args: argparse.Namespace) -> None:
                 "continuity_chars": status.continuity_chars,
                 "episodes_by_type": status.episodes_by_type,
                 "association_stats": _assoc_stats_dict(status.association_stats),
+                "audit": {
+                    "enabled": status.audit_enabled,
+                    "log_path": status.audit_log_path,
+                    "entry_count": status.audit_entry_count,
+                    "retention_days": status.audit_retention_days,
+                },
             })
             return
 
@@ -274,6 +280,24 @@ def cmd_status(args: argparse.Namespace) -> None:
                 print(f"  Strongest pairs:")
                 for p in a.strongest_pairs[:5]:
                     print(f"    {p.episode_a} <-> {p.episode_b}  strength={p.strength:.3f}  citations={p.co_citations}")
+
+        # Audit health (Diogenes ARCH finding, Apr 13 2026)
+        print()
+        if status.audit_enabled:
+            if status.audit_entry_count is not None:
+                count_str = f"{status.audit_entry_count:,} entries"
+            else:
+                count_str = "entry count unavailable"
+            if status.audit_retention_days is not None:
+                retention_str = f"retention {status.audit_retention_days}d"
+            else:
+                retention_str = "retention unlimited"
+            print(f"Audit:      enabled — {count_str}, {retention_str}")
+            if status.audit_log_path is not None:
+                print(f"  Log:      {status.audit_log_path}")
+            print(f"  Verify:   `anneal-memory verify` validates hash chain")
+        else:
+            print(f"Audit:      disabled")
 
 
 def cmd_episodes(args: argparse.Namespace) -> None:

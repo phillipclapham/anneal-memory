@@ -64,6 +64,22 @@ class TestToolDefinitions:
         assert RESOURCES[1]["uri"] == "anneal://integrity/manifest"
         assert RESOURCES[1]["mimeType"] == "application/json"
 
+    def test_delete_episode_description_honest_about_tombstone_fields(self):
+        """Regression guard for Diogenes SEMANTIC finding (Apr 13 2026).
+
+        The delete_episode tool description previously claimed tombstones
+        were "content-hash only, no original text," but the schema stores
+        id + timestamp + type + content_hash. GDPR implications hinge on
+        what survives deletion — the description must match reality.
+        """
+        delete = next(t for t in TOOLS if t["name"] == "delete_episode")
+        desc = delete["description"]
+        assert "content-hash only" not in desc
+        assert "timestamp" in desc
+        assert "type" in desc
+        assert "hash" in desc
+        assert "GDPR" in desc
+
 
 class TestHashTool:
     """Verify hash generation is deterministic and sensitive."""

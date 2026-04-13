@@ -190,6 +190,33 @@ class TestCmdStatus:
         captured = capsys.readouterr()
         assert __version__ in captured.out
 
+    def test_status_shows_audit_section_when_enabled(
+        self, base_args_with_data, capsys
+    ):
+        """Diogenes ARCH finding (Apr 13 2026): CLI `status` must surface
+        the audit health block for parity with the MCP status tool."""
+        cmd_status(base_args_with_data)
+        captured = capsys.readouterr()
+        assert "Audit:" in captured.out
+        assert "enabled" in captured.out
+        assert ".audit.jsonl" in captured.out
+        assert "retention" in captured.out
+        assert "anneal-memory verify" in captured.out
+
+    def test_status_json_includes_audit_block(
+        self, base_args_with_data, capsys
+    ):
+        base_args_with_data.json = True
+        cmd_status(base_args_with_data)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "audit" in data
+        audit = data["audit"]
+        assert audit["enabled"] is True
+        assert audit["log_path"] is not None
+        assert audit["entry_count"] is not None
+        assert audit["entry_count"] >= 1
+
 
 # -- cmd_episodes tests --
 

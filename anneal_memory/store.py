@@ -413,7 +413,10 @@ class Store:
     Args:
         path: Path to the SQLite database file. Created if it doesn't exist.
         retention_days: Optional. Prune episodes older than N days. None = keep all.
-        keep_tombstones: When pruning, preserve audit trail (ID, timestamp, hash). Default True.
+        keep_tombstones: When pruning or deleting, preserve a tombstone row
+            (episode ID, original timestamp, episode type, SHA-256 content hash)
+            as an existence proof for the audit trail. Original text is erased.
+            Default True.
         project_name: Name for the continuity file header. Default "Agent".
         audit: Enable hash-chained JSONL audit trail. Default True.
         audit_retention_days: Auto-cleanup for rotated audit files. None = keep forever.
@@ -641,8 +644,12 @@ class Store:
     def delete(self, episode_id: str) -> bool:
         """Delete a single episode by ID.
 
-        For corrections, mistakes, or privacy (right to erasure).
-        Optionally creates a tombstone if keep_tombstones is enabled.
+        For corrections, mistakes, or privacy (right to erasure). The
+        original content is fully erased from the episodes table. If
+        ``keep_tombstones`` is enabled (default), a tombstone row is
+        inserted recording the episode ID, original timestamp, episode
+        type, and SHA-256 content hash — the text itself is gone but the
+        audit trail retains enough metadata to prove the episode existed.
 
         Args:
             episode_id: The 8-char hex episode ID.
@@ -827,6 +834,28 @@ class Store:
         # Association network metrics
         assoc_stats = _association_stats(self._conn, total)
 
+        # Audit health snapshot (Diogenes ARCH finding, Apr 13 2026).
+        # Cheap visibility — lazy init inside stats() if needed, no chain
+        # walk. Defaults below keep the fields backward-compatible when
+        # audit is disabled.
+        audit_enabled = self._audit is not None
+        audit_log_path: str | None = None
+        audit_entry_count: int | None = None
+        audit_retention_days: int | None = None
+        if self._audit is not None:
+            try:
+                audit_stats = self._audit.stats()
+            except OSError:
+                # Audit layer is enabled but its files are unreadable
+                # (permissions, disk issue, etc.). Surface enabled=True
+                # with None fields so the operator sees the state without
+                # status() itself raising.
+                pass
+            else:
+                audit_log_path = audit_stats["log_path"]
+                audit_entry_count = audit_stats["entry_count"]
+                audit_retention_days = audit_stats["retention_days"]
+
         return StoreStatus(
             total_episodes=total,
             episodes_since_wrap=since_wrap,
@@ -837,6 +866,10 @@ class Store:
             continuity_chars=continuity_chars,
             episodes_by_type=episodes_by_type,
             association_stats=assoc_stats,
+            audit_enabled=audit_enabled,
+            audit_log_path=audit_log_path,
+            audit_entry_count=audit_entry_count,
+            audit_retention_days=audit_retention_days,
         )
 
     # -- Wrap lifecycle --

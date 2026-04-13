@@ -535,6 +535,32 @@ class Server:
                 f"{density_str}"
             )
 
+        # Audit layer visibility — tamper-evident trail is load-bearing
+        # for the "grounded memory" claim. Agents and operators need to
+        # be able to see that it's running without shelling out.
+        lines.append("")
+        if status.audit_enabled:
+            if status.audit_entry_count is not None:
+                audit_line = (
+                    f"Audit: enabled — {status.audit_entry_count} entries"
+                )
+            else:
+                audit_line = "Audit: enabled — entry count unavailable"
+            if status.audit_retention_days is not None:
+                audit_line += (
+                    f", retention {status.audit_retention_days}d"
+                )
+            else:
+                audit_line += ", retention unlimited"
+            lines.append(audit_line)
+            if status.audit_log_path is not None:
+                lines.append(f"Audit log: {status.audit_log_path}")
+            lines.append(
+                "Audit chain: run `anneal-memory verify` to validate"
+            )
+        else:
+            lines.append("Audit: disabled")
+
         return _tool_result("\n".join(lines))
 
 

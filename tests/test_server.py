@@ -342,6 +342,50 @@ class TestToolStatus:
         text = _text_from_result(result)
         assert "Wraps: 1 completed" in text
 
+    # -- Audit health visibility (Diogenes ARCH finding, Apr 13 2026) --
+
+    def test_status_surfaces_audit_enabled(self, server):
+        """Default fixture enables audit — status must show it."""
+        server._tool_record({"content": "Test", "episode_type": "observation"})
+        result = server._tool_status({})
+        text = _text_from_result(result)
+        assert "Audit: enabled" in text
+        assert "entries" in text
+        assert ".audit.jsonl" in text
+        assert "retention unlimited" in text
+        assert "anneal-memory verify" in text
+
+    def test_status_surfaces_audit_disabled(self, tmp_path):
+        """audit=False: status must say so in one clean line."""
+        db_path = str(tmp_path / "noaudit.db")
+        s = Store(path=db_path, project_name="NoAudit", audit=False)
+        try:
+            srv = Server(s)
+            result = srv._tool_status({})
+            text = _text_from_result(result)
+            assert "Audit: disabled" in text
+            assert ".audit.jsonl" not in text
+        finally:
+            s.close()
+
+    def test_status_surfaces_audit_retention_days(self, tmp_path):
+        """Finite retention window surfaces in the line."""
+        db_path = str(tmp_path / "retain.db")
+        s = Store(
+            path=db_path,
+            project_name="Retain",
+            audit=True,
+            audit_retention_days=30,
+        )
+        try:
+            srv = Server(s)
+            srv._tool_record({"content": "Test", "episode_type": "observation"})
+            result = srv._tool_status({})
+            text = _text_from_result(result)
+            assert "retention 30d" in text
+        finally:
+            s.close()
+
 
 # -- Tool: prepare_wrap --
 

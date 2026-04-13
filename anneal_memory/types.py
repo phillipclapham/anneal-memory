@@ -107,6 +107,14 @@ class StoreStatus:
     continuity_chars: int | None  # Size of current continuity file, None if no file
     episodes_by_type: dict[str, int] = field(default_factory=dict)
     association_stats: AssociationStats | None = None  # Hebbian network metrics
+    # Audit trail visibility (Diogenes ARCH finding, Apr 13 2026): agents
+    # and operators need cheap visibility into whether the audit layer is
+    # running without walking the hash chain. ``audit_log_path`` and
+    # ``audit_entry_count`` are populated only when audit is enabled.
+    audit_enabled: bool = False
+    audit_log_path: str | None = None
+    audit_entry_count: int | None = None
+    audit_retention_days: int | None = None
 
 
 @dataclass(frozen=True)

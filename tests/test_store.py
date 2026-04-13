@@ -974,6 +974,53 @@ class TestStatus:
         assert status.total_wraps == 1
         assert status.last_wrap_at is not None
 
+    # -- Audit health visibility (Diogenes ARCH finding, Apr 13 2026) --
+
+    def test_status_audit_enabled_exposes_health(self, store):
+        """Default fixture has audit=True; status() must surface health."""
+        store.record("trigger audit init", EpisodeType.OBSERVATION)
+        status = store.status()
+        assert status.audit_enabled is True
+        assert status.audit_log_path is not None
+        assert status.audit_log_path.endswith(".audit.jsonl")
+        # At minimum the record() call above wrote one audit entry.
+        assert status.audit_entry_count is not None
+        assert status.audit_entry_count >= 1
+        # Default retention is unlimited.
+        assert status.audit_retention_days is None
+
+    def test_status_audit_disabled_reports_cleanly(self, tmp_db):
+        """audit=False: enabled flag false, all other audit fields None."""
+        s = Store(tmp_db, project_name="NoAudit", audit=False)
+        try:
+            status = s.status()
+            assert status.audit_enabled is False
+            assert status.audit_log_path is None
+            assert status.audit_entry_count is None
+            assert status.audit_retention_days is None
+        finally:
+            s.close()
+
+    def test_status_audit_retention_days_surfaced(self, tmp_db):
+        """Retention window is part of the health snapshot."""
+        s = Store(tmp_db, project_name="Retain", audit_retention_days=30)
+        try:
+            s.record("ep", EpisodeType.OBSERVATION)
+            status = s.status()
+            assert status.audit_enabled is True
+            assert status.audit_retention_days == 30
+        finally:
+            s.close()
+
+    def test_status_audit_count_reflects_activity(self, store):
+        """Entry count should monotonically rise with write activity."""
+        before = store.status().audit_entry_count or 0
+        store.record("one", EpisodeType.OBSERVATION)
+        store.record("two", EpisodeType.OBSERVATION)
+        after = store.status().audit_entry_count
+        assert after is not None
+        assert after >= before + 2
+
 
 # -- Delete --
 

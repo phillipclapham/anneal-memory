@@ -162,6 +162,28 @@ class AuditTrail:
 
         return entry
 
+    def stats(self) -> dict[str, Any]:
+        """Return a cheap health snapshot of the audit trail.
+
+        Lazy-initializes the trail if it hasn't been touched yet so
+        ``entry_count`` reflects the true count on disk (including any
+        entries recovered from a prior active file). Does NOT walk the
+        full hash chain — for integrity verification, call :meth:`verify`.
+
+        Returns:
+            Dict with keys ``log_path`` (str), ``entry_count`` (int),
+            ``retention_days`` (int | None). Callers that also care
+            about the enabled/disabled distinction should check for
+            ``None`` at the ``Store._audit`` level before calling this.
+        """
+        if not self._initialized:
+            self._initialize()
+        return {
+            "log_path": str(self._active_path),
+            "entry_count": self._seq,
+            "retention_days": self._retention_days,
+        }
+
     @classmethod
     def verify(cls, db_path: str | Path) -> AuditVerifyResult:
         """Verify hash chain integrity across all audit files.

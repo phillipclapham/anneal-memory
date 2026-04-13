@@ -10,7 +10,12 @@ import pytest
 from dataclasses import asdict, is_dataclass
 from datetime import date
 
-from anneal_memory.store import AnnealMemoryError, Store, StoreError
+from anneal_memory.store import (
+    AnnealMemoryError,
+    Store,
+    StoreDatabaseError,
+    StoreError,
+)
 from anneal_memory.types import EpisodeType, StoreStatus, WrapRecord, WrapResult
 
 
@@ -1485,3 +1490,724 @@ class TestValidatedSaveContinuityReturnContract:
         history = store.get_wrap_history()
         assert len(history) == 1
         assert history[0].graduations_demoted == result["graduations_demoted"]
+
+
+# -- 10.5c.6 SQLite error wrapping (Store._db_boundary) --
+
+
+class TestDbBoundaryErrorWrapping:
+    """Every public Store method that touches SQLite must surface
+    failures as ``StoreDatabaseError`` via :meth:`Store._db_boundary`
+    instead of leaking bare ``sqlite3.Error`` subclasses.
+
+    Pattern: monkeypatch ``store._conn.execute`` (or a specific helper)
+    to raise ``sqlite3.OperationalError``, call the public method, and
+    assert the raised exception is a StoreDatabaseError with the right
+    ``operation`` field, that it's still catchable as ``StoreError`` and
+    ``AnnealMemoryError``, and that ``__cause__`` preserves the original
+    sqlite3 exception.
+    """
+
+    # -- helpers -------------------------------------------------
+
+    @staticmethod
+    def _flaky_execute(
+        store,
+        monkeypatch,
+        *,
+        message: str = "injected",
+        exc_cls=None,
+    ) -> None:
+        """Swap ``store._conn`` with a proxy that raises on execute().
+
+        ``sqlite3.Connection.execute`` is a C-level method and
+        ``monkeypatch.setattr(store._conn, "execute", ...)`` fails with
+        ``AttributeError: ... is read-only`` — the same constraint that
+        drove the ``FlakyCommitProxy`` pattern in
+        ``tests/test_continuity.py::test_batch_commit_failure_rolls_back``.
+
+        The proxy delegates every attribute lookup except ``execute``
+        (which raises a configurable ``sqlite3.Error`` subclass).
+        Restored via ``monkeypatch.setattr`` so cleanup is automatic
+        at test teardown; the fixture's ``store.close()`` still runs
+        on the real connection.
+        """
+        import sqlite3
+
+        if exc_cls is None:
+            exc_cls = sqlite3.OperationalError
+
+        class _FlakyExecuteProxy:
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def execute(self, *args, **kwargs):
+                raise exc_cls(message)
+
+        monkeypatch.setattr(store, "_conn", _FlakyExecuteProxy(store._conn))
+
+    def _assert_wrapped(
+        self,
+        exc: StoreDatabaseError,
+        expected_operation: str,
+    ) -> None:
+        """Common assertion bundle for a wrapped error."""
+        import sqlite3
+
+        assert isinstance(exc, StoreDatabaseError)
+        assert isinstance(exc, StoreError)
+        assert isinstance(exc, AnnealMemoryError)
+        assert exc.operation == expected_operation
+        assert exc.path is not None
+        assert isinstance(exc.__cause__, sqlite3.Error)
+
+    # -- record --------------------------------------------------
+
+    def test_record_wraps_sqlite_error(self, store, monkeypatch):
+        self._flaky_execute(store, monkeypatch, message="record blew up")
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.record("boom", EpisodeType.OBSERVATION)
+        self._assert_wrapped(exc_info.value, "record")
+        assert "record blew up" in str(exc_info.value.__cause__)
+
+    # -- get -----------------------------------------------------
+
+    def test_get_wraps_sqlite_error(self, store, monkeypatch):
+        self._flaky_execute(store, monkeypatch)
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.get("deadbeef")
+        self._assert_wrapped(exc_info.value, "get")
+
+    # -- delete --------------------------------------------------
+
+    def test_delete_wraps_sqlite_error(self, store, monkeypatch):
+        store.record("to be deleted", EpisodeType.OBSERVATION)
+        self._flaky_execute(store, monkeypatch)
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.delete("deadbeef")
+        self._assert_wrapped(exc_info.value, "delete")
+
+    # -- recall --------------------------------------------------
+
+    def test_recall_wraps_sqlite_error(self, store, monkeypatch):
+        store.record("ep", EpisodeType.OBSERVATION)
+        self._flaky_execute(store, monkeypatch)
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.recall(limit=5)
+        self._assert_wrapped(exc_info.value, "recall")
+
+    # -- episodes_since_wrap ------------------------------------
+
+    def test_episodes_since_wrap_wraps_sqlite_error(self, store, monkeypatch):
+        self._flaky_execute(store, monkeypatch)
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.episodes_since_wrap()
+        self._assert_wrapped(exc_info.value, "episodes_since_wrap")
+
+    # -- status --------------------------------------------------
+
+    def test_status_wraps_sqlite_error(self, store, monkeypatch):
+        self._flaky_execute(store, monkeypatch)
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.status()
+        self._assert_wrapped(exc_info.value, "status")
+
+    # -- wrap lifecycle ------------------------------------------
+
+    def test_wrap_started_wraps_sqlite_error(self, store, monkeypatch):
+        self._flaky_execute(store, monkeypatch)
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.wrap_started(token="a" * 32, episode_ids=[])
+        self._assert_wrapped(exc_info.value, "wrap_started")
+
+    def test_wrap_cancelled_wraps_sqlite_error(self, store, monkeypatch):
+        self._flaky_execute(store, monkeypatch)
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.wrap_cancelled()
+        self._assert_wrapped(exc_info.value, "wrap_cancelled")
+
+    def test_wrap_completed_wraps_sqlite_error(self, store, monkeypatch):
+        self._flaky_execute(store, monkeypatch)
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.wrap_completed(episodes_compressed=0, continuity_chars=0)
+        self._assert_wrapped(exc_info.value, "wrap_completed")
+
+    def test_get_wrap_started_at_wraps_sqlite_error(self, store, monkeypatch):
+        self._flaky_execute(store, monkeypatch)
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.get_wrap_started_at()
+        self._assert_wrapped(exc_info.value, "get_wrap_started_at")
+
+    def test_load_wrap_snapshot_wraps_sqlite_error(self, store, monkeypatch):
+        self._flaky_execute(store, monkeypatch)
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.load_wrap_snapshot()
+        self._assert_wrapped(exc_info.value, "load_wrap_snapshot")
+
+    def test_get_wrap_history_wraps_sqlite_error(self, store, monkeypatch):
+        # "no such table" is still swallowed (returns []); other
+        # OperationalErrors must surface as StoreDatabaseError.
+        self._flaky_execute(store, monkeypatch, message="database is locked")
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.get_wrap_history()
+        self._assert_wrapped(exc_info.value, "get_wrap_history")
+
+    def test_get_wrap_history_still_swallows_no_such_table(
+        self, store, monkeypatch
+    ):
+        """Regression guard — 10.5c.6 must NOT change the legacy
+        ``no such table: wraps`` swallow behavior. That path stays
+        silent."""
+        self._flaky_execute(
+            store, monkeypatch, message="no such table: wraps"
+        )
+        result = store.get_wrap_history()
+        assert result == []
+
+    def test_get_wrap_history_does_not_swallow_other_missing_table(
+        self, store, monkeypatch
+    ):
+        """10.5c.6 L1 H1 — the ``no such table`` swallow is now
+        tightened to ``no such table: wraps`` specifically. A corrupt
+        DB missing a DIFFERENT table (e.g. ``episodes``) must NOT
+        silently return [] — that's a real store integrity failure
+        that should surface as StoreDatabaseError.
+        """
+        self._flaky_execute(
+            store, monkeypatch, message="no such table: episodes"
+        )
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.get_wrap_history()
+        self._assert_wrapped(exc_info.value, "get_wrap_history")
+
+    # -- associations --------------------------------------------
+
+    def test_get_associations_wraps_sqlite_error(self, store, monkeypatch):
+        self._flaky_execute(store, monkeypatch)
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.get_associations(["deadbeef"])
+        self._assert_wrapped(exc_info.value, "get_associations")
+
+    def test_get_association_context_wraps_sqlite_error(
+        self, store, monkeypatch
+    ):
+        self._flaky_execute(store, monkeypatch)
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.get_association_context(["deadbeef"])
+        self._assert_wrapped(exc_info.value, "get_association_context")
+
+    def test_record_associations_wraps_sqlite_error(
+        self, store, monkeypatch
+    ):
+        # Need an existing episode to form a real pair shape. Record
+        # before flaky-execute so the setup INSERT actually runs.
+        ep_a = store.record("source a", EpisodeType.OBSERVATION)
+        ep_b = store.record("source b", EpisodeType.OBSERVATION)
+        self._flaky_execute(store, monkeypatch)
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.record_associations(
+                direct_pairs={(ep_a.id, ep_b.id)},
+            )
+        self._assert_wrapped(exc_info.value, "record_associations")
+
+    def test_decay_associations_wraps_sqlite_error(
+        self, store, monkeypatch
+    ):
+        self._flaky_execute(store, monkeypatch)
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.decay_associations(strengthened_pairs=set())
+        self._assert_wrapped(exc_info.value, "decay_associations")
+
+    def test_association_stats_wraps_sqlite_error(self, store, monkeypatch):
+        self._flaky_execute(store, monkeypatch)
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.association_stats()
+        self._assert_wrapped(exc_info.value, "association_stats")
+
+    # -- prune ---------------------------------------------------
+
+    def test_prune_wraps_sqlite_error(self, store, monkeypatch):
+        self._flaky_execute(store, monkeypatch)
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.prune(older_than_days=0)
+        self._assert_wrapped(exc_info.value, "prune")
+
+    # -- integrity of the hierarchy -----------------------------
+
+    def test_store_error_is_still_the_catch_point(self, store, monkeypatch):
+        """The whole point of making StoreDatabaseError a subclass of
+        StoreError is that every existing transport handler continues
+        to work unchanged. Regression guard."""
+        self._flaky_execute(store, monkeypatch)
+        with pytest.raises(StoreError):
+            store.status()
+
+    def test_anneal_memory_error_is_still_the_catch_point(
+        self, store, monkeypatch
+    ):
+        self._flaky_execute(store, monkeypatch)
+        with pytest.raises(AnnealMemoryError):
+            store.status()
+
+    def test_cause_chain_preserves_original_sqlite_subclass(
+        self, store, monkeypatch
+    ):
+        """``__cause__`` must still be the exact sqlite3 subclass so
+        callers with errno-level needs can drill down. The record()
+        method retries on IntegrityError (ID collision) up to 3 times;
+        after the final retry exhausts, the error propagates out of
+        the retry loop and into _db_boundary."""
+        import sqlite3
+
+        self._flaky_execute(
+            store,
+            monkeypatch,
+            message="UNIQUE constraint failed",
+            exc_cls=sqlite3.IntegrityError,
+        )
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.record("anything", EpisodeType.OBSERVATION)
+        assert isinstance(exc_info.value.__cause__, sqlite3.IntegrityError)
+        assert exc_info.value.operation == "record"
+
+    def test_interface_error_propagates_bare_not_wrapped(
+        self, store, monkeypatch
+    ):
+        """10.5c.6 L2 #2 — ``_db_boundary`` catches
+        ``sqlite3.DatabaseError``, not the broader ``sqlite3.Error``,
+        so ``sqlite3.InterfaceError`` (API misuse, a programming bug
+        in the library or caller) propagates bare instead of being
+        mis-wrapped as a 'retryable DB error.' This is load-bearing
+        for retry-loop correctness in downstream consumers that
+        treat StoreDatabaseError as transient.
+        """
+        import sqlite3
+
+        self._flaky_execute(
+            store,
+            monkeypatch,
+            message="bindings must be a sequence",
+            exc_cls=sqlite3.InterfaceError,
+        )
+        with pytest.raises(sqlite3.InterfaceError):
+            store.status()
+        # And NOT StoreDatabaseError — verify the class specifically.
+        self._flaky_execute(
+            store,
+            monkeypatch,
+            message="bindings must be a sequence",
+            exc_cls=sqlite3.InterfaceError,
+        )
+        try:
+            store.status()
+        except sqlite3.InterfaceError as err:
+            assert not isinstance(err, StoreDatabaseError)
+            assert not isinstance(err, StoreError)
+            assert not isinstance(err, AnnealMemoryError)
+
+    def test_wrap_completed_cas_path_wraps_sqlite_error(
+        self, store, monkeypatch
+    ):
+        """10.5c.6 L1 L1 — the wrap_completed _db_boundary must
+        cover the CAS UPDATE branch (``if wrap_token is not None``),
+        not just the insert/update path. Seed a real wrap_token via
+        ``wrap_started`` so the CAS branch executes, then flaky-
+        execute to force the CAS UPDATE itself to fail.
+        """
+        store.wrap_started(token="a" * 32, episode_ids=[])
+        self._flaky_execute(store, monkeypatch)
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            store.wrap_completed(
+                episodes_compressed=0,
+                continuity_chars=0,
+                wrap_token="a" * 32,
+            )
+        self._assert_wrapped(exc_info.value, "wrap_completed")
+
+    def test_close_is_idempotent_after_success(self, tmp_db):
+        """10.5c.6 L3 complement F4 — after a successful close,
+        ``self._closed`` is True so subsequent close() calls
+        early-return (no spurious ProgrammingError wrapped as
+        StoreDatabaseError). Regression guard for the idempotency
+        invariant."""
+        s = Store(tmp_db, project_name="Idempotent")
+        s.close()
+        # Second and third calls must succeed silently.
+        s.close()
+        s.close()
+        assert s._closed is True
+
+    def test_post_close_operations_raise_store_error_not_attributeerror(
+        self, tmp_db
+    ):
+        """10.5c.6 L3 codex H1 — after close(), calling any public
+        method must surface as ``StoreError`` with the caller's
+        operation name, NOT a bare ``AttributeError`` from
+        ``self._conn.execute(...)``. Regression guard for the
+        hierarchy-consistency contract."""
+        s = Store(tmp_db, project_name="PostClose")
+        s.close()
+
+        # Every method that goes through _db_boundary should now
+        # raise StoreError (the base class, not StoreDatabaseError —
+        # closed-store state is a library-state error, not a DB
+        # runtime error). Verify the catchpoint works for a
+        # representative sample covering read + write + wrap ops.
+        with pytest.raises(StoreError) as exc_info:
+            s.status()
+        assert "closed store" in str(exc_info.value)
+        assert exc_info.value.operation == "status"
+
+        with pytest.raises(StoreError) as exc_info:
+            s.record("after close", EpisodeType.OBSERVATION)
+        assert exc_info.value.operation == "record"
+
+        with pytest.raises(StoreError) as exc_info:
+            s.get("deadbeef")
+        assert exc_info.value.operation == "get"
+
+        with pytest.raises(StoreError) as exc_info:
+            s.recall(limit=5)
+        assert exc_info.value.operation == "recall"
+
+        with pytest.raises(StoreError) as exc_info:
+            s.wrap_cancelled()
+        assert exc_info.value.operation == "wrap_cancelled"
+
+        # Critically: none of these should be AttributeError.
+        # A sanity check that the error type is right.
+        try:
+            s.prune(older_than_days=0)
+        except AttributeError:  # pragma: no cover — regression guard
+            pytest.fail(
+                "prune() after close() raised AttributeError — "
+                "this means the boundary's _closed pre-check is "
+                "not firing and the hierarchy contract is broken."
+            )
+        except StoreError as exc:
+            assert exc.operation == "prune"
+
+    def test_close_wraps_sqlite_error(self, tmp_db, monkeypatch):
+        """10.5c.6 L1 L4 — ``close()`` is now covered by
+        _db_boundary. A failure during close surfaces as
+        StoreDatabaseError with ``operation="close"`` instead of a
+        bare sqlite3 error leaking out of a context manager exit."""
+        s = Store(tmp_db, project_name="CloseFail")
+        self._flaky_execute(s, monkeypatch, message="close failed")
+        # The proxy's execute is swapped, but close() calls
+        # self._conn.close(), not execute — so we need a proxy for
+        # close too. Extend the proxy inline.
+        import sqlite3
+
+        real_conn = s._conn._real  # type: ignore[attr-defined]
+
+        class CloseFailProxy:
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def close(self):
+                raise sqlite3.OperationalError("close failed")
+
+        s._conn = CloseFailProxy(real_conn)  # type: ignore[assignment]
+        try:
+            with pytest.raises(StoreDatabaseError) as exc_info:
+                s.close()
+            self._assert_wrapped(exc_info.value, "close")
+        finally:
+            # Clean up the real connection so the test doesn't leak.
+            real_conn.close()
+
+    def test_store_database_error_pickle_roundtrip(self):
+        """The subclass must round-trip cleanly through pickle with
+        its identity, context fields, and cause_type_name preserved.
+        Tests the 10.5c.6-refactored single generic reconstructor.
+        """
+        import copy
+        import pickle
+
+        err = StoreDatabaseError(
+            "SQLite record failed on /tmp/test.db: injected",
+            operation="record",
+            path="/tmp/test.db",
+            cause_type_name="OperationalError",
+        )
+
+        for round_trip in (pickle.loads(pickle.dumps(err)), copy.copy(err), copy.deepcopy(err)):
+            assert isinstance(round_trip, StoreDatabaseError)
+            assert isinstance(round_trip, StoreError)  # hierarchy preserved
+            assert isinstance(round_trip, AnnealMemoryError)
+            assert round_trip.operation == "record"
+            assert round_trip.path == "/tmp/test.db"
+            assert round_trip.cause_type_name == "OperationalError"
+            assert "injected" in str(round_trip)
+
+    def test_store_error_parent_class_pickle_roundtrip(self):
+        """The parent class must ALSO round-trip cleanly through the
+        single generic reconstructor — regression guard that the
+        10.5c.6 refactor didn't break StoreError pickle.
+        """
+        import pickle
+
+        err = StoreError(
+            "Failed to write continuity to /tmp/test.db: disk full",
+            operation="save_continuity",
+            path="/tmp/test.db",
+        )
+        round_trip = pickle.loads(pickle.dumps(err))
+        assert type(round_trip) is StoreError
+        assert not isinstance(round_trip, StoreDatabaseError)
+        assert round_trip.operation == "save_continuity"
+        assert round_trip.path == "/tmp/test.db"
+        assert round_trip.cause_type_name is None
+
+    def test_cause_type_name_populated_by_boundary(self, store, monkeypatch):
+        """10.5c.6 L2 #5 + L3 F7 — the _db_boundary must populate
+        cause_type_name with the sqlite3 exception class name at
+        raise time. Cross-process consumers rely on this field for
+        retry decisions after pickle drops __cause__.
+        """
+        import sqlite3
+
+        self._flaky_execute(
+            store, monkeypatch, exc_cls=sqlite3.OperationalError
+        )
+        try:
+            store.status()
+            assert False, "expected StoreDatabaseError"
+        except StoreDatabaseError as err:
+            assert err.cause_type_name == "OperationalError"
+
+        self._flaky_execute(
+            store, monkeypatch, exc_cls=sqlite3.IntegrityError
+        )
+        try:
+            store.status()
+            assert False, "expected StoreDatabaseError"
+        except StoreDatabaseError as err:
+            assert err.cause_type_name == "IntegrityError"
+
+    def test_is_retryable_helper_works_post_pickle(self):
+        """10.5c.6 L3 F7 — the is_retryable() helper shown in the
+        docs must work BOTH in-process (with live __cause__) AND
+        after pickle (where __cause__ is dropped) via the
+        cause_type_name field. Regression guard for the docs snippet.
+        """
+        import pickle
+
+        # Simulate what _db_boundary produces.
+        err = StoreDatabaseError(
+            "SQLite record failed on /tmp: database is locked",
+            operation="record",
+            path="/tmp",
+            cause_type_name="OperationalError",
+        )
+
+        def is_retryable(e):
+            if e.cause_type_name != "OperationalError":
+                return False
+            msg = str(e).lower()
+            return "locked" in msg or "busy" in msg
+
+        # In-process: should be retryable.
+        assert is_retryable(err) is True
+
+        # After pickle: must STILL be retryable (the whole point).
+        round_trip = pickle.loads(pickle.dumps(err))
+        assert is_retryable(round_trip) is True
+
+        # Non-retryable cases also survive pickle correctly.
+        integrity = StoreDatabaseError(
+            "SQLite record failed on /tmp: UNIQUE constraint failed",
+            operation="record",
+            path="/tmp",
+            cause_type_name="IntegrityError",
+        )
+        assert is_retryable(integrity) is False
+        assert is_retryable(pickle.loads(pickle.dumps(integrity))) is False
+
+        disk_full = StoreDatabaseError(
+            "SQLite record failed on /tmp: disk I/O error",
+            operation="record",
+            path="/tmp",
+            cause_type_name="OperationalError",
+        )
+        # disk I/O error is OperationalError but NOT locked/busy
+        assert is_retryable(disk_full) is False
+        assert is_retryable(pickle.loads(pickle.dumps(disk_full))) is False
+
+    def test_store_operation_literal_has_no_drift(self):
+        """10.5c.6 L2 #3 + codex L3.5 — the StoreOperation Literal
+        is a soft contract without mypy-in-CI. Codex already caught
+        one drift (prepare_continuity_write / prepare_meta_write
+        raise sites missing from the Literal). This structural test
+        catches future drift in BOTH directions:
+
+        (a) New raise sites with an ``operation=`` string that's not
+            in the Literal (the codex-class failure mode).
+        (b) Literal values that no raise site uses (dead enum members
+            that decay to noise).
+
+        Enforcement is grep-based on the store.py source. A future
+        refactor that adds a new public method touching SQLite
+        without adding the operation value to the Literal fails THIS
+        test at CI time, before the code ships. Turns the
+        discipline-based contract into a structural invariant.
+        """
+        import re
+        from typing import get_args
+
+        from anneal_memory.store import StoreOperation
+
+        source = Path(
+            "anneal_memory/store.py"
+        ).read_text(encoding="utf-8")
+
+        literal_values = set(get_args(StoreOperation))
+
+        # Collect every operation="..." or _db_boundary("...") string
+        # literal that appears in the source. We accept both single
+        # and double quotes and allow optional whitespace.
+        used = set()
+        for match in re.finditer(
+            r'_db_boundary\(\s*["\']([^"\']+)["\']',
+            source,
+        ):
+            used.add(match.group(1))
+        for match in re.finditer(
+            r'operation\s*=\s*["\']([^"\']+)["\']',
+            source,
+        ):
+            used.add(match.group(1))
+
+        # Drift direction (a): every used operation must be in the
+        # Literal. This catches the codex-class failure mode.
+        missing_from_literal = used - literal_values
+        assert not missing_from_literal, (
+            f"Raise sites use operation values not in StoreOperation "
+            f"Literal: {sorted(missing_from_literal)}. Add them to "
+            f"the Literal in store.py (the alias is a soft contract "
+            f"but drift is still a bug — pickled errors from these "
+            f"raise sites would have operation fields outside the "
+            f"type, breaking exhaustive-match consumers)."
+        )
+
+        # Drift direction (b): every Literal value must appear as a
+        # raise site. Dead enum members indicate the Literal has
+        # drifted ahead of the code. Allow a small opt-out set for
+        # values that are reserved but not-yet-used (currently none).
+        reserved_for_future = set()  # Empty for now
+        unused_literal_values = (
+            literal_values - used - reserved_for_future
+        )
+        assert not unused_literal_values, (
+            f"StoreOperation Literal has dead entries with no raise "
+            f"site: {sorted(unused_literal_values)}. Either add a "
+            f"raise site that uses them or remove them from the "
+            f"Literal. If intentionally reserved for an upcoming "
+            f"session, add to ``reserved_for_future`` in this test "
+            f"with a comment explaining the timing."
+        )
+
+    # -- schema_init --------------------------------------------
+
+    def test_schema_init_wraps_executescript_error(
+        self, tmp_path, monkeypatch
+    ):
+        """10.5c.6 L3 contrarian F3 — the _FlakyExecuteProxy covers
+        ``execute`` but ``_init_schema`` uses ``executescript``. The
+        _db_boundary catches ``sqlite3.DatabaseError`` regardless of
+        which connection method raised it, but a dedicated test
+        proves this (and catches future refactors that move
+        executescript out of the boundary).
+        """
+        import sqlite3
+
+        real_connect = sqlite3.connect
+
+        class FailingScriptConn:
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def executescript(self, *args, **kwargs):
+                raise sqlite3.DatabaseError(
+                    "malformed database schema"
+                )
+
+        def wrapping_connect(*args, **kwargs):
+            real_conn = real_connect(*args, **kwargs)
+            return FailingScriptConn(real_conn)
+
+        monkeypatch.setattr(
+            "anneal_memory.store.sqlite3.connect", wrapping_connect
+        )
+
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            Store(str(tmp_path / "bad_schema.db"), project_name="BadSchema")
+
+        self._assert_wrapped(exc_info.value, "schema_init")
+        assert "malformed" in str(exc_info.value.__cause__)
+
+    def test_schema_init_wraps_sqlite_connect_error(
+        self, tmp_path, monkeypatch
+    ):
+        """If ``sqlite3.connect`` itself fails during Store(), the
+        error surfaces as StoreDatabaseError with
+        ``operation="schema_init"`` rather than leaking a bare
+        sqlite3 error from the constructor. Regression guard for the
+        constructor wrapping."""
+        import sqlite3
+
+        real_connect = sqlite3.connect
+
+        def failing_connect(*args, **kwargs):
+            raise sqlite3.OperationalError("unable to open database file")
+
+        monkeypatch.setattr("anneal_memory.store.sqlite3.connect", failing_connect)
+
+        with pytest.raises(StoreDatabaseError) as exc_info:
+            Store(str(tmp_path / "wont_exist.db"), project_name="Fail")
+
+        self._assert_wrapped(exc_info.value, "schema_init")
+        assert "unable to open" in str(exc_info.value.__cause__)
+
+    # -- real database-locked integration smoke test -------------
+
+    def test_real_database_locked_surfaces_as_store_database_error(
+        self, tmp_path
+    ):
+        """Integration smoke test with an actual locked DB (no
+        monkeypatching). Two Store instances share a path; Store A
+        takes an EXCLUSIVE write lock; Store B attempts a write and
+        must surface StoreDatabaseError (not bare sqlite3 error)."""
+        import sqlite3
+
+        db_path = str(tmp_path / "locked.db")
+        store_a = Store(db_path, project_name="Locker")
+        store_b = Store(db_path, project_name="Locker")
+
+        try:
+            # Drop Store B's busy_timeout so it fails fast instead of
+            # hanging the test on the default 5s retry window.
+            store_b._conn.execute("PRAGMA busy_timeout=50")
+
+            # Start an EXCLUSIVE transaction on store_a
+            store_a._conn.execute("BEGIN EXCLUSIVE")
+            try:
+                with pytest.raises(StoreDatabaseError) as exc_info:
+                    store_b.record("blocked", EpisodeType.OBSERVATION)
+                self._assert_wrapped(exc_info.value, "record")
+                assert "lock" in str(exc_info.value.__cause__).lower()
+            finally:
+                store_a._conn.execute("ROLLBACK")
+        finally:
+            store_a.close()
+            store_b.close()

@@ -2837,7 +2837,14 @@ class TestL3Fixes:
 
             store._conn = FlakyCommitProxy(real_conn)  # type: ignore[assignment]
 
-            with pytest.raises(_sqlite.OperationalError, match="injected"):
+            # 10.5c.6: batch commit failures now surface as
+            # StoreDatabaseError with operation="batch_commit" instead
+            # of bare sqlite3.OperationalError. The underlying sqlite
+            # error is still attached via __cause__ for callers that
+            # need the original errno.
+            from anneal_memory import StoreDatabaseError
+
+            with pytest.raises(StoreDatabaseError) as exc_info:
                 with store._batch():
                     real_conn.execute(
                         """INSERT INTO episodes
@@ -2851,6 +2858,11 @@ class TestL3Fixes:
                             "test",
                         ),
                     )
+
+            # __cause__ should still be the original injected error
+            assert isinstance(exc_info.value.__cause__, _sqlite.OperationalError)
+            assert "injected" in str(exc_info.value.__cause__)
+            assert exc_info.value.operation == "batch_commit"
 
             # Restore real connection for post-check and cleanup.
             store._conn = real_conn

@@ -209,6 +209,127 @@ store = Store(
 
 The database path can be absolute or relative. The continuity file lives alongside the database as `{db_name}.continuity.md`. Audit files live in `{db_dir}/audit/`.
 
+## Error Handling
+
+Every error raised by the library is a subclass of `AnnealMemoryError`. **Most callers should catch that base class at their outermost boundary, log, and let the failure propagate.** Branching per subclass is a minority pattern for long-running servers with retry budgets or transport authors writing their own error translation layer.
+
+### The 80% case
+
+```python
+from anneal_memory import (
+    AnnealMemoryError,
+    prepare_wrap,
+    validated_save_continuity,
+)
+
+try:
+    package = prepare_wrap(store)
+    continuity_text = agent_compress(package)
+    result = validated_save_continuity(
+        store, continuity_text, wrap_token=package["wrap_token"]
+    )
+except AnnealMemoryError as err:
+    logger.error(
+        "anneal-memory failed (op=%s path=%s): %s",
+        getattr(err, "operation", "unknown"),
+        getattr(err, "path", "unknown"),
+        err,
+        exc_info=True,
+    )
+    raise
+```
+
+`exc_info=True` captures the full traceback including the `__cause__` chain to the underlying `sqlite3` error (if any). That's almost always all you need.
+
+### The hierarchy
+
+```
+AnnealMemoryError (Exception)
+ └── StoreError
+      └── StoreDatabaseError
+```
+
+- **`AnnealMemoryError`** — base class. Catch this at your outermost boundary. anneal-memory deliberately does NOT mirror PEP 249 / DB-API 2.0's nine-class hierarchy: this is a library that consumes a database internally, not a database driver, so callers branch on operational intent (log/retry/escalate), not on vendor-level failure taxonomy.
+- **`StoreError`** — operation-level failure with structured context. Carries an `.operation` field (a `StoreOperation` literal like `"save_continuity"`, `"record"`, `"wrap_completed"`) and a `.path` field pointing at the store DB file. Covers file-write failures (continuity/meta atomic writes) and integrity failures (partial wrap-snapshot state).
+- **`StoreDatabaseError`** — subclass of `StoreError` raised when a SQLite operation fails (locked database, disk full, integrity constraint violations after retries, corruption). The underlying `sqlite3.DatabaseError` is attached as `__cause__` at raise time (not preserved across pickle — see below). Because it subclasses `StoreError`, existing `except StoreError` handlers catch it unchanged.
+
+### When (and when not) to retry
+
+`StoreDatabaseError` is **not blanket-retryable**. The subclass wraps every runtime database failure — transient contention AND permanent conditions like disk-full, integrity violations, and corruption. Retrying the non-transient class wastes cycles or makes things worse. Check the cause type and message to decide:
+
+```python
+from anneal_memory import StoreDatabaseError
+
+def is_retryable(err: StoreDatabaseError) -> bool:
+    """Return True only for transient contention that a backoff-retry
+    can reasonably clear. sqlite3 doesn't expose SQLite's extended
+    error codes at the Python level (no SQLITE_BUSY constant), so we
+    dispatch on the cause type name and then match the message — the
+    ugly-but-stable approach.
+
+    This helper works both in-process AND after a pickle round-trip
+    because ``cause_type_name`` is a plain string field on the
+    exception instance, not a live ``__cause__`` reference (see the
+    Pickle section below for why that matters for cross-process
+    consumers like ProcessPoolExecutor and pytest-xdist)."""
+    if err.cause_type_name != "OperationalError":
+        return False
+    # The wrapped message embeds the sqlite3 error text, so we can
+    # string-match on str(err) regardless of whether __cause__ is
+    # still live.
+    msg = str(err).lower()
+    return "locked" in msg or "busy" in msg
+```
+
+Then:
+
+```python
+try:
+    result = validated_save_continuity(store, text, wrap_token=token)
+except StoreDatabaseError as err:
+    if is_retryable(err):
+        retry_backoff()
+    else:
+        logger.error(
+            "Non-retryable DB failure (op=%s): %s",
+            err.operation, err.__cause__,
+            exc_info=True,
+        )
+        raise
+except StoreError as err:
+    # File I/O or integrity — not retryable; surface to operator.
+    logger.error(
+        "Store failure (op=%s path=%s): %s",
+        err.operation, err.path, err,
+    )
+    alert_operator(err)
+except AnnealMemoryError:
+    raise
+```
+
+### `.operation` field
+
+The `.operation` value names the caller-facing unit of work (what you'd retry), not the individual SQL statement that failed. For most public methods it matches the method name exactly (`record`, `recall`, `wrap_completed`, `save_continuity`). Two exceptions surface internal sub-phases of `validated_save_continuity`:
+
+- **`"schema_init"`** — a failure during `Store(path)` construction (connect, schema setup, PRAGMA configuration, or orphan-tmp detection).
+- **`"batch_commit"`** — a failure during the outer commit of the two-phase-commit wrap pipeline. Surfaces to callers through `validated_save_continuity`, not through any method named `batch_commit`.
+
+The full list of `StoreOperation` values is exported as a `Literal` from `anneal_memory`.
+
+### Pickle / copy
+
+Both error classes round-trip cleanly through `pickle`, `copy.copy`, and `copy.deepcopy` with their subclass identity and context fields preserved. The **`__cause__` chain does NOT survive pickle** — this is a standard Python limitation, not a library choice. Cross-process consumers (`ProcessPoolExecutor`, `pytest-xdist`, RPC transports) see a `StoreDatabaseError` with `__cause__ = None`; the cause text is embedded in `str(err)` for human-readable logs but the live sqlite3 exception object is local-scope only.
+
+**Retry decisions in cross-process contexts — use `cause_type_name`, not `__cause__`:** the `is_retryable()` helper above deliberately dispatches on `err.cause_type_name` (a plain string field populated at raise time) rather than `err.__cause__` (the live exception reference). The reason: after a pickle round-trip — which is what every `ProcessPoolExecutor`, `pytest-xdist` worker, or Celery task queue does when propagating exceptions back to a supervisor — Python drops `__cause__`. A helper that checks `isinstance(err.__cause__, sqlite3.OperationalError)` returns `False` for every error after unpickling, regardless of whether the original cause was transient. Silent retry-storm bait.
+
+`cause_type_name` is a plain string on the exception instance, populated by `_db_boundary` at raise time with `type(exc).__name__`. It survives pickle identically because there's no live reference to marshal. The `is_retryable()` example above works both in-process (with a live `__cause__`) and post-pickle (with `__cause__ = None`) via the same code path.
+
+If you need the live exception object (for `errno` access or sqlite3 extended error codes) you still need in-process access — those attributes don't survive pickle and `cause_type_name` doesn't try to preserve them. Cross-process retry decisions should dispatch on type name + message text; in-process callers can additionally drill into `err.__cause__.args` for errno-level detail.
+
+### Hash chain verification
+
+`StoreError` / `StoreDatabaseError` are runtime operation errors. To validate the audit-log hash chain itself, run `anneal-memory verify` from the CLI — that walks every entry in the sidecar JSONL and returns an `AuditVerifyResult`.
+
 ## Next Steps
 
 - **Framework integration:** See [integration guides](integrations/) for LangGraph, CrewAI, OpenAI Agents SDK, and 9 more frameworks

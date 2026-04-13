@@ -2,7 +2,13 @@
 
 __version__ = "0.1.9"
 
-from .store import AnnealMemoryError, Store, StoreError, StoreOperation
+from .store import (
+    AnnealMemoryError,
+    Store,
+    StoreDatabaseError,
+    StoreError,
+    StoreOperation,
+)
 from .types import (
     AffectiveState,
     AssociationPair,
@@ -39,6 +45,7 @@ from .server import Server
 __all__ = [
     "AnnealMemoryError",
     "Store",
+    "StoreDatabaseError",
     "StoreError",
     "StoreOperation",
     "Server",

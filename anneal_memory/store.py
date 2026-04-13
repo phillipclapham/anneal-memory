@@ -81,16 +81,32 @@ class AnnealMemoryError(Exception):
     Subclasses:
 
     - :class:`StoreError` — store I/O or integrity failure
+    - :class:`StoreDatabaseError` — SQLite-origin failure (subclass
+      of ``StoreError`` so existing ``except StoreError`` handlers
+      catch both file-write and DB-origin failures unchanged)
+
+    This library deliberately does **not** mirror PEP 249 / DB-API
+    2.0's nine-class hierarchy (``InterfaceError``, ``DatabaseError``,
+    ``DataError``, ``OperationalError``, ``IntegrityError``, etc.).
+    PEP 249 is a contract for driver authors — those nine classes
+    exist so generic ORMs can sit on top of any compliant driver.
+    anneal-memory is the opposite: it consumes ``sqlite3`` internally
+    and presents a domain API (episodes, wraps, associations) to
+    callers. Callers branch on operational intent ("log and retry"
+    vs "log and escalate"), not on vendor-level failure taxonomy. If
+    a second useful branch ever emerges in practice we add it as a
+    new subclass at that point — pre-emptively widening the hierarchy
+    is the wrong default. (See also ``docs/library-quickstart.md``
+    for the caller guidance.)
 
     .. note::
-        Currently colocated in ``store.py`` because ``StoreError`` is
-        the only subclass and is raised only from store methods. When
-        the hierarchy grows beyond store-family errors (e.g. future
-        ``PartialCommitError`` from the 10.5c.5 two-phase-commit work
-        would straddle store+continuity), the base class and its
-        subclasses will move to a dedicated ``exceptions.py`` module.
-        Import paths via ``anneal_memory.AnnealMemoryError`` will
-        remain stable across the relocation.
+        Currently colocated in ``store.py`` because ``StoreError`` /
+        ``StoreDatabaseError`` are the only subclasses and are raised
+        only from store methods. When the hierarchy grows beyond
+        store-family errors the base class and its subclasses will
+        move to a dedicated ``exceptions.py`` module. Import paths
+        via ``anneal_memory.AnnealMemoryError`` will remain stable
+        across the relocation.
     """
 
 
@@ -109,10 +125,42 @@ class AnnealMemoryError(Exception):
 # pressure makes this brittle, promote the alias to an ``Enum`` (or
 # enforce statically via mypy once 10.5d ships — either works).
 StoreOperation = Literal[
+    # File-write + integrity surfaces (10.5c.3 / 10.5c.4 / 10.5c.5)
     "save_continuity",
     "save_meta",
     "load_wrap_snapshot",
     "wrap_completed",
+    # Two-phase commit tmp sidecar writes (10.5c.5 — pre-existing
+    # raise sites that were missing from the Literal until 10.5c.6
+    # audit caught the drift. Both surface from
+    # ``validated_save_continuity`` under disk-full / permission
+    # failures during the tmp write phase.)
+    "prepare_continuity_write",
+    "prepare_meta_write",
+    # SQLite-origin surfaces (10.5c.6) — every public Store method
+    # that touches the SQLite connection. New raise sites MUST extend
+    # this Literal before raising (see _db_boundary docstring). Kept
+    # in method-name parity so grep lands on the raise site and the
+    # handler simultaneously.
+    "record",
+    "get",
+    "delete",
+    "recall",
+    "episodes_since_wrap",
+    "status",
+    "wrap_started",
+    "wrap_cancelled",
+    "get_wrap_started_at",
+    "get_wrap_history",
+    "record_associations",
+    "decay_associations",
+    "get_associations",
+    "get_association_context",
+    "association_stats",
+    "prune",
+    "schema_init",
+    "batch_commit",
+    "close",
 ]
 
 
@@ -130,20 +178,22 @@ class StoreError(AnnealMemoryError):
 
     - :meth:`Store.save_continuity` — atomic continuity file write
     - :meth:`Store.save_meta` — atomic metadata sidecar write
+    - :meth:`Store.load_wrap_snapshot` — partial-state integrity failures
 
-    These are the file-write paths where a transport boundary is
-    expected to translate I/O failures into protocol-level errors.
+    These are the file-write + integrity paths where a transport
+    boundary is expected to translate failures into protocol-level
+    errors.
 
-    **Not currently wrapped** (tracked as follow-up work — see
-    ``projects/anneal_memory/next.md``):
-
-    - ``sqlite3.OperationalError`` and related DB errors from the
-      episode/wrap/associations path. These continue to propagate
-      bare as of 10.5c.3. Wrapping them into
-      ``StoreDatabaseError(StoreError)`` is filed as a scheduled
-      follow-up; doing so is a non-breaking expansion of this
-      hierarchy because both new and old errors will be catchable
-      as ``StoreError`` or ``AnnealMemoryError``.
+    **SQLite-origin failures** surface as :class:`StoreDatabaseError`,
+    a subclass of this class added in 10.5c.6. Every public Store
+    method that executes SQL is wrapped in :meth:`Store._db_boundary`,
+    which catches ``sqlite3.Error`` and re-raises as
+    ``StoreDatabaseError`` with operation context. Because the subclass
+    relationship is ``StoreDatabaseError → StoreError → AnnealMemoryError``,
+    any existing ``except StoreError`` handler continues to catch
+    both file-write and DB-origin failures unchanged. Callers who
+    need to branch on "retryable DB error vs non-retryable file
+    error" can catch :class:`StoreDatabaseError` specifically.
 
     **Pickle / copy safety.** ``StoreError`` uses a keyword-only
     constructor for the context fields but implements ``__reduce__``
@@ -154,20 +204,37 @@ class StoreError(AnnealMemoryError):
     logging frameworks that pickle exception context, RPC
     transports).
 
+    **Cross-process retry decisions via** ``cause_type_name``. The
+    ``__cause__`` chain does not survive pickle (standard Python
+    limitation), which would break the ``is_retryable()`` pattern
+    shown in ``docs/library-quickstart.md`` for cross-process
+    consumers — the helper checks ``err.__cause__`` which is ``None``
+    after unpickling. To close that gap, 10.5c.6 added a
+    ``cause_type_name: str | None`` field populated at raise time in
+    :meth:`Store._db_boundary` with the ``__name__`` of the caught
+    sqlite3 exception class (``"OperationalError"``,
+    ``"IntegrityError"``, etc.). This field DOES survive pickle
+    because it's a plain string on the instance, not chained state.
+    Retry helpers should prefer ``err.cause_type_name`` over
+    ``err.__cause__`` for portability — the former works in-process
+    and post-pickle identically, while ``__cause__`` only works
+    in-process.
+
     .. note::
-        ``__cause__`` is **not** preserved across pickle/copy round
-        trips. This is a standard Python limitation — the default
+        The live ``__cause__`` exception object itself is not
+        preserved across pickle/copy round trips — only the type
+        name. This is a standard Python limitation (the default
         exception pickling model does not serialize the cause chain,
-        and reconstructing the original exception on the receiving
-        side would require pickling arbitrary exception types. The
+        and reconstructing arbitrary foreign exception types on the
+        receiving side would be a security vulnerability). The
         message on the wrapped ``StoreError`` already embeds the
         underlying failure text (e.g. ``"Failed to write continuity
-        file to /path: [Errno 28] No space left on device"``), so
-        the human-readable cause survives; only the ``__cause__``
-        attribute chain does not. In-process callers see the full
-        chain via ``err.__cause__`` as normal; cross-process callers
-        should read the message for the cause and treat the chain
-        as locally-scoped.
+        file to /path: [Errno 28] No space left on device"``), and
+        ``cause_type_name`` preserves the dispatch-level identity.
+        In-process callers can still introspect ``err.__cause__``
+        for errno / args detail; cross-process callers use
+        ``cause_type_name`` + string parsing for programmatic
+        decisions.
     """
 
     def __init__(
@@ -176,43 +243,123 @@ class StoreError(AnnealMemoryError):
         *,
         operation: StoreOperation,
         path: str | None = None,
+        cause_type_name: str | None = None,
     ) -> None:
         super().__init__(message)
         self.operation: StoreOperation = operation
         self.path = path
+        # 10.5c.6: populated at raise time in ``_db_boundary`` with
+        # ``type(exc).__name__``. Survives pickle. Plain string, no
+        # live exception reference.
+        self.cause_type_name: str | None = cause_type_name
 
     def __reduce__(self) -> tuple:
         """Support pickle / copy round-trips.
 
         Default ``Exception.__reduce__`` reconstructs via
         ``type(self)(*self.args)`` which would lose the keyword-only
-        ``operation`` and ``path`` fields (and crash with
-        ``TypeError: missing 1 required keyword-only argument``).
-        We override to pass them through.
+        ``operation`` / ``path`` / ``cause_type_name`` fields (and
+        crash with ``TypeError: missing 1 required keyword-only
+        argument``). We override to route through the generic
+        module-level reconstructor, passing ``type(self)`` so the
+        round-trip preserves the exact subclass identity — a single
+        reconstructor handles ``StoreError`` and every subclass
+        without needing a parallel reconstructor per subclass.
         """
         return (
             _reconstruct_store_error,
-            (str(self), self.operation, self.path),
+            (
+                type(self),
+                str(self),
+                self.operation,
+                self.path,
+                self.cause_type_name,
+            ),
         )
 
     def __repr__(self) -> str:
         return (
-            f"StoreError({str(self)!r}, "
-            f"operation={self.operation!r}, path={self.path!r})"
+            f"{type(self).__name__}({str(self)!r}, "
+            f"operation={self.operation!r}, path={self.path!r}, "
+            f"cause_type_name={self.cause_type_name!r})"
         )
 
 
 def _reconstruct_store_error(
+    cls: "type[StoreError]",
     message: str,
     operation: StoreOperation,
     path: str | None,
+    cause_type_name: str | None = None,
 ) -> StoreError:
-    """Module-level reconstructor for :class:`StoreError` under pickle.
+    """Module-level generic reconstructor for :class:`StoreError` pickles.
 
-    Lives at module scope (not as a ``@classmethod``) because pickle
+    Takes the class as its first argument so a single function
+    handles :class:`StoreError`, :class:`StoreDatabaseError`, and any
+    future subclass — no parallel per-subclass reconstructors needed.
+    Lives at module scope (not as a classmethod) because pickle
     requires the reconstructor to be importable by qualified name.
+
+    10.5c.6 refactor: replaces the prior parallel-reconstructor
+    pattern (``_reconstruct_store_error`` + separate
+    ``_reconstruct_store_database_error``) which required a new
+    function per subclass. The "add a subclass, forget the
+    reconstructor, silently downgrade to parent class on unpickle"
+    failure mode is now structurally impossible — there's only one
+    reconstructor and it honors whichever class the caller passes.
+
+    The ``cause_type_name`` parameter has a default of ``None`` for
+    forward compatibility with any pickled errors from a hypothetical
+    pre-10.5c.6 era (there are none in the wild because the pickle
+    shape changed pre-v0.2.0, but the default-None signature keeps
+    the function tolerant).
     """
-    return StoreError(message, operation=operation, path=path)
+    return cls(
+        message,
+        operation=operation,
+        path=path,
+        cause_type_name=cause_type_name,
+    )
+
+
+class StoreDatabaseError(StoreError):
+    """Raised when a SQLite operation fails inside the store.
+
+    Subclass of :class:`StoreError` so every existing ``except StoreError``
+    handler in transports (server.py, cli.py) and user code continues to
+    work unchanged. Callers who care about the difference between a file
+    I/O failure and a database failure — e.g. DB-locked errors are often
+    retryable while disk-full file errors are not — can branch on this
+    subclass specifically.
+
+    The underlying ``sqlite3.DatabaseError`` subclass
+    (``OperationalError``, ``IntegrityError``, ``DataError``,
+    ``NotSupportedError``, ``ProgrammingError``) is attached as
+    ``__cause__`` at raise time for callers that need errno-level
+    detail, AND its type name is captured in
+    ``self.cause_type_name`` (a plain string that survives pickle).
+    Cross-process consumers use ``cause_type_name`` for dispatch;
+    in-process consumers can use either.
+
+    Raised by :meth:`Store._db_boundary` whenever a contained block of
+    SQLite work raises ``sqlite3.DatabaseError`` or any subclass. That
+    boundary is wrapped around every public Store method that executes
+    SQL, including ``record``, ``recall``, ``delete``, ``prune``,
+    ``status``, the wrap lifecycle methods, and all association
+    operations.
+
+    .. note::
+        Pickle round-trips work because :class:`StoreError` implements
+        a generic ``__reduce__`` that passes ``type(self)`` through the
+        single module-level reconstructor. No per-subclass reconstructor
+        required — new subclasses inherit correct pickle behavior
+        automatically.
+    """
+
+    # __reduce__ is inherited from StoreError and handles subclass
+    # identity via type(self). __repr__ is inherited too — the base
+    # class uses type(self).__name__ so the subclass gets the right
+    # class name automatically.
 
 
 def _safe_unlink(path: Path) -> None:
@@ -468,39 +615,102 @@ class Store:
         # Ensure parent directory exists
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
-        self._conn = sqlite3.connect(str(self._path))
+        # 10.5c.6: wrap the entire constructor DB-setup path in a
+        # single _db_boundary so construction failures surface as
+        # StoreDatabaseError with ``operation="schema_init"``. Callers
+        # of ``Store(path)`` can catch StoreDatabaseError / StoreError
+        # at construction instead of bare sqlite3 errors leaking
+        # through. The boundary starts at ``sqlite3.connect`` itself
+        # (which can raise on unable-to-open, permissions, disk full)
+        # and extends through schema init + PRAGMA setup + orphan
+        # detection, all of which exercise SQLite. The outer
+        # ``except Exception: self._conn.close()`` catches
+        # StoreDatabaseError (subclass of Exception) and still cleans
+        # up a half-initialized connection correctly.
+        #
+        # A single boundary (rather than the two-boundary pattern in
+        # the first draft) matches the "one _db_boundary per public
+        # entry point" rule documented on _db_boundary itself.
+        #
+        # Initialize ``self._conn`` to None BEFORE the try so the
+        # cleanup-on-failure path can distinguish "connect never
+        # succeeded" from "connect succeeded but schema/PRAGMA
+        # failed." AttributeError on ``self._conn.close()`` in the
+        # cleanup path would mask the primary exception.
+        self._conn = None  # type: ignore[assignment]
+        # 10.5c.6 L3 codex H1: track close state via a separate flag
+        # rather than nulling ``_conn`` after close. Nulling the
+        # attribute means a post-close method call fails with a bare
+        # ``AttributeError`` from ``self._conn.execute(...)`` BEFORE
+        # reaching any boundary — violating the "every store failure
+        # flows through the hierarchy" contract. The flag lets the
+        # boundary detect closed-store usage and raise StoreError
+        # with the caller's operation name instead.
+        self._closed: bool = False
         try:
-            self._conn.row_factory = sqlite3.Row
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            # synchronous=FULL makes commit() fsync the WAL so a
-            # successful COMMIT is durable at the block-device layer.
-            # Under the default synchronous=NORMAL (which WAL
-            # promotes from NORMAL's weaker semantic to "fsync on
-            # checkpoint but not on every commit") a post-commit
-            # power loss can revert the most recent committed
-            # transactions. 10.5c.5's two-phase commit ordering
-            # assumes "DB commit returns ⇒ data is durable" — FULL
-            # is required for that invariant to actually hold. The
-            # cost is ~1 extra fsync per commit, paid only at wrap
-            # boundaries in the canonical pipeline, which is
-            # negligible against the fsync already happening for
-            # the continuity/meta tmp writes. L2 L3.
-            self._conn.execute("PRAGMA synchronous=FULL")
-            self._conn.execute("PRAGMA foreign_keys=ON")
-            self._init_schema()
-            # 10.5c.5 L3 Fix #13: detect orphan tmp sidecars from a
-            # prior crashed pipeline before any new wrap runs. If a
-            # previous ``validated_save_continuity`` crashed between
-            # DB commit and file rename, the tmp files hold committed
-            # content that needs manual recovery. We emit a warning
-            # (not a hard raise) so programmatic callers aren't
-            # broken and interactive users see the issue. Detection
-            # must run AFTER _init_schema so the metadata table
-            # exists — Fix #21 cross-references active wrap_token
-            # from that table to avoid flagging live in-flight tmps.
-            self._warn_orphan_tmp_files()
+            with self._db_boundary("schema_init"):
+                self._conn = sqlite3.connect(str(self._path))
+                self._conn.row_factory = sqlite3.Row
+                self._conn.execute("PRAGMA journal_mode=WAL")
+                # synchronous=FULL makes commit() fsync the WAL so a
+                # successful COMMIT is durable at the block-device layer.
+                # Under the default synchronous=NORMAL (which WAL
+                # promotes from NORMAL's weaker semantic to "fsync on
+                # checkpoint but not on every commit") a post-commit
+                # power loss can revert the most recent committed
+                # transactions. 10.5c.5's two-phase commit ordering
+                # assumes "DB commit returns ⇒ data is durable" — FULL
+                # is required for that invariant to actually hold. The
+                # cost is ~1 extra fsync per commit, paid only at wrap
+                # boundaries in the canonical pipeline, which is
+                # negligible against the fsync already happening for
+                # the continuity/meta tmp writes. L2 L3.
+                self._conn.execute("PRAGMA synchronous=FULL")
+                self._conn.execute("PRAGMA foreign_keys=ON")
+                self._init_schema()
+                # 10.5c.5 L3 Fix #13: detect orphan tmp sidecars from a
+                # prior crashed pipeline before any new wrap runs. If a
+                # previous ``validated_save_continuity`` crashed between
+                # DB commit and file rename, the tmp files hold committed
+                # content that needs manual recovery. We emit a warning
+                # (not a hard raise) so programmatic callers aren't
+                # broken and interactive users see the issue. Detection
+                # must run AFTER _init_schema so the metadata table
+                # exists — Fix #21 cross-references active wrap_token
+                # from that table to avoid flagging live in-flight tmps.
+                # Orphan tmp detection runs inside the schema_init
+                # boundary because _find_orphan_tmp_files → _get_metadata
+                # hits SQLite and a DB failure here must flow through
+                # the unified error hierarchy just like _init_schema.
+                # 10.5c.6 L3 contrarian F1: wrap the call in a local
+                # try/except so a failure during orphan detection (on
+                # a corrupted metadata table, say) does NOT abort the
+                # constructor AND does not silently vanish. The schema
+                # has already been initialized + committed at this
+                # point; failing the constructor would strand a valid
+                # store. Emit a warning instead so the operator sees
+                # that detection was skipped without losing the store.
+                try:
+                    self._warn_orphan_tmp_files()
+                except Exception as orphan_exc:
+                    warnings.warn(
+                        f"anneal-memory: orphan tmp-file detection "
+                        f"failed during Store initialization "
+                        f"({type(orphan_exc).__name__}: {orphan_exc}). "
+                        f"The store is usable but any prior-crash "
+                        f"orphan tmp sidecars were NOT reported. Run "
+                        f"the operator recovery CLI subcommands "
+                        f"(wrap-status / wrap-token-current) manually "
+                        f"if you suspect a prior crashed wrap.",
+                        UserWarning,
+                        stacklevel=3,
+                    )
         except Exception:
-            self._conn.close()
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except sqlite3.Error:
+                    pass
             raise
 
     def _init_schema(self) -> None:
@@ -574,7 +784,6 @@ class Store:
             episode_type = EpisodeType(episode_type)
 
         ts = timestamp or _now_utc()
-        session_id = self._current_session_id()
         meta_json = json.dumps(metadata) if metadata is not None else None
 
         # Retry with incrementing nonce on ID collision (birthday or duplicate content).
@@ -585,22 +794,37 @@ class Store:
         # a batch, but ``_batch()`` is documented as a general
         # primitive so extending it to new pipelines should not
         # silently break atomicity. L3 contrarian F1.
+        #
+        # 10.5c.6: the _current_session_id() call ALSO hits SQLite
+        # ("SELECT id FROM wraps ORDER BY id DESC LIMIT 1"), so the
+        # boundary starts BEFORE it — not just around the insert retry
+        # loop — otherwise a DB failure while reading the current
+        # session would leak through as bare sqlite3.Error. The whole
+        # retry loop + commit is also inside the boundary so any
+        # sqlite3.Error that escapes the inner collision-retry handler
+        # surfaces as StoreDatabaseError with ``operation="record"``.
+        # Transient collisions are still handled by the inner
+        # try/except (they never reach the boundary); only genuine
+        # errors — or a 3rd consecutive collision that exhausts
+        # retries — propagate out.
         max_retries = 3
-        for nonce in range(max_retries):
-            ep_id = _episode_id(content, ts, nonce)
-            try:
-                self._conn.execute(
-                    """INSERT INTO episodes (id, timestamp, type, content, source, session_id, metadata)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (ep_id, ts, episode_type.value, content, source, session_id, meta_json),
-                )
-                if not self._defer_commit:
-                    self._conn.commit()
-                break
-            except sqlite3.IntegrityError:
-                if nonce == max_retries - 1:
-                    raise
-                continue
+        with self._db_boundary("record"):
+            session_id = self._current_session_id()
+            for nonce in range(max_retries):
+                ep_id = _episode_id(content, ts, nonce)
+                try:
+                    self._conn.execute(
+                        """INSERT INTO episodes (id, timestamp, type, content, source, session_id, metadata)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (ep_id, ts, episode_type.value, content, source, session_id, meta_json),
+                    )
+                    if not self._defer_commit:
+                        self._conn.commit()
+                    break
+                except sqlite3.IntegrityError:
+                    if nonce == max_retries - 1:
+                        raise
+                    continue
 
         episode = Episode(
             id=ep_id,
@@ -634,9 +858,10 @@ class Store:
         Returns:
             The Episode, or None if not found.
         """
-        row = self._conn.execute(
-            "SELECT * FROM episodes WHERE id = ?", (episode_id,)
-        ).fetchone()
+        with self._db_boundary("get"):
+            row = self._conn.execute(
+                "SELECT * FROM episodes WHERE id = ?", (episode_id,)
+            ).fetchone()
         if not row:
             return None
         return self._row_to_episode(row)
@@ -657,28 +882,29 @@ class Store:
         Returns:
             True if the episode was found and deleted, False if not found.
         """
-        row = self._conn.execute(
-            "SELECT * FROM episodes WHERE id = ?", (episode_id,)
-        ).fetchone()
-        if not row:
-            return False
+        with self._db_boundary("delete"):
+            row = self._conn.execute(
+                "SELECT * FROM episodes WHERE id = ?", (episode_id,)
+            ).fetchone()
+            if not row:
+                return False
 
-        if self._keep_tombstones:
-            self._conn.execute(
-                """INSERT OR IGNORE INTO tombstones
-                   (id, timestamp, type, content_hash)
-                   VALUES (?, ?, ?, ?)""",
-                (row["id"], row["timestamp"], row["type"], _content_hash(row["content"])),
-            )
+            if self._keep_tombstones:
+                self._conn.execute(
+                    """INSERT OR IGNORE INTO tombstones
+                       (id, timestamp, type, content_hash)
+                       VALUES (?, ?, ?, ?)""",
+                    (row["id"], row["timestamp"], row["type"], _content_hash(row["content"])),
+                )
 
-        self._conn.execute("DELETE FROM episodes WHERE id = ?", (episode_id,))
-        # 10.5c.5 L4 Fix: batch-aware commit for consistency with
-        # record() and the other write-path methods. No current
-        # caller invokes delete() inside a _batch(), but making it
-        # batch-safe removes a forward-looking misuse hazard and
-        # matches the rest of the batch-aware method set.
-        if not self._defer_commit:
-            self._conn.commit()
+            self._conn.execute("DELETE FROM episodes WHERE id = ?", (episode_id,))
+            # 10.5c.5 L4 Fix: batch-aware commit for consistency with
+            # record() and the other write-path methods. No current
+            # caller invokes delete() inside a _batch(), but making it
+            # batch-safe removes a forward-looking misuse hazard and
+            # matches the rest of the batch-aware method set.
+            if not self._defer_commit:
+                self._conn.commit()
 
         self._audit_log("delete", {
             "episode_id": row["id"],
@@ -739,18 +965,19 @@ class Store:
 
         where = " AND ".join(conditions) if conditions else "1=1"
 
-        # Get total count
-        count_row = self._conn.execute(
-            f"SELECT COUNT(*) FROM episodes WHERE {where}", params
-        ).fetchone()
-        total = count_row[0]
+        with self._db_boundary("recall"):
+            # Get total count
+            count_row = self._conn.execute(
+                f"SELECT COUNT(*) FROM episodes WHERE {where}", params
+            ).fetchone()
+            total = count_row[0]
 
-        # Get episodes
-        rows = self._conn.execute(
-            f"""SELECT * FROM episodes WHERE {where}
-                ORDER BY timestamp DESC LIMIT ? OFFSET ?""",
-            [*params, limit, offset],
-        ).fetchall()
+            # Get episodes
+            rows = self._conn.execute(
+                f"""SELECT * FROM episodes WHERE {where}
+                    ORDER BY timestamp DESC LIMIT ? OFFSET ?""",
+                [*params, limit, offset],
+            ).fetchall()
 
         episodes = [self._row_to_episode(row) for row in rows]
 
@@ -781,58 +1008,60 @@ class Store:
         Uses session IDs (not timestamps) for precision — avoids
         same-second boundary issues.
         """
-        last_wrap = self._conn.execute(
-            "SELECT id FROM wraps ORDER BY id DESC LIMIT 1"
-        ).fetchone()
+        with self._db_boundary("episodes_since_wrap"):
+            last_wrap = self._conn.execute(
+                "SELECT id FROM wraps ORDER BY id DESC LIMIT 1"
+            ).fetchone()
 
-        if last_wrap:
-            # Episodes with session_id > last wrap's ID are post-wrap.
-            # Also include any with NULL session_id (shouldn't happen, but safe).
-            rows = self._conn.execute(
-                """SELECT * FROM episodes
-                   WHERE CAST(session_id AS INTEGER) > ? OR session_id IS NULL
-                   ORDER BY timestamp ASC""",
-                (last_wrap["id"],),
-            ).fetchall()
-        else:
-            # No wraps yet — all episodes are in the compression window
-            rows = self._conn.execute(
-                "SELECT * FROM episodes ORDER BY timestamp ASC"
-            ).fetchall()
+            if last_wrap:
+                # Episodes with session_id > last wrap's ID are post-wrap.
+                # Also include any with NULL session_id (shouldn't happen, but safe).
+                rows = self._conn.execute(
+                    """SELECT * FROM episodes
+                       WHERE CAST(session_id AS INTEGER) > ? OR session_id IS NULL
+                       ORDER BY timestamp ASC""",
+                    (last_wrap["id"],),
+                ).fetchall()
+            else:
+                # No wraps yet — all episodes are in the compression window
+                rows = self._conn.execute(
+                    "SELECT * FROM episodes ORDER BY timestamp ASC"
+                ).fetchall()
 
         return [self._row_to_episode(row) for row in rows]
 
     def status(self) -> StoreStatus:
         """Get store status snapshot."""
-        total = self._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
-        since_wrap = self._count_episodes_since_wrap()
-        total_wraps = self._conn.execute("SELECT COUNT(*) FROM wraps").fetchone()[0]
-        tombstone_count = self._conn.execute(
-            "SELECT COUNT(*) FROM tombstones"
-        ).fetchone()[0]
+        with self._db_boundary("status"):
+            total = self._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+            since_wrap = self._count_episodes_since_wrap()
+            total_wraps = self._conn.execute("SELECT COUNT(*) FROM wraps").fetchone()[0]
+            tombstone_count = self._conn.execute(
+                "SELECT COUNT(*) FROM tombstones"
+            ).fetchone()[0]
 
-        last_wrap_row = self._conn.execute(
-            "SELECT wrapped_at FROM wraps ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        last_wrap_at = last_wrap_row["wrapped_at"] if last_wrap_row else None
+            last_wrap_row = self._conn.execute(
+                "SELECT wrapped_at FROM wraps ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            last_wrap_at = last_wrap_row["wrapped_at"] if last_wrap_row else None
 
-        wrap_started = self._get_metadata("wrap_started_at")
-        wrap_in_progress = bool(wrap_started)
+            wrap_started = self._get_metadata("wrap_started_at")
+            wrap_in_progress = bool(wrap_started)
 
-        # Episodes by type
-        type_rows = self._conn.execute(
-            "SELECT type, COUNT(*) as count FROM episodes GROUP BY type"
-        ).fetchall()
-        episodes_by_type = {row["type"]: row["count"] for row in type_rows}
+            # Episodes by type
+            type_rows = self._conn.execute(
+                "SELECT type, COUNT(*) as count FROM episodes GROUP BY type"
+            ).fetchall()
+            episodes_by_type = {row["type"]: row["count"] for row in type_rows}
 
-        # Continuity file size
+            # Association network metrics (also executes SQL)
+            assoc_stats = _association_stats(self._conn, total)
+
+        # Continuity file size — file read, outside the DB boundary
         continuity_path = self.continuity_path
         continuity_chars = None
         if continuity_path.exists():
             continuity_chars = len(continuity_path.read_text(encoding="utf-8"))
-
-        # Association network metrics
-        assoc_stats = _association_stats(self._conn, total)
 
         # Audit health snapshot (Diogenes ARCH finding, Apr 13 2026).
         # Cheap visibility — lazy init inside stats() if needed, no chain
@@ -969,29 +1198,30 @@ class Store:
         # ``load_wrap_snapshot`` now treats as an integrity failure
         # to catch any code path that slips past the write-side
         # validation above).
-        self._conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-            ("wrap_started_at", _now_utc()),
-        )
-        self._conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-            ("wrap_token", token),
-        )
-        # Empty-string encoding means "no snapshot stored" (legacy
-        # path where ``store.wrap_started()`` was called with no
-        # args). An empty list from a validated ``token + episode_ids``
-        # pair encodes as ``"[]"`` JSON so ``load_wrap_snapshot`` can
-        # distinguish "caller explicitly passed an empty snapshot"
-        # from "legacy no-snapshot path."
-        if token:
-            ids_json = json.dumps(list(episode_ids or []))
-        else:
-            ids_json = ""
-        self._conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-            ("wrap_episode_ids", ids_json),
-        )
-        self._conn.commit()
+        with self._db_boundary("wrap_started"):
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_started_at", _now_utc()),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_token", token),
+            )
+            # Empty-string encoding means "no snapshot stored" (legacy
+            # path where ``store.wrap_started()`` was called with no
+            # args). An empty list from a validated ``token + episode_ids``
+            # pair encodes as ``"[]"`` JSON so ``load_wrap_snapshot`` can
+            # distinguish "caller explicitly passed an empty snapshot"
+            # from "legacy no-snapshot path."
+            if token:
+                ids_json = json.dumps(list(episode_ids or []))
+            else:
+                ids_json = ""
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_episode_ids", ids_json),
+            )
+            self._conn.commit()
 
         if self._audit is not None:
             payload: dict[str, Any] = {}
@@ -1036,23 +1266,24 @@ class Store:
         # partial-state cancel emitted NO audit event at all —
         # silent_error_swallowing inside the very tool that exists
         # to recover from silent error states. 10.5c.5 L1 MEDIUM.
-        cancelled_started_at = self._get_metadata("wrap_started_at")
-        cancelled_token = self._get_metadata("wrap_token")
-        cancelled_ids_raw = self._get_metadata("wrap_episode_ids")
+        with self._db_boundary("wrap_cancelled"):
+            cancelled_started_at = self._get_metadata("wrap_started_at")
+            cancelled_token = self._get_metadata("wrap_token")
+            cancelled_ids_raw = self._get_metadata("wrap_episode_ids")
 
-        self._conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-            ("wrap_started_at", ""),
-        )
-        self._conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-            ("wrap_token", ""),
-        )
-        self._conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-            ("wrap_episode_ids", ""),
-        )
-        self._conn.commit()
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_started_at", ""),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_token", ""),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_episode_ids", ""),
+            )
+            self._conn.commit()
 
         if self._audit is not None:
             # Three cases:
@@ -1113,7 +1344,8 @@ class Store:
             :meth:`wrap_started`) if a wrap is in progress, else
             ``None``.
         """
-        started = self._get_metadata("wrap_started_at")
+        with self._db_boundary("get_wrap_started_at"):
+            started = self._get_metadata("wrap_started_at")
         return started if started else None
 
     def load_wrap_snapshot(self) -> WrapSnapshot | None:
@@ -1149,10 +1381,11 @@ class Store:
         # between them. Prior pattern called _get_metadata three
         # times, which is itself TOCTOU-prone inside the TOCTOU
         # fix. One SELECT reads all three keys atomically.
-        rows = self._conn.execute(
-            "SELECT key, value FROM metadata WHERE key IN (?, ?, ?)",
-            ("wrap_started_at", "wrap_token", "wrap_episode_ids"),
-        ).fetchall()
+        with self._db_boundary("load_wrap_snapshot"):
+            rows = self._conn.execute(
+                "SELECT key, value FROM metadata WHERE key IN (?, ?, ?)",
+                ("wrap_started_at", "wrap_token", "wrap_episode_ids"),
+            ).fetchall()
         meta = {row["key"]: row["value"] for row in rows}
 
         wrap_started = meta.get("wrap_started_at", "")
@@ -1326,135 +1559,143 @@ class Store:
         # whole point of the 10.5c.4 fix is "TOCTOU structurally
         # impossible" — leaving a second race open contradicts the
         # thesis. Closing it costs ~10 lines and one test.
-        if wrap_token is not None:
-            cas_cursor = self._conn.execute(
-                "UPDATE metadata SET value = '' "
-                "WHERE key = 'wrap_token' AND value = ?",
-                (wrap_token,),
+        # 10.5c.6: wrap the entire SQL section of wrap_completed in a
+        # single db boundary so any sqlite3.Error — from the CAS UPDATE,
+        # the wraps INSERT, the session-id UPDATE, the metadata clears,
+        # or the final commit — surfaces as StoreDatabaseError with
+        # ``operation="wrap_completed"``. The ValueError raised on CAS
+        # mismatch is NOT a database error and propagates through the
+        # boundary unchanged.
+        with self._db_boundary("wrap_completed"):
+            if wrap_token is not None:
+                cas_cursor = self._conn.execute(
+                    "UPDATE metadata SET value = '' "
+                    "WHERE key = 'wrap_token' AND value = ?",
+                    (wrap_token,),
+                )
+                if cas_cursor.rowcount != 1:
+                    # Roll back the implicit transaction the CAS opened
+                    # (legacy path) OR let the outer ``_batch.__exit__``
+                    # handle rollback (batched path). In batched mode the
+                    # enclosing transaction may contain uncommitted DML
+                    # from ``record_associations`` + ``decay_associations``
+                    # that must be discarded together with the failed CAS
+                    # — that's exactly what ``_batch.__exit__`` does on
+                    # exception. Double-rolling back would be harmless but
+                    # semantically muddled; 10.5c.5 L2 review flagged the
+                    # ownership confusion. Fix: rollback here only for the
+                    # legacy (non-batched) caller, which is still a valid
+                    # path for library users managing their own wrap
+                    # lifecycle. The caller sees a ValueError that's
+                    # distinguishable from the earlier mismatch at
+                    # continuity.py (different message) so an operator
+                    # knows a concurrent process interfered versus a
+                    # client-side stale-token bug.
+                    if not self._defer_commit:
+                        self._conn.rollback()
+                    raise ValueError(
+                        f"wrap_completed: wrap_token has been cleared or "
+                        f"replaced during save. The persisted token no "
+                        f"longer matches '{wrap_token[:8]}…' — a concurrent "
+                        f"process probably ran prepare_wrap, wrap_cancelled, "
+                        f"or wrap_completed between this session's token "
+                        f"verification and the save commit. Re-run "
+                        f"prepare_wrap to start a fresh wrap."
+                    )
+
+            self._conn.execute(
+                """INSERT INTO wraps
+                   (wrapped_at, episodes_compressed, continuity_chars, graduations_validated,
+                    graduations_demoted, citation_reuse_max, patterns_extracted,
+                    associations_formed, associations_strengthened, associations_decayed)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    _now_utc(),
+                    episodes_compressed,
+                    continuity_chars,
+                    graduations_validated,
+                    graduations_demoted,
+                    citation_reuse_max,
+                    patterns_extracted,
+                    associations_formed,
+                    associations_strengthened,
+                    associations_decayed,
+                ),
             )
-            if cas_cursor.rowcount != 1:
-                # Roll back the implicit transaction the CAS opened
-                # (legacy path) OR let the outer ``_batch.__exit__``
-                # handle rollback (batched path). In batched mode the
-                # enclosing transaction may contain uncommitted DML
-                # from ``record_associations`` + ``decay_associations``
-                # that must be discarded together with the failed CAS
-                # — that's exactly what ``_batch.__exit__`` does on
-                # exception. Double-rolling back would be harmless but
-                # semantically muddled; 10.5c.5 L2 review flagged the
-                # ownership confusion. Fix: rollback here only for the
-                # legacy (non-batched) caller, which is still a valid
-                # path for library users managing their own wrap
-                # lifecycle. The caller sees a ValueError that's
-                # distinguishable from the earlier mismatch at
-                # continuity.py (different message) so an operator
-                # knows a concurrent process interfered versus a
-                # client-side stale-token bug.
-                if not self._defer_commit:
-                    self._conn.rollback()
-                raise ValueError(
-                    f"wrap_completed: wrap_token has been cleared or "
-                    f"replaced during save. The persisted token no "
-                    f"longer matches '{wrap_token[:8]}…' — a concurrent "
-                    f"process probably ran prepare_wrap, wrap_cancelled, "
-                    f"or wrap_completed between this session's token "
-                    f"verification and the save commit. Re-run "
-                    f"prepare_wrap to start a fresh wrap."
-                )
+            # Update session_id for episodes in this wrap cycle.
+            #
+            # Pre-10.5c.4 behavior: stamp every NULL-session_id episode
+            # with the new wrap's ID. This still runs on the legacy
+            # ``skipped_prepare`` path when ``episode_ids`` is None.
+            #
+            # 10.5c.4 behavior: when the caller provides the frozen
+            # snapshot ID list, restrict the UPDATE to exactly those IDs.
+            # Any NULL-session_id episodes recorded AFTER prepare_wrap
+            # (the TOCTOU window) are NOT in the list, so they stay NULL
+            # and land in the next wrap's ``episodes_since_wrap()`` result.
+            # Data loss is impossible — new episodes are preserved, just
+            # carried over to the wrap they semantically belong to.
+            last_wrap = self._conn.execute(
+                "SELECT id FROM wraps ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if last_wrap:
+                session_id = str(last_wrap["id"])
+                if episode_ids is None:
+                    # Legacy / skipped_prepare path.
+                    self._conn.execute(
+                        "UPDATE episodes SET session_id = ? WHERE session_id IS NULL",
+                        (session_id,),
+                    )
+                elif episode_ids:
+                    # Frozen snapshot path. Build a dynamic IN clause —
+                    # SQLite supports up to 999 parameters by default, which
+                    # covers the realistic per-session episode count by a
+                    # comfortable margin. If a wrap ever exceeds that, the
+                    # caller should chunk the ID list and call us per chunk
+                    # (we don't do it here because the batching concerns
+                    # belong upstream where chunking the compression is also
+                    # a relevant choice).
+                    placeholders = ",".join("?" for _ in episode_ids)
+                    self._conn.execute(
+                        f"UPDATE episodes SET session_id = ? "
+                        f"WHERE session_id IS NULL AND id IN ({placeholders})",
+                        (session_id, *episode_ids),
+                    )
+                # If episode_ids is an empty list, skip the UPDATE entirely.
+                # An empty snapshot means "this wrap compressed nothing" —
+                # the prepare_wrap empty path already calls wrap_cancelled
+                # instead of wrap_completed, so the only way to reach here
+                # with an empty list is a library user deliberately
+                # recording a no-op wrap. Do nothing rather than
+                # accidentally stamping all NULL episodes.
 
-        self._conn.execute(
-            """INSERT INTO wraps
-               (wrapped_at, episodes_compressed, continuity_chars, graduations_validated,
-                graduations_demoted, citation_reuse_max, patterns_extracted,
-                associations_formed, associations_strengthened, associations_decayed)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                _now_utc(),
-                episodes_compressed,
-                continuity_chars,
-                graduations_validated,
-                graduations_demoted,
-                citation_reuse_max,
-                patterns_extracted,
-                associations_formed,
-                associations_strengthened,
-                associations_decayed,
-            ),
-        )
-        # Update session_id for episodes in this wrap cycle.
-        #
-        # Pre-10.5c.4 behavior: stamp every NULL-session_id episode
-        # with the new wrap's ID. This still runs on the legacy
-        # ``skipped_prepare`` path when ``episode_ids`` is None.
-        #
-        # 10.5c.4 behavior: when the caller provides the frozen
-        # snapshot ID list, restrict the UPDATE to exactly those IDs.
-        # Any NULL-session_id episodes recorded AFTER prepare_wrap
-        # (the TOCTOU window) are NOT in the list, so they stay NULL
-        # and land in the next wrap's ``episodes_since_wrap()`` result.
-        # Data loss is impossible — new episodes are preserved, just
-        # carried over to the wrap they semantically belong to.
-        last_wrap = self._conn.execute(
-            "SELECT id FROM wraps ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        if last_wrap:
-            session_id = str(last_wrap["id"])
-            if episode_ids is None:
-                # Legacy / skipped_prepare path.
-                self._conn.execute(
-                    "UPDATE episodes SET session_id = ? WHERE session_id IS NULL",
-                    (session_id,),
-                )
-            elif episode_ids:
-                # Frozen snapshot path. Build a dynamic IN clause —
-                # SQLite supports up to 999 parameters by default, which
-                # covers the realistic per-session episode count by a
-                # comfortable margin. If a wrap ever exceeds that, the
-                # caller should chunk the ID list and call us per chunk
-                # (we don't do it here because the batching concerns
-                # belong upstream where chunking the compression is also
-                # a relevant choice).
-                placeholders = ",".join("?" for _ in episode_ids)
-                self._conn.execute(
-                    f"UPDATE episodes SET session_id = ? "
-                    f"WHERE session_id IS NULL AND id IN ({placeholders})",
-                    (session_id, *episode_ids),
-                )
-            # If episode_ids is an empty list, skip the UPDATE entirely.
-            # An empty snapshot means "this wrap compressed nothing" —
-            # the prepare_wrap empty path already calls wrap_cancelled
-            # instead of wrap_completed, so the only way to reach here
-            # with an empty list is a library user deliberately
-            # recording a no-op wrap. Do nothing rather than
-            # accidentally stamping all NULL episodes.
-
-        # Clear all three wrap-in-progress metadata keys in the same
-        # SQL transaction as the wraps INSERT + episodes UPDATE so a
-        # mid-clear crash cannot leave partial state (e.g. wraps row
-        # committed but wrap_started_at still set, which would look
-        # like a stuck wrap on the next session's prepare_wrap call).
-        # Using bare ``execute`` instead of ``_set_metadata`` so the
-        # three writes share the single ``commit()`` below.
-        self._conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-            ("wrap_started_at", ""),
-        )
-        self._conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-            ("wrap_token", ""),
-        )
-        self._conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-            ("wrap_episode_ids", ""),
-        )
-        # 10.5c.5: defer the commit when we're inside a ``_batch()``
-        # context — the outer two-phase-commit pipeline wraps the
-        # whole sequence (associations + meta tmp write + wrap_completed)
-        # in a single SQLite transaction so a mid-pipeline crash
-        # cannot leave the wraps table ahead of the episodes.session_id
-        # UPDATE or the metadata-key clears.
-        if not self._defer_commit:
-            self._conn.commit()
+            # Clear all three wrap-in-progress metadata keys in the same
+            # SQL transaction as the wraps INSERT + episodes UPDATE so a
+            # mid-clear crash cannot leave partial state (e.g. wraps row
+            # committed but wrap_started_at still set, which would look
+            # like a stuck wrap on the next session's prepare_wrap call).
+            # Using bare ``execute`` instead of ``_set_metadata`` so the
+            # three writes share the single ``commit()`` below.
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_started_at", ""),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_token", ""),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_episode_ids", ""),
+            )
+            # 10.5c.5: defer the commit when we're inside a ``_batch()``
+            # context — the outer two-phase-commit pipeline wraps the
+            # whole sequence (associations + meta tmp write + wrap_completed)
+            # in a single SQLite transaction so a mid-pipeline crash
+            # cannot leave the wraps table ahead of the episodes.session_id
+            # UPDATE or the metadata-key clears.
+            if not self._defer_commit:
+                self._conn.commit()
 
         audit_payload: dict[str, Any] = {
             "episodes_compressed": episodes_compressed,
@@ -1514,35 +1755,47 @@ class Store:
         ``stats``, ``export``).
 
         Returns an empty list only when the wraps table does not exist
-        yet (unmigrated legacy DB). Any other ``sqlite3.OperationalError``
-        (locked database, corruption, connection gone) propagates so
-        callers can surface the real failure instead of silently
-        reporting "no wraps" during an outage.
+        yet (unmigrated legacy DB). Any other database failure (locked
+        database, corruption, connection gone) propagates as
+        :class:`StoreDatabaseError` via the ``get_wrap_history``
+        :meth:`_db_boundary` so callers can surface the real failure
+        through the unified hierarchy instead of silently reporting
+        "no wraps" during an outage.
 
         Returns:
             List of WrapRecord, oldest first.
 
         Raises:
-            sqlite3.OperationalError: On any database failure other
-                than a missing ``wraps`` table.
+            StoreDatabaseError: On any database failure other than a
+                missing ``wraps`` table. The underlying
+                ``sqlite3.Error`` is attached as ``__cause__``.
         """
-        try:
-            rows = self._conn.execute(
-                """SELECT id, wrapped_at, episodes_compressed, continuity_chars,
-                          graduations_validated, graduations_demoted,
-                          citation_reuse_max, patterns_extracted,
-                          associations_formed, associations_strengthened,
-                          associations_decayed
-                   FROM wraps ORDER BY id ASC"""
-            ).fetchall()
-        except sqlite3.OperationalError as exc:
-            # Only swallow "no such table" — every other OperationalError
-            # (database locked, corruption, disk full, connection gone)
-            # indicates a real failure that monitoring subcommands MUST
-            # surface rather than silently report an empty history.
-            if "no such table" in str(exc).lower():
-                return []
-            raise
+        with self._db_boundary("get_wrap_history"):
+            try:
+                rows = self._conn.execute(
+                    """SELECT id, wrapped_at, episodes_compressed, continuity_chars,
+                              graduations_validated, graduations_demoted,
+                              citation_reuse_max, patterns_extracted,
+                              associations_formed, associations_strengthened,
+                              associations_decayed
+                       FROM wraps ORDER BY id ASC"""
+                ).fetchall()
+            except sqlite3.OperationalError as exc:
+                # 10.5c.6 L1 H1: tightened from a loose "no such table"
+                # match to the exact "no such table: wraps" message. The
+                # looser match would silently return [] for ANY missing
+                # table (e.g. a corrupted DB missing ``episodes`` but
+                # intact ``wraps``) — dangerous silent-error-swallowing
+                # sitting inside a method whose job is reporting wrap
+                # history. Only the specifically-documented "wraps
+                # table missing on a legacy unmigrated DB" case should
+                # swallow; everything else (database locked, corruption,
+                # disk full, wrong table missing) propagates to the
+                # enclosing _db_boundary and surfaces as
+                # StoreDatabaseError.
+                if "no such table: wraps" in str(exc).lower():
+                    return []
+                raise
 
         # Coerce nullable columns (episodes_compressed, continuity_chars)
         # and legacy-default columns to 0 at construction, so the
@@ -1590,14 +1843,15 @@ class Store:
         ts = _now_utc()
         # 10.5c.5: inside a ``_batch()`` the free-function helper must
         # NOT commit — the outer pipeline owns the single commit.
-        formed, strengthened = _record_associations(
-            self._conn,
-            direct_pairs,
-            session_pairs or set(),
-            ts,
-            affective_state=affective_state,
-            commit=not self._defer_commit,
-        )
+        with self._db_boundary("record_associations"):
+            formed, strengthened = _record_associations(
+                self._conn,
+                direct_pairs,
+                session_pairs or set(),
+                ts,
+                affective_state=affective_state,
+                commit=not self._defer_commit,
+            )
 
         if formed or strengthened:
             audit_data: dict = {
@@ -1639,13 +1893,14 @@ class Store:
 
         # 10.5c.5: inside a ``_batch()`` the free-function helper must
         # NOT commit — the outer pipeline owns the single commit.
-        decayed = _decay_associations(
-            self._conn,
-            canonical,
-            decay_factor,
-            cleanup_threshold,
-            commit=not self._defer_commit,
-        )
+        with self._db_boundary("decay_associations"):
+            decayed = _decay_associations(
+                self._conn,
+                canonical,
+                decay_factor,
+                cleanup_threshold,
+                commit=not self._defer_commit,
+            )
 
         if decayed:
             self._audit_log("associations_decayed", {
@@ -1672,7 +1927,8 @@ class Store:
         Returns:
             List of AssociationPair ordered by strength descending.
         """
-        return _get_associations(self._conn, episode_ids, min_strength, limit)
+        with self._db_boundary("get_associations"):
+            return _get_associations(self._conn, episode_ids, min_strength, limit)
 
     def get_association_context(
         self,
@@ -1685,14 +1941,16 @@ class Store:
         Returns human-readable text describing which episodes have been
         thought about together before, or empty string if none.
         """
-        return _get_association_context(
-            self._conn, episode_ids, min_strength, limit
-        )
+        with self._db_boundary("get_association_context"):
+            return _get_association_context(
+                self._conn, episode_ids, min_strength, limit
+            )
 
     def association_stats(self) -> AssociationStats:
         """Get Hebbian association network health metrics."""
-        total = self._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
-        return _association_stats(self._conn, total)
+        with self._db_boundary("association_stats"):
+            total = self._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+            return _association_stats(self._conn, total)
 
     # -- Pruning --
 
@@ -1716,32 +1974,33 @@ class Store:
             "%Y-%m-%dT%H:%M:%S.%fZ"
         )
 
-        # Find episodes to prune
-        rows = self._conn.execute(
-            "SELECT * FROM episodes WHERE timestamp < ?", (cutoff,)
-        ).fetchall()
+        with self._db_boundary("prune"):
+            # Find episodes to prune
+            rows = self._conn.execute(
+                "SELECT * FROM episodes WHERE timestamp < ?", (cutoff,)
+            ).fetchall()
 
-        if not rows:
-            return 0
+            if not rows:
+                return 0
 
-        pruned = 0
-        for row in rows:
-            if self._keep_tombstones:
-                self._conn.execute(
-                    """INSERT OR IGNORE INTO tombstones
-                       (id, timestamp, type, content_hash)
-                       VALUES (?, ?, ?, ?)""",
-                    (
-                        row["id"],
-                        row["timestamp"],
-                        row["type"],
-                        _content_hash(row["content"]),
-                    ),
-                )
-            self._conn.execute("DELETE FROM episodes WHERE id = ?", (row["id"],))
-            pruned += 1
+            pruned = 0
+            for row in rows:
+                if self._keep_tombstones:
+                    self._conn.execute(
+                        """INSERT OR IGNORE INTO tombstones
+                           (id, timestamp, type, content_hash)
+                           VALUES (?, ?, ?, ?)""",
+                        (
+                            row["id"],
+                            row["timestamp"],
+                            row["type"],
+                            _content_hash(row["content"]),
+                        ),
+                    )
+                self._conn.execute("DELETE FROM episodes WHERE id = ?", (row["id"],))
+                pruned += 1
 
-        self._conn.commit()
+            self._conn.commit()
 
         if self._audit is not None and pruned > 0:
             self._audit.log("prune", {
@@ -2038,6 +2297,127 @@ class Store:
             self._audit.log(event, payload, **kwargs)
 
     @contextmanager
+    def _db_boundary(self, operation: StoreOperation) -> Iterator[None]:
+        """Wrap a SQLite-touching block so callers get ``StoreDatabaseError``.
+
+        The 10.5c.6 caller-consistency primitive. Transports and user
+        code that catch :class:`StoreError` expect EVERY store failure
+        to surface through that hierarchy. Before 10.5c.6, file-write
+        paths raised :class:`StoreError` but SQLite paths leaked bare
+        ``sqlite3.OperationalError`` / ``IntegrityError`` / etc. —
+        partial consistency that confused transport handlers.
+
+        This context manager catches any ``sqlite3.Error`` subclass
+        raised inside the block and re-raises it as
+        :class:`StoreDatabaseError` with operation context, preserving
+        the original via ``__cause__``. Callers that care about the
+        original sqlite3 subclass can still ``raise ... from`` chain
+        back via ``err.__cause__``.
+
+        **Scope.** The block should contain ONLY the SQLite work, not
+        unrelated I/O or audit writes. Audit-log failures are not
+        database errors and must not be mis-wrapped; keep them outside.
+        Hashing, object construction, and pure-Python logic can sit
+        inside without harm — the context manager only triggers on
+        ``sqlite3.DatabaseError``.
+
+        **One boundary per public method, not one per SQL statement.**
+        The ``operation`` field names the caller-facing unit of work
+        (what the caller would retry), not the individual SQL
+        statement that failed. Keep exactly one ``_db_boundary`` per
+        public method even when the block is long — the underlying
+        ``sqlite3.DatabaseError`` is attached as ``__cause__`` for
+        operators needing finer attribution. Splitting one method
+        into multiple sub-boundaries fragments the caller-facing
+        abstraction and is explicitly NOT the pattern.
+
+        **Catch scope: ``sqlite3.DatabaseError``, not ``sqlite3.Error``.**
+        ``sqlite3.InterfaceError`` (API misuse — wrong arg count, bad
+        bindings, closed connection reuse) propagates bare because
+        it's a programming bug, not a runtime failure. Wrapping it
+        would mislead callers into retrying a deterministic bug.
+        ``DatabaseError`` covers ``OperationalError``,
+        ``IntegrityError``, ``DataError``, ``NotSupportedError``,
+        and ``ProgrammingError`` — the full set of runtime DB
+        failures a well-formed call can produce.
+
+        **Commits are part of the boundary.** ``conn.commit()`` can
+        raise ``sqlite3.OperationalError`` ("unable to commit") so it
+        must sit inside the boundary, not after.
+
+        **Identifier naming.** Most operation values match the public
+        method name verbatim (``record``, ``recall``, ``wrap_completed``,
+        etc.) so grep lands on the raise site and the caller-facing
+        handler simultaneously. Two intentional exceptions surface
+        internal sub-phases whose failures a caller can meaningfully
+        see: ``"schema_init"`` for constructor failures (no public
+        method named schema_init, but ``Store(path)`` is the call
+        that raises it) and ``"batch_commit"`` for the outer commit
+        of ``_batch()`` contexts (surfaces to callers through
+        ``validated_save_continuity`` / ``wrap_completed``, not
+        through any method named batch_commit). Soften the "verbatim"
+        claim in caller docs if either identifier changes.
+
+        New raise sites MUST add their ``operation`` identifier to the
+        :data:`StoreOperation` Literal before calling this. Without
+        mypy in CI (see 10.5d+), this is a soft contract — reviewers
+        must reject diffs that pass a string not in the alias.
+
+        Args:
+            operation: The :data:`StoreOperation` identifier for the
+                containing public method. Used verbatim as the
+                ``operation`` field on the raised error.
+        """
+        # 10.5c.6 L3 codex H1: pre-check closed state so post-close
+        # method calls surface as StoreError (with the caller's
+        # operation name) instead of bare AttributeError from
+        # ``self._conn.execute(...)``. The check fires BEFORE the
+        # yield so every wrapped method gets the guard for free.
+        # ``close()`` itself has an early-return guard at its own
+        # entry, so it never reaches this check with _closed=True.
+        if self._closed:
+            raise StoreError(
+                f"Cannot {operation} on a closed store",
+                operation=operation,
+                path=str(self._path),
+            )
+        try:
+            yield
+        except sqlite3.DatabaseError as exc:
+            # 10.5c.6 L2 #2: catch ``sqlite3.DatabaseError`` (the
+            # runtime-failure root) rather than ``sqlite3.Error`` (the
+            # whole tree). This excludes ``sqlite3.InterfaceError``
+            # (API misuse — a programming bug inside anneal-memory's
+            # own code, or a caller that passed bad types) which must
+            # propagate bare so the stack trace points at the real
+            # bug, not at a wrapped "retryable DB error" the user
+            # might retry in a loop. ``DatabaseError`` covers
+            # ``OperationalError``, ``IntegrityError``, ``DataError``,
+            # ``NotSupportedError``, and ``ProgrammingError`` — the
+            # full set of runtime DB failures a well-formed call can
+            # produce. Note that ``ProgrammingError`` is intentionally
+            # wrapped here because it includes real runtime conditions
+            # like "Cannot operate on a closed database" that callers
+            # legitimately hit in long-running processes; it only
+            # surfaces from API misuse in a narrow set of test
+            # patterns, and the retry-guidance disclaimer in
+            # ``docs/library-quickstart.md`` tells users not to retry
+            # the non-transient class.
+            #
+            # 10.5c.6 L3 codex F5 follow-up: capture the cause class
+            # name as a plain string so cross-process consumers can
+            # still make retry decisions after ``__cause__`` drops in
+            # pickle. ``type(exc).__name__`` is stable for the
+            # stdlib sqlite3 subclasses and gives the retry helper a
+            # pickle-safe dispatch key.
+            raise StoreDatabaseError(
+                f"SQLite {operation} failed on {self._path}: {exc}",
+                operation=operation,
+                path=str(self._path),
+                cause_type_name=type(exc).__name__,
+            ) from exc
+
+    @contextmanager
     def _batch(self) -> Iterator[None]:
         """Suspend auto-commit + audit-firing for a multi-step pipeline.
 
@@ -2135,7 +2515,17 @@ class Store:
                 # is a harmless no-op. The queued audit events are
                 # discarded so no phantom audit entries are written
                 # for DML that never committed.
-                self._conn.rollback()
+                #
+                # 10.5c.6: a rollback that itself raises sqlite3.Error
+                # would mask the primary exception that triggered it.
+                # Swallow rollback failures here — the primary error is
+                # what the caller needs to see. The store is about to
+                # be in an unknown state either way; the caller should
+                # reconstruct it.
+                try:
+                    self._conn.rollback()
+                except sqlite3.Error:
+                    pass
                 raise
             # Single outer commit. If this raises (disk full, locked
             # DB, etc.) rollback and re-raise — the exception
@@ -2147,10 +2537,35 @@ class Store:
             # ambiguous transaction state, and subsequent store use
             # could see partial DML from the failed batch. Rolling
             # back explicitly restores clean state.
+            #
+            # 10.5c.6: the commit is wrapped in a _db_boundary with
+            # op="batch_commit" so a commit failure surfaces as
+            # StoreDatabaseError like every other SQLite failure. The
+            # underlying sqlite3 error is still attached via __cause__
+            # for callers that need the original errno.
             try:
-                self._conn.commit()
+                with self._db_boundary("batch_commit"):
+                    self._conn.commit()
             except BaseException:
-                self._conn.rollback()
+                # 10.5c.6 L3 complement F2: note on the dual-rollback
+                # propagation path. A commit failure inside the
+                # _db_boundary raises StoreDatabaseError. This outer
+                # except catches it (StoreDatabaseError is an
+                # Exception) and issues rollback #1. Re-raise then
+                # propagates the StoreDatabaseError out of the inner
+                # try block, which does NOT exit through the outer
+                # try's ``except BaseException: yield-wrapper path``
+                # above (that path is yielded-block-only). Single
+                # rollback attempt on commit failure, not two. Any
+                # future refactor that moves this commit block under
+                # the yield-wrapper's except must check that rollback
+                # doesn't run twice against an already-rolled-back
+                # connection. SQLite's rollback on an already-empty
+                # transaction is a no-op, but the contract matters.
+                try:
+                    self._conn.rollback()
+                except sqlite3.Error:
+                    pass
                 raise
             commit_succeeded = True
         finally:
@@ -2551,8 +2966,36 @@ class Store:
         return tmp_path
 
     def close(self) -> None:
-        """Close the database connection."""
-        self._conn.close()
+        """Close the database connection.
+
+        Idempotent — subsequent calls are no-ops after the first
+        successful close. 10.5c.6 L3 codex H1: closed state is
+        tracked via ``self._closed`` (set AFTER the underlying
+        sqlite3 close succeeds), not by nulling ``self._conn``. The
+        flag-based approach lets ``_db_boundary`` detect post-close
+        usage and surface a clean ``StoreError`` with the caller's
+        operation name, rather than a bare ``AttributeError`` from
+        ``self._conn.execute(...)`` that bypasses the whole
+        hierarchy.
+
+        Raises:
+            StoreDatabaseError: If the underlying sqlite3 close fails
+                (rare — typically "unable to close due to unfinalized
+                statements"). The underlying ``sqlite3.DatabaseError``
+                is attached as ``__cause__``. On failure,
+                ``self._closed`` stays ``False`` — the connection is
+                in an indeterminate state the caller can inspect or
+                retry closing.
+        """
+        if self._closed:
+            return
+        if self._conn is None:
+            # Construction failed before connect ever ran.
+            self._closed = True
+            return
+        with self._db_boundary("close"):
+            self._conn.close()
+        self._closed = True
 
     def __enter__(self) -> Store:
         return self

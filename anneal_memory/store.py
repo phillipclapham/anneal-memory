@@ -12,11 +12,26 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
+import uuid
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal
+
+# Shared wrap-token shape constant. Mirrors the JSON schema pattern in
+# ``integrity.py`` for the ``save_continuity`` MCP tool's
+# ``wrap_token`` field. Lives at ``store.py`` module scope so both
+# the CLI and the MCP server import from the store layer (not across
+# the cli ↔ server boundary). Moved from ``server.py`` in 10.5c.5
+# L1-review fix — importing from a transport module for a shape
+# constant was an architectural wart (CLI had to load the entire MCP
+# server module to reach one compiled regex). Both transports now
+# import from here.
+_WRAP_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
 
 from .associations import (
     ASSOCIATIONS_SCHEMA,
@@ -217,6 +232,46 @@ def _safe_unlink(path: Path) -> None:
         pass
 
 
+def _fsync_dir(path: Path) -> None:
+    """Best-effort directory fsync for crash-safe atomic writes.
+
+    On POSIX filesystems (ext4, xfs, btrfs, APFS), ``fsync(file)``
+    guarantees the file's data blocks are on disk but does NOT
+    guarantee the containing directory's entry for the file is
+    durable. A crash between the file fsync and a subsequent
+    ``rename(2)`` can leave the directory without an entry for the
+    tmp file — the rename then fails with ``ENOENT`` even though the
+    data was durable. Syncing the parent directory closes this gap.
+
+    Windows does NOT support ``os.open`` on a directory for fsync;
+    on that platform this function is a no-op. macOS ``fsync`` is
+    weaker than Linux (true durability needs ``F_FULLFSYNC`` via
+    ``fcntl``, which Python's stdlib doesn't expose) but the
+    directory entry sync still helps reduce the residual crash
+    window.
+
+    Swallows all OSError — this is a best-effort durability
+    reinforcement, NOT a hard guarantee. Callers must not rely on
+    this function either succeeding or raising; it's one layer of
+    defense among several.
+    """
+    if os.name != "posix":
+        return
+    try:
+        dir_fd = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.close(dir_fd)
+        except OSError:
+            pass
+
+
 # Schema version — increment on breaking changes
 _SCHEMA_VERSION = 1
 
@@ -380,6 +435,24 @@ class Store:
         self._keep_tombstones = keep_tombstones
         self._project_name = project_name or "Agent"
 
+        # Two-phase commit / batch mode (10.5c.5). When ``_defer_commit``
+        # is True, write-path methods accumulate DML without calling
+        # ``self._conn.commit()`` and queue audit events into
+        # ``_deferred_audits`` instead of firing them immediately. The
+        # :meth:`_batch` context manager manages the flag and flushes
+        # both on successful exit. Audit events are only replayed AFTER
+        # the outer DB commit succeeds, preserving the "audit after
+        # externalize" invariant the rest of the codebase relies on.
+        self._defer_commit: bool = False
+        # Deferred audit queue: each entry is
+        # ``(event, payload, kwargs)`` — the kwargs slot carries
+        # pass-through keyword arguments for ``AuditTrail.log``
+        # (e.g. ``actor="source"`` for record events). 10.5c.5 L3
+        # Fix #17 widened the tuple from 2 to 3 elements.
+        self._deferred_audits: list[
+            tuple[str, dict[str, Any] | None, dict[str, Any]]
+        ] = []
+
         # Audit trail — hash-chained JSONL sidecar
         self._audit: AuditTrail | None = None
         if audit:
@@ -396,8 +469,33 @@ class Store:
         try:
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")
+            # synchronous=FULL makes commit() fsync the WAL so a
+            # successful COMMIT is durable at the block-device layer.
+            # Under the default synchronous=NORMAL (which WAL
+            # promotes from NORMAL's weaker semantic to "fsync on
+            # checkpoint but not on every commit") a post-commit
+            # power loss can revert the most recent committed
+            # transactions. 10.5c.5's two-phase commit ordering
+            # assumes "DB commit returns ⇒ data is durable" — FULL
+            # is required for that invariant to actually hold. The
+            # cost is ~1 extra fsync per commit, paid only at wrap
+            # boundaries in the canonical pipeline, which is
+            # negligible against the fsync already happening for
+            # the continuity/meta tmp writes. L2 L3.
+            self._conn.execute("PRAGMA synchronous=FULL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._init_schema()
+            # 10.5c.5 L3 Fix #13: detect orphan tmp sidecars from a
+            # prior crashed pipeline before any new wrap runs. If a
+            # previous ``validated_save_continuity`` crashed between
+            # DB commit and file rename, the tmp files hold committed
+            # content that needs manual recovery. We emit a warning
+            # (not a hard raise) so programmatic callers aren't
+            # broken and interactive users see the issue. Detection
+            # must run AFTER _init_schema so the metadata table
+            # exists — Fix #21 cross-references active wrap_token
+            # from that table to avoid flagging live in-flight tmps.
+            self._warn_orphan_tmp_files()
         except Exception:
             self._conn.close()
             raise
@@ -476,7 +574,14 @@ class Store:
         session_id = self._current_session_id()
         meta_json = json.dumps(metadata) if metadata is not None else None
 
-        # Retry with incrementing nonce on ID collision (birthday or duplicate content)
+        # Retry with incrementing nonce on ID collision (birthday or duplicate content).
+        # 10.5c.5 L3 Fix #17: batch-aware commit. If this method is
+        # called inside a ``_batch()`` context, skip the commit so
+        # the outer pipeline owns the single commit boundary. The
+        # canonical 10.5c.5 pipeline does NOT call record() inside
+        # a batch, but ``_batch()`` is documented as a general
+        # primitive so extending it to new pipelines should not
+        # silently break atomicity. L3 contrarian F1.
         max_retries = 3
         for nonce in range(max_retries):
             ep_id = _episode_id(content, ts, nonce)
@@ -486,7 +591,8 @@ class Store:
                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     (ep_id, ts, episode_type.value, content, source, session_id, meta_json),
                 )
-                self._conn.commit()
+                if not self._defer_commit:
+                    self._conn.commit()
                 break
             except sqlite3.IntegrityError:
                 if nonce == max_retries - 1:
@@ -503,13 +609,16 @@ class Store:
             metadata=metadata,
         )
 
-        if self._audit is not None:
-            self._audit.log("record", {
-                "episode_id": ep_id,
-                "type": episode_type.value,
-                "content_hash": _content_hash(content),
-                "source": source,
-            }, actor=source)
+        # Audit goes through the batch-aware helper so the event is
+        # queued (not fired) inside a batch, and flushed only after
+        # the outer commit succeeds. Same ordering invariant as the
+        # existing batched write methods.
+        self._audit_log("record", {
+            "episode_id": ep_id,
+            "type": episode_type.value,
+            "content_hash": _content_hash(content),
+            "source": source,
+        }, actor=source)
 
         return episode
 
@@ -556,14 +665,19 @@ class Store:
             )
 
         self._conn.execute("DELETE FROM episodes WHERE id = ?", (episode_id,))
-        self._conn.commit()
+        # 10.5c.5 L4 Fix: batch-aware commit for consistency with
+        # record() and the other write-path methods. No current
+        # caller invokes delete() inside a _batch(), but making it
+        # batch-safe removes a forward-looking misuse hazard and
+        # matches the rest of the batch-aware method set.
+        if not self._defer_commit:
+            self._conn.commit()
 
-        if self._audit is not None:
-            self._audit.log("delete", {
-                "episode_id": row["id"],
-                "type": row["type"],
-                "content_hash": _content_hash(row["content"]),
-            })
+        self._audit_log("delete", {
+            "episode_id": row["id"],
+            "type": row["type"],
+            "content_hash": _content_hash(row["content"]),
+        })
 
         return True
 
@@ -875,14 +989,21 @@ class Store:
         single SQL transaction, matching the batched-write invariant
         :meth:`wrap_started` establishes.
         """
-        # Capture both the token AND the frozen episode ID list
-        # before we clear them, so the audit entry records the full
-        # chain-of-custody context for the abandoned wrap. Layer 1
-        # M3 flagged that cancelled wraps were previously logging
-        # only the token, forcing auditors to cross-join against
-        # the wrap_started event to see which episodes were
-        # abandoned. Logging the ids inline on the cancel event
-        # removes that join.
+        # Capture all three wrap-lifecycle keys before we clear them,
+        # so the audit entry records the full chain-of-custody
+        # context for the abandoned wrap. Layer 1 M3 flagged that
+        # cancelled wraps were previously logging only the token,
+        # forcing auditors to cross-join against the wrap_started
+        # event to see which episodes were abandoned. Logging the
+        # ids inline on the cancel event removes that join.
+        #
+        # We read ``wrap_started_at`` too so partial-state cancels
+        # (the recovery scenario wrap_cancelled most exists to
+        # handle) still emit a forensic trail. Pre-10.5c.5 the
+        # partial-state cancel emitted NO audit event at all —
+        # silent_error_swallowing inside the very tool that exists
+        # to recover from silent error states. 10.5c.5 L1 MEDIUM.
+        cancelled_started_at = self._get_metadata("wrap_started_at")
         cancelled_token = self._get_metadata("wrap_token")
         cancelled_ids_raw = self._get_metadata("wrap_episode_ids")
 
@@ -901,13 +1022,28 @@ class Store:
         self._conn.commit()
 
         if self._audit is not None:
-            if cancelled_token:
-                payload: dict[str, Any] = {"wrap_token": cancelled_token}
+            # Three cases:
+            # 1. Healthy cancel — all three keys were set. Log full
+            #    chain-of-custody with token + episode list.
+            # 2. Partial state — at least one of the three keys was
+            #    set but not all three. Log what we DID find plus a
+            #    ``partial_state: true`` marker so auditors can
+            #    distinguish "operator cleaned up a broken store"
+            #    from "operator abandoned a healthy wrap."
+            # 3. Clean store — none of the three keys was set. No
+            #    audit event (there was nothing to cancel).
+            any_state = bool(
+                cancelled_started_at or cancelled_token or cancelled_ids_raw
+            )
+            if any_state:
+                payload: dict[str, Any] = {}
+                if cancelled_token:
+                    payload["wrap_token"] = cancelled_token
+                if cancelled_started_at:
+                    payload["wrap_started_at"] = cancelled_started_at
                 if cancelled_ids_raw:
                     # Audit is best-effort: a corrupt JSON here should
                     # not prevent the cancellation from being recorded.
-                    # The cancellation itself is the important fact;
-                    # the ids field is nice-to-have context.
                     try:
                         decoded = json.loads(cancelled_ids_raw)
                         if isinstance(decoded, list):
@@ -915,9 +1051,37 @@ class Store:
                             payload["wrap_episode_count"] = len(decoded)
                     except json.JSONDecodeError:
                         pass
+                # Healthy cancels have all three keys set. Anything
+                # else is partial state — tag it so operators
+                # reviewing the audit trail know this was recovery,
+                # not routine abandonment.
+                healthy = bool(
+                    cancelled_started_at
+                    and cancelled_token
+                    and cancelled_ids_raw
+                )
+                if not healthy:
+                    payload["partial_state"] = True
                 self._audit.log("wrap_cancelled", payload)
-            else:
-                self._audit.log("wrap_cancelled", None)
+
+    def get_wrap_started_at(self) -> str | None:
+        """Return the wrap-in-progress timestamp, or None if no wrap is pending.
+
+        Thin accessor for operator tooling (``wrap-status`` CLI
+        subcommand) that needs to display *when* a wrap was started
+        alongside the snapshot contents. Kept separate from
+        :meth:`load_wrap_snapshot` so operator display code doesn't pay
+        the partial-state integrity checks that TOCTOU callers need,
+        and so the ``WrapSnapshot`` TypedDict stays minimal for its
+        critical-path use.
+
+        Returns:
+            ISO 8601 UTC timestamp string (as persisted by
+            :meth:`wrap_started`) if a wrap is in progress, else
+            ``None``.
+        """
+        started = self._get_metadata("wrap_started_at")
+        return started if started else None
 
     def load_wrap_snapshot(self) -> WrapSnapshot | None:
         """Return the frozen wrap-in-progress snapshot, or None if no wrap is pending.
@@ -1136,13 +1300,25 @@ class Store:
                 (wrap_token,),
             )
             if cas_cursor.rowcount != 1:
-                # Roll back the implicit transaction the CAS opened,
-                # then raise. The caller sees a ValueError that's
+                # Roll back the implicit transaction the CAS opened
+                # (legacy path) OR let the outer ``_batch.__exit__``
+                # handle rollback (batched path). In batched mode the
+                # enclosing transaction may contain uncommitted DML
+                # from ``record_associations`` + ``decay_associations``
+                # that must be discarded together with the failed CAS
+                # — that's exactly what ``_batch.__exit__`` does on
+                # exception. Double-rolling back would be harmless but
+                # semantically muddled; 10.5c.5 L2 review flagged the
+                # ownership confusion. Fix: rollback here only for the
+                # legacy (non-batched) caller, which is still a valid
+                # path for library users managing their own wrap
+                # lifecycle. The caller sees a ValueError that's
                 # distinguishable from the earlier mismatch at
                 # continuity.py (different message) so an operator
                 # knows a concurrent process interfered versus a
                 # client-side stale-token bug.
-                self._conn.rollback()
+                if not self._defer_commit:
+                    self._conn.rollback()
                 raise ValueError(
                     f"wrap_completed: wrap_token has been cleared or "
                     f"replaced during save. The persisted token no "
@@ -1238,34 +1414,48 @@ class Store:
             "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
             ("wrap_episode_ids", ""),
         )
-        self._conn.commit()
+        # 10.5c.5: defer the commit when we're inside a ``_batch()``
+        # context — the outer two-phase-commit pipeline wraps the
+        # whole sequence (associations + meta tmp write + wrap_completed)
+        # in a single SQLite transaction so a mid-pipeline crash
+        # cannot leave the wraps table ahead of the episodes.session_id
+        # UPDATE or the metadata-key clears.
+        if not self._defer_commit:
+            self._conn.commit()
 
-        if self._audit is not None:
-            audit_payload: dict[str, Any] = {
-                "episodes_compressed": episodes_compressed,
-                "continuity_chars": continuity_chars,
-                "graduations_validated": graduations_validated,
-                "graduations_demoted": graduations_demoted,
-                "patterns_extracted": patterns_extracted,
-                "associations_formed": associations_formed,
-                "associations_strengthened": associations_strengthened,
-                "associations_decayed": associations_decayed,
-            }
-            # Chain-of-custody link: the token ties this completion
-            # event to the earlier wrap_started audit event that
-            # carried the same token + the full wrap_episode_ids.
-            # An auditor reconstructing a specific wrap walks
-            # wrap_started → (optional wrap_cancelled) → wrap_completed
-            # events by matching ``wrap_token``. The token is passed
-            # in by the caller rather than re-read from metadata to
-            # avoid a within-method read-before-clear sequence.
-            if wrap_token:
-                audit_payload["wrap_token"] = wrap_token
-            self._audit.log("wrap_completed", audit_payload)
+        audit_payload: dict[str, Any] = {
+            "episodes_compressed": episodes_compressed,
+            "continuity_chars": continuity_chars,
+            "graduations_validated": graduations_validated,
+            "graduations_demoted": graduations_demoted,
+            "patterns_extracted": patterns_extracted,
+            "associations_formed": associations_formed,
+            "associations_strengthened": associations_strengthened,
+            "associations_decayed": associations_decayed,
+        }
+        # Chain-of-custody link: the token ties this completion
+        # event to the earlier wrap_started audit event that carried
+        # the same token + the full wrap_episode_ids. An auditor
+        # reconstructing a specific wrap walks wrap_started →
+        # (optional wrap_cancelled) → wrap_completed events by
+        # matching ``wrap_token``. The token is passed in by the
+        # caller rather than re-read from metadata to avoid a
+        # within-method read-before-clear sequence.
+        if wrap_token:
+            audit_payload["wrap_token"] = wrap_token
+        # Route through the batch-aware audit helper so the event is
+        # queued (and flushed only after the outer commit succeeds)
+        # when we're inside ``_batch()``, and fired immediately
+        # otherwise.
+        self._audit_log("wrap_completed", audit_payload)
 
-        # Auto-prune old episodes if retention_days is configured
+        # Auto-prune old episodes if retention_days is configured.
+        # Skip inside a batch — auto-prune is a separate DML burst
+        # with its own commit semantics that don't belong inside the
+        # wrap two-phase commit. The pipeline caller can invoke prune
+        # after the batch exits if desired.
         pruned = 0
-        if self._retention_days is not None:
+        if self._retention_days is not None and not self._defer_commit:
             pruned = self.prune()
 
         return WrapResult(
@@ -1365,15 +1555,18 @@ class Store:
             Tuple of (links_formed, links_strengthened).
         """
         ts = _now_utc()
+        # 10.5c.5: inside a ``_batch()`` the free-function helper must
+        # NOT commit — the outer pipeline owns the single commit.
         formed, strengthened = _record_associations(
             self._conn,
             direct_pairs,
             session_pairs or set(),
             ts,
             affective_state=affective_state,
+            commit=not self._defer_commit,
         )
 
-        if self._audit is not None and (formed or strengthened):
+        if formed or strengthened:
             audit_data: dict = {
                 "formed": formed,
                 "strengthened": strengthened,
@@ -1383,7 +1576,7 @@ class Store:
             if affective_state is not None:
                 audit_data["affective_tag"] = affective_state.tag
                 audit_data["affective_intensity"] = affective_state.intensity
-            self._audit.log("associations_updated", audit_data)
+            self._audit_log("associations_updated", audit_data)
 
         return formed, strengthened
 
@@ -1411,12 +1604,18 @@ class Store:
                 if cp is not None:
                     canonical.add(cp)
 
+        # 10.5c.5: inside a ``_batch()`` the free-function helper must
+        # NOT commit — the outer pipeline owns the single commit.
         decayed = _decay_associations(
-            self._conn, canonical, decay_factor, cleanup_threshold
+            self._conn,
+            canonical,
+            decay_factor,
+            cleanup_threshold,
+            commit=not self._defer_commit,
         )
 
-        if self._audit is not None and decayed:
-            self._audit.log("associations_decayed", {
+        if decayed:
+            self._audit_log("associations_decayed", {
                 "decayed": decayed,
                 "decay_factor": decay_factor,
                 "cleanup_threshold": cleanup_threshold,
@@ -1599,33 +1798,27 @@ class Store:
                 not be masked behind a ``StoreError`` wrapper.
         """
         path = self.continuity_path
-        tmp_path = path.with_suffix(".md.tmp")
-        # Success flag gates the cleanup path in the ``finally`` block:
-        # the goal is that the ``.md.tmp`` sidecar never survives,
-        # regardless of which exception class was raised mid-write.
-        # This preserves the atomic-write invariant even for
-        # non-OSError failures (UnicodeEncodeError on malformed agent
-        # text, TypeError from a buggy caller, etc.).
-        #
-        # Single cleanup point: the ``finally`` block runs on EVERY
-        # exit path including the OSError wrap+raise below. We
-        # deliberately do NOT call ``_safe_unlink`` inside the
-        # ``except OSError`` block — that would run cleanup twice on
-        # the OSError path (once explicitly, once via finally), which
-        # is harmless today because ``_safe_unlink`` is idempotent but
-        # is extra I/O and a maintenance trap. One cleanup site, one
-        # source of truth.
+        # 10.5c.5: delegate the tmp-write + fsync to the shared
+        # primitive, keeping the atomic-write invariant in ONE place.
+        # Re-wrap any StoreError raised by the primitive with the
+        # public-API operation name so callers see
+        # ``operation="save_continuity"`` regardless of which internal
+        # helper actually raised (preserves the pre-10.5c.5 contract).
+        try:
+            tmp_path = self._prepare_continuity_write(text)
+        except StoreError as exc:
+            raise StoreError(
+                str(exc).replace("tmp sidecar", "file"),
+                operation="save_continuity",
+                path=str(path),
+            ) from exc.__cause__
         succeeded = False
         try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                f.write(text)
-                f.flush()
-                os.fsync(f.fileno())
             tmp_path.replace(path)
             succeeded = True
         except OSError as exc:
             raise StoreError(
-                f"Failed to write continuity file to {path}: {exc}",
+                f"Failed to rename continuity tmp to {path}: {exc}",
                 operation="save_continuity",
                 path=str(path),
             ) from exc
@@ -1666,21 +1859,24 @@ class Store:
                 regardless of exception class.
         """
         path = self.meta_path
-        tmp_path = path.with_suffix(".json.tmp")
-        # Single cleanup site — ``finally`` only. See the matching
-        # comment in ``save_continuity`` for rationale.
+        # 10.5c.5: delegate the tmp-write to the shared primitive.
+        # Re-wrap primitive StoreErrors with the public-API operation
+        # name so the pre-10.5c.5 contract holds.
+        try:
+            tmp_path = self._prepare_meta_write(meta)
+        except StoreError as exc:
+            raise StoreError(
+                str(exc).replace("tmp sidecar", "sidecar"),
+                operation="save_meta",
+                path=str(path),
+            ) from exc.__cause__
         succeeded = False
         try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(meta, f, indent=2, sort_keys=True)
-                f.write("\n")
-                f.flush()
-                os.fsync(f.fileno())
             tmp_path.replace(path)
             succeeded = True
         except OSError as exc:
             raise StoreError(
-                f"Failed to write meta sidecar to {path}: {exc}",
+                f"Failed to rename meta tmp to {path}: {exc}",
                 operation="save_meta",
                 path=str(path),
             ) from exc
@@ -1775,6 +1971,551 @@ class Store:
             session_id=row["session_id"],
             metadata=meta,
         )
+
+    # -- Two-phase commit / batched write mode (10.5c.5) --
+
+    def _audit_log(
+        self,
+        event: str,
+        payload: dict[str, Any] | None,
+        **kwargs: Any,
+    ) -> None:
+        """Audit log with batch-aware deferral.
+
+        Fires the audit event immediately when the store is in normal
+        mode. During a :meth:`_batch` context, queues the event into
+        ``_deferred_audits`` so it can be flushed only AFTER the outer
+        DB commit succeeds — preserving the "audit after externalize"
+        invariant even across batched multi-step writes.
+
+        Additional keyword arguments (e.g. ``actor="source"`` for
+        ``record()`` events) are passed through to ``AuditTrail.log``
+        when firing and stored alongside the queued tuple when
+        deferring. The tuple shape is
+        ``(event, payload, kwargs)`` — stable internal contract
+        since 10.5c.5 L3 Fix #17.
+
+        No-op if audit is disabled (``self._audit is None``).
+        """
+        if self._audit is None:
+            return
+        if self._defer_commit:
+            self._deferred_audits.append((event, payload, kwargs))
+        else:
+            self._audit.log(event, payload, **kwargs)
+
+    @contextmanager
+    def _batch(self) -> Iterator[None]:
+        """Suspend auto-commit + audit-firing for a multi-step pipeline.
+
+        The 10.5c.5 two-phase commit primitive. Write-path methods
+        check ``self._defer_commit`` and skip their own ``commit()``
+        calls while the flag is True; audit events route through
+        :meth:`_audit_log`, which queues them into
+        ``_deferred_audits``. On successful ``__exit__`` this context
+        manager does the single outer commit and then replays the
+        queued audit events, preserving the "audit only fires for
+        committed DML" invariant. On any exception it rolls back the
+        accumulated DML and discards the queued audits.
+
+        The caller is responsible for ordering file-side externalizations
+        (atomic renames of ``continuity.md.tmp`` and ``meta.json.tmp``)
+        AFTER the ``with`` block exits. The batch context only covers
+        the SQLite side; file atomicity is managed by
+        :meth:`_prepare_continuity_write` + :meth:`_prepare_meta_write`
+        at the caller level.
+
+        Nested use is not supported — nesting ``_batch()`` calls raises
+        ``RuntimeError``. Two-phase commit has exactly one outer
+        transaction by design.
+
+        **Audit-flush exceptions are swallowed after successful commit.**
+        Once the outer commit has returned, any exception from
+        replaying ``_deferred_audits`` is trapped inside ``__exit__``
+        and not re-raised. This preserves the load-bearing invariant
+        that a successful ``_batch()`` exit means "DB committed +
+        safe for the caller to proceed with file externalization."
+        Propagating an audit-flush failure would trick the caller's
+        outer ``except`` clause into cleaning up tmp files that
+        represent committed state — a data-loss path. L2 review M2.
+
+        **Python sqlite3 stdlib implicit-BEGIN quirk:** the store uses
+        the default ``isolation_level=""`` (legacy transaction
+        control). In theory this means ``BEGIN`` only fires before
+        DML, not before SELECT, so a read-only batch could leave the
+        connection with no open transaction at exit. In practice the
+        canonical 10.5c.5 pipeline always issues DML before any point
+        where rollback matters, and the
+        ``test_batched_dml_invisible_to_other_connection_until_commit``
+        regression gate empirically verifies that batched DML is in
+        a single transaction under the Python version this ships on.
+        If you ever add a read-only batch consumer, revisit this
+        assumption explicitly.
+
+        **Not reentrant. Not thread-safe. Not task-safe.** The
+        ``_defer_commit`` + ``_deferred_audits`` state lives on
+        ``self``. Do not share a Store instance across threads or
+        asyncio tasks while a batch is in flight.
+
+        **Batch-aware methods** (check ``_defer_commit`` and route
+        audit events through :meth:`_audit_log`):
+
+        - :meth:`record` (episode writes)
+        - :meth:`delete` (episode deletions)
+        - :meth:`record_associations` / :meth:`decay_associations`
+        - :meth:`wrap_completed`
+
+        All other write methods (``prune``, ``wrap_started``,
+        ``wrap_cancelled``, ``save_continuity``, ``save_meta``)
+        commit immediately and are NOT safe to call inside a batch —
+        doing so would break the single-transaction invariant.
+        Extend this list by adding the batch-aware guard to any new
+        write method that becomes part of a batched pipeline. L3
+        contrarian F1 flagged this as a forward-looking hazard;
+        check this list whenever adding a new write path.
+
+        **macOS durability caveat:** ``os.fsync`` on macOS (APFS)
+        flushes to the drive cache but NOT to the physical medium.
+        True durability requires ``fcntl(F_FULLFSYNC)``, which
+        Python's stdlib does not expose. The two-phase commit
+        ordering (DB commit → file rename) still holds under normal
+        crashes, but a power loss in the wrong microsecond can lose
+        the most recent committed wrap on macOS. L2 H1.
+        """
+        if self._defer_commit:
+            raise RuntimeError(
+                "Store._batch() does not support nesting. Two-phase "
+                "commit has exactly one outer transaction; nested "
+                "batches would break the commit-once invariant."
+            )
+        self._defer_commit = True
+        self._deferred_audits = []
+        commit_succeeded = False
+        try:
+            try:
+                yield
+            except BaseException:
+                # Rollback the accumulated DML. SQLite's rollback is
+                # safe to call even if an earlier method already
+                # rolled back (legacy ``wrap_completed`` CAS path
+                # outside a batch does this) — the second rollback
+                # is a harmless no-op. The queued audit events are
+                # discarded so no phantom audit entries are written
+                # for DML that never committed.
+                self._conn.rollback()
+                raise
+            # Single outer commit. If this raises (disk full, locked
+            # DB, etc.) rollback and re-raise — the exception
+            # propagates to the pipeline caller which has NOT yet
+            # externalized files, so the outer ``except`` cleans up
+            # tmp files correctly. The explicit rollback before
+            # re-raise closes a gap L3 complement F2 flagged: a
+            # failed commit leaves Python's sqlite3 wrapper in an
+            # ambiguous transaction state, and subsequent store use
+            # could see partial DML from the failed batch. Rolling
+            # back explicitly restores clean state.
+            try:
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+            commit_succeeded = True
+        finally:
+            # Unconditional flag reset — even if SIGINT fires between
+            # the commit and the audit flush, the store does NOT
+            # stay poisoned in ``_defer_commit=True``. L2 review H2.
+            deferred = self._deferred_audits
+            self._deferred_audits = []
+            self._defer_commit = False
+
+        # Commit succeeded. Flush deferred audits with exception
+        # swallowing — the DB is already committed and the load-
+        # bearing invariant is "successful batch exit ⇒ caller can
+        # externalize files." An audit-flush exception here must not
+        # propagate; it would trick the caller's ``except`` into
+        # unlinking tmp files that represent committed state (L2 M2
+        # / L1 audit-flush-destroys-committed-state path). Audit is
+        # best-effort at this point; we trade a missing audit event
+        # for durability of the actual wrap data.
+        if commit_succeeded and self._audit is not None:
+            for event, payload, kwargs in deferred:
+                try:
+                    self._audit.log(event, payload, **kwargs)
+                except Exception:
+                    # Best-effort. No logger wired at this layer;
+                    # silently drop the failing event and continue
+                    # flushing the rest. A future pass can route
+                    # this to a stderr warning or metric.
+                    pass
+
+    # -- 10.5c.5 L3 fix: unique tmp sidecar filename pattern.
+    #
+    # Two concurrent ``validated_save_continuity`` calls would race on
+    # a fixed ``*.md.tmp`` / ``*.json.tmp`` path — Process B's write
+    # could overwrite Process A's content before Process A renames,
+    # silently externalizing the wrong continuity text. The CAS token
+    # closes the DB race but happens AFTER Phase 1 tmp writes; the
+    # filesystem race is a distinct failure mode all three L3
+    # reviewers flagged independently (complement F1, gemini, contrarian F2).
+    #
+    # Fix: each prepare_*_write call generates a fresh ~12 char uuid
+    # suffix and writes to a unique tmp path. The suffix pattern
+    # (``continuity.{hex}.md.tmp`` / ``meta.{hex}.json.tmp``) stays
+    # globbable for startup orphan detection and operator recovery
+    # (L3 Fix #13).
+    _TMP_CONTINUITY_GLOB = "*.md.tmp"
+    _TMP_META_GLOB = "*.json.tmp"
+
+    def _continuity_tmp_path(self, token_hex: str | None = None) -> Path:
+        """Return a tmp sidecar path for continuity writes.
+
+        Pattern: ``<continuity_stem>.<12hex>.md.tmp`` (sits beside
+        the real continuity file). The hex suffix is either a
+        provided token prefix (for pairing with meta tmp writes in
+        the same wrap) or a fresh ``uuid.uuid4()`` hex slice for the
+        legacy standalone caller path.
+
+        **Pairing (10.5c.5 L3 Fix #19, codex HIGH).** When called
+        from the canonical pipeline, both ``_prepare_continuity_write``
+        and ``_prepare_meta_write`` pass the SAME wrap_token-derived
+        suffix so the two tmp files share an identifying prefix:
+        ``mystore.continuity.<token>.md.tmp`` +
+        ``mystore.meta.<token>.json.tmp``. Operators recovering from
+        multiple crashed wraps can pair files by token prefix,
+        which is impossible when each call uses an independent
+        random suffix.
+        """
+        suffix = token_hex or uuid.uuid4().hex[:12]
+        final = self.continuity_path
+        return final.with_name(f"{final.stem}.{suffix}.md.tmp")
+
+    def _meta_tmp_path(self, token_hex: str | None = None) -> Path:
+        """Return a tmp sidecar path for meta writes.
+
+        Same pairing-via-token semantics as
+        :meth:`_continuity_tmp_path`; callers in the canonical
+        pipeline pass the wrap-token-derived suffix so continuity
+        and meta tmp files share an identifying prefix. 10.5c.5
+        L3 Fix #19.
+        """
+        suffix = token_hex or uuid.uuid4().hex[:12]
+        final = self.meta_path
+        return final.with_name(f"{final.stem}.{suffix}.json.tmp")
+
+    def _find_orphan_tmp_files(self) -> list[Path]:
+        """Return list of orphan tmp sidecars from prior crashed pipelines.
+
+        A crashed ``validated_save_continuity`` between DB commit and
+        file rename leaves tmp sidecars on disk holding committed
+        content (L3 Fix #12's unique-uuid tmp paths make this
+        detectable rather than racy). This helper globs the
+        continuity / meta sidecar directories for any matching tmp
+        files and returns them sorted. Operator recovery: rename each
+        orphan tmp file to its final destination (``mv
+        mystore.continuity.ab12cd34.md.tmp mystore.continuity.md``).
+
+        **Active-wrap filtering (10.5c.5 L3 Fix #21, codex MEDIUM):**
+        tmp files whose embedded token matches the currently-active
+        ``wrap_token`` metadata are NOT treated as orphans — they
+        belong to an in-flight pipeline that hasn't reached Phase 3
+        renames yet. Filtering these out avoids a false-positive
+        warning when a second Store instance opens the same DB
+        during another writer's batch window. The post-commit
+        pre-rename window (microseconds) still produces false
+        positives because ``wrap_completed`` cleared the metadata
+        token before the rename happened — that narrow case is
+        accepted as documented residual risk.
+
+        Returns:
+            List of orphan tmp sidecar Paths, continuity-first then
+            meta, sorted within each class for deterministic output.
+            Empty list when the store is clean or when all detected
+            tmp files belong to an active wrap.
+        """
+        # Read current active wrap token (if any) so we can filter
+        # out in-flight tmps. 12-char prefix because that's what the
+        # tmp filenames embed.
+        active_token = self._get_metadata("wrap_token") or ""
+        active_prefix = active_token[:12] if active_token else ""
+
+        candidates: list[Path] = []
+        cont_parent = self.continuity_path.parent
+        cont_stem = self.continuity_path.stem  # e.g. "mystore.continuity"
+        if cont_parent.exists():
+            candidates.extend(
+                sorted(
+                    cont_parent.glob(f"{cont_stem}.*.md.tmp")
+                )
+            )
+        meta_parent = self.meta_path.parent
+        meta_stem = self.meta_path.stem  # e.g. "mystore.meta"
+        if meta_parent.exists():
+            candidates.extend(
+                sorted(
+                    meta_parent.glob(f"{meta_stem}.*.json.tmp")
+                )
+            )
+
+        # Filter out tmp files whose embedded token matches the
+        # currently-active wrap — those belong to an in-flight
+        # pipeline, not a crashed one.
+        if not active_prefix:
+            return candidates
+        return [
+            c for c in candidates
+            if self._token_from_orphan(c) != active_prefix
+        ]
+
+    def _warn_orphan_tmp_files(self) -> None:
+        """Emit a ``warnings.warn`` for each orphan tmp sidecar found.
+
+        Called from :meth:`__init__` before any pipeline activity
+        runs. The warning text includes the operator-recovery
+        instruction so an interactive user sees exactly what to do:
+        ``mv <tmp_path> <final_path>``. Programmatic callers that
+        filter warnings are unaffected; the detection is best-effort
+        and non-breaking.
+
+        Does NOT delete the files — they hold committed content and
+        cleanup is the operator's explicit decision.
+        """
+        orphans = self._find_orphan_tmp_files()
+        if not orphans:
+            return
+
+        # Group orphans by their embedded token prefix so paired
+        # continuity + meta tmp files surface as a single warning.
+        # The pipeline writes both tmp files with the SAME token
+        # prefix (10.5c.5 L3 Fix #19), so operators recovering
+        # multiple crashed wraps can match them: the `.md.tmp` with
+        # token X pairs with the `.json.tmp` with token X. Without
+        # this grouping, N crashed wraps would emit 2N unrelated
+        # warnings with no pairing information. 10.5c.5 L3 Fix #20.
+        groups: dict[str, dict[str, Path]] = {}
+        for orphan in orphans:
+            token = self._token_from_orphan(orphan)
+            bucket = groups.setdefault(token, {})
+            if orphan.name.endswith(".md.tmp"):
+                bucket["cont"] = orphan
+            elif orphan.name.endswith(".json.tmp"):
+                bucket["meta"] = orphan
+
+        for token, files in groups.items():
+            cont_orphan = files.get("cont")
+            meta_orphan = files.get("meta")
+            pair_desc_parts = []
+            recovery_parts = []
+            if cont_orphan is not None:
+                cont_final = self._final_path_for_orphan(cont_orphan)
+                pair_desc_parts.append(f"continuity: {cont_orphan}")
+                recovery_parts.append(f"mv '{cont_orphan}' '{cont_final}'")
+            if meta_orphan is not None:
+                meta_final = self._final_path_for_orphan(meta_orphan)
+                pair_desc_parts.append(f"meta: {meta_orphan}")
+                recovery_parts.append(f"mv '{meta_orphan}' '{meta_final}'")
+            pair_desc = " + ".join(pair_desc_parts)
+            recovery_cmd = " && ".join(recovery_parts)
+            missing = ""
+            if cont_orphan is None:
+                missing = (
+                    " (NOTE: no paired continuity tmp found — "
+                    "only the meta sidecar is present; recovery "
+                    "may be incomplete.)"
+                )
+            elif meta_orphan is None:
+                missing = (
+                    " (NOTE: no paired meta tmp found — only the "
+                    "continuity file is present; recovery may be "
+                    "incomplete — the meta sidecar will stay "
+                    "stale after recovery.)"
+                )
+            # Warning text: point operators at the ``continuity_saved``
+            # audit event, which is where the ``content_hash`` field
+            # lives. (Earlier 10.5c.5 text pointed at ``wrap_completed``
+            # which has no content_hash — codex L3 MEDIUM caught the
+            # unfollowable instruction.)
+            warnings.warn(
+                f"anneal-memory: orphan tmp sidecar(s) detected for "
+                f"wrap token prefix '{token}' — this indicates a "
+                f"prior wrap pipeline crashed between DB commit and "
+                f"file rename. Files: {pair_desc}.{missing} "
+                f"These tmp files hold committed content and need "
+                f"manual recovery. To finish the wrap, run: "
+                f"{recovery_cmd}. If you're unsure whether these "
+                f"represent committed state or stale debris, inspect "
+                f"the audit trail for a ``continuity_saved`` event "
+                f"(which carries the content_hash) or a "
+                f"``wrap_completed`` event with wrap_token starting "
+                f"'{token}'; a paired record in the audit trail "
+                f"confirms the wrap was committed before the "
+                f"crash and the recovery is safe.",
+                UserWarning,
+                stacklevel=3,
+            )
+
+    @staticmethod
+    def _token_from_orphan(orphan: Path) -> str:
+        """Extract the token prefix from an orphan tmp filename.
+
+        Pattern: ``<stem>.<12hex>.md.tmp`` → ``<12hex>``.
+        Returns ``"unknown"`` if the pattern doesn't match (legacy
+        or malformed filenames).
+        """
+        parts = orphan.name.split(".")
+        if len(parts) >= 4 and parts[-1] == "tmp":
+            return parts[-3]  # the token slot
+        return "unknown"
+
+    @staticmethod
+    def _final_path_for_orphan(orphan: Path) -> Path:
+        """Derive the final destination path from an orphan tmp path.
+
+        Pattern: ``<stem>.<12hex>.md.tmp`` → ``<stem>.md``.
+        Pattern: ``<stem>.<12hex>.json.tmp`` → ``<stem>.json``.
+        """
+        # Example: mystore.continuity.abcd12345678.md.tmp
+        # name parts split on '.': [mystore, continuity, abcd12345678, md, tmp]
+        parts = orphan.name.split(".")
+        if len(parts) >= 3 and parts[-1] == "tmp":
+            # Drop the uuid (second-to-last-before-extension) and "tmp".
+            # Real extension is parts[-2] (md or json).
+            ext = parts[-2]
+            stem_parts = parts[:-3]  # drop uuid, ext, tmp
+            return orphan.with_name(".".join(stem_parts) + "." + ext)
+        # Defensive fallback: strip only the ``.tmp`` suffix.
+        return orphan.with_suffix("")
+
+    def _prepare_continuity_write(
+        self, text: str, token_hex: str | None = None
+    ) -> Path:
+        """Write continuity text to a tmp sidecar; do not rename.
+
+        Primitive used by the 10.5c.5 two-phase commit pipeline. Writes
+        a uuid-suffixed tmp sidecar (e.g.
+        ``mystore.continuity.ab12cd34ef56.md.tmp``) with ``fsync`` so
+        the content is durable on disk, but leaves the final
+        ``continuity.md`` untouched. The caller is responsible for:
+
+        1. Calling :meth:`_commit` (directly or via :meth:`_batch`) on
+           any DB DML that should be atomic with this write.
+        2. After the DB commit succeeds, renaming the returned tmp
+           path to :attr:`continuity_path` (atomic on POSIX and
+           Windows).
+        3. On failure anywhere in the pipeline, cleaning up the tmp
+           file via :func:`_safe_unlink`.
+
+        Internal use only — outside the library pipeline, call
+        :meth:`save_continuity` for the full write+rename+audit
+        sequence.
+
+        **Concurrent-writer safety (10.5c.5 L3 Fix #12):** each call
+        generates a unique suffix so two concurrent
+        ``validated_save_continuity`` invocations cannot race on the
+        same tmp path. Orphan tmp files from crashed pipelines are
+        discoverable via :meth:`_find_orphan_tmp_files` at store open.
+
+        **Pairing via wrap token (10.5c.5 L3 Fix #19, codex HIGH):**
+        the canonical pipeline passes a 12-char slice of the
+        current wrap_token as ``token_hex`` so the returned tmp path
+        is paired with the meta tmp path written for the same wrap.
+        Operators recovering from multiple crashed wraps can pair
+        continuity + meta tmps by their shared token prefix. When
+        ``token_hex`` is None (legacy ``save_continuity`` standalone
+        path), a fresh random uuid is used — standalone writes
+        rename immediately and never leave orphans, so pairing is
+        unnecessary.
+
+        Args:
+            text: Continuity markdown content.
+            token_hex: Optional pairing prefix; should be a 12-char
+                hex slice of the wrap_token to pair with the
+                corresponding meta tmp write.
+
+        Returns:
+            Path to the tmp sidecar that was written.
+
+        Raises:
+            StoreError: On file-I/O failure. The tmp file is cleaned
+                up before raising. ``.operation ==
+                "prepare_continuity_write"``, ``.path`` points at the
+                final continuity destination (not the tmp sidecar).
+        """
+        path = self.continuity_path
+        tmp_path = self._continuity_tmp_path(token_hex)
+        succeeded = False
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            # Sync the parent directory so the tmp file's directory
+            # entry is durable before the caller proceeds to the DB
+            # commit. Without this, a crash between file fsync and
+            # the later rename can leave the tmp file non-existent
+            # on recovery even though the data was durable. 10.5c.5
+            # L2 H1. Best-effort; POSIX only.
+            _fsync_dir(path.parent)
+            succeeded = True
+        except OSError as exc:
+            raise StoreError(
+                f"Failed to write continuity tmp sidecar to {tmp_path}: {exc}",
+                operation="prepare_continuity_write",
+                path=str(path),
+            ) from exc
+        finally:
+            if not succeeded:
+                _safe_unlink(tmp_path)
+        return tmp_path
+
+    def _prepare_meta_write(
+        self, meta: dict, token_hex: str | None = None
+    ) -> Path:
+        """Write meta sidecar to a tmp file; do not rename.
+
+        Primitive used by the 10.5c.5 two-phase commit pipeline. Same
+        semantics as :meth:`_prepare_continuity_write` — passes
+        ``token_hex`` through to :meth:`_meta_tmp_path` so the tmp
+        file pairs with the corresponding continuity tmp via a
+        shared prefix. Internal use only.
+
+        Args:
+            meta: Meta sidecar JSON-serializable dict.
+            token_hex: Optional pairing prefix; pass a 12-char hex
+                slice of the wrap_token to pair with the
+                corresponding continuity tmp write.
+
+        Returns:
+            Path to the tmp sidecar that was written.
+
+        Raises:
+            StoreError: On file-I/O failure. The tmp file is cleaned
+                up before raising. ``.operation ==
+                "prepare_meta_write"``, ``.path`` points at the final
+                meta destination.
+        """
+        path = self.meta_path
+        tmp_path = self._meta_tmp_path(token_hex)
+        succeeded = False
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2, sort_keys=True)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            # Parent dir fsync — see _prepare_continuity_write for
+            # rationale. 10.5c.5 L2 H1.
+            _fsync_dir(path.parent)
+            succeeded = True
+        except OSError as exc:
+            raise StoreError(
+                f"Failed to write meta tmp sidecar to {tmp_path}: {exc}",
+                operation="prepare_meta_write",
+                path=str(path),
+            ) from exc
+        finally:
+            if not succeeded:
+                _safe_unlink(tmp_path)
+        return tmp_path
 
     def close(self) -> None:
         """Close the database connection."""

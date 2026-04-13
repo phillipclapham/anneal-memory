@@ -20,15 +20,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Module-level wrap-token shape constant. Mirrors the JSON schema
-# pattern in ``integrity.py`` for the ``save_continuity`` tool's
-# ``wrap_token`` field. Kept as a module-level compiled regex so the
-# transport doesn't re-compile on every call AND so a future second
-# transport (WebSocket, gRPC, etc.) can import the same constant
-# instead of duplicating the pattern inline — contrarian Layer 3 F1
-# flagged the inline ``import re`` pattern as a rule-of-three risk.
-_WRAP_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
-
 from . import __version__
 from .continuity import (
     format_wrap_package_text,
@@ -36,7 +27,12 @@ from .continuity import (
     validated_save_continuity as _lib_validated_save_continuity,
 )
 from .integrity import RESOURCES, TOOLS, hash_tool, generate_integrity_file, verify_integrity
-from .store import Store, StoreError
+# ``_WRAP_TOKEN_RE`` lives in ``store.py`` as of 10.5c.5 — shared
+# shape constant importable by any transport (CLI, MCP, future
+# WebSocket/gRPC). The earlier server-module home was an
+# architectural wart that made the CLI load the entire MCP server
+# module just to reach one compiled regex.
+from .store import Store, StoreError, _WRAP_TOKEN_RE
 from .types import AffectiveState
 
 logger = logging.getLogger("anneal-memory")

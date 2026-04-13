@@ -715,9 +715,14 @@ class TestStoreError:
             # At this point ``with open(...) as f`` has already
             # created the tmp file on disk. Snapshot existence
             # before raising so the assertion downstream is real.
-            tmp_existed_at_fsync.append(
-                (store.continuity_path.with_suffix(".md.tmp")).exists()
+            # 10.5c.5 L3 Fix #12 uses uuid-suffixed tmp filenames
+            # (e.g. ``mystore.continuity.abc12345.md.tmp``), so we
+            # glob for any matching tmp file rather than checking a
+            # fixed path.
+            tmps = list(
+                store.continuity_path.parent.glob("*.md.tmp")
             )
+            tmp_existed_at_fsync.append(len(tmps) > 0)
             raise OSError("injected fsync failure")
 
         monkeypatch.setattr(os, "fsync", exploding_fsync)

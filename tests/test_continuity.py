@@ -12,7 +12,7 @@ from anneal_memory.continuity import (
     prepare_wrap_package,
     validate_structure,
 )
-from anneal_memory.store import Store
+from anneal_memory.store import Store, StoreError
 from anneal_memory.types import Episode, EpisodeType
 
 
@@ -1769,4 +1769,1582 @@ class TestTOCTOUHandshakeToken:
             assert store.status().total_wraps == 1
         finally:
             store.close()
+
+
+# -- 10.5c.5 Two-phase commit (file/DB atomicity) --
+
+
+class TestTwoPhaseCommit:
+    """10.5c.5 — file/DB atomicity via tmp-sidecar + batched SQLite txn.
+
+    These tests inject failures at each stage of the canonical save
+    pipeline and verify that:
+      1. The pre-wrap state is cleanly restored on any failure BEFORE
+         the batched DB commit (no partial wraps row, no stale
+         wrap_started_at, no orphan .tmp files, no continuity / meta
+         file mutation).
+      2. The batch context manager actually defers all intermediate
+         commits — an in-flight DML snapshot shows uncommitted writes
+         to a separate connection, and a crash rolls them all back.
+      3. The narrow "DB committed, renames pending" window is
+         recoverable: the DB reflects the new wrap, the old continuity
+         / meta files remain intact, and the tmp sidecars still hold
+         the new content.
+    """
+
+    @staticmethod
+    def _make_continuity(project_name: str, cited_id: str) -> str:
+        return (
+            f"# {project_name} — Memory (v1)\n\n"
+            f"## State\nWorking.\n\n"
+            f"## Patterns\n"
+            f"{{core:\n"
+            f"  thought: two-phase commit holds "
+            f"| 1x (2026-04-10)\n"
+            f"}}\n\n"
+            f"## Decisions\n"
+            f"[decided(rationale: \"2pc\", on: \"2026-04-10\")] ok\n\n"
+            f"## Context\nCited {cited_id}.\n"
+        )
+
+    def _prime_store(self, db_path: str, project: str):
+        """Record one episode, prepare a wrap, return (store, text, token)."""
+        from anneal_memory import prepare_wrap
+
+        store = Store(db_path, project_name=project)
+        ep = store.record("Seed observation", EpisodeType.OBSERVATION)
+        result = prepare_wrap(store)
+        text = self._make_continuity(project, ep.id)
+        return store, text, result["wrap_token"]
+
+    def _count_wraps(self, store: Store) -> int:
+        row = store._conn.execute(
+            "SELECT COUNT(*) FROM wraps"
+        ).fetchone()
+        return row[0]
+
+    # -- Failure: continuity tmp write fails --
+
+    def test_continuity_tmp_write_failure_leaves_clean_state(
+        self, tmp_path, monkeypatch
+    ):
+        """StoreError from _prepare_continuity_write: no DB mutation,
+        no continuity / meta changes, no orphan tmp files."""
+        from anneal_memory import validated_save_continuity
+
+        db_path = str(tmp_path / "cont_fail.db")
+        store, text, token = self._prime_store(db_path, "ContFail")
+        try:
+            wraps_before = self._count_wraps(store)
+            snapshot_before = store.load_wrap_snapshot()
+            assert snapshot_before is not None  # wrap IS in progress
+
+            original = Store._prepare_continuity_write
+
+            def exploding(self, text_arg, token_hex=None):
+                raise StoreError(
+                    "injected continuity tmp write failure",
+                    operation="prepare_continuity_write",
+                    path=str(self.continuity_path),
+                )
+
+            monkeypatch.setattr(Store, "_prepare_continuity_write", exploding)
+            with pytest.raises(StoreError, match="injected continuity"):
+                validated_save_continuity(store, text, wrap_token=token)
+
+            # Post-conditions: pre-wrap state intact.
+            monkeypatch.setattr(Store, "_prepare_continuity_write", original)
+            assert self._count_wraps(store) == wraps_before
+            # Snapshot still present — wrap was not completed.
+            assert store.load_wrap_snapshot() is not None
+            # No orphan tmp files.
+            assert not list(
+                store.continuity_path.parent.glob("*.md.tmp")
+            )
+            assert not list(
+                store.continuity_path.parent.glob("*.json.tmp")
+            )
+        finally:
+            store.close()
+
+    # -- Failure: meta tmp write fails (mid-batch) --
+
+    def test_meta_tmp_write_failure_rolls_back_batch(
+        self, tmp_path, monkeypatch
+    ):
+        """StoreError from _prepare_meta_write inside the batch:
+        associations DML rolled back, continuity tmp cleaned up,
+        no wraps row inserted, snapshot still in progress."""
+        from anneal_memory import validated_save_continuity
+
+        db_path = str(tmp_path / "meta_fail.db")
+        store, text, token = self._prime_store(db_path, "MetaFail")
+        try:
+            wraps_before = self._count_wraps(store)
+
+            original = Store._prepare_meta_write
+
+            def exploding(self, meta_arg, token_hex=None):
+                raise StoreError(
+                    "injected meta tmp write failure",
+                    operation="prepare_meta_write",
+                    path=str(self.meta_path),
+                )
+
+            monkeypatch.setattr(Store, "_prepare_meta_write", exploding)
+            with pytest.raises(StoreError, match="injected meta"):
+                validated_save_continuity(store, text, wrap_token=token)
+
+            monkeypatch.setattr(Store, "_prepare_meta_write", original)
+
+            # DB rolled back: no new wrap, no associations persisted.
+            assert self._count_wraps(store) == wraps_before
+            assert store.load_wrap_snapshot() is not None
+            assert not list(
+                store.continuity_path.parent.glob("*.md.tmp")
+            )
+            assert not list(
+                store.continuity_path.parent.glob("*.json.tmp")
+            )
+        finally:
+            store.close()
+
+    # -- Failure: continuity rename fails (after DB commit) --
+
+    def test_continuity_rename_failure_preserves_tmp_for_recovery(
+        self, tmp_path, monkeypatch
+    ):
+        """OSError from continuity tmp -> real rename (post-DB-commit):
+        the residual risk window. DB reflects the new wrap (including
+        cleared snapshot), continuity and meta files remain the
+        pre-wrap versions, but BOTH .tmp files PERSIST on disk with
+        the new content. This is the load-bearing invariant: once the
+        batch has committed, the outer except clause MUST NOT unlink
+        the tmp files, because they hold the committed state that
+        still needs to be externalized. Operator recovery: manually
+        ``mv *.md.tmp *.md`` and ``mv *.json.tmp *.json``.
+
+        10.5c.5 L1 HIGH + L2 M2 — prior implementation unlinked the
+        tmp files on post-commit failure, destroying the new content
+        permanently and making the "residual window recoverable via
+        wrap-status/wrap-cancel" story a lie.
+        """
+        from anneal_memory import validated_save_continuity
+
+        db_path = str(tmp_path / "rename_fail.db")
+        store, text, token = self._prime_store(db_path, "RenameFail")
+        try:
+            wraps_before = self._count_wraps(store)
+            # Establish a known-pre-wrap continuity baseline so we
+            # can assert the rename failure did NOT clobber it.
+            pre_wrap_contents = None
+            if store.continuity_path.exists():
+                pre_wrap_contents = store.continuity_path.read_text(
+                    encoding="utf-8"
+                )
+
+            from pathlib import Path as _Path
+            original_replace = _Path.replace
+
+            def flaky_replace(self, target):
+                if self.suffix == ".tmp" and self.name.endswith(".md.tmp"):
+                    raise OSError(
+                        "injected continuity rename failure"
+                    )
+                return original_replace(self, target)
+
+            monkeypatch.setattr(_Path, "replace", flaky_replace)
+
+            with pytest.raises(StoreError, match="continuity tmp"):
+                validated_save_continuity(store, text, wrap_token=token)
+
+            monkeypatch.setattr(_Path, "replace", original_replace)
+
+            # DB WAS committed before the rename failed.
+            assert self._count_wraps(store) == wraps_before + 1
+            # Snapshot is cleared because wrap_completed ran inside
+            # the batch and the batch did commit.
+            assert store.load_wrap_snapshot() is None
+            # Continuity file on disk is STILL the pre-wrap version.
+            if pre_wrap_contents is not None:
+                assert store.continuity_path.read_text(encoding="utf-8") == \
+                    pre_wrap_contents
+
+            # THE LOAD-BEARING ASSERTION: tmp files must PERSIST.
+            # They hold the committed state awaiting externalization.
+            cont_tmp_files = list(
+                store.continuity_path.parent.glob("*.md.tmp")
+            )
+            meta_tmp_files = list(
+                store.continuity_path.parent.glob("*.json.tmp")
+            )
+            assert len(cont_tmp_files) == 1, (
+                f"continuity tmp should persist for operator recovery; "
+                f"found: {cont_tmp_files}"
+            )
+            assert len(meta_tmp_files) == 1, (
+                f"meta tmp should persist for operator recovery; "
+                f"found: {meta_tmp_files}"
+            )
+
+            # And they must hold the NEW content, not old.
+            cont_tmp_text = cont_tmp_files[0].read_text(encoding="utf-8")
+            assert cont_tmp_text == text.replace(
+                "| 1x (2026-04-10)",
+                # graduation may rewrite the date or status — just
+                # verify the marker content we know is unique to
+                # the new wrap is present.
+                "| 1x (2026-04-10)",
+            ) or "two-phase commit holds" in cont_tmp_text
+
+            # Simulate operator recovery: finish the rename manually.
+            cont_tmp_files[0].replace(store.continuity_path)
+            meta_tmp_files[0].replace(store.meta_path)
+
+            # After manual recovery the store is in the committed
+            # state the pipeline would have produced on a clean run.
+            assert "two-phase commit holds" in store.continuity_path.read_text(
+                encoding="utf-8"
+            )
+        finally:
+            store.close()
+
+    # -- Behavioral: batched DML is atomic (visible to separate conn only after commit) --
+
+    def test_batched_dml_invisible_to_other_connection_until_commit(
+        self, tmp_path
+    ):
+        """The batch context manager must keep intermediate DML
+        uncommitted. A separate read connection against the same DB
+        file sees ZERO new wraps until the batch exits successfully.
+        """
+        import sqlite3
+        from anneal_memory import validated_save_continuity
+
+        db_path = str(tmp_path / "visibility.db")
+        store, text, token = self._prime_store(db_path, "Visibility")
+        try:
+            # Snapshot the "other reader" count before save.
+            other = sqlite3.connect(db_path)
+            other.row_factory = sqlite3.Row
+            before = other.execute("SELECT COUNT(*) FROM wraps").fetchone()[0]
+            other.close()
+
+            validated_save_continuity(store, text, wrap_token=token)
+
+            # After save completes, the new wrap IS visible externally.
+            other = sqlite3.connect(db_path)
+            other.row_factory = sqlite3.Row
+            after = other.execute("SELECT COUNT(*) FROM wraps").fetchone()[0]
+            other.close()
+            assert after == before + 1
+        finally:
+            store.close()
+
+    # -- Behavioral: nested batch raises --
+
+    def test_nested_batch_raises(self, tmp_path):
+        """Two-phase commit has exactly one outer transaction; nested
+        _batch() calls would break the commit-once invariant. Guard
+        it at the API level.
+        """
+        store = Store(str(tmp_path / "nested.db"), project_name="Nested")
+        try:
+            with store._batch():
+                with pytest.raises(RuntimeError, match="does not support nesting"):
+                    with store._batch():
+                        pass
+        finally:
+            store.close()
+
+    # -- Behavioral: batch commits on successful exit --
+
+    def test_batch_commits_on_success(self, tmp_path):
+        """The batch context manager performs the single outer commit
+        at __exit__ after a successful body. A simple DML inside the
+        batch should be visible to a separate connection AFTER exit
+        but NOT before.
+        """
+        import sqlite3
+
+        db_path = str(tmp_path / "commit.db")
+        store = Store(db_path, project_name="Commit")
+        try:
+            # Pre-check: no episodes in store.
+            assert store._conn.execute(
+                "SELECT COUNT(*) FROM episodes"
+            ).fetchone()[0] == 0
+
+            with store._batch():
+                store.record(
+                    "Inside batch", EpisodeType.OBSERVATION
+                )
+                # Inside the batch, another connection sees zero.
+                other = sqlite3.connect(db_path)
+                other.row_factory = sqlite3.Row
+                seen_mid_batch = other.execute(
+                    "SELECT COUNT(*) FROM episodes"
+                ).fetchone()[0]
+                other.close()
+                # Note: record() itself may commit (the episode-write
+                # path is outside the batched-commit scope by design
+                # — batching is scoped to wrap-path methods). This
+                # test is about verifying _batch() survives a
+                # successful cycle without raising, not about
+                # universal write isolation.
+
+            # After the batch exits, our own connection is committed
+            # state; the episode must be visible.
+            other = sqlite3.connect(db_path)
+            other.row_factory = sqlite3.Row
+            seen_after = other.execute(
+                "SELECT COUNT(*) FROM episodes"
+            ).fetchone()[0]
+            other.close()
+            assert seen_after == 1
+        finally:
+            store.close()
+
+    # -- Behavioral: exception inside batch rolls back --
+
+    def test_batch_rolls_back_on_exception(self, tmp_path):
+        """Exception inside the batch body triggers rollback of
+        accumulated DML. A wraps INSERT executed directly on
+        self._conn inside a failing batch must NOT persist.
+        """
+        import sqlite3
+
+        db_path = str(tmp_path / "rollback.db")
+        store = Store(db_path, project_name="Rollback")
+        try:
+            with pytest.raises(RuntimeError, match="injected"):
+                with store._batch():
+                    store._conn.execute(
+                        "INSERT INTO wraps "
+                        "(wrapped_at, episodes_compressed, continuity_chars) "
+                        "VALUES (?, ?, ?)",
+                        ("2026-04-10T00:00:00Z", 1, 100),
+                    )
+                    raise RuntimeError("injected mid-batch failure")
+
+            # Wraps table must still be empty.
+            other = sqlite3.connect(db_path)
+            other.row_factory = sqlite3.Row
+            count = other.execute(
+                "SELECT COUNT(*) FROM wraps"
+            ).fetchone()[0]
+            other.close()
+            assert count == 0
+
+            # And flag is reset so subsequent calls behave normally.
+            assert store._defer_commit is False
+            assert store._deferred_audits == []
+        finally:
+            store.close()
+
+    # -- Behavioral: deferred audits only fire after commit --
+
+    def test_deferred_audits_discarded_on_rollback(self, tmp_path):
+        """Audit events queued inside a failing batch must NOT be
+        written to the audit trail after rollback. Prevents phantom
+        entries for DML that never committed.
+        """
+        from anneal_memory.audit import AuditTrail
+
+        db_path = str(tmp_path / "audit_rollback.db")
+        store = Store(db_path, project_name="AuditRollback", audit=True)
+        try:
+            assert store._audit is not None
+            audit_path = store._audit._active_path
+
+            # Count audit entries before.
+            def count_audit_entries() -> int:
+                if not audit_path.exists():
+                    return 0
+                return sum(1 for _ in audit_path.read_text(
+                    encoding="utf-8"
+                ).splitlines() if _.strip())
+
+            entries_before = count_audit_entries()
+
+            with pytest.raises(RuntimeError, match="injected"):
+                with store._batch():
+                    # Queue an event directly.
+                    store._audit_log("test_event", {"marker": "nope"})
+                    # Simulate the store verifying the queued payload
+                    # — it should NOT have hit the audit file yet.
+                    assert count_audit_entries() == entries_before
+                    raise RuntimeError("injected failure after queueing")
+
+            # After rollback, the deferred audit event is discarded.
+            assert count_audit_entries() == entries_before
+            assert store._deferred_audits == []
+        finally:
+            store.close()
+
+    # -- Behavioral: successful save still fires all expected audits --
+
+    def test_successful_save_fires_all_audits(self, tmp_path):
+        """Regression guard: the batched save path still fires
+        wrap_completed, continuity_saved, and associations_* audit
+        events in the correct order. Confirms batching did NOT
+        silently drop audit events.
+        """
+        import json as json_mod
+        from anneal_memory import validated_save_continuity
+
+        db_path = str(tmp_path / "audits.db")
+        store, text, token = self._prime_store(db_path, "Audits")
+        try:
+            assert store._audit is not None
+            audit_path = store._audit._active_path
+
+            def read_events() -> list[dict]:
+                if not audit_path.exists():
+                    return []
+                events: list[dict] = []
+                for line in audit_path.read_text(
+                    encoding="utf-8"
+                ).splitlines():
+                    if not line.strip():
+                        continue
+                    events.append(json_mod.loads(line))
+                return events
+
+            before = read_events()
+            validated_save_continuity(store, text, wrap_token=token)
+            after = read_events()
+
+            new_events = after[len(before):]
+            event_names = [e["event"] for e in new_events]
+            assert "wrap_completed" in event_names
+            assert "continuity_saved" in event_names
+            # The wrap_completed event must come before
+            # continuity_saved because the batch flushes its deferred
+            # audits BEFORE the pipeline fires the post-rename
+            # continuity_saved event.
+            assert event_names.index("wrap_completed") < event_names.index(
+                "continuity_saved"
+            )
+        finally:
+            store.close()
+
+
+class TestPostReviewFixes:
+    """10.5c.5 post-L1/L2-review regression gates.
+
+    Each test here covers a specific finding from the 4-layer review
+    that previously had NO regression coverage. These are the
+    tests the review said should have existed.
+    """
+
+    @staticmethod
+    def _make_continuity(project_name: str, cited_id: str) -> str:
+        return (
+            f"# {project_name} — Memory (v1)\n\n"
+            f"## State\nWorking.\n\n"
+            f"## Patterns\n"
+            f"{{core:\n"
+            f"  thought: post review fix coverage "
+            f"| 1x (2026-04-10)\n"
+            f"}}\n\n"
+            f"## Decisions\n"
+            f"[decided(rationale: \"regression\", on: \"2026-04-10\")] ok\n\n"
+            f"## Context\nCited {cited_id}.\n"
+        )
+
+    def _prime_store_with_retention(self, db_path: str, retention_days: int):
+        """Store with retention configured, one old episode + one fresh."""
+        from datetime import datetime, timedelta, timezone
+        from anneal_memory import prepare_wrap
+
+        store = Store(
+            db_path,
+            project_name="Retention",
+            retention_days=retention_days,
+        )
+        # Record a fresh episode that will survive pruning.
+        fresh_ep = store.record(
+            "fresh observation", EpisodeType.OBSERVATION
+        )
+        # Backdate an old episode past the retention threshold. We
+        # reach into the DB directly because the Store API doesn't
+        # expose timestamp override — this mirrors how the existing
+        # prune tests seed stale rows.
+        old_ts = (
+            datetime.now(timezone.utc)
+            - timedelta(days=retention_days + 10)
+        ).isoformat().replace("+00:00", "Z")
+        store._conn.execute(
+            "UPDATE episodes SET timestamp = ? WHERE id = ?",
+            (old_ts, fresh_ep.id),
+        )
+        # Add ANOTHER fresh episode that we actually cite in the
+        # wrap, so graduation has a live ID to validate against.
+        live_ep = store.record(
+            "live observation that the wrap cites",
+            EpisodeType.OBSERVATION,
+        )
+        store._conn.commit()
+        prepare_wrap(store)
+        text = self._make_continuity("Retention", live_ep.id)
+        # Return fresh_ep id so the test can verify it was pruned.
+        return store, text, fresh_ep.id
+
+    # -- L1 CRITICAL: auto-prune regression through canonical pipeline --
+
+    def test_canonical_pipeline_runs_auto_prune(self, tmp_path):
+        """retention_days configured + canonical pipeline → old
+        episodes are pruned after the wrap completes. Regression
+        guard for the L1 CRITICAL finding: the batched pipeline was
+        silently skipping prune inside wrap_completed and the
+        pipeline caller never invoked it, so users with
+        retention_days configured would silently stop getting
+        lifecycle management.
+        """
+        from anneal_memory import validated_save_continuity
+
+        db_path = str(tmp_path / "retention.db")
+        store, text, stale_id = self._prime_store_with_retention(
+            db_path, retention_days=7
+        )
+        try:
+            # Verify the stale episode exists pre-pipeline.
+            row = store._conn.execute(
+                "SELECT id FROM episodes WHERE id = ?", (stale_id,)
+            ).fetchone()
+            assert row is not None
+
+            result = validated_save_continuity(store, text)
+
+            # Pipeline returned a pruned_count reflecting the prune.
+            # (Exact count depends on how many stale episodes seed,
+            # but the key invariant is "at least 1 pruned.")
+            pruned_count = result["wrap_result"]["pruned_count"]
+            assert pruned_count >= 1, (
+                f"auto-prune did not run — pruned_count={pruned_count}"
+            )
+
+            # Stale episode is gone from the episodes table OR marked
+            # as a tombstone (depending on keep_tombstones setting).
+            row = store._conn.execute(
+                "SELECT id FROM episodes WHERE id = ?", (stale_id,)
+            ).fetchone()
+            assert row is None, (
+                f"stale episode {stale_id} still in episodes table "
+                f"after auto-prune"
+            )
+        finally:
+            store.close()
+
+    def test_canonical_pipeline_skips_prune_when_no_retention(self, tmp_path):
+        """retention_days is None → pipeline does NOT invoke prune.
+        Negative-space companion to the regression guard above — we
+        don't want to accidentally prune when the user hasn't opted
+        into retention management.
+        """
+        from anneal_memory import prepare_wrap, validated_save_continuity
+
+        db_path = str(tmp_path / "no_retention.db")
+        store = Store(db_path, project_name="NoRetention")
+        try:
+            ep = store.record("obs", EpisodeType.OBSERVATION)
+            prepare_wrap(store)
+            text = self._make_continuity("NoRetention", ep.id)
+            result = validated_save_continuity(store, text)
+            assert result["wrap_result"]["pruned_count"] == 0
+        finally:
+            store.close()
+
+    # -- L2 M2: audit-flush failure must not propagate --
+
+    def test_audit_flush_failure_does_not_propagate(
+        self, tmp_path, monkeypatch
+    ):
+        """Audit log raising mid-flush during batch __exit__ must be
+        swallowed. Otherwise the exception propagates through the
+        pipeline's outer except, which unlinks the tmp files — the
+        DB is already committed, so that would permanently destroy
+        the new wrap content. Regression guard for L2 M2.
+        """
+        from anneal_memory import validated_save_continuity
+
+        db_path = str(tmp_path / "audit_flush.db")
+        store, text, token = _prime_simple(db_path, "AuditFlush")
+        try:
+            wraps_before = store._conn.execute(
+                "SELECT COUNT(*) FROM wraps"
+            ).fetchone()[0]
+
+            # Inject a failure ONLY in the deferred-audit flush path.
+            # We target self._audit.log itself, raising on the
+            # wrap_completed event. All other audit sites (pre-batch
+            # and post-rename continuity_saved) still fire normally.
+            assert store._audit is not None
+            original_log = store._audit.log
+            call_count = {"n": 0}
+
+            def flaky_log(event, payload):
+                call_count["n"] += 1
+                if event == "wrap_completed":
+                    raise OSError(
+                        "injected audit flush failure"
+                    )
+                return original_log(event, payload)
+
+            monkeypatch.setattr(store._audit, "log", flaky_log)
+
+            # The pipeline must complete successfully despite the
+            # audit failure. DB committed + files externalized +
+            # no exception propagated.
+            result = validated_save_continuity(
+                store, text, wrap_token=token
+            )
+
+            assert result["episodes_compressed"] >= 1
+            # DB committed.
+            assert store._conn.execute(
+                "SELECT COUNT(*) FROM wraps"
+            ).fetchone()[0] == wraps_before + 1
+            # Files externalized.
+            assert store.continuity_path.exists()
+            assert store.meta_path.exists()
+            # No orphan tmp files (this is the healthy-path
+            # assertion; tmp files persist only on post-commit
+            # failure, which isn't what we're testing here — we're
+            # testing that AUDIT failure does NOT count as
+            # post-commit failure for cleanup purposes).
+            assert not list(
+                store.continuity_path.parent.glob("*.md.tmp")
+            )
+            assert not list(
+                store.continuity_path.parent.glob("*.json.tmp")
+            )
+        finally:
+            store.close()
+
+    # -- L2 H2: _defer_commit flag reset is unconditional --
+
+    def test_defer_commit_reset_after_successful_save(self, tmp_path):
+        """After a successful validated_save_continuity, _defer_commit
+        must be False. Guard against the poisoned-store scenario
+        where a commit succeeds but the flag stays True.
+        """
+        from anneal_memory import validated_save_continuity
+
+        db_path = str(tmp_path / "reset_success.db")
+        store, text, token = _prime_simple(db_path, "ResetSuccess")
+        try:
+            validated_save_continuity(store, text, wrap_token=token)
+            assert store._defer_commit is False
+            assert store._deferred_audits == []
+        finally:
+            store.close()
+
+    def test_defer_commit_reset_after_failed_save(
+        self, tmp_path, monkeypatch
+    ):
+        """After validated_save_continuity raises from inside the
+        batch, _defer_commit must be False. Guard against the
+        poisoned-store scenario under the exception path.
+        """
+        from anneal_memory import validated_save_continuity
+
+        db_path = str(tmp_path / "reset_fail.db")
+        store, text, token = _prime_simple(db_path, "ResetFail")
+        try:
+            def exploding(self, meta_arg, token_hex=None):
+                raise StoreError(
+                    "injected meta failure",
+                    operation="prepare_meta_write",
+                    path=str(self.meta_path),
+                )
+
+            monkeypatch.setattr(Store, "_prepare_meta_write", exploding)
+            with pytest.raises(StoreError):
+                validated_save_continuity(store, text, wrap_token=token)
+
+            assert store._defer_commit is False
+            assert store._deferred_audits == []
+        finally:
+            store.close()
+
+    def test_defer_commit_reset_after_nested_batch_raises(self, tmp_path):
+        """Nested _batch() raises RuntimeError — but critically, the
+        OUTER batch's state must not be mutated by the guard, and
+        subsequent batches on the same store must work normally.
+        Guard for L1 LOW finding.
+        """
+        db_path = str(tmp_path / "nested_reset.db")
+        store = Store(db_path, project_name="NestedReset")
+        try:
+            with store._batch():
+                # Queue an event so we can verify outer state is
+                # not disturbed by the inner guard.
+                store._audit_log("test_marker", {"ok": 1})
+                outer_queue_len = len(store._deferred_audits)
+                with pytest.raises(RuntimeError, match="does not support nesting"):
+                    with store._batch():
+                        pass
+                # Outer batch's queued audits untouched.
+                assert len(store._deferred_audits) == outer_queue_len
+
+            # After outer batch exits normally, flag is reset.
+            assert store._defer_commit is False
+            assert store._deferred_audits == []
+
+            # A subsequent batch works normally.
+            with store._batch():
+                store._audit_log("second_batch", {"ok": 1})
+            assert store._defer_commit is False
+        finally:
+            store.close()
+
+    # -- L1 MEDIUM: wrap_cancelled emits audit on partial state --
+
+    def test_wrap_cancelled_partial_state_emits_audit(self, tmp_path):
+        """Partial state (wrap_started_at set but wrap_token empty)
+        must produce a wrap_cancelled audit entry with
+        partial_state=True so operator recovery leaves a forensic
+        trail. Regression guard for L1 MEDIUM.
+        """
+        import json as json_mod
+
+        db_path = str(tmp_path / "partial_cancel.db")
+        store = Store(db_path, project_name="PartialCancel", audit=True)
+        try:
+            assert store._audit is not None
+            audit_path = store._audit._active_path
+
+            # Induce partial state: wrap_started_at set, token empty.
+            store._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_started_at", "2026-04-10T00:00:00.000000Z"),
+            )
+            store._conn.commit()
+
+            before_events = _read_audit_events(audit_path)
+
+            store.wrap_cancelled()
+
+            after_events = _read_audit_events(audit_path)
+            new = after_events[len(before_events):]
+            cancel_events = [
+                e for e in new if e.get("event") == "wrap_cancelled"
+            ]
+            assert len(cancel_events) == 1, (
+                f"expected exactly 1 wrap_cancelled event, got "
+                f"{len(cancel_events)}: {cancel_events}"
+            )
+            payload = cancel_events[0].get("data") or {}
+            assert payload.get("partial_state") is True
+            assert "wrap_started_at" in payload
+
+            # State is cleared.
+            assert store.get_wrap_started_at() is None
+        finally:
+            store.close()
+
+    def test_wrap_cancelled_clean_store_no_audit(self, tmp_path):
+        """Cancelling a clean store (no partial state, no healthy
+        wrap) must NOT emit an audit event — there's nothing to
+        cancel. Negative-space companion to the partial-state test.
+        """
+        db_path = str(tmp_path / "clean_cancel.db")
+        store = Store(db_path, project_name="CleanCancel", audit=True)
+        try:
+            assert store._audit is not None
+            audit_path = store._audit._active_path
+            before = _read_audit_events(audit_path)
+
+            store.wrap_cancelled()
+
+            after = _read_audit_events(audit_path)
+            new = after[len(before):]
+            cancel_events = [
+                e for e in new if e.get("event") == "wrap_cancelled"
+            ]
+            assert cancel_events == []
+        finally:
+            store.close()
+
+
+# -- Module-level helpers shared across TestPostReviewFixes --
+
+
+def _prime_simple(db_path: str, project: str):
+    """Minimal primed store + text + token fixture for post-review tests."""
+    from anneal_memory import prepare_wrap
+
+    store = Store(db_path, project_name=project)
+    ep = store.record("seed observation", EpisodeType.OBSERVATION)
+    result = prepare_wrap(store)
+    text = (
+        f"# {project} — Memory (v1)\n\n"
+        f"## State\nWorking.\n\n"
+        f"## Patterns\n"
+        f"{{core:\n"
+        f"  thought: post review fix | 1x (2026-04-10)\n"
+        f"}}\n\n"
+        f"## Decisions\n"
+        f"[decided(rationale: \"fix\", on: \"2026-04-10\")] ok\n\n"
+        f"## Context\nCited {ep.id[:8]}.\n"
+    )
+    return store, text, result["wrap_token"]
+
+
+def _read_audit_events(audit_path: Path) -> list[dict]:
+    """Read the JSONL audit trail as a list of parsed events."""
+    import json as json_mod
+
+    if not audit_path.exists():
+        return []
+    events = []
+    for line in audit_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        events.append(json_mod.loads(line))
+    return events
+
+
+class TestL3Fixes:
+    """10.5c.5 Layer 3 consultation fix regression gates.
+
+    Each test guards a specific L3 finding that was fixed in the
+    post-review pass. Convergent findings (all 3 agents flagged)
+    get prioritized assertions; single-agent findings get
+    individual coverage.
+    """
+
+    @staticmethod
+    def _make_continuity(project_name: str, cited_id: str) -> str:
+        return (
+            f"# {project_name} — Memory (v1)\n\n"
+            f"## State\nWorking.\n\n"
+            f"## Patterns\n"
+            f"{{core:\n"
+            f"  thought: l3 fix regression guard "
+            f"| 1x (2026-04-10)\n"
+            f"}}\n\n"
+            f"## Decisions\n"
+            f"[decided(rationale: \"l3\", on: \"2026-04-10\")] ok\n\n"
+            f"## Context\nCited {cited_id}.\n"
+        )
+
+    # -- L3 Fix #12: unique tmp filenames (CRITICAL convergent) --
+
+    def test_prepare_continuity_write_generates_unique_tmp_paths(
+        self, tmp_path
+    ):
+        """Two back-to-back _prepare_continuity_write calls must
+        return different tmp paths. The uuid suffix is the
+        concurrent-writer collision fix from L3 Fix #12.
+        """
+        store = Store(str(tmp_path / "unique.db"), project_name="Unique")
+        try:
+            path_a = store._prepare_continuity_write("a")
+            path_b = store._prepare_continuity_write("b")
+            assert path_a != path_b, (
+                f"tmp paths collided: {path_a} == {path_b}"
+            )
+            # Both files exist on disk after the writes.
+            assert path_a.exists()
+            assert path_b.exists()
+            # Both sit beside the final continuity path, not inside
+            # a subdirectory.
+            assert path_a.parent == store.continuity_path.parent
+            assert path_b.parent == store.continuity_path.parent
+            # Clean up so later tests / fixtures don't see orphans.
+            path_a.unlink()
+            path_b.unlink()
+        finally:
+            store.close()
+
+    def test_prepare_meta_write_generates_unique_tmp_paths(self, tmp_path):
+        """Same invariant for meta sidecar tmp files."""
+        store = Store(str(tmp_path / "unique_meta.db"), project_name="UniqueMeta")
+        try:
+            path_a = store._prepare_meta_write({"a": 1})
+            path_b = store._prepare_meta_write({"b": 2})
+            assert path_a != path_b
+            path_a.unlink()
+            path_b.unlink()
+        finally:
+            store.close()
+
+    def test_tmp_path_matches_glob_pattern(self, tmp_path):
+        """Operator recovery + startup detection globs for
+        ``<stem>.*.md.tmp`` / ``<stem>.*.json.tmp``. Verify the
+        generated tmp paths actually match that pattern so the
+        recovery tooling finds them.
+        """
+        store = Store(str(tmp_path / "glob.db"), project_name="Glob")
+        try:
+            cont_tmp = store._prepare_continuity_write("x")
+            meta_tmp = store._prepare_meta_write({"x": 1})
+            cont_stem = store.continuity_path.stem
+            meta_stem = store.meta_path.stem
+            cont_matches = list(
+                store.continuity_path.parent.glob(f"{cont_stem}.*.md.tmp")
+            )
+            meta_matches = list(
+                store.meta_path.parent.glob(f"{meta_stem}.*.json.tmp")
+            )
+            assert cont_tmp in cont_matches
+            assert meta_tmp in meta_matches
+            cont_tmp.unlink()
+            meta_tmp.unlink()
+        finally:
+            store.close()
+
+    # -- L3 Fix #13: startup orphan tmp detection (HIGH convergent) --
+
+    def test_store_init_warns_on_orphan_continuity_tmp(self, tmp_path):
+        """Store open after a crash that left an orphan .md.tmp
+        file must emit a UserWarning so the operator notices.
+        """
+        db_path = str(tmp_path / "orphan_cont.db")
+        # First open to establish the continuity path conventions.
+        store = Store(db_path, project_name="OrphanCont")
+        cont_parent = store.continuity_path.parent
+        cont_stem = store.continuity_path.stem
+        store.close()
+
+        # Simulate a crashed pipeline: drop an orphan .md.tmp
+        # alongside the (non-existent) real continuity file.
+        orphan = cont_parent / f"{cont_stem}.deadbeef0123.md.tmp"
+        orphan.write_text(
+            "# orphan — Memory (v1)\n\n## State\nstuck\n\n"
+            "## Patterns\np\n\n## Decisions\nd\n\n## Context\nc\n",
+            encoding="utf-8",
+        )
+
+        # Re-opening the store must warn.
+        with pytest.warns(UserWarning, match="orphan tmp sidecar"):
+            store = Store(db_path, project_name="OrphanCont")
+        try:
+            # And the orphan is discoverable via the helper.
+            orphans = store._find_orphan_tmp_files()
+            assert orphan in orphans
+            # AND not auto-deleted — operator owns the recovery.
+            assert orphan.exists()
+        finally:
+            store.close()
+            orphan.unlink()  # cleanup for pytest tmp dir
+
+    def test_store_init_warns_on_orphan_meta_tmp(self, tmp_path):
+        """Same behavior for meta orphans."""
+        db_path = str(tmp_path / "orphan_meta.db")
+        store = Store(db_path, project_name="OrphanMeta")
+        meta_parent = store.meta_path.parent
+        meta_stem = store.meta_path.stem
+        store.close()
+
+        orphan = meta_parent / f"{meta_stem}.deadbeef0123.json.tmp"
+        orphan.write_text('{"stuck": true}\n', encoding="utf-8")
+
+        with pytest.warns(UserWarning, match="orphan tmp sidecar"):
+            store = Store(db_path, project_name="OrphanMeta")
+        try:
+            orphans = store._find_orphan_tmp_files()
+            assert orphan in orphans
+            assert orphan.exists()
+        finally:
+            store.close()
+            orphan.unlink()
+
+    def test_store_init_silent_with_no_orphans(self, tmp_path):
+        """Clean store open emits NO UserWarning about tmp files."""
+        import warnings as _warnings
+
+        db_path = str(tmp_path / "clean.db")
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            store = Store(db_path, project_name="Clean")
+            store.close()
+        orphan_warnings = [
+            w for w in caught
+            if "orphan tmp sidecar" in str(w.message)
+        ]
+        assert orphan_warnings == []
+
+    def test_orphan_recovery_via_manual_rename(self, tmp_path):
+        """Operator recovery story end-to-end: tmp file exists,
+        operator renames it to final path, next Store open is
+        silent (no warning).
+        """
+        import warnings as _warnings
+
+        db_path = str(tmp_path / "recovery.db")
+        store = Store(db_path, project_name="Recovery")
+        final = store.continuity_path
+        parent = final.parent
+        stem = final.stem
+        store.close()
+
+        orphan = parent / f"{stem}.abcd12345678.md.tmp"
+        orphan.write_text("orphan content", encoding="utf-8")
+
+        # Simulate the operator running:
+        #   mv <orphan> <final>
+        orphan.replace(final)
+
+        # Next open must be silent.
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            store = Store(db_path, project_name="Recovery")
+            store.close()
+        orphan_warnings = [
+            w for w in caught
+            if "orphan tmp sidecar" in str(w.message)
+        ]
+        assert orphan_warnings == []
+        assert final.exists()
+
+    # -- L3 Fix #14: _batch() commit-failure rollback --
+
+    def test_batch_commit_failure_rolls_back(self, tmp_path):
+        """If self._conn.commit() raises during batch __exit__,
+        subsequent DML on the store must see the pre-batch state.
+        L3 complement F2.
+
+        sqlite3.Connection.commit is read-only at the C level so
+        we can't monkeypatch it directly — instead, wrap _conn in
+        a transparent proxy that only overrides commit.
+        """
+        import sqlite3 as _sqlite
+
+        class FlakyCommitProxy:
+            """Delegates everything except commit (which explodes)."""
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def commit(self):
+                raise _sqlite.OperationalError(
+                    "injected commit failure"
+                )
+
+        db_path = str(tmp_path / "commit_fail.db")
+        store = Store(db_path, project_name="CommitFail")
+        try:
+            real_conn = store._conn
+            baseline = real_conn.execute(
+                "SELECT COUNT(*) FROM episodes"
+            ).fetchone()[0]
+
+            store._conn = FlakyCommitProxy(real_conn)  # type: ignore[assignment]
+
+            with pytest.raises(_sqlite.OperationalError, match="injected"):
+                with store._batch():
+                    real_conn.execute(
+                        """INSERT INTO episodes
+                           (id, timestamp, type, content, source, metadata)
+                           VALUES (?, ?, ?, ?, ?, NULL)""",
+                        (
+                            "aaaaaaaa",
+                            "2026-04-10T00:00:00Z",
+                            "observation",
+                            "should be rolled back",
+                            "test",
+                        ),
+                    )
+
+            # Restore real connection for post-check and cleanup.
+            store._conn = real_conn
+
+            # Post-conditions: flags reset, DML rolled back.
+            assert store._defer_commit is False
+            assert store._deferred_audits == []
+
+            after = real_conn.execute(
+                "SELECT COUNT(*) FROM episodes"
+            ).fetchone()[0]
+            assert after == baseline
+        finally:
+            store.close()
+
+    # -- L3 Fix #15: Phase 4 audit try/except --
+
+    def test_phase4_audit_exception_does_not_propagate(
+        self, tmp_path, monkeypatch
+    ):
+        """Exception during the Phase 4 continuity_saved audit log
+        must not propagate — at this point the wrap is fully
+        committed + externalized, and a phantom failure report
+        would mislead the transport layer. L3 complement F4.
+        """
+        from anneal_memory import validated_save_continuity
+
+        db_path = str(tmp_path / "phase4_audit.db")
+        store, text, token = _prime_simple(db_path, "Phase4Audit")
+        try:
+            assert store._audit is not None
+            original_log = store._audit.log
+
+            def flaky_log(event, payload, **kwargs):
+                if event == "continuity_saved":
+                    raise OSError(
+                        "injected phase 4 audit failure"
+                    )
+                return original_log(event, payload, **kwargs)
+
+            monkeypatch.setattr(store._audit, "log", flaky_log)
+
+            # Must return successfully despite the audit failure.
+            result = validated_save_continuity(
+                store, text, wrap_token=token
+            )
+            assert result["episodes_compressed"] >= 1
+            # Files externalized.
+            assert store.continuity_path.exists()
+            assert store.meta_path.exists()
+        finally:
+            store.close()
+
+    # -- L3 Fix #16: assert → StoreError (-O safety) --
+
+    def test_meta_tmp_none_raises_storeerror_not_assertion(
+        self, tmp_path, monkeypatch
+    ):
+        """If meta_tmp is somehow None at Phase 3 (should be
+        impossible under normal control flow, but future refactors
+        could introduce it), the pipeline must raise StoreError with
+        recovery guidance, not AssertionError (which would vanish
+        under python -O) or AttributeError.
+        """
+        # Impossible to reach this branch under the current code
+        # path without patching — which is the point of the fix.
+        # We verify by monkeypatching _prepare_meta_write to return
+        # None, forcing the explicit None check to fire.
+        from anneal_memory import validated_save_continuity
+
+        db_path = str(tmp_path / "meta_none.db")
+        store, text, token = _prime_simple(db_path, "MetaNone")
+        try:
+            original_prep = Store._prepare_meta_write
+
+            def returns_none(self, meta, token_hex=None):
+                # Pretend the meta write succeeded but returned None.
+                # Walk through the real call first so the tmp file
+                # exists (Phase 3 rename would otherwise blow up
+                # differently), then return None.
+                real_path = original_prep(self, meta, token_hex=token_hex)
+                # Unlink the tmp so no orphan is left behind.
+                real_path.unlink(missing_ok=True)
+                return None
+
+            monkeypatch.setattr(Store, "_prepare_meta_write", returns_none)
+
+            with pytest.raises(StoreError, match="meta_tmp is None"):
+                validated_save_continuity(store, text, wrap_token=token)
+        finally:
+            store.close()
+
+    # -- L3 Fix #17: record() batch-aware --
+
+    def test_record_inside_batch_defers_commit(self, tmp_path):
+        """record() called inside _batch() must NOT commit mid-batch.
+        A separate connection against the same DB should see zero
+        new episodes until the batch exits successfully.
+        """
+        import sqlite3 as _sqlite
+
+        db_path = str(tmp_path / "record_batch.db")
+        store = Store(db_path, project_name="RecordBatch")
+        try:
+            with store._batch():
+                store.record(
+                    "inside batch observation",
+                    EpisodeType.OBSERVATION,
+                )
+                # Another connection sees zero episodes mid-batch.
+                other = _sqlite.connect(db_path)
+                other.row_factory = _sqlite.Row
+                mid = other.execute(
+                    "SELECT COUNT(*) FROM episodes"
+                ).fetchone()[0]
+                other.close()
+                assert mid == 0, (
+                    f"record() committed mid-batch: other conn saw "
+                    f"{mid} episodes"
+                )
+
+            # After batch exits, the new episode is visible.
+            other = _sqlite.connect(db_path)
+            other.row_factory = _sqlite.Row
+            after = other.execute(
+                "SELECT COUNT(*) FROM episodes"
+            ).fetchone()[0]
+            other.close()
+            assert after == 1
+        finally:
+            store.close()
+
+    def test_record_inside_failed_batch_rolls_back(self, tmp_path):
+        """record() inside a batch that raises must be rolled back —
+        no trace of the new episode in the store after the
+        exception propagates.
+        """
+        import sqlite3 as _sqlite
+
+        db_path = str(tmp_path / "record_batch_rollback.db")
+        store = Store(db_path, project_name="RecordBatchRollback")
+        try:
+            with pytest.raises(RuntimeError, match="injected"):
+                with store._batch():
+                    store.record(
+                        "should be rolled back",
+                        EpisodeType.OBSERVATION,
+                    )
+                    raise RuntimeError("injected mid-batch failure")
+
+            # Store is clean: episode was rolled back, flags reset.
+            other = _sqlite.connect(db_path)
+            other.row_factory = _sqlite.Row
+            count = other.execute(
+                "SELECT COUNT(*) FROM episodes"
+            ).fetchone()[0]
+            other.close()
+            assert count == 0
+            assert store._defer_commit is False
+        finally:
+            store.close()
+
+    def test_record_audit_deferred_inside_batch(self, tmp_path):
+        """record() audit event must be queued (not fired) inside a
+        batch, and flushed only after commit succeeds. Preserves
+        the audit-after-commit invariant that the batch exists to
+        enforce.
+        """
+        db_path = str(tmp_path / "record_audit.db")
+        store = Store(db_path, project_name="RecordAudit", audit=True)
+        try:
+            assert store._audit is not None
+            audit_path = store._audit._active_path
+
+            before = _read_audit_events(audit_path)
+
+            with store._batch():
+                store.record(
+                    "batched observation",
+                    EpisodeType.OBSERVATION,
+                )
+                # Inside the batch, the audit event is queued,
+                # not fired.
+                mid = _read_audit_events(audit_path)
+                new_mid = [
+                    e for e in mid[len(before):]
+                    if e["event"] == "record"
+                ]
+                assert new_mid == [], (
+                    f"record audit fired mid-batch: {new_mid}"
+                )
+                # And the deferred queue contains it.
+                assert len(store._deferred_audits) == 1
+                assert store._deferred_audits[0][0] == "record"
+                # Third slot is kwargs — should carry actor.
+                assert store._deferred_audits[0][2].get("actor") == "agent"
+
+            # After exit, the record audit fires.
+            after = _read_audit_events(audit_path)
+            new_after = [
+                e for e in after[len(before):]
+                if e["event"] == "record"
+            ]
+            assert len(new_after) == 1
+            assert new_after[0]["actor"] == "agent"
+        finally:
+            store.close()
+
+
+class TestL3CodexFixes:
+    """10.5c.5 Layer 3 codex retry-pass fix regression gates.
+
+    Each test here covers a finding that only the codex agent
+    surfaced in the second consultation pass (the first pass had
+    a codex timeout). These fixes ride on top of the earlier L3
+    landing and address recoverability identity, warning text
+    accuracy, and in-flight false positives.
+    """
+
+    @staticmethod
+    def _make_continuity(project_name: str, cited_id: str) -> str:
+        return (
+            f"# {project_name} — Memory (v1)\n\n"
+            f"## State\nWorking.\n\n"
+            f"## Patterns\n"
+            f"{{core:\n"
+            f"  thought: codex fix regression guard "
+            f"| 1x (2026-04-10)\n"
+            f"}}\n\n"
+            f"## Decisions\n"
+            f"[decided(rationale: \"codex\", on: \"2026-04-10\")] ok\n\n"
+            f"## Context\nCited {cited_id}.\n"
+        )
+
+    # -- L3 Fix #19: paired tmp filenames via wrap_token --
+
+    def test_pipeline_tmp_files_share_token_prefix(
+        self, tmp_path, monkeypatch
+    ):
+        """Continuity + meta tmp files written by the canonical
+        pipeline must share a token prefix (the first 12 hex chars
+        of the wrap_token) so operator recovery can pair them.
+        L3 codex HIGH.
+        """
+        from anneal_memory import validated_save_continuity
+
+        db_path = str(tmp_path / "paired.db")
+        store, text, token = _prime_simple(db_path, "Paired")
+        try:
+            # Monkeypatch Path.replace to fail on the continuity
+            # rename — this freezes the pipeline at the post-commit
+            # / pre-rename state, leaving BOTH tmp files on disk
+            # for us to inspect.
+            from pathlib import Path as _Path
+            original_replace = _Path.replace
+
+            def flaky(self, target):
+                if self.suffix == ".tmp" and self.name.endswith(".md.tmp"):
+                    raise OSError("inject rename failure for paired check")
+                return original_replace(self, target)
+
+            monkeypatch.setattr(_Path, "replace", flaky)
+
+            with pytest.raises(StoreError):
+                validated_save_continuity(store, text, wrap_token=token)
+
+            monkeypatch.setattr(_Path, "replace", original_replace)
+
+            # Find the persisted tmp files.
+            cont_parent = store.continuity_path.parent
+            cont_tmps = list(cont_parent.glob("*.md.tmp"))
+            meta_tmps = list(cont_parent.glob("*.json.tmp"))
+            assert len(cont_tmps) == 1
+            assert len(meta_tmps) == 1
+
+            # Extract tokens from filenames.
+            cont_token = Store._token_from_orphan(cont_tmps[0])
+            meta_token = Store._token_from_orphan(meta_tmps[0])
+            assert cont_token == meta_token, (
+                f"tmp filenames not paired: {cont_token} != {meta_token}"
+            )
+            # The shared token must be the 12-char prefix of the
+            # real wrap_token.
+            assert cont_token == token[:12]
+
+            # Clean up so the fixture's tmp_path doesn't leave
+            # orphans between tests.
+            cont_tmps[0].unlink()
+            meta_tmps[0].unlink()
+        finally:
+            store.close()
+
+    # -- L3 Fix #20: warning text references continuity_saved --
+
+    def test_orphan_warning_mentions_continuity_saved_not_wrap_completed(
+        self, tmp_path
+    ):
+        """Orphan warning recovery text must point operators at the
+        ``continuity_saved`` audit event (which carries
+        content_hash) rather than the old ``wrap_completed`` event
+        (which does not). L3 codex MEDIUM.
+        """
+        db_path = str(tmp_path / "warntext.db")
+        store = Store(db_path, project_name="WarnText")
+        final = store.continuity_path
+        parent = final.parent
+        stem = final.stem
+        store.close()
+
+        orphan = parent / f"{stem}.deadbeef0123.md.tmp"
+        orphan.write_text("orphan content", encoding="utf-8")
+
+        with pytest.warns(UserWarning) as record:
+            store = Store(db_path, project_name="WarnText")
+        try:
+            matching = [
+                w for w in record
+                if "orphan tmp sidecar" in str(w.message)
+            ]
+            assert len(matching) >= 1
+            msg = str(matching[0].message)
+            # The fixed warning text MUST reference continuity_saved
+            # and MUST mention that it carries content_hash.
+            assert "continuity_saved" in msg
+            assert "content_hash" in msg
+        finally:
+            store.close()
+            orphan.unlink(missing_ok=True)
+
+    def test_paired_orphans_emit_single_warning(self, tmp_path):
+        """Two orphans from the same wrap (paired via token prefix)
+        must emit exactly ONE warning listing both files, not two
+        unrelated warnings. L3 codex HIGH — the pairing is the
+        whole point of Fix #19.
+        """
+        db_path = str(tmp_path / "paired_warn.db")
+        store = Store(db_path, project_name="PairedWarn")
+        cont_final = store.continuity_path
+        meta_final = store.meta_path
+        parent = cont_final.parent
+        cont_stem = cont_final.stem
+        meta_stem = meta_final.stem
+        store.close()
+
+        # Drop paired orphans with matching token.
+        tok = "feedface1234"
+        cont_orphan = parent / f"{cont_stem}.{tok}.md.tmp"
+        meta_orphan = parent / f"{meta_stem}.{tok}.json.tmp"
+        cont_orphan.write_text("orphan cont", encoding="utf-8")
+        meta_orphan.write_text('{"orphan": "meta"}', encoding="utf-8")
+
+        with pytest.warns(UserWarning) as record:
+            store = Store(db_path, project_name="PairedWarn")
+        try:
+            matching = [
+                w for w in record
+                if "orphan tmp sidecar" in str(w.message)
+            ]
+            # Exactly one warning — the pair grouped together.
+            assert len(matching) == 1, (
+                f"expected 1 paired warning, got {len(matching)}: "
+                f"{[str(w.message)[:80] for w in matching]}"
+            )
+            msg = str(matching[0].message)
+            # Both filenames appear in the single message.
+            assert str(cont_orphan) in msg
+            assert str(meta_orphan) in msg
+            # Token prefix is called out.
+            assert tok in msg
+        finally:
+            store.close()
+            cont_orphan.unlink(missing_ok=True)
+            meta_orphan.unlink(missing_ok=True)
+
+    def test_unpaired_orphan_notes_missing_pair(self, tmp_path):
+        """An orphan with NO matching pair (only .md.tmp or only
+        .json.tmp) must warn with a NOTE that the pair is missing
+        so operators don't assume the recovery is complete.
+        """
+        db_path = str(tmp_path / "unpaired.db")
+        store = Store(db_path, project_name="Unpaired")
+        parent = store.continuity_path.parent
+        cont_stem = store.continuity_path.stem
+        store.close()
+
+        # Drop an orphan continuity tmp with no matching meta tmp.
+        orphan = parent / f"{cont_stem}.abcdef012345.md.tmp"
+        orphan.write_text("lone orphan", encoding="utf-8")
+
+        with pytest.warns(UserWarning) as record:
+            store = Store(db_path, project_name="Unpaired")
+        try:
+            matching = [
+                w for w in record
+                if "orphan tmp sidecar" in str(w.message)
+            ]
+            assert len(matching) == 1
+            msg = str(matching[0].message)
+            # The NOTE about missing pair is present.
+            assert "no paired meta tmp found" in msg
+        finally:
+            store.close()
+            orphan.unlink(missing_ok=True)
+
+    # -- L3 Fix #21: in-flight tmp files not flagged as orphans --
+
+    def test_active_wrap_tmp_files_not_flagged_as_orphans(
+        self, tmp_path
+    ):
+        """If tmp files exist whose embedded token matches the
+        currently-active wrap_token in metadata, they are in-flight
+        (not orphans) and must NOT trigger a warning when a second
+        store opens. L3 codex MEDIUM.
+        """
+        import warnings as _warnings
+
+        db_path = str(tmp_path / "inflight.db")
+        store = Store(db_path, project_name="Inflight")
+        parent = store.continuity_path.parent
+        cont_stem = store.continuity_path.stem
+        meta_stem = store.meta_path.stem
+
+        # Simulate Store A being mid-batch: set wrap_token in
+        # metadata and write the matching tmp files.
+        active_tok_full = "a1b2c3d4e5f60123456789abcdef0123"  # 32 hex
+        active_prefix = active_tok_full[:12]
+        store._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("wrap_token", active_tok_full),
+        )
+        store._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("wrap_started_at", "2026-04-10T00:00:00Z"),
+        )
+        store._conn.commit()
+
+        cont_inflight = parent / f"{cont_stem}.{active_prefix}.md.tmp"
+        meta_inflight = parent / f"{meta_stem}.{active_prefix}.json.tmp"
+        cont_inflight.write_text("in-flight content", encoding="utf-8")
+        meta_inflight.write_text('{"in_flight": true}', encoding="utf-8")
+        store.close()
+
+        # Store B opens — should NOT warn about these in-flight tmps.
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            store_b = Store(db_path, project_name="Inflight")
+            store_b.close()
+        orphan_warnings = [
+            w for w in caught
+            if "orphan tmp sidecar" in str(w.message)
+        ]
+        assert orphan_warnings == [], (
+            f"in-flight tmps incorrectly flagged as orphans: "
+            f"{[str(w.message)[:80] for w in orphan_warnings]}"
+        )
+
+        # And the orphan-finder returns an empty list.
+        store_b = Store(db_path, project_name="Inflight")
+        try:
+            assert store_b._find_orphan_tmp_files() == []
+        finally:
+            store_b.close()
+            cont_inflight.unlink(missing_ok=True)
+            meta_inflight.unlink(missing_ok=True)
+
+    def test_stale_tmp_different_token_is_flagged(self, tmp_path):
+        """Negative-space companion to the in-flight test: if the
+        active wrap_token is X but a tmp file embeds token Y, the
+        tmp file IS an orphan (from a prior crashed wrap, distinct
+        from the current one) and MUST be flagged.
+        """
+        db_path = str(tmp_path / "stale.db")
+        store = Store(db_path, project_name="Stale")
+        parent = store.continuity_path.parent
+        cont_stem = store.continuity_path.stem
+
+        # Set active wrap_token to X.
+        store._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("wrap_token", "xxxxxxxxxxxx0000000000000000xxxx"),
+        )
+        store._conn.commit()
+
+        # Drop an orphan with token Y (different from active X).
+        stale = parent / f"{cont_stem}.yyyyyyyyyyyy.md.tmp"
+        stale.write_text("stale", encoding="utf-8")
+        store.close()
+
+        with pytest.warns(UserWarning, match="orphan tmp sidecar"):
+            store = Store(db_path, project_name="Stale")
+        try:
+            orphans = store._find_orphan_tmp_files()
+            assert stale in orphans
+        finally:
+            store.close()
+            stale.unlink(missing_ok=True)
 

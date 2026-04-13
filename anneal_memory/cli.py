@@ -53,7 +53,7 @@ from .continuity import (
     prepare_wrap as _lib_prepare_wrap,
     validated_save_continuity as _lib_validated_save_continuity,
 )
-from .store import Store, StoreError
+from .store import Store, StoreError, _WRAP_TOKEN_RE
 from .types import AffectiveState, AssociationStats, EpisodeType
 
 
@@ -655,6 +655,28 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
     # validate_structure() handles whitespace correctly, and we still
     # need to detect entirely-blank input — but the empty-check uses a
     # local stripped copy without modifying what we pass downstream.
+    # Format-check --wrap-token at args intake (before any file I/O)
+    # so malformed tokens give a clean "invalid format" error instead
+    # of a confusing downstream error. Mirrors the MCP transport's
+    # JSON-schema pattern constraint — same regex, imported from
+    # store.py where the shape constant now lives (10.5c.5 L1 fix
+    # moved it out of server.py to avoid the cli → server import
+    # inversion).
+    #
+    # ``getattr`` with default preserves compat with test fixtures
+    # that construct ``Namespace`` objects directly without going
+    # through the argparse parser. Under argparse's own parsing,
+    # the attribute is always set (to ``None`` when absent), so
+    # this defaults to dead defense for the production path but
+    # is load-bearing for direct-Namespace test callers.
+    _wrap_token_arg = getattr(args, "wrap_token", None)
+    if _wrap_token_arg is not None and not _WRAP_TOKEN_RE.fullmatch(_wrap_token_arg):
+        print(
+            "Error: --wrap-token must be 32 lowercase hex characters",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     if args.file == "-":
         text = sys.stdin.read()
     else:
@@ -780,6 +802,165 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
         print("\nSection sizes:")
         for name, chars in sorted(sections.items()):
             print(f"  {name}: {chars} chars")
+
+
+def cmd_wrap_status(args: argparse.Namespace) -> None:
+    """Show wrap-in-progress state (token, episode count, started_at).
+
+    Operator diagnostic for stuck-wrap recovery (10.5c.4a). Reads the
+    frozen snapshot via ``Store.load_wrap_snapshot()`` and the wrap
+    timestamp via ``Store.get_wrap_started_at()``. Prints a structured
+    block when a wrap is in progress, or ``"no wrap in progress"``
+    when the store is idle. Recovers from ``StoreError`` partial-state
+    integrity failures with an actionable recovery hint (``wrap-cancel``).
+    """
+    with _open_store(args) as store:
+        started_at = store.get_wrap_started_at()
+
+        try:
+            snapshot = store.load_wrap_snapshot()
+        except StoreError as exc:
+            # Partial-state integrity failure (e.g. wrap_started_at set
+            # but wrap_token empty). The operator surface exists
+            # precisely for this case — print a clean diagnostic with
+            # recovery instructions rather than propagating the
+            # exception.
+            if args.json:
+                _print_json({
+                    "status": "partial_state",
+                    "wrap_started_at": started_at,
+                    "error": str(exc),
+                    "operation": exc.operation,
+                    "recovery": "Run `anneal-memory wrap-cancel` to clear the stale state.",
+                })
+                sys.exit(1)
+            print(
+                "!! store metadata is in a partial wrap-in-progress state",
+                file=sys.stderr,
+            )
+            if started_at:
+                print(f"  wrap_started_at: {started_at}", file=sys.stderr)
+            print(f"  integrity error: {exc}", file=sys.stderr)
+            print(
+                "  recovery: run `anneal-memory wrap-cancel` to clear the stale state.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        if snapshot is None:
+            if args.json:
+                _print_json({
+                    "status": "idle",
+                    "wrap_started_at": None,
+                    "wrap_token": None,
+                    "wrap_episode_count": 0,
+                    "wrap_episode_ids": [],
+                })
+                return
+            print("no wrap in progress")
+            return
+
+        if args.json:
+            _print_json({
+                "status": "in_progress",
+                "wrap_started_at": started_at,
+                "wrap_token": snapshot["token"],
+                "wrap_episode_count": len(snapshot["episode_ids"]),
+                "wrap_episode_ids": snapshot["episode_ids"],
+            })
+            return
+
+        print(f"wrap in progress since {started_at or '(unknown)'}")
+        print(f"  token:    {snapshot['token']}")
+        print(f"  episodes: {len(snapshot['episode_ids'])}")
+        print()
+        print(
+            f"  complete: anneal-memory save-continuity --wrap-token {snapshot['token']} <file>"
+        )
+        print("  abandon:  anneal-memory wrap-cancel")
+
+
+def cmd_wrap_cancel(args: argparse.Namespace) -> None:
+    """Clear wrap-in-progress state without recording a completed wrap.
+
+    Operator escape hatch for stuck wraps (10.5c.4a). Delegates to
+    ``Store.wrap_cancelled()``, which clears the three wrap-lifecycle
+    metadata keys in a single transaction and emits a ``wrap_cancelled``
+    audit event with the cancelled token and episode IDs for receipts.
+    Prints the cancelled token (if any) to stdout so operators have a
+    record of what was cleared.
+    """
+    with _open_store(args) as store:
+        # Capture the token BEFORE cancellation so we can report what
+        # was cleared. wrap_cancelled() itself clears the state in a
+        # single transaction; reading after would return None.
+        try:
+            snapshot = store.load_wrap_snapshot()
+            cancelled_token = snapshot["token"] if snapshot else None
+        except StoreError:
+            # Partial-state integrity failure still needs to be
+            # cancellable — that's the whole point of this subcommand.
+            # Fall back to reading the raw token via the accessor.
+            cancelled_token = None
+
+        store.wrap_cancelled()
+
+        if args.json:
+            _print_json({
+                "status": "cancelled",
+                "cancelled_token": cancelled_token,
+            })
+            return
+
+        if cancelled_token:
+            print(f"wrap cancelled (token: {cancelled_token})")
+        else:
+            print("no wrap was in progress (state cleared anyway)")
+
+
+def cmd_wrap_token_current(args: argparse.Namespace) -> None:
+    """Print the current wrap-in-progress token, or empty if none.
+
+    Designed for shell pipelines that want to bind the token to a
+    variable without parsing the ``prepare-wrap`` output trailer:
+
+        TOKEN=$(anneal-memory wrap-token-current)
+        [ -n "$TOKEN" ] && anneal-memory save-continuity --wrap-token "$TOKEN" cont.md
+
+    Prints only the token (no label, no newline-terminated diagnostic)
+    when a wrap is pending, or an empty string when idle. Exits 0 in
+    both cases — empty output is not an error condition.
+    """
+    with _open_store(args) as store:
+        try:
+            snapshot = store.load_wrap_snapshot()
+        except StoreError as exc:
+            # Partial state: print nothing to stdout (pipeline-safe)
+            # and surface the error on stderr with recovery hint.
+            print(
+                f"Error: store metadata is in a partial wrap-in-progress state: {exc}",
+                file=sys.stderr,
+            )
+            print(
+                "Run `anneal-memory wrap-cancel` to clear the stale state.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        if snapshot is None:
+            if args.json:
+                _print_json({"wrap_token": None})
+                return
+            # Empty stdout for shell pipeline use.
+            return
+
+        if args.json:
+            _print_json({"wrap_token": snapshot["token"]})
+            return
+
+        # No trailing newline variant — use print default (adds \n)
+        # since shell $(...) strips trailing newlines anyway.
+        print(snapshot["token"])
 
 
 def cmd_export(args: argparse.Namespace) -> None:
@@ -1648,6 +1829,30 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sub.set_defaults(func=cmd_save_continuity)
+
+    # -- wrap-status --
+    sub = subparsers.add_parser(
+        "wrap-status",
+        help="Show wrap-in-progress state (token, episodes, started_at)",
+        parents=[json_parent],
+    )
+    sub.set_defaults(func=cmd_wrap_status)
+
+    # -- wrap-cancel --
+    sub = subparsers.add_parser(
+        "wrap-cancel",
+        help="Clear wrap-in-progress state without recording a completed wrap",
+        parents=[json_parent],
+    )
+    sub.set_defaults(func=cmd_wrap_cancel)
+
+    # -- wrap-token-current --
+    sub = subparsers.add_parser(
+        "wrap-token-current",
+        help="Print the current wrap-in-progress token (or empty if idle)",
+        parents=[json_parent],
+    )
+    sub.set_defaults(func=cmd_wrap_token_current)
 
     # -- serve --
     sub = subparsers.add_parser("serve", help="Start the MCP server", parents=[json_parent])

@@ -42,9 +42,13 @@ from anneal_memory.cli import (
     cmd_stats,
     cmd_status,
     cmd_verify,
+    cmd_wrap_cancel,
+    cmd_wrap_status,
+    cmd_wrap_token_current,
     main,
     parse_duration,
 )
+from anneal_memory.store import StoreError
 
 
 # -- Fixtures --
@@ -2166,3 +2170,254 @@ class TestCLICrossProcessTOCTOU:
         )
         result = json.loads(save.stdout)
         assert result["episodes_compressed"] == 1
+
+
+# -- 10.5c.4a operator surface subcommands --
+
+class TestCmdWrapStatus:
+    """wrap-status: display wrap-in-progress state with recovery hints."""
+
+    def test_idle_store_text(self, base_args_with_data, capsys):
+        cmd_wrap_status(base_args_with_data)
+        captured = capsys.readouterr()
+        assert "no wrap in progress" in captured.out
+
+    def test_idle_store_json(self, base_args_with_data, capsys):
+        base_args_with_data.json = True
+        cmd_wrap_status(base_args_with_data)
+        data = json.loads(capsys.readouterr().out)
+        assert data["status"] == "idle"
+        assert data["wrap_token"] is None
+        assert data["wrap_episode_count"] == 0
+        assert data["wrap_episode_ids"] == []
+        assert data["wrap_started_at"] is None
+
+    def test_in_progress_text(self, base_args_with_data, capsys):
+        # Prime a wrap via prepare_wrap, then inspect.
+        base_args_with_data.max_chars = 20000
+        base_args_with_data.staleness_days = 7
+        cmd_prepare_wrap(base_args_with_data)
+        capsys.readouterr()  # clear
+
+        cmd_wrap_status(base_args_with_data)
+        out = capsys.readouterr().out
+        assert "wrap in progress since" in out
+        assert "token:" in out
+        assert "episodes: 4" in out  # base_args_with_data has 4 episodes
+        assert "save-continuity --wrap-token" in out
+        assert "wrap-cancel" in out
+
+    def test_in_progress_json(self, base_args_with_data, capsys):
+        base_args_with_data.max_chars = 20000
+        base_args_with_data.staleness_days = 7
+        cmd_prepare_wrap(base_args_with_data)
+        capsys.readouterr()
+
+        base_args_with_data.json = True
+        cmd_wrap_status(base_args_with_data)
+        data = json.loads(capsys.readouterr().out)
+        assert data["status"] == "in_progress"
+        assert data["wrap_started_at"] is not None
+        assert len(data["wrap_token"]) == 32
+        assert data["wrap_episode_count"] == 4
+        assert len(data["wrap_episode_ids"]) == 4
+
+    def test_partial_state_recovery_hint(self, base_args_with_data, capsys):
+        """StoreError partial-state failure surfaces recovery hint, not traceback."""
+        # Manually induce partial state: wrap_started_at set but
+        # wrap_token empty. This bypasses the canonical pipeline —
+        # exactly the scenario the operator subcommand exists to recover.
+        with Store(base_args_with_data.db, project_name="TestProject") as store:
+            store._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_started_at", "2026-04-10T00:00:00.000000Z"),
+            )
+            store._conn.commit()
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_wrap_status(base_args_with_data)
+        assert exc_info.value.code == 1
+
+        captured = capsys.readouterr()
+        assert "partial wrap-in-progress state" in captured.err
+        assert "wrap-cancel" in captured.err
+
+    def test_partial_state_json(self, base_args_with_data, capsys):
+        with Store(base_args_with_data.db, project_name="TestProject") as store:
+            store._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_started_at", "2026-04-10T00:00:00.000000Z"),
+            )
+            store._conn.commit()
+
+        base_args_with_data.json = True
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_wrap_status(base_args_with_data)
+        assert exc_info.value.code == 1
+
+        data = json.loads(capsys.readouterr().out)
+        assert data["status"] == "partial_state"
+        assert data["operation"] == "load_wrap_snapshot"
+        assert "wrap-cancel" in data["recovery"]
+
+
+class TestCmdWrapCancel:
+    """wrap-cancel: clear wrap state without recording a completed wrap."""
+
+    def test_cancel_idle_store(self, base_args_with_data, capsys):
+        cmd_wrap_cancel(base_args_with_data)
+        out = capsys.readouterr().out
+        assert "no wrap was in progress" in out
+
+    def test_cancel_in_progress_reports_token(self, base_args_with_data, capsys):
+        base_args_with_data.max_chars = 20000
+        base_args_with_data.staleness_days = 7
+        cmd_prepare_wrap(base_args_with_data)
+
+        # Capture the token that was minted so we can verify it's echoed.
+        with Store(base_args_with_data.db, project_name="TestProject") as store:
+            snapshot = store.load_wrap_snapshot()
+        assert snapshot is not None
+        expected_token = snapshot["token"]
+
+        capsys.readouterr()  # clear prepare_wrap output
+        cmd_wrap_cancel(base_args_with_data)
+        out = capsys.readouterr().out
+        assert "wrap cancelled" in out
+        assert expected_token in out
+
+        # Verify the state was actually cleared.
+        with Store(base_args_with_data.db, project_name="TestProject") as store:
+            assert store.load_wrap_snapshot() is None
+            assert store.get_wrap_started_at() is None
+
+    def test_cancel_json(self, base_args_with_data, capsys):
+        base_args_with_data.max_chars = 20000
+        base_args_with_data.staleness_days = 7
+        cmd_prepare_wrap(base_args_with_data)
+        capsys.readouterr()
+
+        base_args_with_data.json = True
+        cmd_wrap_cancel(base_args_with_data)
+        data = json.loads(capsys.readouterr().out)
+        assert data["status"] == "cancelled"
+        assert len(data["cancelled_token"]) == 32
+
+    def test_cancel_recovers_partial_state(self, base_args_with_data, capsys):
+        """wrap-cancel must work on partial-state stores — that's the whole point."""
+        with Store(base_args_with_data.db, project_name="TestProject") as store:
+            store._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_started_at", "2026-04-10T00:00:00.000000Z"),
+            )
+            store._conn.commit()
+
+        # Should NOT raise — cancel is the escape hatch.
+        cmd_wrap_cancel(base_args_with_data)
+        out = capsys.readouterr().out
+        assert "state cleared" in out or "wrap cancelled" in out
+
+        # Verify wrap-status now sees the store as idle.
+        with Store(base_args_with_data.db, project_name="TestProject") as store:
+            assert store.get_wrap_started_at() is None
+
+
+class TestCmdWrapTokenCurrent:
+    """wrap-token-current: shell-pipeline-friendly token extraction."""
+
+    def test_idle_prints_nothing(self, base_args_with_data, capsys):
+        cmd_wrap_token_current(base_args_with_data)
+        captured = capsys.readouterr()
+        assert captured.out == ""
+
+    def test_idle_json(self, base_args_with_data, capsys):
+        base_args_with_data.json = True
+        cmd_wrap_token_current(base_args_with_data)
+        data = json.loads(capsys.readouterr().out)
+        assert data["wrap_token"] is None
+
+    def test_in_progress_prints_only_token(self, base_args_with_data, capsys):
+        base_args_with_data.max_chars = 20000
+        base_args_with_data.staleness_days = 7
+        cmd_prepare_wrap(base_args_with_data)
+        capsys.readouterr()
+
+        cmd_wrap_token_current(base_args_with_data)
+        out = capsys.readouterr().out.strip()
+        # Pipeline-friendly: just the token, nothing else.
+        assert len(out) == 32
+        assert all(c in "0123456789abcdef" for c in out)
+
+    def test_partial_state_exits_nonzero_with_stderr_hint(
+        self, base_args_with_data, capsys
+    ):
+        with Store(base_args_with_data.db, project_name="TestProject") as store:
+            store._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_started_at", "2026-04-10T00:00:00.000000Z"),
+            )
+            store._conn.commit()
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_wrap_token_current(base_args_with_data)
+        assert exc_info.value.code == 1
+
+        captured = capsys.readouterr()
+        # stdout stays clean for pipeline safety; diagnostic on stderr.
+        assert captured.out == ""
+        assert "partial wrap-in-progress" in captured.err
+        assert "wrap-cancel" in captured.err
+
+
+class TestWrapOperatorSubcommandsSubprocess:
+    """End-to-end subprocess test covering the full operator flow."""
+
+    @staticmethod
+    def _run(*args, check=True):
+        result = subprocess.run(
+            [sys.executable, "-m", "anneal_memory.cli", *args],
+            capture_output=True,
+            text=True,
+        )
+        if check and result.returncode != 0:
+            raise AssertionError(
+                f"CLI call failed ({result.returncode}):\n"
+                f"args={args}\nstdout={result.stdout}\nstderr={result.stderr}"
+            )
+        return result
+
+    def test_prepare_status_token_cancel_roundtrip(self, tmp_path):
+        db_path = str(tmp_path / "ops.db")
+
+        self._run("--db", db_path, "init")
+        self._run("--db", db_path, "record", "ep1", "--type", "observation")
+        self._run("--db", db_path, "record", "ep2", "--type", "observation")
+
+        # Idle status via subprocess.
+        status = self._run("--db", db_path, "--json", "wrap-status")
+        assert json.loads(status.stdout)["status"] == "idle"
+
+        # Token-current prints empty on idle.
+        tok_idle = self._run("--db", db_path, "wrap-token-current")
+        assert tok_idle.stdout.strip() == ""
+
+        # Prime a wrap.
+        self._run("--db", db_path, "prepare-wrap")
+
+        # Status reports in-progress.
+        status = self._run("--db", db_path, "--json", "wrap-status")
+        status_data = json.loads(status.stdout)
+        assert status_data["status"] == "in_progress"
+        assert len(status_data["wrap_token"]) == 32
+        assert status_data["wrap_episode_count"] == 2
+
+        # Token-current yields the exact same token (shell-pipeline use).
+        tok_active = self._run("--db", db_path, "wrap-token-current")
+        assert tok_active.stdout.strip() == status_data["wrap_token"]
+
+        # Cancel and verify idle again.
+        cancel = self._run("--db", db_path, "--json", "wrap-cancel")
+        assert json.loads(cancel.stdout)["cancelled_token"] == status_data["wrap_token"]
+
+        status = self._run("--db", db_path, "--json", "wrap-status")
+        assert json.loads(status.stdout)["status"] == "idle"

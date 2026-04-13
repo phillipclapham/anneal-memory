@@ -17,14 +17,17 @@ Zero dependencies beyond Python stdlib.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import uuid
 import warnings
 from dataclasses import asdict
 from datetime import date
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .graduation import detect_stale_patterns, validate_graduations
+from .store import StoreError, _fsync_dir, _safe_unlink
 from .types import (
     AffectiveState,
     Episode,
@@ -582,23 +585,24 @@ def validated_save_continuity(
         skipped-prepare path exists only for advanced library users
         who are managing the wrap lifecycle themselves.
 
-    .. warning::
-        **Partial-failure window (scheduled for 10.5c.5).** The
-        internal pipeline runs four write stages in order: continuity
-        file write → Hebbian association write → meta sidecar write
-        → wrap completion record in the DB. If stage 2, 3, or 4
-        raises ``StoreError`` (or any other exception), the stages
-        that already committed are NOT rolled back. The continuity
-        file on disk is the new version; the DB may or may not
-        reflect that fact. Transport adapters catching ``StoreError``
-        at their boundary should NOT assume the wrap was cleanly
-        abandoned — the store's persistent state is partially
-        updated, and the next ``prepare_wrap`` call will see
-        ``wrap_in_progress=True`` until recovery runs. A full
-        two-phase commit (continuity tmp → DB txn → atomic rename)
-        is scheduled for Session 10.5c.5 and will close this gap.
-        Until then, treat any mid-pipeline failure as requiring
-        explicit recovery on the next session start.
+    .. note::
+        **Pipeline atomicity (two-phase commit, 10.5c.5).** The
+        internal pipeline is now structurally atomic across the
+        continuity file write, meta sidecar write, Hebbian
+        association DML, and wrap-completion DML. Any exception
+        raised before the final file renames triggers a SQLite
+        rollback of the entire batched transaction AND cleanup of
+        both tmp sidecars, leaving the store in its exact pre-wrap
+        state. Transport adapters catching ``StoreError`` or
+        ``ValueError`` at their boundary can trust that persistent
+        state has not been partially updated. The only residual risk
+        is a crash between the outer DB commit and the two final
+        atomic renames — a microseconds-wide window that can leave
+        the DB reflecting a wrap whose continuity / meta files are
+        still the pre-wrap versions. That window is documented as a
+        bounded operator concern, not a correctness bug; diagnostic
+        recovery via the ``wrap-status`` / ``wrap-cancel``
+        subcommands (10.5c.4a) covers it when it does fire.
 
     Args:
         store: A Store instance.
@@ -769,41 +773,252 @@ def validated_save_continuity(
         citations_seen=citations_seen,
     )
 
-    # Save the (possibly modified) continuity text
-    path = store.save_continuity(grad_result.text)
-
-    # Record Hebbian associations from validated co-citations + decay
-    assoc_formed, assoc_strengthened, assoc_decayed = \
-        process_wrap_associations(store, grad_result, affective_state)
-
-    # Update metadata
-    if grad_result.validated > 0 or grad_result.citation_counts:
-        meta["citations_seen"] = True
-    meta["sessions_produced"] = meta.get("sessions_produced", 0) + 1
-    store.save_meta(meta)
-
-    # Record wrap completion
+    # 10.5c.5 TWO-PHASE COMMIT PIPELINE
+    #
+    # Phase 1: write continuity.md.tmp (no rename yet) so we know the
+    #          content is durable on disk before committing DB state.
+    # Phase 2: inside ``store._batch()``, accumulate DB DML (associations
+    #          + meta + wrap_completed) without intermediate commits and
+    #          write meta.json.tmp (no rename yet). The batch context
+    #          manager commits the single outer SQLite transaction on
+    #          successful exit and flushes queued audit events.
+    # Phase 3: after the DB commit succeeds, atomically rename both
+    #          tmp sidecars to their final paths.
+    # Phase 4: fire the continuity_saved audit event.
+    #
+    # Crash windows:
+    #   - Before the batch commit: DB rolls back + tmp files cleaned up.
+    #     Store is in exact pre-wrap state.
+    #   - Between batch commit and final renames: DB reflects the new
+    #     wrap, both .tmp files PERSIST on disk (deliberately NOT
+    #     cleaned up — they hold the new content and are required
+    #     for operator recovery). continuity.md and meta.json are
+    #     still the pre-wrap versions. Operator recovery path: the
+    #     .md.tmp and .json.tmp files can be manually ``mv``'d to
+    #     their final paths; the wrap-status subcommand still reports
+    #     the pre-wrap state since wrap_completed cleared the
+    #     in-progress metadata during Phase 2.
+    #   - Between the two renames: continuity is the new version;
+    #     meta.json.tmp still holds the new meta. Same operator
+    #     recovery applies — ``mv x.json.tmp x.json`` finishes the
+    #     externalization.
+    #
+    # The load-bearing invariant: once the batch has committed the
+    # DB, the outer ``except`` MUST NOT unlink the tmp files. They
+    # are the committed state awaiting externalization. Pre-commit
+    # cleanup is unchanged (pre-wrap state is restored cleanly).
     sections = measure_sections(grad_result.text)
     patterns = len(re.findall(r"\|\s*\d+x", grad_result.text))
     total_demoted = grad_result.demoted + grad_result.bare_demoted
-    wrap_result = store.wrap_completed(
-        episodes_compressed=len(episodes),
-        continuity_chars=len(grad_result.text),
-        graduations_validated=grad_result.validated,
-        graduations_demoted=total_demoted,
-        citation_reuse_max=grad_result.citation_reuse_max,
-        patterns_extracted=patterns,
-        associations_formed=assoc_formed,
-        associations_strengthened=assoc_strengthened,
-        associations_decayed=assoc_decayed,
-        section_sizes=sections,
-        episode_ids=frozen_episode_ids,
-        # Pass the token from the snapshot in hand rather than
-        # having wrap_completed re-read metadata. Removes a
-        # within-method SELECT-before-clear sequence that Layer 1
-        # L3 flagged as a TOCTOU-within-TOCTOU-fix pattern.
-        wrap_token=snapshot["token"] if snapshot is not None else None,
+    # Hoisted out of the try block so ``path`` is unambiguously bound
+    # on every code path (including the residual-window recovery
+    # comment above where mypy would otherwise flag a possibly-unbound
+    # reference). ``continuity_path`` is a property that reads
+    # ``self._path`` — it's stable across the pipeline.
+    path = str(store.continuity_path)
+
+    # Phase 1: continuity tmp write.
+    # Derive the tmp filename suffix from the wrap_token so
+    # continuity.tmp and meta.tmp (written later in Phase 2) share a
+    # recoverability identity — operators recovering from multiple
+    # crashed wraps can pair the two tmp files by token prefix.
+    # 10.5c.5 L3 Fix #19 (codex HIGH). When the snapshot is absent
+    # (legacy skipped_prepare path), fall back to a per-call random
+    # uuid — those saves don't leave orphans anyway because they
+    # don't use the two-phase pipeline.
+    tmp_token_prefix: str | None = (
+        snapshot["token"][:12] if snapshot is not None else None
     )
+    cont_tmp = store._prepare_continuity_write(
+        grad_result.text, token_hex=tmp_token_prefix
+    )
+    meta_tmp: Path | None = None
+    wrap_result = None
+    # Once ``db_committed`` flips True, the outer ``except`` preserves
+    # tmp files instead of cleaning them up — they represent committed
+    # state awaiting externalization. Cleaning them up would destroy
+    # the new content permanently (L1 HIGH + L2 M2 data-loss path).
+    db_committed = False
+
+    try:
+        # Phase 2: batched DB DML.
+        with store._batch():
+            assoc_formed, assoc_strengthened, assoc_decayed = \
+                process_wrap_associations(store, grad_result, affective_state)
+
+            if grad_result.validated > 0 or grad_result.citation_counts:
+                meta["citations_seen"] = True
+            meta["sessions_produced"] = meta.get("sessions_produced", 0) + 1
+
+            # Write meta tmp inside the batch window — not a DB op,
+            # but scoped here so a failure rolls back the DB alongside
+            # cleaning up both tmp files. Order matters only for the
+            # cleanup path: if this raises, the outer ``try`` below
+            # cleans up cont_tmp (and meta_tmp stays None) and the
+            # batch's ``except`` rolls back the DB. The shared
+            # ``tmp_token_prefix`` pairs this tmp with cont_tmp so
+            # operator recovery can match them by prefix.
+            meta_tmp = store._prepare_meta_write(
+                meta, token_hex=tmp_token_prefix
+            )
+
+            wrap_result = store.wrap_completed(
+                episodes_compressed=len(episodes),
+                continuity_chars=len(grad_result.text),
+                graduations_validated=grad_result.validated,
+                graduations_demoted=total_demoted,
+                citation_reuse_max=grad_result.citation_reuse_max,
+                patterns_extracted=patterns,
+                associations_formed=assoc_formed,
+                associations_strengthened=assoc_strengthened,
+                associations_decayed=assoc_decayed,
+                section_sizes=sections,
+                episode_ids=frozen_episode_ids,
+                # Pass the token from the snapshot in hand rather than
+                # having wrap_completed re-read metadata. Removes a
+                # within-method SELECT-before-clear sequence that
+                # Layer 1 L3 flagged as a TOCTOU-within-TOCTOU-fix
+                # pattern.
+                wrap_token=snapshot["token"] if snapshot is not None else None,
+            )
+            # Batch context manager commits here on successful exit.
+
+        # Batch exited without raising → DB is committed. From this
+        # point forward, failure must NOT unlink the tmp files.
+        db_committed = True
+
+        # Phase 3: DB commit succeeded — externalize files.
+        try:
+            cont_tmp.replace(store.continuity_path)
+        except OSError as exc:
+            raise StoreError(
+                f"Failed to rename continuity tmp to "
+                f"{store.continuity_path}: {exc}. "
+                f"The DB has committed the wrap but externalization "
+                f"is incomplete; the new continuity content is "
+                f"preserved at {cont_tmp}. Manually move it to "
+                f"{store.continuity_path} to finish recovery.",
+                operation="save_continuity",
+                path=str(store.continuity_path),
+            ) from exc
+        # cont_tmp is now the final file, not a tmp file. Clear the
+        # handle so the except clause below doesn't try to preserve
+        # a path that no longer refers to a tmp sidecar.
+        cont_tmp = None
+
+        # Explicit None check instead of ``assert`` so the guard
+        # survives ``python -O`` (which strips assertions). Under
+        # ``-O`` the old assert vanished and ``meta_tmp.replace(...)``
+        # would raise ``AttributeError`` on None — wrong exception
+        # type for the transport layer. L3 complement F3 + contrarian F6.
+        if meta_tmp is None:
+            raise StoreError(
+                "internal pipeline invariant violated: meta_tmp is "
+                "None after the batch committed — this indicates a "
+                "bug in validated_save_continuity's control flow. "
+                "The DB has committed but the meta sidecar was "
+                "never staged; the store is in a partial-commit "
+                "state. Manual recovery required.",
+                operation="save_meta",
+                path=str(store.meta_path),
+            )
+        try:
+            meta_tmp.replace(store.meta_path)
+        except OSError as exc:
+            raise StoreError(
+                f"Failed to rename meta tmp to {store.meta_path}: "
+                f"{exc}. The DB has committed the wrap and the "
+                f"continuity file was externalized; only the meta "
+                f"sidecar rename failed. The new meta content is "
+                f"preserved at {meta_tmp}. Manually move it to "
+                f"{store.meta_path} to finish recovery.",
+                operation="save_meta",
+                path=str(store.meta_path),
+            ) from exc
+        meta_tmp = None
+        # Directory fsync after both renames so the rename syscalls
+        # themselves are durable. Without this, a crash immediately
+        # after a successful rename can revert to the pre-rename
+        # directory entry on some POSIX filesystems. Best-effort.
+        _fsync_dir(store.continuity_path.parent)
+
+    except BaseException:
+        # Cleanup policy depends on whether the DB has committed.
+        #
+        # ``BaseException`` scope chosen deliberately: we want
+        # cleanup to run on ^C (KeyboardInterrupt) and sys.exit()
+        # too, since a half-completed wrap with orphan tmp files is
+        # worse than a clean pre-wrap state. SystemExit and
+        # GeneratorExit are rare enough at this layer that the
+        # consistent "always clean up pre-commit" policy is fine.
+        #
+        # Post-commit failures (rename OSError, Phase 4 audit error,
+        # anything raised after the ``with store._batch()`` block
+        # exits successfully): PRESERVE the tmp files. They hold
+        # the new content and the operator needs them for recovery
+        # via ``mv``. Cleaning them up here would destroy committed
+        # state permanently (L1 HIGH + L2 M2).
+        if not db_committed:
+            if cont_tmp is not None:
+                _safe_unlink(cont_tmp)
+            if meta_tmp is not None:
+                _safe_unlink(meta_tmp)
+        raise
+
+    # Phase 4: fire the continuity_saved audit event (after the file
+    # has been externalized — matches the pre-10.5c.5 "audit after
+    # rename" invariant). The earlier DB-side audit events
+    # (associations_updated, associations_decayed, wrap_completed)
+    # were already flushed by the batch context manager at its
+    # successful exit.
+    #
+    # Audit exceptions are swallowed here — same pattern and
+    # rationale as the batch's deferred-audit flush. At this point
+    # the wrap is fully committed and externalized; an audit log
+    # failure must not cause the pipeline to report failure to the
+    # caller. L3 complement F4.
+    if store._audit is not None:
+        try:
+            store._audit.log("continuity_saved", {
+                "chars": len(grad_result.text),
+                "content_hash": hashlib.sha256(
+                    grad_result.text.encode("utf-8")
+                ).hexdigest(),
+            })
+        except Exception:
+            # Audit is best-effort. Silently drop a failing
+            # continuity_saved event rather than reporting a false
+            # failure after a fully committed wrap.
+            pass
+
+    # Phase 5: auto-prune if retention is configured. In the pre-10.5c.5
+    # pipeline this ran inside wrap_completed via ``self.prune()``;
+    # the batched pipeline explicitly suppresses prune inside the
+    # batch (it's a separate DML burst with its own commit semantics
+    # that do NOT belong inside the wrap transaction), so the pipeline
+    # caller must invoke it after the batch exits. Without this call
+    # the canonical pipeline silently stops honoring retention_days —
+    # a data-lifecycle regression caught by Layer 1 review.
+    if store._retention_days is not None:
+        # Explicit None check rather than relying on flow-narrowing
+        # for ``-O`` safety (L3 complement F5). By this point
+        # wrap_result must be set — the batch completed successfully
+        # and wrap_completed returned a value. If it IS None here,
+        # something is deeply wrong and raising is correct.
+        if wrap_result is None:
+            raise StoreError(
+                "internal pipeline invariant violated: wrap_result "
+                "is None after a successful batch commit. This "
+                "indicates a bug in validated_save_continuity's "
+                "control flow.",
+                operation="save_continuity",
+                path=path,
+            )
+        pruned = store.prune()
+        # Attach pruned count to the wrap_result so the return value
+        # reflects the actual post-wrap store state. WrapResult is a
+        # regular (non-frozen) dataclass so direct mutation is safe.
+        wrap_result.pruned_count = pruned
 
     return SaveContinuityResult(
         path=path,

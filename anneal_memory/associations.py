@@ -116,6 +116,7 @@ def record_associations(
     session_pairs: set[tuple[str, str]],
     timestamp: str,
     affective_state: AffectiveState | None = None,
+    commit: bool = True,
 ) -> tuple[int, int]:
     """Record or strengthen association links from co-citation.
 
@@ -127,6 +128,10 @@ def record_associations(
         affective_state: Optional agent functional state during this consolidation.
             When provided, intensity modulates association strength (up to 1.5x
             at max intensity) and the tag is stored on the association record.
+        commit: Whether to ``conn.commit()`` after the DML. Default ``True``
+            preserves the pre-10.5c.5 standalone-call behavior. Set to
+            ``False`` when calling from the batched two-phase commit pipeline
+            so the outer caller owns the single commit point.
 
     Returns:
         Tuple of (links_formed, links_strengthened).
@@ -180,7 +185,8 @@ def record_associations(
         else:
             strengthened += 1
 
-    conn.commit()
+    if commit:
+        conn.commit()
     return formed, strengthened
 
 
@@ -189,6 +195,7 @@ def decay_associations(
     strengthened_pairs: set[tuple[str, str]],
     decay_factor: float = DEFAULT_DECAY_FACTOR,
     cleanup_threshold: float = DEFAULT_CLEANUP_THRESHOLD,
+    commit: bool = True,
 ) -> int:
     """Decay associations not reinforced this wrap.
 
@@ -201,6 +208,9 @@ def decay_associations(
         strengthened_pairs: Canonical pairs strengthened this wrap (skip these).
         decay_factor: Multiplier for unreinforced links. Default 0.9.
         cleanup_threshold: Delete links weaker than this. Default 0.1.
+        commit: Whether to ``conn.commit()`` after the DML. Default ``True``
+            preserves the pre-10.5c.5 standalone-call behavior. Set to
+            ``False`` when calling from the batched two-phase commit pipeline.
 
     Returns:
         Number of associations that decayed (including deleted ones).
@@ -241,7 +251,8 @@ def decay_associations(
         [decay_factor, *exclude_params],
     )
 
-    conn.commit()
+    if commit:
+        conn.commit()
     return decayed
 
 

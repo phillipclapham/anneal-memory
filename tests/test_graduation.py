@@ -83,6 +83,7 @@ class TestValidateGraduations:
         # Should NOT be demoted — it's from a previous day
         assert result.validated == 0
         assert result.demoted == 0
+        assert result.skipped_non_today == 1
         assert "(ungrounded)" not in result.text
 
     def test_only_patterns_section_checked(self):

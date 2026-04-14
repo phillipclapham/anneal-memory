@@ -1,5 +1,14 @@
 """Tests for continuity validation and wrap package preparation."""
 
+# ``from __future__ import annotations`` defers all annotation
+# evaluation to string form so ``_read_audit_events(audit_path: Path)``
+# below doesn't need ``Path`` imported at module level — Path is only
+# referenced in the annotation, and the function body uses it as an
+# instance method (``audit_path.exists()``). Python 3.14 makes
+# deferred annotations the default (PEP 649), which masked this on
+# local 3.14 runs but broke collection on 3.10-3.13 in CI.
+from __future__ import annotations
+
 from datetime import date
 
 import pytest

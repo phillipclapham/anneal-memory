@@ -1,5 +1,7 @@
 # AutoGen / AG2 Integration
 
+> Verified against `ag2 0.11.5` + `anneal-memory 0.2.0` (Apr 14, 2026). Zero drift.
+
 anneal-memory integrates with AutoGen/AG2 through **hooks** — four message lifecycle hooks registered via `register_hook()`. These fire during the reply generation process, giving you access to messages before and after they're sent between agents.
 
 ## Install

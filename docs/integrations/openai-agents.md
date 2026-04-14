@@ -2,6 +2,9 @@
 
 anneal-memory integrates with the OpenAI Agents SDK through **RunHooks** — lifecycle callbacks that fire at agent, tool, and LLM boundaries. The SDK's context object provides natural dependency injection for the Store.
 
+> **Verified:** `anneal-memory` 0.2.0 · `openai-agents` 0.13.6 · Python 3.13
+> (all imports + 5 `RunHooks` lifecycle methods + signature types + `ModelResponse.output` / `RunResult.final_output` fields verified against live classes)
+
 ## Install
 
 ```
@@ -56,14 +59,28 @@ class AnnealMemoryHooks(RunHooks):
         agent: Agent,
         response: ModelResponse,
     ) -> None:
-        """Record agent responses as episodes."""
+        """Record agent responses as episodes.
+
+        ModelResponse.output is a list[TResponseOutputItem] where each item
+        is a union including ResponseOutputMessage (for assistant text).
+        ResponseOutputMessage has .content which is a list of
+        ResponseOutputText / ResponseOutputRefusal parts — the actual text
+        lives on the text parts as .text. Two-level traversal required.
+        """
         store = context.context.memory
-        # Extract text content from the model response
-        if hasattr(response, "output") and response.output:
-            for item in response.output:
-                if hasattr(item, "text") and item.text:
+        if not response.output:
+            return
+        for item in response.output:
+            # item may be a tool call, reasoning item, etc. — skip
+            # anything that doesn't carry content parts.
+            content = getattr(item, "content", None)
+            if not content:
+                continue
+            for part in content:
+                text = getattr(part, "text", None)
+                if text:
                     store.record(
-                        item.text[:500],
+                        text[:500],
                         EpisodeType.OBSERVATION,
                         source=agent.name,
                     )
@@ -75,10 +92,20 @@ class AnnealMemoryHooks(RunHooks):
         tool: Tool,
         result: str,
     ) -> None:
-        """Record tool results as episodes."""
+        """Record tool results as episodes.
+
+        ``Tool`` is a Union over FunctionTool, FileSearchTool,
+        WebSearchTool, ComputerTool, HostedMCPTool, ShellTool,
+        ApplyPatchTool, LocalShellTool, ImageGenerationTool,
+        CodeInterpreterTool, and ToolSearchTool. Only a subset
+        (FunctionTool, ShellTool, ApplyPatchTool) exposes a ``.name``
+        attribute — the hosted/OpenAI-side tools don't. Fall back to
+        the class name so attribution works for every variant.
+        """
         store = context.context.memory
+        tool_name = getattr(tool, "name", type(tool).__name__)
         store.record(
-            f"Tool '{tool.name}': {result[:400]}",
+            f"Tool '{tool_name}': {result[:400]}",
             EpisodeType.OUTCOME,
             source=agent.name,
         )

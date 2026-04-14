@@ -2,6 +2,9 @@
 
 anneal-memory integrates with LangGraph through **middleware** — the recommended extension mechanism in LangChain 1.0+. Middleware hooks fire at agent and model lifecycle boundaries, giving you full control over when to record, recall, and compress memory.
 
+> **Verified:** `anneal-memory` 0.2.0 · `langchain` 1.2.15 · `langgraph` 1.1.6 · Python 3.14
+> (end-to-end test: all four lifecycle hooks fire, `Store`/`record`/`recall`/`load_continuity`/`prepare_wrap`/`validated_save_continuity` all work)
+
 ## Install
 
 ```

@@ -1,5 +1,7 @@
 # Google ADK Integration
 
+> Verified against `google-adk 1.30.0` + `anneal-memory 0.2.0` (Apr 14, 2026).
+
 anneal-memory integrates with Google's Agent Development Kit through **agent callbacks** and a custom **MemoryService** implementation. ADK provides 6 lifecycle callbacks on the agent constructor plus a memory abstraction layer designed for exactly this kind of integration.
 
 ## Install
@@ -89,6 +91,9 @@ For deeper integration, implement ADK's `BaseMemoryService` — this is the desi
 
 ```python
 from google.adk.memory import BaseMemoryService
+from google.adk.memory.base_memory_service import SearchMemoryResponse
+from google.adk.memory.memory_entry import MemoryEntry
+from google.genai import types as genai_types
 from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
 
 
@@ -98,7 +103,7 @@ class AnnealMemoryService(BaseMemoryService):
     def __init__(self, db_path: str, project_name: str):
         self.store = Store(db_path, project_name=project_name)
 
-    def add_session_to_memory(self, session):
+    def add_session_to_memory(self, session) -> None:
         """Ingest a completed session into long-term memory."""
         # Extract episodes from session events
         for event in session.events:
@@ -116,14 +121,31 @@ class AnnealMemoryService(BaseMemoryService):
             compressed = compress_with_gemini(package)  # your compression function
             validated_save_continuity(self.store, compressed)
 
-    def search_memory(self, query):
-        """Search long-term memory for relevant episodes."""
+    def search_memory(
+        self, *, app_name: str, user_id: str, query: str
+    ) -> SearchMemoryResponse:
+        """Search long-term memory for relevant episodes.
+
+        ADK calls this with keyword-only args ``app_name`` / ``user_id`` /
+        ``query`` and expects a ``SearchMemoryResponse`` with a
+        ``memories`` list of ``MemoryEntry`` objects. ``MemoryEntry.content``
+        is a ``google.genai.types.Content`` (not a plain string), so wrap
+        the episode text in a ``Content(parts=[Part(text=...)])``.
+        """
         result = self.store.recall(keyword=query, limit=10)
-        # Convert to ADK's expected format
-        return {"results": [
-            {"content": ep.content, "type": ep.type, "timestamp": ep.timestamp}
+        memories = [
+            MemoryEntry(
+                content=genai_types.Content(
+                    parts=[genai_types.Part(text=ep.content)],
+                    role="user",
+                ),
+                author=getattr(ep, "source", None) or "anneal-memory",
+                timestamp=ep.timestamp,
+                custom_metadata={"episode_type": str(ep.type)},
+            )
             for ep in result.episodes
-        ]}
+        ]
+        return SearchMemoryResponse(memories=memories)
 ```
 
 ## Using ToolContext.search_memory
@@ -133,10 +155,22 @@ ADK tools have built-in `search_memory()` on the `ToolContext`. With a custom `M
 ```python
 def research_tool(query: str, tool_context: ToolContext) -> dict:
     """Research tool that checks memory before searching."""
-    # This calls your MemoryService.search_memory()
+    # ToolContext.search_memory(query) takes a single positional str and
+    # returns a SearchMemoryResponse. ADK fills in app_name / user_id
+    # from the invocation context before delegating to your
+    # MemoryService.search_memory(*, app_name, user_id, query).
     prior = tool_context.search_memory(query)
-    if prior and prior.get("results"):
-        return {"from_memory": prior["results"]}
+    if prior.memories:
+        return {
+            "from_memory": [
+                {
+                    "content": str(entry.content),
+                    "author": entry.author,
+                    "timestamp": entry.timestamp,
+                }
+                for entry in prior.memories
+            ]
+        }
     # Fall back to external search...
 ```
 

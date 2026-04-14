@@ -2,6 +2,9 @@
 
 anneal-memory integrates with smolagents through **step_callbacks** — per-step-type callback registration that fires after each agent action or planning step. Simple, clean, and covers both CodeAgent and ToolCallingAgent.
 
+> **Verified:** `anneal-memory` 0.2.0 · `smolagents` 1.24.0 · Python 3.13
+> (step_callbacks dict registration + 2-arg callback form + ActionStep/PlanningStep fields + Model.generate messages shape all verified against live classes)
+
 ## Install
 
 ```
@@ -76,7 +79,11 @@ agent = CodeAgent(
 result = agent.run("Analyze the latest AI memory research papers")
 
 # Wrap after run — reuse the agent's own model for compression so the
-# model that did the work reflects on it:
+# model that did the work reflects on it. smolagents' Model.generate()
+# takes a list of ChatMessage objects (not plain dicts) and returns a
+# ChatMessage whose .content holds the compressed text.
+from smolagents.models import ChatMessage, MessageRole
+
 wrap = prepare_wrap(store)
 if wrap["status"] == "ready":
     package = wrap["package"]
@@ -85,7 +92,9 @@ if wrap["status"] == "ready":
         f"Episodes:\n{package['episodes']}\n\n"
         f"Current continuity:\n{package['continuity'] or ''}"
     )
-    compressed = agent.model([{"role": "user", "content": prompt}])
+    compressed = agent.model.generate(
+        messages=[ChatMessage(role=MessageRole.USER, content=prompt)],
+    )
     validated_save_continuity(store, compressed.content)
 
 store.close()

@@ -1,5 +1,7 @@
 # CAMEL-AI Integration
 
+> Verified against `camel-ai 0.2.90` + `anneal-memory 0.2.0` (Apr 14, 2026).
+
 anneal-memory integrates with CAMEL-AI through **WorkforceCallback** for multi-agent orchestration and by wrapping `ChatAgent.step()` for single-agent use. CAMEL-AI's role-playing architecture makes it well-suited for per-agent memory with distinct identity tracking.
 
 ## Install
@@ -51,8 +53,14 @@ class AnnealMemoryCallback(WorkforceCallback):
         )
 
     def log_task_decomposed(self, event: TaskDecomposedEvent) -> None:
+        # TaskDecomposedEvent carries `parent_task_id` + `subtask_ids`,
+        # NOT `task_id` — the "task_id" field only lives on events for
+        # tasks that already exist as a concrete unit of work. A
+        # decomposition describes the edge from parent to children.
         store.record(
-            f"Task decomposed: {event.task_id}",
+            f"Task {event.parent_task_id} decomposed into "
+            f"{len(event.subtask_ids)} subtasks: "
+            f"{', '.join(event.subtask_ids)}",
             EpisodeType.DECISION,
         )
 

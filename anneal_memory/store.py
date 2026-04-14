@@ -637,7 +637,14 @@ class Store:
         # succeeded" from "connect succeeded but schema/PRAGMA
         # failed." AttributeError on ``self._conn.close()`` in the
         # cleanup path would mask the primary exception.
-        self._conn = None  # type: ignore[assignment]
+        # Explicit annotation ensures mypy narrows every subsequent
+        # ``self._conn.execute(...)`` to ``sqlite3.Connection`` without
+        # per-site ``assert`` clutter. Runtime invariant: by the time
+        # any public Store method is reachable, ``_conn`` has been
+        # set to a real Connection inside ``_db_boundary("schema_init")``
+        # below. The brief None window during init failure cleanup is
+        # already protected by the enclosing try/except.
+        self._conn: sqlite3.Connection = None  # type: ignore[assignment]
         # 10.5c.6 L3 codex H1: track close state via a separate flag
         # rather than nulling ``_conn`` after close. Nulling the
         # attribute means a post-close method call fails with a bare

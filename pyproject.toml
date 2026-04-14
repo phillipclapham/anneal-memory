@@ -47,3 +47,29 @@ packages = ["anneal_memory"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.mypy]
+# Targets the library source only — tests use monkeypatching that
+# mypy doesn't play well with and aren't worth the annotation tax.
+# Run via `uvx mypy anneal_memory/` (no dev-dep required) or install
+# mypy locally. This block exists to widen TypedDict key-typo
+# protection from the two runtime drift tests
+# (test_prepare_wrap_result_has_declared_keys /
+# test_save_continuity_result_has_declared_keys) to all five
+# declared shapes (PrepareWrapResult, SaveContinuityResult,
+# WrapPackageDict, StalePatternDict, WrapSnapshot). See
+# 10.5c.3 rationale in the session archive.
+files = ["anneal_memory"]
+python_version = "3.10"
+# Not strict — the codebase is well-annotated but wasn't written
+# with mypy as a gate. Starting strict would surface a large
+# backlog of cosmetic findings; we start permissive and tighten
+# incrementally as the codebase catches up.
+ignore_missing_imports = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+# Check unannotated function bodies too so the TypedDict key-typo
+# protection actually fires on helper functions, not just typed
+# public API.
+check_untyped_defs = true

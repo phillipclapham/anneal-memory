@@ -501,6 +501,11 @@ def format_wrap_package_text(result: PrepareWrapResult) -> str:
         return result["message"]
 
     package = result["package"]
+    # PrepareWrapResult invariant: status == "ready" ⇒ package is not None.
+    # mypy cannot narrow the package Optional through a sibling-key
+    # check on a TypedDict, so the assertion documents + enforces the
+    # invariant at the narrowing boundary.
+    assert package is not None, "PrepareWrapResult invariant violated: status=ready but package is None"
     parts: list[str] = [package["instructions"], "\n---\n"]
     parts.append(f"## Episodes This Session ({package['episode_count']})")
     parts.append(package["episodes"])
@@ -829,7 +834,7 @@ def validated_save_continuity(
     tmp_token_prefix: str | None = (
         snapshot["token"][:12] if snapshot is not None else None
     )
-    cont_tmp = store._prepare_continuity_write(
+    cont_tmp: Path | None = store._prepare_continuity_write(
         grad_result.text, token_hex=tmp_token_prefix
     )
     meta_tmp: Path | None = None
@@ -888,6 +893,11 @@ def validated_save_continuity(
         db_committed = True
 
         # Phase 3: DB commit succeeded — externalize files.
+        # At this point cont_tmp is still the Path returned from
+        # _prepare_continuity_write (we only clear it to None after the
+        # successful rename below). The type is Path | None only because
+        # of the consumed-handle pattern further down.
+        assert cont_tmp is not None
         try:
             cont_tmp.replace(store.continuity_path)
         except OSError as exc:

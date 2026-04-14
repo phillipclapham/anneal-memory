@@ -150,6 +150,9 @@ class Server:
                 _write_message(_error_response(None, _PARSE_ERROR, msg))
                 continue
 
+            # After the EOF + str guards, _read_message() guarantees a
+            # parsed JSON-RPC dict. Narrow for the type checker.
+            assert isinstance(msg, dict), "parsed message must be a dict"
             method = msg.get("method", "")
             msg_id = msg.get("id")
 
@@ -578,9 +581,11 @@ def start_server(
     ``serve`` subcommand. Factored out so callers don't need to reconstruct
     sys.argv — just pass explicit parameters.
     """
-    # Force UTF-8 on stdio — locale encoding can corrupt non-ASCII memories
-    sys.stdin.reconfigure(encoding="utf-8")
-    sys.stdout.reconfigure(encoding="utf-8")
+    # Force UTF-8 on stdio — locale encoding can corrupt non-ASCII memories.
+    # stdlib typeshed types sys.stdin/stdout as TextIO (no .reconfigure) but
+    # at runtime they are io.TextIOWrapper which does expose the method.
+    sys.stdin.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
 
     # Logging to stderr (stdout is the MCP transport)
     logging.basicConfig(

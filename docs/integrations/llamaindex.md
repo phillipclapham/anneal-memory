@@ -1,5 +1,7 @@
 # LlamaIndex Integration
 
+> Verified against `llama-index-core 0.14.20` + `anneal-memory 0.2.0` (Apr 14, 2026).
+
 anneal-memory integrates with LlamaIndex through the **instrumentation system** — event handlers and span handlers that wrap every component execution. LlamaIndex also offers a `BaseMemoryBlock` interface for deeper memory pipeline integration.
 
 ## Install
@@ -141,14 +143,24 @@ from llama_index.core.bridge.pydantic import Field
 class AnnealMemoryBlock(BaseMemoryBlock):
     """Memory block backed by anneal-memory's episodic store."""
 
+    # BaseMemoryBlock declares ``name`` as a required field; all three
+    # framework-side subclasses must either pass it at construction
+    # time or give it a default here.
+    name: str = "anneal_memory"
     store_path: str = Field(description="Path to anneal-memory database")
     project_name: str = Field(default="agent")
 
     def _get_store(self) -> Store:
         return Store(self.store_path, project_name=self.project_name)
 
-    async def _aget(self, messages=None, **kwargs):
-        """Retrieve relevant memory context."""
+    async def _aget(self, messages=None, **block_kwargs):
+        """Retrieve relevant memory context.
+
+        LlamaIndex calls this with the recent chat history so the block
+        can return any supplemental context the memory pipeline should
+        surface. Return a list of ChatMessage objects (or a plain
+        string) — LlamaIndex merges them into the prompt.
+        """
         store = self._get_store()
         continuity = store.load_continuity()
         store.close()
@@ -157,12 +169,20 @@ class AnnealMemoryBlock(BaseMemoryBlock):
             return [ChatMessage(role="system", content=f"Memory:\n{continuity}")]
         return []
 
-    async def _aput(self, message, **kwargs):
-        """Record messages as episodes when they flush to long-term."""
+    async def _aput(self, messages) -> None:
+        """Record a batch of chat messages as episodes.
+
+        LlamaIndex calls ``_aput`` with a *list* of ``ChatMessage``
+        objects (the messages flushing out of short-term memory), not a
+        single message. Record each one as an episode.
+        """
         store = self._get_store()
-        if hasattr(message, "content") and message.content:
-            store.record(message.content[:500], EpisodeType.OBSERVATION)
-        store.close()
+        try:
+            for message in messages:
+                if hasattr(message, "content") and message.content:
+                    store.record(message.content[:500], EpisodeType.OBSERVATION)
+        finally:
+            store.close()
 
 
 # Use in Memory configuration
@@ -171,7 +191,11 @@ from llama_index.core.memory import Memory
 memory = Memory.from_defaults(
     session_id="session-1",
     memory_blocks=[
-        AnnealMemoryBlock(store_path="./memory.db", project_name="my-agent"),
+        AnnealMemoryBlock(
+            name="anneal_memory",
+            store_path="./memory.db",
+            project_name="my-agent",
+        ),
     ],
 )
 ```

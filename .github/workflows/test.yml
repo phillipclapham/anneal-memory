@@ -1,0 +1,79 @@
+name: test
+
+# Minimal CI for anneal-memory — runs the full pytest suite on every
+# push and PR across the supported Python versions, plus a mypy gate.
+#
+# anneal-memory is zero-dep (stdlib only), so no dependency install
+# is needed beyond the package itself and the dev tooling. This
+# workflow is deliberately small: test matrix, lint gate, done.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Allow manual triggering for release verification runs
+  workflow_dispatch:
+
+# Cancel in-progress runs on new push to the same ref — saves CI
+# minutes when commits land fast during a release arc.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Don't let one version's failure cancel the others — we want
+      # to see the full matrix when something breaks.
+      fail-fast: false
+      matrix:
+        # Matches pyproject.toml requires-python = ">=3.10" + the
+        # project classifiers (3.10 / 3.11 / 3.12 / 3.13). Update
+        # both places when bumping the floor.
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Install test dependencies
+        run: pip install pytest
+
+      - name: Run pytest
+        run: pytest -q
+
+  typecheck:
+    name: mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Run mypy on a single recent Python. The [tool.mypy] block
+          # in pyproject.toml pins the check to python_version = "3.10"
+          # so the check itself is independent of the runner version.
+          python-version: "3.13"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Install mypy
+        run: pip install mypy
+
+      - name: Run mypy
+        run: mypy anneal_memory/

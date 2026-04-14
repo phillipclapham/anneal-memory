@@ -1,5 +1,7 @@
 # Anthropic Agents SDK / Claude Code Integration
 
+> Verified against `claude-agent-sdk 0.1.59` + `anneal-memory 0.2.0` (Apr 14, 2026). Zero drift.
+
 anneal-memory integrates with Anthropic's ecosystem through two complementary paths: the **CLAUDE.md snippet** (proven at scale, zero code) and the **Claude Agent SDK hooks** (programmatic control).
 
 The CLAUDE.md snippet is the most validated integration path — it's the same approach every Claude Code user relies on. The agent reads instructions from a file, then uses tools naturally.

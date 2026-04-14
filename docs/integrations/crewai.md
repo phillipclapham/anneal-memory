@@ -2,6 +2,11 @@
 
 anneal-memory integrates with CrewAI through the **event bus** — a `BaseEventListener` that listens for task and crew lifecycle events. This is the cleanest integration path: non-invasive, no monkey-patching, captures everything.
 
+> **Verified:** `anneal-memory` 0.2.0 · `crewai` 1.14.1 · Python 3.13
+> (BaseEventListener + `@crewai_event_bus.on(...)` handlers register on the sync bus; field access + all five event class imports verified against live models)
+>
+> **Python compatibility:** CrewAI's `tiktoken` dependency has no prebuilt wheel for Python 3.14 as of this writing — use Python 3.10–3.13. If you need 3.14, you'll need a Rust toolchain for the source build.
+
 ## Install
 
 ```
@@ -63,11 +68,15 @@ class AnnealMemoryListener(BaseEventListener):
         @crewai_event_bus.on(TaskCompletedEvent)
         def on_task_done(source, event):
             """Record task output as an episode."""
-            if hasattr(event, "result_summary") and event.result_summary:
+            # TaskCompletedEvent carries a TaskOutput object on event.output
+            # with .raw (the rendered task output text) and .agent (the role
+            # string of the agent that produced it). Use these — there is no
+            # .result_summary or .worker_id on the event itself.
+            if event.output and event.output.raw:
                 self.store.record(
-                    event.result_summary[:500],
+                    event.output.raw[:500],
                     EpisodeType.OUTCOME,
-                    source=getattr(event, "worker_id", "crew"),
+                    source=event.output.agent or "crew",
                 )
 
         @crewai_event_bus.on(ToolUsageFinishedEvent)

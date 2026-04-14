@@ -2314,8 +2314,8 @@ class Store:
         ``sqlite3.OperationalError`` / ``IntegrityError`` / etc. —
         partial consistency that confused transport handlers.
 
-        This context manager catches any ``sqlite3.Error`` subclass
-        raised inside the block and re-raises it as
+        This context manager catches any ``sqlite3.DatabaseError``
+        subclass raised inside the block and re-raises it as
         :class:`StoreDatabaseError` with operation context, preserving
         the original via ``__cause__``. Callers that care about the
         original sqlite3 subclass can still ``raise ... from`` chain
@@ -2996,6 +2996,11 @@ class Store:
         """
         if self._closed:
             return
+        if self._defer_commit:
+            raise StoreError(
+                "Cannot close() while inside _batch() context",
+                operation="close",
+            )
         if self._conn is None:
             # Construction failed before connect ever ran.
             self._closed = True

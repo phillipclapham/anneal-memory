@@ -1,5 +1,7 @@
 # DSPy Integration
 
+> Verified against `dspy 3.1.3` + `anneal-memory 0.2.0` (Apr 14, 2026). Zero drift.
+
 anneal-memory integrates with DSPy through **BaseCallback** — 12 lifecycle hooks (6 start/end pairs) that fire during module execution. DSPy's "programming, not prompting" paradigm makes it architecturally unique among frameworks — episodes capture module I/O rather than conversational turns.
 
 ## Install

@@ -2,6 +2,40 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — 2026-04-14
+
+Documentation-verification pass + tooling hardening. Every one of the 12 framework integration guides has now been exercised end-to-end against a live `pip install` of the framework; every guide header is pinned with a "Verified against" line. Combined with 10.5d's prior run of the top 5 (LangGraph, CrewAI, OpenAI Agents SDK, Pydantic AI, smolagents), the final hit rate across all 12 guides was 9/12 had load-bearing drift — 15 integration bugs total fixed between v0.2.0 and v0.2.1.
+
+No public API changes. No data migration. Drop-in upgrade from v0.2.0.
+
+### Fixed — framework integration guides
+
+- **google-adk.** `BaseMemoryService.search_memory` signature was wrong — the real ADK protocol is `(*, app_name: str, user_id: str, query: str) -> SearchMemoryResponse` (keyword-only three-tuple), not `(query) -> dict`. `MemoryEntry.content` is a `google.genai.types.Content` wrapper, not a plain string. Consumer-side `tool_context.search_memory(query)` returns `SearchMemoryResponse` with a `.memories` attribute, not a dict with `"results"`. Rewrote the `AnnealMemoryService` example and the `tool_context.search_memory` usage snippet against live `google-adk 1.30.0`. Verified with a real `MemoryEntry` round-trip.
+- **llamaindex.** `BaseMemoryBlock.name` is a required field; guide's `AnnealMemoryBlock` failed to declare it and raised `ValidationError` at construction. `_aput` signature drift — real API is `_aput(self, messages: list[ChatMessage]) -> None` (a list of messages, no `**kwargs`). Guide had `_aput(self, message, **kwargs)` singular, which would have silently no-op'd on every flush (`hasattr(list, "content")` is False) and recorded zero episodes. Verified with a real `ChatMessage` list round-trip against `llama-index-core 0.14.20`.
+- **haystack.** `Tracer.trace` signature missing `parent_span` — real protocol is `(operation_name, tags=None, parent_span=None)` and Haystack internals pass it as a kwarg; guide's two-arg signature would have raised `TypeError` on first real invocation. Guide's custom tracer was also missing `current_span()` (abstract on base `Tracer`) and the span class was missing `set_tags` / `raw_span` / `get_correlation_data_for_logs` (Haystack internals call all of them). `AgentBreakpoint` API was completely wrong — guide used `AgentBreakpoint(break_after_agent_step=3)` which is not a real kwarg; the real dataclass is `AgentBreakpoint(agent_name: str, break_point: Breakpoint | ToolBreakpoint)`. Rewrote the breakpoint example with the correct `Breakpoint(component_name, visit_count)` wrapper. Verified against `haystack-ai 2.27.0`.
+- **camel-ai.** `TaskDecomposedEvent` has no `task_id` field — a decomposition describes the edge from a parent task into its children, so the real fields are `parent_task_id` and `subtask_ids`. Guide accessed `event.task_id` which would have raised `AttributeError` the first time a workforce decomposed a task. Rewrote the `log_task_decomposed` recording to surface `parent_task_id` + the list of `subtask_ids`. Verified with all 11 `WorkforceCallback` abstract methods implemented and real event objects against `camel-ai 0.2.90`.
+
+### Verified clean (no drift)
+
+- **autogen / ag2** — verified against `ag2 0.11.5`. All three hooks (`update_agent_state`, `process_all_messages_before_reply`, `process_message_before_send`) fire with the exact signatures the guide uses. Confirmed against `ConversableAgent._process_message_before_send` source.
+- **dspy** — verified against `dspy 3.1.3`. All 5 `BaseCallback` lifecycle hooks, `dspy.configure(callbacks=[...])`, `ChainOfThought` / `ReAct` / `Retrieve` / `LM` / `MIPROv2` surface, and the `MemoryAwareRAG` subclass pattern all verified. `dspy.Module` tracks sub-modules without `super().__init__()`.
+- **anthropic-agents (claude-agent-sdk)** — verified against `claude-agent-sdk 0.1.59`. `ClaudeAgentOptions(setting_sources, hooks)`, `HookMatcher(hooks=[callable])`, async hook callback signature, all four hook event names (`Stop`, `PostToolUse`, `PreCompact`, `UserPromptSubmit`) verified against the real `Literal` union, `query(prompt, options)` signature, `Store.status().episodes_since_wrap` accessor.
+
+### Fixed — Diogenes overnight review (3 LOWs)
+
+- `store.py` `_db_boundary` docstring opening line drift. Said "any `sqlite3.Error` subclass"; implementation catches `sqlite3.DatabaseError` specifically (`InterfaceError` API-misuse bugs propagate bare by design — documented lower in the same docstring). Opening line now matches implementation.
+- `store.py` `close()` inside `_batch()` context. Previously raised `"Cannot batch_commit on a closed store"` which attributed the failure to the wrong operation. Added explicit guard at top of `close()` that raises `StoreError("Cannot close() while inside _batch() context", operation="close")`.
+- `pyproject.toml` `[tool.pytest.ini_options]` gained `filterwarnings = ["error::DeprecationWarning"]`. Local dev has always caught `DeprecationWarning` via `-W error`; CI did not enforce the same gate. All 707 tests remain green with the flag set — CI now catches any deprecation regression the dev environment would catch.
+
+### Internal notes
+
+- `assert`-for-mypy-narrowing count held at 3 sites (`continuity.py:505`, `continuity.py:897`, `server.py:153`). No current risk (`python -O` is uncommon in this codebase's deployment). Gate: if this reaches 5+ sites, evaluate whether `if not X: raise StoreError(...)` is cleaner than the assert idiom.
+- `StoreOperation` Literal unchanged from v0.2.0 (25 values). The 10.5c.6 drift test still runs on every CI matrix job.
+
+### Meta
+
+The v0.2.0 → v0.2.1 delta is almost entirely "documentation drift caught by exercising the docs against reality." This reinforces the framework-guide maintenance cadence committed in v0.2.0: every ~8 weeks OR on a major framework release, whichever comes first. 12-of-12 guides now have pinned version headers, so the next verification pass can diff against a concrete baseline instead of reading the prose cold.
+
 ## [0.2.0] — 2026-04-14
 
 Library-first release. The library is now the canonical product; MCP server and CLI are thin adapters that delegate to the same pipeline. Every public integration guide was exercised against a live `pip install` before release (Session 10.5d). Substantial hardening of the wrap pipeline: session-handshake token closes the prepare/save TOCTOU window, two-phase file/DB commit survives crashes in every intermediate state, all SQLite failures surface through a typed exception hierarchy with pickle-safe cross-process retry dispatch.

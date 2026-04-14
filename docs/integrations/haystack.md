@@ -1,5 +1,7 @@
 # Haystack (deepset) Integration
 
+> Verified against `haystack-ai 2.27.0` + `anneal-memory 0.2.0` (Apr 14, 2026).
+
 anneal-memory integrates with Haystack through a custom **Tracer** implementation. Haystack's tracing system wraps every component execution in spans automatically — a custom tracer can record episodes from this data without modifying any user code.
 
 ## Install
@@ -33,15 +35,27 @@ store = Store("./memory.db", project_name="my-haystack-agent")
 
 
 class AnnealMemoryTracer:
-    """Tracer that records episodes from Haystack component execution."""
+    """Tracer that records episodes from Haystack component execution.
+
+    Implements the haystack.tracing.Tracer protocol:
+    - ``trace(operation_name, tags=None, parent_span=None)`` — context
+      manager yielding a Span.
+    - ``current_span()`` — returns the active span or None.
+    """
+
+    def __init__(self):
+        self._current_span: "AnnealMemorySpan | None" = None
 
     @contextmanager
-    def trace(self, operation_name, tags=None):
+    def trace(self, operation_name, tags=None, parent_span=None):
         """Wrap component execution in a span that records episodes."""
-        span = AnnealMemorySpan(operation_name, tags or {})
+        span = AnnealMemorySpan(operation_name, dict(tags or {}))
+        previous = self._current_span
+        self._current_span = span
         try:
             yield span
         finally:
+            self._current_span = previous
             # Record episode from span data
             if span.output_data:
                 content = f"{operation_name}: {str(span.output_data)[:400]}"
@@ -52,20 +66,39 @@ class AnnealMemoryTracer:
                     episode_type = EpisodeType.OUTCOME
                 store.record(content, episode_type)
 
+    def current_span(self):
+        return self._current_span
+
 
 class AnnealMemorySpan:
-    """Span that captures component I/O."""
+    """Span that captures component I/O.
+
+    Implements the haystack.tracing.Span protocol: ``set_tag`` is the
+    only abstract method, but Haystack internals also call
+    ``set_tags``, ``set_content_tag``, ``raw_span``, and
+    ``get_correlation_data_for_logs`` — provide stubs for all of them
+    so the tracer survives every call site.
+    """
 
     def __init__(self, name, tags):
         self.name = name
-        self.tags = tags
+        self.tags = dict(tags)
         self.output_data = None
 
     def set_tag(self, key, value):
         self.tags[key] = value
 
+    def set_tags(self, tags):
+        self.tags.update(tags)
+
     def set_content_tag(self, key, value):
         self.output_data = value
+
+    def raw_span(self):
+        return self
+
+    def get_correlation_data_for_logs(self):
+        return {}
 
 
 # Enable tracing
@@ -143,17 +176,23 @@ for msg in result.get("messages", []):
 
 ## Using Breakpoints for State Capture
 
-Haystack's breakpoint system captures full pipeline state — useful for recording decision points:
+Haystack's breakpoint system captures full pipeline state — useful for recording decision points. `AgentBreakpoint` is a two-field dataclass: `agent_name` (the component name of the agent in the surrounding pipeline, or any identifier you want logged) and `break_point` (a `Breakpoint` or `ToolBreakpoint`). The `snapshot_callback` is a separate keyword on `Agent.run` itself:
 
 ```python
-from haystack.dataclasses.breakpoints import AgentBreakpoint
+from haystack.dataclasses.breakpoints import AgentBreakpoint, Breakpoint
 
-# Break after 3 agent steps
+# Break after the chat_generator has been visited 3 times
 result = agent.run(
     messages=[ChatMessage.from_user("Complex task")],
-    break_point=AgentBreakpoint(break_after_agent_step=3),
+    break_point=AgentBreakpoint(
+        agent_name="researcher",
+        break_point=Breakpoint(
+            component_name="chat_generator",
+            visit_count=3,
+        ),
+    ),
     snapshot_callback=lambda snapshot: store.record(
-        f"State at step 3: {str(snapshot)[:500]}",
+        f"State at breakpoint: {str(snapshot)[:500]}",
         EpisodeType.CONTEXT,
     ),
 )

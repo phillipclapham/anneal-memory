@@ -1,0 +1,39 @@
+### SUMMARY
+
+The episodes trace two intertwined maturations: a production engineering hardening cycle and a conceptual sharpening of the harness thesis. The technical arc starts with a major continuity-save rewrite and immediately exposes why “green tests” are not enough: layered review surfaced hidden retention regressions, crash-window data loss paths, transaction ownership mistakes, and concurrent temp-file collisions that would have shipped. The strongest corrections were structural, not procedural: explicit phase-state tracking, deterministic tmp-file identity, transaction-boundary ownership, durable fsync semantics, and exception-hierarchy unification. The same principle carried into quality gates: CI matrix testing caught version-skew bugs invisible on a single local runtime; integration guides failed when not executed end-to-end; and test quality was redefined from “demonstrates expected behavior” to “discriminates buggy vs fixed behavior.” By Apr 14, the release train reached a high-confidence state (v0.2.0 shipped, 707 tests, mypy clean, CI live) with only low-severity residuals intentionally queued for v0.2.1.
+
+In parallel, the paper direction improved by abandoning a rhetorically extreme binary and replacing it with a stronger claim: generators can be useful, but generalized intelligence requires harness properties (feedback loops, orchestration, substrate continuity). That refinement was triggered by prior-art pressure and explicit recognition of constellation-driven scope drift. Across both threads, the recurring meta-lesson is the same: recovery happens when first principles are reasserted and encoded as invariants that survive scale, concurrency, and handoff.
+
+### CITED CONNECTIONS
+
+(1, 12): [12] gives a formal harness/generalization frame that explains [1]’s structural-illegibility diagnosis as a channel/arrangement problem, not a talent problem.  
+(2, 3): [3] directly audits the 10.5c.5 pipeline from [2] and finds critical prune and post-commit tmp deletion failures.  
+(2, 4): [4] stress-tests [2]’s transaction/durability assumptions and finds rollback ownership and fsync durability gaps.  
+(2, 5): [5] identifies a concurrency race in [2]’s fixed tmp paths before CAS can protect state.  
+(2, 9): [9] extracts [2]’s `db_committed` branch as the exemplar of structural invariant over discipline.  
+(3, 8): [8] explains that skipping mandated review would have let the [3] bug class ship.  
+(4, 7): [7] is an explicit disposition of L2 concerns raised in [4], accepting constrained empirical gating over broad refactor risk.  
+(5, 6): [6] solves [5]’s collision finding with a deeper invariant: one wrap token as recoverability identity across paired tmp files.  
+(8, 14): [14] shows protocol recovery from [8] institutionalized via full 4-layer review before ship.  
+(10, 12): [10]’s prior-art gaps force [12] to refine claims into a defensible, falsifiable thesis.  
+(12, 13): [13] names the scope-drift mechanism that [12] corrects by returning to original first principles.  
+(12, 22): [22] extends [12] by adding loop-composition/orchestration as a harness-level property.  
+(14, 24): [24] is a precision doc correction on `_db_boundary` semantics introduced in [14].  
+(14, 26): [26] finds a misleading programmer-error path in the `_batch`/`close()` behavior of the architecture shipped in [14].  
+(14, 27): [27] validates [14]’s architecture under traced failure paths and bounds remaining risk to LOW findings.  
+(16, 17): [17] generalizes [16]’s 4-of-5 drift rate into an ongoing “execute integrations, don’t read-review only” maintenance rule.  
+(18, 21): [21] turns [18]’s v0.2.0 state into a staged roadmap with explicit gating and dates.  
+(19, 25): [25] flags runtime semantics risk of assert-based narrowing introduced during [19]’s mypy cleanup.  
+(20, 28): [28] applies [20]’s matrix-verification lesson to deprecation-warning enforcement as CI invariant.  
+(20, 29): [29] reinforces [20] by validating CI policy choices that expose full-matrix and typing-debt signals.  
+(24, 30): [30] routes [24]’s docstring drift into the queued v0.2.1 fix bundle.  
+(25, 30): [30] operationalizes [25] with threshold-based tracking rather than immediate churn.  
+(26, 30): [30] schedules [26]’s close-inside-batch guard as a one-line targeted fix.  
+(28, 30): [30] includes [28]’s `filterwarnings` change as structural forward-protection in next release.  
+
+### TOP PATTERNS
+
+1. Across [2]-[9], [19]-[20], and [28]-[30], correctness improves when phase, ownership, and policy are encoded as invariants instead of relying on developer discipline.  
+2. Across [3]-[5], [8], [16]-[17], and [20], independent/external execution layers repeatedly catch load-bearing failures that local confidence and doc review miss.  
+3. Across [10], [12]-[13], [22]-[23], theory quality rises when provocative claims are pressure-tested against prior art and then re-grounded in substrate-level mechanisms.  
+4. Across [1], [18], and [21], legibility strategy shifts from broadcast/institutional text channels toward substrate-preserving channels and adoption-through-working-software.

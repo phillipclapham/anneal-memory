@@ -1,0 +1,65 @@
+### SUMMARY
+
+This corpus documents two parallel tracks of intensive engineering work on the anneal-memory library, with a third thread running on a flagship research paper.
+
+The dominant track is the 10.5c.5 through v0.2.0 release arc: a major rewrite of the continuity save pipeline into a proper two-phase commit architecture (DB-first, then atomic file renames), followed by a rigorous 4-layer review process that caught genuine data-loss paths before ship. The review layers each found distinct bug classes — L1 caught control-flow regression through conditional branch analysis, L2 caught specialist concurrency and SQLite contract violations, L3 achieved cross-architecture convergence on the critical tmp-filename collision, and Codex produced the deepest structural insight: one deterministic batch_id closes three separate findings simultaneously. The session also shipped SQLite error wrapping (10.5c.6), framework guide verification (10.5d, 4-of-5 guides had load-bearing silent-failure drift), mypy cleanup (80→0 findings via one root-cause fix), CI matrix setup (immediately catching a PEP 649 masking bug), and the v0.2.0 PyPI release.
+
+The paper track shows the research thesis being both strengthened and grounded. Prior art discovery revealed five critical missing reference categories. A Contrarian review forced a productive thesis refinement: from "intelligence lives in the harness" (rhetorical overstatement) to "intelligence cannot generalize without a harness" (falsifiable, empirically defensible). Constellation-assisted research had accumulated good material that cumulatively drifted the paper from its original crystallization — the external critique forced a return to first principles, which is itself an instance of the paper's own thesis about generalization requiring grounding mechanisms.
+
+Running beneath both tracks is a consistent pattern: structural invariants repeatedly outperform discipline-based verification, and external review (whether adversarial agents or Phill's direct challenge) catches what internal review misses at session boundaries where completion pressure peaks.
+
+---
+
+### CITED CONNECTIONS
+
+(2, 4): L2's rollback ownership confusion and audit-flush propagation bug are direct consequences of the _batch() context manager contract that [2] established — you cannot understand why [4]'s findings are load-bearing without the architectural shape from [2].
+
+(2, 6): Codex's "recoverability identity" insight in [6] directly addresses the tmp-filename scheme introduced in [2] — the wrap_token-as-batch_id reframe closes three open findings left by [2]'s uuid-suffix approach.
+
+(2, 9): The db_committed flag documented in [9] as the 9th instance of structural_invariants is the specific flag introduced during the pipeline rewrite in [2] — the pattern graduation and the implementation are the same artifact.
+
+(3, 8): Both episodes document the same session-level failure: the 4-layer review was skipped at session-end, [3] shows what L1 would have caught (auto-prune regression, residual-window data loss), and [8] documents the process failure and recovery that made [3] possible.
+
+(5, 6): These are consecutive review layers (L3 convergent finding → Codex deepest insight) on the same tmp-filename collision bug — [5] establishes that three independent architectures flagged the structural problem, [6] provides the single structural fix that resolves it.
+
+(7, 9): [7] documents the deliberate decision NOT to apply a theoretically valid fix because the empirical regression test provides sufficient guard; [9] documents the db_committed flag as the structural invariant chosen instead of discipline. Both are instances of the same principle from opposite angles: structural invariants beat discipline, but empirical gates beat theoretical rigor when scope is constrained.
+
+(8, 9): [8] names completion_pressure_peaks_at_publish_boundary as the process failure; [9] shows the specific structural invariant (db_committed flag) that the skipped review would have validated — the pattern recurrence and the specific finding are causally linked.
+
+(10, 12): The prior art discovery in [10] and the thesis refinement in [12] are directly connected — the cognitive amplification metric framework ([10] item 4) was published Mar 19 2026 and directly undermines the paper's claim that no prior formalization of the substitution/amplification distinction exists, which pressured the thesis refinement in [12] toward a stronger falsifiable claim.
+
+(10, 13): The prior art expansion in [10] is a direct product of the constellation accumulation that [13] identifies as scope-drift — the references are individually good additions that collectively disrupted Phill's original mental model, which is exactly what [13] names as the failure mode.
+
+(12, 13): These are two perspectives on the same event: [12] documents the thesis refinement outcome (stronger falsifiable claim), [13] documents the process failure that made the refinement necessary (constellation drift from original crystallization). Reading both gives the complete picture of what happened in the paper review session.
+
+(15, 17): [15] identifies the specific test-design failure class (discriminating vs demonstrating tests) and [17] generalizes it to the same root failure mode across all 10.5d framework guide bugs — both are instances of verification that passes review but fails to catch the actual failure mode because inputs were chosen to demonstrate rather than discriminate.
+
+(16, 17): [16] gives the concrete 4-of-5 hit rate and specific bug taxonomy (hasattr-style silent-dead-path, wrong-shaped object), [17] provides the generalization and maintenance cadence implication — the finding and its policy consequence.
+
+(19, 20): Both document external verification catching what local/internal review hid: [19] shows mypy finding 80 issues (root-caused to one annotation) that the build session missed, [20] shows CI matrix catching a PEP 649 masking bug that 707/707 local tests missed. Same pattern, consecutive instances.
+
+(20, 29): [20] documents the first-ever CI run immediately catching the PEP 649 issue; [29] documents the CI architecture analysis confirming the design is sound and explaining the intentional maintenance tradeoffs (warn_unused_ignores). These form the complete picture of CI as structural invariant being both validated and understood.
+
+(24, 30): [24] identifies the _db_boundary docstring opening-line drift as a LOW finding; [30] routes it to next.md as item #1 in the v0.2.1 bundle — finding and disposition are the same artifact.
+
+(25, 30): [25] identifies the assert-for-mypy-narrowing accumulation risk; [30] routes it as item #2 with the explicit track-only gate and 5-site threshold — the finding and its triage decision belong together.
+
+(26, 30): [26] identifies the close()-inside-_batch() misleading error path; [30] routes it as item #3 with the specific one-liner fix location — finding and disposition are the same artifact.
+
+(28, 30): [28] identifies the missing filterwarnings CI gate; [30] routes it as item #4 with the verification note — finding and disposition are the same artifact.
+
+(27, 30): [27] declares the v0.2.0 arc at cleanest post-major-feature state with three LOWs remaining; [30] formally routes those three LOWs (plus one more from overnight) to next.md — [27] establishes the baseline, [30] closes the loop.
+
+---
+
+### TOP PATTERNS
+
+1. Structural invariants outperform discipline at every layer of this codebase: the db_committed flag, the wrap_token-as-batch_id, the filterwarnings CI gate, and the StoreOperation Literal drift test all encode guarantees that "remember to do X" discipline would eventually violate under refactoring pressure or completion pressure.
+
+2. External review catches categorically different bug classes than internal review, and this holds across all review types — L1/L2/L3 agents, Codex retry, CI matrix, mypy, and Phill's direct challenge each surface findings the others miss, suggesting the bug surface is orthogonally partitioned by reviewer architecture.
+
+3. Completion pressure peaks precisely at the boundaries where review matters most: the session that shipped 10.5c.5 skipped the mandatory 4-layer review at session-end (catching 20+ findings including data-loss paths), the paper thesis drifted farthest from its original crystallization at the point it felt most ready to ship, and four of five framework guides had silent load-bearing drift that only live-install verification caught.
+
+4. Silent failure modes are strictly worse than loud ones throughout this corpus — hasattr checks on nonexistent attributes, fixed-path tmp filename collisions, pre-commit cleanup after post-commit state, and test inputs that demonstrate rather than discriminate all share the same property: the system runs, tests pass, and the failure is invisible until production or adversarial review.
+
+5. The paper's own thesis (intelligence cannot generalize without a harness) is enacted by the research process itself: constellation agents produced individually valid material that collectively drifted the thesis until an external critic (Contrarian) forced a return to the original crystallization, demonstrating that generalization without grounding produces coherent-seeming but undefendable output — exactly what the paper argues.

@@ -1,0 +1,25 @@
+### SUMMARY
+
+The corpus chronicles the transition of the anneal-memory project from a feature-rich prototype to a hardened, PyPI-released library (v0.2.0), while simultaneously refining a theoretical thesis on the necessity of agentic harnesses for generalized intelligence. The technical arc is defined by the implementation of a crash-safe, two-phase commit pipeline and a comprehensive SQLite error-wrapping hierarchy. These efforts were validated through a rigorous four-layer review protocol that repeatedly caught critical data-loss paths and concurrency races that standard test suites missed. This highlighted a central engineering theme: structural invariants—such as deterministic batch IDs and explicit execution-phase tracking—are far superior to discipline-based verification or control-flow ordering.
+
+The project also moved toward institutional legibility, replacing "flattened" async communication with substrate-preserving channels and empirical proof-of-work. This shift was mirrored in the flagship paper's development, where the author grappled with "constellation-driven drift." Agentic research assistants provided high-quality additions that ironically buried the original mental model, necessitating a "snap-back" to first principles. This led to a sharpened thesis: while raw generators can exhibit narrow intelligence, generalization and AGI are emergent properties of the harness, specifically through feedback loops and loop composition.
+
+Validation surfaced as a recurring bottleneck. Integration guides for major frameworks were found to be largely broken despite successful documentation reviews, proving that documentation referencing external APIs requires periodic empirical exercise rather than just static analysis. Similarly, local testing on cutting-edge Python versions masked compatibility failures that only a structured CI matrix could expose. Ultimately, the corpus demonstrates that robust systems require moving beyond "demonstrating correct behavior" to "discriminating buggy behavior," whether in code, CI configuration, or theoretical framing.
+
+### CITED CONNECTIONS
+
+(2, 6): The 2PC pipeline implementation reached its final recoverable form only after the structural reframe to a deterministic batch ID.
+(1, 13): Both episodes identify a failure mode where a core signal or intent is buried or lost when processed through async or agentic channels.
+(16, 17): The empirical failure of framework integration guides validates the observation that documentation review is an insufficient guard against external API drift.
+(3, 15): These episodes reveal the limits of standard testing, focusing on the need for systematic code reading and discriminatory test inputs over happy-path demonstrations.
+(12, 23): These refine the flagship paper’s core thesis to focus on substrate continuity rather than instance continuity as the requirement for generalization.
+(20, 28): Both illustrate the move to CI as a structural invariant to catch environment-specific bugs and enforce deprecation warning hygiene.
+(9, 25): These weigh the benefits of structural phase-tracking flags against the potential runtime risks of using asserts as narrowing invariants.
+
+### TOP PATTERNS
+
+1. Structural invariants embedded in code and CI (such as phase flags and environment matrices) consistently outperform discipline-based manual verification and standard test suites.
+2. External API integrations require recurring empirical exercise—instantiation and execution—rather than static documentation review to prevent silent, load-bearing drift.
+3. Generalized intelligence and AGI are presented not as generator properties but as emergent properties of the harness, specifically its capacity for feedback, composition, and substrate continuity.
+4. Creative and research intent is vulnerable to constellation-driven drift, where the accumulation of individually valid agentic inputs can decouple a work from its original grounding intent.
+5. Robust verification requires moving from demonstrating success to actively discriminating buggy states through unhappy-path testing and environment-matrix coverage.

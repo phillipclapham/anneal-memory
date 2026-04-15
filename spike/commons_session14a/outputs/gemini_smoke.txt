@@ -1,0 +1,19 @@
+============================================================
+CONSULTATION RESULTS
+============================================================
+Prompt: # Compression Task
+
+You are being asked to compress a corpus of episodes from an AI agent's memory
+s...
+Agents: gemini
+Mode: quick
+Total time: 300.0s
+
+--- gemini (consultant) ---
+
+[TIMEOUT after 300s]
+
+
+============================================================
+END CONSULTATION
+============================================================

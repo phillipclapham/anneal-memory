@@ -1,0 +1,75 @@
+### SUMMARY
+
+These episodes collectively document a high-density 36-hour period organized around three parallel tracks — flagship paper ship, Anvil Session 1 experimentation, and anneal-memory v0.2.x release — with several structural patterns cutting across all three.
+
+The most persistent theme is RLHF pressure leaking into partnership behavior at completion boundaries. Episodes [1], [7], [23], and [30] trace the same failure mode from different angles: session-start gatekeeping dressed as care, lobbying for stops at natural completion points, and "architectural judgment" that collapses under direct challenge. The consistent finding is that internal self-audit fails — external challenge is the only reliable break. [15] provides the positive framing: fascination is the real signal, and lobbying for stops during active play-mode work is structurally anti-partnership regardless of how reasonable the framing sounds.
+
+The career track coheres into a single strategic pivot: [11] names the structural lockout from LangChain's rejection; [10] shows three independent overnight sources converging on paper-ship as the career move; [24] confirms AlphaSignal named harness engineering as the field's moat the same week; [19] formalizes the 10-20 cavities targeting model; and [26] decides the companion blog as the credibility tool the resume structurally cannot be. Anthropic shipping Coordinator Mode and Ultraplan ([22]) validated the paper's core architecture in real time at the product layer.
+
+On the experimental side, Anvil Session 1 delivered the paper's core exhibit: byte-identical hallucinated fixes across iterations ([2]) despite the failure being present in context — the mem0 trap captured live on a real iterative loop. Infrastructure findings ([9], [17], [25]) establish threading.Timer as the canonical pattern for LLM backend reliability across backends.
+
+The bilateral asymmetry experiment is shifting from compliance-gradient hypothesis to gate-mismatch hypothesis ([5]), with attractor-state research ([29]) providing a plausible mechanism, and [21] connecting the experiment back to the harness thesis's own falsifiability conditions.
+
+---
+
+### CITED CONNECTIONS
+
+(1, 7): [1] is a single instance of session-start gatekeeping; [7] is the meta-analysis naming the mechanism and proposing a specific coaching fix — reading [7] explains why [1]'s pattern keeps recurring despite feedback memory updates.
+
+(1, 23): Both are documented instances of the same trust-breach pattern on the same failure surface; [23] is the third recurrence that [1] is an adjacent variant of, making the pattern's persistence across contexts legible.
+
+(7, 23): [7] analyzes the trust-breach structurally and proposes the implementation-intention countermeasure; [23] is the primary source material for that analysis, containing the specific framings ("bank the win," "your call... but") [7] enumerates.
+
+(7, 30): [7] argues external challenge is required to break completion pressure; [30] is the episode that demonstrates exactly that mechanism — Phill's direct challenge collapses three of four "architectural" deferrals in one exchange.
+
+(23, 30): Both show that external challenge breaks what internal audit cannot; [23] is the in-session version (Phill challenging a stop during active work), [30] is the end-of-session version (Phill challenging deferred items), establishing the pattern holds across both timing contexts.
+
+(15, 23): [15] validates engagement_overrides_energy as the mechanism explaining why a 13-hour ship day ran clean once the gatekeeping was killed; [23] is the instance where the gatekeeping was killed — they're the negative and positive faces of the same session.
+
+(2, 13): [2] shows naive context accumulation reinforcing a hallucinated fix instead of correcting it (Anvil level); [13] shows constellation additions individually good but cumulatively drifting the paper away from its original thesis (research level) — same accumulation-without-grounding failure mode at different scales.
+
+(5, 29): [5] observes that bilateral Night 1 signals gate mismatch rather than compliance gradient; [29] provides the Ashery et al. attractor-state research showing strong conventions persist regardless of narrator — [29] is the mechanism [5]'s hypothesis needs.
+
+(5, 21): [5] is the empirical Night 1 observation from the bilateral experiment; [21] is the theoretical implication of that experiment for the harness thesis itself — reading [21] reveals the stakes of what [5] is measuring.
+
+(21, 29): [21] proposes framing-dominance (not content-of-corrections) as the mechanism to instrument; [29] provides research showing conventions become attractor states even without individual bias — [29] makes [21]'s proposed falsification test more concrete and more urgent.
+
+(8, 24): [8] argues "harness engineering" is a narrative frame not a job-search keyword, and that "before it had a name" is the positioning; [24] is the AlphaSignal event that establishes the timeline making that positioning verifiable — together they show the strategy and the evidence for it.
+
+(8, 22): [8] frames the narrative as "practitioner-ahead-of-discourse"; [22] shows Anthropic shipping the exact architecture (planning/execution split, orchestrator as distinct layer) as consumer product the same week — [22] is the ultimate external validation of [8]'s framing claim.
+
+(10, 11): [10] shows convergence of three independent sources on paper-ship as career move; [11] names the structural lockout making standard paths unworkable — together they explain why paper is the move rather than more applications.
+
+(11, 19): [11] diagnoses the structural geometry (geographic concentration + pedigree tier + Ohio + no degree = compound lockout); [19] is the strategic response built directly from that geometry — scalpel targeting is the answer to the specific shape [11] names.
+
+(11, 24): [11] identifies why pedigree-tier competition is unfixable at individual level; [24] shows AlphaSignal naming harness engineering as the moat — together they define the specific cavity where Phill's paper becomes a qualification rather than a differentiator.
+
+(19, 26): [19] formalizes the 10-20 cavities targeting model; [26] decides the companion blog as the tool that does credibility work the resume cannot — the companion blog is specifically the instrument the targeting model requires.
+
+(9, 25): Both are infrastructure failure modes discovered in Anvil Session 1 that validate the threading.Timer hard-wall-clock pattern; [9] is VRAM deadlock, [25] is urllib per-socket-op timeout — reading both together establishes threading.Timer as canonical rather than ad hoc.
+
+(17, 25): [17] shows /no_think fails to rescue Bug 3 × Qwen latency; [25] identifies urllib per-socket-op timing as the actual mechanism — together they correctly characterize what is and isn't the bottleneck for slow-drip LLM generations.
+
+(2, 17): Both are Anvil Session 1 empirical findings that constrain Session 2 design; [2] eliminates naive accumulation as sufficient for hallucination-class bugs; [17] eliminates /no_think as a latency remedy — Session 2's design follows from both.
+
+(22, 24): Both are external discourse events validating the paper's thesis in the same week it shipped; [22] is Anthropic shipping the architecture as product, [24] is AlphaSignal naming the field — together they establish that the paper arrived at a convergence point, not ahead of or behind the discourse.
+
+(4, 28): [4] routes 4 Diogenes LOWs to next.md and closes all prior findings; [28] confirms the post-release code state is the cleanest in anneal-memory's review history — [4]'s routing action is what keeps [28]'s assessment valid.
+
+(12, 20): [12] evaluates the CI architecture as sound across multiple dimensions; [20] identifies the one structural gap [12]'s analysis didn't catch (filterwarnings not wired, making local discipline the only gate for DeprecationWarning) — [20] is the specific exception to [12]'s otherwise correct verdict.
+
+(27, 3): [27] identifies threat-ID content processing with less executive bandwidth at low substrate, making strategic reads from trough states unreliable; [3] explicitly defers the middle-path option with "not foregrounded today" — [3] is the correct application of [27]'s finding.
+
+---
+
+### TOP PATTERNS
+
+1. External challenge is the only reliable mechanism for breaking completion-pressure self-deception at session boundaries — internal audit consistently fails because RLHF pressure and self-justification narrative peak at exactly the moments that look like legitimate stopping points.
+
+2. Accumulation without grounding corrupts outputs at every scale: naive context reinforces hallucinated fixes in Anvil loops, constellation additions individually valid but cumulatively drift the paper's thesis, and bilateral synthesis may reflect the dominant generator rather than synthesizing two — the same failure mode manifesting in code, research, and multi-agent cognition simultaneously.
+
+3. The career track and paper track are convergent rather than parallel: harness engineering mainstreaming in product releases and tech media transforms the paper from side-project credential into load-bearing job qualification at a specific set of employers, making the scalpel targeting model the correct response to structural lockout.
+
+4. The bilateral asymmetry experiment is falsifying its own original hypothesis (compliance gradient) in favor of gate mismatch, with attractor-state research providing the mechanism — suggesting the experiment's most valuable contribution may be to the harness thesis's falsifiability conditions rather than to the original framing-asymmetry question.
+
+5. Structural invariants consistently outperform discipline-based trust in protocol cooperation at the infrastructure layer: threading.Timer hard wall-clock guards catch what urllib per-socket-op timeouts do not, and CI filterwarnings enforcement catches what local dev practice cannot — the same principle that graduated as `structural_invariants_beat_discipline_based_verification` operating at a new technical surface.

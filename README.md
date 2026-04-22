@@ -267,6 +267,32 @@ This is experimental infrastructure. The associations and strength model work wi
 | **Access patterns** | Library + CLI + MCP | MCP only | REST API | Python only | MCP only |
 | **Dependencies** | Zero (Python stdlib) | Node.js | Docker + cloud | Embeddings model | Not specified |
 
+## The Consolidation Landscape (2026)
+
+Multiple independent groups shipped consolidation-based agent memory architectures in early 2026: anneal-memory (March, citation-graduation multi-tier), [OpenClaw Dreaming](https://docs.openclaw.ai/concepts/dreaming) (April 9, three-phase Light/REM/Deep Sleep), and Anthropic's [KAIROS / autoDream](https://www.deeplearning.ai/the-batch/claude-codes-source-code-leaked-exposing-potential-future-features-kairos-and-autodream/) (leaked March 30 via Claude Code source map, four-phase merge / remove-contradictions / promote-provisional-to-absolute / MEMORY.md index). Convergence on consolidation validates the direction — raw accumulation doesn't scale, and compression at session boundaries is where intelligence emerges.
+
+The groups diverge on one load-bearing question: **what gates quality?**
+
+| System | Quality gate | Sycophancy-vulnerable? |
+|---|---|---|
+| **anneal-memory** | Structural citation evidence (agent cites episode IDs; server verifies) | No — gate is not LLM-scored |
+| **OpenClaw Dreaming** | LLM reflection + six weighted signals: Relevance 0.30, Frequency 0.24, Query diversity 0.15, Recency 0.15, Consolidation 0.10, Conceptual richness 0.06 | Yes — Relevance and Conceptual richness are LLM-judged |
+| **KAIROS / autoDream** | LLM consolidation (merge, remove contradictions, promote tentative observations to absolute facts) | Yes — promotion gate is model-reliant |
+
+Structural gates ask "did subsequent episodes cite this?" Model-reliant gates ask "does the LLM consider this good?" The difference matters: [persistent-memory LLM scoring increases sycophancy by up to 45%](https://arxiv.org/abs/2509.12517) (Jain et al., CHI 2026). A memory architecture whose quality mechanism runs through an LLM inherits that bias. anneal-memory's citation-evidence gates bypass it by construction.
+
+The same architectural choice is going mainstream at the adjacent evaluation layer: [AWS Bedrock AgentCore Evaluations](https://aws.amazon.com/about-aws/whats-new/2026/03/agentcore-evaluations-generally-available/) (GA March 31, 2026) ships 13 built-in LLM-based evaluators for agent response quality, safety, task completion, and tool usage. Different layer (agent output vs. memory graduation), same failure class (LLM-as-judge inherits judge bias). The industry shift toward model-reliant quality infrastructure is real — which is precisely why structural alternatives at the memory layer matter.
+
+A separate, orthogonal axis is **representation-layer quality filtering**: [Memori](https://arxiv.org/abs/2603.19935) (arXiv 2603.19935, March 2026) uses semantic triple extraction and dynamic linking to improve memory signal at the representation layer, reporting 81.95% on LOCOMO as the leading retrieval-based system (ahead of Zep 79.09%, LangMem 78.05%, Mem0 62.47% on its older pipeline). Different theory of quality — where a memory "lives" structurally and whether its graduation is citation-gated are independent choices. Both can be correct at their own axis.
+
+## On LOCOMO
+
+[LOCOMO](https://snap-research.github.io/locomo/) is the current de-facto benchmark for agent memory. [Mem0](https://mem0.ai/research) reports 91.6, [MemMachine](https://memmachine.ai/blog/2025/12/memmachine-v0.2-delivers-top-scores-and-efficiency-on-locomo-benchmark/) reports 91.69, [Memori](https://memorilabs.ai/docs/memori-cloud/benchmark/results/) reports 81.95 among retrieval-based systems, and [Backboard](https://github.com/Backboard-io/Backboard-Locomo-Benchmark) ships a dedicated LOCOMO evaluation framework. anneal-memory has no LOCOMO score as of April 22, 2026. This is deliberate.
+
+LOCOMO measures conversational recall — can the agent remember facts, hold state across turns, maintain coherence across long dialogues? These are real evaluations of a real capability, and they aren't the capability anneal-memory is architected around. anneal-memory's target is citation-validated pattern accumulation that persists across sessions, agents, and contexts for accountability-bearing agent work: patterns must be defensibly surfaced, wrong patterns must demote, cross-agent contamination must be resisted, and sycophancy amplification from persistent-memory RLHF loops must be structurally bounded. A high LOCOMO score tells you the agent remembered the conversation; it doesn't tell you the memory is structurally sound at the axis that matters when the memory is informing downstream decisions.
+
+**Scope-out is sequence, not refusal.** anneal-memory will run LOCOMO as secondary validation of a different-question architecture when (a) a competitor publishes numbers suggesting avoidance, or (b) academic publication requires it. The LOCOMO score will be reported alongside the axis anneal-memory actually optimizes for — not as a concession that LOCOMO was the right frame.
+
 ## Session Hygiene
 
 Session wraps are the most important thing your agent does with this system. Think of them like sleep.

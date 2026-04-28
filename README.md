@@ -10,7 +10,7 @@
 
 Memory without grounding is amplification infrastructure.
 
-Persistent memory [increases agent sycophancy by 45%](https://arxiv.org/abs/2509.12517). Production deployments [accumulate 97.8% junk entries](https://github.com/mem0ai/mem0/issues/4573) within weeks. Clinical research documents memory [scaffolding delusions across sessions](https://doi.org/10.1016/S2215-0366(25)00396-7). The problem isn't memory — it's memory without an immune system.
+Persistent user memory profiles [increase agent sycophancy 10–45% across models](https://arxiv.org/abs/2509.12517) (Gemini 2.5 Pro at 45%, others lower). Production deployments [accumulate 97.8% junk entries](https://github.com/mem0ai/mem0/issues/4573) within weeks. Clinical research documents memory [scaffolding delusions across sessions](https://doi.org/10.1016/S2215-0366(25)00396-7). The problem isn't memory — it's memory without an immune system.
 
 anneal-memory is that immune system. Patterns earn permanence through cited evidence, false knowledge gets caught and demoted, stale information fades, and associations form through consolidation. Your agent's memory develops over time, not just accumulates.
 
@@ -138,7 +138,7 @@ These guides show integration patterns based on each framework's current API. Th
 
 Three independent production failures share one root cause: no quality mechanism between memory write and memory read.
 
-**Sycophancy amplification.** Agents with persistent memory become up to 45% more sycophantic than memoryless baselines. Memory recalls what the user liked hearing, the agent learns to repeat it, and stored approval patterns compound across sessions ([Jain et al., CHI 2026](https://arxiv.org/abs/2509.12517); measured with user memory profiles across Gemini and Llama).
+**Sycophancy amplification.** Agents with persistent user memory profiles become 10–45% more sycophantic than memoryless baselines, depending on model (Gemini 2.5 Pro at 45%, others lower). Memory recalls what the user liked hearing, the agent learns to repeat it, and stored approval patterns compound across sessions ([Jain et al., CHI 2026](https://arxiv.org/abs/2509.12517); measured with user memory profiles across Gemini and Llama variants).
 
 **Junk accumulation.** A [detailed production audit](https://github.com/mem0ai/mem0/issues/4573) on Mem0's tracker documents a deployment that generated 10,134 memory entries over 32 days — 224 were usable. The rest were duplicates, self-referential loops, and hallucinated entries: recalled memories re-extracted as new memories in a feedback loop that no one designed but nothing prevented.
 
@@ -279,7 +279,7 @@ The groups diverge on one load-bearing question: **what gates quality?**
 | **OpenClaw Dreaming** | LLM reflection + six weighted signals: Relevance 0.30, Frequency 0.24, Query diversity 0.15, Recency 0.15, Consolidation 0.10, Conceptual richness 0.06 | Yes — Relevance and Conceptual richness are LLM-judged |
 | **KAIROS / autoDream** | LLM consolidation (merge, remove contradictions, promote tentative observations to absolute facts) | Yes — promotion gate is model-reliant |
 
-Structural gates ask "did subsequent episodes cite this?" Model-reliant gates ask "does the LLM consider this good?" The difference matters: [persistent-memory LLM scoring increases sycophancy by up to 45%](https://arxiv.org/abs/2509.12517) (Jain et al., CHI 2026). A memory architecture whose quality mechanism runs through an LLM inherits that bias. anneal-memory's citation-evidence gates bypass it by construction.
+Structural gates ask "did subsequent episodes cite this?" Model-reliant gates ask "does the LLM consider this good?" The difference matters: persistent user memory profiles have been shown to amplify sycophancy 10–45% across models ([Jain et al., CHI 2026](https://arxiv.org/abs/2509.12517); Gemini 2.5 Pro at 45%, others lower). The same RLHF-inherited bias surfaces wherever an LLM evaluates output for the user — including memory-quality scoring. A memory architecture whose quality mechanism runs through an LLM inherits that bias. anneal-memory's citation-evidence gates bypass it by construction.
 
 The same architectural choice is going mainstream at the adjacent evaluation layer: [AWS Bedrock AgentCore Evaluations](https://aws.amazon.com/about-aws/whats-new/2026/03/agentcore-evaluations-generally-available/) (GA March 31, 2026) ships 13 built-in LLM-based evaluators for agent response quality, safety, task completion, and tool usage. Different layer (agent output vs. memory graduation), same failure class (LLM-as-judge inherits judge bias). The industry shift toward model-reliant quality infrastructure is real — which is precisely why structural alternatives at the memory layer matter.
 

@@ -187,8 +187,14 @@ class StoreError(AnnealMemoryError):
     **SQLite-origin failures** surface as :class:`StoreDatabaseError`,
     a subclass of this class added in 10.5c.6. Every public Store
     method that executes SQL is wrapped in :meth:`Store._db_boundary`,
-    which catches ``sqlite3.Error`` and re-raises as
-    ``StoreDatabaseError`` with operation context. Because the subclass
+    which catches ``sqlite3.DatabaseError`` subclasses
+    (``OperationalError``, ``IntegrityError``, ``DataError``,
+    ``NotSupportedError``, ``ProgrammingError``) and re-raises as
+    ``StoreDatabaseError`` with operation context. ``sqlite3.InterfaceError``
+    (API misuse — wrong arg count, bad bindings, closed connection
+    reuse) propagates bare because it indicates a programming bug
+    rather than a runtime DB failure; wrapping it would mislead
+    callers into retrying a deterministic defect. Because the subclass
     relationship is ``StoreDatabaseError → StoreError → AnnealMemoryError``,
     any existing ``except StoreError`` handler continues to catch
     both file-write and DB-origin failures unchanged. Callers who

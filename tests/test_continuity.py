@@ -2066,6 +2066,53 @@ class TestTwoPhaseCommit:
         finally:
             store.close()
 
+    # -- Behavioral: close() inside _batch() raises + cleanup runs --
+
+    def test_close_raises_inside_batch(self, tmp_path):
+        """``close()`` called inside an active ``_batch()`` context
+        raises ``StoreError`` rather than half-closing the connection
+        mid-transaction. After the raise, ``_batch()`` ``__exit__``
+        runs: ``_defer_commit`` resets, the store stays open
+        (``_closed`` is False because the guard fires before any
+        close work runs), and subsequent operations on the same
+        store succeed.
+
+        Regression guard for the ``close()`` guard at
+        ``store.py:close()``. Without this test, a refactor of
+        ``_batch()``/``__exit__`` logic could silently drop the
+        ``StoreError`` (allowing partial close mid-transaction) or
+        corrupt cleanup state, and nothing would catch it.
+        """
+        store = Store(
+            str(tmp_path / "close_in_batch.db"),
+            project_name="CloseInBatch",
+        )
+        try:
+            # Guard fires; StoreError propagates out of the batch block.
+            with pytest.raises(StoreError) as exc_info:
+                with store._batch():
+                    store.close()  # Guard fires here.
+
+            assert exc_info.value.operation == "close"
+            assert "_batch()" in str(exc_info.value)
+
+            # _batch() __exit__ ran with the exception: defer flag reset.
+            assert store._defer_commit is False
+            assert store._deferred_audits == []
+
+            # Guard fires before close logic runs — store stays open.
+            assert store._closed is False
+
+            # Final invariant: store is fully operational after the
+            # failed-close-in-batch sequence. Normal write + read works.
+            store.record(
+                "after close-in-batch", EpisodeType.OBSERVATION
+            )
+            result = store.recall(limit=5)
+            assert len(result.episodes) == 1
+        finally:
+            store.close()
+
     # -- Behavioral: batch commits on successful exit --
 
     def test_batch_commits_on_success(self, tmp_path):

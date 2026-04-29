@@ -2,6 +2,29 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] — 2026-04-29
+
+Documentation precision pass — public README positioning expansion + StoreError docstring completeness fix. No public API changes. No data migration. Drop-in upgrade from v0.2.1.
+
+### Added — README positioning sections
+
+- **Security § Memory poisoning resistance.** New subsection citing the eTAMP attack class ("Poison Once, Exploit Forever," Zou et al., [arXiv:2604.02623](https://arxiv.org/abs/2604.02623), April 2026 — environment-injected memory poisoning against ChatGPT Atlas + Perplexity Comet + OpenClaw, 32.5% ASR on GPT-4-mini) and the three-mechanism partial defense the architecture provides: single-shot poisoning stalls at 1x (no continuity-layer influence without independent citations), anti-inbreeding catches sustained near-duplicate poisoning, SHA-256 audit trail provides forensic surface. Explicit "structural inference, not empirical defense — anneal-memory has not been tested against eTAMP directly" disclaimer; sustained adversarial campaigns with diverse contaminated trajectories can still graduate (the immune system bounds *cost* of poisoning attacks, not the possibility).
+- **Consolidation Landscape § April 2026 adjacent architectures.** Names HeLa-Mem (Zhu et al., [arXiv:2604.16839](https://arxiv.org/abs/2604.16839), ACL 2026 accepted, explicit Hebbian + Reflective Agent) and GAM (Wu et al., [arXiv:2604.12285](https://arxiv.org/abs/2604.12285), April 2026 preprint, hierarchical graph-based — *not* classical Hebbian). Distinguishes by architecture-class AND peer-review status. Both decouple encoding from consolidation; neither has citation-validated quality gates. The differentiator is increasingly *what gates the consolidation*, not whether consolidation happens.
+- **Compliance § Provenance vs timestamps.** Descriptive distinction between timestamp-only logs and provenance chains for Article 12 traceability. anneal-memory ships at the provenance-chain level (SHA-256-chained audit + citation-required graduation). Predictive hedge: as regulatory guidance and case law develop through August 2026 enforcement and after, this distinction may become a differential compliance gate. AWS AgentCore reference date-stamped to "April 2026 architecture" so the contrast doesn't bind to a moving target.
+
+### Fixed — Diogenes overnight review (2 LOWs)
+
+- `store.py` `StoreError` class "Raised by" enumeration was incomplete. Documented `Store.save_continuity`, `Store.save_meta`, `Store.load_wrap_snapshot`; was missing `Store.wrap_completed` (raises bare `StoreError` when `episode_ids` exceeds the SQLite IN-clause variable limit at line 1544) and `Store.close` (raises bare `StoreError` when called inside an active `_batch()` context at line 3006). Both are public methods callers invoke directly. Trailing summary line widened from "file-write + integrity paths" to "file-write + integrity + invariant-guard paths" to accurately reflect the close() guard.
+- `store.py` `close()` Raises section documented only `StoreDatabaseError`. Now also documents the `StoreError` path raised when called inside `_batch()`, including caller guidance to widen `except StoreDatabaseError:` to `except StoreError:` if the guard surface matters to error handling.
+
+### Pattern note
+
+Both LOWs are siblings of the v0.2.1 `_db_boundary` docstring drift fix — same family (parallel docstrings within the same file) at different surfaces (class-level enumeration vs method-level Raises). Generalizes: when fixing a docstring-drift bug, check parallel docstrings + class-level enumerations for the same class of error before declaring fix complete.
+
+### Meta
+
+The README positioning sections went through 3-agent consultation review (complement + contrarian + anansi) before commit. Initial drafts over-claimed on multiple axes — calibrations applied: eTAMP "structural defense" → "structural inference, not empirical defense"; HeLa-Mem + GAM "convergent validators" → "adjacent architectures"; Article 12 "increasingly read as" → descriptive distinction + predictive hedge. All three claims are framed as inferential-rather-than-empirical; targeted empirical evaluation (e.g., direct eTAMP variant testing) is on the future-work surface, not in this release.
+
 ## [0.2.1] — 2026-04-14
 
 Documentation-verification pass + tooling hardening. Every one of the 12 framework integration guides has now been exercised end-to-end against a live `pip install` of the framework; every guide header is pinned with a "Verified against" line. Combined with 10.5d's prior run of the top 5 (LangGraph, CrewAI, OpenAI Agents SDK, Pydantic AI, smolagents), the final hit rate across all 12 guides was 9/12 had load-bearing drift — 15 integration bugs total fixed between v0.2.0 and v0.2.1.

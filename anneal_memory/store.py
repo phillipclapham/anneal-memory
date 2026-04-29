@@ -179,10 +179,16 @@ class StoreError(AnnealMemoryError):
     - :meth:`Store.save_continuity` — atomic continuity file write
     - :meth:`Store.save_meta` — atomic metadata sidecar write
     - :meth:`Store.load_wrap_snapshot` — partial-state integrity failures
+    - :meth:`Store.wrap_completed` — ``episode_ids`` exceeds the SQLite
+      IN-clause variable limit (998 by default; chunking is 10.5c.5+
+      work)
+    - :meth:`Store.close` — called inside an active :meth:`Store._batch`
+      context (explicit guard; closing mid-batch would lose deferred
+      writes)
 
-    These are the file-write + integrity paths where a transport
-    boundary is expected to translate failures into protocol-level
-    errors.
+    These are file-write + integrity + invariant-guard paths where a
+    transport boundary is expected to translate failures into
+    protocol-level errors.
 
     **SQLite-origin failures** surface as :class:`StoreDatabaseError`,
     a subclass of this class added in 10.5c.6. Every public Store
@@ -2992,6 +2998,17 @@ class Store:
         hierarchy.
 
         Raises:
+            StoreError: If called inside an active :meth:`_batch`
+                context. Closing the connection mid-batch would silently
+                lose the deferred writes the batch is holding; the
+                explicit guard surfaces this as an ``operation="close"``
+                error rather than letting the caller corrupt their own
+                wrap. Resolve by letting ``_batch()`` exit normally
+                (which commits its deferred work) before calling
+                ``close()``. Callers who write
+                ``except StoreDatabaseError:`` around ``close()`` will
+                miss this path; widen to ``except StoreError:`` if the
+                guard surface matters to your error handling.
             StoreDatabaseError: If the underlying sqlite3 close fails
                 (rare — typically "unable to close due to unfinalized
                 statements"). The underlying ``sqlite3.DatabaseError``

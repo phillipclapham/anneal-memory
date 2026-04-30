@@ -2,6 +2,23 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] — 2026-04-30
+
+Mechanism-accuracy precision pass on top of v0.2.2's positioning expansion. Two doc-only fixes from Diogenes overnight review of v0.2.2 (commit `1f8d82c`). No public API changes. No behavior change. Drop-in upgrade from v0.2.2.
+
+### Fixed
+
+- **README § Memory poisoning resistance — point 2 mechanism description was wrong.** v0.2.2 shipped point 2 as *"Anti-inbreeding catches sustained near-duplicate poisoning. ... the explanation-overlap check rejects citations whose content is too similar to the graduation claim — sustained poisoning that just repeats itself doesn't accumulate evidence weight."* The actual `check_explanation_overlap(explanation, episode_content)` function in `graduation.py:230` does the opposite comparison: it requires at least 2 meaningful words from the **explanation** to appear in the cited **episode's content**, catching ungrounded/fabricated explanations rather than near-duplicate content. v0.2.2's prose conflated the explanation-overlap check (anti-fraud) with citation-reuse caps in `detect_citation_gaming` (anti-repetition). Point 2 now describes what the code actually does: *"Explanation-grounding check rejects ungrounded citations."* Heading and mechanism description both corrected; the security argument is preserved (poisoned trajectories where the attacker controls graduation-claim text but cannot rewrite the cited episode body still fail this check) but the framing is now anti-fraud rather than anti-repetition.
+- **`StoreError` class "Raised by" enumeration was missing the cross-method closed-store guard.** Every `_db_boundary`-wrapped public method (`record`, `get`, `delete`, `recall`, `episodes_since_wrap`, `status`, `wrap_started`, `wrap_cancelled`, `get_wrap_started_at`, `get_wrap_history`, `record_associations`, `decay_associations`, `get_associations`, `get_association_context`, `association_stats`, `prune`) raises bare `StoreError("Cannot {operation} on a closed store", operation=..., path=...)` via the boundary's pre-yield closed-state check (`store.py:2397`). v0.2.2's docstring documented `_db_boundary`'s `StoreDatabaseError` behavior but omitted this parallel `StoreError` path; callers writing `except StoreDatabaseError:` around a method on a possibly-closed store would miss the closed-store guard. Docstring now enumerates the wrapped methods and explicitly notes that `StoreDatabaseError` is NOT raised on this path because no SQL ran.
+
+### Pattern note
+
+Both fixes are siblings of the v0.2.1/v0.2.2 docstring-drift family at the same surface (parallel docstrings within `store.py`). Same generalization stands: when fixing a docstring-drift bug, check parallel docstrings + class-level enumerations for the same class of error before declaring fix complete.
+
+### Meta — calibration finding
+
+Both v0.2.2 sections that needed correction here passed full 3-agent consultation review (complement + contrarian + anansi) before commit. The reviewers caught calibration over-claims (eTAMP "structural defense" → "structural inference"; HeLa-Mem "convergent" → "adjacent"; Article 12 "increasingly read as" → predictive hedge) but did NOT catch that point 2 described the wrong code mechanism — because consultation agents do prose review, not code review. Operational lesson: for prose that describes implementation mechanisms (Security/§-Validation/§-Audit sections, "the X check rejects Y" claims), consultation is necessary but not sufficient. Code-level verification — opening the named function and confirming the prose matches — is non-replaceable. Saved as a calibration finding in flow's feedback memory; future docs-touching sessions on this codebase route prose-describing-code through both gates.
+
 ## [0.2.2] — 2026-04-29
 
 Documentation precision pass — public README positioning expansion + StoreError docstring completeness fix. No public API changes. No data migration. Drop-in upgrade from v0.2.1.

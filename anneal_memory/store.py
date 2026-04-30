@@ -185,6 +185,19 @@ class StoreError(AnnealMemoryError):
     - :meth:`Store.close` — called inside an active :meth:`Store._batch`
       context (explicit guard; closing mid-batch would lose deferred
       writes)
+    - **Any** :meth:`Store._db_boundary`-wrapped public method
+      (``record``, ``get``, ``delete``, ``recall``,
+      ``episodes_since_wrap``, ``status``, ``wrap_started``,
+      ``wrap_cancelled``, ``get_wrap_started_at``,
+      ``get_wrap_history``, ``record_associations``,
+      ``decay_associations``, ``get_associations``,
+      ``get_association_context``, ``association_stats``, ``prune``)
+      — when called on a closed store. The boundary's pre-yield
+      closed-state check raises bare ``StoreError("Cannot {operation}
+      on a closed store", operation=..., path=...)`` so callers see
+      their own operation name rather than a bare ``AttributeError``
+      from the underlying connection. ``StoreDatabaseError`` is NOT
+      raised on this path because no SQL ran.
 
     These are file-write + integrity + invariant-guard paths where a
     transport boundary is expected to translate failures into

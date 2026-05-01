@@ -20,7 +20,6 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
-import warnings
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
@@ -135,17 +134,19 @@ def _build_wrap_package(
     """Pure helper — build an agent-facing compression package from pre-fetched inputs.
 
     **Private.** Called by :func:`prepare_wrap` (the canonical
-    store-aware pipeline) and by :func:`prepare_wrap_package` (the
-    deprecated public wrapper kept for one release cycle to give
-    existing callers a ``DeprecationWarning`` before removal).
+    store-aware pipeline). Advanced library users managing their own
+    wrap lifecycle can call this helper directly — understanding that
+    as a private symbol it has no API stability guarantee across
+    versions. The deprecated public wrapper ``prepare_wrap_package``
+    was removed in v0.3.0; use :func:`prepare_wrap` instead.
 
     This function does not touch a store. It takes episodes and
     continuity text already in hand and assembles the agent-facing
     compression package (episodes listing + stale-pattern diagnostic
     + compression instructions + sizing constraints). The caller is
-    responsible for wrap lifecycle (``store.wrap_started()``) and
-    Hebbian association context — :func:`prepare_wrap` does that
-    work around this helper.
+    responsible for wrap lifecycle (``store.wrap_started(token=...,
+    episode_ids=...)``) and Hebbian association context —
+    :func:`prepare_wrap` does that work around this helper.
 
     Args:
         episodes: Episodes since last wrap (the compression window).
@@ -191,76 +192,6 @@ def _build_wrap_package(
         instructions=instructions,
         today=today,
         max_chars=max_chars,
-    )
-
-
-def prepare_wrap_package(
-    episodes: list[Episode],
-    existing_continuity: str | None,
-    project_name: str,
-    max_chars: int = 20000,
-    today: str | None = None,
-    staleness_days: int = 7,
-) -> WrapPackageDict:
-    """Deprecated thin wrapper over :func:`_build_wrap_package`.
-
-    .. deprecated:: 0.2.0
-        ``prepare_wrap_package`` is deprecated since 0.2.0 and will
-        be removed in 0.3.0. Use :func:`prepare_wrap` (the canonical
-        store-aware pipeline) instead. This wrapper exists only to
-        give existing callers a :class:`DeprecationWarning` for one
-        release cycle before the public name is removed.
-
-        If you are an advanced library user who genuinely needs to
-        construct a package from pre-fetched episodes without
-        touching a store (for unit testing package construction in
-        isolation, or for a custom wrap lifecycle), use the private
-        :func:`_build_wrap_package` helper directly — understanding
-        that as a private symbol it has no API stability guarantee.
-
-    The wrapper emits a :class:`DeprecationWarning` with
-    ``stacklevel=2`` so the warning surfaces at the caller's source
-    line, then delegates to the canonical helper without mutating
-    any arguments.
-
-    Args:
-        episodes: Episodes since last wrap (the compression window).
-        existing_continuity: Current continuity text, or None for first session.
-        project_name: Name for the continuity file header.
-        max_chars: Maximum size of the continuity file.
-        today: Override for today's date (YYYY-MM-DD). Defaults to actual today.
-        staleness_days: Days before flagging stale patterns.
-
-    Returns:
-        WrapPackageDict — see :func:`_build_wrap_package`.
-    """
-    # NOTE: this warning intentionally names ``_build_wrap_package``
-    # (a private symbol). The only remaining audience for this
-    # deprecated public wrapper is advanced users managing their
-    # own wrap lifecycle — normal users are already on
-    # ``prepare_wrap``. Naming the private migration target here is
-    # the same pattern Python stdlib uses (e.g. ``logging.warn``
-    # directing advanced callers at ``logging.warning``,
-    # ``asyncio.get_event_loop`` naming ``get_running_loop``). Do not
-    # "clean up" the private symbol out of this message without
-    # reading the 10.5c.3 fix-pass review (Layer 2 N3).
-    warnings.warn(
-        "prepare_wrap_package is deprecated since 0.2.0 and will be "
-        "removed in 0.3.0. Use prepare_wrap(store, ...) for the "
-        "canonical store-aware pipeline, or the private "
-        "_build_wrap_package helper for advanced custom lifecycles. "
-        "See the 'Canonical entry points' section of the library "
-        "quickstart for migration guidance.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return _build_wrap_package(
-        episodes,
-        existing_continuity,
-        project_name,
-        max_chars=max_chars,
-        today=today,
-        staleness_days=staleness_days,
     )
 
 
@@ -359,9 +290,8 @@ def prepare_wrap(
     Advanced library users managing their own lifecycle can call
     it directly — understanding that as a private symbol it has no
     API stability guarantee across versions. The deprecated public
-    wrapper :func:`prepare_wrap_package` exists for one release cycle
-    to give v0.1.x callers a warning before removal in v0.3.0; do not
-    reach for it in new code.
+    wrapper ``prepare_wrap_package`` was removed in v0.3.0; new code
+    must use this canonical entry point.
 
     .. note::
         **The prepare/save window is frozen as of the 10.5c.4 fix**
@@ -695,16 +625,16 @@ def validated_save_continuity(
 
     # Load the frozen snapshot persisted by prepare_wrap. None iff
     # no wrap is currently in progress — either the caller is on
-    # the legacy ``skipped_prepare`` path (calling this function
-    # without having run prepare_wrap first) or the store is idle.
-    # Derive ``skipped_prepare`` from snapshot presence so the
-    # return-value semantics collapse onto a single source of truth:
-    # the persisted snapshot. Eliminates the 10.5c.4 Layer 1 finding
-    # where a caller could reach "wrap_in_progress=True but snapshot
-    # absent" via a direct no-arg ``store.wrap_started()`` call —
-    # load_wrap_snapshot now raises StoreError on that state before
-    # we'd even get here, so the only way ``snapshot is None`` is
-    # the legitimate legacy path.
+    # the ``skipped_prepare`` path (calling this function without
+    # having run prepare_wrap first) or the store is idle. Derive
+    # ``skipped_prepare`` from snapshot presence so the return-value
+    # semantics collapse onto a single source of truth: the
+    # persisted snapshot. v0.3.0 tightening of the
+    # ``store.wrap_started()`` signature removed the API path that
+    # could produce a partial "wrap_in_progress=True but snapshot
+    # absent" state; load_wrap_snapshot still raises StoreError on
+    # that state as belt-and-suspenders defense for mid-upgrade
+    # v0.1.x databases.
     snapshot = store.load_wrap_snapshot()
     skipped_prepare = snapshot is None
 

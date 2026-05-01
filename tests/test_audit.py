@@ -4,6 +4,7 @@ import gzip
 import json
 import os
 import tempfile
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -664,8 +665,7 @@ class TestWrapCancelled:
 
         db = tmp_path / "test.db"
         store = Store(db)
-        with pytest.warns(DeprecationWarning, match="legacy call form"):
-            store.wrap_started()
+        store.wrap_started(token=uuid.uuid4().hex, episode_ids=[])
         store.wrap_cancelled()
 
         audit_path = tmp_path / "test.audit.jsonl"
@@ -1072,8 +1072,7 @@ class TestStoreIntegration:
         db = tmp_path / "test.db"
         store = Store(db)
         store.record("Episode 1", "observation")
-        with pytest.warns(DeprecationWarning, match="legacy call form"):
-            store.wrap_started()
+        store.wrap_started(token=uuid.uuid4().hex, episode_ids=[])
         store.save_continuity("## State\nTest\n## Patterns\n\n## Decisions\n\n## Context\n")
         store.wrap_completed(episodes_compressed=1, continuity_chars=50)
 
@@ -1115,8 +1114,7 @@ class TestStoreIntegration:
 
         store.record("Episode 1", "observation")
         store.record("Episode 2", "decision")
-        with pytest.warns(DeprecationWarning, match="legacy call form"):
-            store.wrap_started()
+        store.wrap_started(token=uuid.uuid4().hex, episode_ids=[])
         store.save_continuity("## State\nTest\n## Patterns\n\n## Decisions\n\n## Context\n")
         store.wrap_completed(episodes_compressed=2, continuity_chars=50)
         store.record("Episode 3", "outcome")
@@ -1132,8 +1130,7 @@ class TestStoreIntegration:
         db = tmp_path / "test.db"
         store = Store(db, audit=False)
         store.record("Episode 1", "observation")
-        with pytest.warns(DeprecationWarning, match="legacy call form"):
-            store.wrap_started()
+        store.wrap_started(token=uuid.uuid4().hex, episode_ids=[])
         store.save_continuity("## State\nTest\n## Patterns\n\n## Decisions\n\n## Context\n")
         store.wrap_completed(episodes_compressed=1, continuity_chars=50)
 

@@ -8,6 +8,7 @@ integration with Store, and integration with the full wrap pipeline.
 import json
 import sqlite3
 import tempfile
+import uuid
 from datetime import date
 from pathlib import Path
 
@@ -837,11 +838,10 @@ Working on database architecture.
 Evaluated database architecture. Identified connection pooling as bottleneck.
 """
 
-        # Mark wrap and save (mimics MCP flow). Uses the legacy
-        # no-arg form — wrapped so the DeprecationWarning doesn't
-        # trip -W error and test output stays clean.
-        with pytest.warns(DeprecationWarning, match="legacy call form"):
-            store.wrap_started()
+        # Mark wrap and save (mimics MCP flow). Uses the canonical
+        # form with empty episode_ids — this test validates
+        # graduations and associations, not snapshot filtering.
+        store.wrap_started(token=uuid.uuid4().hex, episode_ids=[])
 
         from anneal_memory.continuity import validate_structure, measure_sections
         from anneal_memory.graduation import validate_graduations, extract_session_co_citations

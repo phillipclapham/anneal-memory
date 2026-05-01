@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+import uuid
 from pathlib import Path
 
 import pytest
@@ -305,14 +306,12 @@ class TestEpisodesSinceWrap:
 
 class TestWrapLifecycle:
     def test_wrap_started_sets_flag(self, store):
-        with pytest.warns(DeprecationWarning, match="legacy call form"):
-            store.wrap_started()
+        store.wrap_started(token=uuid.uuid4().hex, episode_ids=[])
         status = store.status()
         assert status.wrap_in_progress is True
 
     def test_wrap_completed_clears_flag(self, store):
-        with pytest.warns(DeprecationWarning, match="legacy call form"):
-            store.wrap_started()
+        store.wrap_started(token=uuid.uuid4().hex, episode_ids=[])
         store.wrap_completed(episodes_compressed=0, continuity_chars=0)
         status = store.status()
         assert status.wrap_in_progress is False
@@ -963,12 +962,12 @@ class TestStatus:
         assert status.continuity_chars == len("Some continuity text here.")
 
     def test_status_wrap_in_progress(self, store):
-        # Legacy no-arg form — this test only checks the
+        # Canonical form — this test only checks the
         # wrap_in_progress flag on status(), which reads
         # wrap_started_at directly and doesn't call
-        # load_wrap_snapshot, so the partial state is tolerated.
-        with pytest.warns(DeprecationWarning, match="legacy call form"):
-            store.wrap_started()
+        # load_wrap_snapshot. Empty episode_ids is the canonical
+        # way to start a wrap with no snapshot content.
+        store.wrap_started(token=uuid.uuid4().hex, episode_ids=[])
         status = store.status()
         assert status.wrap_in_progress is True
 

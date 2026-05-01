@@ -1,6 +1,6 @@
 """anneal-memory: Living memory for AI agents. Episodes compress into identity."""
 
-__version__ = "0.2.3"
+__version__ = "0.3.0"
 
 from .store import (
     AnnealMemoryError,
@@ -29,7 +29,6 @@ from .audit import AuditTrail, AuditVerifyResult
 from .continuity import (
     format_wrap_package_text,
     prepare_wrap,
-    prepare_wrap_package,
     validate_structure,
     validated_save_continuity,
 )
@@ -69,7 +68,6 @@ __all__ = [
     "RESOURCES",
     "validate_structure",
     "prepare_wrap",
-    "prepare_wrap_package",
     "format_wrap_package_text",
     "validated_save_continuity",
     "validate_graduations",

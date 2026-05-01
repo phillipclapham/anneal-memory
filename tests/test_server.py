@@ -6,6 +6,8 @@ Transport layer tests (_read_message) use mocked stdin/stdout.
 
 import io
 import json
+import uuid
+
 import pytest
 from pathlib import Path
 
@@ -335,8 +337,7 @@ class TestToolStatus:
     def test_status_after_wrap(self, server, store):
         server._tool_record({"content": "Test", "episode_type": "observation"})
         # Manually complete a wrap to test status
-        with pytest.warns(DeprecationWarning, match="legacy call form"):
-            store.wrap_started()
+        store.wrap_started(token=uuid.uuid4().hex, episode_ids=[])
         store.wrap_completed(episodes_compressed=1, continuity_chars=100)
         result = server._tool_status({})
         text = _text_from_result(result)
@@ -759,8 +760,9 @@ class TestGraduationValidation:
 class TestStaleWrapRecovery:
     def test_prepare_wrap_clears_stale_flag(self, server, store):
         """prepare_wrap with no episodes should clear stale wrap_in_progress."""
-        with pytest.warns(DeprecationWarning, match="legacy call form"):
-            store.wrap_started()  # Simulate abandoned wrap
+        store.wrap_started(
+            token=uuid.uuid4().hex, episode_ids=[]
+        )  # Simulate abandoned wrap
         assert store.status().wrap_in_progress is True
         server._tool_prepare_wrap({})  # No episodes → clears flag
         assert store.status().wrap_in_progress is False

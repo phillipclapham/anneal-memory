@@ -9,16 +9,17 @@
 # local 3.14 runs but broke collection on 3.10-3.13 in CI.
 from __future__ import annotations
 
+import uuid
 from datetime import date
 
 import pytest
 
 from anneal_memory.continuity import (
+    _build_wrap_package,
     format_episodes_for_wrap,
     format_wrap_package_text,
     measure_sections,
     prepare_wrap,
-    prepare_wrap_package,
     validate_structure,
 )
 from anneal_memory.store import Store, StoreError
@@ -205,15 +206,20 @@ class TestFormatEpisodes:
         assert "(abc12345)" in formatted
 
 
-# -- prepare_wrap_package --
+# -- _build_wrap_package (private package construction helper) --
 
 
-@pytest.mark.filterwarnings(
-    "ignore:prepare_wrap_package is deprecated:DeprecationWarning"
-)
-class TestPrepareWrapPackage:
+class TestBuildWrapPackage:
+    """Tests for the private ``_build_wrap_package`` helper.
+
+    The deprecated public wrapper ``prepare_wrap_package`` was removed
+    in v0.3.0. These tests cover the private helper directly because
+    it remains the pure-function core called by :func:`prepare_wrap`
+    and by advanced library users managing their own wrap lifecycle.
+    """
+
     def test_returns_all_keys(self):
-        pkg = prepare_wrap_package(
+        pkg = _build_wrap_package(
             SAMPLE_EPISODES, VALID_CONTINUITY, "TestAgent", today="2026-03-31"
         )
         assert "episodes" in pkg
@@ -225,25 +231,25 @@ class TestPrepareWrapPackage:
         assert "max_chars" in pkg
 
     def test_episode_count(self):
-        pkg = prepare_wrap_package(
+        pkg = _build_wrap_package(
             SAMPLE_EPISODES, VALID_CONTINUITY, "TestAgent", today="2026-03-31"
         )
         assert pkg["episode_count"] == 3
 
     def test_passes_existing_continuity(self):
-        pkg = prepare_wrap_package(
+        pkg = _build_wrap_package(
             SAMPLE_EPISODES, VALID_CONTINUITY, "TestAgent", today="2026-03-31"
         )
         assert pkg["continuity"] == VALID_CONTINUITY
 
     def test_null_continuity_for_first_session(self):
-        pkg = prepare_wrap_package(
+        pkg = _build_wrap_package(
             SAMPLE_EPISODES, None, "TestAgent", today="2026-03-31"
         )
         assert pkg["continuity"] is None
 
     def test_instructions_include_markers(self):
-        pkg = prepare_wrap_package(
+        pkg = _build_wrap_package(
             SAMPLE_EPISODES, None, "TestAgent", today="2026-03-31"
         )
         instructions = pkg["instructions"]
@@ -253,18 +259,20 @@ class TestPrepareWrapPackage:
         assert "[evidence:" in instructions
 
     def test_instructions_include_project_name(self):
-        pkg = prepare_wrap_package(
+        pkg = _build_wrap_package(
             SAMPLE_EPISODES, None, "MyProject", today="2026-03-31"
         )
         assert "MyProject" in pkg["instructions"]
 
     def test_instructions_include_today(self):
-        pkg = prepare_wrap_package(
+        pkg = _build_wrap_package(
             SAMPLE_EPISODES, None, "Test", today="2026-03-31"
         )
         assert "2026-03-31" in pkg["instructions"]
 
     def test_detects_stale_patterns(self):
+        from anneal_memory.continuity import _build_wrap_package
+
         stale_continuity = """# Test — Memory (v1)
 
 ## State
@@ -280,20 +288,20 @@ None.
 ## Context
 Working.
 """
-        pkg = prepare_wrap_package(
+        pkg = _build_wrap_package(
             SAMPLE_EPISODES, stale_continuity, "Test", today="2026-03-31"
         )
         assert len(pkg["stale_patterns"]) == 1
         assert pkg["stale_patterns"][0]["days_stale"] == 30
 
     def test_no_stale_patterns_when_no_continuity(self):
-        pkg = prepare_wrap_package(
+        pkg = _build_wrap_package(
             SAMPLE_EPISODES, None, "Test", today="2026-03-31"
         )
         assert pkg["stale_patterns"] == []
 
     def test_max_chars_passed_through(self):
-        pkg = prepare_wrap_package(
+        pkg = _build_wrap_package(
             SAMPLE_EPISODES, None, "Test", max_chars=10000, today="2026-03-31"
         )
         assert pkg["max_chars"] == 10000
@@ -429,122 +437,21 @@ class TestTypedDictReturnShapes:
             store.close()
 
 
-# -- prepare_wrap_package deprecation (10.5c.3) --
+# -- canonical-pipeline regression gate (post-v0.3.0 wrapper removal) --
 
 
-class TestPrepareWrapPackageDeprecation:
-    """Lock in the v0.2.0 deprecation warning on ``prepare_wrap_package``.
+class TestCanonicalPipelineNoDeprecation:
+    """Regression gate: the canonical ``prepare_wrap`` pipeline MUST
+    NOT emit any ``DeprecationWarning``.
 
-    The pure implementation lives in the private ``_build_wrap_package``
-    helper as of 10.5c.3. The public ``prepare_wrap_package`` remains in
-    place for one release cycle as a thin deprecated wrapper that emits
-    a :class:`DeprecationWarning` and delegates. v0.3.0 will delete the
-    public wrapper.
-
-    Internal callers (``prepare_wrap``) now call ``_build_wrap_package``
-    directly — there is no bypass-kwarg on the public wrapper because
-    there is no need for one. The canonical pipeline emits zero
-    deprecation warnings about anneal-memory's own internal delegation.
+    The deprecated public wrapper ``prepare_wrap_package`` was removed
+    in v0.3.0 and the legacy no-arg ``Store.wrap_started()`` form was
+    tightened to require ``token`` + ``episode_ids``. This gate
+    protects the canonical path against any future refactor that
+    re-introduces a deprecated surface inside the pipeline.
     """
 
-    def test_public_call_emits_deprecation_warning(self):
-        with pytest.warns(DeprecationWarning, match="prepare_wrap_package is deprecated"):
-            prepare_wrap_package(
-                SAMPLE_EPISODES,
-                VALID_CONTINUITY,
-                "TestAgent",
-                today="2026-03-31",
-            )
-
-    def test_warning_mentions_canonical_entry_point(self):
-        """The warning must tell users WHERE to migrate, not just
-        that something is deprecated."""
-        with pytest.warns(DeprecationWarning) as captured:
-            prepare_wrap_package(
-                SAMPLE_EPISODES,
-                None,
-                "TestAgent",
-                today="2026-03-31",
-            )
-        assert any(
-            "prepare_wrap(store" in str(w.message) for w in captured
-        ), "warning must reference canonical prepare_wrap(store, ...) entry point"
-
-    def test_warning_mentions_since_and_removed_versions(self):
-        """CPython idiom: 'deprecated since X, removed in Y' lets
-        users grep for 'removed in 0.3.0' across their deprecation
-        tech debt."""
-        with pytest.warns(DeprecationWarning) as captured:
-            prepare_wrap_package(
-                SAMPLE_EPISODES,
-                None,
-                "TestAgent",
-                today="2026-03-31",
-            )
-        messages = [str(w.message) for w in captured]
-        assert any("since 0.2.0" in m for m in messages), (
-            "warning must say 'since 0.2.0' so users know when "
-            "deprecation started"
-        )
-        assert any("0.3.0" in m for m in messages), (
-            "warning must name the removal version explicitly"
-        )
-
-    def test_warning_stacklevel_points_at_exact_caller_line(self):
-        """stacklevel=2 must surface the warning at the user's source
-        line, not inside anneal_memory/continuity.py. The filename-
-        endswith check from 10.5c.3's first pass was a false-positive:
-        it passed for ANY stacklevel that landed anywhere in the test
-        file. Checking the exact lineno catches silent stacklevel
-        regressions in future refactors.
-
-        **FRAGILITY NOTE:** the ``call_lineno + 1`` computation below
-        requires the ``prepare_wrap_package(...)`` call statement to
-        start on the very next source line after the ``call_lineno =``
-        assignment. Do NOT insert blank lines, comments, or
-        reformatting between them — the test will fail with a
-        misleading "stacklevel is wrong" error. If you need to add
-        setup, put it BEFORE the ``call_lineno =`` line.
-        """
-        import warnings as _warnings
-        import sys as _sys
-
-        with _warnings.catch_warnings(record=True) as caught:
-            _warnings.simplefilter("always")
-            # Capture the lineno of the CALL SITE below. The next
-            # source line is the prepare_wrap_package call; that's
-            # the line the warning should report.
-            call_lineno = _sys._getframe().f_lineno + 1
-            prepare_wrap_package(
-                SAMPLE_EPISODES,
-                None,
-                "TestAgent",
-                today="2026-03-31",
-            )
-        deprecations = [
-            w for w in caught if issubclass(w.category, DeprecationWarning)
-        ]
-        assert len(deprecations) == 1
-        w = deprecations[0]
-        assert w.filename.endswith("test_continuity.py"), (
-            f"warning fired in {w.filename}, not test file — "
-            f"stacklevel is too deep"
-        )
-        assert w.lineno == call_lineno, (
-            f"warning reported line {w.lineno} but call site is "
-            f"line {call_lineno} — stacklevel is wrong. A different "
-            f"value means the warning points at the wrong frame and "
-            f"users can't find where to migrate."
-        )
-
-    def test_prepare_wrap_canonical_pipeline_emits_no_warning(self, tmp_path):
-        """The canonical ``prepare_wrap(store, ...)`` path calls
-        ``_build_wrap_package`` directly, NOT ``prepare_wrap_package``.
-        Users of the canonical entry point must not see a
-        DeprecationWarning about anneal-memory's own internal
-        delegation — this is the regression gate that protects the
-        canonical path from any future refactor that accidentally
-        routes through the public wrapper."""
+    def test_prepare_wrap_canonical_pipeline_emits_no_deprecation(self, tmp_path):
         import warnings as _warnings
 
         store = Store(str(tmp_path / "canonical.db"), project_name="Canon")
@@ -558,13 +465,20 @@ class TestPrepareWrapPackageDeprecation:
                 _warnings.simplefilter("always")
                 result = prepare_wrap(store)
 
+            # Filter to anneal_memory-specific DeprecationWarnings
+            # only — Python stdlib upgrades (sqlite3, json, datetime,
+            # asyncio) sometimes surface DeprecationWarnings the
+            # canonical pipeline transitively touches; those are not
+            # this gate's concern. The intent is "no deprecated
+            # anneal_memory surface in the pipeline." Layer 3 review
+            # caught the broader gate as a CI-flake risk.
             deprecations = [
                 w for w in caught
                 if issubclass(w.category, DeprecationWarning)
-                and "prepare_wrap_package" in str(w.message)
+                and "anneal_memory" in (w.filename or "")
             ]
             assert deprecations == [], (
-                "canonical pipeline leaked a prepare_wrap_package "
+                "canonical prepare_wrap pipeline leaked an anneal_memory "
                 f"DeprecationWarning: {[str(w.message) for w in deprecations]}"
             )
             assert result["status"] == "ready"
@@ -573,11 +487,9 @@ class TestPrepareWrapPackageDeprecation:
 
     def test_build_wrap_package_private_helper_emits_no_warning(self):
         """Direct users of the private ``_build_wrap_package`` helper
-        (advanced library consumers managing their own lifecycle) do
-        not receive a DeprecationWarning — the warning lives on the
-        public wrapper, not the implementation."""
+        (advanced library consumers managing their own lifecycle)
+        receive no warnings."""
         import warnings as _warnings
-        from anneal_memory.continuity import _build_wrap_package
 
         with _warnings.catch_warnings(record=True) as caught:
             _warnings.simplefilter("always")
@@ -592,26 +504,6 @@ class TestPrepareWrapPackageDeprecation:
         ]
         assert deprecations == []
         assert pkg["episode_count"] == len(SAMPLE_EPISODES)
-
-    def test_deprecation_warning_raises_under_strict_filter(self):
-        """PEP 565 recommended library-test-suite config is
-        ``-W error::DeprecationWarning``. Under that filter, calling
-        ``prepare_wrap_package`` must raise a ``DeprecationWarning``
-        (which subclasses ``Warning``, treated as an exception by
-        the strict filter) — not silently swallow it. Protects
-        against a future refactor that accidentally catches the
-        warning inside the wrapper."""
-        import warnings as _warnings
-
-        with _warnings.catch_warnings():
-            _warnings.simplefilter("error", DeprecationWarning)
-            with pytest.raises(DeprecationWarning, match="prepare_wrap_package"):
-                prepare_wrap_package(
-                    SAMPLE_EPISODES,
-                    None,
-                    "TestAgent",
-                    today="2026-03-31",
-                )
 
 
 # -- prepare_wrap (store-aware library pipeline) --
@@ -651,8 +543,9 @@ class TestPrepareWrapLibrary:
         A prior abandoned wrap could have left wrap_in_progress=True.
         prepare_wrap on an empty store must clean it up.
         """
-        with pytest.warns(DeprecationWarning, match="legacy call form"):
-            wrap_store.wrap_started()  # Simulate a stale flag
+        wrap_store.wrap_started(
+            token=uuid.uuid4().hex, episode_ids=[]
+        )  # Simulate a stale flag
         assert wrap_store.status().wrap_in_progress
 
         result = prepare_wrap(wrap_store)
@@ -668,7 +561,7 @@ class TestPrepareWrapLibrary:
         assert result["status"] == "ready"
         assert result["episode_count"] == 2
         assert result["package"] is not None
-        # Package should contain the full prepare_wrap_package output
+        # Package should contain the full _build_wrap_package output
         pkg = result["package"]
         assert "episodes" in pkg
         assert "continuity" in pkg
@@ -692,7 +585,7 @@ class TestPrepareWrapLibrary:
         assert result["package"]["continuity"] is None
 
     def test_max_chars_and_staleness_days_passed_through(self, wrap_store):
-        """Caller-provided config must reach prepare_wrap_package."""
+        """Caller-provided config must reach _build_wrap_package."""
         wrap_store.record("Observation", EpisodeType.OBSERVATION)
         result = prepare_wrap(
             wrap_store, max_chars=5000, staleness_days=14
@@ -1626,68 +1519,98 @@ class TestTOCTOUHandshakeToken:
         assert data.get("wrap_episode_count") == 2
         assert set(data.get("wrap_episode_ids", [])) == {ep_a.id, ep_b.id}
 
-    # -- State machine tightening: partial wrap state is an integrity failure --
+    # -- v0.3.0 signature tightening: contract violations --
 
-    def test_no_arg_wrap_started_then_canonical_save_raises(self, tmp_path):
-        """L1 H1 convergent finding + L2 M4: a caller bypassing the
-        canonical pipeline (``store.wrap_started()`` with no args)
-        creates a partial in-progress state (timestamp set, token
-        empty). As of the 10.5c.4 fix-pass, ``load_wrap_snapshot``
-        raises StoreError on that state so the silent-bypass window
-        is closed — the canonical pipeline has exactly one valid
-        state machine, and partial states are integrity failures
-        rather than "silently fall back to legacy behavior."
+    def test_wrap_started_missing_args_raises_typeerror(self, tmp_path):
+        """v0.3.0 regression gate: ``token`` and ``episode_ids`` are
+        both required keyword-only with no defaults. Python enforces
+        this at the call site via TypeError. This test locks the
+        Python-level enforcement as a structural invariant — if a
+        future refactor accidentally re-adds defaults, the partial
+        wrap-in-progress state becomes reachable again and this
+        test fails loudly. Cheap structural lock.
         """
-        from anneal_memory import validated_save_continuity
-        from anneal_memory.store import StoreError
-
-        store = Store(str(tmp_path / "partial.db"), project_name="Partial")
+        store = Store(str(tmp_path / "missing_args.db"), project_name="MissingArgs")
         try:
-            store.record("A", EpisodeType.OBSERVATION)
-            # Legacy no-arg wrap_started — writes only the timestamp.
-            # The DeprecationWarning is expected; assert it here so
-            # any future removal of the deprecation path shows up
-            # as a visible test signal rather than silent noise.
-            with pytest.warns(DeprecationWarning, match="legacy call form"):
+            with pytest.raises(TypeError):
                 store.wrap_started()
-
-            # load_wrap_snapshot must refuse the partial state.
-            with pytest.raises(StoreError) as excinfo:
-                store.load_wrap_snapshot()
-            assert excinfo.value.operation == "load_wrap_snapshot"
-
-            # The canonical save pipeline propagates the StoreError
-            # because it calls load_wrap_snapshot at the start.
-            text = self._make_continuity("Partial", "deadbeef")
-            with pytest.raises(StoreError):
-                validated_save_continuity(store, text)
-
-            # Recovery: wrap_cancelled clears the partial state, then
-            # the canonical pipeline works again (falls into the
-            # true skipped_prepare branch).
-            store.wrap_cancelled()
-            result = validated_save_continuity(store, text)
-            assert result["skipped_prepare"] is True
-        finally:
-            store.close()
-
-    def test_wrap_started_token_without_ids_raises(self, tmp_path):
-        """Write-side validation: passing a token but omitting
-        episode_ids is a caller contract violation."""
-        store = Store(str(tmp_path / "missing_ids.db"), project_name="Missing")
-        try:
-            with pytest.raises(ValueError, match="episode_ids is None"):
+            with pytest.raises(TypeError):
                 store.wrap_started(token="abc")
+            with pytest.raises(TypeError):
+                store.wrap_started(episode_ids=["a" * 8])
         finally:
             store.close()
 
-    def test_wrap_started_ids_without_token_raises(self, tmp_path):
-        """Write-side validation: passing episode_ids but no token
-        is a caller contract violation."""
-        store = Store(str(tmp_path / "missing_tok.db"), project_name="MissingTok")
+    def test_wrap_started_empty_token_raises(self, tmp_path):
+        """v0.3.0: ``token`` is required keyword-only with no default.
+        Python's TypeError covers the missing-argument case; this
+        test covers the remaining contract violation — passing an
+        empty string token. The canonical pipeline always mints a
+        non-empty uuid4().hex token, so any empty token at the write
+        boundary is a caller bug."""
+        store = Store(str(tmp_path / "empty_tok.db"), project_name="EmptyTok")
         try:
-            with pytest.raises(ValueError, match="token is"):
-                store.wrap_started(episode_ids=["aaaaaaaa"])
+            with pytest.raises(ValueError, match="token must be non-empty"):
+                store.wrap_started(token="", episode_ids=[])
+        finally:
+            store.close()
+
+    def test_wrap_started_non_list_episode_ids_raises(self, tmp_path):
+        """v0.3.0: ``episode_ids`` must be a list. The runtime
+        ``isinstance`` guard catches strings, tuples, generators —
+        the generator case is the load-bearing one because
+        ``list(generator)`` exhausts it and ``len(generator)`` would
+        raise TypeError AFTER the SQL writes already committed,
+        leaving the store in a partial-state with no audit entry.
+        Catching at the entry point keeps the failure mode atomic."""
+        store = Store(
+            str(tmp_path / "non_list.db"), project_name="NonList"
+        )
+        try:
+            with pytest.raises(TypeError, match="episode_ids must be a list"):
+                store.wrap_started(token="a" * 32, episode_ids="abc")
+            with pytest.raises(TypeError, match="episode_ids must be a list"):
+                store.wrap_started(
+                    token="a" * 32, episode_ids=("a" * 8, "b" * 8)
+                )
+            with pytest.raises(TypeError, match="episode_ids must be a list"):
+                store.wrap_started(
+                    token="a" * 32, episode_ids=(x for x in ["a" * 8])
+                )
+        finally:
+            store.close()
+
+    def test_load_wrap_snapshot_empty_list_round_trip(self, tmp_path):
+        """v0.3.0 canonical empty-snapshot round-trip lock.
+
+        The canonical encoding for ``episode_ids=[]`` is the JSON
+        string ``"[]"`` — a two-character string. The
+        ``load_wrap_snapshot`` partial-state guard checks
+        ``if not ids_raw:`` against the raw metadata string, which
+        is truthy for ``"[]"`` (passes the guard) and falsy for the
+        legacy empty-string default (raises). Layer 3 caught the
+        coverage gap: no test exercised the empty-list write →
+        load round-trip, so a one-character change like
+        ``if not json.loads(ids_raw):`` would silently break the
+        canonical empty case.
+
+        This test locks the round-trip as a structural invariant.
+        """
+        store = Store(
+            str(tmp_path / "empty_roundtrip.db"),
+            project_name="EmptyRoundtrip",
+        )
+        try:
+            token = uuid.uuid4().hex
+            store.wrap_started(token=token, episode_ids=[])
+            snap = store.load_wrap_snapshot()
+            assert snap is not None, (
+                "load_wrap_snapshot returned None on a canonical "
+                "empty-list snapshot — the partial-state guard is "
+                "incorrectly rejecting '[]' (the canonical encoding)."
+            )
+            assert snap["token"] == token
+            assert snap["episode_ids"] == []
         finally:
             store.close()
 

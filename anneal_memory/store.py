@@ -185,19 +185,26 @@ class StoreError(AnnealMemoryError):
     - :meth:`Store.close` — called inside an active :meth:`Store._batch`
       context (explicit guard; closing mid-batch would lose deferred
       writes)
-    - **Any** :meth:`Store._db_boundary`-wrapped public method
-      (``record``, ``get``, ``delete``, ``recall``,
-      ``episodes_since_wrap``, ``status``, ``wrap_started``,
-      ``wrap_cancelled``, ``get_wrap_started_at``,
-      ``get_wrap_history``, ``record_associations``,
-      ``decay_associations``, ``get_associations``,
-      ``get_association_context``, ``association_stats``, ``prune``)
-      — when called on a closed store. The boundary's pre-yield
-      closed-state check raises bare ``StoreError("Cannot {operation}
-      on a closed store", operation=..., path=...)`` so callers see
-      their own operation name rather than a bare ``AttributeError``
-      from the underlying connection. ``StoreDatabaseError`` is NOT
-      raised on this path because no SQL ran.
+    - **Any** :meth:`Store._db_boundary`-wrapped public method called
+      on a closed store. The boundary's pre-yield closed-state check
+      raises bare ``StoreError("Cannot {operation} on a closed store",
+      operation=..., path=...)`` so callers see their own operation
+      name rather than a bare ``AttributeError`` from the underlying
+      connection. ``StoreDatabaseError`` is NOT raised on this path
+      because no SQL ran. The set of operation identifiers is a
+      subset of the ``StoreOperation`` ``Literal`` defined at module
+      scope — specifically, the ``_db_boundary``-wrapped operations.
+      The Literal is broader than this subset: it also includes
+      file-write operation identifiers (``save_continuity`` and
+      ``save_meta`` have their own bullets above, ``prepare_continuity_write``
+      and ``prepare_meta_write`` are internal sidecar-write helpers
+      reached only via ``save_continuity`` / ``save_meta`` and surface
+      ``StoreError`` from disk-full / permission failures during the
+      tmp-write phase). The canonical source of truth for "which
+      methods hit the closed-store guard" is grep at the call sites
+      (``with self._db_boundary(...)``) — v0.3.0 replaced the prior
+      inline enumeration with this pointer because the previous form
+      had drift (it omitted ``wrap_completed`` and ``load_wrap_snapshot``).
 
     These are file-write + integrity + invariant-guard paths where a
     transport boundary is expected to translate failures into
@@ -1138,98 +1145,79 @@ class Store:
     def wrap_started(
         self,
         *,
-        token: str = "",
-        episode_ids: list[str] | None = None,
+        token: str,
+        episode_ids: list[str],
     ) -> None:
         """Mark that a wrap has been initiated (prepare_wrap called).
 
-        **The canonical call form is ``wrap_started(token=<uuid>,
-        episode_ids=<list>)``.** The no-arg form ``wrap_started()`` is
-        legacy — it writes only ``wrap_started_at`` and leaves
-        ``wrap_token`` / ``wrap_episode_ids`` empty, creating a state
-        that :meth:`load_wrap_snapshot` now rejects as a store
-        integrity failure (see the 10.5c.4 fix-pass review for the
-        rationale). The no-arg form is preserved for tests and
-        low-level tooling that only need the ``wrap_in_progress``
-        flag semantics (e.g. ``store.status()`` reads), but emits a
-        :class:`DeprecationWarning` to surface the contract drift.
+        Both ``token`` and ``episode_ids`` are required keyword-only
+        arguments. v0.3.0 removed the legacy no-arg form that produced
+        a partial wrap-in-progress state (``wrap_started_at`` set but
+        ``wrap_token`` empty) — Python now enforces the contract at
+        the call site rather than at runtime via a DeprecationWarning.
 
-        Writes the ``wrap_started_at`` flag and, when the caller
-        provides a session-handshake token and frozen episode-ID
-        snapshot, persists them alongside so
+        Writes the ``wrap_started_at`` flag, the session-handshake
+        token, and the frozen episode-ID snapshot so
         :meth:`validated_save_continuity` can verify the token and
         filter its re-fetched episode set to exactly the frozen list.
 
         The three metadata writes happen inside a single SQL
         transaction (one ``INSERT OR REPLACE`` per key, one commit at
         the end) so a crash mid-write cannot leave the store with a
-        timestamp but no token, or a token but no episode list. See
-        the 10.5c.4 design note on ``_DEFAULT_METADATA`` for the
-        invariant.
+        timestamp but no token, or a token but no episode list.
 
         Args:
             token: Session-handshake token (uuid4().hex from
-                :func:`prepare_wrap`). Empty string triggers the
-                legacy flag-only behavior and emits a
-                :class:`DeprecationWarning`. The canonical pipeline
-                always passes a real token.
+                :func:`prepare_wrap`). Must be non-empty.
             episode_ids: Frozen list of 8-char episode IDs the agent
-                was shown for compression. Required when ``token`` is
-                non-empty; ignored when ``token`` is empty. Stored
-                JSON-encoded in the ``wrap_episode_ids`` metadata key.
+                was shown for compression. Empty list is valid
+                (caller explicitly starting a wrap with no snapshot
+                content). Stored JSON-encoded in the
+                ``wrap_episode_ids`` metadata key.
+
+        Raises:
+            ValueError: If ``token`` is empty. The canonical pipeline
+                always mints a non-empty token via ``uuid.uuid4().hex``;
+                an empty token is a contract violation.
         """
-        if not token and episode_ids is None:
-            # Legacy no-arg form. Emits a DeprecationWarning so any
-            # future caller reaches for the canonical (token,
-            # episode_ids) form. The state produced by this path is
-            # ``wrap_started_at`` set + ``wrap_token`` empty, which
-            # ``load_wrap_snapshot`` now raises StoreError on — so
-            # callers on this path MUST NOT subsequently call
-            # ``validated_save_continuity`` without first clearing
-            # with ``wrap_cancelled``.
-            warnings.warn(
-                "Store.wrap_started() with no arguments is a legacy "
-                "call form. The canonical pipeline is "
-                "wrap_started(token=uuid.uuid4().hex, "
-                "episode_ids=<list>) — see prepare_wrap() in "
-                "anneal_memory.continuity for the reference caller. "
-                "Calling validated_save_continuity after the no-arg "
-                "form will raise StoreError from load_wrap_snapshot "
-                "because the metadata is in a partial "
-                "wrap-in-progress state; call wrap_cancelled() to "
-                "clear it before proceeding.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        # Validate the caller-supplied token/episode_ids combo at the
-        # write boundary. The defensive asymmetry the reviewer caught:
-        # load_wrap_snapshot raises StoreError for a "token present,
-        # ids empty" state, but without this guard the write side
-        # would happily store that exact malformed pair. Surface the
-        # bad-caller early so debugging points at the write site, not
-        # at the next load.
-        if token and episode_ids is None:
+        if not token:
             raise ValueError(
-                "wrap_started: token was provided but episode_ids is "
-                "None. The canonical pipeline must pass both together "
-                "— pass episode_ids=[] explicitly if you really mean "
-                "an empty snapshot."
+                "wrap_started: token must be non-empty. The canonical "
+                "pipeline mints a token via uuid.uuid4().hex in "
+                "prepare_wrap()."
             )
-        if episode_ids is not None and not token:
-            raise ValueError(
-                "wrap_started: episode_ids was provided but token is "
-                "empty. Snapshot episode IDs only make sense with a "
-                "handshake token; pass token=uuid.uuid4().hex."
+        # v0.3.0 review-pass: explicit isinstance guard. The type
+        # hint ``list[str]`` is documentation; without runtime
+        # enforcement, callers passing strings, tuples, or generators
+        # would hit failure modes downstream — particularly the
+        # generator case, where ``list(episode_ids)`` exhausts the
+        # generator and ``len(episode_ids)`` in the audit-log payload
+        # later would raise ``TypeError`` AFTER the SQL writes have
+        # already committed (partial state — token + ids written,
+        # audit fails). Catching at the entry point keeps the error
+        # surface consistent with the empty-token guard above.
+        if not isinstance(episode_ids, list):
+            raise TypeError(
+                "wrap_started: episode_ids must be a list[str], "
+                f"got {type(episode_ids).__name__}. The canonical "
+                "pipeline always passes a list (possibly empty)."
             )
 
+        # Materialize the JSON encoding once, before the SQL
+        # transaction. Keeps the audit-log path and the SQL path
+        # consistent on the same in-memory snapshot — even if a
+        # future refactor accidentally accepts a generator at the
+        # signature, both code paths see the same materialized list.
+        ids_list = list(episode_ids)
+        ids_json = json.dumps(ids_list)
         # Batch the three metadata writes into a single commit so a
         # crash mid-write cannot leave the store with a partial
         # snapshot (e.g. timestamp set but token blank, which would
         # look like legacy skipped_prepare state and silently bypass
         # the frozen-snapshot filter at save time — a state
-        # ``load_wrap_snapshot`` now treats as an integrity failure
-        # to catch any code path that slips past the write-side
-        # validation above).
+        # ``load_wrap_snapshot`` still treats as an integrity failure
+        # as belt-and-suspenders defense even though the v0.3.0
+        # signature tightening removed the API path that produced it).
         with self._db_boundary("wrap_started"):
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
@@ -1239,16 +1227,6 @@ class Store:
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_token", token),
             )
-            # Empty-string encoding means "no snapshot stored" (legacy
-            # path where ``store.wrap_started()`` was called with no
-            # args). An empty list from a validated ``token + episode_ids``
-            # pair encodes as ``"[]"`` JSON so ``load_wrap_snapshot`` can
-            # distinguish "caller explicitly passed an empty snapshot"
-            # from "legacy no-snapshot path."
-            if token:
-                ids_json = json.dumps(list(episode_ids or []))
-            else:
-                ids_json = ""
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_episode_ids", ids_json),
@@ -1256,22 +1234,34 @@ class Store:
             self._conn.commit()
 
         if self._audit is not None:
-            payload: dict[str, Any] = {}
-            if token:
-                payload["wrap_token"] = token
-            if token and episode_ids:
-                # Record both the count (for fast integrity scans) and
-                # the full ID list (for forensic reconstruction). The
-                # audit trail is the tamper-evident record, so logging
-                # the full list is load-bearing for chain-of-custody
-                # — with this field the audit alone can answer "which
-                # episodes were shown to the agent for wrap #N" without
-                # joining against the wraps + episodes tables. Key
-                # names mirror the metadata keys for vocabulary
-                # consistency (Layer 2 NIT-2).
-                payload["wrap_episode_count"] = len(episode_ids)
-                payload["wrap_episode_ids"] = list(episode_ids)
-            self._audit.log("wrap_started", payload if payload else None)
+            # Record both the count (for fast integrity scans) and
+            # the full ID list (for forensic reconstruction). The
+            # audit trail is the tamper-evident record, so logging
+            # the full list is load-bearing for chain-of-custody —
+            # with these fields the audit alone can answer "which
+            # episodes were shown to the agent for wrap #N" without
+            # joining against the wraps + episodes tables. Key
+            # names mirror the metadata keys for vocabulary
+            # consistency (Layer 2 NIT-2).
+            #
+            # v0.3.0: always log episode_count + episode_ids even
+            # when ``episode_ids=[]``. Pre-v0.3.0 the empty case was
+            # omitted (because the no-arg legacy form passed None
+            # and an empty list looked like the legacy default).
+            # With the canonical signature requiring an explicit
+            # list, ``[]`` means "agent explicitly started a wrap
+            # with no snapshot content" and is forensically distinct
+            # from "audit entry from a legacy version that didn't
+            # log these fields." Always-on logging restores that
+            # discrimination.
+            self._audit.log(
+                "wrap_started",
+                {
+                    "wrap_token": token,
+                    "wrap_episode_count": len(ids_list),
+                    "wrap_episode_ids": ids_list,
+                },
+            )
 
     def wrap_cancelled(self) -> None:
         """Clear wrap-in-progress flag without recording a completed wrap.
@@ -1381,32 +1371,44 @@ class Store:
         return started if started else None
 
     def load_wrap_snapshot(self) -> WrapSnapshot | None:
-        """Return the frozen wrap-in-progress snapshot, or None if no wrap is pending.
+        """Return the frozen wrap-in-progress snapshot, or None if idle.
 
         Used by :func:`validated_save_continuity` to filter the
         re-fetched episode set down to exactly what the agent was
         shown at prepare time, and to verify any caller-provided
-        token. Returns ``None`` in two cases:
+        token.
 
-        1. **No wrap in progress** — ``wrap_started_at`` metadata is
-           empty. This is the legacy idle state.
-        2. **Legacy prepare path with no token** — ``wrap_started_at``
-           is set but ``wrap_token`` is empty. This shouldn't happen
-           under the canonical 10.5c.4 pipeline but stays a tolerated
-           state for the ``skipped_prepare`` path where callers
-           invoke ``validated_save_continuity`` without having called
-           ``prepare_wrap`` first.
+        Returns ``None`` only when there is no wrap in progress —
+        ``wrap_started_at`` metadata is empty. This is the idle
+        state, and also the ``skipped_prepare`` path where the caller
+        invokes ``validated_save_continuity`` without having run
+        ``prepare_wrap`` first.
 
         Returns:
             :class:`WrapSnapshot` with ``token`` and ``episode_ids`` if
-            a snapshot is stored, else ``None``.
+            a snapshot is stored, ``None`` if no wrap is in progress.
 
         Raises:
+            StoreError: If the wrap-in-progress metadata is in a
+                partial state (``wrap_started_at`` set but
+                ``wrap_token`` empty, or ``wrap_token`` set but
+                ``wrap_episode_ids`` metadata stored as the empty
+                string — the legacy v0.1.x default). v0.3.0
+                tightened ``Store.wrap_started()`` to require both
+                ``token`` and ``episode_ids``, so the API can no
+                longer produce these partial states; this guard
+                remains as belt-and-suspenders defense for
+                mid-upgrade v0.1.x databases or manual metadata
+                edits. **Note:** the canonical encoding for an
+                empty episode list is the JSON string ``"[]"`` (two
+                characters) — that is accepted as a valid empty
+                snapshot, not flagged as partial state.
+                ``operation`` is ``"load_wrap_snapshot"``, ``path``
+                is the store's DB file.
             StoreError: If the ``wrap_episode_ids`` metadata key is
-                populated but its JSON fails to decode — treated as a
+                populated but its JSON fails to decode, or decodes
+                to an unexpected shape — treated as a
                 store-integrity failure, not silently recovered.
-                ``operation`` is ``"load_wrap_snapshot"``, ``path`` is
-                the store's DB file.
         """
         # Codex Layer 3 MEDIUM: batch the three metadata reads into
         # a single query so concurrent writers can't interleave
@@ -1426,26 +1428,23 @@ class Store:
 
         token = meta.get("wrap_token", "")
         if not token:
-            # wrap_started_at is set but wrap_token is empty — this is
-            # a malformed state after 10.5c.4. The canonical path
+            # wrap_started_at is set but wrap_token is empty — a
+            # partial wrap-in-progress state. The canonical path
             # ``prepare_wrap → store.wrap_started(token=..., episode_ids=...)``
-            # writes all three keys atomically; the only way to reach
-            # "timestamp present, token empty" is (a) a caller invoking
-            # the no-arg ``store.wrap_started()`` form directly (bypass
-            # of the canonical pipeline), (b) a mid-upgrade v0.1.x
-            # database with a pre-existing stale flag, or (c) a manual
-            # metadata edit. Layer 1 review caught this as a silent
-            # bypass of the snapshot filter — surfacing it as a
-            # StoreError is the right move: the canonical pipeline has
-            # one valid state machine, and partial states are integrity
-            # failures, not "try to recover silently."
+            # writes all three keys atomically; v0.3.0 tightened the
+            # signature so the no-arg form that previously could
+            # produce this state is gone. The only ways to reach
+            # "timestamp present, token empty" now are (a) a
+            # mid-upgrade v0.1.x database with a pre-existing stale
+            # flag, or (b) a manual metadata edit. Surfacing as
+            # StoreError is the right move: the canonical pipeline
+            # has one valid state machine, and partial states are
+            # integrity failures, not "try to recover silently."
             raise StoreError(
                 "wrap_started_at is set but wrap_token is empty — "
                 "store metadata is in a partial wrap-in-progress state. "
-                "This happens if a caller bypasses the canonical "
-                "prepare_wrap pipeline (e.g. by calling "
-                "store.wrap_started() with no arguments) or if a v0.1.x "
-                "database is mid-upgrade with a stale legacy flag. "
+                "Possible causes: a v0.1.x database mid-upgrade with a "
+                "stale legacy flag, or a manual metadata edit. "
                 "Call store.wrap_cancelled() to clear the stale flag, "
                 "then re-run prepare_wrap for a clean snapshot.",
                 operation="load_wrap_snapshot",
@@ -2554,10 +2553,23 @@ class Store:
                 # what the caller needs to see. The store is about to
                 # be in an unknown state either way; the caller should
                 # reconstruct it.
-                try:
-                    self._conn.rollback()
-                except sqlite3.Error:
-                    pass
+                #
+                # v0.3.0 (Diogenes May 1): guard ``self._conn is not
+                # None`` before the rollback. Private-API invariant
+                # says ``_batch()`` is unreachable when ``_conn`` is
+                # None (construction failure surfaces inside the
+                # constructor's ``_db_boundary("schema_init")`` block,
+                # before any caller can hold a Store reference). The
+                # guard is defensive against future refactors that
+                # might widen the reachable state — without it, a
+                # construction-failure path that ever does land here
+                # would raise ``AttributeError`` (not ``sqlite3.Error``)
+                # and bypass the swallowing, masking the primary error.
+                if self._conn is not None:
+                    try:
+                        self._conn.rollback()
+                    except sqlite3.Error:
+                        pass
                 raise
             # Single outer commit. If this raises (disk full, locked
             # DB, etc.) rollback and re-raise — the exception
@@ -2594,10 +2606,15 @@ class Store:
                 # doesn't run twice against an already-rolled-back
                 # connection. SQLite's rollback on an already-empty
                 # transaction is a no-op, but the contract matters.
-                try:
-                    self._conn.rollback()
-                except sqlite3.Error:
-                    pass
+                #
+                # v0.3.0 (Diogenes May 1): same ``_conn is not None``
+                # guard as the yield-wrapper rollback above. See the
+                # rationale comment there.
+                if self._conn is not None:
+                    try:
+                        self._conn.rollback()
+                    except sqlite3.Error:
+                        pass
                 raise
             commit_succeeded = True
         finally:

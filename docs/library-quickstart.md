@@ -44,15 +44,16 @@ This is the most important part. Wrapping is how raw episodes compress into work
 
 > **Canonical entry points: `prepare_wrap(store)` + `validated_save_continuity(store, text)`.**
 > These are the only functions you should call at session end. The library exposes
-> lower-level primitives (`prepare_wrap_package()`, `store.save_continuity()`) for
-> test use only — calling them directly bypasses the immune system and leaves
-> `skipped_prepare=True` in the save result.
+> a lower-level primitive (`store.save_continuity()`) for test use only — calling
+> it directly bypasses the immune system and leaves `skipped_prepare=True` in the
+> save result.
 >
-> `prepare_wrap_package()` is **deprecated since 0.2.0 and will be removed in 0.3.0.**
-> Calling it emits a `DeprecationWarning` directing you to `prepare_wrap(store, ...)`.
 > Advanced library users managing their own wrap lifecycle can use the private
-> `_build_wrap_package()` helper instead — understanding that as a private symbol
-> it carries no API stability guarantee across versions.
+> `_build_wrap_package()` helper to construct a compression package from
+> pre-fetched episodes without touching a store — understanding that as a private
+> symbol it carries no API stability guarantee across versions. The deprecated
+> public wrapper `prepare_wrap_package()` was **removed in v0.3.0**; new code
+> must use `prepare_wrap(store, ...)`.
 
 ```python
 from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
@@ -107,7 +108,7 @@ if wrap["status"] == "ready":
 store.close()
 ```
 
-**Why `prepare_wrap(store)` and not `prepare_wrap_package()`?** The store-aware version marks the wrap as in progress so the immune system knows this compression was preceded by a proper prepare step. Calling `prepare_wrap_package()` directly and then `validated_save_continuity()` will leave `skipped_prepare=True` in the save result — a signal the cognitive loop was bypassed. As of **0.2.0 `prepare_wrap_package()` is deprecated** and emits a `DeprecationWarning`; it will be removed in 0.3.0. Advanced library users managing their own lifecycle can use the private `_build_wrap_package()` helper (no API stability guarantee). Similarly, `store.save_continuity(text)` is the low-level file-write primitive — it bypasses graduation, associations, decay, and wrap metadata. Don't reach for either one.
+**Why `prepare_wrap(store)` is the canonical entry point.** The store-aware version marks the wrap as in progress, mints the session-handshake token, and freezes the episode-ID snapshot — all signals the immune system relies on to enforce the cognitive loop. Bypassing it (e.g. calling `_build_wrap_package()` directly and then `validated_save_continuity()`) leaves `skipped_prepare=True` in the save result, surfacing the bypass to operators. The deprecated public wrapper `prepare_wrap_package()` was removed in **v0.3.0**; advanced library users managing their own wrap lifecycle can call the private `_build_wrap_package()` helper directly (no API stability guarantee). Similarly, `store.save_continuity(text)` is the low-level file-write primitive — it bypasses graduation, associations, decay, and wrap metadata. Don't reach for either one.
 
 ## Affective State
 

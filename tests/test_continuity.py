@@ -1434,6 +1434,34 @@ class TestTOCTOUHandshakeToken:
         finally:
             store.close()
 
+    def test_load_wrap_snapshot_valid_json_wrong_shape_raises(
+        self, tmp_path
+    ):
+        """wrap_episode_ids that is valid JSON but decodes to a
+        non-list-of-strings (e.g. an integer) is a store-integrity
+        failure, not silently recovered. Distinct from the corrupt-JSON
+        case: json.loads succeeds here, the isinstance/all check is
+        what rejects it."""
+        from anneal_memory.store import StoreError
+
+        store = Store(
+            str(tmp_path / "wrongshape.db"), project_name="WrongShape"
+        )
+        try:
+            store.record("A", EpisodeType.OBSERVATION)
+            prepare_wrap(store)
+            # Valid JSON, wrong shape: decodes to an int, not a list.
+            store._conn.execute(
+                "UPDATE metadata SET value = ? WHERE key = ?",
+                ("42", "wrap_episode_ids"),
+            )
+            store._conn.commit()
+            with pytest.raises(StoreError) as excinfo:
+                store.load_wrap_snapshot()
+            assert excinfo.value.operation == "load_wrap_snapshot"
+        finally:
+            store.close()
+
     def test_load_wrap_snapshot_token_without_ids_raises(self, tmp_path):
         """Token set but episode_ids empty is a malformed state —
         treat as integrity failure, don't silently return an empty
@@ -1644,6 +1672,27 @@ class TestTOCTOUHandshakeToken:
                 store.wrap_started(
                     token="a" * 32, episode_ids=(x for x in ["a" * 8])
                 )
+        finally:
+            store.close()
+
+    def test_wrap_started_non_str_element_raises(self, tmp_path):
+        """v0.3.1 (Diogenes LOW): a list containing a non-str element
+        passes the isinstance(list) guard and JSON-encodes without
+        error, but is rejected at the entry point with TypeError so the
+        failure surfaces at the write boundary — not later at
+        load_wrap_snapshot() as a misleading store-integrity
+        StoreError. Keeps the error surface consistent with the
+        empty-token and non-list guards."""
+        store = Store(
+            str(tmp_path / "non_str_elem.db"), project_name="NonStrElem"
+        )
+        try:
+            with pytest.raises(TypeError, match="non-str element"):
+                store.wrap_started(
+                    token="a" * 32, episode_ids=["a" * 8, 42]
+                )
+            with pytest.raises(TypeError, match="non-str element"):
+                store.wrap_started(token="a" * 32, episode_ids=[None])
         finally:
             store.close()
 

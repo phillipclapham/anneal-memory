@@ -601,16 +601,27 @@ def validated_save_continuity(
             wrap is in progress (``prepare_wrap`` not called, or the
             session already wrapped), or a passed ``wrap_token`` does
             not match the in-progress wrap.
-        StoreError: If the filesystem write of the continuity sidecar
-            or meta sidecar fails. ``StoreError`` is a library-level
-            domain error (subclass of :class:`AnnealMemoryError`, NOT
-            of :class:`OSError`). Transports should catch
+        StoreError: Raised in two distinct cases. (1) **Integrity
+            failure.** The wrap-state precondition runs
+            :meth:`Store.load_wrap_snapshot` first (before any payload
+            validation); if the stored wrap-in-progress metadata is in
+            a partial or corrupt state — ``wrap_started_at`` set but
+            ``wrap_token`` empty, ``wrap_token`` set but
+            ``wrap_episode_ids`` empty, or ``wrap_episode_ids`` JSON
+            that fails to decode or decodes to anything other than a
+            list of strings — that integrity failure surfaces here
+            with ``operation="load_wrap_snapshot"``. (2) **Filesystem
+            write failure.** The write of the continuity sidecar or
+            meta sidecar fails, surfacing with the relevant write
+            operation; the original ``OSError`` is preserved on
+            ``__cause__`` (we raise ``StoreError(...) from exc``), so
+            callers that need ``errno`` can dig one level deeper. In
+            both cases ``StoreError`` is a library-level domain error
+            (subclass of :class:`AnnealMemoryError`, NOT of
+            :class:`OSError`); transports should catch
             :class:`AnnealMemoryError` as a single library boundary,
             or :class:`StoreError` specifically to read ``.operation``
-            and ``.path`` for clean error messages. The original
-            ``OSError`` is preserved on ``__cause__`` (we raise
-            ``StoreError(...) from exc``), so callers that need
-            ``errno`` can dig one level deeper.
+            and ``.path`` for clean error messages.
     """
     from .associations import process_wrap_associations
 

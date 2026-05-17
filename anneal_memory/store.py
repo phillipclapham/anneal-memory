@@ -1179,6 +1179,12 @@ class Store:
             ValueError: If ``token`` is empty. The canonical pipeline
                 always mints a non-empty token via ``uuid.uuid4().hex``;
                 an empty token is a contract violation.
+            TypeError: If ``episode_ids`` is not a ``list``, or is a
+                list containing a non-``str`` element. Both checks run
+                at the entry point — before any SQL write — so a
+                caller type error surfaces here rather than later as a
+                store-integrity ``StoreError`` at
+                :meth:`load_wrap_snapshot`.
         """
         if not token:
             raise ValueError(
@@ -1202,6 +1208,24 @@ class Store:
                 f"got {type(episode_ids).__name__}. The canonical "
                 "pipeline always passes a list (possibly empty)."
             )
+        # v0.3.1 review-pass (Diogenes LOW): validate element types at
+        # the entry point too. A list with a non-str element passes the
+        # isinstance guard above, JSON-encodes without error, gets
+        # committed, and only fails LATER at load_wrap_snapshot() as a
+        # store-integrity StoreError — making a caller type bug look
+        # like store corruption. Catch it here so the error surface
+        # matches the empty-token and non-list guards: fail fast at the
+        # write boundary, before any SQL touches the store. Short-
+        # circuits on the first bad element (episode lists are tiny).
+        for episode_id in episode_ids:
+            if not isinstance(episode_id, str):
+                raise TypeError(
+                    "wrap_started: episode_ids must be a list[str]; "
+                    "got a non-str element of type "
+                    f"{type(episode_id).__name__}. The canonical "
+                    "pipeline always passes a list of episode ID "
+                    "strings."
+                )
 
         # Materialize the JSON encoding once, before the SQL
         # transaction. Keeps the audit-log path and the SQL path
@@ -1409,8 +1433,11 @@ class Store:
                 is the store's DB file.
             StoreError: If the ``wrap_episode_ids`` metadata key is
                 populated but its JSON fails to decode, or decodes
-                to an unexpected shape — treated as a
-                store-integrity failure, not silently recovered.
+                to an unexpected shape (anything other than a list
+                of strings) — treated as a store-integrity failure,
+                not silently recovered. ``operation`` is
+                ``"load_wrap_snapshot"``, ``path`` is the store's
+                DB file.
         """
         # Codex Layer 3 MEDIUM: batch the three metadata reads into
         # a single query so concurrent writers can't interleave
@@ -1485,7 +1512,7 @@ class Store:
             raise StoreError(
                 "wrap_episode_ids metadata decoded to an unexpected "
                 f"shape ({type(episode_ids).__name__}); expected a "
-                "list of 8-char episode ID strings.",
+                "list of episode ID strings.",
                 operation="load_wrap_snapshot",
                 path=str(self.path),
             )

@@ -1885,17 +1885,22 @@ class TestCmdSaveContinuity:
         with pytest.raises(SystemExit):
             cmd_save_continuity(base_args_with_data)
 
-    def test_save_warns_without_prepare(self, base_args_with_data, tmp_path, capsys):
-        """Saving without prepare-wrap should warn."""
+    def test_save_without_prepare_is_refused(self, base_args_with_data, tmp_path, capsys):
+        """Saving without prepare-wrap is refused (v0.3.1 phantom-re-save fix).
+
+        Before v0.3.1 this warned and saved anyway; now cmd_save_continuity
+        surfaces the library's ValueError and exits non-zero.
+        """
         cont_file = tmp_path / "continuity.md"
         cont_file.write_text(self._valid_continuity())
 
         base_args_with_data.file = str(cont_file)
         base_args_with_data.affect_tag = None
         base_args_with_data.affect_intensity = 0.5
-        cmd_save_continuity(base_args_with_data)
+        with pytest.raises(SystemExit):
+            cmd_save_continuity(base_args_with_data)
         captured = capsys.readouterr()
-        assert "prepare-wrap was not called first" in captured.out
+        assert "No wrap in progress" in captured.err
 
     def test_save_records_wrap_in_history(self, base_args_with_data, tmp_path, capsys):
         """After save-continuity, wrap should appear in history."""

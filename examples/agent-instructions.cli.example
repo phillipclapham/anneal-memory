@@ -1,8 +1,10 @@
-# anneal-memory CLI — CLAUDE.md Snippet
+# anneal-memory CLI — Agent-Instructions Snippet
 #
-# Paste the section below into your project's CLAUDE.md to enable
-# two-layer memory via the CLI. Use this when the agent has shell
-# access (Claude Code, Aider, etc.) instead of MCP.
+# Paste the section below into your harness's agent-instructions file
+# — CLAUDE.md (Claude Code), AGENTS.md (Codex), GEMINI.md (Gemini CLI)
+# — to enable anneal-memory's four-layer memory via the CLI. Use this
+# when the agent has shell access (Claude Code, Aider, etc.) instead
+# of MCP.
 #
 # This snippet teaches the agent WHEN and HOW to use the CLI
 # throughout a session.
@@ -98,6 +100,13 @@ First run: `anneal-memory init` creates the database and continuity file.
 
   An explicit wrap produces better continuity than stopping without one.
   Always encourage wrapping before ending a session.
+
+  **Wrap once.** Run the wrap sequence exactly once per session.
+  `save-continuity` may report demoted graduations — that is the
+  immune system working, not an error. Don't re-run `save-continuity`
+  to chase a clean report; re-saving compresses nothing, and a second
+  save with no new `prepare-wrap` is refused. If a pattern is
+  ungrounded, fix it in your *next* wrap with fresh evidence.
 
 **How the cognitive system works (why recording quality matters):**
 

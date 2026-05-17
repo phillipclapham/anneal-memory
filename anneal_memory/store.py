@@ -1380,9 +1380,11 @@ class Store:
 
         Returns ``None`` only when there is no wrap in progress —
         ``wrap_started_at`` metadata is empty. This is the idle
-        state, and also the ``skipped_prepare`` path where the caller
-        invokes ``validated_save_continuity`` without having run
-        ``prepare_wrap`` first.
+        state: no ``prepare_wrap`` has run, or the last wrap already
+        completed (``wrap_completed`` clears the snapshot). As of
+        v0.3.1 :func:`validated_save_continuity` treats a ``None``
+        here as a hard error — saving with no wrap in progress is
+        refused rather than silently re-fetching the full episode set.
 
         Returns:
             :class:`WrapSnapshot` with ``token`` and ``episode_ids`` if
@@ -1530,16 +1532,17 @@ class Store:
                 the 10.5c.4 TOCTOU window: episodes recorded between
                 ``prepare_wrap`` and ``validated_save_continuity`` are
                 preserved for the next wrap instead of being silently
-                absorbed into this one. When ``None`` (the legacy
-                ``skipped_prepare`` path), the UPDATE falls back to
-                the pre-10.5c.4 behavior of stamping every episode
-                with a NULL ``session_id``.
+                absorbed into this one. When ``None`` (a direct
+                ``wrap_completed`` call not routed through the
+                canonical ``validated_save_continuity`` pipeline), the
+                UPDATE falls back to the pre-10.5c.4 behavior of
+                stamping every episode with a NULL ``session_id``.
             wrap_token: The session-handshake token from the prepare
                 event this completion is committing. Passed through
                 to the audit payload as the chain-of-custody link
                 between ``wrap_started`` and ``wrap_completed``
-                events. When ``None`` (legacy or skipped_prepare
-                path), no token field is added to the audit entry.
+                events. When ``None`` (a direct ``wrap_completed``
+                call), no token field is added to the audit entry.
                 Passed as an explicit parameter rather than re-read
                 from metadata because the 10.5c.4 canonical caller
                 already has the token in hand from ``load_wrap_snapshot``
@@ -1656,8 +1659,8 @@ class Store:
             # Update session_id for episodes in this wrap cycle.
             #
             # Pre-10.5c.4 behavior: stamp every NULL-session_id episode
-            # with the new wrap's ID. This still runs on the legacy
-            # ``skipped_prepare`` path when ``episode_ids`` is None.
+            # with the new wrap's ID. This still runs when a direct
+            # ``wrap_completed`` call passes ``episode_ids=None``.
             #
             # 10.5c.4 behavior: when the caller provides the frozen
             # snapshot ID list, restrict the UPDATE to exactly those IDs.
@@ -1672,7 +1675,7 @@ class Store:
             if last_wrap:
                 session_id = str(last_wrap["id"])
                 if episode_ids is None:
-                    # Legacy / skipped_prepare path.
+                    # Direct wrap_completed call (episode_ids=None).
                     self._conn.execute(
                         "UPDATE episodes SET session_id = ? WHERE session_id IS NULL",
                         (session_id,),

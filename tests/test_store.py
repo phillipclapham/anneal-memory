@@ -18,6 +18,7 @@ from anneal_memory.store import (
     StoreError,
 )
 from anneal_memory.types import EpisodeType, StoreStatus, WrapRecord, WrapResult
+from anneal_memory import prepare_wrap
 
 
 @pytest.fixture
@@ -858,6 +859,7 @@ class TestValidatedSaveContinuity:
         ep2 = store.record("Chose caching to improve latency", EpisodeType.DECISION)
 
         # Mark wrap as in progress
+        prepare_wrap(store)
 
         # Build continuity with a real 2x citation so graduation fires
         text = (
@@ -898,13 +900,16 @@ class TestValidatedSaveContinuity:
         from anneal_memory import validated_save_continuity
 
         store.record("Something", EpisodeType.OBSERVATION)
+        prepare_wrap(store)
         with pytest.raises(ValueError, match="4 sections"):
             validated_save_continuity(store, "Just some text without sections")
 
     def test_validated_save_rejects_empty_text(self, store):
-        """Should raise ValueError for empty text."""
+        """Should raise ValueError for empty text (with a wrap in progress)."""
         from anneal_memory import validated_save_continuity
 
+        store.record("Something", EpisodeType.OBSERVATION)
+        prepare_wrap(store)
         with pytest.raises(ValueError, match="empty"):
             validated_save_continuity(store, "")
 
@@ -929,6 +934,7 @@ class TestValidatedSaveContinuity:
         )
 
         affect = AffectiveState(tag="curious", intensity=0.8)
+        prepare_wrap(store)
         result = validated_save_continuity(store, text, affective_state=affect)
         assert result["episodes_compressed"] == 1
 
@@ -1172,6 +1178,7 @@ class TestGetWrapHistory:
         from anneal_memory import validated_save_continuity
 
         store.record("First observation", EpisodeType.OBSERVATION)
+        prepare_wrap(store)
         validated_save_continuity(
             store, _valid_continuity_text(date.today().isoformat())
         )
@@ -1187,6 +1194,7 @@ class TestGetWrapHistory:
 
         store.record("Episode one", EpisodeType.OBSERVATION)
         store.record("Episode two", EpisodeType.DECISION)
+        prepare_wrap(store)
         validated_save_continuity(
             store, _valid_continuity_text(date.today().isoformat())
         )
@@ -1214,6 +1222,7 @@ class TestGetWrapHistory:
         today = date.today().isoformat()
         for i in range(3):
             store.record(f"Episode {i}", EpisodeType.OBSERVATION)
+            prepare_wrap(store)
             validated_save_continuity(store, _valid_continuity_text(today))
 
         history = store.get_wrap_history()
@@ -1230,6 +1239,7 @@ class TestGetWrapHistory:
         from anneal_memory import validated_save_continuity
 
         store.record("Observation", EpisodeType.OBSERVATION)
+        prepare_wrap(store)
         validated_save_continuity(
             store, _valid_continuity_text(date.today().isoformat())
         )
@@ -1276,6 +1286,7 @@ class TestValidatedSaveContinuityReturnContract:
 
         store.record("Observation A", EpisodeType.OBSERVATION)
 
+        prepare_wrap(store)
         result = validated_save_continuity(
             store, _valid_continuity_text(date.today().isoformat())
         )
@@ -1285,7 +1296,6 @@ class TestValidatedSaveContinuityReturnContract:
         assert "chars" in result  # top-level convenience key (10.5c.1 review fix)
         assert "episodes_compressed" in result
         assert "wrap_result" in result
-        assert "skipped_prepare" in result
         # Graduation breakdown (the Diogenes Finding #1 fix)
         assert "graduations_validated" in result
         assert "graduations_demoted" in result
@@ -1315,6 +1325,7 @@ class TestValidatedSaveContinuityReturnContract:
         from anneal_memory import validated_save_continuity
 
         store.record("Observation", EpisodeType.OBSERVATION)
+        prepare_wrap(store)
         result = validated_save_continuity(
             store, _valid_continuity_text(date.today().isoformat())
         )
@@ -1342,6 +1353,7 @@ class TestValidatedSaveContinuityReturnContract:
         from anneal_memory import validated_save_continuity
 
         store.record("Observation", EpisodeType.OBSERVATION)
+        prepare_wrap(store)
         result = validated_save_continuity(
             store, _valid_continuity_text(date.today().isoformat())
         )
@@ -1392,6 +1404,7 @@ class TestValidatedSaveContinuityReturnContract:
             f"## Context\nPinned-date determinism test.\n"
         )
 
+        prepare_wrap(store)
         result = validated_save_continuity(store, text, today=pinned_today)
 
         # Graduation fired even though the citation date isn't today's
@@ -1417,6 +1430,7 @@ class TestValidatedSaveContinuityReturnContract:
         )
 
         # No today= parameter → falls back to wall clock
+        prepare_wrap(store)
         result = validated_save_continuity(store, text)
         assert result["graduations_validated"] >= 1
 
@@ -1451,6 +1465,7 @@ class TestValidatedSaveContinuityReturnContract:
             "## Context\nFirst pass.\n"
         )
 
+        prepare_wrap(store)
         result = validated_save_continuity(store, text)
 
         # graduations_demoted is the combined total
@@ -1484,6 +1499,7 @@ class TestValidatedSaveContinuityReturnContract:
             "## Decisions\nNone.\n\n"
             "## Context\nFirst pass.\n"
         )
+        prepare_wrap(store)
         result = validated_save_continuity(store, text)
 
         history = store.get_wrap_history()

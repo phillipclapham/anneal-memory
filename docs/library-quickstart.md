@@ -43,17 +43,18 @@ store.close()
 This is the most important part. Wrapping is how raw episodes compress into working memory.
 
 > **Canonical entry points: `prepare_wrap(store)` + `validated_save_continuity(store, text)`.**
-> These are the only functions you should call at session end. The library exposes
-> a lower-level primitive (`store.save_continuity()`) for test use only — calling
-> it directly bypasses the immune system and leaves `skipped_prepare=True` in the
-> save result.
+> These are the only functions you should call at session end, and the order is
+> load-bearing: as of **v0.3.1** `validated_save_continuity` requires a wrap in
+> progress. Call `prepare_wrap` first, every session — it creates the wrap
+> snapshot that `validated_save_continuity` consumes. A save with no snapshot
+> raises `ValueError("No wrap in progress…")`.
 >
-> Advanced library users managing their own wrap lifecycle can use the private
-> `_build_wrap_package()` helper to construct a compression package from
-> pre-fetched episodes without touching a store — understanding that as a private
-> symbol it carries no API stability guarantee across versions. The deprecated
-> public wrapper `prepare_wrap_package()` was **removed in v0.3.0**; new code
-> must use `prepare_wrap(store, ...)`.
+> The lower-level primitive `store.save_continuity()` is a raw file write (test
+> use only) — it bypasses graduation, associations, decay, and wrap metadata.
+> Advanced users driving their own wrap lifecycle should call
+> `store.wrap_started(token=..., episode_ids=[...])` to create the snapshot
+> before `validated_save_continuity`. The deprecated public wrapper
+> `prepare_wrap_package()` was **removed in v0.3.0**; use `prepare_wrap(store, ...)`.
 
 ```python
 from anneal_memory import Store, EpisodeType, prepare_wrap, validated_save_continuity
@@ -103,12 +104,12 @@ if wrap["status"] == "ready":
 #   - Logs everything in the audit trail
 #
 # Returns: dict with episodes_compressed, graduations_validated,
-#          graduations_demoted, associations_formed, skipped_prepare, etc.
+#          graduations_demoted, associations_formed, etc.
 
 store.close()
 ```
 
-**Why `prepare_wrap(store)` is the canonical entry point.** The store-aware version marks the wrap as in progress, mints the session-handshake token, and freezes the episode-ID snapshot — all signals the immune system relies on to enforce the cognitive loop. Bypassing it (e.g. calling `_build_wrap_package()` directly and then `validated_save_continuity()`) leaves `skipped_prepare=True` in the save result, surfacing the bypass to operators. The deprecated public wrapper `prepare_wrap_package()` was removed in **v0.3.0**; advanced library users managing their own wrap lifecycle can call the private `_build_wrap_package()` helper directly (no API stability guarantee). Similarly, `store.save_continuity(text)` is the low-level file-write primitive — it bypasses graduation, associations, decay, and wrap metadata. Don't reach for either one.
+**Why `prepare_wrap(store)` is the canonical entry point.** The store-aware version marks the wrap as in progress, mints the session-handshake token, and freezes the episode-ID snapshot — all signals the immune system relies on to enforce the cognitive loop. As of **v0.3.1** that snapshot is mandatory: `validated_save_continuity` raises `ValueError` when no wrap is in progress, so `prepare_wrap` is not optional — it is the first half of the operation. Advanced users driving their own wrap lifecycle must call `store.wrap_started(token=..., episode_ids=[...])` to create the snapshot before saving; the private `_build_wrap_package()` helper builds a compression package but does NOT create a snapshot, so it cannot stand in for `prepare_wrap`. `store.save_continuity(text)` is a separate low-level file-write primitive — it bypasses graduation, associations, decay, and wrap metadata. Don't reach for either of those.
 
 ## Affective State
 
@@ -212,7 +213,7 @@ The database path can be absolute or relative. The continuity file lives alongsi
 
 ## Error Handling
 
-Every error raised by the library is a subclass of `AnnealMemoryError`. **Most callers should catch that base class at their outermost boundary, log, and let the failure propagate.** Branching per subclass is a minority pattern for long-running servers with retry budgets or transport authors writing their own error translation layer.
+The library raises errors in two categories. **`AnnealMemoryError` and its subclasses** (`StoreError`, `StoreDatabaseError`) signal I/O and store failures — catch the base class at your outermost boundary, log, and let it propagate. Branching per subclass is a minority pattern for long-running servers with retry budgets or transport authors writing their own error translation layer. **Plain `ValueError`** is raised by `validated_save_continuity` for caller-contract violations — empty or malformed continuity text, no wrap in progress (`prepare_wrap` not called, or the session already wrapped), or a wrong `wrap_token`. A `ValueError` here is a bug in your wrap flow, not a runtime failure to recover from: fix the call site rather than catching it.
 
 ### The 80% case
 
@@ -224,11 +225,13 @@ from anneal_memory import (
 )
 
 try:
-    package = prepare_wrap(store)
-    continuity_text = agent_compress(package)
-    result = validated_save_continuity(
-        store, continuity_text, wrap_token=package["wrap_token"]
-    )
+    wrap = prepare_wrap(store)
+    if wrap["status"] == "ready":
+        continuity_text = agent_compress(wrap["package"])
+        result = validated_save_continuity(
+            store, continuity_text, wrap_token=wrap["wrap_token"]
+        )
+    # "empty" status — no episodes to compress; nothing to save.
 except AnnealMemoryError as err:
     logger.error(
         "anneal-memory failed (op=%s path=%s): %s",
@@ -335,5 +338,5 @@ If you need the live exception object (for `errno` access or sqlite3 extended er
 
 - **Framework integration:** See [integration guides](integrations/) for LangGraph, CrewAI, OpenAI Agents SDK, and 9 more frameworks
 - **MCP setup:** See the [README](../README.md#mcp-server) for editor configuration
-- **CLI usage:** See [`examples/CLAUDE.md.cli.example`](../examples/CLAUDE.md.cli.example) for the full agent workflow
+- **CLI usage:** See [`examples/agent-instructions.cli.example`](../examples/agent-instructions.cli.example) for the full agent workflow
 - **Session hygiene:** See the [README](../README.md#session-hygiene) for why wraps matter

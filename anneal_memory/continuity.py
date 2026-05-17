@@ -488,9 +488,23 @@ def validated_save_continuity(
     agent has finished compressing its session.
 
     .. note::
+        **A wrap must be in progress.** This function consumes the
+        wrap snapshot that :func:`prepare_wrap` persists. If no
+        snapshot is present — ``prepare_wrap`` was never called, or a
+        wrap already completed this session (``wrap_completed`` clears
+        the snapshot) — the function raises ``ValueError`` rather than
+        saving. This is the v0.3.1 fix for phantom re-saves: before
+        v0.3.1 a no-snapshot call fell back to a ``skipped_prepare``
+        path that saved anyway, which after a completed wrap ran
+        graduation against an empty episode set and demoted every
+        citation — feedback an agent would "fix" by re-saving, a loop
+        that also inflated ``sessions_produced``. The canonical path
+        is ``prepare_wrap`` → compress → ``validated_save_continuity``,
+        run exactly once per session.
+
         **The episode set is frozen when ``prepare_wrap`` was called.**
-        As of 10.5c.4 this function loads the wrap snapshot persisted
-        by :func:`prepare_wrap` and filters its re-fetched episode set
+        This function loads the wrap snapshot persisted by
+        :func:`prepare_wrap` and filters its re-fetched episode set
         down to exactly the IDs that were shown to the agent at
         prepare time. Episodes recorded between prepare and save
         (the TOCTOU window) stay with ``session_id IS NULL`` after
@@ -505,20 +519,6 @@ def validated_save_continuity(
         single-process common case (library caller, CLI without
         ``--wrap-token``, single-threaded MCP agent) needs no
         ceremony.
-
-        The legacy ``skipped_prepare`` path — calling this function
-        without any prior ``prepare_wrap`` call — is unchanged. With
-        no snapshot present, the function falls back to its
-        pre-10.5c.4 behavior of re-fetching the full episode set
-        since the last completed wrap. Note that this path keeps
-        the TOCTOU window OPEN by design; callers that bypass
-        ``prepare_wrap`` opt out of the fix, and the
-        ``skipped_prepare=True`` flag on the return value surfaces
-        that to the caller. This is a documented foot-gun, not an
-        accidental escape hatch — the canonical path is
-        ``prepare_wrap`` → ``validated_save_continuity``, and the
-        skipped-prepare path exists only for advanced library users
-        who are managing the wrap lifecycle themselves.
 
     .. note::
         **Pipeline atomicity (two-phase commit, 10.5c.5).** The
@@ -590,8 +590,6 @@ def validated_save_continuity(
           - ``associations_strengthened`` (int)
           - ``associations_decayed`` (int)
           - ``sections`` (dict[str, int]): char count per continuity section
-          - ``skipped_prepare`` (bool): True if ``prepare_wrap`` was not
-            called first
           - ``wrap_result`` (dict[str, Any]): the store-level wrap
             record as a plain dict (``dataclasses.asdict`` of the
             underlying :class:`WrapResult`). Library users who want
@@ -599,7 +597,10 @@ def validated_save_continuity(
             ``WrapResult(**result["wrap_result"])``.
 
     Raises:
-        ValueError: If text is empty or missing required sections.
+        ValueError: If text is empty, missing required sections, no
+            wrap is in progress (``prepare_wrap`` not called, or the
+            session already wrapped), or a passed ``wrap_token`` does
+            not match the in-progress wrap.
         StoreError: If the filesystem write of the continuity sidecar
             or meta sidecar fails. ``StoreError`` is a library-level
             domain error (subclass of :class:`AnnealMemoryError`, NOT
@@ -613,32 +614,49 @@ def validated_save_continuity(
     """
     from .associations import process_wrap_associations
 
-    if not text or not text.strip():
-        raise ValueError("Continuity text cannot be empty")
+    # --- Wrap-state preconditions, checked BEFORE payload validation ---
+    #
+    # Ordering is deliberate: a save with no wrap to commit to is
+    # doomed regardless of what the continuity text says. An agent
+    # should hear "no wrap in progress" first, not spend a turn
+    # fixing continuity markdown for a save that cannot land. State
+    # (precondition) before payload.
 
-    # Validate structure (4 required sections)
-    if not validate_structure(text):
+    # Load the frozen snapshot persisted by prepare_wrap. ``None``
+    # means no wrap is in progress: prepare_wrap was never called, it
+    # returned status="empty" for a zero-episode session (which
+    # cancels the wrap rather than starting one), or a wrap already
+    # completed this session (wrap_completed clears the snapshot).
+    # Either way there is nothing to save — refuse rather than fall
+    # through.
+    #
+    # This refusal is the v0.3.1 structural fix for phantom re-saves.
+    # Before v0.3.1 a no-snapshot call fell back to a ``skipped_prepare``
+    # path that re-fetched the full episode set and saved anyway. After
+    # a completed wrap that set is empty, so validate_graduations ran
+    # against empty valid_ids and demoted every citation — feedback an
+    # agent reads as a problem and "fixes" by re-saving, a loop that
+    # also inflates sessions_produced. Refusing the no-snapshot save
+    # makes the re-save structurally impossible.
+    #
+    # (load_wrap_snapshot still raises StoreError on a partial
+    # wrap-in-progress state — belt-and-suspenders defense for
+    # mid-upgrade v0.1.x databases.)
+    snapshot = store.load_wrap_snapshot()
+    if snapshot is None:
         raise ValueError(
-            "Continuity must contain all 4 sections: "
-            "## State, ## Patterns, ## Decisions, ## Context"
+            "No wrap in progress — nothing to save. If you already "
+            "wrapped this session, you are done: a second "
+            "save_continuity with no new prepare_wrap is a phantom "
+            "re-save and is refused by design — do not re-save to "
+            "chase a clean immune-system report. If you have not "
+            "wrapped yet, call prepare_wrap first (and if it reports "
+            "no episodes, there is nothing to compress — skip the "
+            "save). Wrap exactly once per session: prepare_wrap → "
+            "compress → save_continuity."
         )
 
-    # Load the frozen snapshot persisted by prepare_wrap. None iff
-    # no wrap is currently in progress — either the caller is on
-    # the ``skipped_prepare`` path (calling this function without
-    # having run prepare_wrap first) or the store is idle. Derive
-    # ``skipped_prepare`` from snapshot presence so the return-value
-    # semantics collapse onto a single source of truth: the
-    # persisted snapshot. v0.3.0 tightening of the
-    # ``store.wrap_started()`` signature removed the API path that
-    # could produce a partial "wrap_in_progress=True but snapshot
-    # absent" state; load_wrap_snapshot still raises StoreError on
-    # that state as belt-and-suspenders defense for mid-upgrade
-    # v0.1.x databases.
-    snapshot = store.load_wrap_snapshot()
-    skipped_prepare = snapshot is None
-
-    if snapshot is not None and wrap_token is not None:
+    if wrap_token is not None:
         # Caller opted into explicit token verification. A mismatch
         # is a caller contract violation (stale token, or wrong
         # wrap), same category as empty text or missing sections —
@@ -659,36 +677,30 @@ def validated_save_continuity(
                 f"fresh token."
             )
 
+    # --- Payload validation: the continuity text itself ---
+    if not text or not text.strip():
+        raise ValueError("Continuity text cannot be empty")
+
+    # Validate structure (4 required sections)
+    if not validate_structure(text):
+        raise ValueError(
+            "Continuity must contain all 4 sections: "
+            "## State, ## Patterns, ## Decisions, ## Context"
+        )
+
     # Get current session's episodes for citation validation.
-    #
-    # With a snapshot: re-fetch the full post-last-wrap set and
-    # filter down to exactly the IDs the snapshot froze at prepare
-    # time. Any episodes recorded in the TOCTOU window drop out
-    # here and stay with ``session_id IS NULL`` through the rest
-    # of the pipeline — they land in the next wrap's compression
-    # window on the next ``prepare_wrap`` call.
-    #
-    # Without a snapshot (legitimate ``skipped_prepare`` path,
-    # library caller bypassing prepare_wrap entirely): fall back
-    # to the pre-10.5c.4 behavior of using the full re-fetched
-    # set. Preserves backward compatibility for that path. Note
-    # that this path keeps the TOCTOU window OPEN by design —
-    # callers who bypass prepare_wrap opt out of the fix, and the
-    # ``skipped_prepare=True`` flag in the return surfaces that
-    # to the caller.
+    # Re-fetch the full post-last-wrap set and filter down to exactly
+    # the IDs the snapshot froze at prepare time. Any episodes recorded
+    # in the prepare→save window are not in the snapshot, so they drop
+    # out here and stay with ``session_id IS NULL`` through the rest of
+    # the pipeline — they land in the next wrap's compression window on
+    # the next ``prepare_wrap`` call. The snapshot's ID list is used
+    # directly: the WrapSnapshot TypedDict declares it ``list[str]``
+    # and wrap_completed does not mutate its argument.
     episodes_all = store.episodes_since_wrap()
-    frozen_episode_ids: list[str] | None
-    if snapshot is not None:
-        snapshot_id_set = set(snapshot["episode_ids"])
-        episodes = [ep for ep in episodes_all if ep.id in snapshot_id_set]
-        # Use the snapshot's ID list directly — the TypedDict
-        # already declares it as list[str] and wrap_completed does
-        # not mutate its argument. The outer ``if snapshot is not
-        # None`` guard means the field access is safe.
-        frozen_episode_ids = snapshot["episode_ids"]
-    else:
-        episodes = episodes_all
-        frozen_episode_ids = None
+    snapshot_id_set = set(snapshot["episode_ids"])
+    episodes = [ep for ep in episodes_all if ep.id in snapshot_id_set]
+    frozen_episode_ids: list[str] = snapshot["episode_ids"]
     valid_ids = {ep.id[:8].lower() for ep in episodes}
     node_content_map = {ep.id[:8].lower(): ep.content for ep in episodes}
 
@@ -757,13 +769,8 @@ def validated_save_continuity(
     # continuity.tmp and meta.tmp (written later in Phase 2) share a
     # recoverability identity — operators recovering from multiple
     # crashed wraps can pair the two tmp files by token prefix.
-    # 10.5c.5 L3 Fix #19 (codex HIGH). When the snapshot is absent
-    # (legacy skipped_prepare path), fall back to a per-call random
-    # uuid — those saves don't leave orphans anyway because they
-    # don't use the two-phase pipeline.
-    tmp_token_prefix: str | None = (
-        snapshot["token"][:12] if snapshot is not None else None
-    )
+    # 10.5c.5 L3 Fix #19 (codex HIGH).
+    tmp_token_prefix: str = snapshot["token"][:12]
     cont_tmp: Path | None = store._prepare_continuity_write(
         grad_result.text, token_hex=tmp_token_prefix
     )
@@ -814,7 +821,7 @@ def validated_save_continuity(
                 # within-method SELECT-before-clear sequence that
                 # Layer 1 L3 flagged as a TOCTOU-within-TOCTOU-fix
                 # pattern.
-                wrap_token=snapshot["token"] if snapshot is not None else None,
+                wrap_token=snapshot["token"],
             )
             # Batch context manager commits here on successful exit.
 
@@ -975,7 +982,6 @@ def validated_save_continuity(
         associations_strengthened=assoc_strengthened,
         associations_decayed=assoc_decayed,
         sections=sections,
-        skipped_prepare=skipped_prepare,
         # asdict() makes the full return value JSON-serializable
         # top-to-bottom. Library users who want the typed object can
         # do ``WrapResult(**result["wrap_result"])``; everyone else

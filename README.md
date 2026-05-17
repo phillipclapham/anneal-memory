@@ -80,26 +80,51 @@ anneal-memory audit --since 7d       # Read audit trail
 anneal-memory export --format json   # Full store export
 ```
 
-See [`examples/CLAUDE.md.cli.example`](examples/CLAUDE.md.cli.example) for the agent workflow snippet.
+See [`examples/agent-instructions.cli.example`](examples/agent-instructions.cli.example) for the agent workflow snippet.
 
 ### MCP Server
 
-For MCP-enabled editors (Claude Code, Cursor, Windsurf, etc.). Zero-config — add to your MCP settings and go.
+For MCP-capable agent harnesses — Claude Code, Codex, Gemini CLI, Cursor, Windsurf, and others.
+
+The server is one command — `anneal-memory --project-name MyProject serve` — wired into the harness's MCP config. The `serve` subcommand starts the MCP server; `--project-name` (and optional `--db`) are global flags and come *before* `serve`. Each harness has its own config file and format:
+
+**Claude Code / Cursor / Windsurf** — `mcpServers` JSON (the editor's MCP settings, or a project `.mcp.json`):
 
 ```json
 {
   "mcpServers": {
-    "anneal-memory": {
+    "anneal_memory": {
       "command": "uvx",
-      "args": ["anneal-memory", "--project-name", "MyProject"]
+      "args": ["anneal-memory", "--project-name", "MyProject", "serve"]
     }
   }
 }
 ```
 
-Add the [orchestration snippet](examples/CLAUDE.md.example) to your project's `CLAUDE.md` — it teaches the agent *when* and *how* to use the memory tools. Without this snippet, the tools are available but the agent won't know the cognitive workflow.
+**Codex** — `~/.codex/config.toml` (or a project `.codex/config.toml`):
 
-> **Alternative:** `pip install anneal-memory` if you prefer a pinned install, then use `"command": "anneal-memory"` directly.
+```toml
+[mcp_servers.anneal_memory]
+command = "uvx"
+args = ["anneal-memory", "--project-name", "MyProject", "serve"]
+```
+
+**Gemini CLI** — `~/.gemini/settings.json` (or a project `.gemini/settings.json`):
+
+```json
+{
+  "mcpServers": {
+    "anneal_memory": {
+      "command": "uvx",
+      "args": ["anneal-memory", "--project-name", "MyProject", "serve"]
+    }
+  }
+}
+```
+
+Then add the [agent-instructions snippet](examples/agent-instructions.example) to the harness's instructions file — `CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, `GEMINI.md` for Gemini CLI. It teaches the agent *when* and *how* to use the memory tools; without it the tools are available but the agent won't know the cognitive workflow.
+
+> **Pinned install:** `uvx` fetches the latest published version on each run. For a pinned install, `pip install anneal-memory`, then set `"command": "anneal-memory"` with `"args": ["--project-name", "MyProject", "serve"]` — or point `command` at an absolute path to the installed binary.
 
 ### All Three Paths, Same Cognitive Loop
 
@@ -122,7 +147,7 @@ anneal-memory works with any agent framework through the Python library. Each gu
 | **LangGraph / LangChain** | `AgentMiddleware` (before/after agent + model) | [docs/integrations/langgraph.md](docs/integrations/langgraph.md) |
 | **CrewAI** | `BaseEventListener` (event bus) | [docs/integrations/crewai.md](docs/integrations/crewai.md) |
 | **OpenAI Agents SDK** | `RunHooks` (agent lifecycle) | [docs/integrations/openai-agents.md](docs/integrations/openai-agents.md) |
-| **Anthropic Agents SDK** | CLAUDE.md snippet + `Stop` hook | [docs/integrations/anthropic-agents.md](docs/integrations/anthropic-agents.md) |
+| **Anthropic Agents SDK** | agent-instructions snippet + `Stop` hook | [docs/integrations/anthropic-agents.md](docs/integrations/anthropic-agents.md) |
 | **Google ADK** | Callbacks + custom `MemoryService` | [docs/integrations/google-adk.md](docs/integrations/google-adk.md) |
 | **Pydantic AI** | `AbstractCapability` with `Hooks` | [docs/integrations/pydantic-ai.md](docs/integrations/pydantic-ai.md) |
 | **smolagents** | `step_callbacks` dict | [docs/integrations/smolagents.md](docs/integrations/smolagents.md) |
@@ -311,7 +336,8 @@ anneal-memory works the same way. During a session, episodes accumulate in the e
 
 **Rules of thumb:**
 - Always wrap before ending a session. An unwrapped session is like an all-nighter — the experiences happened but they weren't consolidated
-- The orchestration snippets ([MCP](examples/CLAUDE.md.example), [CLI](examples/CLAUDE.md.cli.example)) handle this automatically — they teach the agent to detect session-end signals and run the full sequence
+- Wrap exactly once per session. `save_continuity` reporting demoted graduations is the immune system working, not an error — don't re-save to chase a clean report (a second save with no new `prepare_wrap` is refused)
+- The agent-instructions snippets ([MCP](examples/agent-instructions.example), [CLI](examples/agent-instructions.cli.example)) handle this automatically — they teach the agent to detect session-end signals and run the full sequence
 - Short sessions (3-5 episodes) still benefit from wraps. Even a small amount of compression builds the continuity file
 - If `prepare_wrap` says "no episodes" — nothing to compress. That's fine, skip it
 

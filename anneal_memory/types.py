@@ -352,5 +352,4 @@ class SaveContinuityResult(TypedDict):
     associations_strengthened: int
     associations_decayed: int
     sections: dict[str, int]  # Char count per continuity section
-    skipped_prepare: bool  # True if prepare_wrap was not called first
     wrap_result: dict[str, Any]  # WrapResult-as-dict (JSON-serializable)

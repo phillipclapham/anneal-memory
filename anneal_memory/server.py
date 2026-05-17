@@ -450,11 +450,6 @@ class Server:
         lines = [
             f"Continuity saved ({result['chars']} chars) to {result['path']}"
         ]
-        if result["skipped_prepare"]:
-            lines.append(
-                "Note: prepare_wrap was not called first — "
-                "continuity may not reflect current episodes."
-            )
         lines.append(f"Episodes compressed: {result['episodes_compressed']}")
 
         if result["graduations_validated"]:

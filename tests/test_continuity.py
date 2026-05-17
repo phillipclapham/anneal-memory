@@ -384,7 +384,7 @@ class TestTypedDictReturnShapes:
                 "skipped_non_today",
                 "gaming_suspects", "associations_formed",
                 "associations_strengthened", "associations_decayed",
-                "sections", "skipped_prepare", "wrap_result",
+                "sections", "wrap_result",
             }
             assert set(result.keys()) == expected
         finally:
@@ -1279,40 +1279,107 @@ class TestTOCTOUHandshakeToken:
         finally:
             store.close()
 
-    # -- Layer 4: skipped_prepare backward compatibility --
+    # -- Layer 4: save refused when no wrap is in progress --
 
-    def test_skipped_prepare_path_unchanged(self, tmp_path):
-        """Calling validated_save_continuity without a prior
-        prepare_wrap call works exactly as before — no snapshot, full
-        re-fetch, skipped_prepare=True in the result."""
+    def test_save_without_prepare_wrap_is_refused(self, tmp_path):
+        """v0.3.1: validated_save_continuity with no wrap in progress
+        is refused — the structural fix for phantom re-saves. Before
+        v0.3.1 this fell through to a skipped_prepare path."""
         from anneal_memory import validated_save_continuity
 
-        store = Store(str(tmp_path / "skipped.db"), project_name="Skipped")
+        store = Store(str(tmp_path / "nowrap.db"), project_name="NoWrap")
         try:
             ep = store.record("An observation", EpisodeType.OBSERVATION)
-            # No prepare_wrap call.
-            text = self._make_continuity("Skipped", ep.id)
-            result = validated_save_continuity(store, text)
-            assert result["skipped_prepare"] is True
-            assert result["episodes_compressed"] == 1
+            # No prepare_wrap call — the save must refuse.
+            text = self._make_continuity("NoWrap", ep.id)
+            with pytest.raises(ValueError, match="No wrap in progress"):
+                validated_save_continuity(store, text)
+            # Nothing was saved.
+            assert store.status().total_wraps == 0
         finally:
             store.close()
 
-    def test_skipped_prepare_ignores_wrap_token_arg(self, tmp_path):
-        """If there's no snapshot to verify against (skipped_prepare
-        path), passing wrap_token is a no-op — verification only
-        fires when the store actually has a snapshot."""
+    def test_save_without_prepare_refused_before_token_check(self, tmp_path):
+        """v0.3.1: with no wrap in progress the save is refused before
+        any wrap_token verification — the caller gets 'No wrap in
+        progress', not a token-mismatch error, even when a token is
+        passed."""
         from anneal_memory import validated_save_continuity
 
-        store = Store(str(tmp_path / "skip_tok.db"), project_name="SkipTok")
+        store = Store(str(tmp_path / "notok.db"), project_name="NoTok")
         try:
             ep = store.record("An observation", EpisodeType.OBSERVATION)
-            text = self._make_continuity("SkipTok", ep.id)
-            # Garbage token, but no snapshot — should succeed.
-            result = validated_save_continuity(
-                store, text, wrap_token="ffffffffffffffffffffffffffffffff"
-            )
-            assert result["skipped_prepare"] is True
+            text = self._make_continuity("NoTok", ep.id)
+            with pytest.raises(ValueError, match="No wrap in progress"):
+                validated_save_continuity(
+                    store, text, wrap_token="ffffffffffffffffffffffffffffffff"
+                )
+        finally:
+            store.close()
+
+    def test_phantom_resave_after_completed_wrap_is_refused(self, tmp_path):
+        """v0.3.1 core regression: a completed wrap consumes the
+        snapshot, so a second save with no fresh prepare_wrap is
+        refused. This is the phantom re-save nexus's session-3 audit
+        caught — before v0.3.1 it re-ran the immune pass and inflated
+        the session counter."""
+        from anneal_memory import prepare_wrap, validated_save_continuity
+
+        store = Store(str(tmp_path / "phantom.db"), project_name="Phantom")
+        try:
+            ep = store.record("An observation", EpisodeType.OBSERVATION)
+            text = self._make_continuity("Phantom", ep.id)
+
+            # Real wrap.
+            prepare_wrap(store)
+            validated_save_continuity(store, text)
+            assert store.status().total_wraps == 1
+            sessions_after = store.load_meta()["sessions_produced"]
+
+            # Phantom re-save — no fresh prepare_wrap. Refused.
+            with pytest.raises(ValueError, match="No wrap in progress"):
+                validated_save_continuity(store, text)
+
+            # The refusal touched nothing: no extra wrap row, no
+            # session-counter inflation.
+            assert store.status().total_wraps == 1
+            assert store.load_meta()["sessions_produced"] == sessions_after
+        finally:
+            store.close()
+
+    def test_refusal_precedes_text_validation(self, tmp_path):
+        """v0.3.1: the no-wrap refusal is a wrap-state precondition,
+        checked before continuity-text validation. An agent re-saving
+        with garbage markdown and no wrap in progress gets 'No wrap in
+        progress' — not a 'missing sections' error that would send it
+        off fixing text for a save that cannot land."""
+        from anneal_memory import validated_save_continuity
+
+        store = Store(str(tmp_path / "order.db"), project_name="Order")
+        try:
+            store.record("An observation", EpisodeType.OBSERVATION)
+            # No prepare_wrap, AND structurally invalid text — the
+            # wrap-state refusal must win over the structure error.
+            with pytest.raises(ValueError, match="No wrap in progress"):
+                validated_save_continuity(store, "garbage with no sections")
+        finally:
+            store.close()
+
+    def test_empty_prepare_wrap_then_save_is_refused(self, tmp_path):
+        """v0.3.1: prepare_wrap on a zero-episode session returns
+        status='empty' and cancels the wrap (no snapshot is minted).
+        A save after an empty prepare_wrap is therefore still refused —
+        the once-per-session guarantee holds even on the empty path."""
+        from anneal_memory import prepare_wrap, validated_save_continuity
+
+        store = Store(str(tmp_path / "emptyprep.db"), project_name="EmptyPrep")
+        try:
+            result = prepare_wrap(store)
+            assert result["status"] == "empty"
+            assert store.load_wrap_snapshot() is None
+            text = self._make_continuity("EmptyPrep", "deadbeef")
+            with pytest.raises(ValueError, match="No wrap in progress"):
+                validated_save_continuity(store, text)
         finally:
             store.close()
 
@@ -1685,20 +1752,26 @@ class TestTOCTOUHandshakeToken:
             store.close()
 
     def test_wrap_completed_no_cas_when_token_is_none(self, tmp_path):
-        """The CAS only runs when wrap_token is passed. The legacy
-        skipped_prepare path (wrap_token=None) bypasses CAS and
-        proceeds with the unconditional clear, same as pre-10.5c.4.
+        """The CAS only runs when wrap_token is passed. A direct
+        store.wrap_completed(wrap_token=None) call bypasses the CAS
+        and proceeds with the unconditional metadata clear — the
+        low-level primitive path for library users managing their
+        own wrap lifecycle.
         """
-        from anneal_memory import validated_save_continuity
-
         store = Store(str(tmp_path / "nocas.db"), project_name="NoCAS")
         try:
-            ep = store.record("A", EpisodeType.OBSERVATION)
-            # No prepare_wrap — legacy skipped path.
-            text = self._make_continuity("NoCAS", ep.id)
-            result = validated_save_continuity(store, text)
-            assert result["skipped_prepare"] is True
+            store.record("A", EpisodeType.OBSERVATION)
+            store.wrap_started(token="a" * 32, episode_ids=["deadbeef"])
+            result = store.wrap_completed(
+                episodes_compressed=1,
+                continuity_chars=100,
+                episode_ids=None,
+                wrap_token=None,
+            )
+            assert result is not None
             assert store.status().total_wraps == 1
+            # wrap_completed cleared the wrap-in-progress snapshot.
+            assert store.load_wrap_snapshot() is None
         finally:
             store.close()
 

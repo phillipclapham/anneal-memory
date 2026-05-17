@@ -1,8 +1,10 @@
-# anneal-memory — CLAUDE.md Snippet
+# anneal-memory — Agent-Instructions Snippet
 #
-# Paste the section below into your project's CLAUDE.md to enable
-# two-layer memory. anneal-memory MCP tools are available when the
-# server is configured in your editor's MCP settings.
+# Paste the section below into your harness's agent-instructions file
+# — CLAUDE.md (Claude Code), AGENTS.md (Codex), GEMINI.md (Gemini CLI)
+# — to enable anneal-memory's four-layer memory. The MCP tools are
+# available once the server is configured in your harness's MCP
+# settings.
 #
 # This snippet teaches the agent WHEN and HOW to use the memory
 # tools throughout a session.
@@ -73,6 +75,13 @@ explain the tooling to the user, just work with what you know.
 
   An explicit wrap produces better continuity than stopping without
   one. Always encourage wrapping before ending a session.
+
+  **Wrap once.** Run the wrap sequence exactly once per session.
+  `save_continuity` may report demoted graduations — that is the
+  immune system working, not an error. Don't re-run `save_continuity`
+  to chase a clean report; re-saving compresses nothing, and a second
+  save with no new `prepare_wrap` is refused. If a pattern is
+  ungrounded, fix it in your *next* wrap with fresh evidence.
 
 **Hebbian associations (automatic — no extra work needed):**
 

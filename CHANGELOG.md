@@ -2,6 +2,31 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-05-17
+
+Phantom-re-save fix. `validated_save_continuity` now refuses to run when no wrap is in progress, closing a path where a second save in the same session — with no fresh `prepare_wrap` — would re-run the immune pass against an empty episode set, demote every citation, and inflate the session counter. The wrap is now structurally a once-per-session operation: `prepare_wrap` mints the snapshot, `save_continuity` consumes it, and a save with no snapshot is a hard error.
+
+**Pre-1.0 policy reminder.** anneal-memory is in 0.x; breaking changes between minor *and patch* versions are possible. This release removes one return-dict field — see Breaking changes.
+
+### Breaking changes
+
+- **`validated_save_continuity` refuses a save with no wrap in progress.** Calling `validated_save_continuity` (or the MCP `save_continuity` tool / CLI `save-continuity` subcommand) with no wrap in progress now raises `ValueError("No wrap in progress…")`. "No wrap in progress" means any of: `prepare_wrap` was never called; `prepare_wrap` returned `status="empty"` for a zero-episode session (it cancels the wrap rather than starting one); or the session already completed its wrap (`wrap_completed` clears the snapshot). Previously a no-snapshot call fell through to a `skipped_prepare` path that re-fetched the full episode set and saved anyway — a documented foot-gun: after a completed wrap that set is empty, so graduation ran against zero valid episode IDs and demoted every 2x/3x citation, feedback an agent would "fix" by re-saving (a loop that also incremented `sessions_produced` each pass). A caller that runs `prepare_wrap` but does not check `status` before saving will now get this error on an empty session — guard with `if wrap["status"] == "ready"`. The wrap-state check is a precondition, evaluated *before* continuity-text validation, so a no-wrap save reports "No wrap in progress" rather than a misleading "missing sections" error. The canonical path is unchanged: `prepare_wrap` → compress → `validated_save_continuity`, once per session. Library users driving their own wrap lifecycle via a direct `store.wrap_started(token=…, episode_ids=…)` call are unaffected — that creates a snapshot.
+- **`skipped_prepare` removed from `SaveContinuityResult`.** With the refusal above, the field could only ever be `False` — it is removed from the `SaveContinuityResult` TypedDict, the MCP `save_continuity` text response, and the CLI `save-continuity --json` output. Callers reading `result["skipped_prepare"]` will get a `KeyError`; drop the access — there is no longer a skipped-prepare state to report.
+
+### Fixed
+
+- **Phantom re-save inflated the session counter and re-ran the immune pass.** The structural refusal above closes this. The `wrap_token` machinery (minted by `prepare_wrap`, consumed by `wrap_completed`'s compare-and-swap) was already correct — v0.3.1 gates `validated_save_continuity` on the snapshot's presence so the consumed-once semantics are enforced, not merely available.
+
+### Changed — docs
+
+- **README MCP setup reworked; `server.json` updated.** The README's old single MCP config block lacked the `serve` subcommand and covered only one harness. v0.3.1 ships three verified, per-harness config blocks — Claude Code / Cursor / Windsurf (`mcpServers` JSON), Codex (`.codex/config.toml`), and Gemini CLI (`.gemini/settings.json`) — using the explicit `anneal-memory … serve` form, and `server.json` uses `serve` too. Note: bare no-subcommand startup (`anneal-memory --project-name X`) remains fully backward-compatible — `cli.main()` delegates to the server when no subcommand is given. `serve` is the explicit, recommended form, not a fix for a non-launching config.
+- **"CLAUDE.md snippet" reframed to "agent-instructions snippet"** across the README, `docs/`, and the `examples/` snippet files, with placement guidance: `CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, `GEMINI.md` for Gemini CLI. The snippet is harness-neutral, so the two example files are renamed to match — `CLAUDE.md.example` → `agent-instructions.example` and `CLAUDE.md.cli.example` → `agent-instructions.cli.example`. A stale "two-layer memory" line in those file headers was also corrected to "four-layer."
+- **"Wrap once" guidance added** to both agent-instructions snippets and the README's Session Hygiene section: wrap exactly once per session, and a `save_continuity` report of demoted graduations is the immune system working, not an error to chase with a re-save.
+
+### Test surface
+
+- **704 → 707 tests.** Added `test_phantom_resave_after_completed_wrap_is_refused` (the core regression — a completed wrap followed by a second save raises, with no extra wrap row and no `sessions_produced` increment), `test_empty_prepare_wrap_then_save_is_refused` (an empty `prepare_wrap` is refused on save too), and `test_refusal_precedes_text_validation` (the wrap-state refusal wins over a structure error). The former `skipped_prepare` tests were repurposed — two now assert the refusal, one now exercises the low-level `store.wrap_completed` primitive directly. Cold `validated_save_continuity` / MCP-`save_continuity` call sites across the suite now run `prepare_wrap` first, exercising the canonical pipeline.
+
 ## [0.3.0] — 2026-05-01
 
 Deprecation cleanup release. Removes the v0.2.0-deprecated `prepare_wrap_package()` public wrapper and the legacy no-arg form of `Store.wrap_started()`. Tightens both surfaces from runtime DeprecationWarning to call-site enforcement so the canonical pipeline has exactly one valid state machine. Bundles two Diogenes overnight LOWs and seven review-pass fixes from a four-layer code review pipeline (session-code-review + domain-expert + cross-substrate consultation + integration semantics).

@@ -780,17 +780,11 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 "associations_formed": result["associations_formed"],
                 "associations_strengthened": result["associations_strengthened"],
                 "associations_decayed": result["associations_decayed"],
-                "skipped_prepare": result["skipped_prepare"],
                 "sections": {name: c for name, c in sorted(sections.items())},
             })
             return
 
         print(f"Continuity saved ({chars:,} chars) to {result['path']}")
-        if result["skipped_prepare"]:
-            print(
-                "Note: prepare-wrap was not called first — "
-                "continuity may not reflect current episodes."
-            )
         print(f"Episodes compressed: {result['episodes_compressed']}")
 
         if result["graduations_validated"]:

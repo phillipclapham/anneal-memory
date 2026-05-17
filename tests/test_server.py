@@ -450,6 +450,7 @@ class TestToolSaveContinuity:
             "## Decisions\n[decided(rationale: \"test\", on: \"2026-03-31\")] Use SQLite\n"
             "## Context\nFirst session. Tested things.\n"
         )
+        server._tool_prepare_wrap({})
         result = server._tool_save_continuity({"text": text})
         assert not _is_error(result)
         output = _text_from_result(result)
@@ -465,11 +466,15 @@ class TestToolSaveContinuity:
         assert _is_error(result)
 
     def test_save_invalid_structure_fails(self, server):
+        server._tool_record({"content": "Test obs", "episode_type": "observation"})
+        server._tool_prepare_wrap({})
         result = server._tool_save_continuity({"text": "# Just a title\nNo sections."})
         assert _is_error(result)
         assert "4 sections" in _text_from_result(result)
 
     def test_save_missing_one_section_fails(self, server):
+        server._tool_record({"content": "Test obs", "episode_type": "observation"})
+        server._tool_prepare_wrap({})
         text = (
             "# Test\n"
             "## State\nActive\n"
@@ -489,6 +494,7 @@ class TestToolSaveContinuity:
             "## Decisions\n\n"
             "## Context\nDid a thing.\n"
         )
+        server._tool_prepare_wrap({})
         server._tool_save_continuity({"text": text})
         # Verify stored
         saved = store.load_continuity()
@@ -507,12 +513,18 @@ class TestToolSaveContinuity:
             "## Decisions\n[decided(rationale: \"yes\", on: \"2026-03-31\")] Choice\n"
             "## Context\nLong narrative about what happened in the session.\n"
         )
+        server._tool_prepare_wrap({})
         result = server._tool_save_continuity({"text": text})
         output = _text_from_result(result)
         assert "Section sizes:" in output
 
-    def test_save_without_prepare_wrap_works_with_warning(self, server, store):
-        """save_continuity works without prepare_wrap but warns about it."""
+    def test_save_without_prepare_wrap_is_refused(self, server, store):
+        """save_continuity with no wrap in progress is refused (v0.3.1).
+
+        Before v0.3.1 a no-prepare save fell through to a
+        skipped_prepare path and warned; v0.3.1 makes it a hard error
+        — the structural fix for phantom re-saves.
+        """
         server._tool_record({"content": "Test", "episode_type": "observation"})
         text = (
             "# TestProject — Memory (v1)\n"
@@ -522,10 +534,9 @@ class TestToolSaveContinuity:
             "## Context\nFirst session.\n"
         )
         result = server._tool_save_continuity({"text": text})
-        assert not _is_error(result)
-        output = _text_from_result(result)
-        assert "prepare_wrap was not called" in output
-        assert store.status().total_wraps == 1
+        assert _is_error(result)
+        assert "No wrap in progress" in _text_from_result(result)
+        assert store.status().total_wraps == 0
 
 
 # -- 10.5c.4: MCP token round-trip --
@@ -684,6 +695,7 @@ class TestGraduationValidation:
             "## Decisions\n\n"
             "## Context\nTested SQLite.\n"
         )
+        server._tool_prepare_wrap({})
         result = server._tool_save_continuity({"text": text})
         assert not _is_error(result)
         output = _text_from_result(result)
@@ -702,6 +714,7 @@ class TestGraduationValidation:
             "## Decisions\n\n"
             "## Context\nTest.\n"
         )
+        server._tool_prepare_wrap({})
         result = server._tool_save_continuity({"text": text})
         assert not _is_error(result)
         output = _text_from_result(result)
@@ -724,6 +737,7 @@ class TestGraduationValidation:
             "## Decisions\n\n"
             "## Context\nTest.\n"
         )
+        server._tool_prepare_wrap({})
         result = server._tool_save_continuity({"text": text})
         assert not _is_error(result)
         # No validation messages — 1x doesn't need citations
@@ -749,6 +763,7 @@ class TestGraduationValidation:
             "## Decisions\n\n"
             "## Context\nTest.\n"
         )
+        server._tool_prepare_wrap({})
         result = server._tool_save_continuity({"text": text})
         output = _text_from_result(result)
         assert "demoted" in output

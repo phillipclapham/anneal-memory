@@ -34,6 +34,7 @@ from .graduation import (
     validate_graduations,
     _NAMED_PATTERN_RE,
     _PATTERN_LINE_WITH_EVIDENCE_RE,
+    _is_patterns_heading,
 )
 from .store import StoreError, _fsync_dir, _safe_unlink
 from .types import (
@@ -824,6 +825,7 @@ def validated_save_continuity(
     proven_without_declaration = detect_proven_without_declaration(
         prior_text=prior_text_for_omission_audit,
         new_text=grad_result.text,
+        today=today_str,  # v0.3.3 MEDIUM #4 fix — today-aware
         min_level=2,
     )
 
@@ -962,7 +964,22 @@ def validated_save_continuity(
             # wrap timing and pattern_history's last_seen_at field
             # gives the per-pattern timestamp — the marginal forensic
             # value of an explicit wrap_id pointer is low.
+            # v0.3.3 HIGH #1 fix: gate upsert loop to `## Patterns`
+            # section only. Codex L3 caught that v0.3.2 fixed the
+            # Anti-Patterns parsing leak at the graduation.py side
+            # (validate_graduations / extract_pattern_names /
+            # detect_stale_patterns all use _is_patterns_heading) but
+            # did NOT propagate the fix to the upsert path here.
+            # Result: `## Anti-Patterns` bullets matching the widened
+            # _NAMED_PATTERN_RE still polluted the pattern_history DB
+            # via the upsert loop. The section guard closes that gap.
+            in_patterns_section = False
             for line in grad_result.text.split("\n"):
+                if line.startswith("## "):
+                    in_patterns_section = _is_patterns_heading(line)
+                    continue
+                if not in_patterns_section:
+                    continue
                 name_match = _NAMED_PATTERN_RE.match(line)
                 if name_match is None:
                     continue

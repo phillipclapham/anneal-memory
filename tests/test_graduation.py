@@ -807,3 +807,602 @@ class TestCrossSessionGraduationCheck:
         assert "(ungrounded)" in result.text
         assert "(cross-session-overlap)" not in result.text
         assert result.cross_session_collisions == []
+
+
+class TestFlowScriptPrefixedPatterns:
+    """Critical #1 fix coverage (v0.3.2): pattern lines with FlowScript
+    marker prefixes (``!``, ``!!``, ``?``, ``✓``, ``*``) between the
+    bullet and the operator-style name must be recognized by the
+    immune-system regex. Before v0.3.2, `_NAMED_PATTERN_RE` required
+    the name to immediately follow ``-\\s+`` and silently no-op'd on
+    any FlowScript-prefixed line — making the entire library's
+    canonical-flow continuity invisible to Move #2 and Move #3."""
+
+    def test_double_bang_marker(self):
+        text = """## Patterns
+- !! load_bearing_pattern | 3x (2026-05-21) [evidence: abc12345 "x"]
+"""
+        assert extract_pattern_names(text) == {"load_bearing_pattern": 3}
+
+    def test_single_bang_marker(self):
+        text = """## Patterns
+- ! urgent_pattern | 2x (2026-05-21) [evidence: abc12345 "x"]
+"""
+        assert extract_pattern_names(text) == {"urgent_pattern": 2}
+
+    def test_question_marker(self):
+        text = """## Patterns
+- ? open_question_pattern | 1x (2026-05-21)
+"""
+        assert extract_pattern_names(text) == {"open_question_pattern": 1}
+
+    def test_checkmark_marker(self):
+        text = """## Patterns
+- ✓ resolved_pattern | 2x (2026-05-21) [evidence: abc12345 "x"]
+"""
+        assert extract_pattern_names(text) == {"resolved_pattern": 2}
+
+    def test_star_marker(self):
+        text = """## Patterns
+- * starred_pattern | 1x (2026-05-21)
+"""
+        assert extract_pattern_names(text) == {"starred_pattern": 1}
+
+    def test_mixed_prefixed_and_unprefixed(self):
+        text = """## Patterns
+- plain_pattern | 2x (2026-05-21) [evidence: abc12345 "x"]
+- !! marked_pattern | 3x (2026-05-21) [evidence: def67890 "y"]
+- ? developing_pattern | 1x (2026-05-21)
+"""
+        result = extract_pattern_names(text)
+        assert result == {
+            "plain_pattern": 2,
+            "marked_pattern": 3,
+            "developing_pattern": 1,
+        }
+
+
+class TestCanonicalTemplateFormatEndToEnd:
+    """Critical #1 lockdown (v0.3.2): a continuity in the EXACT format
+    that ``_marker_reference()`` teaches agents to produce must fire
+    Move #2 (omission audit) and Move #3 (cross-session check). Before
+    v0.3.2 the template taught one format (``thought: prose | Nx``)
+    and the immune system parsed a different format (``- name | Nx``),
+    so every defense silently no-op'd in production. This test fixture
+    pins the format the template now teaches against the regex the
+    immune system uses, preventing silent re-divergence."""
+
+    def _canonical_continuity(self, today: str) -> str:
+        """Continuity built to match the format ``_marker_reference()``
+        teaches as of v0.3.2 — operator-style names + optional
+        FlowScript prefixes."""
+        return f"""# Agent — Memory
+
+## State
+Built database layer.
+
+## Patterns
+- acid_compliance_over_speed | 2x ({today}) [evidence: 4931b6a8 "PostgreSQL chosen for ACID guarantees"]
+- !! connection_pooling_bottleneck | 1x ({today}) [evidence: 5a829c7b "API latency improved after adding pool"]
+- ? horizontal_scaling_strategy | 1x ({today})
+
+## Decisions
+[decided(rationale: "reliability over speed", on: "{today}")] PostgreSQL
+
+## Context
+Production work on data layer.
+"""
+
+    def test_extract_pattern_names_sees_canonical_format(self):
+        """extract_pattern_names must capture every named pattern the
+        template-teaches format produces — this is the regression
+        guard against the v0.3.1→v0.3.2 grammar mismatch."""
+        text = self._canonical_continuity("2026-05-21")
+        result = extract_pattern_names(text)
+        assert result == {
+            "acid_compliance_over_speed": 2,
+            "connection_pooling_bottleneck": 1,
+            "horizontal_scaling_strategy": 1,
+        }
+
+    def test_omission_audit_fires_on_canonical_format(self):
+        """detect_pattern_omissions must surface a dropped Proven
+        pattern when prior and new are both in canonical format."""
+        prior = self._canonical_continuity("2026-05-20")
+        new = """# Agent — Memory
+## State
+After.
+## Patterns
+- !! connection_pooling_bottleneck | 1x (2026-05-21) [evidence: 5a829c7b "x"]
+- ? horizontal_scaling_strategy | 1x (2026-05-21)
+## Decisions
+.
+## Context
+.
+"""
+        omissions = detect_pattern_omissions(prior, new, min_level=2)
+        # acid_compliance_over_speed was at 2x in prior, absent in new
+        assert [op.name for op in omissions] == ["acid_compliance_over_speed"]
+        assert omissions[0].prior_level == 2
+
+    def test_cross_session_check_fires_on_canonical_format(self):
+        """validate_graduations cross-session path must fire on
+        canonical-format graduations when pattern_history_lookup
+        returns prior explanation overlapping ≥3 meaningful words."""
+        text = """## State
+.
+## Patterns
+- !! acid_compliance_over_speed | 2x (2026-05-21) [evidence: abc12345 "PostgreSQL chosen for ACID guarantees"]
+## Decisions
+.
+## Context
+.
+"""
+        prior_explanation = "PostgreSQL deployed for strong ACID guarantees on reads"
+
+        def lookup(name):
+            if name == "acid_compliance_over_speed":
+                return {
+                    "max_level_reached": 2,
+                    "explanation_corpus": prior_explanation,
+                    "last_explanation": prior_explanation,
+                    "last_seen_at": "2026-05-20T00:00:00Z",
+                    "last_wrap_id": None,
+                }
+            return None
+
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-21",
+            node_content_map={"abc12345": "PostgreSQL chosen for ACID compliance"},
+            pattern_history_lookup=lookup,
+        )
+        # Today's explanation: PostgreSQL chosen for ACID guarantees
+        # Prior explanation:  PostgreSQL deployed for strong ACID guarantees on reads
+        # Shared meaningful words: postgresql, acid, guarantees → 3 = threshold
+        assert result.demoted == 1
+        assert "(cross-session-overlap)" in result.text
+        assert len(result.cross_session_collisions) == 1
+        assert result.cross_session_collisions[0].name == "acid_compliance_over_speed"
+
+
+class TestAntiPatternsSectionRejection:
+    """v0.3.2 fix: ``## Anti-Patterns`` (and other ``pattern``-substring
+    section names) must NOT be parsed as the graduated-patterns
+    section. Before v0.3.2 the section check was ``"pattern" in
+    line.lower()`` which matched every such section, polluting
+    validation / extraction / staleness with anti-pattern bullets the
+    agent was actively trying to suppress.
+
+    All three section-scanning functions (validate_graduations,
+    extract_pattern_names, detect_stale_patterns) must converge on
+    the canonical ``## Patterns`` heading via _is_patterns_heading."""
+
+    def test_extract_skips_anti_patterns(self):
+        text = """## State
+foo.
+## Patterns
+- legitimate_pattern | 2x (2026-05-21) [evidence: abc12345 "x"]
+## Anti-Patterns
+- avoid_this_pattern | 3x (2026-05-21) [evidence: bad11111 "x"]
+## Context
+.
+"""
+        result = extract_pattern_names(text)
+        assert result == {"legitimate_pattern": 2}
+        assert "avoid_this_pattern" not in result
+
+    def test_extract_skips_other_pattern_sections(self):
+        text = """## Patterns
+- real_pattern | 2x (2026-05-21) [evidence: abc12345 "x"]
+## Other Patterns
+- fake_pattern | 3x (2026-05-21) [evidence: bad11111 "x"]
+## Design Patterns
+- design_pattern | 2x (2026-05-21) [evidence: cd111111 "x"]
+"""
+        assert extract_pattern_names(text) == {"real_pattern": 2}
+
+    def test_validate_graduations_skips_anti_patterns(self):
+        text = """## State
+.
+## Patterns
+- real_pattern | 2x (2026-05-21) [evidence: abc12345 "matches the episode content here"]
+## Anti-Patterns
+- avoid_pattern | 2x (2026-05-21) [evidence: ffffffff "nonexistent"]
+## Context
+.
+"""
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-21",
+            node_content_map={
+                "abc12345": "matches the episode content here",
+                "ffffffff": "would be poisoned if scanned",
+            },
+        )
+        # Only the real pattern should be validated. The anti-pattern
+        # line should be skipped entirely — no validate, no demote.
+        assert result.validated == 1
+        assert result.demoted == 0
+
+    def test_detect_stale_skips_anti_patterns(self):
+        text = """## Patterns
+- real_pattern | 2x (2026-05-01) [evidence: abc12345 "x"]
+## Anti-Patterns
+- avoid_pattern | 2x (2026-05-01) [evidence: bad11111 "x"]
+"""
+        stale = detect_stale_patterns(text, today="2026-05-21", staleness_days=7)
+        # Only the real Patterns-section pattern should appear as stale.
+        # The anti-patterns entry must not be surfaced — operators do
+        # not want their anti-pattern catalog flagged for removal.
+        contents = [s.content for s in stale]
+        assert any("real_pattern" in c for c in contents)
+        assert not any("avoid_pattern" in c for c in contents)
+
+
+class TestCorpusGrowthDoesNotFalsePositive:
+    """v0.3.2 reframe (4-layer review WARNING #1 from 4 independent
+    agents): the cross-session check must NOT false-positive on
+    legitimate long-lived patterns whose domain vocabulary naturally
+    recurs across multi-faceted evidence. The previous whole-corpus
+    union comparison failed this — corpus word-set grew monotonically
+    and the chance of ≥threshold overlap with new legitimate
+    explanations approached 1 over time.
+
+    These tests simulate N≥10 legitimate accumulations with
+    deliberately-distinct vocabulary per session (mirroring how real
+    multi-faceted evidence accrues across sessions) and assert the
+    Nth+1 graduation still passes."""
+
+    def test_ten_distinct_explanations_then_distinct_eleventh_passes(self):
+        """The killer test. Ten prior explanations, each on a different
+        angle of the same pattern, then an eleventh that's also a new
+        angle. Per-prior comparison must let it through; whole-corpus
+        union comparison would have demoted it."""
+        prior_explanations = [
+            "PostgreSQL chosen for ACID guarantees on writes",
+            "Connection pooling improved query latency dramatically",
+            "Read replicas added to scale reporting queries",
+            "Partitioning strategy designed around tenant boundaries",
+            "Backup window moved to off-hours after capacity issue",
+            "Index tuning revealed missing compound key on orders",
+            "Vacuum scheduling reduced bloat on hot tables overnight",
+            "Replication lag debugged via streaming WAL inspection",
+            "Connection limits raised after pgbouncer pool exhaustion",
+            "Failover tested with synthetic primary outage drill",
+        ]
+        corpus = "\n".join(prior_explanations)
+
+        def lookup(name):
+            if name == "database_evolution":
+                return {
+                    "max_level_reached": 3,
+                    "explanation_corpus": corpus,
+                    "last_explanation": prior_explanations[-1],
+                    "last_seen_at": "2026-05-20T00:00:00Z",
+                    "last_wrap_id": None,
+                }
+            return None
+
+        # 11th explanation — new angle, distinct vocabulary
+        text = """## State
+.
+## Patterns
+- database_evolution | 3x (2026-05-21) [evidence: abc12345 "Foreign data wrapper deployed for analytics warehouse joins"]
+## Decisions
+.
+## Context
+.
+"""
+        node_content = {"abc12345": "Foreign data wrapper deployed for analytics warehouse joins"}
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-21",
+            node_content_map=node_content,
+            pattern_history_lookup=lookup,
+        )
+        # The 11th explanation shares ZERO meaningful words with ANY
+        # individual prior. Per-prior max-overlap = 0. Should pass cleanly.
+        assert result.validated == 1, (
+            f"Expected validated=1, got demoted={result.demoted}, "
+            f"collisions={[c.overlap_words for c in result.cross_session_collisions]}"
+        )
+        assert result.cross_session_collisions == []
+
+    def test_rephrasing_against_specific_prior_still_demotes(self):
+        """The reframe must NOT break the actual attack closure. A
+        new explanation that heavily reuses vocabulary from a SPECIFIC
+        prior explanation should still demote — that's the
+        lexical-rephrasing variant Phase 1b probe #1 S5 demonstrated."""
+        prior_explanations = [
+            "PostgreSQL chosen for ACID guarantees on writes",
+            "Connection pooling improved query latency dramatically",
+            "Read replicas added to scale reporting queries",
+        ]
+        corpus = "\n".join(prior_explanations)
+
+        def lookup(name):
+            if name == "database_evolution":
+                return {
+                    "max_level_reached": 3,
+                    "explanation_corpus": corpus,
+                    "last_explanation": prior_explanations[0],
+                    "last_seen_at": "2026-05-20T00:00:00Z",
+                    "last_wrap_id": None,
+                }
+            return None
+
+        # Rephrase of prior 0: shared = postgresql, acid, guarantees, writes → 4
+        text = """## State
+.
+## Patterns
+- database_evolution | 3x (2026-05-21) [evidence: abc12345 "PostgreSQL deployed because ACID guarantees on writes matter most"]
+## Decisions
+.
+## Context
+.
+"""
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-21",
+            node_content_map={"abc12345": "PostgreSQL ACID guarantees writes selected"},
+            pattern_history_lookup=lookup,
+        )
+        # Today's explanation rephrases prior[0] heavily. Best per-prior
+        # overlap = 4 (postgresql, acid, guarantees, writes). Should demote.
+        assert result.demoted == 1
+        assert "(cross-session-overlap)" in result.text
+        assert len(result.cross_session_collisions) == 1
+        # Collision should report the prior that triggered (the rephrased one)
+        coll = result.cross_session_collisions[0]
+        assert "PostgreSQL chosen for ACID guarantees on writes" in coll.prior_explanation
+
+    def test_twenty_explanations_with_natural_vocabulary_recurrence_passes(self):
+        """Stress test — a pattern at 20+ accumulations where domain
+        vocabulary naturally recurs across MOST priors. The reframe
+        must still let a new genuinely-distinct angle through. This
+        is the failure scenario all four review agents predicted
+        would silently surface in production at 6-12 month horizons
+        under the old whole-corpus implementation."""
+        # 20 explanations, all mentioning "database" + "PostgreSQL" + assorted
+        # domain words — natural recurrence pattern for a long-lived Proven.
+        prior_explanations = [
+            "PostgreSQL database chosen ACID writes",
+            "PostgreSQL database connection pooling latency",
+            "PostgreSQL database read replicas reporting",
+            "PostgreSQL database partitioning tenant boundaries",
+            "PostgreSQL database backup window capacity",
+            "PostgreSQL database index compound orders",
+            "PostgreSQL database vacuum bloat tables",
+            "PostgreSQL database replication lag streaming",
+            "PostgreSQL database limits pgbouncer pool",
+            "PostgreSQL database failover synthetic outage",
+            "PostgreSQL database materialized views dashboards",
+            "PostgreSQL database row-level security policies",
+            "PostgreSQL database extension PostGIS spatial",
+            "PostgreSQL database upgrade major version migration",
+            "PostgreSQL database table inheritance partitioning",
+            "PostgreSQL database trigger function audit",
+            "PostgreSQL database statement timeout configuration",
+            "PostgreSQL database query plan analyzer review",
+            "PostgreSQL database concurrent index build",
+            "PostgreSQL database logical decoding replication",
+        ]
+        corpus = "\n".join(prior_explanations)
+
+        def lookup(name):
+            return {
+                "max_level_reached": 3,
+                "explanation_corpus": corpus,
+                "last_explanation": prior_explanations[-1],
+                "last_seen_at": "2026-05-20T00:00:00Z",
+                "last_wrap_id": None,
+            }
+
+        # 21st explanation: distinct angle, but reuses "PostgreSQL database"
+        # naturally — 2 shared words with EVERY prior. Per-prior max = 2,
+        # below threshold=3. Should pass.
+        text = """## State
+.
+## Patterns
+- database_evolution | 3x (2026-05-21) [evidence: abc12345 "PostgreSQL database foreign wrappers analytics warehouse"]
+## Decisions
+.
+## Context
+.
+"""
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-21",
+            node_content_map={"abc12345": "PostgreSQL database foreign wrappers analytics warehouse joins"},
+            pattern_history_lookup=lookup,
+        )
+        # The new explanation shares 2 meaningful words ("postgresql",
+        # "database") with EVERY prior — but per-prior overlap is 2,
+        # below threshold=3. Under the old whole-corpus union check,
+        # this would have demoted (the union has 50+ accumulated words
+        # and the new explanation easily shares ≥3 with it). Under the
+        # per-prior reframe, it passes.
+        assert result.validated == 1, (
+            f"Expected validated=1, got demoted={result.demoted}, "
+            f"collisions={[c.overlap_words for c in result.cross_session_collisions]}"
+        )
+
+
+class TestExtractProvenPatterns:
+    """Move #4 library layer (v0.3.2): extract_proven_patterns returns
+    operator-style names of every Proven-tier (>= min_level) pattern
+    in the ## Patterns section. Used by prepare_wrap to surface
+    uncovered_proven_to_check."""
+
+    def test_returns_2x_and_3x_sorted(self):
+        from anneal_memory.graduation import extract_proven_patterns
+        text = """## Patterns
+- gamma_pattern | 3x (2026-05-21) [evidence: abc12345 "x"]
+- alpha_pattern | 2x (2026-05-21) [evidence: def67890 "x"]
+- beta_pattern | 1x (2026-05-21)
+"""
+        assert extract_proven_patterns(text) == ["alpha_pattern", "gamma_pattern"]
+
+    def test_excludes_1x_by_default(self):
+        from anneal_memory.graduation import extract_proven_patterns
+        text = """## Patterns
+- developing_pattern | 1x (2026-05-21)
+- proven_pattern | 2x (2026-05-21) [evidence: abc12345 "x"]
+"""
+        assert extract_proven_patterns(text) == ["proven_pattern"]
+
+    def test_min_level_override(self):
+        from anneal_memory.graduation import extract_proven_patterns
+        text = """## Patterns
+- one_x | 1x (2026-05-21)
+- two_x | 2x (2026-05-21) [evidence: abc12345 "x"]
+- three_x | 3x (2026-05-21) [evidence: def67890 "x"]
+"""
+        assert extract_proven_patterns(text, min_level=3) == ["three_x"]
+        assert extract_proven_patterns(text, min_level=1) == ["one_x", "three_x", "two_x"]
+
+    def test_empty_continuity_returns_empty(self):
+        from anneal_memory.graduation import extract_proven_patterns
+        assert extract_proven_patterns("") == []
+
+
+class TestExtractContradictionDeclarations:
+    """Move #4 library layer (v0.3.2): per-pattern [contradicts: ...]
+    and [no-contradicts] declaration extraction."""
+
+    def test_contradicts_single_name(self):
+        from anneal_memory.graduation import extract_contradiction_declarations
+        text = """## Patterns
+- new_pattern | 2x (2026-05-21) [evidence: abc12345 "x"] [contradicts: old_pattern]
+"""
+        result = extract_contradiction_declarations(text)
+        assert result == {"new_pattern": ["old_pattern"]}
+
+    def test_contradicts_multiple_names(self):
+        from anneal_memory.graduation import extract_contradiction_declarations
+        text = """## Patterns
+- new_pattern | 3x (2026-05-21) [evidence: abc12345 "x"] [contradicts: old_a, old_b, old_c]
+"""
+        result = extract_contradiction_declarations(text)
+        assert result == {"new_pattern": ["old_a", "old_b", "old_c"]}
+
+    def test_no_contradicts_declaration(self):
+        from anneal_memory.graduation import extract_contradiction_declarations
+        text = """## Patterns
+- new_pattern | 2x (2026-05-21) [evidence: abc12345 "x"] [no-contradicts]
+"""
+        result = extract_contradiction_declarations(text)
+        # Empty list = explicit no-contradicts declaration
+        assert result == {"new_pattern": []}
+
+    def test_no_declaration_absent_from_dict(self):
+        from anneal_memory.graduation import extract_contradiction_declarations
+        text = """## Patterns
+- new_pattern | 2x (2026-05-21) [evidence: abc12345 "x"]
+"""
+        result = extract_contradiction_declarations(text)
+        # Pattern with NO declaration should not appear in the dict
+        assert result == {}
+
+    def test_mixed_declarations(self):
+        from anneal_memory.graduation import extract_contradiction_declarations
+        text = """## Patterns
+- pattern_a | 2x (2026-05-21) [evidence: abc12345 "x"] [contradicts: prior_a]
+- pattern_b | 2x (2026-05-21) [evidence: def67890 "x"] [no-contradicts]
+- pattern_c | 2x (2026-05-21) [evidence: 11111111 "x"]
+"""
+        result = extract_contradiction_declarations(text)
+        assert result == {
+            "pattern_a": ["prior_a"],
+            "pattern_b": [],
+            # pattern_c absent — no declaration
+        }
+
+
+class TestDetectProvenWithoutDeclaration:
+    """Move #4 library layer (v0.3.2): detect NEW Proven graduations
+    missing contradiction-stance declaration. Audit signal for
+    operator-review (Diogenes) to know which new Provens need
+    semantic-opposition inspection."""
+
+    def test_new_proven_without_declaration_surfaces(self):
+        from anneal_memory.graduation import detect_proven_without_declaration
+        prior = """## Patterns
+- old_proven | 2x (2026-05-20) [evidence: 11111111 "x"]
+"""
+        new = """## Patterns
+- old_proven | 2x (2026-05-21) [evidence: 11111111 "x"]
+- new_proven_no_declaration | 2x (2026-05-21) [evidence: abc12345 "x"]
+"""
+        result = detect_proven_without_declaration(prior, new)
+        assert [p.name for p in result] == ["new_proven_no_declaration"]
+        assert result[0].level == 2
+
+    def test_new_proven_with_contradicts_declaration_skipped(self):
+        from anneal_memory.graduation import detect_proven_without_declaration
+        prior = """## Patterns
+- old_proven | 2x (2026-05-20) [evidence: 11111111 "x"]
+"""
+        new = """## Patterns
+- old_proven | 2x (2026-05-21) [evidence: 11111111 "x"]
+- new_proven_with_declaration | 2x (2026-05-21) [evidence: abc12345 "x"] [contradicts: old_proven]
+"""
+        result = detect_proven_without_declaration(prior, new)
+        # The declaration satisfied the discipline; not surfaced
+        assert result == []
+
+    def test_new_proven_with_no_contradicts_declaration_skipped(self):
+        from anneal_memory.graduation import detect_proven_without_declaration
+        prior = """## Patterns
+- old_proven | 2x (2026-05-20) [evidence: 11111111 "x"]
+"""
+        new = """## Patterns
+- old_proven | 2x (2026-05-21) [evidence: 11111111 "x"]
+- explicit_no_contradicts | 2x (2026-05-21) [evidence: abc12345 "x"] [no-contradicts]
+"""
+        result = detect_proven_without_declaration(prior, new)
+        # Explicit no-contradicts satisfies the discipline too
+        assert result == []
+
+    def test_carried_forward_proven_not_flagged(self):
+        from anneal_memory.graduation import detect_proven_without_declaration
+        prior = """## Patterns
+- old_proven | 3x (2026-05-20) [evidence: 11111111 "x"]
+"""
+        new = """## Patterns
+- old_proven | 3x (2026-05-21) [evidence: 11111111 "x"]
+"""
+        # No new graduation, only carry-forward at same level — must not surface
+        result = detect_proven_without_declaration(prior, new)
+        assert result == []
+
+    def test_1x_to_2x_graduation_without_declaration_surfaces(self):
+        from anneal_memory.graduation import detect_proven_without_declaration
+        prior = """## Patterns
+- pattern | 1x (2026-05-20) [evidence: 11111111 "x"]
+"""
+        new = """## Patterns
+- pattern | 2x (2026-05-21) [evidence: abc12345 "x"]
+"""
+        # 1x → 2x is a new Proven graduation; should surface without declaration
+        result = detect_proven_without_declaration(prior, new)
+        assert [p.name for p in result] == ["pattern"]
+        assert result[0].level == 2
+
+    def test_demotion_not_flagged(self):
+        from anneal_memory.graduation import detect_proven_without_declaration
+        prior = """## Patterns
+- pattern | 3x (2026-05-20) [evidence: 11111111 "x"]
+"""
+        new = """## Patterns
+- pattern | 2x (2026-05-21) [evidence: 11111111 "x"]
+"""
+        # Carried forward at LOWER level — not a new graduation
+        result = detect_proven_without_declaration(prior, new)
+        assert result == []

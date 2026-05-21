@@ -238,32 +238,64 @@ This creates persistent emotional associations between co-cited episodes.
 
 def _marker_reference(today: str) -> str:
     """The marker reference section used in agent compression instructions."""
-    return f"""### Density Markers (use in ## Patterns)
-- `? question` — open question needing decision
-- `thought: insight` — observation or principle worth preserving
-- `✓ item` — completed/resolved
+    return f"""### Pattern Line Format (CRITICAL — this is what the immune system reads)
+
+Pattern lines in `## Patterns` MUST follow this shape:
+
+```
+- pattern_name | Nx ({today}) [evidence: <episode_id> "how episode validates pattern"]
+```
+
+Required elements:
+- Markdown bullet `-` followed by space
+- Operator-style `pattern_name` — starts with a letter, contains only letters,
+  digits, underscores, dots, hyphens. Examples: `acid_compliance_over_speed`,
+  `connection_pooling_is_bottleneck`, `partnership_challenge_at_X_boundary`.
+- Graduation marker `| Nx ({today})` where N is 1, 2, or 3
+- For 2x and 3x: `[evidence: <8-char-episode-id> "explanation"]` is REQUIRED
+
+Optional FlowScript marker prefix (supported by the immune system):
+- `!` urgent / load-bearing → `- ! pattern_name | 1x ({today})`
+- `!!` highest urgency → `- !! pattern_name | 3x ({today}) [evidence: ...]`
+- `?` open question → `- ? pattern_name | 1x ({today})`
+- `✓` completed/resolved → `- ✓ pattern_name | 2x ({today}) [evidence: ...]`
+
+**Why operator-style names are load-bearing (v0.3.2):** the cross-session
+immune system tracks per-pattern history so it can detect sycophantic
+vocabulary reuse across sessions, silent dropout of previously-graduated
+Proven patterns, and (when enabled) contradiction with existing Proven.
+All three defenses need a stable per-pattern identifier. Free-form prose
+identifiers ("thought: ACID compliance outweighs raw speed") still validate
+via the citation-overlap check but cannot anchor the cross-session defenses
+because they have no stable identity across sessions. Use operator-style
+names so the immune system can protect your patterns.
+
+### Other Density Markers (in pattern explanations, decisions, context)
+
 - `A -> B` — A causes or leads to B
 - `A ><[axis] B` — tension between A and B on the named axis
 - `[decided(rationale: "why", on: "date")] choice` — committed decision
 - `[blocked(reason: "what", since: "date")] item` — waiting on dependency
 
-### Temporal Graduation (CRITICAL — this is what makes the system learn)
-- New pattern from THIS session → `| 1x ({today})`
-- Validates existing 1x → `| 2x ({today}) [evidence: <episode_id> "how episode validates pattern"]`
-- Validates existing 2x → `| 3x ({today}) [evidence: <episode_id> "explanation"]`
-- Evidence citations are REQUIRED for graduations (2x and 3x). Cite the episode's 8-char ID.
+### Temporal Graduation (this is what makes the system learn)
+- New pattern from THIS session → `- pattern_name | 1x ({today})`
+- Validates existing 1x → `- pattern_name | 2x ({today}) [evidence: <episode_id> "explanation"]`
+- Validates existing 2x → `- pattern_name | 3x ({today}) [evidence: <episode_id> "explanation"]`
+- Evidence citations REQUIRED for graduations (2x and 3x). Cite the episode's 8-char ID.
 - Patterns marked `(ungrounded)` need FRESH evidence from THIS session to re-graduate.
+- Patterns marked `(cross-session-overlap)` were demoted because today's explanation
+  reused too much vocabulary from prior sessions; compose new evidence with
+  genuinely distinct words to re-graduate.
 - Patterns at 3x: extract the PRINCIPLE, not the surface observations.
 - Patterns older than 7 days with no new validation → remove (stale).
-- Group related patterns: `{{topic: ...}}`
+- Group related patterns visually with a header line above them; the immune
+  system does not require any specific grouping syntax.
 
 **Example:**
 ```
-{{database_architecture:
-  thought: ACID compliance outweighs raw speed | 2x ({today}) [evidence: 4931b6a8 "PostgreSQL chosen for ACID"]
-  thought: connection pooling is the real bottleneck | 1x ({today})
-  ? horizontal scaling strategy ><[single-writer vs multi-writer] | 1x ({today})
-}}
+- acid_compliance_over_speed | 2x ({today}) [evidence: 4931b6a8 "PostgreSQL chosen for ACID guarantees"]
+- connection_pooling_bottleneck | 1x ({today})
+- horizontal_scaling_strategy | 1x ({today})
 ```
 
 ### Decisions (use in ## Decisions)
@@ -372,6 +404,7 @@ def prepare_wrap(
             package=None,
             assoc_context=None,
             wrap_token=None,
+            uncovered_proven_to_check=[],
         )
 
     # All store reads and package construction happen BEFORE wrap_started().
@@ -401,6 +434,14 @@ def prepare_wrap(
     wrap_token = uuid.uuid4().hex
     store.wrap_started(token=wrap_token, episode_ids=episode_ids)
 
+    # Move #4 library layer (v0.3.2): surface the list of existing
+    # Proven (2x/3x) pattern names so the methodology-layer
+    # contradiction-scan discipline can require the agent to declare
+    # contradiction-stance against each before any new Proven
+    # graduation in this wrap.
+    from .graduation import extract_proven_patterns
+    uncovered_proven = extract_proven_patterns(existing or "") if existing else []
+
     return PrepareWrapResult(
         status="ready",
         message=f"Ready to compress {len(episodes)} episode(s).",
@@ -408,6 +449,7 @@ def prepare_wrap(
         package=package,
         assoc_context=assoc_context,
         wrap_token=wrap_token,
+        uncovered_proven_to_check=uncovered_proven,
     )
 
 
@@ -770,6 +812,21 @@ def validated_save_continuity(
         min_level=2,
     )
 
+    # Move #4 library layer (v0.3.2): detect new Proven graduations
+    # that landed without explicit contradiction-stance declaration.
+    # Audit signal only — the library does not refuse the save.
+    # Methodology layer (Levain WRAP_PROTOCOL.md) enforces the scan
+    # discipline; operator-review (Diogenes) is the LLM-as-judge
+    # layer that catches semantic opposition. The library's job is
+    # to record whether the discipline was followed so Diogenes
+    # knows which new Provens need its attention.
+    from .graduation import detect_proven_without_declaration
+    proven_without_declaration = detect_proven_without_declaration(
+        prior_text=prior_text_for_omission_audit,
+        new_text=grad_result.text,
+        min_level=2,
+    )
+
     # 10.5c.5 TWO-PHASE COMMIT PIPELINE
     #
     # Phase 1: write continuity.md.tmp (no rename yet) so we know the
@@ -876,16 +933,26 @@ def validated_save_continuity(
 
             # Update cross-session pattern history. Scan the
             # post-validation continuity text for every named pattern
-            # line with an [evidence: ...] explanation — that includes
-            # 1x mentions (preserves their explanation for the next
-            # session's cross-session check) and surviving 2x/3x
-            # graduations (the demoted ones already lost their evidence
-            # tag via _demote_line so they won't match here, which is
-            # correct: a demoted graduation should not anchor the
-            # cross-session check). Patterns whose graduation got
-            # demoted to 1x with `(cross-session-overlap)` marker
-            # specifically don't have an evidence tag anymore so
-            # they're skipped here — the prior session's history
+            # line with an [evidence: ...] explanation that was AUTHORED
+            # TODAY. That includes today's 1x mentions (preserves their
+            # explanation for the next session's cross-session check)
+            # and today's surviving 2x/3x graduations (the demoted
+            # ones already lost their evidence tag via _demote_line so
+            # they won't match here, which is correct).
+            #
+            # Today-only gate (v0.3.2 fix for Codex MEDIUM from the
+            # 4-layer review): without this, carried-forward pattern
+            # lines whose explanation prose differs from the prior
+            # session's stored version would silently overwrite the
+            # canonical prior explanation in pattern_history — letting
+            # unvalidated carry-forward edits pollute the corpus the
+            # cross-session check relies on. validate_graduations
+            # intentionally skips non-today graduation lines for the
+            # same family of reasons; the upsert path must match.
+            #
+            # Patterns demoted to 1x with `(cross-session-overlap)`
+            # marker specifically don't have an evidence tag anymore
+            # so they're skipped — the prior session's history
             # remains authoritative, exactly the desired behavior.
             #
             # wrap_id stays None for now: WrapResult is a dataclass
@@ -911,6 +978,13 @@ def validated_save_continuity(
                     # No [evidence: ...] tag (1x without explanation,
                     # or a demoted line) — nothing to anchor the
                     # cross-session check against.
+                    continue
+                # Today-only gate (Codex MEDIUM v0.3.2): only upsert
+                # for lines authored this wrap. Carried-forward lines
+                # with non-today dates are skipped to keep the
+                # cross-session corpus authoritative.
+                line_date = evidence_match.group(2)
+                if line_date != today_str:
                     continue
                 explanation = evidence_match.group(4)
                 if not explanation:
@@ -1067,6 +1141,16 @@ def validated_save_continuity(
                     }
                     for coll in grad_result.cross_session_collisions
                 ]
+            # Move #4 library layer audit signal (v0.3.2): new Proven
+            # graduations that landed without explicit contradiction-
+            # stance declaration ride into the hash-chained audit log
+            # so operator-review (Diogenes weekly sweep) can find them.
+            # Lean omission when no new Provens skipped declaration.
+            if proven_without_declaration:
+                audit_payload["proven_without_contradicts_declaration"] = [
+                    {"name": p.name, "level": p.level}
+                    for p in proven_without_declaration
+                ]
             store._audit.log("continuity_saved", audit_payload)
         except Exception:
             # Audit is best-effort. Silently drop a failing
@@ -1120,6 +1204,10 @@ def validated_save_continuity(
         }
         for coll in grad_result.cross_session_collisions
     ]
+    proven_without_declaration_payload: list[dict[str, Any]] = [
+        {"name": p.name, "level": p.level}
+        for p in proven_without_declaration
+    ]
 
     return SaveContinuityResult(
         path=path,
@@ -1134,6 +1222,7 @@ def validated_save_continuity(
         gaming_suspects=list(grad_result.gaming_suspects),
         omitted_patterns=omitted_patterns_payload,
         cross_session_collisions=cross_session_collisions_payload,
+        proven_without_contradicts_declaration=proven_without_declaration_payload,
         associations_formed=assoc_formed,
         associations_strengthened=assoc_strengthened,
         associations_decayed=assoc_decayed,

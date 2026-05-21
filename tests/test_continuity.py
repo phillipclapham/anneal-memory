@@ -348,6 +348,11 @@ class TestTypedDictReturnShapes:
                 "package",
                 "assoc_context",
                 "wrap_token",
+                # Added v0.3.2 (Move #4 library layer): list of existing
+                # Proven (2x/3x) pattern names the methodology-layer
+                # contradiction-scan discipline must check against
+                # before any new Proven graduation this wrap.
+                "uncovered_proven_to_check",
             }
             assert set(result["package"].keys()) == {
                 "episodes",
@@ -392,6 +397,12 @@ class TestTypedDictReturnShapes:
                 # the pattern's prior-session explanation — closes
                 # the Phase 1b slow-drift attack from the same probe.
                 "cross_session_collisions",
+                # Added v0.3.2 (Move #4 library layer): new Proven
+                # graduations that landed without explicit
+                # contradiction-stance declaration. Audit signal for
+                # operator-review (Diogenes) to know which new Provens
+                # need semantic-opposition inspection.
+                "proven_without_contradicts_declaration",
                 "associations_formed",
                 "associations_strengthened", "associations_decayed",
                 "sections", "wrap_result",

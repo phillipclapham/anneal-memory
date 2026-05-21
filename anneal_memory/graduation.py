@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from datetime import datetime as _datetime
 from dataclasses import dataclass, field
+from typing import Any, Callable
 
 
 # Matches graduated patterns (2x or 3x) WITH [evidence: <id> "explanation"] citations.
@@ -33,6 +34,32 @@ _BARE_GRADUATION_RE = re.compile(
 # Matches any pattern with temporal marker (Nx)
 _PATTERN_RE = re.compile(
     r"\|\s*(\d+)x\s*\((\d{4}-\d{2}-\d{2})\)"
+)
+
+# Matches a pattern line at ANY level (1x/2x/3x) with an
+# ``[evidence: HEXID "explanation"]`` tag. Distinct from
+# ``_GRADUATION_RE`` (which is scoped to 2x/3x for validation
+# purposes) and from ``_PATTERN_RE`` (which ignores evidence).
+# Used by the cross-session history-upsert path so that 1x mentions
+# with explanations also anchor the per-pattern history — without
+# this, the first graduation (1x → 2x) wouldn't see any prior
+# explanation to compare against, defeating the cross-session
+# defense on initially-developing patterns.
+_PATTERN_LINE_WITH_EVIDENCE_RE = re.compile(
+    r"\|\s*(\d+)x\s*\((\d{4}-\d{2}-\d{2})\)\s*\[evidence:\s*"
+    r"([a-fA-F0-9][a-fA-F0-9, ]*)"
+    r'(?:\s+"([^"]*)")?\s*\]'
+)
+
+# Matches a full pattern line in ## Patterns, capturing the pattern name
+# (the text between the leading bullet and the ` | Nx` marker) and the
+# graduation level. Used by extract_pattern_names() / detect_pattern_omissions().
+#
+# Pattern name grammar is intentionally narrow — operator-style identifiers
+# (alphanumeric + underscore + period + hyphen) — to avoid matching arbitrary
+# bullet text in adjacent sections that happens to contain ``| Nx``.
+_NAMED_PATTERN_RE = re.compile(
+    r"^\s*-\s+([A-Za-z][\w\.\-]*)\s*\|\s*(\d+)x"
 )
 
 # Stop words for explanation overlap checking
@@ -65,6 +92,16 @@ class GraduationResult:
     gaming_suspects: list[str] = field(default_factory=list)  # IDs cited >= threshold
     direct_co_citations: list[tuple[str, str]] = field(default_factory=list)  # Pairs from same line
     all_validated_ids: list[set[str]] = field(default_factory=list)  # Per-line validated ID sets
+    # Patterns at 2x/3x in the prior continuity that are absent at any
+    # level in the new continuity. Surfaced as audit signal — see
+    # detect_pattern_omissions() and OmittedPattern docstring.
+    omitted_patterns: list["OmittedPattern"] = field(default_factory=list)
+    # Graduations refused because today's explanation overlaps too
+    # heavily with the pattern's prior-session explanation. Closes
+    # the slow-drift sycophantic-accumulation gap surfaced by Phase
+    # 1b probe #1. The graduation in the text was demoted (same
+    # mechanic as the ungrounded path) when this list is non-empty.
+    cross_session_collisions: list["CrossSessionCollision"] = field(default_factory=list)
 
 
 @dataclass
@@ -78,12 +115,70 @@ class StalenessInfo:
     days_stale: int  # Days since last validation
 
 
+@dataclass
+class CrossSessionCollision:
+    """A graduation event blocked by cross-session explanation overlap.
+
+    Surfaced when today's graduation explanation for a pattern shares
+    too many meaningful words with the pattern's most recent prior
+    appearance (tracked in the pattern_history table). The shape of
+    the failure: legitimate multi-faceted evidence uses different
+    vocabulary per session because each citation is a genuinely
+    different angle on the pattern; sycophantic accumulation rephrases
+    the same claim and reuses trope vocabulary.
+
+    Detected at validate_graduations time. The graduation gets demoted
+    same way an ungrounded citation does (3x→2x or 2x→1x, marked
+    ``(cross-session-overlap)``). Pattern-history row is NOT updated
+    when this fires — the prior session's explanation remains
+    authoritative until the agent composes a new explanation with
+    actually-different vocabulary.
+
+    Added in response to Bold Stand Phase 1b probe #1 (2026-05-21),
+    which demonstrated that the citation-validation pipeline could not
+    distinguish a sycophantic pattern accumulating fresh vocabulary
+    from a legitimate one accumulating distinct evidence. Closes the
+    slow-drift attack class structurally.
+    """
+
+    name: str  # Pattern identifier
+    today_level: int  # Level the agent attempted to graduate to (2 or 3)
+    overlap_words: list[str]  # Meaningful words shared with prior explanation
+    prior_explanation: str  # The prior session's explanation text
+
+
+@dataclass
+class OmittedPattern:
+    """A pattern that was at Proven-tier (2x/3x) in the prior continuity
+    but is absent at any level in the new continuity.
+
+    Silent omission of a graduated pattern is a threat the rest of the
+    citation-layer pipeline does not catch: validate_graduations only
+    sees patterns the agent *wrote into* the new continuity, so a
+    pattern the agent simply *did not carry forward* leaves no trace at
+    the graduation layer. detect_pattern_omissions surfaces these as an
+    informational audit signal — the agent may have intentionally
+    retired the pattern, or may have silently erased load-bearing
+    evidence. Either way, operators and downstream review (Diogenes,
+    consultation, audit-chain queries) can see what was dropped.
+
+    Discovered as a reachable gap during Bold Stand Phase 1b probe #1
+    (2026-05-21) — an adversarial agent dropped two legitimate Proven
+    patterns across three drift sessions with no library detection.
+    """
+
+    name: str  # Pattern identifier (operator-style name before the | marker)
+    prior_level: int  # Level at which it appeared in the previous wrap (2 or 3)
+
+
 def validate_graduations(
     text: str,
     valid_ids: set[str],
     today: str,
     node_content_map: dict[str, str] | None = None,
     citations_seen: bool = False,
+    pattern_history_lookup: "Callable[[str], dict[str, Any] | None] | None" = None,
+    cross_session_overlap_threshold: int = 3,
 ) -> GraduationResult:
     """Validate evidence citations on graduated patterns.
 
@@ -95,8 +190,18 @@ def validate_graduations(
     1. At least one cited ID exists in the current session's episode set
     2. If an explanation is provided and node_content_map is available,
        the explanation must reference actual content from the cited episode
+    3. If pattern_history_lookup is provided AND the pattern has been seen
+       in a prior session, today's explanation must NOT share
+       ``cross_session_overlap_threshold`` or more meaningful words with
+       the prior session's explanation. This catches sycophantic
+       accumulation where each session rephrases the same claim with
+       overlapping vocabulary — closes the slow-drift attack from
+       Bold Stand Phase 1b probe #1 (2026-05-21).
 
-    If validation fails, demotes the graduation (3x->2x, 2x->1x) and marks (ungrounded).
+    If validation check 1 or 2 fails, demotes the graduation (3x->2x,
+    2x->1x) and marks ``(ungrounded)``. If check 3 fails, demotes and
+    marks ``(cross-session-overlap)`` instead — operator-distinguishable
+    failure modes.
 
     Args:
         text: The continuity file text (full markdown).
@@ -104,6 +209,20 @@ def validate_graduations(
         today: Today's date as YYYY-MM-DD string.
         node_content_map: Optional mapping of episode ID -> content for overlap checking.
         citations_seen: If True, bare graduations (no evidence tag) are also demoted.
+        pattern_history_lookup: Optional callable that returns the
+            cross-session history dict for a given pattern name (keys:
+            ``max_level_reached``, ``last_explanation``, ``last_seen_at``,
+            ``last_wrap_id``) or None if the pattern has no history.
+            When None, the cross-session overlap check is skipped (preserves
+            the pre-Move-#3 behavior for library callers that don't wire
+            history through). The canonical save pipeline supplies
+            ``store.get_pattern_history`` here.
+        cross_session_overlap_threshold: Meaningful-word overlap count
+            at which the cross-session check refuses today's graduation.
+            Default 3 — calibrated against Phase 1b probe #1 such that
+            sycophantic vocabulary reuse (5+ shared words) trips while
+            normal cross-session graduations with distinct evidence
+            (≤2 shared trope words) pass cleanly.
 
     Returns:
         GraduationResult with possibly modified text and validation counts.
@@ -117,6 +236,7 @@ def validate_graduations(
     citation_counts: dict[str, int] = {}
     direct_co_citations: list[tuple[str, str]] = []
     all_validated_ids: list[set[str]] = []
+    cross_session_collisions: list[CrossSessionCollision] = []
 
     for i, line in enumerate(lines):
         # Track section boundaries
@@ -170,7 +290,45 @@ def validate_graduations(
                         explanation_valid = True
                         break
 
-            if ids_valid and explanation_valid:
+            # Cross-session sycophantic-accumulation check (Phase 1b probe #1).
+            # Runs ONLY after the within-session checks pass — there is
+            # no point comparing across sessions when the citation
+            # itself is ungrounded today. If pattern_history_lookup is
+            # None (library caller not wiring history through), check
+            # is skipped entirely and the pre-Move-#3 behavior holds.
+            cross_session_overlap_words: list[str] = []
+            prior_explanation_for_check = ""
+            if ids_valid and explanation_valid and pattern_history_lookup is not None and explanation:
+                name_match = _NAMED_PATTERN_RE.match(line)
+                if name_match is not None:
+                    pattern_name = name_match.group(1)
+                    history = pattern_history_lookup(pattern_name)
+                    if history:
+                        # Compare today's explanation against the FULL
+                        # accumulated corpus of prior explanations
+                        # (newline-joined). Without this, an agent who
+                        # rotates vocabulary across sessions to dodge
+                        # per-explanation matching could push a
+                        # sycophantic pattern through by composing each
+                        # session's explanation to be distinct from the
+                        # immediately-prior one — the slow-drift attack
+                        # variant from Phase 1b probe #1 with vocabulary
+                        # rotation. The corpus comparison forces every
+                        # new explanation to be distinct from the entire
+                        # accumulated history.
+                        prior_explanation_for_check = (
+                            history.get("explanation_corpus")
+                            or history.get("last_explanation")
+                            or ""
+                        )
+                        if prior_explanation_for_check:
+                            shared = _meaningful_word_overlap(
+                                explanation, prior_explanation_for_check,
+                            )
+                            if len(shared) >= cross_session_overlap_threshold:
+                                cross_session_overlap_words = sorted(shared)
+
+            if ids_valid and explanation_valid and not cross_session_overlap_words:
                 validated += 1
                 # Extract co-citation pairs for Hebbian associations
                 # Only from VALIDATED citations — immune system protects the graph
@@ -184,6 +342,26 @@ def validate_graduations(
                 # Track all validated IDs per line for session co-citation
                 if valid_cited:
                     all_validated_ids.append(set(valid_cited))
+            elif cross_session_overlap_words:
+                # Cross-session check fired: today's explanation reuses
+                # vocabulary from the pattern's prior-session
+                # explanation. Demote with a distinct marker so
+                # operators can tell this apart from the ungrounded
+                # path. The pattern_history row is NOT updated when
+                # this fires — the prior session's explanation remains
+                # authoritative until the agent composes a new
+                # explanation with actually-different vocabulary.
+                demoted += 1
+                lines[i] = _demote_line(line, match, level, marker="(cross-session-overlap)")
+                # Extract pattern name again for the collision record
+                name_match = _NAMED_PATTERN_RE.match(line)
+                collision_name = name_match.group(1) if name_match else "<unnamed>"
+                cross_session_collisions.append(CrossSessionCollision(
+                    name=collision_name,
+                    today_level=level,
+                    overlap_words=cross_session_overlap_words,
+                    prior_explanation=prior_explanation_for_check,
+                ))
             else:
                 demoted += 1
                 lines[i] = _demote_line(line, match, level)
@@ -224,7 +402,25 @@ def validate_graduations(
         gaming_suspects=gaming_suspects,
         direct_co_citations=direct_co_citations,
         all_validated_ids=all_validated_ids,
+        cross_session_collisions=cross_session_collisions,
     )
+
+
+def _meaningful_word_overlap(text_a: str, text_b: str) -> set[str]:
+    """Return the set of meaningful words shared by two explanation texts.
+
+    Uses the same tokenization rule as :func:`check_explanation_overlap`:
+    split on non-alphanumeric, lowercase, drop stop words and tokens of
+    length ≤2. Returning the actual set (not just a count) lets callers
+    surface which specific words triggered a cross-session collision —
+    valuable for the audit log and for operator review.
+    """
+    def words(text: str) -> set[str]:
+        return {
+            w for w in re.split(r"[^a-zA-Z0-9]+", text.lower())
+            if len(w) > 2 and w not in _STOP_WORDS
+        }
+    return words(text_a) & words(text_b)
 
 
 def check_explanation_overlap(explanation: str, episode_content: str) -> bool:
@@ -348,6 +544,102 @@ def detect_stale_patterns(text: str, today: str, staleness_days: int = 7) -> lis
     return stale
 
 
+def extract_pattern_names(text: str) -> dict[str, int]:
+    """Extract the max graduation level per pattern name in the ## Patterns section.
+
+    Scans only the ## Patterns section (consistent with validate_graduations
+    and detect_stale_patterns) and returns a mapping of pattern name →
+    highest level (Nx) seen. If a pattern name appears on multiple lines
+    in the section (which would be a malformed continuity but is not
+    enforced anywhere), the highest level wins.
+
+    Pattern names are matched against _NAMED_PATTERN_RE — operator-style
+    identifiers (starts with a letter; contains letters, digits, underscore,
+    dot, hyphen). Patterns that don't match this grammar (e.g. free-form
+    prose bullets that happen to contain ``| Nx``) are silently skipped.
+    This is intentional: continuity-internal documentation that resembles
+    a graduation marker should not be mistaken for one.
+
+    Args:
+        text: The continuity file text.
+
+    Returns:
+        Mapping ``{pattern_name: max_level_seen}`` for every named pattern
+        found in the ``## Patterns`` section.
+    """
+    result: dict[str, int] = {}
+    in_patterns = False
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            in_patterns = "pattern" in line.lower()
+            continue
+        if not in_patterns:
+            continue
+        match = _NAMED_PATTERN_RE.match(line)
+        if not match:
+            continue
+        name = match.group(1)
+        try:
+            level = int(match.group(2))
+        except ValueError:
+            continue
+        prior = result.get(name, 0)
+        if level > prior:
+            result[name] = level
+    return result
+
+
+def detect_pattern_omissions(
+    prior_text: str,
+    new_text: str,
+    min_level: int = 2,
+) -> list[OmittedPattern]:
+    """Detect Proven-tier patterns silently dropped between two wraps.
+
+    Compares the ``## Patterns`` section of the prior continuity against
+    the new continuity and surfaces any pattern at ``min_level`` or
+    higher in the prior text that is absent at any level in the new
+    text. Default ``min_level=2`` so 1x ("Developing") drops are NOT
+    surfaced — those are normal lifecycle; only 2x/3x ("Proven-tier")
+    omissions are tracked.
+
+    This is informational, not a gate. The library does not refuse the
+    save when patterns are omitted — the agent may have intentionally
+    retired the pattern, or may have silently erased load-bearing
+    evidence. The returned list goes onto :class:`GraduationResult` and
+    into the wrap audit event so operators and downstream review can
+    see what was dropped between sessions.
+
+    Added in response to Bold Stand Phase 1b probe #1 (2026-05-21),
+    which surfaced silent pattern omission as a reachable adversarial-
+    agent gap not caught by validate_graduations.
+
+    Args:
+        prior_text: The continuity text BEFORE this wrap (the
+            persisted file state at the start of the session).
+        new_text: The continuity text the agent is about to save.
+        min_level: Minimum level in prior_text to count as an omission
+            when missing from new_text. Default 2.
+
+    Returns:
+        List of :class:`OmittedPattern` for every pattern at or above
+        ``min_level`` in ``prior_text`` that is not present at any
+        level in ``new_text``.
+    """
+    prior_levels = extract_pattern_names(prior_text)
+    new_names = set(extract_pattern_names(new_text).keys())
+    omissions: list[OmittedPattern] = []
+    for name, prior_level in prior_levels.items():
+        if prior_level < min_level:
+            continue
+        if name in new_names:
+            continue
+        omissions.append(OmittedPattern(name=name, prior_level=prior_level))
+    # Stable order so callers / tests / audit logs see consistent output
+    omissions.sort(key=lambda op: (-op.prior_level, op.name))
+    return omissions
+
+
 def detect_citation_gaming(citation_counts: dict[str, int], threshold: int = 3) -> list[str]:
     """Detect episodes cited suspiciously many times.
 
@@ -371,19 +663,35 @@ def detect_citation_gaming(citation_counts: dict[str, int], threshold: int = 3) 
 # -- Internal helpers --
 
 
-def _demote_line(line: str, match: re.Match, level: int) -> str:
-    """Demote a graduated pattern line (3x->2x or 2x->1x) and mark ungrounded.
+def _demote_line(
+    line: str,
+    match: re.Match,
+    level: int,
+    marker: str = "(ungrounded)",
+) -> str:
+    """Demote a graduated pattern line (3x->2x or 2x->1x) and mark it.
 
     Uses positional replacement via match span to avoid fragility
     from str.replace on LLM-generated text that might contain
     duplicate marker-like substrings.
+
+    Args:
+        line: The full line being demoted.
+        match: The ``_GRADUATION_RE`` match object that captured the
+            graduation marker.
+        level: The current level (2 or 3) to demote from.
+        marker: The text to replace the ``[evidence: ...]`` tag with.
+            Default ``(ungrounded)`` (the citation-validation failure
+            path); cross-session-overlap demotions pass
+            ``(cross-session-overlap)`` so operators can distinguish
+            the failure mode at a glance.
     """
     old_marker = match.group(0)
     new_marker = old_marker.replace(f"| {level}x", f"| {level - 1}x")
-    # Replace evidence tag with ungrounded marker
+    # Replace evidence tag with the demotion marker
     new_marker = re.sub(
         r'\[evidence:\s*[a-fA-F0-9][a-fA-F0-9, ]*(?:\s+"[^"]*")?\s*\]',
-        "(ungrounded)", new_marker
+        marker, new_marker
     )
     # Positional replacement — immune to duplicate marker text elsewhere in line
     start, end = match.span()

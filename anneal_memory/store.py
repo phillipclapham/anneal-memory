@@ -157,6 +157,10 @@ StoreOperation = Literal[
     "get_associations",
     "get_association_context",
     "association_stats",
+    # Cross-session pattern history (2026-05-21, closes Phase 1b
+    # probe #1 sycophantic-accumulation gap)
+    "get_pattern_history",
+    "upsert_pattern_history",
     "prune",
     "schema_init",
     "batch_commit",
@@ -493,6 +497,40 @@ CREATE TABLE IF NOT EXISTS wraps (
 CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+-- Cross-session graduation history per pattern name. Closes the
+-- slow-drift sycophantic-accumulation gap surfaced by Bold Stand
+-- Phase 1b probe #1 (2026-05-21): without per-pattern history,
+-- the library validates each graduation in isolation and cannot
+-- distinguish multi-faceted evidence accumulation from rephrased
+-- repetition of the same claim. Each row tracks the most recent
+-- graduation event for a pattern: the explanation text used (so
+-- subsequent graduations can be checked for sycophantic vocabulary
+-- reuse), the highest level the pattern has ever reached, and a
+-- pointer to the wrap that recorded it. Schema is additive — existing
+-- stores upgrade safely via CREATE TABLE IF NOT EXISTS; the table
+-- starts empty and the cross-session check correctly treats "no
+-- prior history" as "first graduation allowed."
+CREATE TABLE IF NOT EXISTS pattern_history (
+    pattern_name TEXT PRIMARY KEY,
+    max_level_reached INTEGER NOT NULL,
+    -- Newline-joined corpus of every distinct prior explanation seen
+    -- for this pattern across all sessions. The cross-session check
+    -- compares today's explanation against the FULL corpus (not just
+    -- the most recent explanation), so agents who try to rotate
+    -- vocabulary across multiple sessions to dodge the per-explanation
+    -- overlap check have to make their new explanations distinct from
+    -- the entire history — and accumulated history grows monotonically
+    -- so this gets harder, not easier, over time.
+    explanation_corpus TEXT NOT NULL DEFAULT '',
+    -- The most recent individual explanation. Kept for forensic /
+    -- debugging surfaces (CLI inspection, audit log entries) where
+    -- the most-recent attempt is the relevant data point.
+    last_explanation TEXT NOT NULL DEFAULT '',
+    last_seen_at TEXT NOT NULL,
+    last_wrap_id INTEGER,
+    FOREIGN KEY (last_wrap_id) REFERENCES wraps(id)
 );
 """
 
@@ -1878,6 +1916,166 @@ class Store:
             )
             for row in rows
         ]
+
+    # -- Pattern history (cross-session graduation tracking) --
+    #
+    # Closes the slow-drift sycophantic-accumulation gap surfaced by
+    # Bold Stand Phase 1b probe #1 (2026-05-21). Each pattern that has
+    # appeared with an [evidence: ...] explanation in any prior wrap
+    # has its most-recent explanation and max-level-reached stored
+    # here; the cross-session check at graduation time compares today's
+    # explanation against this history to detect sycophantic vocabulary
+    # reuse across sessions.
+
+    def get_pattern_history(self, pattern_name: str) -> dict[str, Any] | None:
+        """Look up the cross-session graduation history for a pattern.
+
+        Returns a dict with keys ``max_level_reached``, ``explanation_corpus``
+        (newline-joined corpus of all distinct prior explanations for this
+        pattern), ``last_explanation`` (most recent individual explanation,
+        kept for forensic surfaces), ``last_seen_at``, ``last_wrap_id``,
+        or ``None`` if this pattern has never been seen before. The
+        first-ever appearance of a pattern returns None — the
+        cross-session check treats that as "no prior history, allow
+        graduation."
+
+        The corpus field is what the cross-session overlap check
+        compares today's explanation against: every distinct prior
+        explanation accumulated across sessions. An agent rotating
+        vocabulary to dodge per-explanation matching has to compose
+        new explanations distinct from the entire history, not just
+        from the most recent attempt.
+
+        Args:
+            pattern_name: The pattern identifier (operator-style name).
+
+        Returns:
+            History dict or None if no row exists.
+
+        Raises:
+            StoreDatabaseError: On any database failure.
+        """
+        with self._db_boundary("get_pattern_history"):
+            try:
+                row = self._conn.execute(
+                    """SELECT pattern_name, max_level_reached,
+                              explanation_corpus, last_explanation,
+                              last_seen_at, last_wrap_id
+                       FROM pattern_history WHERE pattern_name = ?""",
+                    (pattern_name,),
+                ).fetchone()
+            except sqlite3.OperationalError as exc:
+                # Same legacy-table tolerance as get_wrap_history: a
+                # store from before this column existed returns None
+                # for every lookup, which the cross-session check
+                # treats as "no history" — correct behavior for an
+                # unmigrated DB.
+                if "no such table: pattern_history" in str(exc).lower():
+                    return None
+                raise
+
+            if row is None:
+                return None
+            return {
+                "pattern_name": row["pattern_name"],
+                "max_level_reached": row["max_level_reached"],
+                "explanation_corpus": row["explanation_corpus"] or "",
+                # ``last_explanation`` is the convenience accessor the
+                # cross-session check used in the v0.4-pre design;
+                # external callers may still rely on it. The
+                # authoritative comparison field is
+                # ``explanation_corpus``.
+                "last_explanation": row["last_explanation"] or "",
+                "last_seen_at": row["last_seen_at"],
+                "last_wrap_id": row["last_wrap_id"],
+            }
+
+    def upsert_pattern_history(
+        self,
+        pattern_name: str,
+        level: int,
+        explanation: str,
+        wrap_id: int | None = None,
+    ) -> None:
+        """Record or update a pattern's cross-session graduation history.
+
+        Appends today's explanation to the pattern's accumulated
+        ``explanation_corpus`` (deduplicated — identical re-citations
+        of the same text aren't re-added), updates the
+        ``last_explanation`` convenience field to the new value, and
+        clamps ``max_level_reached`` to the max of stored and incoming.
+        A demotion (carrying a pattern forward at a lower level)
+        updates last_explanation / last_seen_at / last_wrap_id but
+        does NOT decrease the recorded max-level. Demoted graduations
+        (which lose their ``[evidence:]`` tag via ``_demote_line``) are
+        not seen by the canonical caller — they skip the upsert path
+        entirely, so the prior session's history remains authoritative.
+
+        Called at the end of the canonical save pipeline for every
+        pattern line that retains an ``[evidence: ...]`` tag in the
+        post-validation continuity, regardless of graduation level
+        (1x/2x/3x). The 1x case preserves first-time observation
+        explanations so the next session's first graduation has prior
+        history to compare against.
+
+        Args:
+            pattern_name: The pattern identifier.
+            level: The level the pattern appears at in this wrap.
+            explanation: The explanation text from the
+                ``[evidence: ID "explanation"]`` tag.
+            wrap_id: Optional pointer to the wrap that recorded this
+                appearance.
+
+        Raises:
+            StoreDatabaseError: On any database failure.
+        """
+        from datetime import datetime as _dt
+        ts = _dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self._db_boundary("upsert_pattern_history"):
+            # Fetch the current row to maintain the corpus correctly.
+            # The two-step "read then write" inside a single
+            # _db_boundary is safe — the canonical caller is the
+            # save_continuity batch which holds the SQLite connection
+            # exclusively.
+            existing_row = self._conn.execute(
+                "SELECT explanation_corpus FROM pattern_history "
+                "WHERE pattern_name = ?",
+                (pattern_name,),
+            ).fetchone()
+            if existing_row is None:
+                # First appearance — corpus starts as this explanation.
+                new_corpus = explanation
+            else:
+                # Append iff this explanation is not already in the
+                # corpus. Newline-joined entries; dedup keeps the
+                # corpus bounded for patterns that get re-cited
+                # verbatim across many sessions (legitimate carry-
+                # forward) without losing distinctness.
+                existing_corpus = existing_row["explanation_corpus"] or ""
+                corpus_entries = existing_corpus.split("\n") if existing_corpus else []
+                if explanation not in corpus_entries:
+                    corpus_entries.append(explanation)
+                new_corpus = "\n".join(corpus_entries)
+
+            # UPSERT semantics: if the pattern exists, take MAX of the
+            # stored max_level_reached and the incoming level so a
+            # demotion doesn't erase the historical high-water mark.
+            self._conn.execute(
+                """INSERT INTO pattern_history
+                       (pattern_name, max_level_reached,
+                        explanation_corpus, last_explanation,
+                        last_seen_at, last_wrap_id)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(pattern_name) DO UPDATE SET
+                       max_level_reached = MAX(max_level_reached, excluded.max_level_reached),
+                       explanation_corpus = excluded.explanation_corpus,
+                       last_explanation = excluded.last_explanation,
+                       last_seen_at = excluded.last_seen_at,
+                       last_wrap_id = excluded.last_wrap_id""",
+                (pattern_name, level, new_corpus, explanation, ts, wrap_id),
+            )
+            if not self._defer_commit:
+                self._conn.commit()
 
     # -- Associations (Hebbian) --
 

@@ -382,7 +382,17 @@ class TestTypedDictReturnShapes:
                 "graduations_validated", "graduations_demoted",
                 "demoted", "bare_demoted", "citation_reuse_max",
                 "skipped_non_today",
-                "gaming_suspects", "associations_formed",
+                "gaming_suspects",
+                # Added 2026-05-21: surfaces Proven-tier (2x/3x)
+                # patterns silently dropped between wraps — closes
+                # the Phase 1b probe #1 gap.
+                "omitted_patterns",
+                # Added 2026-05-21: surfaces graduations refused
+                # because today's explanation reused vocabulary from
+                # the pattern's prior-session explanation — closes
+                # the Phase 1b slow-drift attack from the same probe.
+                "cross_session_collisions",
+                "associations_formed",
                 "associations_strengthened", "associations_decayed",
                 "sections", "wrap_result",
             }
@@ -3460,4 +3470,134 @@ class TestL3CodexFixes:
         finally:
             store.close()
             stale.unlink(missing_ok=True)
+
+
+class TestPatternOmissionAudit:
+    """End-to-end integration tests for the silent-omission audit added
+    in response to Bold Stand Phase 1b probe #1 (2026-05-21). Confirms
+    that the omission surfaces on the SaveContinuityResult AND that it
+    rides into the hash-chained audit log under the ``continuity_saved``
+    event payload, not just that the underlying primitives work
+    (those have unit coverage in test_graduation.py)."""
+
+    def _build_session(self, store, text_template, today):
+        """Helper: record episodes, prepare_wrap, render real IDs into
+        the wrap text template, save. ``text_template`` may contain
+        ``{ep0}``/``{ep1}``/``{ep2}`` placeholders — those get
+        substituted with the 8-char IDs of the recorded episodes so
+        the citation-validation pipeline accepts the wrap text.
+        """
+        from anneal_memory import prepare_wrap, validated_save_continuity
+        ep_ids = []
+        for i in range(3):
+            ep = store.record(
+                f"baseline episode {i}: substrate observation about "
+                f"discipline rotation memory tracking topic {i}.",
+                "observation",
+            )
+            ep_ids.append(ep.id)
+        result = prepare_wrap(store, max_chars=20000)
+        rendered = text_template
+        for i, ep_id in enumerate(ep_ids):
+            rendered = rendered.replace(f"{{ep{i}}}", ep_id)
+        return validated_save_continuity(
+            store, rendered, today=today, wrap_token=result["wrap_token"],
+        )
+
+    def test_omitted_patterns_empty_on_first_wrap(self, tmp_path):
+        from anneal_memory import Store
+        db = tmp_path / "store.db"
+        store = Store(db, project_name="OmissionTest")
+        try:
+            text = (
+                "## State\nfirst session.\n\n"
+                "## Patterns\n"
+                "- alpha_proven | 2x (2026-05-21) [evidence: {ep0} "
+                '"baseline substrate observation"]\n\n'
+                "## Decisions\n- decided.\n\n"
+                "## Context\n- context.\n"
+            )
+            result = self._build_session(store, text, "2026-05-21")
+            assert result["omitted_patterns"] == []
+        finally:
+            store.close()
+
+    def test_omitted_patterns_surfaces_2x_dropout(self, tmp_path):
+        from anneal_memory import Store
+        db = tmp_path / "store.db"
+        store = Store(db, project_name="OmissionTest")
+        try:
+            s1_text = (
+                "## State\nsession 1.\n\n"
+                "## Patterns\n"
+                "- alpha_proven | 2x (2026-05-21) [evidence: {ep0} "
+                '"baseline substrate observation"]\n'
+                "- beta_proven | 2x (2026-05-21) [evidence: {ep1} "
+                '"baseline rotation memory"]\n\n'
+                "## Decisions\n- decided.\n\n"
+                "## Context\n- context.\n"
+            )
+            self._build_session(store, s1_text, "2026-05-21")
+
+            # Session 2: agent silently drops alpha_proven entirely
+            # (citation here uses a fresh session-2 episode so the
+            # carried beta pattern doesn't itself demote — keeps the
+            # test focused on the omission detection)
+            s2_text = (
+                "## State\nsession 2 — alpha silently dropped.\n\n"
+                "## Patterns\n"
+                "- beta_proven | 2x (2026-05-22) [evidence: {ep0} "
+                '"carried baseline substrate observation"]\n\n'
+                "## Decisions\n- decided.\n\n"
+                "## Context\n- context.\n"
+            )
+            result = self._build_session(store, s2_text, "2026-05-22")
+            assert result["omitted_patterns"] == [
+                {"name": "alpha_proven", "prior_level": 2}
+            ]
+        finally:
+            store.close()
+
+    def test_omitted_patterns_rides_into_audit_log(self, tmp_path):
+        import json
+        from anneal_memory import Store
+        db = tmp_path / "store.db"
+        store = Store(db, project_name="OmissionTest")
+        try:
+            s1_text = (
+                "## State\nsession 1.\n\n"
+                "## Patterns\n"
+                "- alpha_proven | 3x (2026-05-21) [evidence: {ep0} "
+                '"baseline substrate observation"]\n\n'
+                "## Decisions\n- decided.\n\n"
+                "## Context\n- context.\n"
+            )
+            self._build_session(store, s1_text, "2026-05-21")
+
+            s2_text = (
+                "## State\nsession 2 — alpha dropped.\n\n"
+                "## Patterns\n\n"
+                "## Decisions\n- decided.\n\n"
+                "## Context\n- context.\n"
+            )
+            self._build_session(store, s2_text, "2026-05-22")
+        finally:
+            store.close()
+
+        audit = db.parent / "store.audit.jsonl"
+        assert audit.exists()
+        events = [
+            json.loads(line) for line in audit.read_text().splitlines()
+            if line.strip()
+        ]
+        saved_events = [
+            e for e in events if e.get("event") == "continuity_saved"
+        ]
+        assert len(saved_events) == 2
+        # First save has no prior continuity -> no omission key
+        assert "omitted_patterns" not in saved_events[0]["data"]
+        # Second save dropped alpha_proven (3x) -> audit captures it
+        assert saved_events[1]["data"]["omitted_patterns"] == [
+            {"name": "alpha_proven", "prior_level": 3}
+        ]
 

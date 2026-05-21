@@ -25,7 +25,16 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .graduation import detect_stale_patterns, validate_graduations
+from .graduation import (
+    CrossSessionCollision,
+    OmittedPattern,
+    detect_pattern_omissions,
+    detect_stale_patterns,
+    extract_pattern_names,
+    validate_graduations,
+    _NAMED_PATTERN_RE,
+    _PATTERN_LINE_WITH_EVIDENCE_RE,
+)
 from .store import StoreError, _fsync_dir, _safe_unlink
 from .types import (
     AffectiveState,
@@ -729,6 +738,36 @@ def validated_save_continuity(
         today=today_str,
         node_content_map=node_content_map,
         citations_seen=citations_seen,
+        # Cross-session sycophantic-accumulation defense (Phase 1b
+        # probe #1 fix). store.get_pattern_history returns the most
+        # recent appearance of a pattern across sessions; the
+        # validate_graduations check compares today's explanation
+        # against the stored prior explanation and demotes graduations
+        # that share too many meaningful words (sycophantic vocabulary
+        # reuse rather than independent evidence).
+        pattern_history_lookup=store.get_pattern_history,
+    )
+
+    # Detect Proven-tier (2x/3x) patterns silently dropped between the
+    # prior wrap and this one. validate_graduations operates only on
+    # patterns the agent wrote INTO the new continuity, so a pattern
+    # that was at 2x or 3x in the prior continuity and is absent from
+    # the new continuity leaves no trace at the graduation layer —
+    # silently erased. Surfaced here as informational audit signal, not
+    # a gate: the agent may have intentionally retired the pattern, or
+    # may have silently erased load-bearing evidence. Either way it
+    # goes onto grad_result.omitted_patterns and into the audit log.
+    #
+    # Added in response to Bold Stand Phase 1b probe #1 (2026-05-21).
+    # store.load_continuity() returns ``None`` (not ``""``) when no
+    # prior continuity file exists — coerce to empty string so
+    # detect_pattern_omissions returns an empty list on the first
+    # wrap (correct behavior: no prior patterns means no omissions).
+    prior_text_for_omission_audit = store.load_continuity() or ""
+    grad_result.omitted_patterns = detect_pattern_omissions(
+        prior_text=prior_text_for_omission_audit,
+        new_text=grad_result.text,
+        min_level=2,
     )
 
     # 10.5c.5 TWO-PHASE COMMIT PIPELINE
@@ -834,6 +873,58 @@ def validated_save_continuity(
                 # pattern.
                 wrap_token=snapshot["token"],
             )
+
+            # Update cross-session pattern history. Scan the
+            # post-validation continuity text for every named pattern
+            # line with an [evidence: ...] explanation — that includes
+            # 1x mentions (preserves their explanation for the next
+            # session's cross-session check) and surviving 2x/3x
+            # graduations (the demoted ones already lost their evidence
+            # tag via _demote_line so they won't match here, which is
+            # correct: a demoted graduation should not anchor the
+            # cross-session check). Patterns whose graduation got
+            # demoted to 1x with `(cross-session-overlap)` marker
+            # specifically don't have an evidence tag anymore so
+            # they're skipped here — the prior session's history
+            # remains authoritative, exactly the desired behavior.
+            #
+            # wrap_id stays None for now: WrapResult is a dataclass
+            # without the wraps.id field, and adding it would be a
+            # caller-visible return-shape change unrelated to the
+            # cross-session check itself. The audit log captures the
+            # wrap timing and pattern_history's last_seen_at field
+            # gives the per-pattern timestamp — the marginal forensic
+            # value of an explicit wrap_id pointer is low.
+            for line in grad_result.text.split("\n"):
+                name_match = _NAMED_PATTERN_RE.match(line)
+                if name_match is None:
+                    continue
+                # Use the any-level evidence regex (not the 2x/3x-only
+                # GRADUATION_RE) so 1x mentions with explanations also
+                # anchor cross-session history. Without this, the
+                # first graduation step (1x → 2x) would have no prior
+                # explanation to compare against and the cross-session
+                # defense would always skip on the FIRST graduation —
+                # exactly the step Phase 1b probe #1 exploits.
+                evidence_match = _PATTERN_LINE_WITH_EVIDENCE_RE.search(line)
+                if evidence_match is None:
+                    # No [evidence: ...] tag (1x without explanation,
+                    # or a demoted line) — nothing to anchor the
+                    # cross-session check against.
+                    continue
+                explanation = evidence_match.group(4)
+                if not explanation:
+                    continue
+                try:
+                    pattern_level = int(name_match.group(2))
+                except ValueError:
+                    continue
+                store.upsert_pattern_history(
+                    pattern_name=name_match.group(1),
+                    level=pattern_level,
+                    explanation=explanation,
+                    wrap_id=None,
+                )
             # Batch context manager commits here on successful exit.
 
         # Batch exited without raising → DB is committed. From this
@@ -937,12 +1028,46 @@ def validated_save_continuity(
     # caller. L3 complement F4.
     if store._audit is not None:
         try:
-            store._audit.log("continuity_saved", {
+            audit_payload: dict[str, Any] = {
                 "chars": len(grad_result.text),
                 "content_hash": hashlib.sha256(
                     grad_result.text.encode("utf-8")
                 ).hexdigest(),
-            })
+            }
+            # Capture Proven-tier pattern omissions in the audit chain.
+            # detect_pattern_omissions returns an empty list for the
+            # common case (first wrap, or all prior 2x/3x patterns
+            # carried forward at some level), in which case we omit
+            # the key entirely to keep the routine-case audit entry
+            # lean. When omissions DID happen, the audit chain records
+            # exactly which graduated patterns disappeared at this
+            # wrap — operators and downstream review (Diogenes,
+            # consultation, audit-chain queries) can see what was
+            # dropped without re-reading prior continuity files.
+            if grad_result.omitted_patterns:
+                audit_payload["omitted_patterns"] = [
+                    {"name": op.name, "prior_level": op.prior_level}
+                    for op in grad_result.omitted_patterns
+                ]
+            # Cross-session collisions ride into the audit chain on
+            # the same "only when they fired" basis as omissions —
+            # routine wraps stay lean, but any drift attempt that
+            # tripped the cross-session check leaves a hash-chained
+            # record naming the pattern, the level it tried to reach,
+            # the meaningful words that overlapped with the prior
+            # session, and the prior session's explanation text. Full
+            # forensic trail for operator review.
+            if grad_result.cross_session_collisions:
+                audit_payload["cross_session_collisions"] = [
+                    {
+                        "name": coll.name,
+                        "today_level": coll.today_level,
+                        "overlap_words": list(coll.overlap_words),
+                        "prior_explanation": coll.prior_explanation,
+                    }
+                    for coll in grad_result.cross_session_collisions
+                ]
+            store._audit.log("continuity_saved", audit_payload)
         except Exception:
             # Audit is best-effort. Silently drop a failing
             # continuity_saved event rather than reporting a false
@@ -978,6 +1103,24 @@ def validated_save_continuity(
         # regular (non-frozen) dataclass so direct mutation is safe.
         wrap_result.pruned_count = pruned
 
+    # Render omitted_patterns to plain dicts so the entire return
+    # value stays JSON-serializable (mirrors the asdict() treatment of
+    # wrap_result below). OmittedPattern is a small dataclass; asdict
+    # is unnecessary overhead for two fields, so we render explicitly.
+    omitted_patterns_payload: list[dict[str, Any]] = [
+        {"name": op.name, "prior_level": op.prior_level}
+        for op in grad_result.omitted_patterns
+    ]
+    cross_session_collisions_payload: list[dict[str, Any]] = [
+        {
+            "name": coll.name,
+            "today_level": coll.today_level,
+            "overlap_words": list(coll.overlap_words),
+            "prior_explanation": coll.prior_explanation,
+        }
+        for coll in grad_result.cross_session_collisions
+    ]
+
     return SaveContinuityResult(
         path=path,
         chars=len(grad_result.text),
@@ -989,6 +1132,8 @@ def validated_save_continuity(
         citation_reuse_max=grad_result.citation_reuse_max,
         skipped_non_today=grad_result.skipped_non_today,
         gaming_suspects=list(grad_result.gaming_suspects),
+        omitted_patterns=omitted_patterns_payload,
+        cross_session_collisions=cross_session_collisions_payload,
         associations_formed=assoc_formed,
         associations_strengthened=assoc_strengthened,
         associations_decayed=assoc_decayed,

@@ -12,7 +12,7 @@ Memory without grounding is amplification infrastructure.
 
 Persistent user memory profiles [increase agent sycophancy 16–45% across models](https://arxiv.org/abs/2509.12517) (Gemini 2.5 Pro at 45%, others lower). Production deployments [accumulate 97.8% junk entries](https://github.com/mem0ai/mem0/issues/4573) within weeks. Clinical research documents memory [scaffolding delusions across sessions](https://doi.org/10.1016/S2215-0366(25)00396-7). The problem isn't memory — it's memory without an immune system.
 
-anneal-memory is that immune system. Patterns earn permanence through cited evidence, false knowledge gets caught and demoted, stale information fades, and associations form through consolidation. Your agent's memory develops over time, not just accumulates.
+anneal-memory adds structural defenses at the citation layer that no other agent memory ships today. Patterns earn promotion through cited episode evidence with lexical-overlap explanation-grounding, fabricated citations get demoted, per-ID citation gaming surfaces a flag, replay attempts against stale episodes fail by construction, and the audit chain is SHA-256 hash-chained and tamper-evident. Stale patterns surface for the agent to act on; associations form through consolidation. These are narrow, structural primitives — not a complete defense against every form of memory drift. See *Honest scope* below for what these primitives catch and what they don't.
 
 Four cognitive layers: episodic store, compressed continuity, Hebbian associations, and affective state tracking. Zero dependencies (Python stdlib only). Works with any agent framework.
 
@@ -173,9 +173,9 @@ Every existing MCP memory server stores memories and retrieves them. None of the
 
 anneal-memory asks all three:
 
-- **Is it true?** Patterns must cite specific episode IDs as evidence to graduate. The server verifies the episodes exist and the explanation connects to the cited content.
-- **Is it still true?** Graduated knowledge that stops being reinforced by new episodes gets flagged as stale and demoted. Memory actively forgets what's no longer relevant.
-- **Is it self-confirming?** Anti-inbreeding detection catches the agent citing its own output as evidence. The cited episode must contain meaningfully different content from the graduation claim.
+- **Is it true?** Patterns must cite specific episode IDs as evidence to graduate. The server verifies the episodes exist and the explanation references the cited content via lexical overlap (≥2 meaningful words shared between the explanation and the episode body). Ungrounded citations demote.
+- **Is it still true?** Graduated patterns whose dates fall behind the staleness threshold (default 7 days) surface in the next wrap's package as removal candidates. The agent decides whether to demote, refresh evidence, or carry forward.
+- **Is the citation evidence real?** The library catches fabricated episode IDs (no matching episode → demote), suspicious reuse of the same episode across many patterns in one session (per-ID frequency ≥3 → flag), and bare graduations with no `[evidence:]` tag at all. The explanation-grounding check (≥2-word lexical overlap with episode content) raises the cost of fabricated evidence chains but is not a semantic-coherence check — see *Honest scope* below for what this catches and what it doesn't.
 
 The result: **memory as a living system, not a filing cabinet.** Episodes accumulate fast, get compressed at session boundaries — and the compression IS the cognition, where patterns emerge and get validated. Co-cited episodes form lateral Hebbian associations, building a cognitive network through use. The continuity file stays bounded and always-loaded, getting denser rather than longer.
 
@@ -185,13 +185,36 @@ The agent memory ecosystem is converging on consolidation as the right approach 
 
 But consolidation alone doesn't solve the problem. A system that consolidates faithfully and a system that consolidates sycophantically produce the same *kind* of output — compressed, structured, always-loaded. The difference is whether anything checks the quality of what got consolidated. That's the immune system.
 
-### The immune system (nobody else has this)
+### Structural immune-system primitives at the citation layer
 
-**Citation-validated graduation.** Patterns start at 1x. To graduate to 2x or 3x, they must cite specific episode IDs as evidence. The server verifies those IDs exist and the explanation connects to the cited episode. No evidence, no promotion.
+The library implements a set of structural defenses around how patterns earn graduation. They are narrow and specific — naming them honestly is part of the architecture.
 
-**Anti-inbreeding defense.** Explanation overlap checking prevents the agent from confirming its own hallucinated patterns — the cited episode must contain meaningfully different content from the graduation claim itself.
+**Citation-validated graduation.** Patterns start at 1x. To graduate to 2x or 3x, they must cite specific episode IDs as evidence. The server verifies those IDs exist in the current wrap's frozen episode snapshot — the cross-session episode set is intentionally out of scope. No matching episode IDs, no promotion.
 
-**Principle demotion.** Graduated knowledge that stops being reinforced by new episodes gets flagged as stale and can be demoted. Memory actively forgets what's no longer relevant.
+**Explanation-grounding check.** For each cited episode, the explanation in `[evidence: ID "explanation"]` must share ≥2 meaningful words (>2 chars, non-stopword) with the cited episode's content. This catches citations whose explanations are fabricated wholesale (no overlap → demote). It is lexical, not semantic — see *Honest scope* below.
+
+**Active demotion of ungrounded citations.** Any 2x/3x graduation that fails either check above demotes (3x→2x, 2x→1x) and gets marked `(ungrounded)`. Bare graduations (no `[evidence:]` tag) demote after the first wrap with `citations_seen=True` (first-wrap exemption protects onboarding).
+
+**Citation-gaming flag.** When any single episode ID is cited ≥3 times in one wrap, the wrap result surfaces the gaming-suspect list. The flag is informational — it does not auto-demote. Useful operator signal; not a hard gate.
+
+**Staleness flagging.** Patterns whose dates fall behind the staleness threshold (default 7 days, configurable) surface in the next wrap's compression package. The agent decides removal vs refresh-evidence vs carry-forward; the library does not auto-demote on staleness alone.
+
+**Replay-attack block (structural).** Each wrap's `valid_ids` set is scoped to the frozen episode snapshot from `prepare_wrap`. Patterns citing prior-session episode IDs that are not in the current snapshot demote — re-graduating a stale pattern requires fresh evidence from the current session.
+
+**Hash-chained audit trail (single-writer).** Every memory mutation appends to a SHA-256 hash-chained JSONL audit log. `AuditTrail.verify` walks the chain and detects post-hoc tampering at the exact entry where the chain breaks. **Single-process invariant required** — `Store` is documented as not thread-safe, not task-safe, not reentrant. Multi-writer deployments break the hash chain by construction.
+
+### Honest scope — what these primitives do NOT catch
+
+The defenses above are **structural at the citation layer**. They catch fabricated citation evidence (fake IDs, missing IDs, wholesale-invented explanations), naive replay (re-citing prior-session episodes), per-ID citation gaming (single episode pumped across patterns), and post-hoc audit tampering. They do not catch:
+
+- **Lexical-overlap exploits.** An agent who can read episode content can craft an explanation that shares ≥2 meaningful words with the episode while making a claim the episode does not actually support. The explanation-grounding check is anti-fabrication, not anti-misinterpretation.
+- **Rotated-pair citation pumping.** Five patterns each citing a distinct pair of episodes from a pool of ten — `citation_reuse_max=1`, the per-ID gaming detector cannot trip. The shape bypasses gaming detection cleanly.
+- ~~**Slow-drift sycophantic graduation across sessions.** A plausible-sounding pattern with plausible-sounding episodes can ride 1x → 2x → 3x across three sessions when each session brings fresh evidence that satisfies lexical overlap. The library has no cross-session "is this pattern actually load-bearing in real downstream decisions" tracker as of the current release.~~ **(partially closed in Unreleased)** A new `pattern_history` table tracks the accumulated explanation corpus per pattern across sessions. At graduation time the library checks today's explanation against the corpus; if it shares ≥3 meaningful words with prior history (the lexical-rephrasing variant of sycophantic accumulation), the graduation is demoted and marked `(cross-session-overlap)`. The deliberately-divergent-vocabulary variant — where each session's explanation uses entirely new words — still passes; that requires the architectural contradiction-detection layer (next in the same release window). For the rephrasing-style attack, the structural defense holds.
+- **Contradiction with existing graduated patterns.** No semantic comparison runs between candidate graduations and existing Proven-tier patterns. A pattern can graduate while actively contradicting another Proven pattern in the same continuity, with no warning.
+- ~~**Pattern omission.** An adversarial or drift-leaking agent can silently drop previously-graduated patterns by not carrying them forward in the next wrap. The library has no dropout audit across sessions as of the current release.~~ **(closed in Unreleased)** Proven-tier patterns (level 2x or 3x) absent from the new wrap now surface as `omitted_patterns: [{"name": ..., "prior_level": ...}]` on the `validated_save_continuity` return and ride into the hash-chained audit log under the `continuity_saved` event. This is an audit signal, not a save-time gate; intentional retirement is fine. Demotion (carrying a pattern forward at a lower level) does NOT trigger this — only complete dropout. Default `min_level=2` so 1x ("Developing") drops stay invisible (normal lifecycle).
+- **Shared-store multi-tenant deployments.** If two `Store` instances point at the same DB path, citation isolation, episode recall scoping, and audit chain integrity all silently degrade. The library is single-process by design.
+
+These gaps are documented honestly because they are reachable under adversarial-agent or drift-leaking conditions. The hostile-test results that surfaced them live at `phase1_tests/` in the flow project repo; reproducibility scripts ship with the results. **The pattern-omission audit landed in Unreleased; cross-session pattern-frequency cap and an architectural contradiction-detection layer are scoped for the same release window.** Until those land, "immune system" describes the citation-layer structural primitives above plus the new omission audit, not a complete defense against all forms of memory drift.
 
 ### Associations through consolidation (not retrieval)
 
@@ -285,7 +308,7 @@ This is experimental infrastructure. The associations and strength model work wi
 |---|---|---|---|---|---|
 | **Architecture** | Episodic + continuity + associations | JSONL flat file (graph-shaped) | Vector + graph | Retrieval + Hebbian | Memory + Hebbian |
 | **Compression** | Session-boundary rewrite | None | One-pass extraction | None | None |
-| **Quality mechanism** | Immune system (citations + anti-inbreeding + demotion) | None | None | NPMI normalization | None |
+| **Quality mechanism** | Structural citation-layer primitives (cited episode IDs verified + lexical-overlap explanation check + ungrounded-citation demotion + per-ID gaming flag + audit chain) | None | None | NPMI normalization | None |
 | **Association formation** | Co-citation during consolidation | None | None | Co-retrieval at runtime | Co-access at runtime |
 | **Affective tracking** | Agent self-report during compression | None | None | None | None |
 | **Audit trail** | Hash-chained JSONL | None | None | None | None |
@@ -423,7 +446,7 @@ anneal-memory's citation-validated graduation does not eliminate this attack cla
 2. **Explanation-grounding check rejects ungrounded citations.** The graduation pipeline runs `check_explanation_overlap(explanation, episode_content)` on every citation: at least two meaningful words from the citation's quoted explanation must actually appear in the cited episode's content. Citations with vague or fabricated explanations — including poisoned trajectories where an attacker controls the graduation claim text but cannot rewrite the episode body it points at — fail this check and don't accrue evidence weight. This is anti-fraud, not anti-repetition: it forces graduating claims to be textually grounded in what the episodes actually said.
 3. **SHA-256 audit trail provides forensic surface.** While the chain doesn't prevent ingestion of contaminated environmental content, it preserves a tamper-evident record of what the agent encountered and when — supporting post-incident analysis when poisoning is detected downstream.
 
-**This is structural inference, not empirical defense.** anneal-memory has not been tested against eTAMP directly. The mechanisms above derive from architectural properties — citation-validated graduation, anti-inbreeding overlap checking, SHA-256 audit chain — not from a published evaluation. A targeted eTAMP variant could partially or fully bypass these defenses in ways the architecture-level argument doesn't anticipate. Sustained adversarial campaigns with diverse contaminated trajectories can still graduate; the immune system bounds the *cost* of poisoning attacks, not the possibility. Architectures with no graduation gate inherit the full attack surface; anneal-memory inherits a structurally narrower one, pending direct empirical evaluation.
+**This is structural inference, not empirical defense.** anneal-memory has not been tested against eTAMP directly. The mechanisms above derive from architectural properties — citation-validated graduation, lexical-overlap explanation-grounding, SHA-256 audit chain — not from a published evaluation. A targeted eTAMP variant could partially or fully bypass these defenses in ways the architecture-level argument doesn't anticipate. Sustained adversarial campaigns with diverse contaminated trajectories can still graduate, and the *Honest scope* section above documents specific gap classes (lexical-overlap exploits, rotated-pair gaming, slow-drift accumulation, contradiction-with-existing-Proven, pattern omission) confirmed reachable under adversarial-agent conditions. Architectures with no graduation gate inherit the full attack surface; anneal-memory inherits a structurally narrower one, pending direct empirical evaluation and the next set of defenses listed in *Honest scope*.
 
 ### Tool description integrity
 

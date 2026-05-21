@@ -145,13 +145,59 @@ fresh evidence, it graduates to 2x. At 3x, it's proven knowledge. Each
 graduation REQUIRES citing the episode ID that validates it — you can't
 game the system by repeating claims without evidence.
 
-The immune system protects against cognitive drift:
-- **Citation validation:** Graduations must reference real episode IDs.
-  Ungrounded patterns get demoted with an `(ungrounded)` marker.
-- **Citation decay:** Patterns that stop being cited weaken over time.
-  Stale knowledge loses rank automatically.
-- **Anti-inbreeding:** The system detects when patterns cite themselves
-  circularly — false confidence from echo chambers, not evidence.
+Structural defenses at the citation layer (narrow but real):
+- **Citation validation:** Graduations must reference real episode IDs
+  from the current wrap. Ungrounded patterns demote with `(ungrounded)`.
+- **Explanation-grounding check:** The quoted explanation in `[evidence:
+  ID "explanation"]` must share ≥2 meaningful words with the cited
+  episode's content. Wholesale-fabricated explanations demote.
+- **Per-ID citation-gaming flag:** Reusing the same episode ID ≥3 times
+  in one wrap surfaces a gaming-suspect flag (informational, not an
+  auto-demote).
+- **Staleness flagging:** Patterns whose dates fall behind the staleness
+  threshold (default 7 days) appear in the next wrap's package as
+  removal candidates. You decide.
+- **Pattern-omission audit:** Proven-tier patterns (2x or 3x) that were
+  in the prior continuity and are absent from the new continuity
+  surface as `omitted_patterns` on the save result and in the audit
+  log. Intentional retirement is fine; the audit just records what
+  changed so downstream review can see it. Demotion (carrying a
+  pattern forward at a lower level) does NOT trigger this — only
+  complete dropout.
+- **Cross-session corpus-overlap demotion:** Each pattern's
+  accumulated explanation history is tracked across sessions. At
+  graduation time, today's explanation is compared against the
+  corpus of all prior explanations for the same pattern; ≥3
+  shared meaningful words demotes the graduation and marks
+  `(cross-session-overlap)`. Sycophantic rephrasing-style accumulation
+  gets caught; legitimate multi-faceted evidence with distinct
+  vocabulary passes. Surfaced as `cross_session_collisions` on the
+  save result + in the audit log with the specific overlap words.
+- **Hebbian association decay:** Co-citation links between episodes
+  decay 0.9× per wrap when not reinforced; cleanup at 0.1 threshold.
+
+What these primitives do NOT catch (named honestly):
+- Lexical-overlap exploits where an explanation shares ≥2 words with
+  the cited episode but misinterprets it semantically.
+- Rotated-pair citation gaming that keeps per-ID frequency below the
+  threshold while pumping unrelated patterns.
+- Slow-drift sycophantic graduation with deliberately-divergent
+  vocabulary (where each session's explanation uses entirely new
+  words, defeating the corpus-overlap check). The rephrasing-style
+  variant IS caught.
+- Patterns that contradict existing graduated Proven patterns — no
+  semantic comparison runs.
+
+These gaps are reachable under adversarial-agent conditions. You are
+the first line of defense; the library is the second. Compose wraps
+honestly.
+
+**Single-process invariant (load-bearing):** Only one `Store` instance
+should write to any given DB path at a time. The library is not
+thread-safe, not task-safe, not reentrant. Multi-tenant deployments
+sharing a store break the hash-chained audit trail by construction and
+remove the actor-scoping that filesystem-path isolation provides. If
+you need multi-agent setups, give each agent its own store path.
 
 Hebbian associations form automatically during wraps: episodes you cite
 together build lateral connections that strengthen through repetition and

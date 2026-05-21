@@ -2029,8 +2029,8 @@ class Store:
         Raises:
             StoreDatabaseError: On any database failure.
         """
-        from datetime import datetime as _dt
-        ts = _dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        from datetime import datetime as _dt, timezone as _tz
+        ts = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         with self._db_boundary("upsert_pattern_history"):
             # Fetch the current row to maintain the corpus correctly.
             # The two-step "read then write" inside a single

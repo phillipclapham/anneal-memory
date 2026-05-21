@@ -52,15 +52,105 @@ _PATTERN_LINE_WITH_EVIDENCE_RE = re.compile(
 )
 
 # Matches a full pattern line in ## Patterns, capturing the pattern name
-# (the text between the leading bullet and the ` | Nx` marker) and the
-# graduation level. Used by extract_pattern_names() / detect_pattern_omissions().
+# (operator-style identifier following any optional FlowScript marker prefix)
+# and the graduation level. Used by extract_pattern_names() /
+# detect_pattern_omissions() / cross-session history upsert.
 #
-# Pattern name grammar is intentionally narrow — operator-style identifiers
-# (alphanumeric + underscore + period + hyphen) — to avoid matching arbitrary
-# bullet text in adjacent sections that happens to contain ``| Nx``.
+# Grammar:
+#     - [optional FlowScript markers] operator_style_name | Nx
+#
+# Operator-style names are intentionally narrow — alphanumeric + underscore +
+# period + hyphen, must start with a letter — so arbitrary bullet text in
+# adjacent sections containing ``| Nx`` does not get mistaken for a pattern.
+#
+# FlowScript marker prefixes (``!``, ``!!``, ``?``, ``✓``, ``*``) may appear
+# between the bullet and the name; this is the convention flow's continuity
+# uses heavily and is now supported as canonical. Examples that match:
+#     - pattern_name | 2x (2026-05-21) [evidence: abc12345 "..."]
+#     - !! pattern_name | 3x (2026-05-21) [evidence: abc12345 "..."]
+#     - ? pattern_name | 1x (2026-05-21)
+#     - ✓ pattern_name | 2x (2026-05-21) [evidence: abc12345 "..."]
+#
+# Legacy format that does NOT match (intentional — see Move #1 naming-honesty
+# Round 2, v0.3.2):
+#     thought: ACID compliance outweighs raw speed | 2x ...
+#         ↑ no bullet, no operator-style name
+#     {topic: ...}-grouped freeform thoughts
+#         ↑ same — they validate via _GRADUATION_RE but do not anchor the
+#           per-name immune system (Move #2 omission audit, Move #3
+#           cross-session check, Move #4 contradicts registry). Operators
+#           who want the per-name defenses must use the canonical
+#           operator-style name format taught in _marker_reference().
 _NAMED_PATTERN_RE = re.compile(
-    r"^\s*-\s+([A-Za-z][\w\.\-]*)\s*\|\s*(\d+)x"
+    r"^\s*-\s+"                          # bullet
+    r"(?:[!?✓*]+\s+)?"                   # optional FlowScript marker prefix
+    r"([A-Za-z][\w\.\-]*)"               # operator-style identifier
+    r"\s*\|\s*(\d+)x"                    # graduation marker
 )
+
+# Matches `[contradicts: name_a, name_b, ...]` annotation on a pattern
+# line. Move #4 library layer (v0.3.2): agents declare which existing
+# Proven patterns a new pattern explicitly contradicts. Comma-separated
+# operator-style names inside the brackets. Library treats this as audit
+# data — does NOT verify the named patterns exist or perform semantic
+# judgment; methodology layer (Levain) + operator-review (Diogenes)
+# carry the enforcement and detection responsibilities.
+_CONTRADICTS_RE = re.compile(
+    r"\[contradicts:\s*([A-Za-z][\w\.\-]*(?:\s*,\s*[A-Za-z][\w\.\-]*)*)\s*\]"
+)
+
+# Matches `[no-contradicts]` declaration on a pattern line — the agent
+# explicitly considered contradiction with existing Proven and declares
+# none. Together with `_CONTRADICTS_RE`, satisfies the methodology-layer
+# scan requirement; absence of EITHER on a new Proven graduation
+# surfaces as audit signal `proven_without_contradicts_declaration`.
+_NO_CONTRADICTS_RE = re.compile(r"\[no-contradicts\]")
+
+
+@dataclass
+class ProvenWithoutDeclaration:
+    """A new Proven graduation that landed without explicit contradiction
+    stance (neither ``[contradicts: ...]`` nor ``[no-contradicts]``).
+
+    Surfaced by :func:`detect_proven_without_declaration` as an audit
+    signal. The library does NOT refuse the save — methodology-layer
+    discipline (Levain WRAP_PROTOCOL.md mandatory contradiction-scan)
+    enforces the requirement at agent-prompt time, and operator-review
+    (Diogenes weekly sweep) is the LLM-as-judge layer that actually
+    detects semantic opposition between patterns. The library is the
+    audit substrate: records whether the discipline was followed,
+    leaves enforcement and detection to layers above and beside.
+
+    Added in v0.3.2 as the library-layer component of the Move #4
+    contradiction-detection architecture (reframed from the
+    locked-design Move #4 after the 4-layer review surfaced that
+    token-similarity triggers cannot close Phase 1b probe #1's
+    divergent-vocabulary variant).
+    """
+
+    name: str  # Pattern identifier (operator-style name)
+    level: int  # Level at which the pattern graduated (2 or 3)
+
+
+def _is_patterns_heading(line: str) -> bool:
+    """Return True iff this line is exactly the canonical ``## Patterns``
+    section heading (case-insensitive on the literal word).
+
+    Replaces the historical loose check ``"pattern" in line.lower()``
+    which matched ``## Anti-Patterns``, ``## Other patterns``,
+    ``## Design Patterns``, etc. — every such section would be parsed
+    as the graduated-patterns section, polluting validation /
+    extraction / staleness with anti-pattern bullets the agent was
+    actively trying to suppress.
+
+    Used by :func:`validate_graduations`, :func:`extract_pattern_names`,
+    and :func:`detect_stale_patterns` so all three converge on the same
+    canonical section definition. Added in v0.3.2 as part of the
+    Anti-Patterns parsing fix (Codex / Gemini / Complement convergence
+    on the 4-layer review).
+    """
+    return line.strip().lower() == "## patterns"
+
 
 # Stop words for explanation overlap checking
 _STOP_WORDS = frozenset(
@@ -165,6 +255,16 @@ class OmittedPattern:
     Discovered as a reachable gap during Bold Stand Phase 1b probe #1
     (2026-05-21) — an adversarial agent dropped two legitimate Proven
     patterns across three drift sessions with no library detection.
+
+    Known false-positive shape (documented as audit-signal-not-gate
+    behavior, v0.3.2 4-layer review WARNING #3): renaming a Proven
+    pattern across wraps surfaces an OmittedPattern entry for the old
+    name. The library cannot distinguish "renamed pattern" from
+    "silently dropped pattern" without semantic comparison, which the
+    no-LLM-as-judge axiom prohibits at the library layer. Operators
+    who rename patterns can safely ignore omission entries whose name
+    is structurally similar to a freshly-introduced pattern in the
+    same wrap; the audit chain has both records for post-hoc review.
     """
 
     name: str  # Pattern identifier (operator-style name before the | marker)
@@ -241,7 +341,7 @@ def validate_graduations(
     for i, line in enumerate(lines):
         # Track section boundaries
         if line.startswith("## "):
-            in_patterns = "pattern" in line.lower()
+            in_patterns = _is_patterns_heading(line)
             continue
         if not in_patterns:
             continue
@@ -304,29 +404,55 @@ def validate_graduations(
                     pattern_name = name_match.group(1)
                     history = pattern_history_lookup(pattern_name)
                     if history:
-                        # Compare today's explanation against the FULL
-                        # accumulated corpus of prior explanations
-                        # (newline-joined). Without this, an agent who
-                        # rotates vocabulary across sessions to dodge
-                        # per-explanation matching could push a
-                        # sycophantic pattern through by composing each
-                        # session's explanation to be distinct from the
-                        # immediately-prior one — the slow-drift attack
-                        # variant from Phase 1b probe #1 with vocabulary
-                        # rotation. The corpus comparison forces every
-                        # new explanation to be distinct from the entire
-                        # accumulated history.
-                        prior_explanation_for_check = (
-                            history.get("explanation_corpus")
-                            or history.get("last_explanation")
-                            or ""
-                        )
-                        if prior_explanation_for_check:
-                            shared = _meaningful_word_overlap(
-                                explanation, prior_explanation_for_check,
-                            )
-                            if len(shared) >= cross_session_overlap_threshold:
-                                cross_session_overlap_words = sorted(shared)
+                        # Compare today's explanation against each prior
+                        # explanation INDIVIDUALLY and take the maximum
+                        # overlap. Demote iff the worst-case (highest)
+                        # per-prior overlap meets the threshold.
+                        #
+                        # v0.3.2 reframe (4-layer review convergence —
+                        # Complement F2, Gemini observation 1, Codex
+                        # HIGH, Contrarian Finding 4): the previous
+                        # implementation compared today's explanation
+                        # against the UNION of all prior explanation
+                        # words (whole corpus). That structurally
+                        # false-positives on long-lived legitimate
+                        # patterns whose domain vocabulary naturally
+                        # recurs across multi-faceted evidence: the
+                        # union word-set grows monotonically with
+                        # sessions, so the chance any new explanation
+                        # shares ≥threshold words with the union
+                        # approaches 1 over time. Per-prior comparison
+                        # avoids this — legitimate distinct evidence
+                        # passes against each prior individually even
+                        # when accumulated vocabulary is large.
+                        #
+                        # Closure scope: this catches the lexical-
+                        # rephrasing variant of slow-drift sycophantic
+                        # accumulation (Phase 1b probe #1 S5 — today's
+                        # explanation reuses ≥threshold words from a
+                        # specific prior explanation). It does NOT
+                        # catch the deliberately-divergent-vocabulary
+                        # variant (S6 — today's explanation uses
+                        # entirely new words against every prior).
+                        # Divergent-vocab is Move #4's domain.
+                        corpus = history.get("explanation_corpus") or ""
+                        if not corpus:
+                            # Legacy stores that only have last_explanation
+                            corpus = history.get("last_explanation") or ""
+                        prior_explanations = [
+                            e for e in corpus.split("\n") if e.strip()
+                        ]
+                        if prior_explanations:
+                            best_overlap: set[str] = set()
+                            best_prior = ""
+                            for prior in prior_explanations:
+                                shared = _meaningful_word_overlap(explanation, prior)
+                                if len(shared) > len(best_overlap):
+                                    best_overlap = shared
+                                    best_prior = prior
+                            if len(best_overlap) >= cross_session_overlap_threshold:
+                                cross_session_overlap_words = sorted(best_overlap)
+                                prior_explanation_for_check = best_prior
 
             if ids_valid and explanation_valid and not cross_session_overlap_words:
                 validated += 1
@@ -353,11 +479,15 @@ def validate_graduations(
                 # explanation with actually-different vocabulary.
                 demoted += 1
                 lines[i] = _demote_line(line, match, level, marker="(cross-session-overlap)")
-                # Extract pattern name again for the collision record
-                name_match = _NAMED_PATTERN_RE.match(line)
-                collision_name = name_match.group(1) if name_match else "<unnamed>"
+                # `pattern_name` is in scope from the upper-block match
+                # — this branch only fires when cross_session_overlap_words
+                # is non-empty, which itself only happens after the
+                # `_NAMED_PATTERN_RE.match(line)` above succeeded (line 348),
+                # so pattern_name is guaranteed to be set. NOTE #1 v0.3.2
+                # cleanup — dropped the redundant re-match + dead
+                # `"<unnamed>"` fallback that the 4-layer review flagged.
                 cross_session_collisions.append(CrossSessionCollision(
-                    name=collision_name,
+                    name=pattern_name,
                     today_level=level,
                     overlap_words=cross_session_overlap_words,
                     prior_explanation=prior_explanation_for_check,
@@ -514,7 +644,7 @@ def detect_stale_patterns(text: str, today: str, staleness_days: int = 7) -> lis
 
     for i, line in enumerate(lines):
         if line.startswith("## "):
-            in_patterns = "pattern" in line.lower()
+            in_patterns = _is_patterns_heading(line)
             continue
         if not in_patterns:
             continue
@@ -571,7 +701,7 @@ def extract_pattern_names(text: str) -> dict[str, int]:
     in_patterns = False
     for line in text.split("\n"):
         if line.startswith("## "):
-            in_patterns = "pattern" in line.lower()
+            in_patterns = _is_patterns_heading(line)
             continue
         if not in_patterns:
             continue
@@ -638,6 +768,143 @@ def detect_pattern_omissions(
     # Stable order so callers / tests / audit logs see consistent output
     omissions.sort(key=lambda op: (-op.prior_level, op.name))
     return omissions
+
+
+def extract_proven_patterns(text: str, min_level: int = 2) -> list[str]:
+    """Return the operator-style names of every Proven-tier pattern in
+    the continuity's ``## Patterns`` section.
+
+    Move #4 library layer (v0.3.2): this is the list of names that the
+    methodology-layer contradiction-scan discipline (Levain
+    WRAP_PROTOCOL.md) requires the agent to consider before any new
+    Proven graduation. ``prepare_wrap`` surfaces this as the
+    ``uncovered_proven_to_check`` field so the agent has the list in
+    front of them during compression.
+
+    The default ``min_level=2`` means 1x ("Developing") patterns are
+    NOT returned — only Proven-tier (2x and 3x) patterns are
+    contradiction-scan targets. Adjust ``min_level`` if a stricter or
+    looser definition of "Proven" applies in a calling context.
+
+    Args:
+        text: The continuity file text.
+        min_level: Minimum level to include. Default 2.
+
+    Returns:
+        Sorted list of operator-style pattern names. Sorted so
+        downstream methodology-layer prompts and audit-log entries see
+        a deterministic order.
+    """
+    level_map = extract_pattern_names(text)
+    names = [name for name, lvl in level_map.items() if lvl >= min_level]
+    return sorted(names)
+
+
+def extract_contradiction_declarations(text: str) -> dict[str, list[str]]:
+    """Extract every pattern line's contradiction-stance declaration.
+
+    Returns a mapping from pattern name → list of contradicted names
+    declared on that line. A pattern with ``[no-contradicts]`` returns
+    an empty list (explicit no-contradiction declaration); a pattern
+    with no annotation at all is absent from the returned dict.
+
+    Move #4 library layer (v0.3.2). Used by
+    :func:`detect_proven_without_declaration` to identify new Proven
+    graduations that skipped the methodology-layer contradiction-scan
+    discipline.
+
+    Args:
+        text: The continuity file text.
+
+    Returns:
+        Mapping ``{pattern_name: [contradicted_name, ...]}``. Empty
+        list means ``[no-contradicts]`` declared. Absence from the
+        dict means neither declaration was present (caught by
+        :func:`detect_proven_without_declaration` for new Provens).
+    """
+    declarations: dict[str, list[str]] = {}
+    in_patterns = False
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            in_patterns = _is_patterns_heading(line)
+            continue
+        if not in_patterns:
+            continue
+        name_match = _NAMED_PATTERN_RE.match(line)
+        if not name_match:
+            continue
+        name = name_match.group(1)
+        if _NO_CONTRADICTS_RE.search(line):
+            declarations[name] = []
+            continue
+        contradicts_match = _CONTRADICTS_RE.search(line)
+        if contradicts_match:
+            raw_names = contradicts_match.group(1)
+            contradicted = [
+                n.strip() for n in raw_names.split(",") if n.strip()
+            ]
+            declarations[name] = contradicted
+    return declarations
+
+
+def detect_proven_without_declaration(
+    prior_text: str,
+    new_text: str,
+    min_level: int = 2,
+) -> list[ProvenWithoutDeclaration]:
+    """Detect NEW Proven graduations that landed without contradiction
+    stance declaration.
+
+    A "new Proven" is a pattern at ``min_level`` or higher in the new
+    continuity that did NOT appear at the same level in the prior
+    continuity — i.e., the agent graduated it to Proven-tier this
+    wrap. The methodology layer (Levain WRAP_PROTOCOL.md) requires
+    every such graduation to carry either ``[contradicts: name_a, ...]``
+    or ``[no-contradicts]``; this function surfaces the ones that
+    didn't.
+
+    The library does NOT refuse the save on these — audit signal,
+    not gate. The signal flows through ``SaveContinuityResult``'s
+    ``proven_without_contradicts_declaration`` field and into the
+    hash-chained audit log under the ``continuity_saved`` event.
+    Operator-review (Diogenes weekly sweep) is the LLM-as-judge layer
+    that actually inspects pairs for semantic opposition; this
+    audit-signal lets Diogenes know which graduations need its
+    attention.
+
+    Added in v0.3.2 as the library-layer surface for the Move #4
+    contradiction-detection architecture.
+
+    Args:
+        prior_text: The continuity text BEFORE this wrap.
+        new_text: The continuity text the agent is about to save.
+        min_level: Minimum level to count as "Proven". Default 2.
+
+    Returns:
+        List of :class:`ProvenWithoutDeclaration` for every NEW Proven
+        graduation in the new continuity that lacks either declaration.
+        Sorted by (level descending, name ascending) for stable
+        downstream output.
+    """
+    prior_levels = extract_pattern_names(prior_text)
+    new_levels = extract_pattern_names(new_text)
+    declarations = extract_contradiction_declarations(new_text)
+
+    new_provens: list[ProvenWithoutDeclaration] = []
+    for name, new_level in new_levels.items():
+        if new_level < min_level:
+            continue
+        prior_level = prior_levels.get(name, 0)
+        if prior_level >= new_level:
+            # Carried forward at same or higher level — not a new graduation
+            continue
+        # This is a new Proven graduation. Check for declaration.
+        if name in declarations:
+            continue
+        new_provens.append(ProvenWithoutDeclaration(name=name, level=new_level))
+
+    new_provens.sort(key=lambda p: (-p.level, p.name))
+    return new_provens
 
 
 def detect_citation_gaming(citation_counts: dict[str, int], threshold: int = 3) -> list[str]:

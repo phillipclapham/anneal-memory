@@ -2,6 +2,58 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] — 2026-05-21
+
+v0.3.2 is the Bold Stand 4-layer review release. The Bold Stand Phase 1 adversarial stress-test (2026-05-21 morning) surfaced Moves #1/#2/#3 as the closure path; the 4-layer review (session-code-review + multi-agent code consultation + multi-agent Move #4 design consultation + L1/L4 attention-mode) of those moves the same evening surfaced a load-bearing grammar mismatch (the new defenses protected the wrong pattern format), a structural false-positive defect in Move #3's corpus comparison, an Anti-Patterns section-detection bug, and the architectural reframe of Move #4. All of it bundled into this single release.
+
+### Fixed — CRITICAL
+
+- **Pattern-name regex widened to match the format the library actually teaches (Critical #1 from 4-layer review).** `_NAMED_PATTERN_RE` previously required `^\s*-\s+[A-Za-z]` — bullet-then-letter immediately. The library's documented agent-instruction template (`_marker_reference()`) emitted `thought: prose | Nx (date)` and FlowScript-marker-prefixed lines (`- !! pattern_name | Nx`), neither of which matched. Result before this fix: Move #2 omission audit and Move #3 cross-session check silently no-op'd in production against the library's own canonical agent output; pattern_history table sat permanently empty. Reproduction (Codex L3, verified end-to-end via 3-session SQLite run) showed `extract_pattern_names()` returning `{}`, `omitted_patterns=[]`, `cross_session_collisions=[]` for every wrap. Fix is two-sided: (a) `_NAMED_PATTERN_RE` widened to accept FlowScript marker prefixes (`!`, `!!`, `?`, `✓`, `*`) between bullet and operator-style name, and (b) `_marker_reference()` rewritten to teach `- pattern_name | Nx (date) [evidence: ...]` as the canonical format with explicit note that operator-style names are load-bearing for the cross-session immune system. Legacy `thought: prose | Nx` format still validates via `_GRADUATION_RE` (no behavior break) but is documented as not anchoring the per-name defenses since it has no stable identity across sessions. 9 new tests in `TestFlowScriptPrefixedPatterns` + `TestCanonicalTemplateFormatEndToEnd` pin the canonical template literal as a regression fixture.
+
+- **`## Anti-Patterns` section no longer parsed as graduated-patterns section (Critical from 4-layer review).** Section-detection in `validate_graduations`, `extract_pattern_names`, and `detect_stale_patterns` previously used `"pattern" in line.lower()` which matched `## Anti-Patterns`, `## Other patterns`, `## Design Patterns`, `## Pattern Library`, etc. Result: anti-pattern bullets were eagerly extracted as graduated patterns, polluting validation / omission audit / staleness with content the agent was actively trying to suppress. New helper `_is_patterns_heading(line)` requires exact `## patterns` (case-insensitive) and is the single source of truth for all three callsites. 4 new tests in `TestAntiPatternsSectionRejection` confirm rejection across all three pipelines.
+
+- **Move #3 corpus design reframe — per-prior-explanation max-overlap replaces whole-corpus union (CRITICAL convergent finding from 4 review agents).** The original v0.3.2-Unreleased implementation compared today's explanation against the FULL accumulated `explanation_corpus` (newline-joined union of every prior explanation). Four independent agents (Complement F2, Gemini observation 1, Contrarian Finding 4, Codex HIGH) converged: this structurally false-positives on legitimate long-lived Proven patterns whose domain vocabulary naturally recurs across multi-faceted evidence. Corpus union grows monotonically with sessions; chance of ≥threshold overlap with new legitimate explanations approaches 1 at 6-12 month horizons. Fix: compare today's explanation against each prior explanation INDIVIDUALLY and demote iff the worst-case per-prior overlap meets threshold. Legitimate distinct evidence passes against each prior individually even when accumulated vocabulary is large; lexical-rephrasing variant (Phase 1b probe #1 S5) still demotes when it heavily reuses any specific prior. 3 new tests in `TestCorpusGrowthDoesNotFalsePositive` exercise N≥10 and N≥20 legitimate-accumulation scenarios that the previous implementation would have silently demoted.
+
+- **Corpus dedup normalized (WARNING #2).** `upsert_pattern_history` corpus dedup previously used exact-string `in` check. Trailing space, case differences, trailing punctuation all bypassed dedup and accumulated near-duplicate corpus entries, compounding the monotonic-growth FP defect. New helper `_normalize_explanation_for_dedup()` collapses whitespace, lowercases, and strips outer punctuation before the `in` check. Examples that now correctly collapse to the same key: `"PostgreSQL chosen"` / `"postgresql chosen"` / `"PostgreSQL chosen."` / `" PostgreSQL  chosen "`.
+
+- **Cross-session history upsert gated to today's lines (Codex MEDIUM).** Previously the upsert path scanned the post-validation text regardless of date — carried-forward pattern lines whose explanation prose differed from the prior session's stored version would silently overwrite the canonical prior explanation in `pattern_history`. Now `validated_save_continuity` checks that the line's date matches `today_str` before calling `upsert_pattern_history`. `validate_graduations` already skipped non-today graduation lines; the upsert path now matches.
+
+- **`OmittedPattern` docstring documents pattern-rename false-positive (WARNING #3).** Renaming a Proven pattern across wraps surfaces an OmittedPattern entry for the old name. The library cannot distinguish "renamed" from "silently dropped" without semantic comparison (no-LLM-as-judge axiom). Docstring now names this as known audit-signal-not-gate behavior so operators don't misread the signal.
+
+- **Dropped dead `"<unnamed>"` fallback in cross-session collision recording (NOTE #1).** The cross-session-overlap branch in `validate_graduations` re-matched `_NAMED_PATTERN_RE` and had a `"<unnamed>"` fallback for a None match — but the branch only fires when the upstream match already succeeded, so the fallback was structurally unreachable. Cleanup: pass `pattern_name` from upper scope.
+
+- **CI green on Python 3.12 + 3.13 (post-pre-release fix).** `Store.upsert_pattern_history` previously used `datetime.datetime.utcnow()` which raises `DeprecationWarning` on Python 3.12+. `pyproject.toml` `filterwarnings = ["error::DeprecationWarning"]` turned the warning into a test failure. Single callsite fixed to `datetime.now(timezone.utc).strftime(...)` — identical ISO-8601 Z-suffixed output, no other behavior change. Shipped as commit `c060bd6` before the rest of the v0.3.2 work landed.
+
+### Added — Move #4 library layer
+
+- **Library-layer contradiction-detection substrate added (architectural reframe of locked Move #4).** The original locked Move #4 design — manually-maintained `contradicts:` registry + token-similarity trigger at library — was reframed before build after the 4-layer Move #4 design consultation (Complement F1, Contrarian Finding 2, Daemon ADVERSARIAL-1 convergence) demonstrated the trigger structurally cannot close Phase 1b probe #1's divergent-vocabulary variant: pattern-name token overlap between `rapid_consensus_validates_decisions` and `partnership_challenge_at_X_boundary` is zero (semantic opposites, lexical strangers). No threshold tuning closes this. The right architecture splits the responsibility: **library = audit substrate** (this release), **methodology = discipline at graduation boundary** (Levain WRAP_PROTOCOL.md follow-up, separate repo), **operator-review = LLM-as-judge detection** (Diogenes weekly sweep, separate location). This release ships the library substrate.
+
+  Concrete library additions:
+  - **`prepare_wrap()` now returns `uncovered_proven_to_check: list[str]`** — sorted operator-style names of every Proven-tier (2x/3x) pattern already in the continuity. Methodology-layer discipline uses this to drive the mandatory contradiction-scan: before any new Proven graduation, agent considers each name and either declares `[contradicts: name]` or `[no-contradicts]` on the new pattern line.
+  - **New `extract_proven_patterns(text, min_level=2) -> list[str]`** — exposed for downstream tooling.
+  - **New `extract_contradiction_declarations(text) -> dict[str, list[str]]`** — per-pattern contradiction-stance extraction. `[contradicts: a, b]` → `{name: [a, b]}`; `[no-contradicts]` → `{name: []}`; no annotation → absent from dict.
+  - **New `detect_proven_without_declaration(prior_text, new_text, min_level=2) -> list[ProvenWithoutDeclaration]`** — detects NEW Proven graduations (level >= min_level in new, was at lower or absent in prior) that lack contradiction-stance declaration.
+  - **New `ProvenWithoutDeclaration` dataclass** (`name`, `level`).
+  - **`SaveContinuityResult.proven_without_contradicts_declaration`** field — surfaces detection result on every save.
+  - **`continuity_saved` audit-log payload** captures `proven_without_contradicts_declaration` when non-empty.
+
+  **The library does NOT enforce** — no save refusal, no demotion. The signal flows to the audit chain and to operator-review (Diogenes weekly sweep, scheduled separately). This is the architecturally honest shape under the no-LLM-as-judge axiom: library audits, methodology disciplines, operator-review judges. 15 new tests covering all three new functions + edge cases (carry-forward not flagged, demotion not flagged, 1x→2x graduation correctly flagged when no declaration, explicit `[no-contradicts]` satisfies discipline).
+
+### Test count
+
+768 (up from 707 at v0.3.1 ship). All passing on Python 3.10, 3.11, 3.12, 3.13. mypy clean.
+
+### Schema
+
+Schema is additive — the v0.3.x `pattern_history` table from the (now-superseded) Unreleased work is preserved. No table changes in v0.3.2. Existing v0.3.x stores upgrade safely on first instantiation.
+
+### Paired follow-up releases (not shipped with v0.3.2)
+
+- **Levain WRAP_PROTOCOL.md update** (separate repo `levainhq/levain`) — adds mandatory contradiction-scan step at graduation boundary, using the library's new `uncovered_proven_to_check` field to drive the agent prompt. Without the Levain side, the library's `proven_without_contradicts_declaration` audit signal still fires (records that the agent skipped the scan), but no methodology-layer prompt drives the agent to perform the scan in the first place. Solo-anneal-memory users who want the scan discipline can adopt the agent-instructions snippet additions (also shipped paired).
+- **Diogenes weekly sweep** (separate location `~/consultation/diogenes/` in the flow repo) — contradiction-detection pass on Proven pairs. Diogenes IS LLM-as-judge by design — that's its role, not an axiom violation. This is the layer that actually detects semantic opposition between graduated patterns; the library and methodology layers feed it the audit signal of which patterns to inspect.
+
+The three layers must ship before any public claim of "anneal-memory closes Phase 1b probe #1's divergent-vocabulary variant" is honest. v0.3.2 ships the library piece; the other two follow.
+
 ## [Unreleased]
 
 ### Changed — docs

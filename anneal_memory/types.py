@@ -317,6 +317,19 @@ class PrepareWrapResult(TypedDict):
     package: WrapPackageDict | None  # None when status == "empty"
     assoc_context: str | None  # Hebbian association context, or None
     wrap_token: str | None  # Session-handshake token, None when status == "empty"
+    # Move #4 library layer (v0.3.2): list of existing Proven (2x/3x)
+    # pattern names already in the continuity. Methodology-layer
+    # discipline (e.g., Levain WRAP_PROTOCOL.md) uses this to drive a
+    # mandatory contradiction-scan at graduation: before any new
+    # Proven graduation in the wrap, the agent considers each name in
+    # this list and either declares ``[contradicts: name]`` or
+    # ``[no-contradicts]`` on the new pattern line. Library does NOT
+    # enforce — the no-LLM-as-judge axiom means library cannot decide
+    # semantic opposition. Library surfaces the question; methodology
+    # layer enforces the scan; operator-review (Diogenes weekly sweep)
+    # catches what slips through. ``[]`` when no Proven patterns exist
+    # yet (cold-start case) or status is ``"empty"``.
+    uncovered_proven_to_check: list[str]
 
 
 class SaveContinuityResult(TypedDict):
@@ -369,6 +382,17 @@ class SaveContinuityResult(TypedDict):
     # collision fired. Closes the slow-drift sycophantic-accumulation
     # gap surfaced by Bold Stand Phase 1b probe #1 (2026-05-21).
     cross_session_collisions: list[dict[str, Any]]
+    # Move #4 library layer (v0.3.2): new Proven graduations (2x or 3x
+    # with today's date) that landed in this wrap WITHOUT either a
+    # ``[contradicts: ...]`` or ``[no-contradicts]`` annotation. Audit
+    # signal, not a gate — the library does not refuse the save. The
+    # signal flags that the agent skipped the methodology-layer
+    # contradiction-scan discipline; operator-review (Diogenes) can
+    # use it to surface candidate-contradictions for partnership
+    # review. Each entry: ``{"name": str, "level": int}``. Empty list
+    # when no new Provens graduated this wrap, or all new Provens
+    # carried explicit contradiction-stance declarations.
+    proven_without_contradicts_declaration: list[dict[str, Any]]
     associations_formed: int
     associations_strengthened: int
     associations_decayed: int

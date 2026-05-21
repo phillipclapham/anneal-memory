@@ -1,6 +1,6 @@
 """anneal-memory: Living memory for AI agents. Episodes compress into identity."""
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 from .store import (
     AnnealMemoryError,
@@ -33,10 +33,18 @@ from .continuity import (
     validated_save_continuity,
 )
 from .graduation import (
-    validate_graduations,
+    CrossSessionCollision,
+    OmittedPattern,
+    ProvenWithoutDeclaration,
     check_explanation_overlap,
+    detect_pattern_omissions,
+    detect_proven_without_declaration,
     detect_stale_patterns,
+    extract_contradiction_declarations,
+    extract_pattern_names,
+    extract_proven_patterns,
     extract_session_co_citations,
+    validate_graduations,
 )
 from .integrity import TOOLS, RESOURCES, verify_integrity, generate_integrity_file
 from .server import Server
@@ -74,6 +82,14 @@ __all__ = [
     "check_explanation_overlap",
     "detect_stale_patterns",
     "extract_session_co_citations",
+    "extract_pattern_names",
+    "detect_pattern_omissions",
+    "OmittedPattern",
+    "CrossSessionCollision",
+    "extract_proven_patterns",
+    "extract_contradiction_declarations",
+    "detect_proven_without_declaration",
+    "ProvenWithoutDeclaration",
     "verify_integrity",
     "generate_integrity_file",
 ]

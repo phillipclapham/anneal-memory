@@ -592,6 +592,47 @@ def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _normalize_explanation_for_dedup(explanation: str) -> str:
+    """Normalize an explanation string for corpus dedup comparison.
+
+    Returns the explanation lowercased, with all runs of whitespace
+    collapsed to a single space, with leading/trailing whitespace
+    stripped, and with surrounding punctuation removed. This is the
+    canonical form used by :meth:`Store.upsert_pattern_history` when
+    deciding whether a new explanation is already in the
+    ``explanation_corpus``.
+
+    Without normalization, trivial caller variation bypasses dedup
+    and the corpus accumulates near-duplicate entries faster, growing
+    the cross-session check's false-positive surface (WARNING #2 from
+    the v0.3.2 4-layer review).
+
+    Examples that this normalization collapses to the same key:
+
+        "PostgreSQL chosen for ACID"
+        "postgresql chosen for ACID"
+        "PostgreSQL chosen for ACID."
+        " PostgreSQL  chosen  for ACID "
+        "PostgreSQL chosen for ACID\\n"
+
+    Examples that this normalization keeps distinct (different
+    semantic content):
+
+        "PostgreSQL chosen for ACID guarantees"
+        "PostgreSQL chosen for ACID compliance under writes"
+
+    The normalization is intentionally minimal — it catches the
+    trivial-fuzzing case without conflating substantively different
+    explanations.
+    """
+    import re as _re
+    # Collapse whitespace + lowercase + strip outer whitespace
+    normalized = _re.sub(r"\s+", " ", explanation.lower()).strip()
+    # Strip leading/trailing punctuation that doesn't change meaning
+    normalized = normalized.strip(".,;:!?\"'()[]{}—–-")
+    return normalized
+
+
 class Store:
     """SQLite-backed episodic store.
 
@@ -2051,9 +2092,20 @@ class Store:
                 # corpus bounded for patterns that get re-cited
                 # verbatim across many sessions (legitimate carry-
                 # forward) without losing distinctness.
+                #
+                # Dedup uses NORMALIZED comparison (lowercase + collapsed
+                # whitespace + stripped surrounding punctuation) — without
+                # this, trivial caller variation ("PostgreSQL chosen" vs
+                # "postgresql chosen" vs "PostgreSQL chosen." vs " PostgreSQL
+                # chosen ") all bypass the exact-string check, accumulating
+                # near-duplicate corpus entries faster and growing the
+                # cross-session check's false-positive surface (v0.3.2 fix
+                # for WARNING #2 from the 4-layer review).
                 existing_corpus = existing_row["explanation_corpus"] or ""
                 corpus_entries = existing_corpus.split("\n") if existing_corpus else []
-                if explanation not in corpus_entries:
+                new_fp = _normalize_explanation_for_dedup(explanation)
+                existing_fps = {_normalize_explanation_for_dedup(e) for e in corpus_entries}
+                if new_fp not in existing_fps:
                     corpus_entries.append(explanation)
                 new_corpus = "\n".join(corpus_entries)
 

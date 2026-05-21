@@ -1406,3 +1406,185 @@ class TestDetectProvenWithoutDeclaration:
         # Carried forward at LOWER level — not a new graduation
         result = detect_proven_without_declaration(prior, new)
         assert result == []
+
+
+class TestV033HotfixRegressionGuards:
+    """v0.3.3 hotfix regression guards — locks the four bugs that
+    v0.3.2 shipped to PyPI before its own 4-layer review fired.
+
+    Each bug class below has a test that would have FAILED on v0.3.2
+    main + PASSES on v0.3.3 main. CI parity protects against any
+    future regression."""
+
+    def test_high2_demote_handles_no_space_between_pipe_and_level(self):
+        """HIGH #2: _demote_line must handle `|2x` (no space) — the
+        widened _NAMED_PATTERN_RE in v0.3.2 accepts no-space form, but
+        v0.3.2's literal `f"| {level}x"` string-replace only matched
+        the single-space form. Result was state corruption: counter
+        said `demoted == 1` but text retained the old level."""
+        text = """## Patterns
+- bad |2x (2026-05-21) [evidence: ffffffff "completely unrelated"]
+"""
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-21",
+            node_content_map={"abc12345": "PostgreSQL"},
+        )
+        assert result.demoted == 1
+        # Text must reflect the demotion — no `|2x` should remain
+        # (the bug was: counter says demoted but text stays 2x)
+        assert "|2x" not in result.text
+        assert "| 2x" not in result.text
+        assert "| 1x" in result.text or "|1x" in result.text
+        assert "(ungrounded)" in result.text
+
+    def test_high2_demote_handles_extra_space_between_pipe_and_level(self):
+        """Same defect family — multiple spaces between pipe and level."""
+        text = """## Patterns
+- bad |  2x (2026-05-21) [evidence: ffffffff "x"]
+"""
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-21",
+        )
+        assert result.demoted == 1
+        # The "2x" that's being demoted should not remain. The
+        # regex-based replace handles both `|  2x` and `| 2x`.
+        # Confirm the line shows a 1x marker:
+        assert "1x" in result.text
+
+    def test_medium3_no_contradicts_inside_evidence_quote_does_not_count(self):
+        """MEDIUM #3: contradiction declarations inside evidence
+        quotes must NOT spoof the declaration check. Codex L3 v0.3.2
+        review caught that `[evidence: ... "we wrote [no-contradicts]
+        in a log"]` was being treated as an explicit no-contradicts
+        declaration. v0.3.3 strips evidence blocks before searching."""
+        from anneal_memory.graduation import extract_contradiction_declarations
+        text = """## Patterns
+- spoofed_pattern | 2x (2026-05-21) [evidence: abc12345 "we wrote [no-contradicts] in a log"]
+"""
+        result = extract_contradiction_declarations(text)
+        # The pattern has NO real declaration outside the evidence
+        # quote; result must be empty (absence = no declaration).
+        assert result == {}, (
+            f"Spoofed no-contradicts inside evidence should not register, "
+            f"got: {result}"
+        )
+
+    def test_medium3_contradicts_inside_evidence_quote_does_not_count(self):
+        """Same spoofing protection for [contradicts: X] inside
+        evidence quotes."""
+        from anneal_memory.graduation import extract_contradiction_declarations
+        text = """## Patterns
+- spoofed_pattern | 2x (2026-05-21) [evidence: abc12345 "we said [contradicts: old_pattern] earlier"]
+"""
+        result = extract_contradiction_declarations(text)
+        assert result == {}, (
+            f"Spoofed contradicts inside evidence should not register, "
+            f"got: {result}"
+        )
+
+    def test_medium3_real_declaration_outside_evidence_still_counts(self):
+        """The fix must NOT break the legitimate case — a real
+        contradiction declaration outside the evidence quote must
+        still count."""
+        from anneal_memory.graduation import extract_contradiction_declarations
+        text = """## Patterns
+- legitimate | 2x (2026-05-21) [evidence: abc12345 "x"] [contradicts: old_pattern]
+"""
+        result = extract_contradiction_declarations(text)
+        assert result == {"legitimate": ["old_pattern"]}
+
+    def test_medium4_old_date_restored_line_not_flagged_as_new_proven(self):
+        """MEDIUM #4: detect_proven_without_declaration with today
+        parameter must skip pattern lines whose date is not today.
+        v0.3.2 flagged restored/imported old-date lines as new
+        graduations needing a declaration — wrong, the agent didn't
+        author those THIS wrap."""
+        from anneal_memory.graduation import detect_proven_without_declaration
+        prior = """## Patterns
+- old_unchanged | 2x (2026-05-15) [evidence: 11111111 "x"]
+"""
+        new = """## Patterns
+- old_unchanged | 2x (2026-05-15) [evidence: 11111111 "x"]
+- restored_old | 2x (2026-05-10) [evidence: abc12345 "imported from prior"]
+"""
+        # restored_old is "new relative to prior" but its date is
+        # 2026-05-10, not today's 2026-05-21. Should NOT flag.
+        result = detect_proven_without_declaration(
+            prior, new, today="2026-05-21",
+        )
+        assert result == [], (
+            f"Old-date restored line should not flag, got: {result}"
+        )
+
+    def test_medium4_today_dated_new_proven_still_flagged_without_declaration(self):
+        """Fix must NOT break the legitimate flagging case — a today-
+        authored new Proven without declaration must still flag."""
+        from anneal_memory.graduation import detect_proven_without_declaration
+        prior = ""
+        new = """## Patterns
+- new_today | 2x (2026-05-21) [evidence: abc12345 "x"]
+"""
+        result = detect_proven_without_declaration(
+            prior, new, today="2026-05-21",
+        )
+        assert [p.name for p in result] == ["new_today"]
+
+    def test_low5_named_pattern_re_rejects_invalid_marker_combinations(self):
+        """LOW #5: v0.3.2's `[!?✓*]+` matched `!!!`, `!*?`, `??`, etc.
+        v0.3.3 tightens to explicit alternation. Confirm invalid
+        combinations no longer match."""
+        from anneal_memory.graduation import _NAMED_PATTERN_RE
+        # Invalid: three bangs
+        assert _NAMED_PATTERN_RE.match("- !!! pattern_name | 2x") is None
+        # Invalid: mixed-marker combo
+        assert _NAMED_PATTERN_RE.match("- !*? pattern_name | 2x") is None
+        # Invalid: double-question
+        assert _NAMED_PATTERN_RE.match("- ?? pattern_name | 2x") is None
+
+    def test_low5_named_pattern_re_still_accepts_valid_markers(self):
+        """Regression guard — fix must not break the canonical
+        FlowScript marker set."""
+        from anneal_memory.graduation import _NAMED_PATTERN_RE
+        assert _NAMED_PATTERN_RE.match("- pattern_name | 2x") is not None
+        assert _NAMED_PATTERN_RE.match("- !! pattern_name | 2x") is not None
+        assert _NAMED_PATTERN_RE.match("- ! pattern_name | 1x") is not None
+        assert _NAMED_PATTERN_RE.match("- ? pattern_name | 1x") is not None
+        assert _NAMED_PATTERN_RE.match("- ✓ pattern_name | 3x") is not None
+        assert _NAMED_PATTERN_RE.match("- * pattern_name | 2x") is not None
+
+
+class TestV033NormalizeOrderOfOpsRegression:
+    """v0.3.3 session-code-review WARNING #1: em-dash-wrapped explanations
+    bypassed dedup because the punct-strip revealed whitespace the
+    earlier .strip() had consumed. Regression guard."""
+
+    def test_em_dash_wrapped_normalizes_same_as_plain(self):
+        from anneal_memory.store import _normalize_explanation_for_dedup
+        plain = "PostgreSQL chosen for ACID"
+        em_dash = "— PostgreSQL chosen for ACID —"
+        assert _normalize_explanation_for_dedup(plain) == \
+               _normalize_explanation_for_dedup(em_dash)
+
+    def test_compound_punct_whitespace_normalizes_consistently(self):
+        from anneal_memory.store import _normalize_explanation_for_dedup
+        plain = "PostgreSQL chosen for ACID"
+        # All these should collapse to the same key
+        variants = [
+            "PostgreSQL chosen for ACID",
+            "PostgreSQL chosen for ACID.",
+            " PostgreSQL  chosen  for  ACID ",
+            "PostgreSQL chosen for ACID\n",
+            "(PostgreSQL chosen for ACID)",
+            "— PostgreSQL chosen for ACID —",
+            "[PostgreSQL chosen for ACID]",
+            " ' PostgreSQL chosen for ACID ' ",
+        ]
+        canonical = _normalize_explanation_for_dedup(plain)
+        for v in variants:
+            assert _normalize_explanation_for_dedup(v) == canonical, (
+                f"Variant {v!r} did not normalize to canonical {canonical!r}"
+            )

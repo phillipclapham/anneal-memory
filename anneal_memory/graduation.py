@@ -82,10 +82,10 @@ _PATTERN_LINE_WITH_EVIDENCE_RE = re.compile(
 #           who want the per-name defenses must use the canonical
 #           operator-style name format taught in _marker_reference().
 _NAMED_PATTERN_RE = re.compile(
-    r"^\s*-\s+"                          # bullet
-    r"(?:[!?✓*]+\s+)?"                   # optional FlowScript marker prefix
-    r"([A-Za-z][\w\.\-]*)"               # operator-style identifier
-    r"\s*\|\s*(\d+)x"                    # graduation marker
+    r"^\s*-\s+"                                  # bullet
+    r"(?:(?:!!|!|\?|✓|\*)\s+)?"                 # optional FlowScript marker prefix
+    r"([A-Za-z][A-Za-z0-9_.\-]*)"               # operator-style identifier (ASCII)
+    r"\s*\|\s*(\d+)x"                            # graduation marker
 )
 
 # Matches `[contradicts: name_a, name_b, ...]` annotation on a pattern
@@ -834,10 +834,18 @@ def extract_contradiction_declarations(text: str) -> dict[str, list[str]]:
         if not name_match:
             continue
         name = name_match.group(1)
-        if _NO_CONTRADICTS_RE.search(line):
+        # v0.3.3 MEDIUM #3 fix: strip any `[evidence: ... "..."]` block
+        # from the line before searching for declarations. Without this,
+        # an evidence explanation containing literal `[no-contradicts]`
+        # or `[contradicts: X]` text would spoof the declaration —
+        # `[evidence: abc12345 "we wrote [no-contradicts] in a log"]`
+        # would be treated as an explicit no-contradicts declaration
+        # for the pattern. Codex L3 v0.3.2 review caught this.
+        evidence_stripped_line = _PATTERN_LINE_WITH_EVIDENCE_RE.sub("", line)
+        if _NO_CONTRADICTS_RE.search(evidence_stripped_line):
             declarations[name] = []
             continue
-        contradicts_match = _CONTRADICTS_RE.search(line)
+        contradicts_match = _CONTRADICTS_RE.search(evidence_stripped_line)
         if contradicts_match:
             raw_names = contradicts_match.group(1)
             contradicted = [
@@ -850,6 +858,7 @@ def extract_contradiction_declarations(text: str) -> dict[str, list[str]]:
 def detect_proven_without_declaration(
     prior_text: str,
     new_text: str,
+    today: str | None = None,
     min_level: int = 2,
 ) -> list[ProvenWithoutDeclaration]:
     """Detect NEW Proven graduations that landed without contradiction
@@ -857,11 +866,13 @@ def detect_proven_without_declaration(
 
     A "new Proven" is a pattern at ``min_level`` or higher in the new
     continuity that did NOT appear at the same level in the prior
-    continuity — i.e., the agent graduated it to Proven-tier this
-    wrap. The methodology layer (Levain WRAP_PROTOCOL.md) requires
-    every such graduation to carry either ``[contradicts: name_a, ...]``
-    or ``[no-contradicts]``; this function surfaces the ones that
-    didn't.
+    continuity AND whose graduation line carries today's date — i.e.,
+    the agent graduated it to Proven-tier in *this* wrap, not a
+    restored/imported older line that happens to be absent from the
+    prior text. The methodology layer (Levain WRAP_PROTOCOL.md)
+    requires every such graduation to carry either
+    ``[contradicts: name_a, ...]`` or ``[no-contradicts]``; this
+    function surfaces the ones that didn't.
 
     The library does NOT refuse the save on these — audit signal,
     not gate. The signal flows through ``SaveContinuityResult``'s
@@ -873,11 +884,20 @@ def detect_proven_without_declaration(
     attention.
 
     Added in v0.3.2 as the library-layer surface for the Move #4
-    contradiction-detection architecture.
+    contradiction-detection architecture. ``today`` parameter added
+    in v0.3.3 to close the today-awareness gap Codex L3 caught (a
+    restored/imported old-date line was being flagged as a new
+    Proven graduation under v0.3.2's level-only comparison).
 
     Args:
         prior_text: The continuity text BEFORE this wrap.
         new_text: The continuity text the agent is about to save.
+        today: Today's date as YYYY-MM-DD. When provided, only
+            graduation lines whose date == today are eligible to
+            be flagged as "new Proven without declaration." When
+            ``None``, falls back to v0.3.2's level-only comparison
+            (preserves backward compatibility for callers that
+            don't pass today; not recommended — pass today).
         min_level: Minimum level to count as "Proven". Default 2.
 
     Returns:
@@ -890,6 +910,28 @@ def detect_proven_without_declaration(
     new_levels = extract_pattern_names(new_text)
     declarations = extract_contradiction_declarations(new_text)
 
+    # v0.3.3 MEDIUM #4 fix: extract the date per pattern line in new
+    # text so we can gate to today-authored graduations only. Pre-fix
+    # behavior compared prior/new levels with no date awareness — a
+    # restored/imported old-date Proven line absent from prior was
+    # flagged as a "new graduation" needing a declaration even though
+    # the agent didn't author it in this wrap.
+    new_pattern_dates: dict[str, str] = {}
+    if today is not None:
+        in_patterns = False
+        for line in new_text.split("\n"):
+            if line.startswith("## "):
+                in_patterns = _is_patterns_heading(line)
+                continue
+            if not in_patterns:
+                continue
+            name_match = _NAMED_PATTERN_RE.match(line)
+            if not name_match:
+                continue
+            date_match = _PATTERN_RE.search(line)
+            if date_match is not None:
+                new_pattern_dates[name_match.group(1)] = date_match.group(2)
+
     new_provens: list[ProvenWithoutDeclaration] = []
     for name, new_level in new_levels.items():
         if new_level < min_level:
@@ -898,6 +940,13 @@ def detect_proven_without_declaration(
         if prior_level >= new_level:
             # Carried forward at same or higher level — not a new graduation
             continue
+        if today is not None:
+            line_date = new_pattern_dates.get(name)
+            if line_date != today:
+                # Not authored this wrap — restored/imported old-date
+                # line that the discipline cannot require to carry a
+                # contradiction declaration for "today's graduation."
+                continue
         # This is a new Proven graduation. Check for declaration.
         if name in declarations:
             continue
@@ -954,7 +1003,23 @@ def _demote_line(
             the failure mode at a glance.
     """
     old_marker = match.group(0)
-    new_marker = old_marker.replace(f"| {level}x", f"| {level - 1}x")
+    # v0.3.3 HIGH #2 fix: use regex substitution against the actual
+    # graduation pattern (`\|\s*Nx`) rather than a literal `f"| {N}x"`
+    # string replace. The widened `_NAMED_PATTERN_RE` in v0.3.2
+    # accepts `|2x` (no space after pipe) AND `| 2x` (with space) AND
+    # `|  2x` (multiple spaces) — the literal replace only matched the
+    # single-space form, so demotion silently no-op'd on the
+    # no-space/multi-space variants. Counter said `demoted == 1` but
+    # text retained the old level. State corruption. Codex L3 caught
+    # this end-to-end against a `|2x` test input. The regex replaces
+    # only the FIRST match (count=1) so we don't accidentally rewrite
+    # graduation markers elsewhere in the captured span.
+    new_marker = re.sub(
+        rf"\|\s*{level}x",
+        f"| {level - 1}x",
+        old_marker,
+        count=1,
+    )
     # Replace evidence tag with the demotion marker
     new_marker = re.sub(
         r'\[evidence:\s*[a-fA-F0-9][a-fA-F0-9, ]*(?:\s+"[^"]*")?\s*\]',

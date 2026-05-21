@@ -3612,3 +3612,171 @@ class TestPatternOmissionAudit:
             {"name": "alpha_proven", "prior_level": 3}
         ]
 
+
+
+class TestMove4LibraryLayerIntegration:
+    """v0.3.3 (NOTE #4 from v0.3.2 session-code-review): end-to-end
+    integration tests for the Move #4 library-layer plumbing. Parity
+    with TestPatternOmissionAudit — proves the field plumbing
+    (`uncovered_proven_to_check` on prepare_wrap +
+    `proven_without_contradicts_declaration` on save +
+    audit-log capture) actually fires through the full SQLite
+    pipeline, not just at the unit-function layer."""
+
+    def _record_episodes(self, store, count: int = 3) -> list[str]:
+        ep_ids = []
+        for i in range(count):
+            ep = store.record(
+                f"episode {i}: substrate observation about graduation "
+                f"discipline contradiction declaration topic {i}.",
+                "observation",
+            )
+            ep_ids.append(ep.id)
+        return ep_ids
+
+    def _render(self, text_template: str, ep_ids: list[str]) -> str:
+        rendered = text_template
+        for i, ep_id in enumerate(ep_ids):
+            rendered = rendered.replace(f"{{ep{i}}}", ep_id)
+        return rendered
+
+    def test_uncovered_proven_to_check_lists_existing_proven(self, tmp_path):
+        """prepare_wrap surfaces the existing Proven names so methodology
+        layer can drive the contradiction-scan discipline."""
+        from anneal_memory import Store, prepare_wrap, validated_save_continuity
+
+        db = tmp_path / "store.db"
+        store = Store(db, project_name="Move4Plumbing")
+        try:
+            ep_ids = self._record_episodes(store)
+            # Session 1: graduate two Provens with explicit no-contradicts
+            # declarations so the discipline is satisfied
+            s1 = self._render(
+                "## State\nseed.\n\n"
+                "## Patterns\n"
+                "- alpha_proven | 2x (2026-05-21) [evidence: {ep0} "
+                '"substrate observation discipline"] [no-contradicts]\n'
+                "- beta_proven | 2x (2026-05-21) [evidence: {ep1} "
+                '"contradiction declaration topic"] [no-contradicts]\n\n'
+                "## Decisions\n- decided.\n\n"
+                "## Context\n- context.\n",
+                ep_ids,
+            )
+            wrap1 = prepare_wrap(store, max_chars=20000)
+            # First-wrap uncovered list — no prior continuity → empty
+            assert wrap1["uncovered_proven_to_check"] == []
+            validated_save_continuity(
+                store, s1, today="2026-05-21",
+                wrap_token=wrap1["wrap_token"],
+            )
+
+            # Session 2: prepare_wrap should now list the two prior Provens
+            self._record_episodes(store)  # fresh episodes for session 2
+            wrap2 = prepare_wrap(store, max_chars=20000)
+            assert set(wrap2["uncovered_proven_to_check"]) == {
+                "alpha_proven", "beta_proven"
+            }
+            store.wrap_cancelled()  # don't actually save session 2
+        finally:
+            store.close()
+
+    def test_proven_without_declaration_surfaces_on_save_result(self, tmp_path):
+        """A new Proven graduation authored TODAY without contradiction
+        stance must surface on SaveContinuityResult."""
+        from anneal_memory import Store, prepare_wrap, validated_save_continuity
+
+        db = tmp_path / "store.db"
+        store = Store(db, project_name="Move4Plumbing")
+        try:
+            ep_ids = self._record_episodes(store)
+            s1 = self._render(
+                "## State\nfirst session.\n\n"
+                "## Patterns\n"
+                "- new_proven_no_declaration | 2x (2026-05-21) "
+                '[evidence: {ep0} "substrate observation discipline"]\n\n'
+                "## Decisions\n- decided.\n\n"
+                "## Context\n- context.\n",
+                ep_ids,
+            )
+            wrap = prepare_wrap(store, max_chars=20000)
+            result = validated_save_continuity(
+                store, s1, today="2026-05-21",
+                wrap_token=wrap["wrap_token"],
+            )
+            assert result["proven_without_contradicts_declaration"] == [
+                {"name": "new_proven_no_declaration", "level": 2}
+            ]
+        finally:
+            store.close()
+
+    def test_proven_without_declaration_rides_into_audit_log(self, tmp_path):
+        """Parity with test_omitted_patterns_rides_into_audit_log —
+        confirms the Move #4 signal rides into the hash-chained audit
+        log so Diogenes weekly sweep can pick it up."""
+        import json
+        from anneal_memory import Store, prepare_wrap, validated_save_continuity
+
+        db = tmp_path / "store.db"
+        store = Store(db, project_name="Move4Plumbing")
+        try:
+            ep_ids = self._record_episodes(store)
+            s1 = self._render(
+                "## State\nfirst.\n\n"
+                "## Patterns\n"
+                "- audit_test_proven | 3x (2026-05-21) "
+                '[evidence: {ep0} "substrate observation discipline"]\n\n'
+                "## Decisions\n- decided.\n\n"
+                "## Context\n- context.\n",
+                ep_ids,
+            )
+            wrap = prepare_wrap(store, max_chars=20000)
+            validated_save_continuity(
+                store, s1, today="2026-05-21",
+                wrap_token=wrap["wrap_token"],
+            )
+        finally:
+            store.close()
+
+        audit = db.parent / "store.audit.jsonl"
+        assert audit.exists()
+        events = [
+            json.loads(line) for line in audit.read_text().splitlines()
+            if line.strip()
+        ]
+        saved_events = [
+            e for e in events if e.get("event") == "continuity_saved"
+        ]
+        assert len(saved_events) == 1
+        # The new Proven graduated without contradiction-stance declaration —
+        # audit chain captures it for Diogenes operator-review layer
+        assert saved_events[0]["data"]["proven_without_contradicts_declaration"] == [
+            {"name": "audit_test_proven", "level": 3}
+        ]
+
+    def test_no_contradicts_declaration_satisfies_audit(self, tmp_path):
+        """When agent declares [no-contradicts] on a new Proven, the
+        audit signal must NOT fire — discipline is satisfied."""
+        from anneal_memory import Store, prepare_wrap, validated_save_continuity
+
+        db = tmp_path / "store.db"
+        store = Store(db, project_name="Move4Plumbing")
+        try:
+            ep_ids = self._record_episodes(store)
+            s1 = self._render(
+                "## State\nfirst.\n\n"
+                "## Patterns\n"
+                "- declared_proven | 2x (2026-05-21) "
+                '[evidence: {ep0} "substrate observation discipline"] [no-contradicts]\n\n'
+                "## Decisions\n- decided.\n\n"
+                "## Context\n- context.\n",
+                ep_ids,
+            )
+            wrap = prepare_wrap(store, max_chars=20000)
+            result = validated_save_continuity(
+                store, s1, today="2026-05-21",
+                wrap_token=wrap["wrap_token"],
+            )
+            # [no-contradicts] satisfies the discipline; audit must be empty
+            assert result["proven_without_contradicts_declaration"] == []
+        finally:
+            store.close()

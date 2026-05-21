@@ -628,8 +628,14 @@ def _normalize_explanation_for_dedup(explanation: str) -> str:
     import re as _re
     # Collapse whitespace + lowercase + strip outer whitespace
     normalized = _re.sub(r"\s+", " ", explanation.lower()).strip()
-    # Strip leading/trailing punctuation that doesn't change meaning
-    normalized = normalized.strip(".,;:!?\"'()[]{}—–-")
+    # Strip leading/trailing punctuation that doesn't change meaning.
+    # Then strip again to catch whitespace re-revealed by the punct
+    # strip (e.g. `'— PostgreSQL chosen —'` → after first .strip()
+    # `'— postgresql chosen —'` → after punct strip `' postgresql
+    # chosen '` → final .strip() → `'postgresql chosen'`). v0.3.3
+    # session-code-review WARNING #1 fix — without the second strip,
+    # compound punctuation+whitespace cases bypassed dedup.
+    normalized = normalized.strip(".,;:!?\"'()[]{}—–-").strip()
     return normalized
 
 

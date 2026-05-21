@@ -348,6 +348,27 @@ class SaveContinuityResult(TypedDict):
     # Finding #3 class permanently.
     skipped_non_today: int
     gaming_suspects: list[str]  # Episode IDs flagged for suspicious reuse
+    # Patterns at 2x/3x in the prior continuity that are absent at any
+    # level in the new continuity. Surfaced as informational audit
+    # signal — see graduation.detect_pattern_omissions() and
+    # graduation.OmittedPattern. Each entry is a dict
+    # ``{"name": str, "prior_level": int}``. Empty list on first wrap
+    # (no prior continuity to compare against) and when the agent
+    # carried all prior 2x/3x patterns forward at any level. Closes
+    # the silent-omission gap surfaced by Bold Stand Phase 1b probe #1
+    # (2026-05-21).
+    omitted_patterns: list[dict[str, Any]]
+    # Graduations refused because today's explanation shared too many
+    # meaningful words with the pattern's prior-session explanation —
+    # sycophantic vocabulary reuse across sessions, not multi-faceted
+    # evidence accumulation. The corresponding patterns in the saved
+    # continuity were demoted (3x→2x, 2x→1x) and marked
+    # ``(cross-session-overlap)``. Each entry is a dict
+    # ``{"name": str, "today_level": int, "overlap_words": list[str],
+    #  "prior_explanation": str}``. Empty list when no cross-session
+    # collision fired. Closes the slow-drift sycophantic-accumulation
+    # gap surfaced by Bold Stand Phase 1b probe #1 (2026-05-21).
+    cross_session_collisions: list[dict[str, Any]]
     associations_formed: int
     associations_strengthened: int
     associations_decayed: int

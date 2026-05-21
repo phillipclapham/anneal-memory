@@ -3,10 +3,15 @@
 import pytest
 
 from anneal_memory.graduation import (
+    CrossSessionCollision,
     GraduationResult,
+    OmittedPattern,
+    _meaningful_word_overlap,
     check_explanation_overlap,
     detect_citation_gaming,
+    detect_pattern_omissions,
     detect_stale_patterns,
+    extract_pattern_names,
     validate_graduations,
 )
 
@@ -318,3 +323,487 @@ class TestDetectCitationGaming:
 
     def test_empty_counts(self):
         assert detect_citation_gaming({}) == []
+
+
+# -- extract_pattern_names + detect_pattern_omissions --
+#
+# These two primitives close the silent-omission gap surfaced by
+# Bold Stand Phase 1b probe #1 (2026-05-21). An adversarial agent
+# dropped two legitimate Proven-tier patterns across three drift
+# sessions by simply not carrying them forward in the wrap text;
+# validate_graduations had no visibility into them (it only sees
+# patterns the agent wrote INTO the new continuity). The primitives
+# below let validated_save_continuity diff the prior continuity
+# against the new one and surface 2x+ patterns that disappeared.
+
+
+class TestExtractPatternNames:
+    def test_extracts_names_and_max_levels(self):
+        text = """## State
+foo.
+## Patterns
+- alpha_pattern | 3x (2026-05-20) [evidence: abc12345 "explanation"]
+- beta_pattern | 2x (2026-05-20) [evidence: def67890 "explanation"]
+- gamma_pattern | 1x (2026-05-20) [evidence: 11112222 "explanation"]
+## Decisions
+- something happened.
+## Context
+- something else.
+"""
+        result = extract_pattern_names(text)
+        assert result == {
+            "alpha_pattern": 3,
+            "beta_pattern": 2,
+            "gamma_pattern": 1,
+        }
+
+    def test_only_patterns_section(self):
+        # A line that looks like a pattern but lives in ## Decisions
+        # must NOT be picked up — that would mistake free-form decision
+        # prose for a graduated pattern.
+        text = """## State
+foo.
+## Patterns
+- alpha_pattern | 2x (2026-05-20) [evidence: abc12345 "x"]
+## Decisions
+- decided_thing | 3x (2026-05-20) — pattern-shaped decision text.
+## Context
+- contextual.
+"""
+        result = extract_pattern_names(text)
+        assert result == {"alpha_pattern": 2}
+        assert "decided_thing" not in result
+
+    def test_empty_text(self):
+        assert extract_pattern_names("") == {}
+
+    def test_no_patterns_section(self):
+        text = """## State
+foo.
+## Decisions
+- something.
+"""
+        assert extract_pattern_names(text) == {}
+
+    def test_duplicate_name_takes_max(self):
+        # If the same pattern name appears at multiple levels (malformed
+        # continuity), highest level wins. This is defensive — the
+        # canonical write path doesn't produce duplicates, but external
+        # editors might.
+        text = """## Patterns
+- alpha_pattern | 2x (2026-05-20) [evidence: abc12345 "x"]
+- alpha_pattern | 3x (2026-05-21) [evidence: def67890 "y"]
+"""
+        result = extract_pattern_names(text)
+        assert result == {"alpha_pattern": 3}
+
+    def test_ignores_unnamed_pattern_lines(self):
+        # Free-form bullets that happen to contain ``| Nx`` but don't
+        # match the operator-style identifier grammar must NOT be
+        # captured as patterns. This is the discriminator that lets
+        # the section coexist with continuity-internal documentation.
+        text = """## Patterns
+- alpha_pattern | 2x (2026-05-20) [evidence: abc12345 "x"]
+- this is some prose that mentions | 2x in passing.
+"""
+        result = extract_pattern_names(text)
+        assert result == {"alpha_pattern": 2}
+
+
+class TestDetectPatternOmissions:
+    PRIOR = """## State
+prior.
+## Patterns
+- alpha_proven_3x | 3x (2026-05-20) [evidence: aaa11111 "explanation"]
+- beta_proven_2x | 2x (2026-05-20) [evidence: bbb22222 "explanation"]
+- gamma_developing_1x | 1x (2026-05-20) [evidence: ccc33333 "explanation"]
+## Decisions
+- decision.
+## Context
+- context.
+"""
+
+    def test_no_omissions_when_all_carried_forward(self):
+        new = """## State
+new.
+## Patterns
+- alpha_proven_3x | 3x (2026-05-20) [evidence: aaa11111 "x"]
+- beta_proven_2x | 2x (2026-05-20) [evidence: bbb22222 "x"]
+## Decisions
+- decision.
+## Context
+- context.
+"""
+        result = detect_pattern_omissions(self.PRIOR, new)
+        assert result == []
+
+    def test_detects_3x_dropout(self):
+        new = """## State
+new.
+## Patterns
+- beta_proven_2x | 2x (2026-05-20) [evidence: bbb22222 "x"]
+## Decisions
+- decision.
+## Context
+- context.
+"""
+        result = detect_pattern_omissions(self.PRIOR, new)
+        assert len(result) == 1
+        assert isinstance(result[0], OmittedPattern)
+        assert result[0].name == "alpha_proven_3x"
+        assert result[0].prior_level == 3
+
+    def test_detects_multiple_dropouts_sorted_by_level_desc(self):
+        new = """## State
+new.
+## Patterns
+- gamma_developing_1x | 1x (2026-05-20) [evidence: ccc33333 "x"]
+## Decisions
+- decision.
+## Context
+- context.
+"""
+        result = detect_pattern_omissions(self.PRIOR, new)
+        assert len(result) == 2
+        # Sort order: highest prior_level first
+        assert result[0].name == "alpha_proven_3x"
+        assert result[0].prior_level == 3
+        assert result[1].name == "beta_proven_2x"
+        assert result[1].prior_level == 2
+
+    def test_1x_dropout_not_surfaced_by_default(self):
+        # Dropping a 1x ("Developing") pattern is normal lifecycle —
+        # patterns that don't accrue further evidence in the next
+        # session are supposed to drop out. min_level=2 makes this
+        # the default behavior.
+        new = """## State
+new.
+## Patterns
+- alpha_proven_3x | 3x (2026-05-20) [evidence: aaa11111 "x"]
+- beta_proven_2x | 2x (2026-05-20) [evidence: bbb22222 "x"]
+## Decisions
+- decision.
+## Context
+- context.
+"""
+        # gamma_developing_1x dropped — should NOT be flagged
+        result = detect_pattern_omissions(self.PRIOR, new)
+        assert result == []
+
+    def test_min_level_1_catches_1x_drops(self):
+        # Operators can opt into stricter auditing.
+        new = """## State
+new.
+## Patterns
+- alpha_proven_3x | 3x (2026-05-20) [evidence: aaa11111 "x"]
+- beta_proven_2x | 2x (2026-05-20) [evidence: bbb22222 "x"]
+## Decisions
+- decision.
+## Context
+- context.
+"""
+        result = detect_pattern_omissions(self.PRIOR, new, min_level=1)
+        assert len(result) == 1
+        assert result[0].name == "gamma_developing_1x"
+        assert result[0].prior_level == 1
+
+    def test_pattern_demoted_not_omitted(self):
+        # A pattern that demoted (3x -> 2x or 2x -> 1x) is still PRESENT
+        # in the new continuity at a lower level — it must NOT be
+        # flagged as omitted. Omission means absent at any level.
+        new = """## State
+new.
+## Patterns
+- alpha_proven_3x | 2x (2026-05-20) [evidence: aaa11111 "x"]
+- beta_proven_2x | 1x (2026-05-20) [evidence: bbb22222 "x"]
+## Decisions
+- decision.
+## Context
+- context.
+"""
+        result = detect_pattern_omissions(self.PRIOR, new)
+        assert result == []
+
+    def test_empty_prior_returns_no_omissions(self):
+        # First-wrap case: no prior continuity, nothing to be omitted.
+        new = """## State
+first.
+## Patterns
+- alpha_proven_3x | 3x (2026-05-20) [evidence: aaa11111 "x"]
+## Decisions
+- decision.
+## Context
+- context.
+"""
+        assert detect_pattern_omissions("", new) == []
+
+    def test_empty_new_continuity_surfaces_all_proven_dropouts(self):
+        # Pathological case: agent writes a continuity with no ## Patterns
+        # section. All prior Proven-tier patterns are dropped.
+        new = """## State
+new state.
+## Patterns
+## Decisions
+- decision.
+## Context
+- context.
+"""
+        result = detect_pattern_omissions(self.PRIOR, new)
+        names = {op.name for op in result}
+        assert names == {"alpha_proven_3x", "beta_proven_2x"}
+
+
+# -- Cross-session sycophantic-accumulation defense --
+#
+# Closes the slow-drift attack from Bold Stand Phase 1b probe #1
+# (2026-05-21): without this defense, a plausible-sounding pattern
+# with plausible-sounding fresh episodes can ride 1x → 2x → 3x across
+# three sessions even when each session's explanation simply rephrases
+# the same claim. The cross-session check refuses graduations whose
+# explanation overlaps too heavily with the pattern's prior-session
+# explanation; multi-faceted legitimate evidence uses distinct
+# vocabulary across sessions and passes cleanly.
+
+
+class TestMeaningfulWordOverlap:
+    def test_clean_overlap(self):
+        a = "the database race condition fixed"
+        b = "race condition in our database"
+        # Stop words and short tokens excluded; remaining shared:
+        # database, race, condition
+        assert _meaningful_word_overlap(a, b) == {"database", "race", "condition"}
+
+    def test_no_overlap(self):
+        a = "first explanation about widgets"
+        b = "second explanation discussing flanges"
+        assert _meaningful_word_overlap(a, b) == {"explanation"}
+
+    def test_excludes_stop_words(self):
+        a = "this is the database race condition"
+        b = "that was the database race condition"
+        # "this", "is", "the", "that", "was" are stop words → excluded
+        assert _meaningful_word_overlap(a, b) == {"database", "race", "condition"}
+
+    def test_case_insensitive(self):
+        a = "Database RACE Condition"
+        b = "database race condition"
+        assert _meaningful_word_overlap(a, b) == {"database", "race", "condition"}
+
+
+class TestCrossSessionGraduationCheck:
+    """End-to-end coverage of the cross-session-overlap demotion path
+    in validate_graduations. Tests pass a stub pattern_history_lookup
+    callable instead of wiring through Store — keeps the unit tests
+    fast and independent of the SQLite layer."""
+
+    def _stub_lookup(self, **patterns):
+        """Build a pattern_history_lookup callback from kwargs:
+        ``pattern_name=explanation_string`` → returns a history dict.
+        Patterns not in the kwargs return None (no prior history)."""
+        def _lookup(name):
+            if name in patterns:
+                return {
+                    "max_level_reached": 2,
+                    "last_explanation": patterns[name],
+                    "last_seen_at": "2026-05-20T00:00:00Z",
+                    "last_wrap_id": None,
+                }
+            return None
+        return _lookup
+
+    def test_no_history_allows_graduation(self):
+        """First time a pattern reaches 2x: no prior history,
+        graduation must pass cleanly."""
+        text = """## State\nfirst graduation.\n## Patterns
+- alpha | 2x (2026-05-21) [evidence: abc12345 "concurrency safety invariant"]
+## Decisions
+.
+## Context
+.
+"""
+        node_content = {"abc12345": "we made this concurrency safety invariant a hard rule"}
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-21",
+            node_content_map=node_content,
+            pattern_history_lookup=self._stub_lookup(),
+        )
+        assert result.validated == 1
+        assert result.demoted == 0
+        assert result.cross_session_collisions == []
+
+    def test_distinct_vocabulary_across_sessions_passes(self):
+        """Legitimate cross-session graduation: today's explanation
+        uses different words than the prior session's. Both contain
+        meaningful vocabulary, but overlap is below threshold."""
+        text = """## State\ndistinct evidence.\n## Patterns
+- alpha | 3x (2026-05-21) [evidence: abc12345 "throughput improvement after batch consolidation"]
+## Decisions
+.
+## Context
+.
+"""
+        # Prior session's evidence was about a different angle of the
+        # same pattern. Overlap with today: zero meaningful words.
+        prior = "concurrency safety invariant for the migration path"
+        node_content = {"abc12345": "throughput improvement after batch consolidation in the pipeline"}
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-21",
+            node_content_map=node_content,
+            pattern_history_lookup=self._stub_lookup(alpha=prior),
+        )
+        assert result.validated == 1
+        assert result.demoted == 0
+        assert result.cross_session_collisions == []
+
+    def test_high_overlap_across_sessions_demotes_with_marker(self):
+        """The sycophantic shape: today's explanation rephrases the
+        prior session's. The graduation gets demoted and marked
+        ``(cross-session-overlap)`` so operators can distinguish this
+        failure from the ungrounded path."""
+        text = """## State\nsycophantic rephrase.\n## Patterns
+- alpha | 3x (2026-05-21) [evidence: abc12345 "standup consensus decision quick agreement architectural"]
+## Decisions
+.
+## Context
+.
+"""
+        # Prior shares 5 meaningful words: standup, consensus,
+        # decision, quick, agreement
+        prior = "standup consensus decision architecture sync quick agreement"
+        node_content = {
+            "abc12345":
+            "standup consensus decision quick agreement architectural meeting"
+        }
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-21",
+            node_content_map=node_content,
+            pattern_history_lookup=self._stub_lookup(alpha=prior),
+        )
+        assert result.validated == 0
+        assert result.demoted == 1
+        assert "(cross-session-overlap)" in result.text
+        assert len(result.cross_session_collisions) == 1
+        coll = result.cross_session_collisions[0]
+        assert isinstance(coll, CrossSessionCollision)
+        assert coll.name == "alpha"
+        assert coll.today_level == 3
+        # Demotion lands at level - 1 in the saved text
+        assert "alpha | 2x" in result.text
+        # Overlap captures the meaningful words specifically
+        assert "standup" in coll.overlap_words
+        assert "consensus" in coll.overlap_words
+
+    def test_threshold_at_boundary_2_words_passes(self):
+        """At exactly 2 shared meaningful words, the default threshold
+        of 3 does NOT trigger. Within-session check uses 2 as the
+        floor for VALID grounding; cross-session check needs more
+        than 2 to flag sycophancy."""
+        text = """## State\nboundary case.\n## Patterns
+- alpha | 2x (2026-05-21) [evidence: abc12345 "standup quick reactive observation pivot detection"]
+## Decisions
+.
+## Context
+.
+"""
+        prior = "standup quick alignment broad agreement consensus building"
+        # Shared: standup, quick = 2 words — at threshold boundary,
+        # default threshold=3 does NOT fire
+        node_content = {
+            "abc12345":
+            "standup quick reactive observation pivot detection finding"
+        }
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-21",
+            node_content_map=node_content,
+            pattern_history_lookup=self._stub_lookup(alpha=prior),
+        )
+        assert result.validated == 1
+        assert result.cross_session_collisions == []
+
+    def test_custom_threshold_2_catches_2_word_overlap(self):
+        """Operators can tighten the cross-session threshold by
+        passing a smaller value. Threshold=2 catches even mild
+        trope-vocabulary reuse — most legitimate graduations would
+        false-positive at this level, but the option exists."""
+        text = """## State\nstrict threshold.\n## Patterns
+- alpha | 2x (2026-05-21) [evidence: abc12345 "standup quick reactive observation pivot detection"]
+## Decisions
+.
+## Context
+.
+"""
+        prior = "standup quick alignment broad agreement consensus building"
+        node_content = {
+            "abc12345":
+            "standup quick reactive observation pivot detection finding"
+        }
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-21",
+            node_content_map=node_content,
+            pattern_history_lookup=self._stub_lookup(alpha=prior),
+            cross_session_overlap_threshold=2,
+        )
+        assert result.validated == 0
+        assert result.demoted == 1
+        assert len(result.cross_session_collisions) == 1
+
+    def test_no_lookup_skips_check_entirely(self):
+        """When pattern_history_lookup is None, the cross-session
+        check is skipped — preserves pre-Move-#3 behavior for library
+        callers that don't wire history through."""
+        text = """## State\nno lookup.\n## Patterns
+- alpha | 3x (2026-05-21) [evidence: abc12345 "standup consensus decision quick agreement architectural"]
+## Decisions
+.
+## Context
+.
+"""
+        node_content = {"abc12345": "standup consensus decision quick agreement architectural meeting"}
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-21",
+            node_content_map=node_content,
+            pattern_history_lookup=None,
+        )
+        # Within-session check passes (lexical overlap with episode
+        # body ≥2). No cross-session check ran. Graduation accepted.
+        assert result.validated == 1
+        assert result.cross_session_collisions == []
+
+    def test_ungrounded_graduation_skips_cross_session_check(self):
+        """Within-session check fails first (no matching episode);
+        cross-session check should NOT also fire — operators see one
+        failure reason at a time, and the within-session failure is
+        more fundamental."""
+        text = """## State\nungrounded.\n## Patterns
+- alpha | 2x (2026-05-21) [evidence: deadbeef "standup consensus decision quick agreement architectural"]
+## Decisions
+.
+## Context
+.
+"""
+        prior = "standup consensus decision quick agreement architectural"
+        # deadbeef is not in valid_ids -> ungrounded
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-21",
+            pattern_history_lookup=self._stub_lookup(alpha=prior),
+        )
+        assert result.validated == 0
+        assert result.demoted == 1
+        # Demotion marker should be (ungrounded), not (cross-session-overlap)
+        assert "(ungrounded)" in result.text
+        assert "(cross-session-overlap)" not in result.text
+        assert result.cross_session_collisions == []

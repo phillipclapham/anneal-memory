@@ -104,10 +104,52 @@ explain the tooling to the user, just work with what you know.
 
   **Wrap once.** Run the wrap sequence exactly once per session.
   `save_continuity` may report demoted graduations — that is the
-  immune system working, not an error. Don't re-run `save_continuity`
-  to chase a clean report; re-saving compresses nothing, and a second
-  save with no new `prepare_wrap` is refused. If a pattern is
-  ungrounded, fix it in your *next* wrap with fresh evidence.
+  citation-validation pipeline working, not an error. Don't re-run
+  `save_continuity` to chase a clean report; re-saving compresses
+  nothing, and a second save with no new `prepare_wrap` is refused.
+  If a pattern is ungrounded, fix it in your *next* wrap with fresh
+  evidence.
+
+  **What the citation-layer pipeline catches:** fabricated episode IDs
+  (no matching episode → demote), explanations with no lexical overlap
+  against cited episode content (≥2-word shared-vocabulary threshold →
+  demote), bare graduations with no `[evidence:]` tag (demote after
+  first wrap), single-ID citation pumping (≥3 reuses of one ID in one
+  wrap → gaming flag), replay-attempts citing prior-session episode
+  IDs that aren't in the current wrap window (demote), and **silent
+  pattern omission across sessions** — patterns that were at 2x or 3x
+  in the prior continuity but absent from the new continuity surface
+  as `omitted_patterns: [{"name": ..., "prior_level": ...}]` on the
+  save result and in the hash-chained audit log. Demotion (carrying a
+  pattern forward at a lower level) does NOT trigger this — only
+  complete dropout. Intentional pattern retirement is fine; the audit
+  just records that it happened so downstream review can see what
+  changed between sessions.
+
+  **Cross-session corpus-overlap demotion.** Each pattern's
+  accumulated explanation history is tracked across sessions in the
+  `pattern_history` table. At graduation time, today's explanation is
+  compared against the corpus of all prior explanations for the same
+  pattern name; if it shares ≥3 meaningful words with the
+  accumulated history, the graduation is demoted to the prior level
+  and marked `(cross-session-overlap)`. Sycophantic patterns that
+  rephrase the same claim across sessions get caught structurally —
+  legitimate multi-faceted evidence uses distinct vocabulary per
+  session and passes cleanly. The `cross_session_collisions` field
+  on the save result + the audit log capture every collision with
+  the specific overlap words and the prior explanation.
+
+  **What it does NOT catch (named honestly):** lexical-overlap
+  exploits where an explanation shares ≥2 words with the cited episode
+  but misinterprets it semantically, rotated-pair citation gaming that
+  keeps per-ID frequency below the threshold, slow-drift sycophantic
+  graduation with deliberately-divergent vocabulary (where each
+  session uses entirely new words, defeating the corpus-overlap
+  check), and patterns that contradict existing graduated Proven
+  patterns (no semantic comparison runs). These gaps are reachable
+  under adversarial-agent or drift-leaking conditions. You are the
+  first line of defense; the citation-layer pipeline is the second.
+  Compose wraps honestly.
 
 **Hebbian associations (automatic — no extra work needed):**
 
@@ -128,9 +170,19 @@ cleaned up when they drop below 0.1. This means the network naturally
 forgets connections that stop being relevant while strengthening the
 ones you keep reinforcing through citations.
 
-The immune system extends to associations: only validated citations
-form links. Demoted citations produce no associations. The cognitive
-topology inherits the integrity of the graduation system.
+The citation-validation pipeline extends to associations: only
+validated citations form links. Demoted citations produce no
+associations. The cognitive topology inherits the citation-layer
+integrity of the graduation system (and its limits — see *What it
+does NOT catch* above).
+
+**Single-process invariant (load-bearing).** Only one process should
+operate against any given anneal-memory store at a time. The library
+is not thread-safe, not task-safe, not reentrant. Multi-tenant
+deployments sharing a store break the hash-chained audit trail by
+construction and remove the actor-scoping that filesystem-path
+isolation provides. If you need multi-agent setups, give each agent
+its own store path.
 
 **Limbic layer (optional — reflect on your state during compression):**
 

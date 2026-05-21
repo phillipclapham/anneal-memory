@@ -59,10 +59,12 @@ explain the tooling to the user, just work with what you know.
   patterns. Memory storage without recall is functionally dead,
   regardless of how many episodes it contains.
 
-  **Pair with staleness:** When the decision surface area has Proven
-  patterns that haven't been recalled in N sessions, surface them. The
-  decay metadata is already in the store — the methodology layer just
-  has to ask for it.
+  **Pair with staleness:** If you suspect a Proven pattern on the
+  surface area you're deciding on is going unreferenced, call
+  `prepare_wrap` mid-session — its output includes stale-pattern
+  warnings drawn from the continuity file's pattern markers. The
+  surface read does the work; you don't have to follow it with
+  `save_continuity` to get the warnings.
 
 - **End of session:** When the user signals the session is ending —
   "let's wrap up", "save memory", "we're done", "let's finish",
@@ -72,11 +74,23 @@ explain the tooling to the user, just work with what you know.
   1. Call `prepare_wrap` to get your compression package (recent
      episodes, current continuity, stale pattern warnings, compression
      instructions, and association context for related episodes).
-  2. Follow the compression instructions to compress episodes into an
+  2. **Pre-compose pattern recall.** Before composing new patterns,
+     scan existing Proven and Developing observations in your
+     continuity for the session's surface areas. Ask: "Are we about
+     to write a pattern already in Proven under different framing?
+     Are there Developing 1x/2x entries this session's evidence
+     advances? Cross-section coherence issues — two 1x entries
+     describing the same pattern under different names?" Distinct
+     from the per-decision recall in "Before decisions" — that fires
+     LTP-style at individual decisions; this fires SWR-style across
+     the session's set, catching categorization and graduation moves
+     invisible from any single decision point. Different molecular
+     machinery (neuroscience analogue); neither alone sufficient.
+  3. Follow the compression instructions to compress episodes into an
      updated continuity file. This is NON-NEGOTIABLE — the compression
      step IS the thinking. Patterns emerge during compression that
      weren't visible in the raw episodes. Take it seriously.
-  3. Call `save_continuity` with the result. The server validates your
+  4. Call `save_continuity` with the result. The server validates your
      output (structure, graduation citations, gaming detection),
      may demote ungrounded patterns, forms Hebbian associations
      between co-cited episodes, and decays unreinforced links.

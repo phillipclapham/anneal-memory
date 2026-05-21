@@ -74,10 +74,12 @@ First run: `anneal-memory init` creates the database and continuity file.
   Memory storage without recall is functionally dead, regardless of how
   many episodes it contains.
 
-  **Pair with staleness:** When the decision surface area has Proven
-  patterns that haven't been recalled in N sessions, surface them. The
-  decay metadata is already in the store — the methodology layer just
-  has to ask for it.
+  **Pair with staleness:** If you suspect a Proven pattern on the
+  surface area you're deciding on is going unreferenced, run
+  `anneal-memory prepare-wrap` mid-session — its output includes
+  stale-pattern warnings drawn from the continuity file's pattern
+  markers. The surface read does the work; you don't have to follow
+  it with `save-continuity` to get the warnings.
 
 - **End of session:** When the user signals the session is ending —
   "let's wrap up", "save memory", "we're done" — run the FULL wrap
@@ -91,6 +93,19 @@ First run: `anneal-memory init` creates the database and continuity file.
   This outputs: your episodes, existing continuity, compression
   instructions, stale pattern warnings, and association context.
   Read it carefully — it's your raw material.
+
+  **Step 1.5: Pre-compose pattern recall.** Read your existing
+  continuity (already in the prepare-wrap output) and scan Proven
+  and Developing observations for the session's surface areas
+  before composing new patterns. Ask: "Are we about to write a
+  pattern already in Proven under different framing? Are there
+  Developing 1x/2x entries this session's evidence advances?
+  Cross-section coherence issues — two 1x entries describing the
+  same pattern under different names?" Distinct from the
+  per-decision recall in "Before decisions" — that fires LTP-style
+  at individual decisions; this fires SWR-style across the session's
+  set, catching categorization and graduation moves invisible from
+  any single decision point.
 
   **Step 2: Compress.** Follow the instructions from prepare-wrap.
   Extract principles, not facts. Graduate patterns with evidence

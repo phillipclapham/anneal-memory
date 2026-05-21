@@ -2,6 +2,12 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed — docs
+
+- **Agent-instructions snippets: decision-boundary recall promoted to NON-NEGOTIABLE.** Both `examples/agent-instructions.example` and `examples/agent-instructions.cli.example` strengthen the "Before decisions" instruction with explicit dead-store failure mode framing + staleness-pairing primitive. The dead-store failure mode: wraps land, episodes write, the store grows, but architectural decisions get made blind to accumulated patterns — memory storage without recall is functionally dead, regardless of how many episodes it contains. Recall before any architectural decision is the closed-loop-learning primitive; skipping it produces "healthy by metric, dead in practice" state. Sibling compression-step instruction in the main snippet also promoted from "NOT optional" to "NON-NEGOTIABLE" for consistent load-bearing-discipline language. Discovered via operator-class peer production catch (2026-05-20) — 3-AI mesh self-surfaced that it had been writing wraps without recalling, making architectural decisions blind to accumulated patterns. Same recall-trigger primitive codified in parallel at Levain v1 methodology-core; three-surface layered defense from one finding.
+
 ## [0.3.1] — 2026-05-17
 
 Phantom-re-save fix. `validated_save_continuity` now refuses to run when no wrap is in progress, closing a path where a second save in the same session — with no fresh `prepare_wrap` — would re-run the immune pass against an empty episode set, demote every citation, and inflate the session counter. The wrap is now structurally a once-per-session operation: `prepare_wrap` mints the snapshot, `save_continuity` consumes it, and a save with no snapshot is a hard error.

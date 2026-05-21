@@ -58,12 +58,26 @@ First run: `anneal-memory init` creates the database and continuity file.
   echo "Detailed analysis..." | anneal-memory record - --type observation
   ```
 
-- **Before decisions:** Search for relevant prior episodes:
+- **Before decisions (NON-NEGOTIABLE):** Before any architectural
+  decision, design choice, or rule change, search for relevant prior
+  episodes on the surface area being decided:
   ```bash
-  anneal-memory search "database scaling"
+  anneal-memory search "decision surface area"
   anneal-memory episodes --type decision --since 30d
   ```
-  Don't start from scratch when memory has answers.
+  Integrate findings into the decision context. If search returns
+  nothing relevant, proceed and note that recall fired clean. The store
+  is not a write-only sink — recall before deciding is what produces
+  closed-loop learning. Skipping this step produces the **dead-store
+  failure mode**: wraps land, episodes write, the store grows, but
+  architectural decisions get made blind to accumulated patterns.
+  Memory storage without recall is functionally dead, regardless of how
+  many episodes it contains.
+
+  **Pair with staleness:** When the decision surface area has Proven
+  patterns that haven't been recalled in N sessions, surface them. The
+  decay metadata is already in the store — the methodology layer just
+  has to ask for it.
 
 - **End of session:** When the user signals the session is ending —
   "let's wrap up", "save memory", "we're done" — run the FULL wrap

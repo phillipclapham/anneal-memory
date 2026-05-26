@@ -174,6 +174,32 @@ Nothing.
         result = validate_graduations(text, VALID_IDS, TODAY, citations_seen=True)
         assert result.bare_demoted == 1
         assert "(needs-evidence)" in result.text
+        # Demotion actually rewrote the level — guard against the
+        # Diogenes 2026-05-22 LOW where the counter incremented while
+        # the text retained the old level. Required so future regression
+        # in the level-rewrite path can't sneak past a counter-only check.
+        assert "| 1x" in result.text
+        assert "| 2x" not in result.text
+
+    def test_bare_graduation_demoted_no_space_variant(self):
+        """Bare graduations with no space after pipe (|2x) demote correctly.
+
+        Diogenes 2026-05-22 LOW regression test. `_BARE_GRADUATION_RE`
+        accepts `\\|\\s*Nx` (space-optional); the prior literal replace
+        only matched the single-space form, so `|2x` no-op'd the rewrite
+        while incrementing `bare_demoted`. State mismatch fixed by
+        mirroring the v0.3.3 `_demote_line` regex substitution.
+        """
+        text = """## Patterns
+  thought: bare pattern |2x (2026-03-31)
+"""
+        result = validate_graduations(text, VALID_IDS, TODAY, citations_seen=True)
+        assert result.bare_demoted == 1
+        assert "(needs-evidence)" in result.text
+        assert "| 1x" in result.text
+        # The original `|2x` should be gone — both as `|2x` and as `| 2x`.
+        assert "|2x" not in result.text
+        assert "| 2x" not in result.text
 
     def test_1x_patterns_untouched(self):
         """1x patterns don't need evidence — they're new observations."""

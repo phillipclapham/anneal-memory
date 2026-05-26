@@ -513,8 +513,18 @@ def validate_graduations(
 
         bare_demoted += 1
         old_marker = bare_match.group(0)
-        new_marker = old_marker.replace(
-            f"| {bare_level}x", f"| {bare_level - 1}x"
+        # Diogenes 2026-05-22 LOW fix: parallel to the v0.3.3 _demote_line
+        # treatment. `_BARE_GRADUATION_RE` accepts `\|\s*Nx` (space-optional),
+        # so on `|2x` input the literal `.replace(f"| {N}x", ...)` no-op'd
+        # and `bare_demoted` incremented while the text retained the old
+        # level. State corruption mirroring the original `_demote_line` bug.
+        # Use the same regex substitution against `\|\s*Nx` so all spacing
+        # variants demote correctly. count=1 keeps the rewrite scoped.
+        new_marker = re.sub(
+            rf"\|\s*{bare_level}x",
+            f"| {bare_level - 1}x",
+            old_marker,
+            count=1,
         )
         lines[i] = line.replace(old_marker, new_marker + " (needs-evidence)")
 

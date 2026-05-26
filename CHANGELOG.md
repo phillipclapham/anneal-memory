@@ -2,6 +2,16 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed — LOW
+
+- **Bare graduation demotion path was a partial fix of the v0.3.3 `_demote_line` defect** (Diogenes 2026-05-22 review of v0.3.3). `_BARE_GRADUATION_RE` accepts `\|\s*Nx` (space-optional), but the bare path in `validate_graduations` used `old_marker.replace(f"| {bare_level}x", ...)` which only matched the single-space form. On `|2x` input (no space) the counter incremented (`bare_demoted += 1`) while the text retained the old level — same state-corruption pattern the `_demote_line` HIGH fix closed in v0.3.3, but the bare path was not updated to match. Fixed by mirroring the `_demote_line` treatment: `re.sub(rf"\|\s*{bare_level}x", f"| {bare_level - 1}x", old_marker, count=1)`. Severity stays LOW because the bare path only fires when `citations_seen=True` (legacy agents not using evidence tags). One new regression test `test_bare_graduation_demoted_no_space_variant` covers the `|2x` variant; the existing space-variant test gained level-rewrite assertions (`"| 1x" in result.text` + `"| 2x" not in result.text`) so future regressions in the level-rewrite path can't sneak past a counter-only check.
+
+### Operational — Diogenes contradiction sweep (PAIRED FOLLOW-UP #2)
+
+- Sweep script + scheduler entry built laptop-side (not part of this repo's deliverable, recorded here for cross-reference). Operator-review layer for Move #4 contradiction-detection is now operational; first backfill verdict on flow's own 5+ month Proven corpus landed 2026-05-25 (0 contradictions, 7 closest tensions named and judged as layer-difference / specialization / scoped-application). Closes the Diogenes-side obligation tracked in `next.md` PAIRED FOLLOW-UPS.
+
 ## [0.3.2] — 2026-05-21
 
 v0.3.2 is the Bold Stand 4-layer review release. The Bold Stand Phase 1 adversarial stress-test (2026-05-21 morning) surfaced Moves #1/#2/#3 as the closure path; the 4-layer review (session-code-review + multi-agent code consultation + multi-agent Move #4 design consultation + L1/L4 attention-mode) of those moves the same evening surfaced a load-bearing grammar mismatch (the new defenses protected the wrong pattern format), a structural false-positive defect in Move #3's corpus comparison, an Anti-Patterns section-detection bug, and the architectural reframe of Move #4. All of it bundled into this single release.

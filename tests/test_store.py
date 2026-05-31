@@ -901,7 +901,7 @@ class TestValidatedSaveContinuity:
 
         store.record("Something", EpisodeType.OBSERVATION)
         prepare_wrap(store)
-        with pytest.raises(ValueError, match="4 sections"):
+        with pytest.raises(ValueError, match="must contain all sections"):
             validated_save_continuity(store, "Just some text without sections")
 
     def test_validated_save_rejects_empty_text(self, store):

@@ -470,7 +470,7 @@ class TestToolSaveContinuity:
         server._tool_prepare_wrap({})
         result = server._tool_save_continuity({"text": "# Just a title\nNo sections."})
         assert _is_error(result)
-        assert "4 sections" in _text_from_result(result)
+        assert "must contain all sections" in _text_from_result(result)
 
     def test_save_missing_one_section_fails(self, server):
         server._tool_record({"content": "Test obs", "episode_type": "observation"})

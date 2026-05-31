@@ -3780,3 +3780,360 @@ class TestMove4LibraryLayerIntegration:
             assert result["proven_without_contradicts_declaration"] == []
         finally:
             store.close()
+
+
+class TestCatastrophicShrinkGate:
+    """v0.3.5 structural shrink gate — regression coverage for flow dual-write
+    wrap #4 (2026-05-31): a single-session wrap compressed a ~19.7k-char
+    neocortex to ~1.6k, gutting the timeless ``Understanding`` section and the
+    graduating ``Patterns`` section, and nothing structural caught it
+    (``validate_structure`` passed; the immune system reported clean).
+
+    ``structural_invariants_beat_discipline``: refuse the collapse at the save
+    boundary rather than trust every wrap driver to hold the proportion-check.
+    The ``narrative-timeless`` retain floor (0.5) is strict because no existing
+    ops entity carries that role; the ``graduating`` + whole-doc floors (0.25)
+    are conservative so a legitimate large prune on an autonomous entity is not
+    blocked.
+    """
+
+    # ---- fixtures: a realistic flow-shaped prior + a wrap-#4-shaped collapse ----
+
+    @staticmethod
+    def _flow_prior() -> str:
+        understanding = (
+            "Phill is a paradox-holding ensemble mind; play is the engine not "
+            "the mood; the work is high-bandwidth, irreverent, for the record. "
+        ) * 16
+        patterns = (
+            "partnership_challenge_at_X_boundary breaks the drift the loaded "
+            "context cannot see; verify_or_surface grounds truth over the "
+            "cached snapshot; structural_invariants_beat_discipline refuse at "
+            "the failure point. "
+        ) * 10
+        return (
+            "# flow — Memory (test)\n\n"
+            "## State\nflow->anneal migration in progress; parity-observe mode.\n\n"
+            "## Active Threads\n- migration\n- BJE\n- Argus\n\n"
+            "## Patterns\n" + patterns + "\n\n"
+            "## Decisions\n[decided] diet-first; only identity always-loaded.\n\n"
+            "## Context\nrecent work: stood up the anneal shadow store and ran "
+            "dual-write parity.\n\n"
+            "## Understanding\n" + understanding + "\n"
+        )
+
+    @staticmethod
+    def _flow_collapsed() -> str:
+        # Mirrors wrap #4: all six headings present (validate_structure passes)
+        # but Understanding is one paragraph and Patterns is one line.
+        return (
+            "# flow — Memory (test)\n\n"
+            "## State\nBJE pmc A,7 workaround verified tonight.\n\n"
+            "## Active Threads\n- BJE pmc reply\n\n"
+            "## Patterns\nidb a11y tree is the un-fakeable oracle under a "
+            "fabricating channel.\n\n"
+            "## Decisions\nReload on Sonnet 4.6 after fabrication confirmed.\n\n"
+            "## Context\nBJE soft-18 double-index workaround verified in editor.\n\n"
+            "## Understanding\nThe verification protocol from the fabrication "
+            "incident works: model swap plus single-oracle-per-turn routes "
+            "around load failures.\n"
+        )
+
+    def _wrap(self, store, text, today, *, allow_shrink=None, n_eps=3):
+        from anneal_memory import prepare_wrap, validated_save_continuity
+        for i in range(n_eps):
+            store.record(
+                f"episode {today} #{i}: substrate observation about topic {i}.",
+                "observation",
+            )
+        result = prepare_wrap(store, max_chars=40000)
+        kw = {"today": today, "wrap_token": result["wrap_token"]}
+        if allow_shrink is not None:
+            kw["allow_shrink"] = allow_shrink
+        return validated_save_continuity(store, text, **kw)
+
+    # ---- direct unit coverage of the gate function ----
+
+    def test_unit_flow_collapse_raises_naming_layers(self):
+        from anneal_memory.continuity import _check_no_catastrophic_shrink
+        from anneal_memory import FLOW_SCHEMA
+        with pytest.raises(ValueError) as exc:
+            _check_no_catastrophic_shrink(
+                self._flow_prior(), self._flow_collapsed(),
+                FLOW_SCHEMA, allow_shrink=False,
+            )
+        msg = str(exc.value)
+        assert "Understanding" in msg          # narrative-timeless layer
+        assert "Patterns" in msg               # graduating layer
+        assert "whole continuity" in msg       # whole-doc floor
+        assert "allow_shrink" in msg           # the override is surfaced
+
+    def test_unit_allow_shrink_bypasses(self):
+        from anneal_memory.continuity import _check_no_catastrophic_shrink
+        from anneal_memory import FLOW_SCHEMA
+        # Must not raise.
+        _check_no_catastrophic_shrink(
+            self._flow_prior(), self._flow_collapsed(),
+            FLOW_SCHEMA, allow_shrink=True,
+        )
+
+    def test_unit_first_wrap_no_prior_passes(self):
+        from anneal_memory.continuity import _check_no_catastrophic_shrink
+        from anneal_memory import FLOW_SCHEMA
+        for prior in (None, "", "   \n  "):
+            _check_no_catastrophic_shrink(
+                prior, self._flow_collapsed(), FLOW_SCHEMA, allow_shrink=False,
+            )
+
+    def test_unit_growth_passes(self):
+        from anneal_memory.continuity import _check_no_catastrophic_shrink
+        from anneal_memory import FLOW_SCHEMA
+        prior = self._flow_prior()
+        bigger = prior + ("\n\nappended arc detail line. " * 50)
+        _check_no_catastrophic_shrink(prior, bigger, FLOW_SCHEMA, allow_shrink=False)
+
+    def test_unit_partnership_below_floor_passes(self):
+        # Partnership entity (gated) but every section below the 500-char floor
+        # -> never gated (a young entity cannot meaningfully "collapse").
+        from anneal_memory.continuity import _check_no_catastrophic_shrink
+        from anneal_memory import FLOW_SCHEMA
+        prior = (
+            "# flow\n\n## State\nhi\n\n## Active Threads\n- x\n\n"
+            "## Patterns\n- p | 1x (2026-05-31)\n\n## Decisions\nd\n\n"
+            "## Context\nc\n\n## Understanding\nshort.\n"
+        )
+        new = (
+            "# flow\n\n## State\nyo\n\n## Active Threads\n- y\n\n"
+            "## Patterns\n- q | 1x (2026-05-31)\n\n## Decisions\ne\n\n"
+            "## Context\nf\n\n## Understanding\ntiny.\n"
+        )
+        _check_no_catastrophic_shrink(prior, new, FLOW_SCHEMA, allow_shrink=False)
+
+    def test_unit_ops_entity_not_gated(self):
+        # DEFAULT_SCHEMA has no narrative-timeless section -> the gate is a
+        # no-op even on a catastrophic Patterns/whole-doc collapse. Ops entities
+        # consolidate aggressively + autonomously by design (MEDIUM-1).
+        from anneal_memory.continuity import _check_no_catastrophic_shrink
+        from anneal_memory import DEFAULT_SCHEMA
+        big = "alpha_pattern mechanism prose sentence here. " * 60
+        prior = (
+            "## State\ns\n\n## Patterns\n" + big + "\n\n"
+            "## Decisions\nd\n\n## Context\n" + ("ctx. " * 200) + "\n"
+        )
+        collapsed = "## State\ns2\n\n## Patterns\n- one note.\n\n## Decisions\nd\n\n## Context\nc.\n"
+        # Would trip if this were a partnership entity; ops entity -> no raise.
+        _check_no_catastrophic_shrink(prior, collapsed, DEFAULT_SCHEMA, allow_shrink=False)
+
+    def test_unit_schema_migration_prior_missing_felt_section_passes(self):
+        # flow's Phase-1 -> Phase-2 transition: prior continuity was written
+        # under the default 4-section shape (no Understanding); the store is now
+        # FLOW_SCHEMA. The absent felt section has prior mass 0 -> below floor ->
+        # skipped (you cannot "shrink" a section that did not exist). No false
+        # positive, no crash, as long as the carried sections hold.
+        from anneal_memory.continuity import (
+            _check_no_catastrophic_shrink,
+            _schema_section_masses,
+        )
+        from anneal_memory import FLOW_SCHEMA
+        patterns = (
+            "partnership_challenge breaks drift; verify_or_surface grounds "
+            "truth. "
+        ) * 12
+        prior = (  # DEFAULT-shaped: no Active Threads / Understanding
+            "# flow\n\n## State\npre-migration.\n\n## Patterns\n" + patterns
+            + "\n\n## Decisions\nd.\n\n## Context\nwork narrative.\n"
+        )
+        new = (  # full FLOW shape, Patterns carried forward, Understanding present
+            "# flow\n\n## State\npost.\n\n## Active Threads\n- t\n\n## Patterns\n"
+            + patterns + "\n\n## Decisions\nd.\n\n## Context\nwork narrative "
+            "continues.\n\n## Understanding\n"
+            + ("who we are together, the felt layer. " * 20) + "\n"
+        )
+        assert _schema_section_masses(prior, FLOW_SCHEMA)["understanding"] == 0
+        _check_no_catastrophic_shrink(prior, new, FLOW_SCHEMA, allow_shrink=False)
+
+    def test_unit_narrative_context_churn_passes(self):
+        # Context (narrative, unprotected) is rewritten fresh each wrap; gutting
+        # it must not trip the gate as long as the protected layers + whole-doc
+        # hold.
+        from anneal_memory.continuity import (
+            _check_no_catastrophic_shrink,
+            _schema_section_masses,
+        )
+        from anneal_memory import FLOW_SCHEMA
+        churny = "## Context\n" + ("a churny work-narrative sentence. " * 40) + "\n\n"
+        prior = self._flow_prior().replace(
+            "## Context\nrecent work: stood up the anneal shadow store and ran "
+            "dual-write parity.\n\n",
+            churny,
+        )
+        new = prior.replace(churny, "## Context\nfresh one-liner.\n\n")
+        pm = _schema_section_masses(prior, FLOW_SCHEMA)
+        nm = _schema_section_masses(new, FLOW_SCHEMA)
+        assert nm["context"] < pm["context"] * 0.25     # context did collapse
+        assert nm["understanding"] == pm["understanding"]  # protected, untouched
+        _check_no_catastrophic_shrink(prior, new, FLOW_SCHEMA, allow_shrink=False)
+
+    # ---- end-to-end through validated_save_continuity ----
+
+    def test_pipeline_flow_collapse_refused_wrap_stays_open(self, tmp_path):
+        from anneal_memory import Store, FLOW_SCHEMA
+        store = Store(tmp_path / "s.db", project_name="flow")
+        store.set_section_schema(FLOW_SCHEMA)
+        try:
+            self._wrap(store, self._flow_prior(), "2026-05-30")
+            before = store.load_continuity()
+            with pytest.raises(ValueError) as exc:
+                self._wrap(store, self._flow_collapsed(), "2026-05-31")
+            assert "collapses protected memory" in str(exc.value)
+            # The gate raises before wrap_completed: the wrap is still in
+            # progress (agent can re-wrap or cancel) and the prior continuity
+            # on disk is untouched.
+            assert store.get_wrap_started_at() is not None
+            assert store.load_continuity() == before
+        finally:
+            store.close()
+
+    def test_pipeline_flow_collapse_allow_shrink_saves(self, tmp_path):
+        from anneal_memory import Store, FLOW_SCHEMA
+        store = Store(tmp_path / "s.db", project_name="flow")
+        store.set_section_schema(FLOW_SCHEMA)
+        try:
+            self._wrap(store, self._flow_prior(), "2026-05-30")
+            collapsed = self._flow_collapsed()
+            result = self._wrap(store, collapsed, "2026-05-31", allow_shrink=True)
+            assert result["chars"] == len(collapsed)
+            assert store.get_wrap_started_at() is None   # wrap completed
+        finally:
+            store.close()
+
+    def test_pipeline_flow_healthy_growth_saves(self, tmp_path):
+        from anneal_memory import Store, FLOW_SCHEMA
+        store = Store(tmp_path / "s.db", project_name="flow")
+        store.set_section_schema(FLOW_SCHEMA)
+        try:
+            self._wrap(store, self._flow_prior(), "2026-05-30")
+            grown = self._flow_prior().replace(
+                "## Context\nrecent work: stood up the anneal shadow store and "
+                "ran dual-write parity.\n\n",
+                "## Context\nrecent work: shipped the shrink gate; "
+                + ("more recent-arc detail. " * 40) + "\n\n",
+            )
+            result = self._wrap(store, grown, "2026-05-31")
+            assert result["chars"] == len(grown)
+            assert store.get_wrap_started_at() is None
+        finally:
+            store.close()
+
+    def test_pipeline_default_schema_ops_entity_not_gated(self, tmp_path):
+        # Ops entities (DEFAULT_SCHEMA, no narrative-timeless section) are
+        # intentionally NOT gated (MEDIUM-1 resolution): they consolidate
+        # aggressively + autonomously by design, with no human to pass an
+        # override. Even a hard Patterns collapse saves, byte-identical to
+        # pre-0.3.5 behavior.
+        from anneal_memory import Store
+        store = Store(tmp_path / "s.db", project_name="ops")
+        try:
+            big = "connection_pooling_is_the_bottleneck under sustained load. " * 24
+            prior = (
+                "## State\nrunning steady.\n\n"
+                "## Patterns\n" + big + "\n\n"
+                "## Decisions\n[decided] postgres for ACID.\n\n"
+                "## Context\nops narrative of the week.\n"
+            )
+            self._wrap(store, prior, "2026-05-30")
+            collapsed = (
+                "## State\nrunning, new focus today.\n\n"
+                "## Patterns\none short note.\n\n"
+                "## Decisions\n[decided] postgres for ACID.\n\n"
+                "## Context\nops narrative of the week.\n"
+            )
+            self._wrap(store, collapsed, "2026-05-31")
+            assert store.get_wrap_started_at() is None   # saved, not refused
+        finally:
+            store.close()
+
+    def test_pipeline_default_schema_modest_prune_saves(self, tmp_path):
+        # A ~37% Patterns prune is below the >75%-collapse trip line -> allowed
+        # (the conservative graduating floor protects legitimate ops prunes).
+        from anneal_memory import Store
+        store = Store(tmp_path / "s.db", project_name="ops")
+        try:
+            big = "alpha_pattern mechanism prose sentence here. " * 60
+            ctx = "ctx. " * 200
+            prior = (
+                "## State\ns\n\n## Patterns\n" + big + "\n\n"
+                "## Decisions\nd\n\n## Context\n" + ctx + "\n"
+            )
+            self._wrap(store, prior, "2026-05-30")
+            smaller = "alpha_pattern mechanism prose sentence here. " * 38
+            new = (
+                "## State\ns2\n\n## Patterns\n" + smaller + "\n\n"
+                "## Decisions\nd\n\n## Context\n" + ctx + "\n"
+            )
+            self._wrap(store, new, "2026-05-31")
+            assert store.get_wrap_started_at() is None   # saved, not refused
+        finally:
+            store.close()
+
+    def test_unit_ambiguous_merged_heading_rejected(self):
+        # codex L3: a single "## Patterns and Understanding" line must NOT be
+        # credited to both protected sections (a merged body faking mass for two
+        # roles would defeat the gate), and must NOT satisfy validate_structure
+        # for two required sections.
+        from anneal_memory.continuity import (
+            _schema_section_masses,
+            validate_structure,
+        )
+        from anneal_memory import FLOW_SCHEMA
+        merged = (
+            "# flow\n\n## State\ns\n\n## Active Threads\n- t\n\n"
+            "## Patterns and Understanding\nmerged body here\n\n"
+            "## Decisions\nd\n\n## Context\nc\n"
+        )
+        masses = _schema_section_masses(merged, FLOW_SCHEMA)
+        assert masses["patterns"] == 0          # not credited
+        assert masses["understanding"] == 0     # not credited
+        assert validate_structure(merged, FLOW_SCHEMA) is False  # ambiguous -> invalid
+
+    def test_unit_allow_shrink_strict_only_true_bypasses(self):
+        # codex L3: a safety override must be fail-closed at the core. Only a
+        # literal True bypasses; loosely-typed truthy/falsey values still gate.
+        from anneal_memory.continuity import _check_no_catastrophic_shrink
+        from anneal_memory import FLOW_SCHEMA
+        prior, collapsed = self._flow_prior(), self._flow_collapsed()
+        for sneaky in ("false", "true", 1, 0, [], None):
+            with pytest.raises(ValueError):
+                _check_no_catastrophic_shrink(
+                    prior, collapsed, FLOW_SCHEMA, allow_shrink=sneaky,
+                )
+        # Only literal True bypasses.
+        _check_no_catastrophic_shrink(
+            prior, collapsed, FLOW_SCHEMA, allow_shrink=True
+        )
+
+    def test_pipeline_merged_heading_refused(self, tmp_path):
+        # codex L3: the save boundary rejects a merged protected heading with a
+        # clear message, closing the gate-evasion end to end.
+        from anneal_memory import Store, FLOW_SCHEMA
+        store = Store(tmp_path / "s.db", project_name="flow")
+        store.set_section_schema(FLOW_SCHEMA)
+        try:
+            merged = (
+                "# flow\n\n## State\ns\n\n## Active Threads\n- t\n\n"
+                "## Patterns and Understanding\nmerged body\n\n"
+                "## Decisions\nd\n\n## Context\nc\n"
+            )
+            with pytest.raises(ValueError) as exc:
+                self._wrap(store, merged, "2026-05-31")
+            assert "Ambiguous section heading" in str(exc.value)
+        finally:
+            store.close()
+
+    def test_cli_allow_shrink_flag_parses(self):
+        from anneal_memory.cli import build_parser
+        p = build_parser()
+        on = p.parse_args(["save-continuity", "--allow-shrink", "cont.md"])
+        assert on.allow_shrink is True
+        off = p.parse_args(["save-continuity", "cont.md"])
+        assert off.allow_shrink is False

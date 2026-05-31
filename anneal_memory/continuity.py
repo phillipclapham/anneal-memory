@@ -57,6 +57,24 @@ from .types import (
 if TYPE_CHECKING:
     from .store import Store
 
+
+def _matching_required_headings(line_lower: str, required: set[str]) -> list[str]:
+    """Required schema headings (lowercased) satisfied by one ``## `` header
+    line, via the lenient word-bounded match.
+
+    More than one match means the header is AMBIGUOUS — a single line satisfying
+    two required sections, e.g. ``## Patterns and Understanding``. That would let
+    a merged header route one body into two protected roles and defeat the
+    shrink gate (v0.3.5), and it also lets one line silently satisfy two
+    ``validate_structure`` requirements. Callers treat ``len > 1`` as malformed.
+    """
+    return [
+        h
+        for h in required
+        if re.search(rf"(?<!\w){re.escape(h)}(?!\w)", line_lower)
+    ]
+
+
 def validate_structure(text: str, schema: list[SectionSpec] | None = None) -> bool:
     """Validate that continuity text contains all of the schema's sections.
 
@@ -91,10 +109,15 @@ def validate_structure(text: str, schema: list[SectionSpec] | None = None) -> bo
     found: set[str] = set()
     for line in text.split("\n"):
         if line.startswith("## "):
-            line_lower = line.lower()
-            for heading in required:
-                if re.search(rf"(?<!\w){re.escape(heading)}(?!\w)", line_lower):
-                    found.add(heading)
+            matched = _matching_required_headings(line.lower(), required)
+            # An ambiguous header (one line satisfying multiple required
+            # sections, e.g. "## Patterns and Understanding") is malformed: it
+            # merges two protected roles into one body and would defeat the
+            # shrink gate. Reject the whole structure so each section keeps its
+            # own header line.
+            if len(matched) > 1:
+                return False
+            found.update(matched)
     return found == required
 
 
@@ -124,6 +147,179 @@ def measure_sections(text: str) -> dict[str, int]:
         sections[current_section] = current_chars
 
     return sections
+
+
+# --- Catastrophic-shrink gate (v0.3.5) ---------------------------------------
+#
+# A wrap that collapses a protected-role section — the timeless felt layer
+# (``narrative-timeless``) or the graduated-identity layer (``graduating``) —
+# or the whole neocortex is almost always a recency-trap / stateless-reset
+# failure, not a deliberate edit. (flow dual-write wrap #4, 2026-05-31: a
+# single-session wrap compressed a 19,702-char neocortex down to 1,608 —
+# ``## Understanding`` became one paragraph, ``## Patterns`` one line — and
+# nothing structural caught it; ``validate_structure`` passed because every
+# heading was still present, just gutted.)
+#
+# ``structural_invariants_beat_discipline``: the proportion-check that's meant
+# to prevent this is discipline, and discipline drifts across wrap drivers (a
+# different model, the same model under load, a single-task session). This gate
+# refuses the collapse at the save boundary instead of trusting every driver to
+# hold the check.
+#
+# SCOPE — partnership entities only. The gate fires ONLY when the store's schema
+# declares a ``narrative-timeless`` section (the felt layer): flow's
+# ``FLOW_SCHEMA`` today, and future Levain-seeded partnership entities. Pure ops
+# entities (``DEFAULT_SCHEMA`` — daemon, anansi, Argus, diogenes, nexus, prism)
+# are NOT gated and keep their exact pre-0.3.5 audit-not-gate behavior
+# (byte-identical; the schema feature's backward-compat invariant holds). Three
+# reasons: they wrap autonomously overnight with no human to pass an override;
+# they legitimately consolidate many graduated patterns into a few dense
+# meta-patterns (a large Patterns shrink that is correct, not a collapse — the
+# graduation philosophy *encourages* it); and they have no felt layer to lose.
+# The gate guards exactly the entities that (a) declared a felt / identity layer
+# worth protecting and (b) wrap with a human present who can pass
+# ``allow_shrink`` for a deliberate diet. Decomposition along the existing
+# partnership-vs-ops schema seam, not a new distinction.
+#
+# Retain floors (partnership entities only): the ``narrative-timeless`` (felt)
+# and ``graduating`` (identity) sections must each retain >=50% of prior mass;
+# the whole document >=25%. Sections / documents below the char floor are never
+# gated (thin sections cannot meaningfully "collapse"). A deliberate diet
+# (one-time migration recompression) passes ``allow_shrink=True``.
+_SHRINK_GATE_MIN_PRIOR_CHARS = 500
+_SHRINK_RETAIN_FRACTION: dict[str, float] = {
+    "narrative-timeless": 0.5,
+    "graduating": 0.5,
+}
+_DOC_SHRINK_RETAIN_FRACTION = 0.25
+
+
+def _schema_section_masses(text: str, schema: list[SectionSpec]) -> dict[str, int]:
+    """Character count per schema section, keyed by lowercased schema heading.
+
+    Walks the ``## `` header lines and credits each section's character span to
+    the schema heading(s) it satisfies, using the SAME word-bounded match
+    :func:`validate_structure` uses — so a descriptive header like
+    ``## State of Mind`` is credited to a required ``State`` section. A header
+    matching no schema heading is ignored; a header matching several (which
+    :func:`~anneal_memory.schema.validate_schema` forbids among the schema's own
+    headings) credits each, which is the conservative choice for a gate.
+    """
+    required = {h.lower() for h in required_headings(schema)}
+    masses: dict[str, int] = {h: 0 for h in required}
+    current: list[str] = []
+    current_chars = 0
+
+    def _flush() -> None:
+        for h in current:
+            masses[h] += current_chars
+
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            _flush()
+            matched = _matching_required_headings(line.lower(), required)
+            # Single-credit only: an ambiguous header (matches >1 required
+            # section) credits its span to NONE — conservative for a shrink
+            # gate, since a merged body must not fake mass for two protected
+            # roles. validated_save_continuity rejects such headers up front,
+            # so this is defense in depth.
+            current = matched if len(matched) == 1 else []
+            current_chars = len(line) + 1
+        else:
+            current_chars += len(line) + 1
+    _flush()
+    return masses
+
+
+def _check_no_catastrophic_shrink(
+    prior_text: str | None,
+    new_text: str,
+    schema: list[SectionSpec],
+    *,
+    allow_shrink: bool,
+) -> None:
+    """Refuse a wrap that collapses a protected-role section or the whole
+    neocortex, unless ``allow_shrink`` is set.
+
+    The structural backstop for the felt / identity layers: a recency-trapped
+    or stateless-reset wrap silently guts the timeless ``narrative-timeless``
+    section and/or the ``graduating`` identity section. This refuses at the save
+    boundary (raising :class:`ValueError`, leaving the wrap in progress so the
+    agent can re-wrap — identical handling to a structure-validation failure).
+    Deliberate diets pass ``allow_shrink=True``.
+
+    No-ops when there is no prior continuity (first wrap) or the relevant prior
+    side is below :data:`_SHRINK_GATE_MIN_PRIOR_CHARS` (nothing meaningful to
+    collapse).
+    """
+    # Strict override: a safety gate must be fail-closed. Only a literal True
+    # bypasses — a stray ``allow_shrink="false"`` / ``1`` from a loosely-typed
+    # caller (bridge, script, JSON wrapper) must NOT disable the gate. Mirrors
+    # the MCP adapter's ``is True`` coercion at the core boundary.
+    if allow_shrink is True:
+        return
+    if not prior_text or not prior_text.strip():
+        return
+
+    # Partnership entities only (see module comment). An entity that declared a
+    # narrative-timeless felt section is opting into felt/identity protection;
+    # ops entities (no such section) consolidate aggressively + autonomously by
+    # design and keep their pre-0.3.5 behavior.
+    if not any(s["role"] == "narrative-timeless" for s in schema):
+        return
+
+    display_by_lower = {s["heading"].lower(): s["heading"] for s in schema}
+    role_by_heading = {s["heading"].lower(): s["role"] for s in schema}
+    prior_masses = _schema_section_masses(prior_text, schema)
+    new_masses = _schema_section_masses(new_text, schema)
+
+    offenders: list[str] = []
+    for heading_lower, role in role_by_heading.items():
+        retain = _SHRINK_RETAIN_FRACTION.get(role)
+        if retain is None:
+            continue
+        prior_mass = prior_masses.get(heading_lower, 0)
+        if prior_mass < _SHRINK_GATE_MIN_PRIOR_CHARS:
+            continue
+        new_mass = new_masses.get(heading_lower, 0)
+        if new_mass < prior_mass * retain:
+            pct = round(100 * (1 - new_mass / prior_mass))
+            offenders.append(
+                f"  - '{display_by_lower[heading_lower]}' ({role}): "
+                f"{prior_mass} -> {new_mass} chars "
+                f"({pct}% smaller; must retain >={int(retain * 100)}%)"
+            )
+
+    prior_total = len(prior_text)
+    new_total = len(new_text)
+    if (
+        prior_total >= _SHRINK_GATE_MIN_PRIOR_CHARS
+        and new_total < prior_total * _DOC_SHRINK_RETAIN_FRACTION
+    ):
+        pct = round(100 * (1 - new_total / prior_total))
+        offenders.append(
+            f"  - whole continuity: {prior_total} -> {new_total} chars "
+            f"({pct}% smaller; must retain "
+            f">={int(_DOC_SHRINK_RETAIN_FRACTION * 100)}%)"
+        )
+
+    if not offenders:
+        return
+
+    raise ValueError(
+        "Refusing to save: this wrap collapses protected memory layer(s) — "
+        "almost always a recency-trap or stateless-reset failure (the latest "
+        "session compressed over the accumulated identity), not a deliberate "
+        "edit:\n"
+        + "\n".join(offenders)
+        + "\n\nThe narrative-timeless (felt) and graduating (identity) layers "
+        "carry the continuity that makes you yourself across sessions — they "
+        "evolve, they do not reset. Re-wrap preserving them: carry the prior "
+        "content forward and update it, auditing proportions against the FULL "
+        "arc of the work, not just this session. If this shrink is genuinely "
+        "intended (a deliberate diet / migration recompression), pass "
+        'allow_shrink=True (CLI: --allow-shrink; MCP: "allow_shrink": true).'
+    )
 
 
 def format_episodes_for_wrap(episodes: list[Episode]) -> str:
@@ -654,6 +850,7 @@ def validated_save_continuity(
     *,
     today: str | None = None,
     wrap_token: str | None = None,
+    allow_shrink: bool = False,
 ) -> SaveContinuityResult:
     """Save continuity with the full validation pipeline.
 
@@ -747,6 +944,21 @@ def validated_save_continuity(
             their protocol (MCP ``save_continuity`` tool argument,
             CLI ``--wrap-token`` flag) should pass it for explicit
             safety; single-process library callers can omit it.
+        allow_shrink: Override for the catastrophic-shrink gate
+            (v0.3.5). The gate applies only to PARTNERSHIP entities —
+            stores whose schema declares a ``narrative-timeless``
+            section (e.g. flow's ``FLOW_SCHEMA``); ops entities on the
+            default schema are never gated and ignore this flag. For a
+            gated entity, a wrap that collapses a protected memory
+            layer — the ``narrative-timeless`` (felt) or ``graduating``
+            (identity) section below 50% of its prior mass, or the
+            whole continuity below 25% — raises ``ValueError`` (a
+            recency-trap / stateless-reset wrap silently gutting the
+            felt / identity layers). Pass ``True`` only for a
+            deliberate diet (a one-time migration recompression that
+            intentionally shrinks the neocortex); the override is
+            surfaced on the CLI as ``--allow-shrink`` and on the MCP
+            ``save_continuity`` tool as ``"allow_shrink": true``.
 
     Returns:
         :class:`SaveContinuityResult` — a :class:`TypedDict` with the
@@ -784,8 +996,10 @@ def validated_save_continuity(
     Raises:
         ValueError: If text is empty, missing required sections, no
             wrap is in progress (``prepare_wrap`` not called, or the
-            session already wrapped), or a passed ``wrap_token`` does
-            not match the in-progress wrap.
+            session already wrapped), a passed ``wrap_token`` does
+            not match the in-progress wrap, or the wrap catastrophically
+            collapses a protected memory layer and ``allow_shrink`` is
+            not set.
         StoreError: Raised in two distinct cases. (1) **Integrity
             failure.** The wrap-state precondition runs
             :meth:`Store.load_wrap_snapshot` first (before any payload
@@ -882,11 +1096,39 @@ def validated_save_continuity(
     # further down (v0.3.4).
     section_schema = store.section_schema
     grad_headings = graduating_headings(section_schema)
+    # Reject ambiguous merged headings (e.g. "## Patterns and Understanding")
+    # with a clear message before the generic all-sections check: one header
+    # satisfying two required sections would route a single body into two
+    # protected roles and defeat the shrink gate (v0.3.5). Each section needs
+    # its own '## ' header line.
+    _required_lower = {h.lower() for h in required_headings(section_schema)}
+    for _line in text.split("\n"):
+        if _line.startswith("## "):
+            _matched = _matching_required_headings(_line.lower(), _required_lower)
+            if len(_matched) > 1:
+                raise ValueError(
+                    f"Ambiguous section heading {_line.strip()!r} satisfies "
+                    f"multiple schema sections ({', '.join(sorted(_matched))}). "
+                    "Give each section its own '## ' header so the felt / "
+                    "identity layers stay distinct."
+                )
     if not validate_structure(text, section_schema):
         required_str = ", ".join(
             f"## {h}" for h in required_headings(section_schema)
         )
         raise ValueError(f"Continuity must contain all sections: {required_str}")
+
+    # Catastrophic-shrink gate (v0.3.5). Load the prior continuity ONCE here
+    # and reuse it for the silent-omission audit further down. The gate runs
+    # before the episode fetch + graduation so a collapsing wrap fails fast;
+    # raising ValueError leaves the wrap in progress (same as the
+    # structure-validation failure above), so the agent re-wraps with the
+    # felt/identity layers preserved (or passes allow_shrink for a deliberate
+    # diet) without losing the prepared wrap.
+    prior_continuity = store.load_continuity()
+    _check_no_catastrophic_shrink(
+        prior_continuity, text, section_schema, allow_shrink=allow_shrink
+    )
 
     # Get current session's episodes for citation validation.
     # Re-fetch the full post-last-wrap set and filter down to exactly
@@ -944,7 +1186,7 @@ def validated_save_continuity(
     # prior continuity file exists — coerce to empty string so
     # detect_pattern_omissions returns an empty list on the first
     # wrap (correct behavior: no prior patterns means no omissions).
-    prior_text_for_omission_audit = store.load_continuity() or ""
+    prior_text_for_omission_audit = prior_continuity or ""
     grad_result.omitted_patterns = detect_pattern_omissions(
         prior_text=prior_text_for_omission_audit,
         new_text=grad_result.text,

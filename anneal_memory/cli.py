@@ -740,6 +740,7 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 text,
                 affective_state=affective_state,
                 wrap_token=wrap_token,
+                allow_shrink=getattr(args, "allow_shrink", False),
             )
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
@@ -1844,6 +1845,17 @@ def build_parser() -> argparse.ArgumentParser:
             "with the persisted wrap raises an error; when omitted, the "
             "frozen-snapshot filter still applies but no token "
             "verification runs."
+        ),
+    )
+    sub.add_argument(
+        "--allow-shrink",
+        action="store_true",
+        help=(
+            "Override the catastrophic-shrink gate. By default a wrap that "
+            "collapses a protected memory layer (the timeless felt section, "
+            "the graduating identity section, or the whole continuity) is "
+            "refused as a likely recency-trap/stateless-reset failure. Pass "
+            "this only for a deliberate diet / migration recompression."
         ),
     )
     sub.set_defaults(func=cmd_save_continuity)

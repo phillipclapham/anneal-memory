@@ -2,6 +2,25 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] — 2026-05-31
+
+Catastrophic-shrink gate for the felt / identity memory layers. A single wrap could pass `validate_structure` (every heading present) while gutting the content beneath it — compressing the latest session over the accumulated identity. A real incident: a partnership entity's wrap collapsed a ~19.7k-char continuity neocortex to ~1.6k, reducing the timeless `## Understanding` section to one paragraph and the graduating `## Patterns` section to one line, with nothing structural catching it. `validated_save_continuity` now refuses such a collapse at the save boundary unless the caller explicitly opts in.
+
+**Backward compatibility.** The gate fires **only for partnership entities** — stores whose schema declares a `narrative-timeless` section (e.g. `FLOW_SCHEMA`). Ops entities on `DEFAULT_SCHEMA` (and any schema without a `narrative-timeless` section) are **byte-for-byte unaffected**: they wrap autonomously with no human to pass an override, they legitimately consolidate many graduated patterns into a few dense meta-patterns (a large Patterns shrink that is correct, not a collapse), and they have no felt layer to lose. The one tightening that applies to every entity is the structure check (below): an ambiguous header that merges two required sections is now rejected — previously-malformed input that should never have validated.
+
+### Added — catastrophic-shrink gate (`structural_invariants_beat_discipline`)
+
+- **`validated_save_continuity(..., allow_shrink=False)`.** For a partnership entity, a wrap that drops a protected section below its retain floor raises `ValueError` and leaves the wrap in progress (the agent re-wraps, or passes `allow_shrink=True` for a deliberate diet) — identical lifecycle handling to a structure-validation failure, so no episodes are stranded and no wrap state is corrupted. Retain floors: `narrative-timeless` (felt) and `graduating` (identity) sections must each keep ≥50% of their prior mass; the whole continuity ≥25%. Sections / documents below 500 prior chars are never gated (a young entity cannot meaningfully "collapse"). `narrative` (work-shape) and `live-state` sections are intentionally unprotected — they are meant to be rewritten fresh each wrap. The override is **fail-closed**: only a literal `True` bypasses the gate (a loosely-typed `"false"` / `1` does not silently disable a safety check).
+- **Transport surfaces.** CLI `save-continuity --allow-shrink`; MCP `save_continuity` tool gains an `allow_shrink` boolean (coerced via `is True`). The MCP tool-integrity manifests are regenerated.
+
+### Fixed — ambiguous merged headings (semantic-routing hole)
+
+- **A single `## ` header that satisfies two required schema sections is now rejected.** The lenient word-bounded heading match (0.3.4) let one line like `## Patterns and Understanding` count as both required sections — passing `validate_structure` while merging two protected roles into one body, which would also have let a merged body fake mass for two roles and defeat the shrink gate. `validate_structure` now returns `False` for any such ambiguous header, `validated_save_continuity` raises a clear "Ambiguous section heading …" error before the generic all-sections check, and the section-mass measurement credits an ambiguous header to no section. Well-formed continuity (each section its own header) is unaffected. This closes both the gate-evasion path and the pre-existing structure-validation leniency hole. (Found by cross-substrate L3 review.)
+
+### Tests
+
+- **17 new tests** in `tests/test_continuity.py::TestCatastrophicShrinkGate`: the real wrap-collapse regression (refused, wrap left recoverable, prior continuity untouched), the `allow_shrink` override (and its fail-closed strictness against non-`True` values), partnership-vs-ops scoping, the schema-migration prior (felt section absent → skipped, no false positive), healthy growth + legitimate ops prune passing, narrative-churn passing, the char floor, and the ambiguous-merged-heading rejection (unit + end-to-end). Full suite **846 passing**; mypy clean.
+
 ## [0.3.4] — 2026-05-31
 
 Pluggable continuity section schema. Through 0.3.3 a continuity file's structure was hardcoded to exactly four sections — State / Patterns / Decisions / Context — in three coupled places: `validate_structure` (which sections are required), `_build_wrap_instructions` (what the agent is told to write), and the immune-system graduation gate `_is_patterns_heading` (which section the citation/graduation scan runs in). 0.3.4 makes that mapping a per-`Store` configuration.

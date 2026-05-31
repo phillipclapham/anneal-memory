@@ -236,6 +236,19 @@ TOOLS: list[dict[str, Any]] = [
                         "environments that can round-trip the value."
                     ),
                 },
+                "allow_shrink": {
+                    "type": "boolean",
+                    "description": (
+                        "Optional (default false): override the "
+                        "catastrophic-shrink gate. By default a wrap that "
+                        "collapses a protected memory layer — the timeless "
+                        "felt section, the graduating identity section, or "
+                        "the whole continuity — is refused as a likely "
+                        "recency-trap / stateless-reset failure. Set true "
+                        "ONLY for a deliberate diet / migration "
+                        "recompression that intentionally shrinks memory."
+                    ),
+                },
             },
             "required": ["text"],
         },

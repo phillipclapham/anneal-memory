@@ -427,12 +427,21 @@ class Server:
                     is_error=True,
                 )
 
+        # Optional catastrophic-shrink override (v0.3.5). Defaults to
+        # False; only a deliberate diet / migration recompression should
+        # set it. Require a genuine JSON boolean ``true`` — for a SAFETY
+        # override, a stringy ``"false"`` (or any other non-bool JSON)
+        # must NOT silently disable the gate, so anything that is not
+        # literally ``True`` leaves it enabled.
+        allow_shrink = args.get("allow_shrink", False) is True
+
         try:
             result = _lib_validated_save_continuity(
                 self._store,
                 text,
                 affective_state=affective_state,
                 wrap_token=wrap_token,
+                allow_shrink=allow_shrink,
             )
         except ValueError as exc:
             return _tool_result(f"Error: {exc}", is_error=True)

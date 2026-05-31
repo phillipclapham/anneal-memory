@@ -17,6 +17,8 @@ from datetime import datetime as _datetime
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .schema import DEFAULT_GRADUATING
+
 
 # Matches graduated patterns (2x or 3x) WITH [evidence: <id> "explanation"] citations.
 # Captures: (1) level, (2) date, (3) cited IDs, (4) optional explanation in quotes.
@@ -132,24 +134,40 @@ class ProvenWithoutDeclaration:
     level: int  # Level at which the pattern graduated (2 or 3)
 
 
-def _is_patterns_heading(line: str) -> bool:
-    """Return True iff this line is exactly the canonical ``## Patterns``
-    section heading (case-insensitive on the literal word).
+def _is_graduating_heading(
+    line: str, graduating_headings: frozenset[str] = DEFAULT_GRADUATING
+) -> bool:
+    """Return True iff ``line`` is a ``## ``-heading whose role is ``graduating``.
 
-    Replaces the historical loose check ``"pattern" in line.lower()``
-    which matched ``## Anti-Patterns``, ``## Other patterns``,
-    ``## Design Patterns``, etc. — every such section would be parsed
-    as the graduated-patterns section, polluting validation /
-    extraction / staleness with anti-pattern bullets the agent was
-    actively trying to suppress.
+    ``graduating_headings`` is a set of normalized ``## heading`` markers
+    (lowercased — e.g. ``{"## patterns"}``), produced by
+    :func:`anneal_memory.schema.graduating_headings` from a store's section
+    schema and threaded in by the continuity pipeline (v0.3.4). It defaults to
+    :data:`~anneal_memory.schema.DEFAULT_GRADUATING` (``{"## patterns"}``) so a
+    caller that passes no schema gets exactly the historical behavior — the
+    immune system / graduation scan runs only in ``## Patterns``.
 
-    Used by :func:`validate_graduations`, :func:`extract_pattern_names`,
-    and :func:`detect_stale_patterns` so all three converge on the same
-    canonical section definition. Added in v0.3.2 as part of the
-    Anti-Patterns parsing fix (Codex / Gemini / Complement convergence
-    on the 4-layer review).
+    The exact-match-against-a-set design preserves the v0.3.2 Anti-Patterns fix:
+    ``## Anti-Patterns`` / ``## Other patterns`` / ``## Design Patterns`` do not
+    match ``## patterns`` and so are never parsed as the graduated-patterns
+    section.
     """
-    return line.strip().lower() == "## patterns"
+    return line.strip().lower() in graduating_headings
+
+
+def _is_patterns_heading(line: str) -> bool:
+    """Backward-compatible alias: the default (``## Patterns``) graduating gate.
+
+    Equivalent to ``_is_graduating_heading(line)`` with the default
+    :data:`~anneal_memory.schema.DEFAULT_GRADUATING`. Retained because the
+    historical name is referenced across the codebase and reads clearly at the
+    DEFAULT_SCHEMA sites; schema-aware call sites use
+    :func:`_is_graduating_heading` with the threaded set. Retained for external /
+    legacy callers; after the v0.3.4 schema refactor there are no internal call
+    sites — the canonical pipeline calls :func:`_is_graduating_heading` with the
+    schema-derived graduating set.
+    """
+    return _is_graduating_heading(line)
 
 
 # Stop words for explanation overlap checking
@@ -279,6 +297,7 @@ def validate_graduations(
     citations_seen: bool = False,
     pattern_history_lookup: "Callable[[str], dict[str, Any] | None] | None" = None,
     cross_session_overlap_threshold: int = 3,
+    graduating_headings: frozenset[str] = DEFAULT_GRADUATING,
 ) -> GraduationResult:
     """Validate evidence citations on graduated patterns.
 
@@ -341,7 +360,7 @@ def validate_graduations(
     for i, line in enumerate(lines):
         # Track section boundaries
         if line.startswith("## "):
-            in_patterns = _is_patterns_heading(line)
+            in_patterns = _is_graduating_heading(line, graduating_headings)
             continue
         if not in_patterns:
             continue
@@ -632,7 +651,12 @@ def extract_session_co_citations(
     return pairs
 
 
-def detect_stale_patterns(text: str, today: str, staleness_days: int = 7) -> list[StalenessInfo]:
+def detect_stale_patterns(
+    text: str,
+    today: str,
+    staleness_days: int = 7,
+    graduating_headings: frozenset[str] = DEFAULT_GRADUATING,
+) -> list[StalenessInfo]:
     """Find patterns that haven't been validated recently.
 
     Scans the ## Patterns section for patterns with dates older than
@@ -654,7 +678,7 @@ def detect_stale_patterns(text: str, today: str, staleness_days: int = 7) -> lis
 
     for i, line in enumerate(lines):
         if line.startswith("## "):
-            in_patterns = _is_patterns_heading(line)
+            in_patterns = _is_graduating_heading(line, graduating_headings)
             continue
         if not in_patterns:
             continue
@@ -684,7 +708,9 @@ def detect_stale_patterns(text: str, today: str, staleness_days: int = 7) -> lis
     return stale
 
 
-def extract_pattern_names(text: str) -> dict[str, int]:
+def extract_pattern_names(
+    text: str, graduating_headings: frozenset[str] = DEFAULT_GRADUATING
+) -> dict[str, int]:
     """Extract the max graduation level per pattern name in the ## Patterns section.
 
     Scans only the ## Patterns section (consistent with validate_graduations
@@ -711,7 +737,7 @@ def extract_pattern_names(text: str) -> dict[str, int]:
     in_patterns = False
     for line in text.split("\n"):
         if line.startswith("## "):
-            in_patterns = _is_patterns_heading(line)
+            in_patterns = _is_graduating_heading(line, graduating_headings)
             continue
         if not in_patterns:
             continue
@@ -733,6 +759,7 @@ def detect_pattern_omissions(
     prior_text: str,
     new_text: str,
     min_level: int = 2,
+    graduating_headings: frozenset[str] = DEFAULT_GRADUATING,
 ) -> list[OmittedPattern]:
     """Detect Proven-tier patterns silently dropped between two wraps.
 
@@ -766,8 +793,8 @@ def detect_pattern_omissions(
         ``min_level`` in ``prior_text`` that is not present at any
         level in ``new_text``.
     """
-    prior_levels = extract_pattern_names(prior_text)
-    new_names = set(extract_pattern_names(new_text).keys())
+    prior_levels = extract_pattern_names(prior_text, graduating_headings)
+    new_names = set(extract_pattern_names(new_text, graduating_headings).keys())
     omissions: list[OmittedPattern] = []
     for name, prior_level in prior_levels.items():
         if prior_level < min_level:
@@ -780,7 +807,11 @@ def detect_pattern_omissions(
     return omissions
 
 
-def extract_proven_patterns(text: str, min_level: int = 2) -> list[str]:
+def extract_proven_patterns(
+    text: str,
+    min_level: int = 2,
+    graduating_headings: frozenset[str] = DEFAULT_GRADUATING,
+) -> list[str]:
     """Return the operator-style names of every Proven-tier pattern in
     the continuity's ``## Patterns`` section.
 
@@ -805,12 +836,14 @@ def extract_proven_patterns(text: str, min_level: int = 2) -> list[str]:
         downstream methodology-layer prompts and audit-log entries see
         a deterministic order.
     """
-    level_map = extract_pattern_names(text)
+    level_map = extract_pattern_names(text, graduating_headings)
     names = [name for name, lvl in level_map.items() if lvl >= min_level]
     return sorted(names)
 
 
-def extract_contradiction_declarations(text: str) -> dict[str, list[str]]:
+def extract_contradiction_declarations(
+    text: str, graduating_headings: frozenset[str] = DEFAULT_GRADUATING
+) -> dict[str, list[str]]:
     """Extract every pattern line's contradiction-stance declaration.
 
     Returns a mapping from pattern name → list of contradicted names
@@ -836,7 +869,7 @@ def extract_contradiction_declarations(text: str) -> dict[str, list[str]]:
     in_patterns = False
     for line in text.split("\n"):
         if line.startswith("## "):
-            in_patterns = _is_patterns_heading(line)
+            in_patterns = _is_graduating_heading(line, graduating_headings)
             continue
         if not in_patterns:
             continue
@@ -870,6 +903,7 @@ def detect_proven_without_declaration(
     new_text: str,
     today: str | None = None,
     min_level: int = 2,
+    graduating_headings: frozenset[str] = DEFAULT_GRADUATING,
 ) -> list[ProvenWithoutDeclaration]:
     """Detect NEW Proven graduations that landed without contradiction
     stance declaration.
@@ -916,9 +950,9 @@ def detect_proven_without_declaration(
         Sorted by (level descending, name ascending) for stable
         downstream output.
     """
-    prior_levels = extract_pattern_names(prior_text)
-    new_levels = extract_pattern_names(new_text)
-    declarations = extract_contradiction_declarations(new_text)
+    prior_levels = extract_pattern_names(prior_text, graduating_headings)
+    new_levels = extract_pattern_names(new_text, graduating_headings)
+    declarations = extract_contradiction_declarations(new_text, graduating_headings)
 
     # v0.3.3 MEDIUM #4 fix: extract the date per pattern line in new
     # text so we can gate to today-authored graduations only. Pre-fix
@@ -931,7 +965,7 @@ def detect_proven_without_declaration(
         in_patterns = False
         for line in new_text.split("\n"):
             if line.startswith("## "):
-                in_patterns = _is_patterns_heading(line)
+                in_patterns = _is_graduating_heading(line, graduating_headings)
                 continue
             if not in_patterns:
                 continue

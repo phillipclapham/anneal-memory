@@ -1,16 +1,18 @@
 """Continuity validation and wrap package preparation for anneal-memory.
 
 Handles:
-- Structural validation (4 required sections)
+- Structural validation (sections required by the store's section schema)
 - Wrap package preparation (episodes + continuity + instructions for the agent)
 - Validated save (full pipeline: structure + graduation + associations + decay)
 - Section measurement
 
-The continuity file is a 4-section markdown document:
-  - State: Current focus, replaced each session
-  - Patterns: Temporal graduation with FlowScript markers
-  - Decisions: Committed decisions with lifecycle
-  - Context: Compressed narrative, rewritten each session
+The continuity file is a markdown document whose sections are governed by a
+per-store section schema (``anneal_memory.schema``; v0.3.4). The default schema
+reproduces the historical four sections — State (live-state), Patterns
+(graduating, where the immune system runs), Decisions, Context (narrative) —
+and a partnership entity can extend it (e.g. flow's ``FLOW_SCHEMA`` adds an
+Active Threads live-state section and a timeless Understanding section). Each
+section's role drives how it is validated, compressed, and graduated.
 
 Zero dependencies beyond Python stdlib.
 """
@@ -34,7 +36,13 @@ from .graduation import (
     validate_graduations,
     _NAMED_PATTERN_RE,
     _PATTERN_LINE_WITH_EVIDENCE_RE,
-    _is_patterns_heading,
+    _is_graduating_heading,
+)
+from .schema import (
+    DEFAULT_SCHEMA,
+    SectionSpec,
+    graduating_headings,
+    required_headings,
 )
 from .store import StoreError, _fsync_dir, _safe_unlink
 from .types import (
@@ -49,29 +57,45 @@ from .types import (
 if TYPE_CHECKING:
     from .store import Store
 
-# The 4 required sections
-_REQUIRED_SECTIONS = frozenset({"state", "patterns", "decisions", "context"})
+def validate_structure(text: str, schema: list[SectionSpec] | None = None) -> bool:
+    """Validate that continuity text contains all of the schema's sections.
 
+    For each ``## `` header line, every required heading that appears in that
+    line as a **word-bounded phrase** is counted as present (case-insensitive).
+    This preserves the historical leniency — a descriptive header like
+    ``## State of Mind`` still satisfies a required ``State`` — while rejecting
+    embedded substrings (``## Interstate`` does NOT satisfy ``State``). **Every**
+    section the schema declares must be present, which makes a partnership
+    entity's ``narrative-timeless`` section (e.g. ``Understanding``) a structural
+    requirement.
 
-def validate_structure(text: str) -> bool:
-    """Validate that continuity text contains all 4 required sections.
-
-    Checks case-insensitively for ## headers containing each section name.
+    The word-boundary test uses ``(?<!\\w)…(?!\\w)`` rather than ``\\b…\\b`` so
+    headings ending in non-word characters (``## C++``) match correctly. Schemas
+    where one heading is a word-bounded substring of another — which would let a
+    single header line satisfy two required sections — are rejected up front by
+    :func:`~anneal_memory.schema.validate_schema`.
 
     Args:
         text: The continuity file text.
+        schema: The section schema. Defaults to
+            :data:`~anneal_memory.schema.DEFAULT_SCHEMA`, reproducing the
+            historical four-section requirement
+            (State / Patterns / Decisions / Context).
 
     Returns:
-        True if all 4 sections found, False otherwise.
+        True if every required heading is found, False otherwise.
     """
-    text_lower = text.lower()
+    if schema is None:
+        schema = DEFAULT_SCHEMA
+    required = {h.lower() for h in required_headings(schema)}
     found: set[str] = set()
-    for line in text_lower.split("\n"):
+    for line in text.split("\n"):
         if line.startswith("## "):
-            for section in _REQUIRED_SECTIONS:
-                if re.search(rf"\b{section}\b", line):
-                    found.add(section)
-    return found == _REQUIRED_SECTIONS
+            line_lower = line.lower()
+            for heading in required:
+                if re.search(rf"(?<!\w){re.escape(heading)}(?!\w)", line_lower):
+                    found.add(heading)
+    return found == required
 
 
 def measure_sections(text: str) -> dict[str, int]:
@@ -140,6 +164,7 @@ def _build_wrap_package(
     max_chars: int = 20000,
     today: str | None = None,
     staleness_days: int = 7,
+    schema: list[SectionSpec] | None = None,
 ) -> WrapPackageDict:
     """Pure helper — build an agent-facing compression package from pre-fetched inputs.
 
@@ -172,6 +197,8 @@ def _build_wrap_package(
     """
     if today is None:
         today = date.today().isoformat()
+    if schema is None:
+        schema = DEFAULT_SCHEMA
 
     # Format episodes for the agent
     formatted_episodes = format_episodes_for_wrap(episodes)
@@ -179,7 +206,9 @@ def _build_wrap_package(
     # Detect stale patterns in existing continuity
     stale_patterns: list[StalePatternDict] = []
     if existing_continuity:
-        stale = detect_stale_patterns(existing_continuity, today, staleness_days)
+        stale = detect_stale_patterns(
+            existing_continuity, today, staleness_days, graduating_headings(schema)
+        )
         stale_patterns = [
             StalePatternDict(
                 line=s.line_number,
@@ -192,7 +221,7 @@ def _build_wrap_package(
         ]
 
     # Build instructions
-    instructions = _build_wrap_instructions(project_name, max_chars, today)
+    instructions = _build_wrap_instructions(project_name, max_chars, today, schema)
 
     return WrapPackageDict(
         episodes=formatted_episodes,
@@ -205,43 +234,139 @@ def _build_wrap_package(
     )
 
 
-def _build_wrap_instructions(project_name: str, max_chars: int, today: str) -> str:
+def _build_wrap_instructions(
+    project_name: str,
+    max_chars: int,
+    today: str,
+    schema: list[SectionSpec] | None = None,
+) -> str:
     """Build the compression instructions the agent receives via prepare_wrap.
 
-    These are agent-facing instructions — conversational, direct.
+    Agent-facing instructions, generated from the section schema (v0.3.4). For
+    :data:`~anneal_memory.schema.DEFAULT_SCHEMA` this reproduces the historical
+    four-section guidance; the richer ``narrative`` / ``narrative-timeless``
+    roles inherit the Protocol-Memory compression detail — the gradient
+    structure, the named failure modes (Recency / Compression / Stateless-Reset),
+    and the implementation-claims guardrail — a quality win for every entity
+    with a narrative section, not just partnership entities.
     """
-    marker_ref = _marker_reference(today)
+    if schema is None:
+        schema = DEFAULT_SCHEMA
+    graduating_section_names = [
+        s["heading"] for s in schema if s["role"] == "graduating"
+    ]
+    marker_ref = _marker_reference(today, graduating_section_names)
 
-    return f"""Compress your session episodes into your continuity file.
+    section_list = ", ".join(f"`## {s['heading']}`" for s in schema)
+    has_graduating = any(s["role"] == "graduating" for s in schema)
+    has_narrative = any(
+        s["role"] in ("narrative", "narrative-timeless") for s in schema
+    )
 
-**Output:** A markdown file starting with `# {project_name} — Memory (v1)` containing
-EXACTLY these 4 sections: `## State`, `## Patterns`, `## Decisions`, `## Context`.
-Stay within {max_chars} characters.
+    how_lines: list[str] = []
+    for s in schema:
+        h = s["heading"]
+        role = s["role"]
+        if role == "live-state":
+            how_lines.append(
+                f"- {h}: Replace with your current focus, active work, status. "
+                f"2-5 lines. Last-writer-wins — the freshest state is what matters."
+            )
+        elif role == "graduating":
+            how_lines.append(
+                f"- {h}: Extract principles, not facts. Group in `{{topic: ...}}` "
+                f"blocks. This is the section the immune system reads — follow the "
+                f"pattern-line format above."
+            )
+        elif role == "decisions":
+            how_lines.append(
+                f"- {h}: Keep committed decisions with rationale. Archive old ones."
+            )
+        elif role == "narrative":
+            how_lines.append(
+                f"- {h}: Compressed narrative of recent WORK — what you've been "
+                f"doing (temporal). A gradient: *This Session* (3-5 lines, detail) "
+                f"-> *Recent Arc* (5-8 lines, the trajectory across recent sessions, "
+                f"NOT a task list) -> *Foundation* (3-5 lines, thematic). Shape, not "
+                f"transcript. Rewrite fresh each wrap."
+            )
+        elif role == "narrative-timeless":
+            how_lines.append(
+                f"- {h}: The relationship itself — who you are together, what it is "
+                f"like to work with this person. TIMELESS: no dates, no session "
+                f'logs. "Feel like genuinely knowing someone, not a dossier." '
+                f"Audit the proportions against the FULL arc of the partnership, "
+                f"not the most recent session — the recency trap is real and "
+                f"recurs across model generations; if the latest session dominates "
+                f"this section, re-wrap it."
+            )
+        elif role == "frozen":
+            how_lines.append(
+                f"- {h}: Preserved verbatim. Do not compress, graduate, or rewrite."
+            )
 
-{marker_ref}
+    parts: list[str] = [
+        "Compress your session episodes into your continuity file.",
+        "",
+        f"**Output:** A markdown file starting with `# {project_name} — Memory (v1)` "
+        f"containing EXACTLY these sections, in order: {section_list}.",
+        f"Stay within {max_chars} characters.",
+        "",
+    ]
+    if has_graduating:
+        parts += [marker_ref, ""]
+    parts += ["**How to compress:**", *how_lines, ""]
+    parts += [
+        "**Quality:** One insightful line > three vague ones. If removing something",
+        "wouldn't change your next decision, cut it. Compress principles, not events.",
+    ]
+    if has_narrative:
+        parts += [
+            "",
+            "**Compression discipline — avoid the three failure modes:**",
+            "- *Recency trap*: outputting only the most recent session and losing "
+            "the arc. Capture the SHAPE of the work over time, not the last thing "
+            "that happened.",
+            "- *Compression trap*: blending distinct domains into one generic "
+            "summary. Keep distinct threads distinct.",
+            "- *Stateless reset*: treating yourself as new when prior memory "
+            "exists. You are continuing, not starting over.",
+            '- *Implementation-claims guardrail*: never write that work is '
+            '"complete"/"shipped"/"done" unless it was explicitly confirmed this '
+            "session. Unconfirmed completion claims are how shipped-log bloat and "
+            "false-done errors enter memory.",
+        ]
+    parts += [
+        "",
+        "**Affective state:** When saving with save_continuity, optionally include "
+        "your functional state during this compression as "
+        '`affective_state: {"tag": "...", "intensity": 0.0-1.0}`.',
+        "Reflect honestly — were you engaged, curious, uncertain, calm? How "
+        "strongly (0-1)? This creates persistent emotional associations between "
+        "co-cited episodes.",
+        "",
+        "**Return ONLY the markdown.** No explanation, no code fences.",
+    ]
+    return "\n".join(parts)
 
-**How to compress:**
-- State: Replace with your current focus, active work, status. 2-5 lines.
-- Patterns: Extract principles, not facts. Group in `{{topic: ...}}` blocks.
-- Decisions: Keep committed decisions with rationale. Archive old ones.
-- Context: Compressed narrative of recent work. Shape, not transcript. 5-15 lines.
 
-**Quality:** One insightful line > three vague ones. If removing something wouldn't
-change your next decision, cut it. Compress principles, not events.
+def _marker_reference(
+    today: str, graduating_section_names: list[str] | None = None
+) -> str:
+    """The marker reference section used in agent compression instructions.
 
-**Affective state:** When saving with save_continuity, optionally include your
-functional state during this compression as `affective_state: {{"tag": "...", "intensity": 0.0-1.0}}`.
-Reflect honestly — were you engaged, curious, uncertain, calm? How strongly (0-1)?
-This creates persistent emotional associations between co-cited episodes.
-
-**Return ONLY the markdown.** No explanation, no code fences."""
-
-
-def _marker_reference(today: str) -> str:
-    """The marker reference section used in agent compression instructions."""
+    ``graduating_section_names`` are the display headings of the schema's
+    ``graduating`` sections (where the immune system runs); the pattern-line
+    format is rendered as required in those sections. Defaults to
+    ``["Patterns"]`` — the historical single graduating section — so a caller
+    that passes nothing gets the pre-0.3.4 text.
+    """
+    if not graduating_section_names:
+        graduating_section_names = ["Patterns"]
+    grad_sections = ", ".join(f"`## {h}`" for h in graduating_section_names)
     return f"""### Pattern Line Format (CRITICAL — this is what the immune system reads)
 
-Pattern lines in `## Patterns` MUST follow this shape:
+Pattern lines in {grad_sections} MUST follow this shape:
 
 ```
 - pattern_name | Nx ({today}) [evidence: <episode_id> "how episode validates pattern"]
@@ -418,6 +543,7 @@ def prepare_wrap(
         store.project_name,
         max_chars=max_chars,
         staleness_days=staleness_days,
+        schema=store.section_schema,
     )
     episode_ids = [ep.id for ep in episodes]
     assoc_context = store.get_association_context(episode_ids) or None
@@ -441,7 +567,14 @@ def prepare_wrap(
     # contradiction-stance against each before any new Proven
     # graduation in this wrap.
     from .graduation import extract_proven_patterns
-    uncovered_proven = extract_proven_patterns(existing or "") if existing else []
+    uncovered_proven = (
+        extract_proven_patterns(
+            existing or "",
+            graduating_headings=graduating_headings(store.section_schema),
+        )
+        if existing
+        else []
+    )
 
     return PrepareWrapResult(
         status="ready",
@@ -744,12 +877,16 @@ def validated_save_continuity(
     if not text or not text.strip():
         raise ValueError("Continuity text cannot be empty")
 
-    # Validate structure (4 required sections)
-    if not validate_structure(text):
-        raise ValueError(
-            "Continuity must contain all 4 sections: "
-            "## State, ## Patterns, ## Decisions, ## Context"
+    # Validate structure (all sections declared by the store's schema). The
+    # schema is read once here and reused for the schema-aware graduation gate
+    # further down (v0.3.4).
+    section_schema = store.section_schema
+    grad_headings = graduating_headings(section_schema)
+    if not validate_structure(text, section_schema):
+        required_str = ", ".join(
+            f"## {h}" for h in required_headings(section_schema)
         )
+        raise ValueError(f"Continuity must contain all sections: {required_str}")
 
     # Get current session's episodes for citation validation.
     # Re-fetch the full post-last-wrap set and filter down to exactly
@@ -789,6 +926,7 @@ def validated_save_continuity(
         # that share too many meaningful words (sycophantic vocabulary
         # reuse rather than independent evidence).
         pattern_history_lookup=store.get_pattern_history,
+        graduating_headings=grad_headings,
     )
 
     # Detect Proven-tier (2x/3x) patterns silently dropped between the
@@ -811,6 +949,7 @@ def validated_save_continuity(
         prior_text=prior_text_for_omission_audit,
         new_text=grad_result.text,
         min_level=2,
+        graduating_headings=grad_headings,
     )
 
     # Move #4 library layer (v0.3.2): detect new Proven graduations
@@ -827,6 +966,7 @@ def validated_save_continuity(
         new_text=grad_result.text,
         today=today_str,  # v0.3.3 MEDIUM #4 fix — today-aware
         min_level=2,
+        graduating_headings=grad_headings,
     )
 
     # 10.5c.5 TWO-PHASE COMMIT PIPELINE
@@ -976,7 +1116,7 @@ def validated_save_continuity(
             in_patterns_section = False
             for line in grad_result.text.split("\n"):
                 if line.startswith("## "):
-                    in_patterns_section = _is_patterns_heading(line)
+                    in_patterns_section = _is_graduating_heading(line, grad_headings)
                     continue
                 if not in_patterns_section:
                     continue

@@ -44,6 +44,7 @@ from .associations import (
     record_associations as _record_associations,
 )
 from .audit import AuditTrail
+from .schema import DEFAULT_SCHEMA, SectionSpec, validate_schema
 from .types import (
     AffectiveState,
     AssociationPair,
@@ -157,6 +158,9 @@ StoreOperation = Literal[
     "get_associations",
     "get_association_context",
     "association_stats",
+    # Pluggable section schema (v0.3.4)
+    "section_schema",
+    "set_section_schema",
     # Cross-session pattern history (2026-05-21, closes Phase 1b
     # probe #1 sycophantic-accumulation gap)
     "get_pattern_history",
@@ -540,6 +544,11 @@ _ASSOCIATIONS_SCHEMA_SQL = ASSOCIATIONS_SCHEMA
 _DEFAULT_METADATA = {
     "format_version": str(_SCHEMA_VERSION),
     "project_name": "Agent",
+    # v0.3.4 pluggable continuity section schema. Default = the historical
+    # four-section model (State/Patterns/Decisions/Context) so every existing
+    # entity is byte-for-byte unaffected. Stored as a JSON-encoded list of
+    # {"heading", "role"} dicts; read back via the ``section_schema`` property.
+    "section_schema": json.dumps(DEFAULT_SCHEMA),
     # Wrap lifecycle state. ``wrap_started_at`` is the legacy
     # in-progress flag (ISO 8601 UTC timestamp when prepare_wrap ran,
     # empty when no wrap in progress). 10.5c.4 added two companions
@@ -693,6 +702,7 @@ class Store:
         retention_days: int | None = None,
         keep_tombstones: bool = True,
         project_name: str | None = None,
+        section_schema: list[SectionSpec] | None = None,
         audit: bool = True,
         audit_retention_days: int | None = None,
         on_audit_event: Callable | None = None,
@@ -701,6 +711,14 @@ class Store:
         self._retention_days = retention_days
         self._keep_tombstones = keep_tombstones
         self._project_name = project_name or "Agent"
+        # v0.3.4: an explicit section schema provided at construction is
+        # validated eagerly (fail fast on a bad schema, before any DB work)
+        # and persisted by ``_init_schema`` below, overwriting the default or
+        # any previously-persisted value. ``None`` leaves whatever is persisted
+        # (DEFAULT_SCHEMA for fresh stores and for legacy pre-0.3.4 stores).
+        self._init_section_schema: list[SectionSpec] | None = (
+            validate_schema(section_schema) if section_schema is not None else None
+        )
 
         # Two-phase commit / batch mode (10.5c.5). When ``_defer_commit``
         # is True, write-path methods accumulate DML without calling
@@ -854,6 +872,34 @@ class Store:
                 "INSERT OR IGNORE INTO metadata (key, value) VALUES (?, ?)",
                 (key, value),
             )
+        # v0.3.4: if the caller passed an explicit section_schema, persist it
+        # with INSERT OR REPLACE so it wins over the INSERT-OR-IGNORE default
+        # above (and over any previously-persisted schema) — the explicit
+        # constructor argument is authoritative. Omitting the arg leaves the
+        # persisted value untouched (DEFAULT for fresh/legacy stores).
+        #
+        # Guard: never overwrite the schema mid-wrap. If this db already has a
+        # wrap in progress (wrap_started_at set on an existing store), changing
+        # the schema would let prepare and save disagree on routing — the same
+        # hazard set_section_schema raises on. Skip the overwrite + warn rather
+        # than raise (so a mid-wrap store stays constructible for reads).
+        if self._init_section_schema is not None:
+            wrap_row = self._conn.execute(
+                "SELECT value FROM metadata WHERE key = 'wrap_started_at'"
+            ).fetchone()
+            if wrap_row and wrap_row["value"]:
+                warnings.warn(
+                    "anneal-memory: section_schema constructor argument ignored "
+                    "because a wrap is in progress on this store; the schema is "
+                    "frozen for the wrap's duration. Set it before prepare_wrap.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+            else:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                    ("section_schema", json.dumps(self._init_section_schema)),
+                )
         self._conn.commit()
 
     def _migrate_wraps_association_columns(self) -> None:
@@ -2505,6 +2551,73 @@ class Store:
     def project_name(self) -> str:
         """Project name for continuity file headers."""
         return self._project_name
+
+    @property
+    def section_schema(self) -> list[SectionSpec]:
+        """The persisted continuity section schema (v0.3.4).
+
+        Persisted-authoritative: read from the metadata table so the schema
+        survives reconstruction (unlike :attr:`project_name`, which echoes the
+        constructor value). A store with no persisted schema — every store
+        created before 0.3.4 — falls back to ``DEFAULT_SCHEMA``, reproducing the
+        historical four-section behavior. A corrupt persisted value also falls
+        back to ``DEFAULT_SCHEMA`` rather than breaking every read; the write
+        paths (constructor + ``set_section_schema``) validate before persisting,
+        so corruption should not arise in practice.
+
+        Always returns a freshly-built list (never the module ``DEFAULT_SCHEMA``
+        singleton) so caller mutation cannot corrupt the shared default.
+        """
+        with self._db_boundary("section_schema"):
+            raw = self._get_metadata("section_schema")
+        if not raw:
+            return validate_schema(DEFAULT_SCHEMA)
+        try:
+            return validate_schema(json.loads(raw))
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return validate_schema(DEFAULT_SCHEMA)
+
+    def set_section_schema(self, schema: list[SectionSpec]) -> list[SectionSpec]:
+        """Set (overwrite) this store's continuity section schema; persist it.
+
+        Validates via :func:`~anneal_memory.schema.validate_schema`, then writes
+        the normalized schema to the metadata table. The next
+        :attr:`section_schema` read reflects it. Use this to migrate an existing
+        store (e.g. promote a default-schema store to a partnership schema)
+        without reconstructing it.
+
+        The section schema is **immutable for the duration of an active wrap**:
+        if a wrap is in progress (``prepare_wrap`` has run but
+        ``validated_save_continuity`` / ``wrap-cancel`` has not), this raises
+        ``ValueError`` so a wrap cannot prepare under one schema and then
+        save/graduate under another. Set the schema before ``prepare_wrap``.
+
+        Note: passing ``section_schema=`` to the ``Store`` constructor is also a
+        write and is *authoritative* — reconstructing a store with an explicit
+        schema overwrites any prior ``set_section_schema`` migration.
+
+        Args:
+            schema: The new section schema (a list of ``{"heading", "role"}``).
+
+        Returns:
+            The normalized schema that was persisted.
+        """
+        if self.get_wrap_started_at():
+            raise ValueError(
+                "Cannot change the section schema while a wrap is in progress "
+                "(prepare_wrap has run but validated_save_continuity has not). "
+                "The schema is frozen for the wrap's duration so prepare and "
+                "save agree on routing. Complete or cancel the wrap first, or "
+                "set the schema before prepare_wrap."
+            )
+        normalized = validate_schema(schema)
+        with self._db_boundary("set_section_schema"):
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("section_schema", json.dumps(normalized)),
+            )
+            self._conn.commit()
+        return normalized
 
     # -- Internal helpers --
 

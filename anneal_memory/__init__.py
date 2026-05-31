@@ -1,6 +1,6 @@
 """anneal-memory: Living memory for AI agents. Episodes compress into identity."""
 
-__version__ = "0.3.3"
+__version__ = "0.3.4"
 
 from .store import (
     AnnealMemoryError,
@@ -26,6 +26,18 @@ from .types import (
     WrapResult,
 )
 from .audit import AuditTrail, AuditVerifyResult
+from .schema import (
+    DEFAULT_GRADUATING,
+    DEFAULT_SCHEMA,
+    FLOW_SCHEMA,
+    SectionRole,
+    SectionSpec,
+    graduating_headings,
+    heading_marker,
+    required_headings,
+    sections_by_role,
+    validate_schema,
+)
 from .continuity import (
     format_wrap_package_text,
     prepare_wrap,
@@ -74,6 +86,16 @@ __all__ = [
     "WrapResult",
     "TOOLS",
     "RESOURCES",
+    "SectionSpec",
+    "SectionRole",
+    "DEFAULT_SCHEMA",
+    "FLOW_SCHEMA",
+    "DEFAULT_GRADUATING",
+    "validate_schema",
+    "graduating_headings",
+    "required_headings",
+    "sections_by_role",
+    "heading_marker",
     "validate_structure",
     "prepare_wrap",
     "format_wrap_package_text",

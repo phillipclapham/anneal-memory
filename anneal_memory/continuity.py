@@ -269,23 +269,38 @@ def _check_no_catastrophic_shrink(
         return
 
     display_by_lower = {s["heading"].lower(): s["heading"] for s in schema}
-    role_by_heading = {s["heading"].lower(): s["role"] for s in schema}
     prior_masses = _schema_section_masses(prior_text, schema)
     new_masses = _schema_section_masses(new_text, schema)
 
+    # Group the protected (retain-floored) headings by ROLE. The gate protects
+    # the LAYER — a role: the felt layer (narrative-timeless), the identity
+    # layer (graduating) — not an individual heading. A schema may split a
+    # protected layer across several headings; each could sit under the
+    # per-section char floor while the LAYER as a whole is large and
+    # collapsing. Summing the role's headings catches that split-collapse. For
+    # a single-heading-per-role schema (flow's FLOW_SCHEMA) the aggregate equals
+    # the lone heading's mass, so behavior — and the offender message naming
+    # that heading — is byte-identical to the pre-aggregate check.
+    headings_by_role: dict[str, list[str]] = {}
+    for spec in schema:
+        spec_role = spec["role"]
+        if spec_role in _SHRINK_RETAIN_FRACTION:
+            headings_by_role.setdefault(spec_role, []).append(
+                spec["heading"].lower()
+            )
+
     offenders: list[str] = []
-    for heading_lower, role in role_by_heading.items():
-        retain = _SHRINK_RETAIN_FRACTION.get(role)
-        if retain is None:
-            continue
-        prior_mass = prior_masses.get(heading_lower, 0)
+    for role, heading_lowers in headings_by_role.items():
+        retain = _SHRINK_RETAIN_FRACTION[role]
+        prior_mass = sum(prior_masses.get(h, 0) for h in heading_lowers)
         if prior_mass < _SHRINK_GATE_MIN_PRIOR_CHARS:
             continue
-        new_mass = new_masses.get(heading_lower, 0)
+        new_mass = sum(new_masses.get(h, 0) for h in heading_lowers)
         if new_mass < prior_mass * retain:
             pct = round(100 * (1 - new_mass / prior_mass))
+            label = " + ".join(f"'{display_by_lower[h]}'" for h in heading_lowers)
             offenders.append(
-                f"  - '{display_by_lower[heading_lower]}' ({role}): "
+                f"  - {label} ({role}): "
                 f"{prior_mass} -> {new_mass} chars "
                 f"({pct}% smaller; must retain >={int(retain * 100)}%)"
             )
@@ -733,13 +748,18 @@ def prepare_wrap(
     # If any of them raises, the store is left with no stale wrap-in-progress
     # flag — symmetric with wrap_cancelled() on the empty path.
     existing = store.load_continuity()
+    # Read the section schema fail-closed (v0.3.5): a corrupt persisted schema
+    # must REFUSE the wrap, not silently degrade a partnership store to ops
+    # behavior (which would disable the catastrophic-shrink gate). Read once
+    # here; reuse for the package build + graduating-heading extraction below.
+    schema = store.section_schema_for_wrap()
     package = _build_wrap_package(
         episodes,
         existing,
         store.project_name,
         max_chars=max_chars,
         staleness_days=staleness_days,
-        schema=store.section_schema,
+        schema=schema,
     )
     episode_ids = [ep.id for ep in episodes]
     assoc_context = store.get_association_context(episode_ids) or None
@@ -766,7 +786,7 @@ def prepare_wrap(
     uncovered_proven = (
         extract_proven_patterns(
             existing or "",
-            graduating_headings=graduating_headings(store.section_schema),
+            graduating_headings=graduating_headings(schema),
         )
         if existing
         else []
@@ -1093,8 +1113,10 @@ def validated_save_continuity(
 
     # Validate structure (all sections declared by the store's schema). The
     # schema is read once here and reused for the schema-aware graduation gate
-    # further down (v0.3.4).
-    section_schema = store.section_schema
+    # further down (v0.3.4). Read fail-closed (v0.3.5): a corrupt persisted
+    # schema must refuse the save rather than silently fall back to the ops
+    # DEFAULT_SCHEMA and disable the catastrophic-shrink gate below.
+    section_schema = store.section_schema_for_wrap()
     grad_headings = graduating_headings(section_schema)
     # Reject ambiguous merged headings (e.g. "## Patterns and Understanding")
     # with a clear message before the generic all-sections check: one header

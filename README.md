@@ -203,6 +203,8 @@ The library implements a set of structural defenses around how patterns earn gra
 
 **Hash-chained audit trail (single-writer).** Every memory mutation appends to a SHA-256 hash-chained JSONL audit log. `AuditTrail.verify` walks the chain and detects post-hoc tampering at the exact entry where the chain breaks. **Single-process invariant required** — `Store` is documented as not thread-safe, not task-safe, not reentrant. Multi-writer deployments break the hash chain by construction.
 
+**Catastrophic-shrink gate (structural; partnership entities).** A wrap can pass structure validation — every required section present — while gutting the content beneath it, so the latest session quietly compresses over the accumulated identity. For entities whose continuity declares a felt/identity layer (the *Configurable continuity structure* below), `save_continuity` refuses a wrap that collapses a protected section below its retain floor — the felt (timeless relationship) and graduated-identity sections must each keep ≥50% of prior mass, the whole file ≥25% — and leaves the wrap recoverable so the agent re-wraps preserving the full arc, or passes `allow_shrink=True` for a deliberate diet (fail-closed: only a literal `True` bypasses). A corrupt section schema fails the wrap closed rather than silently degrading an entity to ungated behavior. Ops entities, which legitimately consolidate many graduated patterns into a few dense ones, are not gated. A save-boundary structural invariant, not a proportion-check the agent is trusted to hold.
+
 ### Honest scope — what these primitives do NOT catch
 
 The defenses above are **structural at the citation layer**. They catch fabricated citation evidence (fake IDs, missing IDs, wholesale-invented explanations), naive replay (re-citing prior-session episodes), per-ID citation gaming (single episode pumped across patterns), and post-hoc audit tampering. They do not catch:
@@ -287,7 +289,7 @@ This is experimental infrastructure. The associations and strength model work wi
 **Four cognitive layers, modeled on how memory actually works:**
 
 1. **Episodic store** (SQLite) — timestamped, typed episodes. Fast writes, indexed queries. Cheap to accumulate. The hippocampus.
-2. **Continuity file** (Markdown) — compressed session memory. 4 sections. Always loaded at session start. Rewritten (not appended) at each session boundary. The neocortex.
+2. **Continuity file** (Markdown) — compressed session memory. Always loaded at session start. Rewritten (not appended) at each session boundary. The neocortex. Its structure is a configurable section schema (below) — four sections by default; partnership entities add a timeless felt layer.
 3. **Hebbian associations** (SQLite) — lateral links between episodes, formed through co-citation during compression. Strengthen with reuse, decay without it. The association cortex.
 4. **Affective layer** (on associations) — functional state tags recorded during compression. Intensity modulates association strength. Persistent state infrastructure.
 
@@ -301,6 +303,21 @@ This is experimental infrastructure. The associations and strength model work wi
 | `question` | Needs resolution | "Should we shard or add read replicas?" |
 | `outcome` | Result of action | "Migration done, 3x improvement on hot path" |
 | `context` | Environmental state | "Production DB at 80% capacity, growing 5%/week" |
+
+### Configurable continuity structure
+
+Through v0.3.3 the continuity file was hardcoded to four sections — State / Patterns / Decisions / Context. v0.3.4 makes that a per-store **section schema**: an ordered list of `{heading, role}` specs, where the role tells the system how each section behaves. `graduating` is where the immune system's citation/graduation scan runs (more than one allowed); `narrative` is compressed *work* narrative (temporal, rewritten each wrap); `narrative-timeless` is the felt relationship layer — dateless, carried forward and evolved rather than rewritten; `live-state` is volatile current focus that never graduates; `frozen` is preserved verbatim.
+
+`DEFAULT_SCHEMA` reproduces the historical four-section model exactly, so existing stores need no migration and behave byte-for-byte as before. `FLOW_SCHEMA` is the reference *partnership* schema — it adds an `Active Threads` live-state section and an `Understanding` narrative-timeless section. The distinction is load-bearing: only entities that declare a `narrative-timeless` section carry the felt layer, the richer compression instructions that protect it, and the catastrophic-shrink gate above. Ops agents stay lean — zero extra weight, zero behavior change. Zero new dependencies; stdlib only.
+
+```python
+from anneal_memory import Store, FLOW_SCHEMA
+
+# A partnership entity: gains the felt layer + the shrink gate.
+store = Store("./memory.db", project_name="flow", section_schema=FLOW_SCHEMA)
+# An existing store stays on DEFAULT_SCHEMA untouched — or migrate in place:
+store.set_section_schema(FLOW_SCHEMA)   # validated; frozen during an active wrap
+```
 
 ### Comparison
 
@@ -355,7 +372,7 @@ anneal-memory works the same way. During a session, episodes accumulate in the e
 
 1. **`prepare_wrap`** — gathers recent episodes, current continuity, stale pattern warnings, association context, and compression instructions
 2. **Agent compresses** — this IS the cognition. Patterns emerge during compression that weren't visible in the raw episodes
-3. **`save_continuity`** — server validates structure, checks citation evidence, records associations between co-cited episodes, applies decay to unused associations, and saves the result
+3. **`save_continuity`** — server validates structure, refuses a wrap that collapses a partnership entity's protected felt/identity layers, checks citation evidence, records associations between co-cited episodes, applies decay to unused associations, and saves the result
 
 **Rules of thumb:**
 - Always wrap before ending a session. An unwrapped session is like an all-nighter — the experiences happened but they weren't consolidated

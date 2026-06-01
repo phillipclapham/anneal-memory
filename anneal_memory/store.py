@@ -2554,27 +2554,83 @@ class Store:
 
     @property
     def section_schema(self) -> list[SectionSpec]:
-        """The persisted continuity section schema (v0.3.4).
+        """The persisted continuity section schema (v0.3.4), read-lenient.
 
         Persisted-authoritative: read from the metadata table so the schema
         survives reconstruction (unlike :attr:`project_name`, which echoes the
         constructor value). A store with no persisted schema — every store
         created before 0.3.4 — falls back to ``DEFAULT_SCHEMA``, reproducing the
-        historical four-section behavior. A corrupt persisted value also falls
-        back to ``DEFAULT_SCHEMA`` rather than breaking every read; the write
-        paths (constructor + ``set_section_schema``) validate before persisting,
-        so corruption should not arise in practice.
+        historical four-section behavior. A corrupt persisted value ALSO falls
+        back to ``DEFAULT_SCHEMA`` here rather than breaking every read path
+        (``continuity`` print, ``status``, display surfaces).
+
+        The wrap lifecycle does NOT use this lenient read — see
+        :meth:`section_schema_for_wrap`, which is fail-closed on a corrupt
+        value so a partnership store cannot silently mis-scope as an ops entity
+        and disable the catastrophic-shrink gate (v0.3.5).
 
         Always returns a freshly-built list (never the module ``DEFAULT_SCHEMA``
         singleton) so caller mutation cannot corrupt the shared default.
         """
+        return self._load_section_schema(strict=False)
+
+    def section_schema_for_wrap(self) -> list[SectionSpec]:
+        """The persisted section schema, fail-closed on corruption (v0.3.5).
+
+        Identical to :attr:`section_schema` except a persisted value that is
+        present but unreadable raises :class:`StoreError` instead of silently
+        falling back to ``DEFAULT_SCHEMA``. The wrap lifecycle
+        (:func:`~anneal_memory.continuity.prepare_wrap`,
+        :func:`~anneal_memory.continuity.validated_save_continuity`) reads the
+        schema through this method: the lenient fallback would mis-scope a
+        partnership store whose schema metadata corrupted as an ops entity, and
+        the catastrophic-shrink gate — which fires only when a
+        ``narrative-timeless`` section is declared — would silently no-op,
+        dropping exactly the identity protection the gate exists to provide.
+        ``structural_invariants_beat_discipline``: fail closed at the gate, do
+        not trust the write paths to have kept the metadata intact.
+
+        An ABSENT schema (every pre-0.3.4 store) still falls back to
+        ``DEFAULT_SCHEMA`` — that is normal backward-compat, not corruption.
+        """
+        return self._load_section_schema(strict=True)
+
+    def _load_section_schema(self, *, strict: bool) -> list[SectionSpec]:
+        """Shared read backing :attr:`section_schema` / :meth:`section_schema_for_wrap`.
+
+        ``strict=False`` (lenient, read/display paths): a corrupt persisted
+        value falls back to ``DEFAULT_SCHEMA``. ``strict=True`` (wrap paths): a
+        corrupt persisted value raises :class:`StoreError`. An ABSENT value
+        falls back to ``DEFAULT_SCHEMA`` in both modes (legit pre-0.3.4
+        backward-compat — not corruption). A PRESENT-but-empty value is
+        corruption, NOT absence.
+        """
+        # Read the row directly rather than via _get_metadata, which collapses
+        # a missing row and a present-but-empty ('') value into the same '' —
+        # so the strict path could not tell "no schema ever set" (absent ->
+        # legit default) from "schema row present but empty/garbage" (corrupt
+        # -> must fail closed). An empty persisted value is corruption.
         with self._db_boundary("section_schema"):
-            raw = self._get_metadata("section_schema")
-        if not raw:
+            row = self._conn.execute(
+                "SELECT value FROM metadata WHERE key = ?", ("section_schema",)
+            ).fetchone()
+        if row is None:
+            # No persisted schema at all: every pre-0.3.4 store + ops entities.
             return validate_schema(DEFAULT_SCHEMA)
+        raw = row["value"]
         try:
             return validate_schema(json.loads(raw))
-        except (ValueError, TypeError, json.JSONDecodeError):
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            if strict:
+                raise StoreError(
+                    "Persisted section_schema is present but unreadable "
+                    "(corrupt). Refusing the wrap: silently falling back to "
+                    "the ops DEFAULT_SCHEMA would disable the "
+                    "catastrophic-shrink gate for what may be a partnership "
+                    "entity. Repair or re-set the schema via "
+                    "set_section_schema() before wrapping.",
+                    operation="section_schema",
+                ) from exc
             return validate_schema(DEFAULT_SCHEMA)
 
     def set_section_schema(self, schema: list[SectionSpec]) -> list[SectionSpec]:

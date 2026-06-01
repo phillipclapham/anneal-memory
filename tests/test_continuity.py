@@ -4137,3 +4137,144 @@ class TestCatastrophicShrinkGate:
         assert on.allow_shrink is True
         off = p.parse_args(["save-continuity", "cont.md"])
         assert off.allow_shrink is False
+
+    # ---- codex round-2 (2026-05-31): two MEDIUM fail-opens in the gate ----
+
+    def test_corrupt_persisted_schema_lenient_reads_strict_refuses(self, tmp_path):
+        # codex round-2 MEDIUM-1: a corrupt persisted section_schema must NOT
+        # silently fall back to the ops DEFAULT_SCHEMA on the WRAP path — that
+        # mis-scopes a partnership store as ops and no-ops the shrink gate. Read
+        # paths stay resilient (display keeps working); the wrap path is
+        # fail-closed (structural_invariants_beat_discipline).
+        from anneal_memory import Store, FLOW_SCHEMA
+        from anneal_memory.store import StoreError
+        store = Store(tmp_path / "s.db", project_name="flow")
+        try:
+            store.set_section_schema(FLOW_SCHEMA)
+            # Corrupt the persisted value directly (present-but-unreadable).
+            store._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES "
+                "('section_schema', ?)",
+                ("{not valid json",),
+            )
+            store._conn.commit()
+            # Lenient read: resilient -> degrades to a non-partnership schema so
+            # display paths keep working (no narrative-timeless role present).
+            assert not any(
+                s["role"] == "narrative-timeless" for s in store.section_schema
+            )
+            # Wrap read: fail-closed.
+            with pytest.raises(StoreError) as exc:
+                store.section_schema_for_wrap()
+            assert "corrupt" in str(exc.value).lower()
+        finally:
+            store.close()
+
+    def test_corrupt_empty_string_schema_fail_closed_on_wrap_read(self, tmp_path):
+        # codex round-3: _get_metadata collapses a missing row and a
+        # present-but-empty ('') value into the same '', so the wrap read must
+        # read the row directly. A PRESENT but empty section_schema is
+        # corruption, not absence -> strict (wrap) read fail-closes; lenient
+        # (display) read still degrades gracefully.
+        from anneal_memory import Store, FLOW_SCHEMA
+        from anneal_memory.store import StoreError
+        store = Store(tmp_path / "s.db", project_name="flow")
+        try:
+            store.set_section_schema(FLOW_SCHEMA)
+            store._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES "
+                "('section_schema', '')"
+            )
+            store._conn.commit()
+            # Lenient: resilient -> degraded (no narrative-timeless), display OK.
+            assert not any(
+                s["role"] == "narrative-timeless" for s in store.section_schema
+            )
+            # Strict (wrap): fail-closed even though the value is empty (not
+            # unparseable garbage) — empty-present must not read as absent.
+            with pytest.raises(StoreError):
+                store.section_schema_for_wrap()
+        finally:
+            store.close()
+
+    def test_pipeline_corrupt_schema_refuses_wrap(self, tmp_path):
+        # codex round-2 MEDIUM-1, end to end: a partnership store whose
+        # persisted schema corrupted must REFUSE the wrap rather than silently
+        # wrap as an ungated ops entity. prepare_wrap reads fail-closed.
+        from anneal_memory import Store, FLOW_SCHEMA, prepare_wrap
+        from anneal_memory.store import StoreError
+        store = Store(tmp_path / "s.db", project_name="flow")
+        try:
+            store.set_section_schema(FLOW_SCHEMA)
+            store.record("an episode to make the wrap non-empty.", "observation")
+            store._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES "
+                "('section_schema', ?)",
+                ("garbage-not-json",),
+            )
+            store._conn.commit()
+            with pytest.raises(StoreError):
+                prepare_wrap(store, max_chars=40000)
+        finally:
+            store.close()
+
+    def test_unit_multi_heading_protected_layer_aggregate_collapse_refused(self):
+        # codex round-2 MEDIUM-2: the protected floor is per-ROLE (the layer),
+        # not per heading. A felt layer split across two narrative-timeless
+        # sections — each under the 500-char floor but together well above it —
+        # must still be caught when both are gutted. A per-heading check skips
+        # each as "below floor" and misses the layer collapse; the aggregate
+        # catches it. (This is codex's executed probe, frozen as a regression.)
+        from anneal_memory.continuity import _check_no_catastrophic_shrink
+        schema = [
+            {"heading": "State", "role": "live-state"},
+            {"heading": "Patterns", "role": "graduating"},
+            {"heading": "Felt A", "role": "narrative-timeless"},
+            {"heading": "Felt B", "role": "narrative-timeless"},
+            {"heading": "Context", "role": "narrative"},
+        ]
+        prior = (
+            "## State\ns\n\n## Patterns\n" + ("p " * 300) + "\n\n"
+            "## Felt A\n" + ("a " * 230) + "\n\n"
+            "## Felt B\n" + ("b " * 230) + "\n\n"
+            "## Context\n" + ("c " * 2000) + "\n"
+        )
+        # Both felt sections gutted; Context unchanged so the whole-doc floor
+        # does NOT trip — only the per-role aggregate catches this.
+        new = (
+            "## State\ns\n\n## Patterns\n" + ("p " * 300) + "\n\n"
+            "## Felt A\ngone.\n\n## Felt B\ngone.\n\n"
+            "## Context\n" + ("c " * 2000) + "\n"
+        )
+        with pytest.raises(ValueError) as exc:
+            _check_no_catastrophic_shrink(prior, new, schema, allow_shrink=False)
+        msg = str(exc.value)
+        assert "Felt A" in msg and "Felt B" in msg     # aggregated label
+        assert "narrative-timeless" in msg
+        assert "whole continuity" not in msg           # doc floor did not trip
+
+    def test_unit_multi_heading_protected_layer_modest_trim_passes(self):
+        # Companion to the above: the per-role aggregate must not OVER-fire — a
+        # split felt layer trimmed only modestly (aggregate stays >= 50%) saves.
+        from anneal_memory.continuity import _check_no_catastrophic_shrink
+        schema = [
+            {"heading": "State", "role": "live-state"},
+            {"heading": "Patterns", "role": "graduating"},
+            {"heading": "Felt A", "role": "narrative-timeless"},
+            {"heading": "Felt B", "role": "narrative-timeless"},
+            {"heading": "Context", "role": "narrative"},
+        ]
+        prior = (
+            "## State\ns\n\n## Patterns\n" + ("p " * 300) + "\n\n"
+            "## Felt A\n" + ("a " * 230) + "\n\n"
+            "## Felt B\n" + ("b " * 230) + "\n\n"
+            "## Context\n" + ("c " * 2000) + "\n"
+        )
+        # Felt A trimmed ~25%, Felt B untouched -> aggregate well above 50%.
+        new = (
+            "## State\ns\n\n## Patterns\n" + ("p " * 300) + "\n\n"
+            "## Felt A\n" + ("a " * 170) + "\n\n"
+            "## Felt B\n" + ("b " * 230) + "\n\n"
+            "## Context\n" + ("c " * 2000) + "\n"
+        )
+        _check_no_catastrophic_shrink(prior, new, schema, allow_shrink=False)

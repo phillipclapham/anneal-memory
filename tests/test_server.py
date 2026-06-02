@@ -413,6 +413,21 @@ class TestToolPrepareWrap:
         # Should mention first wrap
         assert "first wrap" in text.lower() or "No existing continuity" in text
 
+    def test_wrap_in_progress_returns_is_error(self, server):
+        """AM-PREPARE-GUARD (0.4.2): a second prepare_wrap while a wrap is
+        open surfaces as a clean is_error tool result. The library raises
+        WrapInProgressError; the tools/call dispatch wrapper turns any
+        exception into is_error=True, so no per-tool catch is needed."""
+        server._tool_record({"content": "Pattern noticed", "episode_type": "observation"})
+        server._tool_prepare_wrap({})  # marks wrap in progress
+        server._tool_record({"content": "Another one", "episode_type": "observation"})
+        # Route through the dispatch wrapper (the layer that catches).
+        result = server._handle_tools_call(
+            {"name": "prepare_wrap", "arguments": {}}
+        )
+        assert _is_error(result)
+        assert "a wrap is already in progress" in _text_from_result(result)
+
     def test_includes_existing_continuity(self, server, store):
         continuity = (
             "# TestProject — Memory (v1)\n"
@@ -436,6 +451,24 @@ class TestToolPrepareWrap:
         result = server._tool_prepare_wrap({"max_chars": 5000})
         text = _text_from_result(result)
         assert "5000" in text
+
+    def test_omitted_max_chars_uses_schema_aware_budget(self, tmp_path):
+        """AM-SCHEMA-BUDGET (0.4.2) M1: omitting max_chars over MCP must
+        derive the schema-aware budget (FLOW_SCHEMA -> 25500), NOT inject a
+        flat 20000 default in the transport. The instruction text surfaces
+        the budget ('Stay within N characters')."""
+        from anneal_memory.schema import FLOW_SCHEMA
+        flow_store = Store(path=tmp_path / "flow.db", project_name="flow",
+                           section_schema=FLOW_SCHEMA)
+        try:
+            srv = Server(flow_store)
+            srv._tool_record({"content": "a substrate observation",
+                              "episode_type": "observation"})
+            text = _text_from_result(srv._tool_prepare_wrap({}))  # no max_chars
+            assert "Stay within 25500 characters" in text
+            assert "Stay within 20000 characters" not in text
+        finally:
+            flow_store.close()
 
 
 # -- Tool: save_continuity --
@@ -716,7 +749,10 @@ class TestGraduationValidation:
             "## Context\nTest.\n"
         )
         server._tool_prepare_wrap({})
-        result = server._tool_save_continuity({"text": text})
+        # The fabricated citation resolves to zero episodes, so AM-WARN
+        # (0.4.2) fires. Assert it (and keep the suite warning-clean).
+        with pytest.warns(UserWarning, match="resolved to ZERO episodes"):
+            result = server._tool_save_continuity({"text": text})
         assert not _is_error(result)
         output = _text_from_result(result)
         assert "Citations demoted (bad evidence): 1" in output

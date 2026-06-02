@@ -362,7 +362,13 @@ class Server:
         whether the token is round-tripped — the token is the
         verification layer, not the snapshot enabler.
         """
-        max_chars = args.get("max_chars", 20000)
+        # AM-SCHEMA-BUDGET (v0.4.2): omit max_chars (None) -> the library
+        # derives a schema-aware budget (20000 for the ops DEFAULT_SCHEMA,
+        # larger for a richer schema like FLOW_SCHEMA). Do NOT inject a flat
+        # 20000 default here — that would silently defeat schema-aware budgeting
+        # for a partnership entity wrapping over MCP. An explicit caller value
+        # still overrides.
+        max_chars = args.get("max_chars")
         staleness_days = args.get("staleness_days", 7)
 
         result = _lib_prepare_wrap(

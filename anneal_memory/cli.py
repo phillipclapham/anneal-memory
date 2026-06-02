@@ -64,7 +64,7 @@ from .spores import (
     SporeStore,
     germination_tier,
 )
-from .store import Store, StoreError, _WRAP_TOKEN_RE
+from .store import Store, StoreError, WrapInProgressError, _WRAP_TOKEN_RE
 from .types import AffectiveState, AssociationStats, EpisodeType
 
 
@@ -629,11 +629,20 @@ def cmd_prepare_wrap(args: argparse.Namespace) -> None:
     CLI process boundary.
     """
     with _open_store(args) as store:
-        result = _lib_prepare_wrap(
-            store,
-            max_chars=args.max_chars,
-            staleness_days=args.staleness_days,
-        )
+        try:
+            result = _lib_prepare_wrap(
+                store,
+                max_chars=args.max_chars,
+                staleness_days=args.staleness_days,
+            )
+        except WrapInProgressError as exc:
+            # AM-PREPARE-GUARD (0.4.2): a wrap is already open. main()
+            # has no top-level handler, so catch here and exit cleanly
+            # (matching cmd_save_continuity's idiom) rather than dumping
+            # a traceback. Recovery path is in the message: finish
+            # (save-continuity) or abandon (wrap-cancel) the open wrap.
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
 
         if args.json:
             if result["status"] == "empty":
@@ -2046,7 +2055,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output compression package for agent-driven wraps",
         parents=[json_parent],
     )
-    sub.add_argument("--max-chars", type=int, default=20000, help="Max continuity size (default: 20000)")
+    sub.add_argument("--max-chars", type=int, default=None,
+                     help="Max continuity size in chars. Omit for a schema-aware "
+                          "default (20000 for the standard schema, larger for a "
+                          "richer schema like FLOW_SCHEMA).")
     sub.add_argument("--staleness-days", type=int, default=7, help="Days before flagging stale patterns (default: 7)")
     sub.set_defaults(func=cmd_prepare_wrap)
 

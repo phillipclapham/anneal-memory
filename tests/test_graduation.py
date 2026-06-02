@@ -725,6 +725,45 @@ class TestCrossSessionGraduationCheck:
         assert "standup" in coll.overlap_words
         assert "consensus" in coll.overlap_words
 
+    def test_cross_session_demote_keeps_citation_resolved_flag(self):
+        """AM-WARN (v0.4.2) regression: a cross-session-overlap demote
+        suppresses ``all_validated_ids`` for that line (the immune gate
+        does not strengthen the graph from a suspected sycophantic
+        re-graduation), but the cited id STILL resolved to a real store
+        episode — the gate fired on the EXPLANATION, not the ids. So
+        ``any_citation_resolved`` must be True even though
+        ``all_validated_ids`` is empty. AM-WARN Signal A reads the former;
+        reading the latter would misdiagnose a healthy immune-gate
+        demotion as a dead-namespace graph (the false positive H1)."""
+        text = """## State\nsycophantic rephrase.\n## Patterns
+- alpha | 3x (2026-05-21) [evidence: abc12345 "standup consensus decision quick agreement architectural"]
+## Decisions
+.
+## Context
+.
+"""
+        prior = "standup consensus decision architecture sync quick agreement"
+        node_content = {
+            "abc12345":
+            "standup consensus decision quick agreement architectural meeting"
+        }
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-21",
+            node_content_map=node_content,
+            pattern_history_lookup=self._stub_lookup(alpha=prior),
+        )
+        # The line was cross-session-demoted...
+        assert result.demoted == 1
+        assert result.validated == 0
+        assert len(result.cross_session_collisions) == 1
+        # ...so the gated co-citation list is empty for it...
+        assert result.all_validated_ids == []
+        # ...but the cited id DID resolve, so the gate-independent signal
+        # AM-WARN reads is True (no false "dead namespace" alarm).
+        assert result.any_citation_resolved is True
+
     def test_threshold_at_boundary_2_words_passes(self):
         """At exactly 2 shared meaningful words, the default threshold
         of 3 does NOT trigger. Within-session check uses 2 as the

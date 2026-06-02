@@ -1,6 +1,6 @@
 """anneal-memory: Living memory for AI agents. Episodes compress into identity."""
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 from .store import (
     AnnealMemoryError,
@@ -8,6 +8,7 @@ from .store import (
     StoreDatabaseError,
     StoreError,
     StoreOperation,
+    WrapInProgressError,
 )
 from .types import (
     AffectiveState,
@@ -81,6 +82,7 @@ __all__ = [
     "StoreDatabaseError",
     "StoreError",
     "StoreOperation",
+    "WrapInProgressError",
     "Server",
     "AuditTrail",
     "AuditVerifyResult",

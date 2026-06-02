@@ -834,6 +834,44 @@ class TestCrossSessionGraduationCheck:
         assert "(cross-session-overlap)" not in result.text
         assert result.cross_session_collisions == []
 
+    def test_cross_session_overlap_forms_no_link(self):
+        """AM-QUOTEFOOTGUN (v0.4.1) Option B: link formation is decoupled
+        from the explanation-overlap *grounding* gate, but NOT from the
+        cross-session anti-sycophancy gate. When the cross-session check
+        flags a suspected re-graduation, we still refuse to strengthen
+        the association graph from the gamed accumulation. Two valid IDs
+        are co-cited so that a direct pair WOULD form if the immune gate
+        were bypassed — it must not."""
+        text = """## State\nsycophantic rephrase.\n## Patterns
+- alpha | 3x (2026-05-21) [evidence: abc12345, def67890 "standup consensus decision quick agreement architectural"]
+## Decisions
+.
+## Context
+.
+"""
+        # Prior shares ≥3 meaningful words → cross-session fires. Both
+        # episode bodies overlap the explanation so explanation_valid is
+        # True (the line reaches the cross-session check at all).
+        prior = "standup consensus decision architecture sync quick agreement"
+        node_content = {
+            "abc12345": "standup consensus decision quick agreement architectural meeting",
+            "def67890": "standup consensus decision quick agreement architectural review",
+        }
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345", "def67890"},
+            today="2026-05-21",
+            node_content_map=node_content,
+            pattern_history_lookup=self._stub_lookup(alpha=prior),
+        )
+        assert result.validated == 0
+        assert result.demoted == 1
+        assert "(cross-session-overlap)" in result.text
+        assert len(result.cross_session_collisions) == 1
+        # The immune gate still protects the graph: no link forms.
+        assert result.direct_co_citations == []
+        assert result.all_validated_ids == []
+
 
 class TestFlowScriptPrefixedPatterns:
     """Critical #1 fix coverage (v0.3.2): pattern lines with FlowScript

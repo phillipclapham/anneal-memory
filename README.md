@@ -230,7 +230,7 @@ This is fundamentally different from how other systems form associations:
 | **Co-retrieval** (Ori-Mnemos) | Episodes returned together at runtime | Better — but still driven by the retrieval system, not the agent |
 | **Co-citation during consolidation** (anneal-memory) | Agent explicitly connects episodes while compressing | Deepest — links form from semantic judgment during a cognitive act |
 
-The association network inherits the immune system's integrity: only validated citations form links. Demoted citations don't. The entire cognitive topology is built on evidence, not frequency.
+The association network is gated by the immune system where gaming is *actively detected*: citations to non-existent episodes form no links, and citations the cross-session anti-sycophancy check flags as suspected re-graduation are refused. Grounding quality — whether a pattern's prose explanation lexically matches its cited episodes — governs whether the pattern *graduates*, not whether the co-cited episodes *associate*: a real but paraphrased co-citation still records that those episodes fired together (it just doesn't level the pattern up). The topology is built on real co-occurrence of real episodes under active gaming defense, not on retrieval frequency.
 
 **Strength model:** Direct co-citation adds 1.0, session co-citation adds 0.3. Links decay 0.9x per wrap (unused connections fade). Strength caps at 10.0 to prevent calcification. Cleanup at 0.1 threshold.
 

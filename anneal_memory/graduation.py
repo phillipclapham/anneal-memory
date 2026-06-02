@@ -199,7 +199,7 @@ class GraduationResult:
     citation_counts: dict[str, int] = field(default_factory=dict)  # ep_id -> times cited
     gaming_suspects: list[str] = field(default_factory=list)  # IDs cited >= threshold
     direct_co_citations: list[tuple[str, str]] = field(default_factory=list)  # Pairs from same line
-    all_validated_ids: list[set[str]] = field(default_factory=list)  # Per-line validated ID sets
+    all_validated_ids: list[set[str]] = field(default_factory=list)  # Per-line co-cited real-episode ID sets — NOT graduation-validated since AM-QUOTEFOOTGUN (v0.4.1): populated on demoted-grounding lines too, feeds session co-citation. (Rename to co_cited_id_sets is a v0.5 candidate.)
     # Patterns at 2x/3x in the prior continuity that are absent at any
     # level in the new continuity. Surfaced as audit signal — see
     # detect_pattern_omissions() and OmittedPattern docstring.
@@ -473,20 +473,20 @@ def validate_graduations(
                                 cross_session_overlap_words = sorted(best_overlap)
                                 prior_explanation_for_check = best_prior
 
+            # AM-QUOTEFOOTGUN (v0.4.1): compute the co-cited episode set up
+            # front so Hebbian link formation can be DECOUPLED from the
+            # explanation-overlap immune gate below. ``explanation_valid``
+            # governs graduation GROUNDING (validated vs demoted) — it must
+            # NOT govern whether two episodes that were cited together get a
+            # co-occurrence link. (Pre-0.4.1 the extraction was bolted inside
+            # the validated branch, so anneal's own documented quoted
+            # ``[evidence: id "why"]`` format silently formed 0 links whenever
+            # the paraphrased explanation missed the ≥2-meaningful-word
+            # lexical overlap, while bare ``[evidence: id, id]`` linked fine.)
+            valid_cited = sorted(cited_ids & valid_ids)
+
             if ids_valid and explanation_valid and not cross_session_overlap_words:
                 validated += 1
-                # Extract co-citation pairs for Hebbian associations
-                # Only from VALIDATED citations — immune system protects the graph
-                valid_cited = sorted(cited_ids & valid_ids)
-                if len(valid_cited) >= 2:
-                    for idx_a in range(len(valid_cited)):
-                        for idx_b in range(idx_a + 1, len(valid_cited)):
-                            direct_co_citations.append(
-                                (valid_cited[idx_a], valid_cited[idx_b])
-                            )
-                # Track all validated IDs per line for session co-citation
-                if valid_cited:
-                    all_validated_ids.append(set(valid_cited))
             elif cross_session_overlap_words:
                 # Cross-session check fired: today's explanation reuses
                 # vocabulary from the pattern's prior-session
@@ -514,6 +514,25 @@ def validate_graduations(
             else:
                 demoted += 1
                 lines[i] = _demote_line(line, match, level)
+
+            # Decoupled co-citation extraction (AM-QUOTEFOOTGUN). Record the
+            # Hebbian co-occurrence for any line citing real episodes,
+            # independent of explanation grounding — EXCEPT when the
+            # cross-session immune defense flagged suspected sycophantic
+            # re-graduation (we don't strengthen the graph from a gamed
+            # accumulation). The graph records what fired together; the
+            # immune gate above still decides what graduates. Note this
+            # block runs even on the demoted explanation path, so a real
+            # but paraphrased co-citation keeps its link.
+            if ids_valid and not cross_session_overlap_words:
+                if len(valid_cited) >= 2:
+                    for idx_a in range(len(valid_cited)):
+                        for idx_b in range(idx_a + 1, len(valid_cited)):
+                            direct_co_citations.append(
+                                (valid_cited[idx_a], valid_cited[idx_b])
+                            )
+                # Per-line co-cited IDs feed session-level co-citation
+                all_validated_ids.append(set(valid_cited))
             continue
 
         # Fail-safe sunset: bare graduations without evidence
@@ -612,15 +631,18 @@ def check_explanation_overlap(explanation: str, episode_content: str) -> bool:
 def extract_session_co_citations(
     all_validated_ids: list[set[str]],
 ) -> set[tuple[str, str]]:
-    """Extract session-level co-citation pairs from validated graduation IDs.
+    """Extract session-level co-citation pairs from per-line co-cited IDs.
 
     Session co-citations are pairs of episodes cited in DIFFERENT pattern
     lines during the same wrap. These represent a weaker association signal
     than direct co-citations (same line).
 
     Args:
-        all_validated_ids: List of sets, each containing validated episode IDs
-            from a single pattern line.
+        all_validated_ids: List of sets, each containing the real (existing)
+            co-cited episode IDs from a single pattern line. Since
+            AM-QUOTEFOOTGUN (v0.4.1) these are NOT necessarily
+            graduation-validated — a demoted-grounding line still contributes
+            its real co-cited IDs (co-occurrence is independent of grounding).
 
     Returns:
         Set of canonical (id_a, id_b) pairs where id_a < id_b.

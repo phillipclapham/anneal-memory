@@ -580,7 +580,15 @@ class TestGraduationCoCitationExtraction:
         assert len(result.direct_co_citations) == 0
 
     def test_demoted_citations_produce_no_associations(self):
-        """Ungrounded citations must NOT form association links."""
+        """Citations to NON-EXISTENT episode IDs must NOT form links.
+
+        AM-QUOTEFOOTGUN (v0.4.1) decoupled link formation from the
+        explanation-overlap *grounding* gate — but a co-citation still
+        requires REAL episodes. With no valid IDs there is nothing to
+        associate, so the graph stays empty regardless of grounding.
+        (Contrast ``test_paraphrased_explanation_still_co_cites``: real
+        IDs + a poorly-grounded explanation now DO link.)
+        """
         text = """## Patterns
 {test:
   thought: bad | 2x (2026-04-07) [evidence: dead1111, dead2222 "nothing real"]
@@ -629,6 +637,64 @@ class TestGraduationCoCitationExtraction:
         assert len(result.all_validated_ids) == 2
         assert {"aaa11111"} in result.all_validated_ids
         assert {"bbb22222"} in result.all_validated_ids
+
+    def test_paraphrased_explanation_still_co_cites(self):
+        """AM-QUOTEFOOTGUN: a quoted explanation that misses the
+        ≥2-word lexical-overlap grounding heuristic is demoted for
+        grounding, but the Hebbian co-citation link MUST still form.
+
+        Pre-0.4.1 the link extraction was bolted inside the validated
+        branch, so the documented ``[evidence: id "why"]`` format
+        silently produced 0 links on any paraphrase, while bare
+        ``[evidence: id, id]`` linked fine. Co-occurrence is a fact
+        about what was cited together; grounding is a separate judgment
+        the immune gate still renders (validated stays 0 here).
+        """
+        text = """## Patterns
+{test:
+  thought: foo | 2x (2026-04-07) [evidence: aaa11111, bbb22222 "semantic paraphrase entirely novel vocabulary"]
+}"""
+        valid_ids = {"aaa11111", "bbb22222"}
+        node_map = {
+            "aaa11111": "database performance is critical for scaling under load",
+            "bbb22222": "scaling requires careful performance tuning over time",
+        }
+
+        result = validate_graduations(text, valid_ids, "2026-04-07", node_map)
+
+        # Grounding gate still fired — the explanation does not graduate.
+        assert result.validated == 0
+        assert result.demoted == 1
+        # ...but the co-citation link is no longer erased.
+        assert len(result.direct_co_citations) == 1
+        assert ("aaa11111", "bbb22222") in result.direct_co_citations
+        assert {"aaa11111", "bbb22222"} in result.all_validated_ids
+
+    def test_paraphrased_session_co_citation_tracked(self):
+        """Per-line co-cited IDs feed session co-citation even when the
+        line is demoted for weak grounding — single IDs on demoted
+        paraphrase lines still pair across lines."""
+        text = """## Patterns
+{test:
+  thought: foo | 2x (2026-04-07) [evidence: aaa11111 "orthogonal unrelated descriptive phrasing"]
+  thought: bar | 2x (2026-04-07) [evidence: bbb22222 "different novel paraphrased wording"]
+}"""
+        valid_ids = {"aaa11111", "bbb22222"}
+        node_map = {
+            "aaa11111": "database performance is critical for production workloads",
+            "bbb22222": "connection pooling is the real bottleneck here",
+        }
+
+        result = validate_graduations(text, valid_ids, "2026-04-07", node_map)
+
+        assert result.validated == 0
+        assert result.demoted == 2
+        # Both demoted lines still contribute to session co-citation.
+        assert len(result.all_validated_ids) == 2
+        assert {"aaa11111"} in result.all_validated_ids
+        assert {"bbb22222"} in result.all_validated_ids
+        session_pairs = extract_session_co_citations(result.all_validated_ids)
+        assert ("aaa11111", "bbb22222") in session_pairs
 
 
 class TestStoreAssociationMethods:
@@ -879,6 +945,52 @@ Evaluated database architecture. Identified connection pooling as bottleneck.
         # Verify association exists
         assocs = store.get_associations([ep1.id[:8].lower()])
         assert len(assocs) >= 1
+
+        store.close()
+
+    def test_paraphrased_co_citation_forms_real_link(self, tmp_path):
+        """AM-QUOTEFOOTGUN end-to-end: a quoted evidence explanation that
+        does NOT lexically overlap its cited episodes is demoted for
+        grounding, yet the association graph still gains a real link.
+        Proves the documented quoted ``[evidence: id "why"]`` format no
+        longer ships a dead Hebbian layer — ``total_links`` rises 0 → 1.
+        """
+        db = tmp_path / "test.db"
+        store = Store(db)
+
+        ep1 = store.record(
+            "database performance is critical for scaling under load",
+            "observation",
+        )
+        ep2 = store.record(
+            "scaling requires careful performance tuning over time",
+            "observation",
+        )
+        a, b = ep1.id[:8].lower(), ep2.id[:8].lower()
+
+        # Baseline: empty association graph.
+        assert store.association_stats().total_links == 0
+
+        today = "2026-04-07"
+        continuity = f"""## Patterns
+{{database:
+  thought: scaling insight | 2x ({today}) [evidence: {ep1.id}, {ep2.id} "semantic paraphrase entirely novel vocabulary"]
+}}"""
+        valid_ids = {a, b}
+        node_map = {a: ep1.content, b: ep2.content}
+
+        grad = validate_graduations(continuity, valid_ids, today, node_map)
+        # Grounding gate demoted the line, but the link was extracted.
+        assert grad.validated == 0
+        assert grad.demoted == 1
+        assert len(grad.direct_co_citations) == 1
+
+        formed, _ = store.record_associations(
+            direct_pairs=set(grad.direct_co_citations),
+            session_pairs=extract_session_co_citations(grad.all_validated_ids),
+        )
+        assert formed == 1
+        assert store.association_stats().total_links == 1
 
         store.close()
 

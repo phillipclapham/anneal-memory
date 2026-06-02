@@ -32,6 +32,13 @@ from .integrity import RESOURCES, TOOLS, hash_tool, generate_integrity_file, ver
 # WebSocket/gRPC). The earlier server-module home was an
 # architectural wart that made the CLI load the entire MCP server
 # module just to reach one compiled regex.
+from .spores import (
+    VALID_GERMINATIONS,
+    VALID_TIERS,
+    VALID_TYPES,
+    SporeStore,
+    germination_tier,
+)
 from .store import Store, StoreError, _WRAP_TOKEN_RE
 from .types import AffectiveState
 
@@ -122,6 +129,11 @@ class Server:
 
     def __init__(self, store: Store) -> None:
         self._store = store
+        # The prospective (spore) store is a JSON sibling of the episodic db:
+        # ``<stem>.spores.json``, mirroring the ``<stem>.continuity.md`` sibling.
+        # Created on first write, so it need not pre-exist.
+        base = Path(store.path) if store.path is not None else Path("memory.db")
+        self._spore_store = SporeStore(base.parent / f"{base.stem}.spores.json")
         self._handlers: dict[str, Any] = {
             "initialize": self._handle_initialize,
             "ping": self._handle_ping,
@@ -137,6 +149,14 @@ class Server:
             "save_continuity": self._tool_save_continuity,
             "delete_episode": self._tool_delete_episode,
             "status": self._tool_status,
+            "spore_add": self._tool_spore_add,
+            "spore_get": self._tool_spore_get,
+            "spore_list": self._tool_spore_list,
+            "spore_touch": self._tool_spore_touch,
+            "spore_update": self._tool_spore_update,
+            "spore_descend": self._tool_spore_descend,
+            "spore_ascend": self._tool_spore_ascend,
+            "spore_surface": self._tool_spore_surface,
         }
 
     def run(self) -> None:
@@ -568,6 +588,125 @@ class Server:
         else:
             lines.append("Audit: disabled")
 
+        return _tool_result("\n".join(lines))
+
+    # -- Spore tools (prospective-intention layer) --
+    # SporeError / ValueError raised by the store propagate to
+    # _handle_tools_call, which converts them to an is_error tool result.
+
+    def _tool_spore_add(self, args: dict[str, Any]) -> dict[str, Any]:
+        # Pass salience through RAW (no int() coercion) so the library validates
+        # type+range — coercing here would silently turn 2.9 into 2, "" into 0,
+        # etc., diverging from the declared integer/0-3 schema.
+        item = self._spore_store.add(
+            type=args.get("type", ""),
+            text=args.get("text", ""),
+            domain=args.get("domain", "") or "",
+            tier=args.get("tier", "warm"),
+            salience=args.get("salience", 0),
+            next=args.get("next"),
+            pointer=args.get("pointer"),
+        )
+        return _tool_result(
+            f"Planted {item['id']} ({item['type']}/{item['tier']}): {item['text']}"
+        )
+
+    def _tool_spore_get(self, args: dict[str, Any]) -> dict[str, Any]:
+        spore_id = (args.get("spore_id") or "").strip()
+        if not spore_id:
+            return _tool_result("Error: spore_id is required", is_error=True)
+        item = self._spore_store.get(spore_id)
+        if item is None:
+            return _tool_result(f"Spore {spore_id} not found.", is_error=True)
+        # Annotate computed germination — the tool description promises it, and
+        # list_open's silent equality filter doesn't add it to the stored row.
+        row = dict(item)
+        row["germination"] = germination_tier(item)
+        return _tool_result(json.dumps(row, indent=2, ensure_ascii=False))
+
+    def _tool_spore_list(self, args: dict[str, Any]) -> dict[str, Any]:
+        # The library equality-filters without validating, so an invalid enum
+        # (e.g. type='tasks') would silently return "no matches". Validate against
+        # the declared schema enums and fail loudly, mirroring the CLI's choices=.
+        for field, valid in (
+            ("type", VALID_TYPES),
+            ("tier", VALID_TIERS),
+            ("germination", VALID_GERMINATIONS),
+        ):
+            v = args.get(field)
+            if v is not None and v not in valid:
+                return _tool_result(
+                    f"Error: invalid {field} {v!r}; valid: {list(valid)}", is_error=True
+                )
+        items = self._spore_store.list_open(
+            type=args.get("type"),
+            tier=args.get("tier"),
+            domain=args.get("domain"),
+            germination=args.get("germination"),
+        )
+        if not items:
+            return _tool_result("No open spores match.")
+        lines = [
+            f"[{s['id']}] {s.get('type')}/{s.get('tier')}/{germination_tier(s)} "
+            f"salience={s.get('salience')}: {s.get('text', '')}"
+            for s in items
+        ]
+        return _tool_result("\n".join(lines))
+
+    def _tool_spore_touch(self, args: dict[str, Any]) -> dict[str, Any]:
+        spore_id = (args.get("spore_id") or "").strip()
+        if not spore_id:
+            return _tool_result("Error: spore_id is required", is_error=True)
+        item = self._spore_store.touch(spore_id)
+        return _tool_result(
+            f"Touched {item['id']} (seen -> {item['seen']}, {germination_tier(item)})"
+        )
+
+    def _tool_spore_update(self, args: dict[str, Any]) -> dict[str, Any]:
+        spore_id = (args.get("spore_id") or "").strip()
+        if not spore_id:
+            return _tool_result("Error: spore_id is required", is_error=True)
+        # Pass only the keys the caller actually sent — presence in `args`
+        # distinguishes "omitted (leave)" from "empty string (clear)".
+        kwargs: dict[str, Any] = {}
+        for field in ("tier", "next", "text", "salience", "domain", "pointer"):
+            if field in args:
+                kwargs[field] = args[field]
+        if args.get("add_note"):
+            kwargs["add_note"] = args["add_note"]
+        if not kwargs:
+            return _tool_result("Error: no fields to update", is_error=True)
+        item = self._spore_store.update(spore_id, **kwargs)
+        return _tool_result(f"Updated {item['id']}")
+
+    def _tool_spore_descend(self, args: dict[str, Any]) -> dict[str, Any]:
+        spore_id = (args.get("spore_id") or "").strip()
+        if not spore_id:
+            return _tool_result("Error: spore_id is required", is_error=True)
+        kind = args.get("kind", "")
+        item = self._spore_store.descend(spore_id, kind=kind)
+        return _tool_result(f"Descended {item['id']} ({kind}) -> resolved down.")
+
+    def _tool_spore_ascend(self, args: dict[str, Any]) -> dict[str, Any]:
+        spore_id = (args.get("spore_id") or "").strip()
+        if not spore_id:
+            return _tool_result("Error: spore_id is required", is_error=True)
+        kind = args.get("kind", "")
+        ref = args.get("ref", "")
+        item = self._spore_store.ascend(spore_id, kind=kind, ref=ref)
+        return _tool_result(f"Ascended {item['id']} -> {kind}: {ref}")
+
+    def _tool_spore_surface(self, args: dict[str, Any]) -> dict[str, Any]:
+        # `is True` (not bool()) so a non-boolean truthy value like the string
+        # "false" can't flip on the ToM subset — matches the save_continuity
+        # allow_shrink convention and fails safe to "all open spores".
+        items = self._spore_store.surface(top_of_mind=args.get("top_of_mind") is True)
+        if not items:
+            return _tool_result("(no open spores)")
+        lines = [
+            f"({s.get('type')}/{s.get('tier')}/{germination_tier(s)}) {s.get('text', '')}"
+            for s in items
+        ]
         return _tool_result("\n".join(lines))
 
 

@@ -2,7 +2,7 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] — 2026-06-02
 
 ### Added — prospective-intention layer (`spores`)
 
@@ -11,10 +11,16 @@ A new parallel store for **prospective** memory, sibling to the episodic (biogra
 - **`SporeStore`** (`anneal_memory.spores`, exported from the package top level) — a JSON-backed store of typed open loops: `task` (open doing) / `question` (open not-knowing) / `thought` (open idea), sharing one lifecycle: **plant → grow → resolve**. Resolve is either `descend` (compost — done/answered/explored/dropped) or `ascend` (transmute into the retrospective layers — records a pointer to what the spore *became*; v1 records the pointer, the actual episode write stays the host's act).
 - **Germination tiers** (`germination_tier()`) — `growing`/`resting`/`dormant`/`parked`, **computed from `seen`/`next` at read-time, never stored** (a stored tier would drift the moment the clock moved). `parked` is deliberate dormancy; a `next:` on/before today forces `dormant`.
 - **API:** `add`/`get`/`list_open`/`touch`/`update`/`descend`/`ascend`/`surface`; type-specific terminal kinds enforced (a `task` can't `descend answered`); `today`/`now` injectable for deterministic runs.
-- **`SporeError`** (subclass of `AnnealMemoryError`) for store-state failures; `ValueError` for malformed arguments. Atomic writes (tmp + fsync + rename + dir-fsync); a corrupt store **never silently re-inits** (raises, validating container/row types + `schema_version`); within-list and cross-list duplicate-id drift refuse loudly.
-- Zero-dep (stdlib only), mypy-clean. 71 new tests.
+- **`SporeError`** (subclass of `AnnealMemoryError`) for store-state failures; `ValueError` for malformed arguments. Atomic writes (unique-tmp + fsync + rename + dir-fsync); a corrupt store **never silently re-inits** (raises, validating container/row types + `schema_version`); within-list and cross-list duplicate-id drift refuse loudly.
+- **Concurrency-safe (multi-writer).** Unlike the episodic store's single-process invariant, the prospective layer is inherently multi-writer (parallel sessions + overnight wrappers planting/touching/resolving against one store). Every mutation serializes under an exclusive `fcntl` advisory lock on a sibling `<store>.lock` spanning the whole load→mutate→save — the document is (re)loaded *inside* the lock, so concurrent `add`/`touch`/`update`/`descend`/`ascend` cannot lose updates or collide ids; the unique-tmp + atomic `os.replace` keep reads lock-free and tear-free. Cross-process serialization is a local-POSIX guarantee (the lock no-ops on non-POSIX / network filesystems; a single-process writer is unaffected there).
+- Zero-dep (stdlib only), mypy-clean. 73 new tests (incl. a multiprocessing cross-process concurrency repro).
 
-Not yet exposed via the CLI or MCP transports (library-only for now). The `ascend`-auto-writes-an-episode membrane is deferred.
+**CLI + MCP surface.** Spores are now first-class on both transports (not library-only):
+- **CLI:** `anneal-memory spore <add|get|list|touch|update|descend|ascend|surface>` — grouped subcommands over the library, `--json` on every action. The spore store is a `<db-stem>.spores.json` sibling of the episodic db, created on first write (independent of it — no `init` required).
+- **MCP:** 8 tools (`spore_add`/`spore_get`/`spore_list`/`spore_touch`/`spore_update`/`spore_descend`/`spore_ascend`/`spore_surface`) with integrity-hashed descriptions. The server validates enum filters and rejects schema-violating inputs (no silent coercion of out-of-schema `salience`/`top_of_mind`). Tool count 6 → 14; `tool-integrity.json` regenerated.
+- **Input hardening (all callers).** `add`/`update` now reject non-string `text`/`domain`/`pointer` and bool `salience` with a clear `ValueError` (previously a non-string `text` raised a confusing `AttributeError`); this benefits direct library consumers, not just the transports.
+
+The `ascend`-auto-writes-an-episode membrane remains deferred to v2.
 
 ## [0.3.5] — 2026-05-31
 

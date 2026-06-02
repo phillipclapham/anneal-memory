@@ -16,12 +16,16 @@ from anneal_memory.integrity import (
 class TestToolDefinitions:
     """Verify canonical tool definitions are well-formed."""
 
-    def test_six_tools_defined(self):
-        assert len(TOOLS) == 6
+    def test_tool_count(self):
+        assert len(TOOLS) == 14  # 6 core + 8 spore (prospective layer)
 
     def test_tool_names(self):
         names = {t["name"] for t in TOOLS}
-        assert names == {"record", "recall", "prepare_wrap", "save_continuity", "delete_episode", "status"}
+        assert names == {
+            "record", "recall", "prepare_wrap", "save_continuity", "delete_episode", "status",
+            "spore_add", "spore_get", "spore_list", "spore_touch",
+            "spore_update", "spore_descend", "spore_ascend", "spore_surface",
+        }
 
     def test_all_tools_have_required_fields(self):
         for tool in TOOLS:
@@ -197,7 +201,7 @@ class TestVerifyIntegrity:
         path.write_text(json.dumps({"version": 1, "tools": {}}))
         valid, issues = verify_integrity(path)
         assert valid is False
-        assert len(issues) == 6  # All 6 tools missing
+        assert len(issues) == 14  # All 14 tools missing
 
 
 class TestShippedManifest:

@@ -77,7 +77,7 @@ class TestPing:
 class TestToolsList:
     def test_returns_all_tools(self, server):
         result = server._handle_tools_list({})
-        assert len(result["tools"]) == 6
+        assert len(result["tools"]) == 14  # 6 core + 8 spore tools
 
     def test_tools_match_integrity_definitions(self, server):
         result = server._handle_tools_list({})
@@ -114,7 +114,8 @@ class TestResourcesRead:
         assert "tools" in manifest
         assert "record" in manifest["tools"]
         assert "delete_episode" in manifest["tools"]
-        assert len(manifest["tools"]) == 6
+        assert "spore_add" in manifest["tools"]
+        assert len(manifest["tools"]) == 14  # 6 core + 8 spore tools
 
     def test_unknown_uri_returns_empty(self, server):
         result = server._handle_resources_read({"uri": "anneal://unknown"})
@@ -950,3 +951,130 @@ class TestNotificationHandling:
 
         # No output should have been written for the notification
         assert output.getvalue() == ""
+
+
+# -- Spore tools (prospective-intention layer) --
+
+
+def _call(server, name, arguments=None):
+    """Drive a tool through the real dispatch path (exercises the
+    exception -> is_error conversion in _handle_tools_call)."""
+    return server._handle_tools_call({"name": name, "arguments": arguments or {}})
+
+
+class TestSporeTools:
+    def test_all_spore_tools_registered_and_in_integrity(self, server):
+        names = {t["name"] for t in TOOLS}
+        expected = {
+            "spore_add", "spore_get", "spore_list", "spore_touch",
+            "spore_update", "spore_descend", "spore_ascend", "spore_surface",
+        }
+        assert expected <= names
+        assert expected <= set(server._tool_handlers)
+
+    def test_spore_store_is_sibling_of_db(self, server, store):
+        # <stem>.spores.json beside the episodic db, mirroring continuity.
+        assert server._spore_store.path == store.path.parent / f"{store.path.stem}.spores.json"
+
+    def test_add_then_list_then_get(self, server):
+        r = _call(server, "spore_add", {"type": "task", "text": "ship the MCP surface", "tier": "hot", "salience": 2})
+        assert not _is_error(r)
+        assert "spore-001" in _text_from_result(r)
+
+        r = _call(server, "spore_list", {})
+        assert not _is_error(r)
+        assert "ship the MCP surface" in _text_from_result(r)
+
+        r = _call(server, "spore_get", {"spore_id": "spore-001"})
+        assert not _is_error(r)
+        body = json.loads(_text_from_result(r))
+        assert body["id"] == "spore-001"
+        assert body["tier"] == "hot"
+        # get annotates computed germination (the tool description promises it).
+        assert body["germination"] == "growing"
+
+    def test_list_invalid_enum_is_error_not_empty(self, server):
+        _call(server, "spore_add", {"type": "task", "text": "real task"})
+        # A typo'd filter must error loudly, not silently return "no matches".
+        r = _call(server, "spore_list", {"type": "tasks"})
+        assert _is_error(r)
+        assert "invalid type" in _text_from_result(r)
+
+    def test_surface_non_boolean_top_of_mind_does_not_enable_tom(self, server):
+        _call(server, "spore_add", {"type": "task", "text": "hot one", "tier": "hot"})
+        _call(server, "spore_add", {"type": "task", "text": "parked one", "tier": "parked"})
+        # The string "false" is truthy in Python; `is True` must keep it OFF, so
+        # this returns ALL open spores (including the parked one), not the ToM subset.
+        r = _call(server, "spore_surface", {"top_of_mind": "false"})
+        assert not _is_error(r)
+        text = _text_from_result(r)
+        assert "hot one" in text and "parked one" in text
+
+    def test_add_invalid_salience_is_error(self, server):
+        # 2.9 must NOT be silently coerced to 2 (no int() masking in the tool).
+        assert _is_error(_call(server, "spore_add", {"type": "task", "text": "x", "salience": 2.9}))
+
+    def test_add_invalid_type_is_error(self, server):
+        r = _call(server, "spore_add", {"type": "nonsense", "text": "x"})
+        assert _is_error(r)
+
+    def test_add_missing_text_is_error(self, server):
+        r = _call(server, "spore_add", {"type": "task"})
+        assert _is_error(r)
+
+    def test_get_missing_and_nonexistent(self, server):
+        assert _is_error(_call(server, "spore_get", {}))
+        assert _is_error(_call(server, "spore_get", {"spore_id": "spore-999"}))
+
+    def test_touch_updates_seen(self, server):
+        _call(server, "spore_add", {"type": "task", "text": "t"})
+        r = _call(server, "spore_touch", {"spore_id": "spore-001"})
+        assert not _is_error(r)
+        assert "Touched spore-001" in _text_from_result(r)
+
+    def test_update_only_passes_given_fields(self, server):
+        _call(server, "spore_add", {"type": "question", "text": "q", "domain": "design"})
+        r = _call(server, "spore_update", {"spore_id": "spore-001", "tier": "hot"})
+        assert not _is_error(r)
+        # domain left intact (not cleared) because it wasn't passed
+        body = json.loads(_text_from_result(_call(server, "spore_get", {"spore_id": "spore-001"})))
+        assert body["tier"] == "hot"
+        assert body["domain"] == "design"
+
+    def test_update_no_fields_is_error(self, server):
+        _call(server, "spore_add", {"type": "task", "text": "t"})
+        assert _is_error(_call(server, "spore_update", {"spore_id": "spore-001"}))
+
+    def test_update_clears_with_empty_string(self, server):
+        _call(server, "spore_add", {"type": "task", "text": "t", "pointer": "p/x"})
+        _call(server, "spore_update", {"spore_id": "spore-001", "pointer": ""})
+        body = json.loads(_text_from_result(_call(server, "spore_get", {"spore_id": "spore-001"})))
+        assert body["pointer"] is None
+
+    def test_descend_valid_and_invalid_kind(self, server):
+        _call(server, "spore_add", {"type": "task", "text": "t"})
+        # 'answered' is a question-kind, invalid for a task
+        assert _is_error(_call(server, "spore_descend", {"spore_id": "spore-001", "kind": "answered"}))
+        r = _call(server, "spore_descend", {"spore_id": "spore-001", "kind": "done"})
+        assert not _is_error(r)
+        assert "resolved down" in _text_from_result(r)
+        # resolved spore no longer open
+        assert "No open spores" in _text_from_result(_call(server, "spore_list", {}))
+
+    def test_ascend_records_ref_and_requires_ref(self, server):
+        _call(server, "spore_add", {"type": "thought", "text": "an idea"})
+        assert _is_error(_call(server, "spore_ascend", {"spore_id": "spore-001", "kind": "essay"}))
+        r = _call(server, "spore_ascend", {"spore_id": "spore-001", "kind": "essay", "ref": "essays/idea.md"})
+        assert not _is_error(r)
+        assert "essays/idea.md" in _text_from_result(r)
+
+    def test_surface_top_of_mind(self, server):
+        _call(server, "spore_add", {"type": "task", "text": "hot one", "tier": "hot"})
+        # A freshly-added spore is 'growing' (seen today) regardless of tier, so to
+        # test exclusion use 'parked' — germination='parked', tier != hot.
+        _call(server, "spore_add", {"type": "task", "text": "parked one", "tier": "parked"})
+        r = _call(server, "spore_surface", {"top_of_mind": True})
+        assert not _is_error(r)
+        text = _text_from_result(r)
+        assert "hot one" in text           # tier == hot -> included
+        assert "parked one" not in text    # parked: not hot, not growing -> excluded

@@ -262,3 +262,57 @@ class TestShippedManifest:
             f"Tools in shipped manifest but removed from TOOLS: {extra}. "
             f"Run generate_integrity_file() and commit."
         )
+
+
+class TestVersionConsistency:
+    """Every shipped version string must agree with ``__version__``.
+
+    The 0.4.0 ship bumped only ``pyproject.toml`` and left ``__version__``
+    and both ``server.json`` fields at 0.3.5 — so ``anneal-memory==0.4.0``
+    reported ``__version__ == "0.3.5"`` and nothing caught it (the existing
+    version tests only assert the server/CLI *report* ``__version__`, not
+    that the manifests agree with it). This makes that drift structurally
+    impossible instead of discipline-dependent.
+    """
+
+    def _repo_root(self) -> Path:
+        import anneal_memory
+        return Path(anneal_memory.__file__).parent.parent
+
+    def test_pyproject_version_matches_dunder(self):
+        import re
+        import anneal_memory
+        text = (self._repo_root() / "pyproject.toml").read_text()
+        # Scope to the [project] table before matching ``version`` so a
+        # future ``[tool.*]`` table introducing its own column-0
+        # ``version = "..."`` cannot bind the wrong line (L1 hardening).
+        # Split on TOML table headers; take the [project] body only.
+        project_body = ""
+        for chunk in re.split(r'(?m)^(\[[^\]]+\])\s*$', text):
+            if chunk == "[project]":
+                project_body = "__MARK__"
+            elif project_body == "__MARK__":
+                project_body = chunk
+                break
+        assert project_body and project_body != "__MARK__", (
+            "no [project] table found in pyproject.toml"
+        )
+        m = re.search(r'(?m)^version = "([^"]+)"', project_body)
+        assert m is not None, "no version in pyproject.toml [project] table"
+        assert m.group(1) == anneal_memory.__version__, (
+            f"pyproject.toml [project] version {m.group(1)!r} != "
+            f"__version__ {anneal_memory.__version__!r}"
+        )
+
+    def test_server_json_versions_match_dunder(self):
+        import anneal_memory
+        data = json.loads((self._repo_root() / "server.json").read_text())
+        assert data["version"] == anneal_memory.__version__, (
+            f"server.json top-level version {data['version']!r} != "
+            f"__version__ {anneal_memory.__version__!r}"
+        )
+        for pkg in data["packages"]:
+            assert pkg["version"] == anneal_memory.__version__, (
+                f"server.json package version {pkg['version']!r} != "
+                f"__version__ {anneal_memory.__version__!r}"
+            )

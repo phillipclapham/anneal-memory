@@ -2,6 +2,26 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-06-02
+
+### Fixed — AM-QUOTEFOOTGUN: the documented quoted evidence format no longer silently kills the Hebbian graph
+
+Hebbian co-citation link formation is now **decoupled from the explanation-overlap grounding gate**. Previously the co-citation extraction was bolted *inside* the validated branch of `validate_graduations` (`if ids_valid and explanation_valid and not cross_session_overlap_words`), so a quoted `[evidence: <id> "explanation"]` whose prose missed the ≥2-meaningful-word lexical-overlap check (`check_explanation_overlap`) was demoted for grounding **and formed zero association links**, while a bare `[evidence: <id>, <id>]` (no explanation → `explanation_valid` stays `True`) linked reliably. The net effect: anneal's own canonical, documented citation format could silently ship a dead Hebbian/limbic layer on any paraphrased explanation — healthy-by-metric, dead-by-structure.
+
+The fix separates two concerns that were conflated:
+- **Graduation grounding** (does the prose reference the cited episode?) — still governed by the explanation-overlap gate; the `validated`/`demoted` counters and line demotion are byte-for-byte unchanged. An ungrounded explanation still does not graduate.
+- **Hebbian co-occurrence** (were these episodes cited together?) — a fact about what fired together, independent of prose quality. Both **direct** co-citation (≥2 real IDs on one line) and **session** co-citation (real IDs paired across lines in the same wrap) now form for any line citing real (valid) episode IDs, **regardless of `explanation_valid`**.
+
+**What still gates the graph — stated precisely.** A link requires real episodes: citations to non-existent IDs form nothing. The **cross-session anti-sycophancy check** (Move #3) still blocks link formation when it fires — but note it is *computed only for grounded explanations* (`explanation_valid` is a precondition at its call site, since it is fundamentally a graduation-integrity check). So it gates links on the *grounded-but-rephrased* path only; on the *demoted-grounding* path (the footgun path), links now form from real-episode co-citation **without** a cross-session check. This is **not a new attacker capability** — bare unquoted `[evidence: id, id]` (no explanation) likewise never reached the cross-session check and always formed links; the per-ID citation-gaming counter still fires on both paths as an (informational) signal. Extending the cross-session gate to *also* run on the demoted path is tracked as a follow-up (**AM-XSESSION-LINKGATE**) for a dedicated immune-system session, since it changes the cross-session *trigger* semantics (demotion marker + `CrossSessionCollision` audit on the demoted path) and warrants isolation from this localized fix.
+
+**Retires the interim "cite-unquoted" workaround.** Adopters (e.g. flow) that had dropped the quoted `[evidence: id "why"]` form to keep the graph alive can return to the documented format.
+
+Localized to `anneal_memory/graduation.py` (`validate_graduations`); no public API or schema change. 4 new regression tests — `test_paraphrased_explanation_still_co_cites`, `test_paraphrased_session_co_citation_tracked`, the end-to-end `test_paraphrased_co_citation_forms_real_link` (`total_links` rises 0 → 1 on a demoted-but-real co-citation), and `test_cross_session_overlap_forms_no_link` (the cross-session gate still blocks where it runs). Plus 2 version-consistency guards (below). 965 tests, mypy clean.
+
+### Fixed — version-string drift from the 0.4.0 ship
+
+`anneal_memory/__init__.py` `__version__` and both `server.json` version fields were left at `0.3.5` when 0.4.0 shipped (only `pyproject.toml` was bumped), so `anneal-memory==0.4.0` reported `__version__ == "0.3.5"`. All version strings are now aligned at `0.4.1`.
+
 ## [0.4.0] — 2026-06-02
 
 ### Added — prospective-intention layer (`spores`)

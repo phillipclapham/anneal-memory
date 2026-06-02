@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
+import warnings
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
@@ -41,6 +42,7 @@ from .graduation import (
 from .schema import (
     DEFAULT_SCHEMA,
     SectionSpec,
+    default_max_chars,
     graduating_headings,
     required_headings,
 )
@@ -372,7 +374,7 @@ def _build_wrap_package(
     existing_continuity: str | None,
     project_name: str,
     *,
-    max_chars: int = 20000,
+    max_chars: int | None = None,
     today: str | None = None,
     staleness_days: int = 7,
     schema: list[SectionSpec] | None = None,
@@ -398,7 +400,8 @@ def _build_wrap_package(
         episodes: Episodes since last wrap (the compression window).
         existing_continuity: Current continuity text, or None for first session.
         project_name: Name for the continuity file header.
-        max_chars: Maximum size of the continuity file.
+        max_chars: Maximum size of the continuity file. ``None`` derives a
+            schema-aware default (see :func:`~anneal_memory.schema.default_max_chars`).
         today: Override for today's date (YYYY-MM-DD). Defaults to actual today.
         staleness_days: Days before flagging stale patterns.
 
@@ -410,6 +413,12 @@ def _build_wrap_package(
         today = date.today().isoformat()
     if schema is None:
         schema = DEFAULT_SCHEMA
+    if max_chars is None:
+        # AM-SCHEMA-BUDGET: schema-aware default. DEFAULT_SCHEMA -> 20000
+        # (byte-compatible); a richer schema (FLOW_SCHEMA) gets headroom for its
+        # incompressible felt/structural sections. Single resolution point —
+        # feeds both _build_wrap_instructions and the returned package.
+        max_chars = default_max_chars(schema)
 
     # Format episodes for the agent
     formatted_episodes = format_episodes_for_wrap(episodes)
@@ -447,7 +456,7 @@ def _build_wrap_package(
 
 def _build_wrap_instructions(
     project_name: str,
-    max_chars: int,
+    max_chars: int | None,
     today: str,
     schema: list[SectionSpec] | None = None,
 ) -> str:
@@ -463,6 +472,10 @@ def _build_wrap_instructions(
     """
     if schema is None:
         schema = DEFAULT_SCHEMA
+    if max_chars is None:
+        # AM-SCHEMA-BUDGET: resolve here too for direct callers (the prepare_wrap
+        # path resolves in _build_wrap_package and passes a concrete int).
+        max_chars = default_max_chars(schema)
     graduating_section_names = [
         s["heading"] for s in schema if s["role"] == "graduating"
     ]
@@ -645,7 +658,7 @@ Use `[decided(rationale: "why", on: "date")] choice` markers.
 def prepare_wrap(
     store: Store,
     *,
-    max_chars: int = 20000,
+    max_chars: int | None = None,
     staleness_days: int = 7,
 ) -> PrepareWrapResult:
     """Run the full store-aware prepare_wrap pipeline.
@@ -700,7 +713,12 @@ def prepare_wrap(
 
     Args:
         store: A Store instance.
-        max_chars: Maximum target size for the continuity file.
+        max_chars: Maximum target size for the continuity file. ``None``
+            (default) derives a schema-aware budget via
+            :func:`~anneal_memory.schema.default_max_chars` — 20000 for the
+            ops DEFAULT_SCHEMA (byte-compatible), larger for a richer schema
+            (e.g. FLOW_SCHEMA's felt/structural sections). An explicit int
+            always overrides.
         staleness_days: Days before flagging stale patterns.
 
     Returns:
@@ -1630,6 +1648,36 @@ def validated_save_continuity(
         for p in proven_without_declaration
     ]
 
+    # AM-WARN (v0.4.2): detect the dead-Hebbian-graph mis-wire. Two structural
+    # signals, both false-positive-free — a healthy wrap that simply had nothing
+    # to co-cite (no graduations, or a single resolved citation) stays silent:
+    #   (A) graduated patterns carried evidence citations but NONE resolved to an
+    #       episode in this store (e.g. ids minted in another namespace) -> the
+    #       graph cannot form and stays dead. This is the
+    #       invisible_infrastructure_failure that ran silent for ~10 wraps.
+    #   (B) co-citation pairs WERE available but nothing formed or strengthened
+    #       -> the association write path itself is mis-wired.
+    association_warning: str | None = None
+    cited_graduations = grad_result.validated + grad_result.demoted
+    resolved_any = any(grad_result.all_validated_ids)
+    cocitation_available = bool(grad_result.direct_co_citations) or any(
+        len(s) >= 2 for s in grad_result.all_validated_ids
+    )
+    if cited_graduations > 0 and not resolved_any:
+        association_warning = (
+            f"{cited_graduations} graduated-pattern citation(s) this wrap resolved "
+            f"to ZERO episodes in this store — the Hebbian association graph cannot "
+            f"form and will stay dead. Check the citation id namespace (cite this "
+            f"store's episode ids, not ids minted elsewhere)."
+        )
+    elif cocitation_available and assoc_formed == 0 and assoc_strengthened == 0:
+        association_warning = (
+            "Co-citation pairs were available this wrap but 0 associations formed "
+            "or strengthened — the association write path appears mis-wired."
+        )
+    if association_warning is not None:
+        warnings.warn(association_warning, UserWarning, stacklevel=2)
+
     return SaveContinuityResult(
         path=path,
         chars=len(grad_result.text),
@@ -1647,6 +1695,7 @@ def validated_save_continuity(
         associations_formed=assoc_formed,
         associations_strengthened=assoc_strengthened,
         associations_decayed=assoc_decayed,
+        association_warning=association_warning,
         sections=sections,
         # asdict() makes the full return value JSON-serializable
         # top-to-bottom. Library users who want the typed object can

@@ -405,6 +405,9 @@ class TestTypedDictReturnShapes:
                 "proven_without_contradicts_declaration",
                 "associations_formed",
                 "associations_strengthened", "associations_decayed",
+                # AM-WARN (v0.4.2): dead-Hebbian-graph mis-wire warning
+                # (str) or None when the association write path is healthy.
+                "association_warning",
                 "sections", "wrap_result",
             }
             assert set(result.keys()) == expected
@@ -4278,3 +4281,100 @@ class TestCatastrophicShrinkGate:
             "## Context\n" + ("c " * 2000) + "\n"
         )
         _check_no_catastrophic_shrink(prior, new, schema, allow_shrink=False)
+
+
+# -- AM-WARN (v0.4.2): dead-Hebbian-graph mis-wire detection on save --
+
+
+class TestAmWarn:
+    """validated_save_continuity surfaces a warning when graduated patterns
+    carry evidence citations but produce no Hebbian links (the
+    invisible_infrastructure_failure that ran silent for ~10 wraps), and stays
+    SILENT when there was simply nothing to co-cite."""
+
+    TODAY = "2026-06-02"
+
+    def _save(self, tmp_path, template, n_episodes=2):
+        """Record n real episodes, substitute {epN} with their ids, save."""
+        from anneal_memory import prepare_wrap, validated_save_continuity
+        store = Store(tmp_path / "amwarn.db", project_name="AmWarn")
+        ep_ids = []
+        for i in range(n_episodes):
+            ep = store.record(
+                f"substrate observation about discipline rotation memory topic {i}",
+                EpisodeType.OBSERVATION,
+            )
+            ep_ids.append(ep.id)
+        res = prepare_wrap(store)
+        rendered = template
+        for i, ep_id in enumerate(ep_ids):
+            rendered = rendered.replace(f"{{ep{i}}}", ep_id)
+        result = validated_save_continuity(
+            store, rendered, today=self.TODAY, wrap_token=res["wrap_token"],
+        )
+        store.close()
+        return result
+
+    def test_warns_when_citations_resolve_to_nothing(self, tmp_path):
+        # Signal A — the flow disaster: evidence cited, none of it resolves to a
+        # store episode (foreign id namespace). Graph cannot form; warn loudly.
+        text = (
+            "## State\nactive.\n\n"
+            "## Patterns\n"
+            '- ghost_pattern | 2x (2026-06-02) [evidence: deadbeef, cafef00d '
+            '"phantom substrate observation citing nothing real"]\n\n'
+            "## Decisions\n- d.\n\n"
+            "## Context\n- c.\n"
+        )
+        with pytest.warns(UserWarning, match="resolved to ZERO"):
+            result = self._save(tmp_path, text)
+        assert result["association_warning"] is not None
+        assert "namespace" in result["association_warning"]
+        assert result["associations_formed"] == 0
+
+    def test_silent_when_nothing_graduated(self, tmp_path):
+        # No graduated patterns -> nothing to co-cite -> no warning.
+        text = (
+            "## State\nactive.\n\n"
+            "## Patterns\nNone yet.\n\n"
+            "## Decisions\n- d.\n\n"
+            "## Context\n- first session.\n"
+        )
+        import warnings as _w
+        with _w.catch_warnings():
+            _w.simplefilter("error")  # any UserWarning would raise
+            result = self._save(tmp_path, text)
+        assert result["association_warning"] is None
+
+    def test_silent_on_healthy_co_citation(self, tmp_path):
+        # Two real ids co-cited on one line -> links form -> no warning.
+        text = (
+            "## State\nactive.\n\n"
+            "## Patterns\n"
+            '- real_pattern | 2x (2026-06-02) [evidence: {ep0}, {ep1} '
+            '"genuine substrate observation discipline rotation co-citation"]\n\n'
+            "## Decisions\n- d.\n\n"
+            "## Context\n- c.\n"
+        )
+        result = self._save(tmp_path, text, n_episodes=2)
+        assert result["association_warning"] is None
+        assert result["associations_formed"] >= 1
+
+    def test_silent_on_single_resolved_citation(self, tmp_path):
+        # THE false-positive guard: one resolved citation forms no pair (correct,
+        # not a mis-wire). resolved_any is True so Signal A must not fire, and no
+        # co-citation is available so Signal B must not fire.
+        text = (
+            "## State\nactive.\n\n"
+            "## Patterns\n"
+            '- solo_pattern | 2x (2026-06-02) [evidence: {ep0} '
+            '"single substrate observation discipline rotation citation"]\n\n'
+            "## Decisions\n- d.\n\n"
+            "## Context\n- c.\n"
+        )
+        import warnings as _w
+        with _w.catch_warnings():
+            _w.simplefilter("error")
+            result = self._save(tmp_path, text, n_episodes=1)
+        assert result["association_warning"] is None
+        assert result["associations_formed"] == 0

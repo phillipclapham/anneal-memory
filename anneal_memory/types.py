@@ -396,5 +396,12 @@ class SaveContinuityResult(TypedDict):
     associations_formed: int
     associations_strengthened: int
     associations_decayed: int
+    # AM-WARN (v0.4.2): a human-readable warning when this wrap's graduated
+    # patterns carried evidence citations but produced no Hebbian links — the
+    # dead-graph mis-wire (e.g. citing ids from the wrong namespace so none
+    # resolve, the invisible_infrastructure_failure that can run silent for
+    # months). ``None`` when the write path is healthy or there was simply
+    # nothing to co-cite. Also emitted as a ``UserWarning`` at save time.
+    association_warning: str | None
     sections: dict[str, int]  # Char count per continuity section
     wrap_result: dict[str, Any]  # WrapResult-as-dict (JSON-serializable)

@@ -20,6 +20,7 @@ from anneal_memory.schema import (
     DEFAULT_SCHEMA,
     FLOW_SCHEMA,
     SectionRole,
+    default_max_chars,
     graduating_headings,
     heading_marker,
     required_headings,
@@ -425,3 +426,82 @@ class TestFlowSchemaEndToEnd:
         saved = s.load_continuity()
         assert saved is not None and "## Proven" in saved
         s.close()
+
+
+# -- AM-SCHEMA-BUDGET (v0.4.2): schema-aware default max_chars --
+
+
+class TestDefaultMaxChars:
+    def test_default_schema_is_exactly_20000(self):
+        # The load-bearing byte-compat invariant: ops entities are unchanged.
+        assert default_max_chars(DEFAULT_SCHEMA) == 20000
+
+    def test_flow_schema_gets_headroom(self):
+        # +1500 for the extra live-state (Active Threads) + 4000 for the
+        # narrative-timeless felt floor (Understanding).
+        assert default_max_chars(FLOW_SCHEMA) == 25500
+        assert default_max_chars(FLOW_SCHEMA) > default_max_chars(DEFAULT_SCHEMA)
+
+    def test_extra_graduating_section_adds_budget(self):
+        sch = validate_schema([
+            {"heading": "State", "role": "live-state"},
+            {"heading": "P1", "role": "graduating"},
+            {"heading": "P2", "role": "graduating"},
+            {"heading": "Ctx", "role": "narrative"},
+        ])
+        assert default_max_chars(sch) == 22500  # 20000 + 2500 for the 2nd graduating
+
+    def test_narrative_timeless_adds_felt_floor(self):
+        sch = validate_schema([
+            {"heading": "State", "role": "live-state"},
+            {"heading": "Patterns", "role": "graduating"},
+            {"heading": "Decisions", "role": "decisions"},
+            {"heading": "Context", "role": "narrative"},
+            {"heading": "Understanding", "role": "narrative-timeless"},
+        ])
+        assert default_max_chars(sch) == 24000  # 20000 + 4000
+
+    def test_extra_live_state_adds_budget(self):
+        sch = validate_schema([
+            {"heading": "State", "role": "live-state"},
+            {"heading": "Threads", "role": "live-state"},
+            {"heading": "Patterns", "role": "graduating"},
+            {"heading": "Context", "role": "narrative"},
+        ])
+        assert default_max_chars(sch) == 21500  # 20000 + 1500
+
+    def test_frozen_section_adds_budget(self):
+        sch = validate_schema([
+            {"heading": "State", "role": "live-state"},
+            {"heading": "Patterns", "role": "graduating"},
+            {"heading": "Context", "role": "narrative"},
+            {"heading": "Charter", "role": "frozen"},
+        ])
+        assert default_max_chars(sch) == 21000  # 20000 + 1000
+
+    def test_prepare_wrap_default_uses_schema_budget(self, tmp_path):
+        # No explicit max_chars -> schema-aware default flows into the package.
+        flow = Store(str(tmp_path / "flow.db"), project_name="flow",
+                     section_schema=FLOW_SCHEMA)
+        flow.record("did a thing", EpisodeType.OBSERVATION)
+        assert prepare_wrap(flow)["package"]["max_chars"] == 25500
+        flow.close()
+
+        ops = Store(str(tmp_path / "ops.db"), project_name="ops")
+        ops.record("did a thing", EpisodeType.OBSERVATION)
+        assert prepare_wrap(ops)["package"]["max_chars"] == 20000  # byte-compat
+        ops.close()
+
+    def test_prepare_wrap_explicit_max_chars_overrides(self, tmp_path):
+        flow = Store(str(tmp_path / "flow.db"), project_name="flow",
+                     section_schema=FLOW_SCHEMA)
+        flow.record("did a thing", EpisodeType.OBSERVATION)
+        assert prepare_wrap(flow, max_chars=9999)["package"]["max_chars"] == 9999
+        flow.close()
+
+    def test_build_wrap_instructions_none_resolves_per_schema(self):
+        # None max_chars resolves to the schema-aware default at the instruction layer.
+        d = _build_wrap_instructions("ops", None, "2026-06-02")
+        assert "within 20000 characters" in d
+        f = _build_wrap_instructions("flow", None, "2026-06-02", FLOW_SCHEMA)
+        assert "within 25500 characters" in f

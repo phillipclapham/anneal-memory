@@ -52,6 +52,7 @@ __all__ = [
     "graduating_headings",
     "required_headings",
     "sections_by_role",
+    "default_max_chars",
 ]
 
 SectionRole = Literal[
@@ -223,6 +224,66 @@ def required_headings(schema: list[SectionSpec]) -> list[str]:
 def sections_by_role(schema: list[SectionSpec], role: str) -> list[SectionSpec]:
     """All sections in ``schema`` with the given ``role``, in schema order."""
     return [s for s in schema if s["role"] == role]
+
+
+# AM-SCHEMA-BUDGET (v0.4.2): per-role budget weights for default_max_chars.
+# The historical flat default (20000) was calibrated for DEFAULT_SCHEMA's exact
+# section composition. A richer schema (a partnership entity's FLOW_SCHEMA, with
+# an extra ``live-state`` "Active Threads" + a ``narrative-timeless``
+# "Understanding") carries *incompressible structural* content a flat ceiling
+# never budgeted for, so a flat default forces the felt layer to compress to
+# fit — backwards. Each section BEYOND the DEFAULT_SCHEMA baseline adds budget
+# by role.
+_BUDGET_BASE = 20000
+# One section of each of these roles is already covered by _BUDGET_BASE (they
+# are exactly DEFAULT_SCHEMA), so the first of each adds nothing.
+_BUDGET_BASELINE_FREE: dict[str, int] = {
+    "live-state": 1,
+    "graduating": 1,
+    "decisions": 1,
+    "narrative": 1,
+}
+# Budget added per section beyond the baseline, by role.
+_BUDGET_EXTRA: dict[str, int] = {
+    "live-state": 1500,          # e.g. flow's Active Threads (beyond State)
+    "graduating": 2500,          # additional graduating sections
+    "decisions": 1500,
+    "narrative": 2500,           # additional work-narrative sections
+    "narrative-timeless": 4000,  # the felt floor (Understanding) — incompressible
+    "frozen": 1000,              # preserved verbatim
+}
+
+
+def default_max_chars(schema: list[SectionSpec]) -> int:
+    """Derive a default continuity-size budget (chars) from a schema's roles.
+
+    The historical flat 20000 default was calibrated for :data:`DEFAULT_SCHEMA`
+    (ops: State / Patterns / Decisions / Context). A richer schema needs more
+    room or a flat ceiling forces the felt layer to compress: :data:`FLOW_SCHEMA`
+    adds ``Active Threads`` (an extra ``live-state``) + ``Understanding``
+    (``narrative-timeless`` — the incompressible felt floor, proportion-checked
+    against the full arc). Each section *beyond* the DEFAULT_SCHEMA baseline
+    composition adds budget by role.
+
+    :data:`DEFAULT_SCHEMA` -> exactly ``20000`` (the byte-compatible invariant);
+    :data:`FLOW_SCHEMA` -> larger. An explicit ``max_chars`` passed to
+    ``prepare_wrap`` always overrides this default.
+
+    Args:
+        schema: A normalized section schema (list of :class:`SectionSpec`).
+
+    Returns:
+        The derived character budget.
+    """
+    budget = _BUDGET_BASE
+    free = dict(_BUDGET_BASELINE_FREE)
+    for section in schema:
+        role = section["role"]
+        if free.get(role, 0) > 0:
+            free[role] -= 1  # covered by the base budget
+        else:
+            budget += _BUDGET_EXTRA.get(role, 0)
+    return budget
 
 
 # Derived once at import: the default graduating-heading set. graduation.py

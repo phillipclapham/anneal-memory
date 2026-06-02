@@ -2,6 +2,20 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — prospective-intention layer (`spores`)
+
+A new parallel store for **prospective** memory, sibling to the episodic (biography) and the planned execution-memory (procedure) stores. Where the four retrospective layers *accrete and never complete*, a spore is an **open cognitive loop that must resolve** — the `tasks ≠ memory` distinction made concrete (prospective vs declarative memory are distinct cognitive systems).
+
+- **`SporeStore`** (`anneal_memory.spores`, exported from the package top level) — a JSON-backed store of typed open loops: `task` (open doing) / `question` (open not-knowing) / `thought` (open idea), sharing one lifecycle: **plant → grow → resolve**. Resolve is either `descend` (compost — done/answered/explored/dropped) or `ascend` (transmute into the retrospective layers — records a pointer to what the spore *became*; v1 records the pointer, the actual episode write stays the host's act).
+- **Germination tiers** (`germination_tier()`) — `growing`/`resting`/`dormant`/`parked`, **computed from `seen`/`next` at read-time, never stored** (a stored tier would drift the moment the clock moved). `parked` is deliberate dormancy; a `next:` on/before today forces `dormant`.
+- **API:** `add`/`get`/`list_open`/`touch`/`update`/`descend`/`ascend`/`surface`; type-specific terminal kinds enforced (a `task` can't `descend answered`); `today`/`now` injectable for deterministic runs.
+- **`SporeError`** (subclass of `AnnealMemoryError`) for store-state failures; `ValueError` for malformed arguments. Atomic writes (tmp + fsync + rename + dir-fsync); a corrupt store **never silently re-inits** (raises, validating container/row types + `schema_version`); within-list and cross-list duplicate-id drift refuse loudly.
+- Zero-dep (stdlib only), mypy-clean. 71 new tests.
+
+Not yet exposed via the CLI or MCP transports (library-only for now). The `ascend`-auto-writes-an-episode membrane is deferred.
+
 ## [0.3.5] — 2026-05-31
 
 Catastrophic-shrink gate for the felt / identity memory layers. A single wrap could pass `validate_structure` (every heading present) while gutting the content beneath it — compressing the latest session over the accumulated identity. A real incident: a partnership entity's wrap collapsed a ~19.7k-char continuity neocortex to ~1.6k, reducing the timeless `## Understanding` section to one paragraph and the graduating `## Patterns` section to one line, with nothing structural catching it. `validated_save_continuity` now refuses such a collapse at the save boundary unless the caller explicitly opts in.

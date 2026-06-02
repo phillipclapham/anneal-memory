@@ -59,6 +59,20 @@ from .graduation import (
     validate_graduations,
 )
 from .integrity import TOOLS, RESOURCES, verify_integrity, generate_integrity_file
+from .spores import (
+    ASCEND_BY_TYPE,
+    DESCEND_BY_TYPE,
+    VALID_TIERS,
+    VALID_TYPES,
+    Germination,
+    ResolutionDict,
+    SporeDict,
+    SporeError,
+    SporeStore,
+    SporeType,
+    Tier,
+    germination_tier,
+)
 from .server import Server
 
 __all__ = [
@@ -114,4 +128,16 @@ __all__ = [
     "ProvenWithoutDeclaration",
     "verify_integrity",
     "generate_integrity_file",
+    "SporeStore",
+    "SporeError",
+    "SporeDict",
+    "ResolutionDict",
+    "SporeType",
+    "Tier",
+    "Germination",
+    "germination_tier",
+    "VALID_TYPES",
+    "VALID_TIERS",
+    "DESCEND_BY_TYPE",
+    "ASCEND_BY_TYPE",
 ]

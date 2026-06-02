@@ -46,7 +46,7 @@ from .schema import (
     graduating_headings,
     required_headings,
 )
-from .store import StoreError, _fsync_dir, _safe_unlink
+from .store import StoreError, WrapInProgressError, _fsync_dir, _safe_unlink
 from .types import (
     AffectiveState,
     Episode,
@@ -740,13 +740,26 @@ def prepare_wrap(
             :func:`validated_save_continuity` to opt into explicit
             mismatch detection.
 
+    Raises:
+        WrapInProgressError: If a wrap is already in progress
+            (``wrap_started_at`` set) AND there are real episodes to
+            compress. The single-writer guard (AM-PREPARE-GUARD, 0.4.2)
+            refuses to clobber the in-flight wrap's token + snapshot.
+            Finish the open wrap with :func:`validated_save_continuity`
+            or abandon it with :meth:`Store.wrap_cancelled`, then call
+            ``prepare_wrap`` again. The empty path (no episodes) does NOT
+            raise — it clears a stale/degenerate flag and returns
+            ``status == "empty"``, preserving stuck-wrap auto-recovery.
+
     Note:
         On ``status == "empty"`` the function calls ``wrap_cancelled()``
         on the store to clear any stale in-progress flag. On
         ``status == "ready"`` it calls ``wrap_started(token=...,
         episode_ids=...)`` so the frozen snapshot is persisted in one
         transaction. Either way, the store's wrap lifecycle state is
-        consistent after the call.
+        consistent after the call. A refused call (WrapInProgressError)
+        leaves the in-flight wrap untouched — it never reaches
+        ``wrap_started``.
     """
     episodes = store.episodes_since_wrap()
 
@@ -761,6 +774,28 @@ def prepare_wrap(
             wrap_token=None,
             uncovered_proven_to_check=[],
         )
+
+    # AM-PREPARE-GUARD (0.4.2): real episodes to compress AND a wrap
+    # already in progress = a clobber. The consolidate is single-writer
+    # by design; a second prepare_wrap would overwrite the in-flight
+    # wrap's token + frozen episode snapshot, stranding the first wrap's
+    # compression (saveable only with a token the store no longer holds —
+    # the old behavior, where only the save-side CAS caught it after the
+    # agent had spent the compression). Refuse structurally so EVERY
+    # adapter inherits single-writer safety (this guard used to live only
+    # in flow's CLI wrapper; Levain/MCP/CLI callers were unprotected). The
+    # check sits AFTER the empty-path above on purpose: an empty wrap
+    # window can never strand real episodes, so the empty path keeps its
+    # stale-flag auto-recovery (a degenerate empty-snapshot in-progress
+    # wrap is cleared, not refused). Recovery from a genuinely stuck wrap
+    # with real episodes is validated_save_continuity (finish) or
+    # store.wrap_cancelled() (abandon), then prepare_wrap again. The
+    # wrap_started() write-point carries the same guard as a structural
+    # backstop (and closes the check→write window below for an unlocked
+    # concurrent library caller).
+    started = store.get_wrap_started_at()
+    if started:
+        raise WrapInProgressError(started_at=started)
 
     # All store reads and package construction happen BEFORE wrap_started().
     # If any of them raises, the store is left with no stale wrap-in-progress
@@ -1659,10 +1694,25 @@ def validated_save_continuity(
     #       -> the association write path itself is mis-wired.
     association_warning: str | None = None
     cited_graduations = grad_result.validated + grad_result.demoted
-    resolved_any = any(grad_result.all_validated_ids)
-    cocitation_available = bool(grad_result.direct_co_citations) or any(
-        len(s) >= 2 for s in grad_result.all_validated_ids
-    )
+    # Read the GATE-INDEPENDENT resolution signal, NOT any(all_validated_ids):
+    # all_validated_ids is suppressed on a cross-session-overlap demote (the
+    # immune gate firing on the EXPLANATION, not the ids), so a healthy
+    # immune-gate demotion would otherwise misfire Signal A as a dead-namespace
+    # graph. any_citation_resolved is True iff some graduation cited a real
+    # store episode this wrap, regardless of grounding or cross-session status.
+    resolved_any = grad_result.any_citation_resolved
+    # Signal B must consider the SAME co-citation set the association
+    # pipeline actually attempts to record (direct pairs + cross-line
+    # SESSION pairs) — see process_wrap_associations, which forms both via
+    # extract_session_co_citations(all_validated_ids). The pre-0.4.2 check
+    # `any(len(s) >= 2 ...)` only saw same-line multi-id sets, so a mis-wire
+    # that manifested ONLY in cross-line session pairs (two lines each
+    # citing one different real episode) was invisible to Signal B. Mirror
+    # the pipeline exactly so "available but 0 formed/strengthened" catches
+    # that path too. (codex L3 MEDIUM, 0.4.2.)
+    from .graduation import extract_session_co_citations
+    session_pairs = extract_session_co_citations(grad_result.all_validated_ids)
+    cocitation_available = bool(grad_result.direct_co_citations) or bool(session_pairs)
     if cited_graduations > 0 and not resolved_any:
         association_warning = (
             f"{cited_graduations} graduated-pattern citation(s) this wrap resolved "

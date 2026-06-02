@@ -1776,6 +1776,37 @@ class TestCmdPrepareWrap:
         with Store(base_args_with_data.db, project_name="TestProject") as store:
             assert store.status().wrap_in_progress is True
 
+    def test_omitted_max_chars_uses_schema_aware_budget(self, tmp_path, capsys):
+        """AM-SCHEMA-BUDGET (0.4.2) M1: --max-chars omitted (None) must derive
+        the schema-aware budget for the persisted schema (FLOW_SCHEMA -> 25500),
+        NOT the flat 20000 the CLI used to inject as the argparse default."""
+        from anneal_memory.schema import FLOW_SCHEMA
+        db = str(tmp_path / "flow.db")
+        store = Store(db, project_name="flow", section_schema=FLOW_SCHEMA)
+        store.record("a substrate observation worth compressing",
+                     episode_type="observation")
+        store.close()
+        args = Namespace(db=db, project_name="flow", json=True,
+                         max_chars=None, staleness_days=7)
+        cmd_prepare_wrap(args)
+        data = json.loads(capsys.readouterr().out)
+        assert data["max_chars"] == 25500
+
+    def test_prepare_wrap_in_progress_exits_cleanly(self, base_args_with_data, capsys):
+        """AM-PREPARE-GUARD (0.4.2): a second prepare-wrap while a wrap is
+        open exits non-zero with a clean stderr message — main() has no
+        top-level handler, so the CLI must catch WrapInProgressError
+        rather than dump a traceback."""
+        base_args_with_data.max_chars = 20000
+        base_args_with_data.staleness_days = 7
+        cmd_prepare_wrap(base_args_with_data)  # marks wrap in progress
+        capsys.readouterr()  # drain the first call's output
+        with pytest.raises(SystemExit) as excinfo:
+            cmd_prepare_wrap(base_args_with_data)
+        assert excinfo.value.code == 1
+        captured = capsys.readouterr()
+        assert "a wrap is already in progress" in captured.err
+
 
 # -- cmd_save_continuity tests --
 
@@ -1940,7 +1971,10 @@ class TestParserPrepareWrapSaveContinuity:
     def test_prepare_wrap_defaults(self):
         parser = build_parser()
         args = parser.parse_args(["prepare-wrap"])
-        assert args.max_chars == 20000
+        # AM-SCHEMA-BUDGET (0.4.2) M1: --max-chars defaults to None so the
+        # library derives a schema-aware budget (was a flat 20000, which
+        # silently defeated schema-aware budgeting through the CLI).
+        assert args.max_chars is None
         assert args.staleness_days == 7
 
     def test_save_continuity_command(self):

@@ -16,6 +16,7 @@ from anneal_memory.store import (
     Store,
     StoreDatabaseError,
     StoreError,
+    WrapInProgressError,
 )
 from anneal_memory.types import EpisodeType, StoreStatus, WrapRecord, WrapResult
 from anneal_memory import prepare_wrap
@@ -363,6 +364,129 @@ class TestWrapLifecycle:
 
         # Both episodes still present (no auto-prune)
         assert store.status().total_episodes == 2
+
+
+# -- AM-PREPARE-GUARD: single-writer wrap_started guard (0.4.2) --
+
+
+class TestWrapStartedGuard:
+    """The structural single-writer backstop at the true write-point.
+
+    ``wrap_started`` refuses to overwrite an in-flight wrap's token +
+    snapshot unless ``allow_restart=True`` — so the metadata clobber is
+    structurally impossible at the chokepoint, not merely gated at the
+    ``prepare_wrap`` pipeline entry.
+    """
+
+    def test_wrap_started_refuses_when_already_in_progress(self, store):
+        first = uuid.uuid4().hex
+        store.wrap_started(token=first, episode_ids=["aaaaaaaa"])
+        with pytest.raises(WrapInProgressError) as excinfo:
+            store.wrap_started(token=uuid.uuid4().hex, episode_ids=["bbbbbbbb"])
+        # Message carries the in-progress wrap's start timestamp.
+        assert excinfo.value.started_at
+
+    def test_refused_wrap_started_does_not_clobber(self, store):
+        """A refused second wrap_started leaves the FIRST wrap intact —
+        same token, same snapshot. The whole point of the guard."""
+        first = uuid.uuid4().hex
+        store.wrap_started(token=first, episode_ids=["aaaaaaaa"])
+        with pytest.raises(WrapInProgressError):
+            store.wrap_started(token="ffffffffffffffffffffffffffffffff",
+                               episode_ids=["bbbbbbbb"])
+        snap = store.load_wrap_snapshot()
+        assert snap is not None
+        assert snap["token"] == first
+        assert snap["episode_ids"] == ["aaaaaaaa"]
+
+    def test_allow_restart_overwrites_in_progress_wrap(self, store):
+        """allow_restart=True is the sanctioned 'discard + restart' path:
+        it overwrites the open wrap's token + snapshot in place."""
+        store.wrap_started(token=uuid.uuid4().hex, episode_ids=["aaaaaaaa"])
+        new_token = uuid.uuid4().hex
+        store.wrap_started(token=new_token, episode_ids=["cccccccc"],
+                           allow_restart=True)
+        snap = store.load_wrap_snapshot()
+        assert snap is not None
+        assert snap["token"] == new_token
+        assert snap["episode_ids"] == ["cccccccc"]
+
+    def test_wrap_started_on_idle_store_is_unaffected(self, store):
+        """The guard only fires on an in-progress store. A first
+        wrap_started on an idle store works exactly as before."""
+        token = uuid.uuid4().hex
+        store.wrap_started(token=token, episode_ids=[])
+        assert store.status().wrap_in_progress is True
+
+    def test_wrap_started_after_cancel_works(self, store):
+        store.wrap_started(token=uuid.uuid4().hex, episode_ids=["aaaaaaaa"])
+        store.wrap_cancelled()
+        second = uuid.uuid4().hex
+        store.wrap_started(token=second, episode_ids=["bbbbbbbb"])
+        snap = store.load_wrap_snapshot()
+        assert snap is not None and snap["token"] == second
+
+    def test_failed_wrap_started_rolls_back_partial_transaction(self, store, monkeypatch):
+        """codex L3 HIGH (v0.4.2): if a metadata write fails PARTWAY through
+        wrap_started's three INSERTs, the partial transaction must be rolled
+        back — otherwise the wrap_started_at row stays uncommitted on the
+        connection and a LATER commit would flush it, producing exactly the
+        partial wrap-in-progress state (started_at set, token/snapshot
+        missing) this release prevents. _db_boundary now rolls back on the
+        error path. Inject a failure on the wrap_token INSERT (so
+        wrap_started_at is applied first, then #2 fails)."""
+        import sqlite3
+        real = store._conn
+
+        class _FailOnTokenInsert:
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+            def execute(self, *a, **k):
+                params = a[1] if len(a) > 1 else None
+                if (isinstance(params, (tuple, list)) and params
+                        and params[0] == "wrap_token"):
+                    raise sqlite3.OperationalError("injected: wrap_token write failed")
+                return real.execute(*a, **k)
+
+        monkeypatch.setattr(store, "_conn", _FailOnTokenInsert())
+        with pytest.raises(StoreDatabaseError):
+            store.wrap_started(token=uuid.uuid4().hex, episode_ids=["aaaaaaaa"])
+        # The rollback fired: no open transaction left dangling...
+        assert real.in_transaction is False
+        # ...and the partially-written wrap_started_at did NOT persist.
+        assert store.get_wrap_started_at() is None
+
+
+class TestWrapInProgressError:
+    """Exception taxonomy + pickle contract for the new error."""
+
+    def test_is_anneal_error_not_store_error(self):
+        """A precondition refusal is NOT a store I/O failure — an
+        ``except StoreError`` handler must NOT swallow it, but the
+        ``AnnealMemoryError`` library boundary must catch it."""
+        err = WrapInProgressError(started_at="2026-06-02T00:00:00Z")
+        assert isinstance(err, AnnealMemoryError)
+        assert not isinstance(err, StoreError)
+        assert not isinstance(err, StoreDatabaseError)
+
+    def test_message_includes_started_at(self):
+        err = WrapInProgressError(started_at="2026-06-02T12:34:56Z")
+        assert "2026-06-02T12:34:56Z" in str(err)
+        assert err.started_at == "2026-06-02T12:34:56Z"
+
+    def test_message_without_started_at(self):
+        err = WrapInProgressError()
+        assert err.started_at is None
+        assert "a wrap is already in progress" in str(err)
+
+    def test_pickle_round_trip_preserves_started_at_and_message(self):
+        import pickle
+        err = WrapInProgressError(started_at="2026-06-02T00:00:00Z")
+        restored = pickle.loads(pickle.dumps(err))
+        assert isinstance(restored, WrapInProgressError)
+        assert restored.started_at == err.started_at
+        assert str(restored) == str(err)
 
 
 # -- Pruning --

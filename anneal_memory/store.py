@@ -402,6 +402,69 @@ class StoreDatabaseError(StoreError):
     # class name automatically.
 
 
+class WrapInProgressError(AnnealMemoryError):
+    """Raised when a new wrap is started while one is already in progress.
+
+    The continuity consolidate is **single-writer by design** (the
+    opposite of the spore store, which is many-writers-serialize-safe).
+    Once :func:`~anneal_memory.prepare_wrap` marks a wrap in progress
+    (``wrap_started_at`` + a frozen ``wrap_token`` + the episode-ID
+    snapshot), starting a SECOND wrap would clobber that token and
+    snapshot — the first wrap's compression text could then only be
+    saved with a token the store no longer recognizes. Before this
+    guard (0.4.2) the clobber succeeded silently and only the save-side
+    compare-and-swap caught the mismatch, after the agent had already
+    spent the compression.
+
+    This refusal makes the single-writer invariant **structural** at the
+    library layer, so every adapter inherits it — Levain's seeded entity
+    (which wires :func:`~anneal_memory.prepare_wrap` directly), the MCP
+    ``prepare_wrap`` tool, the ``prepare-wrap`` CLI, a future agent. It
+    previously lived only in flow's CLI wrapper, leaving every other
+    caller unprotected.
+
+    Subclasses :class:`AnnealMemoryError` directly — **not**
+    :class:`StoreError`. It is a precondition/state refusal, not a store
+    I/O or integrity failure, so an ``except StoreError`` handler (which
+    means "a store operation failed") must NOT swallow it. Callers that
+    want to treat "a wrap is already open" as a recoverable condition
+    catch this class, or the :class:`AnnealMemoryError` base, explicitly.
+
+    **Recovery:** finish the open wrap with
+    :func:`~anneal_memory.validated_save_continuity`, or abandon it with
+    :meth:`Store.wrap_cancelled`, then start a new wrap. A deliberate
+    "discard the in-progress wrap and restart compression" flow passes
+    ``allow_restart=True`` to :meth:`Store.wrap_started` — though
+    :meth:`Store.wrap_cancelled` followed by a fresh ``prepare_wrap``
+    achieves the same thing with a cancel event in the audit trail.
+
+    Carries ``started_at`` — the timestamp of the in-progress wrap, or
+    ``None`` when the raiser had no timestamp to hand — for
+    operator-facing messages. Pickle-safe via ``__reduce__``.
+    """
+
+    def __init__(self, started_at: str | None = None) -> None:
+        self.started_at = started_at
+        super().__init__(self._build_message(started_at))
+
+    @staticmethod
+    def _build_message(started_at: str | None) -> str:
+        when = f" (started {started_at})" if started_at else ""
+        return (
+            f"a wrap is already in progress{when}. Finish it with "
+            "validated_save_continuity, or abandon it with "
+            "store.wrap_cancelled(), before starting a new wrap."
+        )
+
+    def __reduce__(self) -> "tuple[type[WrapInProgressError], tuple[str | None]]":
+        # Reconstruct via the single positional arg so both ``str(e)``
+        # and ``.started_at`` survive a pickle round-trip. No
+        # module-level reconstructor needed (cf. ``_reconstruct_store_error``)
+        # because this class has no subclasses whose identity would need
+        # disambiguating — ``self.__class__`` is always WrapInProgressError.
+        return (self.__class__, (self.started_at,))
+
+
 def _safe_unlink(path: Path) -> None:
     """Delete ``path`` if it exists, swallowing any OSError.
 
@@ -1278,6 +1341,7 @@ class Store:
         *,
         token: str,
         episode_ids: list[str],
+        allow_restart: bool = False,
     ) -> None:
         """Mark that a wrap has been initiated (prepare_wrap called).
 
@@ -1286,6 +1350,22 @@ class Store:
         a partial wrap-in-progress state (``wrap_started_at`` set but
         ``wrap_token`` empty) — Python now enforces the contract at
         the call site rather than at runtime via a DeprecationWarning.
+
+        **Single-writer guard (AM-PREPARE-GUARD, 0.4.2).** Refuses to
+        overwrite an in-flight wrap. If ``wrap_started_at`` is already
+        set this raises :class:`WrapInProgressError` rather than
+        clobbering the existing token + episode snapshot (which would
+        strand the open wrap's compression — only the save-side CAS
+        caught it before). The check reads ``wrap_started_at`` inside
+        the SAME transaction as the writes, so the check-and-set is
+        atomic on this connection: a second ``wrap_started`` cannot slip
+        between the check and the INSERTs. :func:`prepare_wrap` guards
+        earlier and so reaches this method with an empty flag; this is
+        the structural backstop that protects every other direct caller
+        and closes ``prepare_wrap``'s own check→write window. Pass
+        ``allow_restart=True`` to deliberately DISCARD the in-progress
+        wrap and start fresh (equivalent to :meth:`wrap_cancelled` then
+        a new wrap, but without the separate cancel audit event).
 
         Writes the ``wrap_started_at`` flag, the session-handshake
         token, and the frozen episode-ID snapshot so
@@ -1316,6 +1396,11 @@ class Store:
                 caller type error surfaces here rather than later as a
                 store-integrity ``StoreError`` at
                 :meth:`load_wrap_snapshot`.
+            WrapInProgressError: If a wrap is already in progress
+                (``wrap_started_at`` set) and ``allow_restart`` is
+                ``False``. Raised inside the write transaction, before
+                any metadata is mutated, so a refused call leaves the
+                in-flight wrap's token and snapshot untouched.
         """
         if not token:
             raise ValueError(
@@ -1374,6 +1459,28 @@ class Store:
         # as belt-and-suspenders defense even though the v0.3.0
         # signature tightening removed the API path that produced it).
         with self._db_boundary("wrap_started"):
+            # AM-PREPARE-GUARD (0.4.2): single-writer refusal at the true
+            # write-point. The check (read wrap_started_at) and the set
+            # (the INSERTs below) run in the SAME transaction on this one
+            # connection. Under the store's documented single-process /
+            # caller-flock-serialized model that makes the read→decide→write
+            # atomic for the writer holding the lock. It is NOT a
+            # cross-connection guarantee on its own: there is no
+            # BEGIN IMMEDIATE and the SELECT takes no write lock, so a
+            # hypothetical competing connection WITHOUT the external flock
+            # could still race the check. That writer is excluded by the
+            # flock by design — closing it here would need BEGIN IMMEDIATE.
+            # (This is a transactional read-then-write, NOT the
+            # single-statement compare-and-swap UPDATE wrap_completed uses.)
+            # ``_get_metadata`` is a bare SELECT on self._conn — calling
+            # it inside the boundary is the established pattern (see
+            # wrap_cancelled, which reads the same key here). Refuse to
+            # clobber an in-flight wrap's token + snapshot unless the
+            # caller explicitly opts into discarding it.
+            if not allow_restart:
+                existing_started = self._get_metadata("wrap_started_at")
+                if existing_started:
+                    raise WrapInProgressError(started_at=existing_started)
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_started_at", _now_utc()),
@@ -2896,12 +3003,53 @@ class Store:
             # pickle. ``type(exc).__name__`` is stable for the
             # stdlib sqlite3 subclasses and gives the retry helper a
             # pickle-safe dispatch key.
+            #
+            # 0.4.2 L3 codex HIGH: roll back the partial transaction
+            # before surfacing. A DML that fails partway through a
+            # multi-write method (e.g. wrap_started's three metadata
+            # INSERTs) otherwise leaves uncommitted DML on this connection
+            # that a LATER unrelated commit would flush — re-introducing
+            # exactly the partial wrap-in-progress state (wrap_started_at
+            # set, token/snapshot missing) this release exists to prevent.
+            # Inside a _batch() the outer __exit__ also rolls back; the
+            # second rollback is a documented harmless no-op.
+            self._rollback_quietly()
             raise StoreDatabaseError(
                 f"SQLite {operation} failed on {self._path}: {exc}",
                 operation=operation,
                 path=str(self._path),
                 cause_type_name=type(exc).__name__,
             ) from exc
+        except BaseException:
+            # Same partial-write protection for a NON-sqlite failure raised
+            # after DML inside the block — roll back any open transaction,
+            # then propagate unchanged (we do NOT wrap non-DB errors). A
+            # refusal raised BEFORE any DML (WrapInProgressError, the
+            # input-validation ValueError/TypeError guards) or a failed
+            # read finds no open transaction, so this is a no-op for them.
+            # On SUCCESS this clause never runs, so a deferred-commit
+            # _batch() method (which intentionally leaves its DML open for
+            # the outer commit) is unaffected.
+            self._rollback_quietly()
+            raise
+
+    def _rollback_quietly(self) -> None:
+        """Roll back any open transaction, swallowing rollback failures.
+
+        Used only on :meth:`_db_boundary`'s error paths so a partially
+        applied multi-write method does not leave uncommitted DML dangling
+        on the connection (which a later ``commit()`` would silently
+        flush). Rollback failures are swallowed so the PRIMARY exception
+        that triggered the rollback is what the caller sees — the store is
+        in an unknown state either way and the caller must reconstruct it.
+        A no-op when no transaction is open (a failed read, or a refusal
+        raised before any DML), so it is safe on every error path.
+        """
+        if self._conn is not None and self._conn.in_transaction:
+            try:
+                self._conn.rollback()
+            except sqlite3.Error:
+                pass
 
     @contextmanager
     def _batch(self) -> Iterator[None]:

@@ -2,6 +2,38 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] — 2026-06-02
+
+Critical-path de-risk release: three independent hardenings for a **stranger-seeded partnership entity** (the Levain consumer), each a structural fix for a flat-default or single-caller assumption that does not hold once the library — not flow's CLI wrapper — is the integration surface. No breaking changes; additive throughout. 1000 tests, mypy clean.
+
+### Added — AM-SCHEMA-BUDGET: schema-aware `max_chars` default for `prepare_wrap`
+
+`prepare_wrap`'s continuity char budget is now **derived from the section schema** instead of a flat `20000`. The old default was calibrated for the 4-section ops `DEFAULT_SCHEMA`; a richer schema like `FLOW_SCHEMA` carries ~5k of *incompressible structural* content the flat ceiling never budgeted for — `## Understanding` (timeless, proportion-checked against the whole arc, must-not-compress) plus `## Active Threads` (live-awareness) — so the flat ceiling forced *felt* content to compress to fit, backwards.
+
+- New `schema.default_max_chars(schema)` derives the budget from section roles. `DEFAULT_SCHEMA` → `20000` (byte-compatible invariant — ops entities are unaffected); `FLOW_SCHEMA` → `25500` (the felt floor: +4000 for `Understanding`, +1500 for extra live-state).
+- `prepare_wrap`, `_build_wrap_package`, and `_build_wrap_instructions` take `max_chars: int | None = None` → schema-derived when `None`; an explicit value still overrides.
+- **De-risks Levain Bucket 2:** the stranger's seeded 6-section entity gets the right budget with no host-side `max_chars` hack. Retires flow's interim `max_chars=24000`.
+
+### Added — AM-WARN: loud signal when graduations form zero Hebbian links
+
+`validated_save_continuity` now sets `SaveContinuityResult.association_warning` (and emits a `UserWarning`) when a wrap mis-wires the Hebbian graph — the `invisible_infrastructure_failure` where the graph silently stays dead across many wraps (the real "dead 10 wraps, zero surface signal" incident the 0.4.1 footgun caused). Two false-positive-free signals: **(A)** graduated patterns cite evidence but **zero** citations resolve to a store episode (a foreign id namespace — the canonical "cite this store's ids" mistake), and **(B)** co-citation pairs were available but **none** formed or strengthened. Silent when nothing graduated, or when a single citation resolves (the false-positive guard). The warning is advisory — the save still completes.
+
+### Added — AM-PREPARE-GUARD: single-writer wrap refusal moved into the library
+
+The continuity consolidate is **single-writer by design** (the opposite of the multi-writer spore store). Before this release, `prepare_wrap()` called directly would **clobber an in-progress wrap's token + frozen episode snapshot** — two library prepares both "succeeded," the second silently overwriting the first, and only the save-side compare-and-swap caught the stale token *after* the agent had already spent the compression. The single-writer refusal lived only in flow's CLI wrapper, so every other adapter (Levain wires `prepare_wrap` directly, plus MCP and the anneal CLI) was unprotected.
+
+The refusal now lives in the **library**, at two points:
+- **`prepare_wrap`** raises the new `WrapInProgressError` when a wrap is already in progress *and* there are real episodes to compress. The guard sits **after** the empty-path check on purpose: an empty wrap window can never strand real episodes, so the empty path keeps its stale-flag auto-recovery (a degenerate in-progress flag with no episodes is cleared, not refused).
+- **`Store.wrap_started`** carries the same refusal at the true write-point — checked **inside** the write transaction (mirroring `wrap_completed`'s compare-and-swap) so the check-and-set is atomic on the connection and a direct caller can't reintroduce the clobber. New keyword `allow_restart: bool = False` opts into deliberately discarding the open wrap (equivalent to `wrap_cancelled()` + a fresh wrap, without the separate cancel audit event).
+
+**New exception** `WrapInProgressError(AnnealMemoryError)` — a sibling of `StoreError`, **not** a subclass: it is a precondition/state refusal, not a store I/O failure, so an `except StoreError` handler does not swallow it. Exported at the package top level; carries `started_at`; pickle-safe. Recovery is in the message: finish the open wrap (`validated_save_continuity`) or abandon it (`Store.wrap_cancelled()`), then prepare again. MCP surfaces it as a clean `is_error` tool result (via the dispatch wrapper); the CLI `prepare-wrap` exits non-zero with the message rather than a traceback.
+
+**Behavior change (structural, well-contained):** every adapter — Levain (which wires `prepare_wrap` directly), MCP, the CLI, any future direct caller — now inherits single-writer safety at **both** the `prepare_wrap` and `wrap_started` chokepoints, where previously the refusal lived only in flow's external CLI wrapper. The only thing that changes for a correct caller is that an *accidental* double-prepare (or a direct `wrap_started` on an open wrap) is now refused instead of silently overwriting — which is the point. The single production caller of `wrap_started` is `prepare_wrap`, which guards first, so the normal wrap path is unaffected. 16 new regression tests across the library guard, the `wrap_started` backstop, the exception taxonomy + pickle contract, and the CLI/MCP surfaces.
+
+### Fixed — multi-write methods now roll back a partial transaction on failure
+
+`Store._db_boundary` (the SQLite error boundary wrapping every store method) now **rolls back any open transaction** before surfacing the error, instead of re-raising and leaving uncommitted DML on the connection. A multi-write method like `wrap_started` (three metadata `INSERT`s + commit) could otherwise fail on the second write, leaving the first (`wrap_started_at`) uncommitted but live — a later unrelated `commit()` on the same connection would then flush it, producing exactly the partial wrap-in-progress state (timestamp set, token + snapshot missing) AM-PREPARE-GUARD exists to prevent. Rollback failures are swallowed so the primary exception still surfaces; the rollback is a no-op when no transaction is open (failed reads, refusals raised before any DML) and composes cleanly with the two-phase-commit `_batch()` path (whose outer rollback was already documented as a harmless double-rollback no-op). Surfaced by the cross-substrate (codex) review of this release.
+
 ## [0.4.1] — 2026-06-02
 
 ### Fixed — AM-QUOTEFOOTGUN: the documented quoted evidence format no longer silently kills the Hebbian graph

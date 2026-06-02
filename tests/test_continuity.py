@@ -625,6 +625,76 @@ class TestPrepareWrapLibrary:
         assert result["assoc_context"] is None
 
 
+# -- AM-PREPARE-GUARD: prepare_wrap single-writer refusal (0.4.2) --
+
+
+class TestPrepareWrapGuard:
+    """``prepare_wrap`` refuses to start a second wrap while one is open.
+
+    The guard moved out of flow's CLI wrapper and INTO the library so
+    every adapter (Levain, MCP, CLI) inherits single-writer safety. The
+    refusal sits AFTER the empty-path check, so an empty wrap window
+    keeps its stale-flag auto-recovery (it can never strand real
+    episodes), while a real second wrap is refused, not clobbered.
+    """
+
+    def test_second_prepare_with_episodes_refuses(self, wrap_store):
+        from anneal_memory import WrapInProgressError
+        wrap_store.record("Observation", EpisodeType.OBSERVATION)
+        prepare_wrap(wrap_store)  # marks wrap in progress
+        wrap_store.record("Another observation", EpisodeType.OBSERVATION)
+        with pytest.raises(WrapInProgressError):
+            prepare_wrap(wrap_store)
+
+    def test_refusal_carries_started_at(self, wrap_store):
+        from anneal_memory import WrapInProgressError
+        wrap_store.record("Observation", EpisodeType.OBSERVATION)
+        prepare_wrap(wrap_store)
+        with pytest.raises(WrapInProgressError) as excinfo:
+            prepare_wrap(wrap_store)
+        assert excinfo.value.started_at == wrap_store.get_wrap_started_at()
+
+    def test_refused_prepare_leaves_first_wrap_token_intact(self, wrap_store):
+        """The refused second prepare must NOT clobber the open wrap's
+        token or snapshot — the whole reason for the guard."""
+        from anneal_memory import WrapInProgressError
+        wrap_store.record("Observation", EpisodeType.OBSERVATION)
+        first = prepare_wrap(wrap_store)
+        token1 = first["wrap_token"]
+        snap_before = wrap_store.load_wrap_snapshot()
+        wrap_store.record("Another observation", EpisodeType.OBSERVATION)
+        with pytest.raises(WrapInProgressError):
+            prepare_wrap(wrap_store)
+        snap_after = wrap_store.load_wrap_snapshot()
+        assert snap_after is not None
+        assert snap_after["token"] == token1
+        assert snap_after["episode_ids"] == snap_before["episode_ids"]
+
+    def test_empty_path_does_not_refuse_clears_stale_flag(self, wrap_store):
+        """A wrap-in-progress flag with NO new episodes is the empty
+        path: it CLEARS the stale flag and returns 'empty' — it must
+        NOT raise (an empty window can't strand real episodes, so
+        stuck-wrap auto-recovery is preserved)."""
+        # Stale flag on a store with no episodes since the last wrap.
+        wrap_store.wrap_started(token=uuid.uuid4().hex, episode_ids=[])
+        assert wrap_store.status().wrap_in_progress
+        result = prepare_wrap(wrap_store)  # must NOT raise
+        assert result["status"] == "empty"
+        assert not wrap_store.status().wrap_in_progress
+
+    def test_recovery_via_cancel_then_reprepare(self, wrap_store):
+        from anneal_memory import WrapInProgressError
+        wrap_store.record("Observation", EpisodeType.OBSERVATION)
+        first = prepare_wrap(wrap_store)
+        wrap_store.record("Another observation", EpisodeType.OBSERVATION)
+        with pytest.raises(WrapInProgressError):
+            prepare_wrap(wrap_store)
+        wrap_store.wrap_cancelled()
+        second = prepare_wrap(wrap_store)  # now allowed
+        assert second["status"] == "ready"
+        assert second["wrap_token"] != first["wrap_token"]
+
+
 # -- format_wrap_package_text (canonical display text) --
 
 
@@ -1037,11 +1107,19 @@ class TestTOCTOUHandshakeToken:
         finally:
             store.close()
 
-    def test_prepare_wrap_mints_fresh_token_each_call(self, tmp_path):
-        """Each prepare_wrap call mints a unique token. Overlapping
-        prepare calls (e.g. accidental double-prepare) overwrite the
-        earlier snapshot and token — only the latest is valid."""
-        from anneal_memory import validated_save_continuity
+    def test_prepare_wrap_refuses_second_prepare_while_in_progress(self, tmp_path):
+        """AM-PREPARE-GUARD (0.4.2): a second prepare_wrap while a wrap is
+        in progress is REFUSED, not silently clobbered.
+
+        The pre-0.4.2 behavior (overlapping prepare overwrites the earlier
+        token + snapshot, and only the save-side CAS catches the stale
+        token AFTER the agent already spent the compression) is gone.
+        Single-writer safety is now structural in the library, so every
+        adapter — Levain's seeded entity, the MCP tool, the CLI — inherits
+        it. The legitimate "restart compression" flow is now explicit:
+        finish (save) or abandon (wrap_cancelled) the open wrap first.
+        """
+        from anneal_memory import validated_save_continuity, WrapInProgressError
 
         store = Store(str(tmp_path / "fresh.db"), project_name="Fresh")
         try:
@@ -1049,19 +1127,30 @@ class TestTOCTOUHandshakeToken:
             result1 = prepare_wrap(store)
             token1 = result1["wrap_token"]
 
-            # Second prepare (caller never called save; overlapping
-            # prepare is a legitimate "restart compression" flow)
+            # Second prepare while the first wrap is open: REFUSED.
+            with pytest.raises(WrapInProgressError) as excinfo:
+                prepare_wrap(store)
+            # The refusal carries the in-progress wrap's start timestamp...
+            assert excinfo.value.started_at
+            # ...and it did NOT clobber the first wrap — the flag stands.
+            assert store.get_wrap_started_at()
+
+            text = self._make_continuity("Fresh", "aaaaaaaa")
+
+            # The ORIGINAL token still works — the open wrap was untouched
+            # by the refused second prepare. This completes wrap #1.
+            validated_save_continuity(store, text, wrap_token=token1)
+
+            # Explicit restart: a fresh wrap mints a DIFFERENT token.
+            store.record("Second observation", EpisodeType.OBSERVATION)
             result2 = prepare_wrap(store)
             token2 = result2["wrap_token"]
+            assert token2 != token1
 
-            assert token1 != token2
-
-            # Saving with the stale token1 is now rejected.
-            text = self._make_continuity("Fresh", "aaaaaaaa")
+            # The stale (already-consumed) token1 is rejected for wrap #2;
+            # the current token2 succeeds.
             with pytest.raises(ValueError, match="wrap_token mismatch"):
                 validated_save_continuity(store, text, wrap_token=token1)
-
-            # Saving with the current token2 works.
             validated_save_continuity(store, text, wrap_token=token2)
         finally:
             store.close()
@@ -1219,9 +1308,14 @@ class TestTOCTOUHandshakeToken:
                 f"[decided(rationale: \"test\", on: \"{today_str}\")] ok\n\n"
                 f"## Context\nSnapshot episode {ep_a.id}.\n"
             )
-            result = validated_save_continuity(
-                store, text, wrap_token=token
-            )
+            # The cited episode is the TOCTOU one, excluded from the
+            # snapshot — so AM-WARN (0.4.2) correctly fires "citation
+            # resolved to zero episodes." Assert it (and keep the suite
+            # warning-clean) via pytest.warns.
+            with pytest.warns(UserWarning, match="resolved to ZERO episodes"):
+                result = validated_save_continuity(
+                    store, text, wrap_token=token
+                )
             # Structural invariant: no graduation-format line may be
             # skipped due to date mismatch in a test that intends to
             # exercise validation. If this fires, the test author
@@ -4377,4 +4471,82 @@ class TestAmWarn:
             _w.simplefilter("error")
             result = self._save(tmp_path, text, n_episodes=1)
         assert result["association_warning"] is None
+        assert result["associations_formed"] == 0
+
+    def test_silent_on_cross_session_demote_with_resolving_ids(self, tmp_path):
+        """H1 regression (v0.4.2): when the ONLY graduation in a wrap is
+        cross-session-demoted by the immune gate but its cited id resolves
+        to a real store episode, AM-WARN Signal A must NOT misfire its
+        'wrong id namespace / dead graph' alarm. The immune gate fired on
+        the EXPLANATION (suspected sycophantic re-graduation), not on the
+        ids — the graph is healthy, the gate is simply (correctly) refusing
+        to strengthen it from a gamed accumulation. Before the fix, Signal A
+        read all_validated_ids (suppressed on the cross-session path) and
+        misdiagnosed this routine event as a namespace bug."""
+        from anneal_memory import prepare_wrap, validated_save_continuity
+        import warnings as _w
+        store = Store(tmp_path / "xsession.db", project_name="AmWarn")
+        try:
+            VOCAB = "standup consensus decision agreement architectural rotation"
+            # Wrap 1: first graduation of `recurring` — validates and seeds
+            # pattern_history with this explanation.
+            ep1 = store.record(f"{VOCAB} observed in the substrate",
+                               EpisodeType.OBSERVATION)
+            p1 = prepare_wrap(store)
+            text1 = (
+                "## State\nactive.\n\n## Patterns\n"
+                f'- recurring | 2x (2026-06-02) [evidence: {ep1.id} "{VOCAB}"]\n\n'
+                "## Decisions\n- d.\n\n## Context\n- c.\n"
+            )
+            r1 = validated_save_continuity(
+                store, text1, today="2026-06-02", wrap_token=p1["wrap_token"],
+            )
+            assert r1["graduations_validated"] == 1  # history seeded
+
+            # Wrap 2: re-graduate `recurring` reusing wrap-1 vocabulary ->
+            # the cross-session immune gate demotes it. Its cited id (ep2,
+            # in this wrap's snapshot) resolves to a real store episode.
+            ep2 = store.record(f"{VOCAB} observed again in the substrate",
+                               EpisodeType.OBSERVATION)
+            p2 = prepare_wrap(store)
+            text2 = (
+                "## State\nactive.\n\n## Patterns\n"
+                f'- recurring | 3x (2026-06-02) [evidence: {ep2.id} "{VOCAB}"]\n\n'
+                "## Decisions\n- d.\n\n## Context\n- c.\n"
+            )
+            with _w.catch_warnings():
+                # A false namespace warning would raise here (the regression).
+                _w.simplefilter("error")
+                r2 = validated_save_continuity(
+                    store, text2, today="2026-06-02", wrap_token=p2["wrap_token"],
+                )
+            # Self-validate the immune gate actually fired (not a vacuous pass).
+            assert r2["demoted"] >= 1
+            assert r2["graduations_validated"] == 0
+            # The fix: no false "resolved to ZERO episodes / namespace" alarm.
+            assert r2["association_warning"] is None
+        finally:
+            store.close()
+
+    def test_signal_b_fires_on_cross_line_session_pair_miswire(self, tmp_path, monkeypatch):
+        """codex L3 MEDIUM (v0.4.2): Signal B must catch a write-path mis-wire
+        that manifests ONLY in cross-line SESSION pairs — two graduation lines
+        each citing one different real episode. Pre-fix, cocitation_available
+        only saw same-line multi-id sets, so a dead write path on the session
+        pair was invisible. Simulate the mis-wire (record_associations forms
+        nothing) and assert Signal B now fires."""
+        monkeypatch.setattr(Store, "record_associations",
+                            lambda self, *a, **k: (0, 0))
+        text = (
+            "## State\nactive.\n\n## Patterns\n"
+            '- pattern_a | 2x (2026-06-02) [evidence: {ep0} '
+            '"first discipline rotation substrate observation"]\n'
+            '- pattern_b | 2x (2026-06-02) [evidence: {ep1} '
+            '"second discipline rotation substrate observation"]\n\n'
+            "## Decisions\n- d.\n\n## Context\n- c.\n"
+        )
+        with pytest.warns(UserWarning, match="Co-citation pairs were available"):
+            result = self._save(tmp_path, text, n_episodes=2)
+        assert result["association_warning"] is not None
+        assert "mis-wired" in result["association_warning"]
         assert result["associations_formed"] == 0

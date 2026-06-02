@@ -149,9 +149,10 @@ TOOLS: list[dict[str, Any]] = [
                 "max_chars": {
                     "type": "integer",
                     "description": (
-                        "Maximum size of the continuity file in characters. Default 20000."
+                        "Maximum size of the continuity file in characters. Omit "
+                        "to derive a schema-aware default (20000 for the standard "
+                        "schema, larger for a richer schema like FLOW_SCHEMA)."
                     ),
-                    "default": 20000,
                 },
                 "staleness_days": {
                     "type": "integer",

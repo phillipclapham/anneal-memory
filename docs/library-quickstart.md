@@ -213,7 +213,9 @@ The database path can be absolute or relative. The continuity file lives alongsi
 
 ## Error Handling
 
-The library raises errors in two categories. **`AnnealMemoryError` and its subclasses** (`StoreError`, `StoreDatabaseError`) signal I/O and store failures — catch the base class at your outermost boundary, log, and let it propagate. Branching per subclass is a minority pattern for long-running servers with retry budgets or transport authors writing their own error translation layer. **Plain `ValueError`** is raised by `validated_save_continuity` for caller-contract violations — empty or malformed continuity text, no wrap in progress (`prepare_wrap` not called, or the session already wrapped), or a wrong `wrap_token`. A `ValueError` here is a bug in your wrap flow, not a runtime failure to recover from: fix the call site rather than catching it.
+The library raises errors in two categories. **`AnnealMemoryError` and everything under it** — the store-failure family (`StoreError` → `StoreDatabaseError`) and the single-writer lifecycle refusal `WrapInProgressError` (a *sibling* of `StoreError`, not a subclass — see the hierarchy below) — catch the base class at your outermost boundary, log, and let it propagate. Branching per subclass is a minority pattern for long-running servers with retry budgets or transport authors writing their own error translation layer. **Plain `ValueError`** is raised by `validated_save_continuity` for caller-contract violations — empty or malformed continuity text, no wrap in progress (`prepare_wrap` not called, or the session already wrapped), or a wrong `wrap_token`. A `ValueError` here is a bug in your wrap flow, not a runtime failure to recover from: fix the call site rather than catching it.
+
+Note the two *opposite* lifecycle errors: `validated_save_continuity` raises `ValueError` when **no** wrap is in progress, and `prepare_wrap` raises `WrapInProgressError` when one **already** is. The consolidate is single-writer — finish or cancel the open wrap before starting another.
 
 ### The 80% case
 
@@ -249,13 +251,15 @@ except AnnealMemoryError as err:
 
 ```
 AnnealMemoryError (Exception)
- └── StoreError
-      └── StoreDatabaseError
+ ├── StoreError
+ │    └── StoreDatabaseError
+ └── WrapInProgressError
 ```
 
 - **`AnnealMemoryError`** — base class. Catch this at your outermost boundary. anneal-memory deliberately does NOT mirror PEP 249 / DB-API 2.0's nine-class hierarchy: this is a library that consumes a database internally, not a database driver, so callers branch on operational intent (log/retry/escalate), not on vendor-level failure taxonomy.
 - **`StoreError`** — operation-level failure with structured context. Carries an `.operation` field (a `StoreOperation` literal like `"save_continuity"`, `"record"`, `"wrap_completed"`) and a `.path` field pointing at the store DB file. Covers file-write failures (continuity/meta atomic writes) and integrity failures (partial wrap-snapshot state).
 - **`StoreDatabaseError`** — subclass of `StoreError` raised when a SQLite operation fails (locked database, disk full, integrity constraint violations after retries, corruption). The underlying `sqlite3.DatabaseError` is attached as `__cause__` at raise time (not preserved across pickle — see below). Because it subclasses `StoreError`, existing `except StoreError` handlers catch it unchanged.
+- **`WrapInProgressError`** — a **sibling** of `StoreError`, NOT a subclass: it is a single-writer precondition refusal, not a store I/O failure, so an `except StoreError` handler deliberately does not swallow it. Raised by `prepare_wrap` (and `Store.wrap_started`) when a wrap is already in progress. Carries `.started_at` (the open wrap's timestamp) and is pickle-safe. Recovery: finish the open wrap (`validated_save_continuity`) or abandon it (`store.wrap_cancelled()`), then prepare again — or pass `allow_restart=True` to `wrap_started` to deliberately discard it.
 
 ### When (and when not) to retry
 

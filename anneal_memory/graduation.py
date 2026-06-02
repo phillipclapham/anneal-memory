@@ -200,6 +200,16 @@ class GraduationResult:
     gaming_suspects: list[str] = field(default_factory=list)  # IDs cited >= threshold
     direct_co_citations: list[tuple[str, str]] = field(default_factory=list)  # Pairs from same line
     all_validated_ids: list[set[str]] = field(default_factory=list)  # Per-line co-cited real-episode ID sets — NOT graduation-validated since AM-QUOTEFOOTGUN (v0.4.1): populated on demoted-grounding lines too, feeds session co-citation. (Rename to co_cited_id_sets is a v0.5 candidate.)
+    # AM-WARN (v0.4.2) support: did ANY citation-bearing graduation this wrap
+    # cite at least one id that resolves to a real store episode? Tracked
+    # INDEPENDENT of the cross-session immune gate — unlike all_validated_ids,
+    # which is suppressed on a cross-session-overlap demote (graduation.py
+    # gate at the co-citation block). AM-WARN Signal A ("citations resolved to
+    # ZERO episodes — wrong id namespace") must read THIS, not all_validated_ids:
+    # a cross-session-demoted line has resolving ids (the immune gate fired on
+    # the explanation, not the ids), so reading all_validated_ids would
+    # misdiagnose a healthy immune-gate demotion as a dead-namespace graph.
+    any_citation_resolved: bool = False
     # Patterns at 2x/3x in the prior continuity that are absent at any
     # level in the new continuity. Surfaced as audit signal — see
     # detect_pattern_omissions() and OmittedPattern docstring.
@@ -355,6 +365,9 @@ def validate_graduations(
     citation_counts: dict[str, int] = {}
     direct_co_citations: list[tuple[str, str]] = []
     all_validated_ids: list[set[str]] = []
+    # AM-WARN (v0.4.2): tracked independent of the cross-session immune gate
+    # (see the field docstring on GraduationResult).
+    any_citation_resolved = False
     cross_session_collisions: list[CrossSessionCollision] = []
 
     for i, line in enumerate(lines):
@@ -484,6 +497,12 @@ def validate_graduations(
             # the paraphrased explanation missed the ≥2-meaningful-word
             # lexical overlap, while bare ``[evidence: id, id]`` linked fine.)
             valid_cited = sorted(cited_ids & valid_ids)
+            # AM-WARN (v0.4.2): record that this wrap had at least one
+            # citation resolving to a real store episode — BEFORE any gate.
+            # This is the un-gated truth AM-WARN Signal A needs (a
+            # cross-session-demoted line still has resolving ids).
+            if valid_cited:
+                any_citation_resolved = True
 
             if ids_valid and explanation_valid and not cross_session_overlap_words:
                 validated += 1
@@ -580,6 +599,7 @@ def validate_graduations(
         gaming_suspects=gaming_suspects,
         direct_co_citations=direct_co_citations,
         all_validated_ids=all_validated_ids,
+        any_citation_resolved=any_citation_resolved,
         cross_session_collisions=cross_session_collisions,
     )
 

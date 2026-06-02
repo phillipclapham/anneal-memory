@@ -36,11 +36,15 @@ Germination (computed at read-time, NEVER stored — parallel to "top of mind"):
   - ``dormant``  seen > 7 days ago OR past next: — "still alive, or ready to compost?"
   - ``parked``   tier == parked                  — deliberate dormancy, not neglect
 
-Storage: a single JSON document, written atomically (tmp + fsync + rename +
+Storage: a single JSON document, written atomically (unique-tmp + fsync + rename +
 dir-fsync — the same durability idiom as the SQLite store's ``_fsync_dir``). The
 prospective set is small and mutable (open loops, frequently re-tiered and
 resolved); a JSON document fits that shape where the append-heavy episodic corpus
-fits SQLite. Zero dependencies beyond the Python stdlib.
+fits SQLite. Zero dependencies beyond the Python stdlib. Unlike the episodic
+store's single-process invariant, this layer is multi-writer-safe: every mutation
+serializes under an exclusive ``fcntl`` lock spanning the whole load→mutate→save
+(see :meth:`SporeStore._transaction`), since the use-case is parallel sessions +
+overnight wrappers planting/resolving against one store. POSIX-only locking.
 
 Dates vs timestamps: ``seen`` / ``next`` / ``created`` / ``resolution.on`` are
 ``YYYY-MM-DD`` **logical garden dates** in the operator's frame — injectable via
@@ -58,9 +62,16 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Literal, TypedDict, cast
+from typing import Iterator, Literal, TypedDict, cast
+
+try:  # POSIX advisory locking; absent on Windows (see SporeStore._transaction).
+    import fcntl
+except ImportError:  # pragma: no cover - exercised only on non-POSIX platforms
+    fcntl = None  # type: ignore[assignment]
 
 from .store import AnnealMemoryError
 
@@ -74,6 +85,7 @@ Status = Literal["open", "resolved"]
 
 VALID_TYPES: tuple[SporeType, ...] = ("task", "question", "thought")
 VALID_TIERS: tuple[Tier, ...] = ("hot", "warm", "cold", "parked")
+VALID_GERMINATIONS: tuple[Germination, ...] = ("growing", "resting", "dormant", "parked")
 
 # The lifecycle is shared across types; the TERMINAL kinds are type-specific —
 # descending a ``task`` as "answered" is a nonsensical terminal state. The
@@ -241,9 +253,16 @@ class SporeStore:
     """A JSON-backed store of open cognitive loops (the prospective layer).
 
     Mirrors :class:`Store`'s constructor shape — an explicit path, no magic
-    default — and its atomic-write durability (tmp + fsync + rename + dir-fsync).
-    Single-process, like the episodic store: concurrent writers are not
-    supported (the small mutable set re-reads + rewrites the whole document).
+    default — and its atomic-write durability (unique-tmp + fsync + rename +
+    dir-fsync). UNLIKE the episodic :class:`Store` (a documented single-process
+    invariant), the prospective layer is inherently MULTI-writer — its use-case
+    is several parallel sessions plus overnight wrappers each planting / touching
+    / resolving loops against one store. Every mutation therefore runs under an
+    exclusive advisory lock spanning the whole load→mutate→save (see
+    :meth:`_transaction`), so concurrent writers serialize safely with no lost
+    updates or id collisions; reads stay lock-free (atomic ``os.replace`` means a
+    reader always sees a complete committed document). POSIX-only locking — see
+    :meth:`_transaction` for the non-POSIX degradation.
 
     Errors: operational failures (corrupt store, unknown id, already-resolved id,
     ambiguous-id drift) raise :class:`SporeError`; malformed caller arguments
@@ -314,14 +333,81 @@ class SporeStore:
     def _save(self, data: dict) -> None:
         target_dir = self.path.parent
         os.makedirs(target_dir, exist_ok=True)
-        tmp_path = self.path.with_name(self.path.name + ".tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, self.path)
+        # A UNIQUE tmp sibling, never a fixed ``<name>.tmp``: two writers must not
+        # collide on one tmp path (the bug that made a fixed tmp's ``os.replace``
+        # raise FileNotFoundError under concurrency). Mirrors ``store.py``'s
+        # unique-suffix atomic-write idiom. The lock in :meth:`_transaction`
+        # already serializes our own writers; the unique tmp also protects against
+        # a leftover sidecar and any non-cooperating writer.
+        fd, tmp_name = tempfile.mkstemp(
+            dir=target_dir, prefix=self.path.name + ".", suffix=".tmp"
+        )
+        tmp_path = Path(tmp_name)
+        try:
+            try:
+                f = os.fdopen(fd, "w", encoding="utf-8")
+            except BaseException:
+                os.close(fd)  # fdopen didn't take ownership — close the raw fd
+                raise
+            with f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.path)
+        except BaseException:
+            # Never leak the tmp sidecar if the write or replace failed.
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            raise
         _fsync_dir(target_dir)
+
+    @contextmanager
+    def _transaction(self) -> Iterator[dict]:
+        """Serialize a full load→mutate→save against concurrent processes.
+
+        The prospective layer is inherently MULTI-writer (parallel sessions +
+        overnight wrappers each planting / touching / resolving against one
+        store), so a mutation takes an **exclusive** advisory lock on a sibling
+        ``<store>.lock`` and (re)loads the document INSIDE the lock — so
+        :meth:`_next_id` and every field update see the latest committed state,
+        with no lost updates and no id collisions. The lock is released when the
+        fd closes or the process dies, so a crashed holder can never strand it.
+        NOT reentrant — a mutator must never call another mutator (``flock`` is
+        per-fd, so the same process re-acquiring would self-deadlock); today no
+        mutator does. :meth:`_save` runs only on a clean exit; an exception in the
+        body (a bad ``kind``, an unknown id) skips the save and releases the lock.
+
+        Reads (:meth:`get` / :meth:`list_open` / :meth:`surface`) stay lock-free:
+        :meth:`_save` commits via an atomic ``os.replace``, so a reader always
+        sees a complete committed document, never a torn one.
+
+        Platform: ``fcntl`` is POSIX-only and reliable on a LOCAL filesystem. On
+        a non-POSIX platform the lock degrades to a no-op (mirroring
+        ``store._fsync_dir``'s best-effort Windows behavior); over NFS / a network
+        filesystem ``flock`` may also silently no-op. In either case the
+        unique-tmp + atomic-replace write still applies, so a *single-process*
+        writer is unaffected, but cross-process serialization is guaranteed only
+        for a local POSIX filesystem.
+        """
+        os.makedirs(self.path.parent, exist_ok=True)
+        # os.open + flock go INSIDE the try so a flock failure (e.g. ENOLCK on a
+        # lock-less FS) can't leak the lock fd: the finally's None-guard covers
+        # both "os.open failed (fd still None)" and "flock failed (fd open)".
+        lock_fd: int | None = None
+        try:
+            if fcntl is not None:
+                lock_path = self.path.with_name(self.path.name + ".lock")
+                lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            data = self._load()
+            yield data
+            self._save(data)
+        finally:
+            if lock_fd is not None:
+                os.close(lock_fd)
 
     # --- internal lookups ---------------------------------------------------
 
@@ -389,31 +475,36 @@ class SporeStore:
             raise ValueError(f"type must be one of {VALID_TYPES} (got {type!r}).")
         if tier not in VALID_TIERS:
             raise ValueError(f"tier must be one of {VALID_TIERS} (got {tier!r}).")
-        if not isinstance(salience, int) or not 0 <= salience <= 3:
+        # bool is an int subclass — reject it explicitly so a stray True/False
+        # can't be stored as salience 1/0.
+        if not isinstance(salience, int) or isinstance(salience, bool) or not 0 <= salience <= 3:
             raise ValueError(f"salience must be an int 0–3 (got {salience!r}).")
-        if not text or not text.strip():
-            raise ValueError("text is required (the open loop).")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text is required and must be a non-empty string (the open loop).")
+        if not isinstance(domain, str):
+            raise ValueError(f"domain must be a string (got {domain!r}).")
+        if pointer is not None and not isinstance(pointer, str):
+            raise ValueError(f"pointer must be a string or None (got {pointer!r}).")
         next_validated = _validate_date(next, "next")
         now = (today or date.today()).isoformat()
-        data = self._load()
-        item: SporeDict = {
-            "id": self._next_id(data),
-            "type": type,
-            "text": text,
-            "domain": domain or "",
-            "tier": tier,
-            "salience": salience,
-            "seen": now,
-            "next": next_validated,
-            "created": now,
-            "status": "open",
-            "resolution": None,
-            "pointer": pointer or None,
-            "notes": [],
-        }
-        data["spores"].append(item)
-        self._save(data)
-        return item
+        with self._transaction() as data:
+            item: SporeDict = {
+                "id": self._next_id(data),
+                "type": type,
+                "text": text,
+                "domain": domain or "",
+                "tier": tier,
+                "salience": salience,
+                "seen": now,
+                "next": next_validated,
+                "created": now,
+                "status": "open",
+                "resolution": None,
+                "pointer": pointer or None,
+                "notes": [],
+            }
+            data["spores"].append(item)
+            return item
 
     # --- public API: read ---------------------------------------------------
 
@@ -496,14 +587,13 @@ class SporeStore:
         ``update(tier=...)``, not by touching.)
         """
         today = today or date.today()
-        data = self._load()
-        item = self._require_open(data, spore_id)
-        item["seen"] = today.isoformat()
-        nxt = _parse_date(item.get("next"))
-        if nxt and today >= nxt:
-            item["next"] = None
-        self._save(data)
-        return item
+        with self._transaction() as data:
+            item = self._require_open(data, spore_id)
+            item["seen"] = today.isoformat()
+            nxt = _parse_date(item.get("next"))
+            if nxt and today >= nxt:
+                item["next"] = None
+            return item
 
     def update(
         self,
@@ -523,35 +613,38 @@ class SporeStore:
         clears them. Deliberately does NOT bump ``seen`` — engagement is signalled
         explicitly via :meth:`touch`, which keeps germination honest.
         """
-        data = self._load()
-        item = self._require_open(data, spore_id)
+        with self._transaction() as data:
+            item = self._require_open(data, spore_id)
 
-        if not isinstance(tier, _Unset):
-            if tier not in VALID_TIERS:
-                raise ValueError(f"tier must be one of {VALID_TIERS} (got {tier!r}).")
-            item["tier"] = tier
-        if not isinstance(next, _Unset):
-            item["next"] = _validate_date(next, "next")
-        if not isinstance(text, _Unset):
-            if not text or not text.strip():
-                raise ValueError("text cannot be cleared to empty.")
-            item["text"] = text
-        if not isinstance(salience, _Unset):
-            if not isinstance(salience, int) or not 0 <= salience <= 3:
-                raise ValueError(f"salience must be an int 0–3 (got {salience!r}).")
-            item["salience"] = salience
-        if not isinstance(domain, _Unset):
-            item["domain"] = domain or ""
-        if not isinstance(pointer, _Unset):
-            item["pointer"] = pointer or None
-        if add_note:
-            stamp = (today or date.today()).isoformat()
-            if not isinstance(item.get("notes"), list):
-                item["notes"] = []
-            item["notes"].append(f"[{stamp}] {add_note}")
+            if not isinstance(tier, _Unset):
+                if tier not in VALID_TIERS:
+                    raise ValueError(f"tier must be one of {VALID_TIERS} (got {tier!r}).")
+                item["tier"] = tier
+            if not isinstance(next, _Unset):
+                item["next"] = _validate_date(next, "next")
+            if not isinstance(text, _Unset):
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError("text must be a non-empty string (cannot clear to empty).")
+                item["text"] = text
+            if not isinstance(salience, _Unset):
+                if not isinstance(salience, int) or isinstance(salience, bool) or not 0 <= salience <= 3:
+                    raise ValueError(f"salience must be an int 0–3 (got {salience!r}).")
+                item["salience"] = salience
+            if not isinstance(domain, _Unset):
+                if domain is not None and not isinstance(domain, str):
+                    raise ValueError(f"domain must be a string or None (got {domain!r}).")
+                item["domain"] = domain or ""
+            if not isinstance(pointer, _Unset):
+                if pointer is not None and not isinstance(pointer, str):
+                    raise ValueError(f"pointer must be a string or None (got {pointer!r}).")
+                item["pointer"] = pointer or None
+            if add_note:
+                stamp = (today or date.today()).isoformat()
+                if not isinstance(item.get("notes"), list):
+                    item["notes"] = []
+                item["notes"].append(f"[{stamp}] {add_note}")
 
-        self._save(data)
-        return item
+            return item
 
     # --- public API: resolve ------------------------------------------------
 
@@ -566,17 +659,16 @@ class SporeStore:
         """Resolve a spore downward (compost / self-clean). ``kind`` must fit the
         spore's type (e.g. a ``task`` descends done/dropped/composted, never
         ``answered``)."""
-        data = self._load()
-        item = self._require_open(data, spore_id)
-        valid = DESCEND_BY_TYPE.get(item["type"], frozenset())
-        if kind not in valid:
-            raise ValueError(
-                f"descend kind {kind!r} is invalid for a {item.get('type')!r} "
-                f"spore. Valid: {sorted(valid)}."
-            )
-        self._resolve(data, item, "descend", kind, None, today, now)
-        self._save(data)
-        return item
+        with self._transaction() as data:
+            item = self._require_open(data, spore_id)
+            valid = DESCEND_BY_TYPE.get(item["type"], frozenset())
+            if kind not in valid:
+                raise ValueError(
+                    f"descend kind {kind!r} is invalid for a {item.get('type')!r} "
+                    f"spore. Valid: {sorted(valid)}."
+                )
+            self._resolve(data, item, "descend", kind, None, today, now)
+            return item
 
     def ascend(
         self,
@@ -595,17 +687,16 @@ class SporeStore:
         ``today`` (the logical date) and ``now`` (the UTC instant on ``resolution.at``)."""
         if not ref or not ref.strip():
             raise ValueError("ascend requires a ref (what the spore became).")
-        data = self._load()
-        item = self._require_open(data, spore_id)
-        valid = ASCEND_BY_TYPE.get(item["type"], frozenset())
-        if kind not in valid:
-            raise ValueError(
-                f"ascend kind {kind!r} is invalid for a {item.get('type')!r} "
-                f"spore. Valid: {sorted(valid)}."
-            )
-        self._resolve(data, item, "ascend", kind, ref, today, now)
-        self._save(data)
-        return item
+        with self._transaction() as data:
+            item = self._require_open(data, spore_id)
+            valid = ASCEND_BY_TYPE.get(item["type"], frozenset())
+            if kind not in valid:
+                raise ValueError(
+                    f"ascend kind {kind!r} is invalid for a {item.get('type')!r} "
+                    f"spore. Valid: {sorted(valid)}."
+                )
+            self._resolve(data, item, "ascend", kind, ref, today, now)
+            return item
 
     @staticmethod
     def _resolve(

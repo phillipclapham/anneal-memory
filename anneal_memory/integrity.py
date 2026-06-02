@@ -303,6 +303,169 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {},
         },
     },
+    {
+        "name": "spore_add",
+        "description": (
+            "Plant a spore — an open cognitive loop in the PROSPECTIVE layer (a "
+            "thing that must RESOLVE), distinct from episodic/continuity memory "
+            "(which accretes and never completes). Use for an open intention you "
+            "want to carry forward and close later: a `task` (open doing), a "
+            "`question` (open not-knowing), or a `thought` (open idea). Set `tier` "
+            "to weight intent (hot/warm/cold/parked) and `next` (YYYY-MM-DD) to "
+            "ask for re-surfacing on a date. Resolve later via spore_descend "
+            "(compost) or spore_ascend (transmute into memory/a project)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": ["task", "question", "thought"],
+                    "description": "What KIND of openness: task=doing, question=not-knowing, thought=idea.",
+                },
+                "text": {"type": "string", "description": "The open loop itself."},
+                "domain": {"type": "string", "description": "Optional free-text domain tag (e.g. health, strategic, flow)."},
+                "tier": {
+                    "type": "string",
+                    "enum": ["hot", "warm", "cold", "parked"],
+                    "description": "Intent priority (default warm). 'parked' = deliberate dormancy.",
+                },
+                "salience": {"type": "integer", "minimum": 0, "maximum": 3, "description": "0–3 weight (the !/!!/!!! marker). Default 0."},
+                "next": {"type": "string", "description": "YYYY-MM-DD — when to re-surface (a reminder date, NOT a deadline)."},
+                "pointer": {"type": "string", "description": "Optional link to fuller context for the loop as it stands."},
+            },
+            "required": ["type", "text"],
+        },
+    },
+    {
+        "name": "spore_get",
+        "description": (
+            "Fetch one spore by id (searches open first, then resolved). Returns "
+            "its full record including computed germination and any resolution."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"spore_id": {"type": "string", "description": "Spore id, e.g. 'spore-007'."}},
+            "required": ["spore_id"],
+        },
+    },
+    {
+        "name": "spore_list",
+        "description": (
+            "List OPEN spores, ranked by tier then salience then germination. "
+            "Germination is computed at read-time (growing <3d / resting 3–7d / "
+            "dormant >7d or past its `next:` / parked). Filter by type, tier, "
+            "domain, or germination. This is the working view; for the "
+            "salience-generator surface use spore_surface."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "enum": ["task", "question", "thought"]},
+                "tier": {"type": "string", "enum": ["hot", "warm", "cold", "parked"]},
+                "germination": {"type": "string", "enum": ["growing", "resting", "dormant", "parked"]},
+                "domain": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "spore_touch",
+        "description": (
+            "Engage a spore: set `seen` to today and clear an elapsed `next:` "
+            "alarm (returning it to 'growing'). Call when you revisit an open loop "
+            "but aren't resolving it — keeps germination honest."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"spore_id": {"type": "string"}},
+            "required": ["spore_id"],
+        },
+    },
+    {
+        "name": "spore_update",
+        "description": (
+            "Metadata surgery on an OPEN spore. Only the fields you pass change; "
+            "pass an empty string to next/pointer/domain to CLEAR them. Does NOT "
+            "bump `seen` (use spore_touch to signal engagement). Use add_note to "
+            "append a dated note."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "spore_id": {"type": "string"},
+                "tier": {"type": "string", "enum": ["hot", "warm", "cold", "parked"]},
+                "next": {"type": "string", "description": "YYYY-MM-DD, or empty string to clear."},
+                "text": {"type": "string"},
+                "salience": {"type": "integer", "minimum": 0, "maximum": 3},
+                "domain": {"type": "string", "description": "Empty string clears."},
+                "pointer": {"type": "string", "description": "Empty string clears."},
+                "add_note": {"type": "string", "description": "Append a dated note."},
+            },
+            "required": ["spore_id"],
+        },
+    },
+    {
+        "name": "spore_descend",
+        "description": (
+            "Resolve a spore DOWNWARD — compost / self-clean. `kind` must fit the "
+            "spore's type: task -> done|dropped|composted; question -> "
+            "answered|mooted|composted; thought -> explored|dropped|composted "
+            "('composted' is the universal neglect-descent). This is the close "
+            "that does NOT cross into retrospective memory."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "spore_id": {"type": "string"},
+                "kind": {
+                    "type": "string",
+                    "enum": ["done", "dropped", "composted", "answered", "mooted", "explored"],
+                    "description": "Terminal kind; must be valid for the spore's type.",
+                },
+            },
+            "required": ["spore_id", "kind"],
+        },
+    },
+    {
+        "name": "spore_ascend",
+        "description": (
+            "Resolve a spore UPWARD — the membrane INTO retrospective memory. The "
+            "spore became real work: record a `ref` (a pointer to what it became — "
+            "a project path, an episode id, a pattern name). `kind` must fit the "
+            "type: task -> project|thread; question -> episode|pattern; thought -> "
+            "essay|pattern|project. In v1 this RECORDS the pointer; the actual "
+            "episode/continuity write stays the host's act."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "spore_id": {"type": "string"},
+                "kind": {
+                    "type": "string",
+                    "enum": ["project", "thread", "episode", "pattern", "essay"],
+                    "description": "Transmute target; must be valid for the spore's type.",
+                },
+                "ref": {"type": "string", "description": "What the spore became (project path / episode id / pattern name)."},
+            },
+            "required": ["spore_id", "kind", "ref"],
+        },
+    },
+    {
+        "name": "spore_surface",
+        "description": (
+            "The seed-side surface a salience generator consumes. With "
+            "top_of_mind=true, only the Top-of-Mind contribution (spores that are "
+            "'hot' OR 'growing', ranked, across all three types); otherwise all "
+            "open spores, ranked. The downstream consumer composes the full Top of "
+            "Mind from this x active threads x recent ships."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "top_of_mind": {"type": "boolean", "description": "Only the hot-or-growing ToM contribution (default false = all open)."},
+            },
+        },
+    },
 ]
 
 RESOURCES: list[dict[str, Any]] = [

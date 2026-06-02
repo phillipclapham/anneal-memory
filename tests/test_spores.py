@@ -9,12 +9,27 @@ load-bearing store invariant: a corrupt store NEVER silently re-inits.
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
 from anneal_memory import SporeError, SporeStore, germination_tier
+from anneal_memory import spores as _spores
 from anneal_memory.spores import SPORE_SCHEMA_VERSION
+
+
+# Module-level so the "spawn" start method can pickle it by qualified name.
+def _concurrent_add_worker(path_str: str, barrier, idx: int, count: int) -> None:
+    """Plant ``count`` spores against a shared store, aligned to a barrier so all
+    writers hit the load→mutate→save window together (maximizes contention)."""
+    store = SporeStore(path_str)
+    try:
+        barrier.wait(timeout=30)
+    except Exception:  # pragma: no cover - a sibling died before the barrier
+        return
+    for j in range(count):
+        store.add(type="task", text=f"w{idx}-{j}", domain="concurrency", today=date(2026, 1, 1))
 
 
 @pytest.fixture
@@ -139,6 +154,10 @@ class TestAdd:
             {"type": "task", "text": ""},
             {"type": "task", "text": "x", "next": "2026/06/03"},
             {"type": "task", "text": "x", "next": "06-03-2026"},
+            {"type": "task", "text": 123},                       # non-str text
+            {"type": "task", "text": "x", "salience": True},     # bool is not a valid salience
+            {"type": "task", "text": "x", "domain": {"k": "v"}}, # non-str domain
+            {"type": "task", "text": "x", "pointer": 5},         # non-str pointer
         ],
     )
     def test_invalid_args_raise_valueerror(self, store, kw):
@@ -282,8 +301,12 @@ class TestUpdate:
         [
             {"tier": "nope"},
             {"salience": 9},
+            {"salience": True},          # bool is not a valid salience
             {"next": "2026/01/01"},
             {"text": "  "},
+            {"text": 123},               # non-str text
+            {"domain": {"k": "v"}},      # non-str domain
+            {"pointer": 5},              # non-str pointer
         ],
     )
     def test_invalid_update_raises(self, store, kw):
@@ -482,3 +505,62 @@ class TestExports:
         assert hasattr(am, "SporeError")
         assert hasattr(am, "germination_tier")
         assert issubclass(am.SporeError, am.AnnealMemoryError)
+
+
+# -- concurrency (the SP-CONCURRENCY fix: many writers serialize safely) ---
+
+
+class TestConcurrency:
+    """The prospective layer is inherently multi-writer (parallel sessions +
+    overnight wrappers). diogenes repro'd the pre-fix bug: 8 parallel writers →
+    5 crashed at ``os.replace`` and the store ended with 1 spore instead of 8.
+    These exercise the real cross-process path with ``multiprocessing`` (threads
+    would not test the cross-process advisory lock).
+    """
+
+    def _run_writers(self, path_str: str, n: int, count: int) -> None:
+        ctx = mp.get_context("spawn")
+        barrier = ctx.Barrier(n)
+        procs = [
+            ctx.Process(target=_concurrent_add_worker, args=(path_str, barrier, i, count))
+            for i in range(n)
+        ]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(timeout=60)
+        for p in procs:
+            assert p.exitcode == 0, f"a writer crashed (exitcode={p.exitcode})"
+
+    @pytest.mark.skipif(
+        _spores.fcntl is None,
+        reason="cross-process serialization is a POSIX-fcntl guarantee; the lock "
+        "no-ops without fcntl, so this assertion would false-green / flaky-fail",
+    )
+    def test_parallel_writers_no_lost_updates_or_id_collisions(self, tmp_path):
+        path = tmp_path / "spores.json"
+        n, count = 8, 5
+        self._run_writers(str(path), n, count)
+
+        data = json.loads(path.read_text())
+        spores = data["spores"]
+        # No lost updates: every write landed.
+        assert len(spores) == n * count
+        # No id collisions: reload-inside-lock makes _next_id see committed state.
+        ids = [s["id"] for s in spores]
+        assert len(set(ids)) == n * count
+        # No torn writes / leftover tmp sidecars from the concurrent replaces.
+        assert not list(tmp_path.glob("spores.json.*.tmp"))
+        # The store reloads cleanly through the public API.
+        assert len(SporeStore(path).list_open()) == n * count
+
+    def test_lockfile_is_a_sibling_and_does_not_corrupt_reads(self, tmp_path):
+        path = tmp_path / "spores.json"
+        store = SporeStore(path)
+        store.add(type="task", text="solo", today=date(2026, 1, 1))
+        # The advisory lock file sits beside the store and is not the store.
+        lock = path.with_name(path.name + ".lock")
+        if lock.exists():  # POSIX only; a no-op (no lock file) on non-POSIX
+            assert lock.read_text() == ""
+        # The lock file is never confused for a spore document.
+        assert len(store.list_open()) == 1

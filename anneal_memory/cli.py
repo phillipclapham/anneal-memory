@@ -42,7 +42,7 @@ import re
 import sqlite3
 import sys
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +52,17 @@ from .continuity import (
     format_wrap_package_text,
     prepare_wrap as _lib_prepare_wrap,
     validated_save_continuity as _lib_validated_save_continuity,
+)
+from .spores import (
+    ALL_ASCEND_KINDS,
+    ALL_DESCEND_KINDS,
+    VALID_GERMINATIONS,
+    VALID_TIERS,
+    VALID_TYPES,
+    SporeDict,
+    SporeError,
+    SporeStore,
+    germination_tier,
 )
 from .store import Store, StoreError, _WRAP_TOKEN_RE
 from .types import AffectiveState, AssociationStats, EpisodeType
@@ -1702,6 +1713,217 @@ _EPISODE_TYPE_HELP = (
 )
 
 
+# -- Spore subcommands (prospective-intention layer) --
+
+_SPORE_TYPE_GLYPH = {"task": "▸", "question": "?", "thought": "~"}
+
+
+def _open_spore_store(args: argparse.Namespace) -> SporeStore:
+    """Open the SporeStore beside the episodic db (``<stem>.spores.json``).
+
+    Unlike :func:`_open_store`, the file need NOT pre-exist — ``SporeStore``
+    creates it on first write, so spores can be planted into a fresh store
+    location (the prospective layer is independent of the episodic db)."""
+    db_path = Path(args.db).expanduser()
+    return SporeStore(db_path.parent / f"{db_path.stem}.spores.json")
+
+
+def _spore_row(s: SporeDict, today: date) -> dict[str, Any]:
+    """A JSON-serializable spore dict annotated with its computed germination."""
+    row: dict[str, Any] = dict(s)
+    row["germination"] = germination_tier(s, today)
+    return row
+
+
+def _spore_salience_bang(s: SporeDict) -> str:
+    try:
+        return "!" * min(int(s.get("salience") or 0), 3)
+    except (ValueError, TypeError):
+        return ""
+
+
+def cmd_spore_add(args: argparse.Namespace) -> None:
+    """Plant a new spore."""
+    store = _open_spore_store(args)
+    try:
+        item = store.add(
+            type=args.type,
+            text=args.text,
+            domain=args.domain or "",
+            tier=args.tier,
+            salience=args.salience,
+            next=args.next,
+            pointer=args.pointer,
+        )
+    except (SporeError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        _print_json(item)
+        return
+    print(f"Planted: [{item['id']}] ({item['type']}/{item['tier']}) {_truncate(item['text'], 80)}")
+
+
+def cmd_spore_get(args: argparse.Namespace) -> None:
+    """Show a single spore by id (searches open then resolved)."""
+    store = _open_spore_store(args)
+    item = store.get(args.spore_id)
+    if item is None:
+        print(f"Spore {args.spore_id} not found.", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        _print_json(item)
+        return
+    print(f"[{item['id']}] {item.get('type')}/{item.get('tier')} (status={item.get('status')})")
+    print(f"  {item.get('text', '')}")
+    print(f"  domain={item.get('domain')} salience={item.get('salience')} "
+          f"seen={item.get('seen')} next={item.get('next')} created={item.get('created')}")
+    if item.get("pointer"):
+        print(f"  -> {item['pointer']}")
+    res = item.get("resolution")
+    if res:
+        tail = f" -> {res.get('ref')}" if res.get("ref") else ""
+        print(f"  resolved: {res.get('direction')}/{res.get('kind')} on {res.get('on')}{tail}")
+    for note in item.get("notes", []):
+        print(f"  note: {note}")
+
+
+def cmd_spore_list(args: argparse.Namespace) -> None:
+    """List open spores (filtered, ranked by tier -> salience -> germination)."""
+    store = _open_spore_store(args)
+    today = date.today()
+    items = store.list_open(
+        type=args.type,
+        tier=args.tier,
+        domain=args.domain,
+        germination=args.germination,
+        today=today,
+    )
+    if args.json:
+        _print_json([_spore_row(s, today) for s in items])
+        return
+    if not items:
+        print("No open spores match.")
+        return
+    for s in items:
+        germ = germination_tier(s, today)
+        glyph = _SPORE_TYPE_GLYPH.get(s.get("type", ""), "·")
+        print(f"  [{s['id']}] {glyph} {s.get('tier')}/{germ} {_spore_salience_bang(s)} "
+              f"{_truncate(s.get('text', ''), 90)}")
+        if args.verbose:
+            print(f"      type={s.get('type')} domain={s.get('domain')} "
+                  f"seen={s.get('seen')} next={s.get('next')}")
+            if s.get("pointer"):
+                print(f"      -> {s['pointer']}")
+    dormant = [s for s in items if germination_tier(s, today) == "dormant"]
+    if dormant:
+        print(f"\n{len(dormant)} dormant — still alive, or ready to compost?")
+
+
+def cmd_spore_touch(args: argparse.Namespace) -> None:
+    """Engage a spore: seen=today, and clear an elapsed next: alarm (-> growing)."""
+    store = _open_spore_store(args)
+    try:
+        item = store.touch(args.spore_id)
+    except SporeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        _print_json(item)
+        return
+    print(f"Touched [{item['id']}] seen -> {item['seen']} ({germination_tier(item)})")
+
+
+def cmd_spore_update(args: argparse.Namespace) -> None:
+    """Metadata surgery on an open spore. Only the flags you pass are changed;
+    pass an empty string to --next/--pointer/--domain to CLEAR them."""
+    store = _open_spore_store(args)
+    # Pass only the flags the user supplied — argparse leaves omitted optionals at
+    # None, which the library treats as "clear"; we must distinguish omitted (leave)
+    # from explicitly-empty (clear), so build kwargs from what was actually given.
+    kwargs: dict[str, Any] = {}
+    if args.tier is not None:
+        kwargs["tier"] = args.tier
+    if args.next is not None:
+        kwargs["next"] = args.next
+    if args.text is not None:
+        kwargs["text"] = args.text
+    if args.salience is not None:
+        kwargs["salience"] = args.salience
+    if args.domain is not None:
+        kwargs["domain"] = args.domain
+    if args.pointer is not None:
+        kwargs["pointer"] = args.pointer
+    if args.add_note:
+        kwargs["add_note"] = args.add_note
+    if not kwargs:
+        print("No changes specified. Use --tier/--next/--text/--salience/"
+              "--domain/--pointer/--add-note.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        item = store.update(args.spore_id, **kwargs)
+    except (SporeError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        _print_json(item)
+        return
+    print(f"Updated [{item['id']}]")
+
+
+def cmd_spore_descend(args: argparse.Namespace) -> None:
+    """Resolve a spore downward (compost / self-clean)."""
+    store = _open_spore_store(args)
+    try:
+        item = store.descend(args.spore_id, kind=args.kind)
+    except (SporeError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        _print_json(item)
+        return
+    print(f"Descended [{item['id']}] ({args.kind}) -> resolved down. {_truncate(item.get('text', ''), 70)}")
+
+
+def cmd_spore_ascend(args: argparse.Namespace) -> None:
+    """Resolve a spore upward (transmute into memory/project — records the ref)."""
+    store = _open_spore_store(args)
+    try:
+        item = store.ascend(args.spore_id, kind=args.kind, ref=args.ref)
+    except (SporeError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        _print_json(item)
+        return
+    print(f"Ascended [{item['id']}] -> {args.kind}: {args.ref}")
+    print("  (records what it became; the actual episode/project write stays the host's act in v1)")
+
+
+def cmd_spore_surface(args: argparse.Namespace) -> None:
+    """Seed-side surface for a salience generator (the consumer composes the rest)."""
+    store = _open_spore_store(args)
+    today = date.today()
+    items = store.surface(top_of_mind=args.top_of_mind, today=today)
+    if args.json:
+        _print_json([_spore_row(s, today) for s in items])
+        return
+    label = "Top of Mind (seed contribution)" if args.top_of_mind else "Open spores"
+    print(f"**{label}** — {len(items)} items")
+    for s in items:
+        germ = germination_tier(s, today)
+        print(f"- ({s.get('type')}/{s.get('tier')}/{germ}) {_spore_salience_bang(s)} "
+              f"{_truncate(s.get('text', ''), 160)}")
+
+
+def _require_spore_subcommand(args: argparse.Namespace) -> None:
+    """``anneal-memory spore`` with no action — point at the available actions."""
+    print("Error: 'spore' requires a subcommand: "
+          "add / get / list / touch / update / descend / ascend / surface.",
+          file=sys.stderr)
+    sys.exit(1)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
     json_parent = _json_parent()
@@ -1941,6 +2163,78 @@ def build_parser() -> argparse.ArgumentParser:
     sub = subparsers.add_parser("history", help="Show wrap history", parents=[json_parent])
     sub.add_argument("--limit", type=int, default=20, help="Max wraps to show (default: 20)")
     sub.set_defaults(func=cmd_history)
+
+    # -- spore (prospective-intention layer: typed open cognitive loops) --
+    spore_parser = subparsers.add_parser(
+        "spore",
+        help="Prospective-intention layer: typed open loops (task/question/thought)",
+    )
+    spore_parser.set_defaults(func=_require_spore_subcommand)
+    spore_sub = spore_parser.add_subparsers(dest="spore_command")
+
+    sp = spore_sub.add_parser("add", help="Plant a new spore", parents=[json_parent])
+    sp.add_argument("--type", choices=VALID_TYPES, required=True)
+    sp.add_argument("--text", required=True, help="The open loop")
+    sp.add_argument("--domain", help="health|career|strategic|life|flow|apps|... (free text)")
+    sp.add_argument("--tier", choices=VALID_TIERS, default="warm")
+    sp.add_argument("--salience", type=int, choices=range(0, 4), default=0)
+    sp.add_argument("--next", help="YYYY-MM-DD — when to re-surface (not a deadline)")
+    sp.add_argument("--pointer", help="Optional link to fuller detail")
+    sp.set_defaults(func=cmd_spore_add)
+
+    sp = spore_sub.add_parser("get", help="Show a single spore by id", parents=[json_parent])
+    sp.add_argument("spore_id", help="Spore id (e.g. spore-007)")
+    sp.set_defaults(func=cmd_spore_get)
+
+    sp = spore_sub.add_parser("list", help="List open spores", parents=[json_parent])
+    sp.add_argument("--type", choices=VALID_TYPES)
+    sp.add_argument("--tier", choices=VALID_TIERS)
+    sp.add_argument("--germination", choices=VALID_GERMINATIONS)
+    sp.add_argument("--domain")
+    sp.add_argument("--verbose", "-v", action="store_true")
+    sp.set_defaults(func=cmd_spore_list)
+
+    sp = spore_sub.add_parser(
+        "touch", help="Engage: seen=today + clear an elapsed next: (returns to growing)",
+        parents=[json_parent],
+    )
+    sp.add_argument("spore_id", help="Spore id")
+    sp.set_defaults(func=cmd_spore_touch)
+
+    sp = spore_sub.add_parser("update", help="Update an open spore's metadata", parents=[json_parent])
+    sp.add_argument("spore_id", help="Spore id")
+    sp.add_argument("--tier", choices=VALID_TIERS)
+    sp.add_argument("--next", help="YYYY-MM-DD, or empty string to clear")
+    sp.add_argument("--text")
+    sp.add_argument("--salience", type=int, choices=range(0, 4))
+    sp.add_argument("--domain", help="Set/replace domain (empty string clears)")
+    sp.add_argument("--pointer", help="Set/replace pointer (empty string clears)")
+    sp.add_argument("--add-note")
+    sp.set_defaults(func=cmd_spore_update)
+
+    sp = spore_sub.add_parser(
+        "descend", help="Resolve downward (compost); kind must fit the spore's type",
+        parents=[json_parent],
+    )
+    sp.add_argument("spore_id", help="Spore id")
+    sp.add_argument("--kind", choices=ALL_DESCEND_KINDS, required=True)
+    sp.set_defaults(func=cmd_spore_descend)
+
+    sp = spore_sub.add_parser(
+        "ascend", help="Resolve upward (transmute into memory/project); kind must fit the type",
+        parents=[json_parent],
+    )
+    sp.add_argument("spore_id", help="Spore id")
+    sp.add_argument("--kind", choices=ALL_ASCEND_KINDS, required=True)
+    sp.add_argument("--ref", required=True, help="What it became (project path / episode id / pattern)")
+    sp.set_defaults(func=cmd_spore_ascend)
+
+    sp = spore_sub.add_parser(
+        "surface", help="Seed-side surface for a salience generator", parents=[json_parent],
+    )
+    sp.add_argument("--top-of-mind", action="store_true",
+                    help="Only the ToM contribution (hot or growing, ranked)")
+    sp.set_defaults(func=cmd_spore_surface)
 
     return parser
 

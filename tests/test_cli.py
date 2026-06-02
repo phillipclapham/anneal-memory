@@ -2453,3 +2453,88 @@ class TestWrapOperatorSubcommandsSubprocess:
 
         status = self._run("--db", db_path, "--json", "wrap-status")
         assert json.loads(status.stdout)["status"] == "idle"
+
+
+class TestSporeCLI:
+    """End-to-end tests for the grouped ``spore <action>`` subcommands.
+
+    Subprocess via ``python -m anneal_memory.cli`` (matching the wrap-command
+    integration tests) so the real parser -> dispatch -> handler path and exit
+    codes are exercised — including the CLI-specific omitted-vs-cleared logic
+    (``--next ""`` clears, an omitted flag leaves the field intact), which the
+    MCP surface implements differently and so doesn't cover.
+    """
+
+    @staticmethod
+    def _run(*args, check=True):
+        result = subprocess.run(
+            [sys.executable, "-m", "anneal_memory.cli", *args],
+            capture_output=True,
+            text=True,
+        )
+        if check and result.returncode != 0:
+            raise AssertionError(
+                f"CLI call failed ({result.returncode}):\nargs={args}\n"
+                f"stdout={result.stdout}\nstderr={result.stderr}"
+            )
+        return result
+
+    def test_add_list_get_lifecycle(self, tmp_db):
+        r = self._run("--db", tmp_db, "spore", "add", "--type", "task",
+                      "--text", "ship CLI", "--tier", "hot", "--salience", "2")
+        assert "spore-001" in r.stdout
+        assert "ship CLI" in self._run("--db", tmp_db, "spore", "list").stdout
+        body = json.loads(self._run("--db", tmp_db, "spore", "get", "spore-001", "--json").stdout)
+        assert body["id"] == "spore-001"
+        assert body["tier"] == "hot"
+        assert body["salience"] == 2
+
+    def test_spore_store_is_sibling_of_db(self, tmp_db):
+        self._run("--db", tmp_db, "spore", "add", "--type", "task", "--text", "x")
+        sibling = Path(tmp_db).parent / f"{Path(tmp_db).stem}.spores.json"
+        assert sibling.exists()  # created on first write, no init / no .db needed
+
+    def test_update_clears_with_empty_string_but_leaves_omitted(self, tmp_db):
+        self._run("--db", tmp_db, "spore", "add", "--type", "task", "--text", "x",
+                  "--next", "2026-12-01", "--pointer", "p/x")
+        self._run("--db", tmp_db, "spore", "update", "spore-001", "--next", "")
+        body = json.loads(self._run("--db", tmp_db, "spore", "get", "spore-001", "--json").stdout)
+        assert body["next"] is None        # cleared via empty string
+        assert body["pointer"] == "p/x"    # omitted -> left intact
+
+    def test_update_no_fields_exits_nonzero(self, tmp_db):
+        self._run("--db", tmp_db, "spore", "add", "--type", "task", "--text", "x")
+        assert self._run("--db", tmp_db, "spore", "update", "spore-001", check=False).returncode != 0
+
+    def test_descend_wrong_kind_for_type_exits(self, tmp_db):
+        self._run("--db", tmp_db, "spore", "add", "--type", "task", "--text", "x")
+        # 'answered' is a valid argparse choice (a question-kind) but invalid for a task.
+        r = self._run("--db", tmp_db, "spore", "descend", "spore-001", "--kind", "answered", check=False)
+        assert r.returncode != 0
+
+    def test_descend_resolves_and_removes_from_open(self, tmp_db):
+        self._run("--db", tmp_db, "spore", "add", "--type", "task", "--text", "x")
+        assert "resolved down" in self._run("--db", tmp_db, "spore", "descend", "spore-001", "--kind", "done").stdout
+        assert "No open spores" in self._run("--db", tmp_db, "spore", "list").stdout
+
+    def test_ascend_records_ref(self, tmp_db):
+        self._run("--db", tmp_db, "spore", "add", "--type", "thought", "--text", "idea")
+        r = self._run("--db", tmp_db, "spore", "ascend", "spore-001", "--kind", "essay", "--ref", "essays/x.md")
+        assert "essays/x.md" in r.stdout
+
+    def test_touch(self, tmp_db):
+        self._run("--db", tmp_db, "spore", "add", "--type", "task", "--text", "x")
+        assert "Touched [spore-001]" in self._run("--db", tmp_db, "spore", "touch", "spore-001").stdout
+
+    def test_get_nonexistent_exits(self, tmp_db):
+        assert self._run("--db", tmp_db, "spore", "get", "spore-999", check=False).returncode != 0
+
+    def test_no_action_exits(self, tmp_db):
+        assert self._run("--db", tmp_db, "spore", check=False).returncode != 0
+
+    def test_surface_top_of_mind_includes_hot_excludes_parked(self, tmp_db):
+        self._run("--db", tmp_db, "spore", "add", "--type", "task", "--text", "hot one", "--tier", "hot")
+        self._run("--db", tmp_db, "spore", "add", "--type", "task", "--text", "parked one", "--tier", "parked")
+        out = self._run("--db", tmp_db, "spore", "surface", "--top-of-mind").stdout
+        assert "hot one" in out          # tier == hot -> included
+        assert "parked one" not in out   # parked: not hot, not growing -> excluded

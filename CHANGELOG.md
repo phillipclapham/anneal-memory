@@ -2,6 +2,29 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4] — 2026-06-03
+
+### Added — AM-INITSCHEMA: select the continuity section schema from the CLI
+
+The persisted section schema (v0.3.4) was only settable by constructing a `Store` with `section_schema=` in library code — `anneal-memory init` always created a `DEFAULT_SCHEMA` (4-section ops) store, and there was no CLI path to choose or change it. A cognitive-partnership entity needs `FLOW_SCHEMA` (the 6-section felt shape), and the gap was silent: a partnership entity whose store stays on the default runs the ops schema with **no felt-layer proportion-gate** (it fires only for a `narrative-timeless` role, which `DEFAULT_SCHEMA` lacks) and an **under-sized budget** (`default_max_chars` only grants the felt headroom for the richer schema). Surfaced by Levain's partnership-entity install path.
+
+- New `init --schema {default,partnership}` (default `default`, byte-compatible with prior behavior). `partnership` persists `FLOW_SCHEMA` at store creation, so the felt-layer gate + schema-aware budget are switched on from session one.
+- New `set-schema {default,partnership}` subcommand — migrate an existing store's schema (for upgrading an ops store to partnership, or a standalone adopter who didn't pick a schema at `init`). Persists via the existing `Store.set_section_schema`; the continuity *content* is untouched (a promote-to-partnership requires the next wrap to grow `Active Threads` + `Understanding`).
+- New public `anneal_memory.schema` surface: `SCHEMA_NAMES`, `schema_by_name(name)` (select), and `name_for_schema(schema)` (read-back) — the named ops-vs-partnership fork, reused by both CLI commands and available to adapters. The name→schema registry itself is module-private; `schema_by_name` returns a fresh copy so a caller can't mutate the shared schema constants.
+- `init`'s human + `--json` output now report the chosen schema and its section headings; `status` (human + `--json`) now reports the persisted schema so a migration is verifiable.
+
+No breaking changes. Existing `init` calls (no `--schema`) produce a byte-identical default-schema store.
+
+### Fixed — AM-SCHEMASNAPSHOT: freeze the section schema for a wrap's duration
+
+`prepare_wrap` and `validated_save_continuity` both read the *live* persisted section schema (via `Store.section_schema_for_wrap()`). A `set_section_schema` committing between them split the wrap — prepare built the compression package under one schema while save validated/graduated under another (the exact split the in-wrap `set_section_schema` guard claims to prevent, but with a TOCTOU because prepare reads the schema before `wrap_started`). Now the schema is frozen into the wrap snapshot, mirroring the episode-id freeze.
+
+- `Store.wrap_started` gains an optional `section_schema=` keyword; it persists the frozen schema (the one `prepare_wrap` read to build the package, or the live schema for a direct caller) as a fourth wrap-in-progress metadata key (`wrap_section_schema`), inside the same transaction, and records it in the audit payload.
+- `Store.section_schema_for_wrap()` returns the **frozen** schema while a wrap is active, the live schema otherwise — so prepare and save provably agree even under a concurrent/cross-process schema change. It fails **closed** (raises `StoreError`) during an active wrap whose frozen schema is corrupt OR absent (a wrap straddling a pre-AM-SCHEMASNAPSHOT upgrade) rather than silently reverting to the live schema; recovery is `wrap-cancel` + re-run `prepare_wrap` (lossless).
+- The frozen schema is cleared alongside the other wrap-in-progress keys on both `wrap_completed` and `wrap_cancelled`. The `wrap_started` audit event records the full frozen schema (heading + role).
+
+No breaking changes for callers on this version. `wrap_started` callers that omit `section_schema` freeze the current live schema (closes the common case). An in-flight wrap started by a prior version fails closed on its next save (cancel + re-prepare to get a defended wrap).
+
 ## [0.4.3] — 2026-06-02
 
 Immune-system release: two changes that close gaps the 0.4.x arc opened — the cross-session demotion semantics and the contradiction-scan discipline's *delivery*. Both are immune-*trigger* changes (they alter what the immune system catches / what discipline it requires), deliberately held to their own dedicated apparatus pass. No breaking changes; additive + behavior-narrowing only. 1007 tests, mypy clean. Full 4-layer apparatus on the combined diff (L1 + L2 → fixes → codex L3 clean → L4 end-to-end through the real save pipeline).

@@ -39,6 +39,7 @@ from anneal_memory.cli import (
     cmd_record,
     cmd_save_continuity,
     cmd_search,
+    cmd_set_schema,
     cmd_stats,
     cmd_status,
     cmd_verify,
@@ -159,6 +160,214 @@ class TestCmdInit:
         assert "MyProject" in captured.out
 
 
+# -- AM-INITSCHEMA: schema selection at init + migration --
+
+class TestCmdInitSchema:
+    def test_default_when_no_schema_attr(self, base_args):
+        # Existing callers (no `schema` field) get the byte-compatible ops schema.
+        cmd_init(base_args)
+        headings = [s["heading"] for s in Store(base_args.db).section_schema]
+        assert headings == ["State", "Patterns", "Decisions", "Context"]
+
+    def test_explicit_default(self, base_args):
+        base_args.schema = "default"
+        cmd_init(base_args)
+        headings = [s["heading"] for s in Store(base_args.db).section_schema]
+        assert headings == ["State", "Patterns", "Decisions", "Context"]
+
+    def test_partnership_persists_flow_schema(self, base_args):
+        # The load-bearing case: a partnership store must persist FLOW_SCHEMA so
+        # the felt-layer gate (narrative-timeless role) + schema-aware budget fire.
+        base_args.schema = "partnership"
+        cmd_init(base_args)
+        schema = Store(base_args.db).section_schema
+        headings = [s["heading"] for s in schema]
+        assert headings == [
+            "State", "Active Threads", "Patterns", "Decisions",
+            "Context", "Understanding",
+        ]
+        # The felt layer is present and carries the narrative-timeless role the
+        # proportion-gate keys on — the whole point of the partnership schema.
+        roles = {s["heading"]: s["role"] for s in schema}
+        assert roles["Understanding"] == "narrative-timeless"
+
+    def test_partnership_output_reports_schema(self, base_args, capsys):
+        base_args.schema = "partnership"
+        cmd_init(base_args)
+        out = capsys.readouterr().out
+        assert "partnership" in out
+        assert "Understanding" in out
+
+    def test_json_includes_schema_and_sections(self, base_args, capsys):
+        base_args.schema = "partnership"
+        base_args.json = True
+        cmd_init(base_args)
+        data = json.loads(capsys.readouterr().out)
+        assert data["schema"] == "partnership"
+        assert "Understanding" in data["sections"]
+
+    def test_unknown_schema_exits(self, base_args, capsys):
+        # Defensive branch (argparse `choices=` guards the real CLI; a direct
+        # Namespace with a bad name must still fail loud, not persist garbage).
+        base_args.schema = "bogus"
+        with pytest.raises(SystemExit):
+            cmd_init(base_args)
+        assert "unknown schema" in capsys.readouterr().err
+        assert not Path(base_args.db).exists()
+
+    def test_argparse_rejects_unknown_schema(self):
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(["init", "--schema", "bogus"])
+
+    def test_argparse_accepts_partnership(self):
+        ns = build_parser().parse_args(["init", "--schema", "partnership"])
+        assert ns.schema == "partnership"
+
+    def test_argparse_init_defaults_to_default(self):
+        ns = build_parser().parse_args(["init"])
+        assert ns.schema == "default"
+
+    def test_cli_partnership_yields_schema_budget(self, base_args):
+        # Closes the loop: `init --schema partnership` must yield the FLOW_SCHEMA
+        # budget (25500) through the real CLI-created store + prepare_wrap, not
+        # only via a library-constructed Store(section_schema=FLOW_SCHEMA).
+        from anneal_memory.continuity import prepare_wrap
+        base_args.schema = "partnership"
+        cmd_init(base_args)
+        store = Store(base_args.db)
+        store.record("a session episode", "observation")
+        result = prepare_wrap(store)
+        store.close()
+        assert result["package"]["max_chars"] == 25500
+
+    def test_default_init_byte_identical_to_plain_store(self, tmp_path):
+        # LOW-3 (codex L3): a no-`--schema` init must persist a byte-identical
+        # section_schema to a plain Store() — section_schema is passed only for
+        # the non-default case, so the default path is untouched.
+        import sqlite3
+        a = Namespace(db=str(tmp_path / "a.db"), project_name="Agent", json=False)
+        cmd_init(a)  # default (no `schema` attr -> getattr fallback)
+        Store(str(tmp_path / "b.db")).close()  # plain constructor, no section_schema
+
+        def raw_schema(p: str):
+            con = sqlite3.connect(p)
+            try:
+                row = con.execute(
+                    "SELECT value FROM metadata WHERE key='section_schema'"
+                ).fetchone()
+                return row[0] if row else None
+            finally:
+                con.close()
+
+        assert raw_schema(str(tmp_path / "a.db")) == raw_schema(str(tmp_path / "b.db"))
+
+    def test_missing_headings_ambiguous_header_not_counted(self):
+        # LOW-1 (codex L3): one header line satisfying two required headings is
+        # ambiguous and counts for NEITHER (mirrors validate_structure).
+        from anneal_memory.cli import _missing_required_headings
+        from anneal_memory import FLOW_SCHEMA
+        content = ("## State\n## Active Threads\n## Patterns and Understanding\n"
+                   "## Decisions\n## Context\n")
+        missing = _missing_required_headings(content, FLOW_SCHEMA)
+        assert "Patterns" in missing and "Understanding" in missing
+
+
+class TestCmdSetSchema:
+    def test_promote_default_to_partnership(self, base_args, capsys):
+        cmd_init(base_args)  # default ops store
+        set_args = Namespace(db=base_args.db, project_name="Agent",
+                             json=False, schema="partnership")
+        cmd_set_schema(set_args)
+        headings = [s["heading"] for s in Store(base_args.db).section_schema]
+        assert "Understanding" in headings and "Active Threads" in headings
+
+    def test_demote_partnership_to_default(self, base_args):
+        base_args.schema = "partnership"
+        cmd_init(base_args)
+        set_args = Namespace(db=base_args.db, project_name="Agent",
+                             json=False, schema="default")
+        cmd_set_schema(set_args)
+        headings = [s["heading"] for s in Store(base_args.db).section_schema]
+        assert headings == ["State", "Patterns", "Decisions", "Context"]
+
+    def test_json_output(self, base_args, capsys):
+        cmd_init(base_args)
+        capsys.readouterr()  # discard cmd_init's human output before the JSON read
+        set_args = Namespace(db=base_args.db, project_name="Agent",
+                             json=True, schema="partnership")
+        cmd_set_schema(set_args)
+        data = json.loads(capsys.readouterr().out)
+        assert data["schema"] == "partnership"
+        assert "Understanding" in data["sections"]
+
+    def test_unknown_schema_exits(self, base_args, capsys):
+        cmd_init(base_args)
+        set_args = Namespace(db=base_args.db, project_name="Agent",
+                             json=False, schema="bogus")
+        with pytest.raises(SystemExit):
+            cmd_set_schema(set_args)
+        assert "unknown schema" in capsys.readouterr().err
+
+    def test_mid_wrap_exits_cleanly(self, base_args, capsys):
+        # set-schema during an active wrap must exit clean (no traceback) —
+        # main() has no top-level handler; matches cmd_prepare_wrap's contract.
+        from anneal_memory.continuity import prepare_wrap
+        cmd_init(base_args)
+        store = Store(base_args.db)
+        store.record("an episode", "observation")
+        prepare_wrap(store)  # opens a wrap
+        store.close()
+        set_args = Namespace(db=base_args.db, project_name="Agent",
+                             json=False, schema="partnership")
+        with pytest.raises(SystemExit) as excinfo:
+            cmd_set_schema(set_args)
+        assert excinfo.value.code == 1
+        assert "wrap is in progress" in capsys.readouterr().err
+
+    def test_note_present_when_sections_missing(self, base_args, capsys):
+        # Fresh store has no continuity -> all partnership sections missing ->
+        # the Note fires and names them, and --json reports missing_sections.
+        cmd_init(base_args)  # default store, no continuity file yet
+        set_args = Namespace(db=base_args.db, project_name="Agent",
+                             json=False, schema="partnership")
+        cmd_set_schema(set_args)
+        out = capsys.readouterr().out
+        assert "Note:" in out and "Understanding" in out
+
+    def test_note_suppressed_when_sections_present(self, base_args, capsys):
+        # A continuity that already carries all 6 sections -> no false Note,
+        # and --json missing_sections is empty (the no-op-re-run fix).
+        cmd_init(base_args)
+        cont = Path(base_args.db).parent / f"{Path(base_args.db).stem}.continuity.md"
+        cont.write_text(
+            "# C\n## State\n.\n## Active Threads\n.\n## Patterns\n.\n"
+            "## Decisions\n.\n## Context\n.\n## Understanding\n.\n",
+            encoding="utf-8",
+        )
+        capsys.readouterr()  # drain cmd_init's human output before the JSON read
+        set_args = Namespace(db=base_args.db, project_name="Agent",
+                             json=True, schema="partnership")
+        cmd_set_schema(set_args)
+        data = json.loads(capsys.readouterr().out)
+        assert data["missing_sections"] == []
+
+    def test_continuity_read_failure_after_mutation_degrades(self, base_args, capsys, monkeypatch):
+        # MEDIUM-2 (codex L3): a load_continuity failure AFTER the schema is
+        # durably applied must not raise past main() — degrade to a note, and the
+        # schema must still be persisted.
+        cmd_init(base_args)
+        def boom(self):
+            raise OSError("cannot read continuity")
+        monkeypatch.setattr(Store, "load_continuity", boom)
+        set_args = Namespace(db=base_args.db, project_name="Agent",
+                             json=False, schema="partnership")
+        cmd_set_schema(set_args)  # must NOT raise
+        out = capsys.readouterr().out
+        assert "schema applied" in out and "could not read continuity" in out
+        monkeypatch.undo()
+        assert "Understanding" in [s["heading"] for s in Store(base_args.db).section_schema]
+
+
 # -- cmd_status tests --
 
 class TestCmdStatus:
@@ -170,6 +379,25 @@ class TestCmdStatus:
         captured = capsys.readouterr()
         assert "Episodes:   0 total" in captured.out
         assert "Wraps:      0 total" in captured.out
+
+    def test_status_shows_schema(self, base_args, capsys):
+        # AM-INITSCHEMA read-back: status must surface the persisted schema so a
+        # migration is verifiable (human line + --json field).
+        base_args.schema = "partnership"
+        cmd_init(base_args)
+        capsys.readouterr()
+        cmd_status(base_args)
+        out = capsys.readouterr().out
+        assert "Schema:" in out and "partnership" in out and "Understanding" in out
+
+    def test_status_schema_json(self, base_args, capsys):
+        cmd_init(base_args)  # default
+        capsys.readouterr()
+        base_args.json = True
+        cmd_status(base_args)
+        data = json.loads(capsys.readouterr().out)
+        assert data["schema"] == "default"
+        assert data["sections"] == ["State", "Patterns", "Decisions", "Context"]
 
     def test_status_with_data(self, base_args_with_data, capsys):
         cmd_status(base_args_with_data)

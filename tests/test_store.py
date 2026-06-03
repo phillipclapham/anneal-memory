@@ -1757,9 +1757,15 @@ class TestDbBoundaryErrorWrapping:
     # -- wrap lifecycle ------------------------------------------
 
     def test_wrap_started_wraps_sqlite_error(self, store, monkeypatch):
+        from anneal_memory import DEFAULT_SCHEMA
         self._flaky_execute(store, monkeypatch)
         with pytest.raises(StoreDatabaseError) as exc_info:
-            store.wrap_started(token="a" * 32, episode_ids=[])
+            # Pass section_schema (the canonical prepare_wrap path always does)
+            # so the freeze uses the pure validate_schema path: the first DB
+            # touch is then wrap_started's own boundary. AM-SCHEMASNAPSHOT's
+            # None branch instead reads the live schema first (surfacing as the
+            # "section_schema" op), covered by the section_schema boundary tests.
+            store.wrap_started(token="a" * 32, episode_ids=[], section_schema=DEFAULT_SCHEMA)
         self._assert_wrapped(exc_info.value, "wrap_started")
 
     def test_wrap_cancelled_wraps_sqlite_error(self, store, monkeypatch):

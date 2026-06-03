@@ -17,7 +17,9 @@ Usage:
     anneal-memory prune --older-than 90           # Prune old episodes
     anneal-memory prepare-wrap                    # Get compression package (agent-driven)
     anneal-memory save-continuity cont.md         # Save agent's compression (validated)
-    anneal-memory init                            # Initialize new store
+    anneal-memory init                            # Initialize new store (ops schema)
+    anneal-memory init --schema partnership       # ...with the 6-section felt schema
+    anneal-memory set-schema partnership          # Migrate an existing store's schema
     anneal-memory serve                           # Start MCP server
     anneal-memory export --format json -o out.json  # Export store data
     anneal-memory import out.json                 # Import from export
@@ -49,9 +51,17 @@ from typing import Any
 from . import __version__
 from .audit import AuditTrail, _iter_lines as _iter_audit_lines
 from .continuity import (
+    _matching_required_headings,
     format_wrap_package_text,
     prepare_wrap as _lib_prepare_wrap,
     validated_save_continuity as _lib_validated_save_continuity,
+)
+from .schema import (
+    SCHEMA_NAMES,
+    SectionSpec,
+    name_for_schema,
+    required_headings,
+    schema_by_name,
 )
 from .spores import (
     ALL_ASCEND_KINDS,
@@ -213,18 +223,41 @@ def cmd_init(args: argparse.Namespace) -> None:
         print(f"Store already exists: {db_path}", file=sys.stderr)
         sys.exit(1)
 
+    # AM-INITSCHEMA: resolve the named section schema (default = ops; partnership
+    # = the 6-section felt schema). Persisting it at creation is the only point
+    # at which a partnership entity's felt-layer gate + schema-aware budget get
+    # switched on — a store left on the default silently runs the ops schema.
+    schema_name = getattr(args, "schema", "default")
+    try:
+        section_schema = schema_by_name(schema_name)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
     # Ensure parent directory exists (first-run UX)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     project = getattr(args, "project_name", "Agent")
-    store = Store(path=db_path, project_name=project, audit=True)
+    store = Store(
+        path=db_path,
+        project_name=project,
+        audit=True,
+        # Pass the schema ONLY for a non-default selection: a no-`--schema` init
+        # must take the exact prior constructor path (default => leave the
+        # INSERT default), so the default store stays byte-identical to
+        # pre-AM-INITSCHEMA. (LOW-3, codex L3.)
+        section_schema=(None if schema_name == "default" else section_schema),
+    )
     store.close()
 
+    headings = [s["heading"] for s in section_schema]
     if args.json:
         _print_json({
             "database": str(db_path),
             "continuity": str(db_path.parent / f"{db_path.stem}.continuity.md"),
             "project": project,
+            "schema": schema_name,
+            "sections": headings,
         })
         return
 
@@ -232,12 +265,99 @@ def cmd_init(args: argparse.Namespace) -> None:
     print(f"  Database: {db_path}")
     print(f"  Continuity: {db_path.parent / f'{db_path.stem}.continuity.md'}")
     print(f"  Project: {project}")
+    print(f"  Schema: {schema_name} ({' / '.join(headings)})")
+
+
+def _missing_required_headings(content: str, schema: list[SectionSpec]) -> list[str]:
+    """Required section headings the continuity *content* does not yet satisfy,
+    using the SAME word-bounded match as ``validate_structure`` (reused, not
+    re-implemented, so the two cannot drift). Returns display headings in schema
+    order; empty when the content already validates against the schema.
+    """
+    required_lower = {h.lower() for h in required_headings(schema)}
+    found: set[str] = set()
+    for line in content.split("\n"):
+        if line.startswith("## "):
+            matched = _matching_required_headings(line.lower(), required_lower)
+            # Mirror validate_structure: a header matching >1 required heading is
+            # ambiguous (one body routed into two protected roles) and satisfies
+            # NEITHER — so those headings stay "missing" and the Note matches what
+            # save will actually reject. (LOW-1, codex L3.)
+            if len(matched) == 1:
+                found.add(matched[0])
+    return [
+        s["heading"]
+        for s in schema
+        if s["heading"].lower() in required_lower and s["heading"].lower() not in found
+    ]
+
+
+def cmd_set_schema(args: argparse.Namespace) -> None:
+    """Migrate an existing store's continuity section schema.
+
+    Overwrites (and persists) the store's section schema. The continuity
+    *content* is untouched — promoting an ops store to ``partnership`` can leave
+    required sections (e.g. ``Active Threads`` / ``Understanding``) missing until
+    the next wrap grows them; this reports exactly which (if any) are missing, so
+    a no-op re-run on an already-grown store prints no false warning. Demoting
+    (``partnership`` -> ``default``) is always safe — the default headings are a
+    strict subset. The schema is frozen during an active wrap; this exits
+    cleanly (no traceback) if one is in progress.
+    """
+    try:
+        section_schema = schema_by_name(args.schema)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    with _open_store(args) as store:
+        try:
+            applied = store.set_section_schema(section_schema)
+        except (ValueError, StoreError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        # The schema is now DURABLY applied. A continuity-read failure here must
+        # not look like the migration failed (MEDIUM-2, codex L3) — degrade the
+        # missing-section diagnostic to "unknown" rather than raise past main().
+        try:
+            missing: list[str] | None = _missing_required_headings(
+                store.load_continuity() or "", applied
+            )
+        except (OSError, UnicodeDecodeError):
+            missing = None
+
+    headings = [s["heading"] for s in applied]
+    if args.json:
+        _print_json({
+            "schema": args.schema,
+            "sections": headings,
+            "missing_sections": missing,
+        })
+        return
+
+    print(f"Section schema set to {args.schema!r}:")
+    print(f"  {' / '.join(headings)}")
+    if missing is None:
+        print("  (schema applied; could not read continuity to report missing sections)")
+    elif missing:
+        them = "them" if len(missing) > 1 else "it"
+        print(
+            f"  Note: the continuity does not yet contain: {', '.join(missing)}. "
+            f"The next wrap must add {them} for this schema to validate "
+            f"(or `set-schema default` to revert)."
+        )
 
 
 def cmd_status(args: argparse.Namespace) -> None:
     """Show store status."""
     with _open_store(args) as store:
         status = store.status()
+        # AM-INITSCHEMA: surface the persisted schema so a migration is
+        # verifiable (the felt-gate on/off hinges on it) — name + headings, with
+        # "custom" for a hand-built schema matching no registered name.
+        section_schema = store.section_schema
+        schema_name = name_for_schema(section_schema) or "custom"
+        section_headings = [s["heading"] for s in section_schema]
 
         if args.json:
             _print_json({
@@ -249,6 +369,8 @@ def cmd_status(args: argparse.Namespace) -> None:
                 "tombstone_count": status.tombstone_count,
                 "continuity_chars": status.continuity_chars,
                 "episodes_by_type": status.episodes_by_type,
+                "schema": schema_name,
+                "sections": section_headings,
                 "association_stats": _assoc_stats_dict(status.association_stats),
                 "audit": {
                     "enabled": status.audit_enabled,
@@ -262,6 +384,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         print(f"anneal-memory v{__version__}")
         print(f"  Database: {store.path}")
         print(f"  Project:  {store.project_name}")
+        print(f"  Schema:   {schema_name} ({' / '.join(section_headings)})")
         print()
         print(f"Episodes:   {status.total_episodes} total, {status.episodes_since_wrap} since last wrap")
         if status.episodes_by_type:
@@ -1973,7 +2096,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     # -- init --
     sub = subparsers.add_parser("init", help="Initialize a new memory store", parents=[json_parent])
+    sub.add_argument(
+        "--schema",
+        choices=SCHEMA_NAMES,
+        default="default",
+        help="Continuity section schema. 'default' = 4-section ops shape "
+             "(State/Patterns/Decisions/Context). 'partnership' = 6-section felt "
+             "shape (adds Active Threads + the timeless Understanding layer) — "
+             "required for a cognitive-partnership entity so the felt-layer "
+             "proportion-gate and schema-aware budget actually fire.",
+    )
     sub.set_defaults(func=cmd_init)
+
+    # -- set-schema --
+    sub = subparsers.add_parser(
+        "set-schema",
+        help="Change an existing store's continuity section schema (migration)",
+        parents=[json_parent],
+    )
+    sub.add_argument(
+        "schema",
+        choices=SCHEMA_NAMES,
+        help="Target schema: 'default' (ops) or 'partnership' (felt).",
+    )
+    sub.set_defaults(func=cmd_set_schema)
 
     # -- status --
     sub = subparsers.add_parser("status", help="Show store status", parents=[json_parent])

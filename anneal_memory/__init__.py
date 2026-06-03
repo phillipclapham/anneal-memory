@@ -1,6 +1,6 @@
 """anneal-memory: Living memory for AI agents. Episodes compress into identity."""
 
-__version__ = "0.4.3"
+__version__ = "0.4.4"
 
 from .store import (
     AnnealMemoryError,
@@ -31,11 +31,14 @@ from .schema import (
     DEFAULT_GRADUATING,
     DEFAULT_SCHEMA,
     FLOW_SCHEMA,
+    SCHEMA_NAMES,
     SectionRole,
     SectionSpec,
     graduating_headings,
     heading_marker,
+    name_for_schema,
     required_headings,
+    schema_by_name,
     sections_by_role,
     validate_schema,
 )
@@ -106,6 +109,9 @@ __all__ = [
     "SectionRole",
     "DEFAULT_SCHEMA",
     "FLOW_SCHEMA",
+    "SCHEMA_NAMES",
+    "schema_by_name",
+    "name_for_schema",
     "DEFAULT_GRADUATING",
     "validate_schema",
     "graduating_headings",

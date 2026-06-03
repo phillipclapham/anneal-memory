@@ -46,6 +46,9 @@ __all__ = [
     "SectionSpec",
     "DEFAULT_SCHEMA",
     "FLOW_SCHEMA",
+    "SCHEMA_NAMES",
+    "schema_by_name",
+    "name_for_schema",
     "DEFAULT_GRADUATING",
     "validate_schema",
     "heading_marker",
@@ -108,6 +111,69 @@ FLOW_SCHEMA: list[SectionSpec] = [
     {"heading": "Context", "role": "narrative"},
     {"heading": "Understanding", "role": "narrative-timeless"},
 ]
+
+
+# AM-INITSCHEMA: named schemas for CLI / adapter selection. These two
+# names ARE the ops-vs-partnership fork (see the entity-architecture thesis):
+# "default" = the 4-section ops shape (byte-compatible with <= 0.3.3); the
+# selectable named schema "partnership" = the 6-section :data:`FLOW_SCHEMA` with
+# the timeless ``Understanding`` (``narrative-timeless``) felt layer + the
+# ``Active Threads`` live-awareness layer. The selection is load-bearing, not
+# cosmetic: the felt-layer proportion-gate fires ONLY for a ``narrative-timeless``
+# role and :func:`default_max_chars` only grants the felt headroom for the richer
+# schema, so a partnership entity whose store is left on ``default`` silently
+# runs the ops schema — no felt-gate, under-budgeted. ``init --schema partnership``
+# persists the right schema at creation; ``set-schema`` migrates an existing store.
+# Module-private so a caller cannot corrupt the shared schema constants through
+# the registry — selection goes through schema_by_name (copy-on-return) and
+# read-back through name_for_schema; SCHEMA_NAMES is the public name list.
+_SCHEMAS_BY_NAME: dict[str, list[SectionSpec]] = {
+    "default": DEFAULT_SCHEMA,
+    "partnership": FLOW_SCHEMA,
+}
+# Sorted so the surfaced CLI ``choices=`` order is stable across runs.
+SCHEMA_NAMES: tuple[str, ...] = tuple(sorted(_SCHEMAS_BY_NAME))
+
+
+def schema_by_name(name: str) -> list[SectionSpec]:
+    """Resolve a named schema (``"default"`` / ``"partnership"``) to its
+    :class:`SectionSpec` list.
+
+    Returns a fresh copy (new list, new section dicts) — this is a public
+    adapter entry point, so a caller mutating the result must not corrupt the
+    shared module constants (:data:`DEFAULT_SCHEMA` / :data:`FLOW_SCHEMA`).
+
+    Args:
+        name: A schema name from :data:`SCHEMA_NAMES`.
+
+    Returns:
+        A fresh ``list[SectionSpec]`` for the named schema.
+
+    Raises:
+        ValueError: if ``name`` is not a known schema name.
+    """
+    try:
+        schema = _SCHEMAS_BY_NAME[name]
+    except KeyError:
+        raise ValueError(
+            f"unknown schema name {name!r} (valid: {', '.join(SCHEMA_NAMES)})"
+        ) from None
+    return [dict(spec) for spec in schema]  # type: ignore[misc]
+
+
+def name_for_schema(schema: list[SectionSpec]) -> str | None:
+    """Reverse of :func:`schema_by_name`: the registered name whose schema
+    matches ``schema`` (by ordered ``(heading, role)`` pairs), or ``None`` for a
+    custom/hand-built schema that matches no named one.
+
+    Lets a caller answer "is this store on the partnership schema?" without
+    importing the constants — the read-back complement to selection.
+    """
+    target = [(s["heading"], s["role"]) for s in schema]
+    for nm, sch in _SCHEMAS_BY_NAME.items():
+        if [(s["heading"], s["role"]) for s in sch] == target:
+            return nm
+    return None
 
 
 def validate_schema(schema: object) -> list[SectionSpec]:

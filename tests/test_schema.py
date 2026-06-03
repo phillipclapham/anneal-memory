@@ -19,15 +19,19 @@ from anneal_memory.schema import (
     DEFAULT_GRADUATING,
     DEFAULT_SCHEMA,
     FLOW_SCHEMA,
+    SCHEMA_NAMES,
     SectionRole,
+    _SCHEMAS_BY_NAME,
     default_max_chars,
     graduating_headings,
     heading_marker,
+    name_for_schema,
     required_headings,
+    schema_by_name,
     sections_by_role,
     validate_schema,
 )
-from anneal_memory.store import Store
+from anneal_memory.store import Store, StoreError
 from anneal_memory.continuity import (
     _build_wrap_instructions,
     prepare_wrap,
@@ -38,7 +42,196 @@ from anneal_memory.graduation import extract_pattern_names
 from anneal_memory.types import EpisodeType
 
 
+# -- named schemas (AM-INITSCHEMA) --
+
+
+class TestNamedSchemas:
+    def test_registry_maps_names_to_constants(self):
+        # The registry is module-private (LOW-2): selection is via schema_by_name.
+        assert SCHEMA_NAMES == ("default", "partnership")
+        assert _SCHEMAS_BY_NAME["default"] is DEFAULT_SCHEMA
+        assert _SCHEMAS_BY_NAME["partnership"] is FLOW_SCHEMA
+
+    def test_registry_not_in_public_api(self):
+        import anneal_memory
+        assert not hasattr(anneal_memory, "SCHEMAS_BY_NAME")
+
+    def test_schema_by_name_resolves(self):
+        assert [s["heading"] for s in schema_by_name("default")] == \
+            [s["heading"] for s in DEFAULT_SCHEMA]
+        assert [s["heading"] for s in schema_by_name("partnership")] == \
+            [s["heading"] for s in FLOW_SCHEMA]
+
+    def test_schema_by_name_unknown_raises(self):
+        with pytest.raises(ValueError, match="unknown schema name"):
+            schema_by_name("nope")
+
+    def test_schema_by_name_returns_independent_copy(self):
+        # Public adapter entry point: a caller mutating the result (list OR the
+        # section dicts) must not corrupt the shared module constants.
+        got = schema_by_name("partnership")
+        got.append({"heading": "Injected", "role": "narrative"})
+        got[0]["heading"] = "MUTATED"
+        assert len(FLOW_SCHEMA) == 6
+        assert FLOW_SCHEMA[0]["heading"] == "State"
+
+    def test_name_for_schema_roundtrip(self):
+        assert name_for_schema(DEFAULT_SCHEMA) == "default"
+        assert name_for_schema(FLOW_SCHEMA) == "partnership"
+        assert name_for_schema(schema_by_name("partnership")) == "partnership"
+
+    def test_name_for_schema_custom_returns_none(self):
+        custom = [{"heading": "Notes", "role": "graduating"}]
+        assert name_for_schema(custom) is None
+
+    def test_set_section_schema_is_audited(self, tmp_path):
+        # A schema migration changes which sections are required + whether the
+        # felt-gate fires — it belongs in the audit chain (anneal audit-everything).
+        db = tmp_path / "m.db"
+        store = Store(db)  # audit on by default
+        store.set_section_schema(FLOW_SCHEMA)
+        store.close()
+        lines = (tmp_path / "m.audit.jsonl").read_text(encoding="utf-8").strip().split("\n")
+        entries = [json.loads(l) for l in lines]
+        schema_events = [e for e in entries if e["event"] == "section_schema_set"]
+        assert len(schema_events) == 1
+        payload = schema_events[0]["data"]
+        assert payload["from"] == [s["heading"] for s in DEFAULT_SCHEMA]
+        assert payload["to"] == [s["heading"] for s in FLOW_SCHEMA]
+
+    def test_audit_failure_is_best_effort(self, tmp_path):
+        # MEDIUM-1 (codex L3): the schema write is durable before the audit
+        # append; an audit OSError must warn, not raise, and must NOT undo the
+        # persisted schema.
+        db = tmp_path / "m.db"
+        store = Store(db)
+
+        def boom(*a, **k):
+            raise OSError("audit disk full")
+
+        store._audit.log = boom  # type: ignore[union-attr]
+        with pytest.warns(UserWarning, match="audit log append failed"):
+            store.set_section_schema(FLOW_SCHEMA)
+        # The schema is persisted despite the audit failure.
+        assert [s["heading"] for s in store.section_schema] == \
+            [s["heading"] for s in FLOW_SCHEMA]
+        store.close()
+
+
 # -- schema module --
+
+
+class TestSchemaSnapshot:
+    """AM-SCHEMASNAPSHOT: the section schema is frozen for a wrap's duration so
+    prepare and save agree even if the live schema changes mid-wrap."""
+
+    def _raw_set_live_schema(self, store, schema):
+        # Change the LIVE persisted schema directly, bypassing set_section_schema
+        # (whose guard refuses mid-wrap) — simulates the concurrent/cross-process
+        # writer that the freeze defends against.
+        store._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("section_schema", json.dumps(schema)),
+        )
+        store._conn.commit()
+
+    def test_frozen_schema_used_during_wrap(self, tmp_path):
+        store = Store(tmp_path / "s.db", section_schema=FLOW_SCHEMA)
+        store.wrap_started(token="a" * 32, episode_ids=[], section_schema=FLOW_SCHEMA)
+        # A concurrent writer flips the LIVE schema to ops mid-wrap:
+        self._raw_set_live_schema(store, DEFAULT_SCHEMA)
+        # section_schema_for_wrap still returns the FROZEN partnership schema...
+        wrap_headings = [s["heading"] for s in store.section_schema_for_wrap()]
+        assert "Understanding" in wrap_headings
+        # ...while the plain live read reflects the change (proves they diverged
+        # and the freeze is what protected the wrap).
+        live_headings = [s["heading"] for s in store.section_schema]
+        assert "Understanding" not in live_headings
+        store.close()
+
+    def test_frozen_schema_cleared_on_complete(self, tmp_path):
+        store = Store(tmp_path / "s.db", section_schema=FLOW_SCHEMA)
+        ep = store.record("e", "observation")
+        store.wrap_started(token="b" * 32, episode_ids=[ep.id], section_schema=FLOW_SCHEMA)
+        store.wrap_completed(episodes_compressed=1, continuity_chars=10,
+                             wrap_token="b" * 32, episode_ids=[ep.id])
+        # Wrap done -> no freeze; a live change is now reflected by section_schema_for_wrap.
+        self._raw_set_live_schema(store, DEFAULT_SCHEMA)
+        assert [s["heading"] for s in store.section_schema_for_wrap()] == \
+            [s["heading"] for s in DEFAULT_SCHEMA]
+        store.close()
+
+    def test_frozen_schema_cleared_on_cancel(self, tmp_path):
+        store = Store(tmp_path / "s.db", section_schema=FLOW_SCHEMA)
+        store.wrap_started(token="c" * 32, episode_ids=[], section_schema=FLOW_SCHEMA)
+        store.wrap_cancelled()
+        self._raw_set_live_schema(store, DEFAULT_SCHEMA)
+        assert [s["heading"] for s in store.section_schema_for_wrap()] == \
+            [s["heading"] for s in DEFAULT_SCHEMA]
+        store.close()
+
+    def test_no_frozen_schema_fails_closed(self, tmp_path):
+        # A wrap started by a pre-AM-SCHEMASNAPSHOT version (wrap_started_at set,
+        # wrap_section_schema empty) FAILS CLOSED rather than silently reverting
+        # to the live schema (codex L3 LOW-1) — an invariant, not a discipline.
+        store = Store(tmp_path / "s.db", section_schema=FLOW_SCHEMA)
+        store.wrap_started(token="d" * 32, episode_ids=[], section_schema=FLOW_SCHEMA)
+        store._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('wrap_section_schema', '')"
+        )
+        store._conn.commit()
+        with pytest.raises(StoreError, match="predates AM-SCHEMASNAPSHOT"):
+            store.section_schema_for_wrap()
+        store.close()
+
+    def test_allow_restart_overwrites_frozen_schema(self, tmp_path):
+        # B (L1): a restart over an in-flight wrap must OVERWRITE the prior
+        # freeze, not leave the old wrap's schema stranded.
+        store = Store(tmp_path / "s.db", section_schema=FLOW_SCHEMA)
+        store.wrap_started(token="a" * 32, episode_ids=[], section_schema=FLOW_SCHEMA)
+        store.wrap_started(token="b" * 32, episode_ids=[],
+                           section_schema=DEFAULT_SCHEMA, allow_restart=True)
+        assert [s["heading"] for s in store.section_schema_for_wrap()] == \
+            [s["heading"] for s in DEFAULT_SCHEMA]
+        store.close()
+
+    def test_save_enforces_frozen_schema_after_live_flip(self, tmp_path):
+        # C (L1): the load-bearing end-to-end claim — validated_save_continuity
+        # validates against the FROZEN schema, not the live one. Freeze
+        # partnership, flip live to ops mid-wrap, then a save with ops-only
+        # content (missing Active Threads + Understanding) must be REJECTED
+        # because the wrap is still held to the frozen partnership schema.
+        from anneal_memory.continuity import validated_save_continuity
+        store = Store(tmp_path / "s.db", section_schema=FLOW_SCHEMA)
+        store.record("a session episode", "observation")
+        prepare_wrap(store)  # freezes partnership
+        self._raw_set_live_schema(store, DEFAULT_SCHEMA)  # concurrent flip to ops
+        ops_only = "# C\n## State\n.\n## Patterns\n.\n## Decisions\n.\n## Context\n.\n"
+        with pytest.raises(ValueError, match="(?i)section|structure|required|understanding"):
+            validated_save_continuity(store, ops_only)
+        store.close()
+
+    def test_corrupt_frozen_schema_fails_closed(self, tmp_path):
+        store = Store(tmp_path / "s.db", section_schema=FLOW_SCHEMA)
+        store.wrap_started(token="e" * 32, episode_ids=[], section_schema=FLOW_SCHEMA)
+        store._conn.execute(
+            "UPDATE metadata SET value='{not valid json' WHERE key='wrap_section_schema'"
+        )
+        store._conn.commit()
+        with pytest.raises(StoreError, match="Frozen wrap section_schema"):
+            store.section_schema_for_wrap()
+        store.close()
+
+    def test_prepare_wrap_freezes_the_read_schema(self, tmp_path):
+        # End-to-end: prepare_wrap freezes the partnership schema it read, and a
+        # concurrent live flip does not change what the wrap sees.
+        store = Store(tmp_path / "s.db", section_schema=FLOW_SCHEMA)
+        store.record("a session episode", "observation")
+        result = prepare_wrap(store)
+        assert result["status"] == "ready"
+        self._raw_set_live_schema(store, DEFAULT_SCHEMA)
+        assert "Understanding" in [s["heading"] for s in store.section_schema_for_wrap()]
+        store.close()
 
 
 class TestSchemaModule:

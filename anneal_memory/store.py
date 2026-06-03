@@ -622,24 +622,39 @@ _DEFAULT_METADATA = {
     # for compression. ``validated_save_continuity`` reads both to
     # (a) optionally verify the caller passed the right token and
     # (b) filter ``episodes_since_wrap()`` down to the frozen set
-    # regardless of what's been recorded since. All three are
-    # cleared together in ``wrap_completed`` and ``wrap_cancelled``
-    # inside a single SQL transaction so a mid-clear crash cannot
-    # leave partial state.
+    # regardless of what's been recorded since. These three legacy
+    # keys are cleared together in ``wrap_completed`` and
+    # ``wrap_cancelled`` inside a single SQL transaction so a
+    # mid-clear crash cannot leave partial state.
     #
-    # **State machine invariant:** the three keys are canonically
-    # either all zero-length (idle — no wrap in progress) or all
-    # populated (canonical wrap in progress). Any partial state
-    # (e.g. ``wrap_started_at`` set but ``wrap_token`` empty) is a
-    # store-integrity failure and is surfaced as a ``StoreError``
+    # **State machine invariant (the three LEGACY keys):** those three
+    # are canonically either all zero-length (idle — no wrap in
+    # progress) or all populated (canonical wrap in progress). Any
+    # partial state (e.g. ``wrap_started_at`` set but ``wrap_token``
+    # empty) is a store-integrity failure surfaced as a ``StoreError``
     # from ``load_wrap_snapshot``. This is the 10.5c.4 fix-pass
     # tightening: the pre-fix-pass code tolerated the partial state
     # as a "legacy skipped_prepare" path, which silently bypassed
     # the snapshot filter. The canonical pipeline has exactly one
     # valid state machine.
+    #
+    # ``wrap_section_schema`` (below, AM-SCHEMASNAPSHOT) is an ADDITIVE
+    # fourth lifecycle key and is deliberately NOT bound by that
+    # all-or-nothing invariant: it is empty when idle and populated for a
+    # canonical wrap, but the ONE tolerated divergence is a wrap that straddles
+    # a pre-AM-SCHEMASNAPSHOT upgrade (legacy three populated, frozen schema
+    # empty). That case is NOT silently tolerated — ``_load_frozen_wrap_schema``
+    # fails CLOSED on it (raising), forcing wrap-cancel + re-prepare, rather than
+    # reverting to the live schema and re-opening the split. It is cleared
+    # alongside the legacy three on every terminal path.
     "wrap_started_at": "",
     "wrap_token": "",
     "wrap_episode_ids": "",
+    # AM-SCHEMASNAPSHOT: the section schema FROZEN at wrap_started, JSON-encoded.
+    # Empty when no wrap is active. section_schema_for_wrap() returns this (not
+    # the live schema) during a wrap so prepare and save agree even if the live
+    # schema is changed mid-wrap; an active wrap missing it fails closed.
+    "wrap_section_schema": "",
 }
 
 
@@ -1341,6 +1356,7 @@ class Store:
         *,
         token: str,
         episode_ids: list[str],
+        section_schema: list[SectionSpec] | None = None,
         allow_restart: bool = False,
     ) -> None:
         """Mark that a wrap has been initiated (prepare_wrap called).
@@ -1368,14 +1384,16 @@ class Store:
         a new wrap, but without the separate cancel audit event).
 
         Writes the ``wrap_started_at`` flag, the session-handshake
-        token, and the frozen episode-ID snapshot so
-        :meth:`validated_save_continuity` can verify the token and
-        filter its re-fetched episode set to exactly the frozen list.
+        token, the frozen episode-ID snapshot, and the frozen section
+        schema (AM-SCHEMASNAPSHOT) so :meth:`validated_save_continuity`
+        can verify the token, filter its re-fetched episode set to
+        exactly the frozen list, and validate/graduate against the same
+        schema ``prepare_wrap`` built the package with.
 
-        The three metadata writes happen inside a single SQL
-        transaction (one ``INSERT OR REPLACE`` per key, one commit at
-        the end) so a crash mid-write cannot leave the store with a
-        timestamp but no token, or a token but no episode list.
+        The four metadata writes happen inside a single SQL transaction
+        (one ``INSERT OR REPLACE`` per key, one commit at the end) so a
+        crash mid-write cannot leave the store with a timestamp but no
+        token, a token but no episode list, or episodes but no schema.
 
         Args:
             token: Session-handshake token (uuid4().hex from
@@ -1385,6 +1403,14 @@ class Store:
                 (caller explicitly starting a wrap with no snapshot
                 content). Stored JSON-encoded in the
                 ``wrap_episode_ids`` metadata key.
+            section_schema: The section schema to freeze for the wrap's
+                duration (AM-SCHEMASNAPSHOT). ``prepare_wrap`` passes the
+                exact schema it read to build the package; ``None`` (a
+                direct caller's convenience) freezes the current live
+                schema instead. Validated + normalized before encoding,
+                stored JSON-encoded in ``wrap_section_schema``;
+                :meth:`section_schema_for_wrap` returns it for the
+                wrap's duration.
 
         Raises:
             ValueError: If ``token`` is empty. The canonical pipeline
@@ -1450,7 +1476,21 @@ class Store:
         # signature, both code paths see the same materialized list.
         ids_list = list(episode_ids)
         ids_json = json.dumps(ids_list)
-        # Batch the three metadata writes into a single commit so a
+        # AM-SCHEMASNAPSHOT: freeze the section schema for the wrap's duration.
+        # prepare_wrap passes the EXACT schema it read to build the package, so
+        # the frozen value is byte-identical to what the agent compresses
+        # against; a direct caller that omits it freezes the current live schema
+        # (closes the common case, not the prepare-read→here micro-window). Both
+        # are validated + normalized before encoding. section_schema_for_wrap()
+        # returns this for the rest of the wrap so save cannot read a different
+        # (concurrently-changed) live schema.
+        frozen_schema = (
+            validate_schema(section_schema)
+            if section_schema is not None
+            else self._load_section_schema(strict=True)
+        )
+        frozen_schema_json = json.dumps(frozen_schema)
+        # Batch the four metadata writes into a single commit so a
         # crash mid-write cannot leave the store with a partial
         # snapshot (e.g. timestamp set but token blank, which would
         # look like legacy skipped_prepare state and silently bypass
@@ -1493,6 +1533,10 @@ class Store:
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_episode_ids", ids_json),
             )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_section_schema", frozen_schema_json),
+            )
             self._conn.commit()
 
         if self._audit is not None:
@@ -1522,6 +1566,12 @@ class Store:
                     "wrap_token": token,
                     "wrap_episode_count": len(ids_list),
                     "wrap_episode_ids": ids_list,
+                    # Full normalized schema (heading + role), not just headings:
+                    # roles are load-bearing (the felt-gate keys on the
+                    # narrative-timeless role), so headings alone are not full
+                    # chain-of-custody for which schema this wrap froze. (codex
+                    # L3 LOW-2.)
+                    "wrap_section_schema": frozen_schema,
                 },
             )
 
@@ -1531,10 +1581,10 @@ class Store:
         Use when a wrap is abandoned (no episodes, LLM failure, validation
         failure with fallback). Prevents stale-wrap detection from false-firing.
 
-        Clears all three wrap-in-progress metadata keys
-        (``wrap_started_at``, ``wrap_token``, ``wrap_episode_ids``) in a
-        single SQL transaction, matching the batched-write invariant
-        :meth:`wrap_started` establishes.
+        Clears the wrap-in-progress metadata keys (``wrap_started_at``,
+        ``wrap_token``, ``wrap_episode_ids``, and the frozen
+        ``wrap_section_schema``) in a single SQL transaction, matching
+        the batched-write invariant :meth:`wrap_started` establishes.
         """
         # Capture all three wrap-lifecycle keys before we clear them,
         # so the audit entry records the full chain-of-custody
@@ -1566,6 +1616,13 @@ class Store:
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_episode_ids", ""),
+            )
+            # AM-SCHEMASNAPSHOT: clear the frozen schema alongside the rest of
+            # the wrap-in-progress state so section_schema_for_wrap() falls back
+            # to the live schema once the wrap is abandoned.
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_section_schema", ""),
             )
             self._conn.commit()
 
@@ -1968,13 +2025,14 @@ class Store:
                 # recording a no-op wrap. Do nothing rather than
                 # accidentally stamping all NULL episodes.
 
-            # Clear all three wrap-in-progress metadata keys in the same
-            # SQL transaction as the wraps INSERT + episodes UPDATE so a
+            # Clear the wrap-in-progress metadata keys (the three legacy
+            # keys + the frozen wrap_section_schema) in the same SQL
+            # transaction as the wraps INSERT + episodes UPDATE so a
             # mid-clear crash cannot leave partial state (e.g. wraps row
             # committed but wrap_started_at still set, which would look
             # like a stuck wrap on the next session's prepare_wrap call).
             # Using bare ``execute`` instead of ``_set_metadata`` so the
-            # three writes share the single ``commit()`` below.
+            # writes share the single ``commit()`` below.
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_started_at", ""),
@@ -1986,6 +2044,13 @@ class Store:
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_episode_ids", ""),
+            )
+            # AM-SCHEMASNAPSHOT: clear the frozen wrap schema in the same
+            # transaction as the other wrap-in-progress clears, so a completed
+            # wrap leaves section_schema_for_wrap() reading the live schema again.
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_section_schema", ""),
             )
             # 10.5c.5: defer the commit when we're inside a ``_batch()``
             # context — the outer two-phase-commit pipeline wraps the
@@ -2699,8 +2764,67 @@ class Store:
 
         An ABSENT schema (every pre-0.3.4 store) still falls back to
         ``DEFAULT_SCHEMA`` — that is normal backward-compat, not corruption.
+
+        AM-SCHEMASNAPSHOT: during an ACTIVE wrap this returns the schema FROZEN
+        at ``wrap_started`` rather than the live persisted schema, so
+        ``prepare_wrap`` and ``validated_save_continuity`` agree even if a
+        concurrent ``set_section_schema`` changed the live schema mid-wrap. The
+        live schema is read only when NO wrap is active. An active wrap with no
+        frozen schema (a wrap straddling a pre-AM-SCHEMASNAPSHOT upgrade) fails
+        CLOSED — see :meth:`_load_frozen_wrap_schema`.
         """
+        frozen = self._load_frozen_wrap_schema()
+        if frozen is not None:
+            return frozen
         return self._load_section_schema(strict=True)
+
+    def _load_frozen_wrap_schema(self) -> list[SectionSpec] | None:
+        """The section schema frozen at ``wrap_started`` (AM-SCHEMASNAPSHOT), or
+        ``None`` when no wrap is active.
+
+        Returns ``None`` (→ caller reads the live schema) ONLY when
+        ``wrap_started_at`` is unset (no active wrap). During an ACTIVE wrap it
+        fails CLOSED — raising :class:`StoreError` — if the frozen schema is
+        empty (a wrap straddling a pre-AM-SCHEMASNAPSHOT upgrade) or
+        present-but-unreadable (corrupt): silently reverting to the live schema
+        in either case would re-open the prepare/save split this freeze closes.
+        Recovery is wrap-cancel + re-run ``prepare_wrap`` (lossless).
+        """
+        with self._db_boundary("section_schema"):
+            rows = self._conn.execute(
+                "SELECT key, value FROM metadata WHERE key IN (?, ?)",
+                ("wrap_started_at", "wrap_section_schema"),
+            ).fetchall()
+        meta = {row["key"]: row["value"] for row in rows}
+        if not meta.get("wrap_started_at"):
+            return None  # no active wrap → live schema
+        raw = meta.get("wrap_section_schema", "")
+        if not raw:
+            # Active wrap but nothing frozen: a wrap started by a binary that
+            # predates AM-SCHEMASNAPSHOT, straddling the upgrade. Falling back to
+            # the live schema here would silently re-open the prepare/save split
+            # this guard exists to close (the live schema is exactly what may have
+            # changed). Fail CLOSED instead — an invariant, not a discipline
+            # (structural_invariants_beat_discipline). Recovery is cheap and
+            # lossless: wrap-cancel + re-run prepare_wrap re-freezes a current
+            # schema; no episodes are dropped. (codex L3 LOW-1.)
+            raise StoreError(
+                "Wrap in progress predates AM-SCHEMASNAPSHOT (no frozen section "
+                "schema): refusing to fall back to the live schema, which would "
+                "re-open the prepare/save split this guard closes. Run wrap-cancel "
+                "and re-run prepare_wrap to start a defended wrap.",
+                operation="section_schema",
+            )
+        try:
+            return validate_schema(json.loads(raw))
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise StoreError(
+                "Frozen wrap section_schema is present but unreadable (corrupt). "
+                "Refusing to fall back to the live schema mid-wrap — that would "
+                "re-open the prepare/save schema split AM-SCHEMASNAPSHOT closes. "
+                "Cancel the wrap (wrap-cancel) and re-run prepare_wrap.",
+                operation="section_schema",
+            ) from exc
 
     def _load_section_schema(self, *, strict: bool) -> list[SectionSpec]:
         """Shared read backing :attr:`section_schema` / :meth:`section_schema_for_wrap`.
@@ -2749,11 +2873,22 @@ class Store:
         store (e.g. promote a default-schema store to a partnership schema)
         without reconstructing it.
 
-        The section schema is **immutable for the duration of an active wrap**:
-        if a wrap is in progress (``prepare_wrap`` has run but
-        ``validated_save_continuity`` / ``wrap-cancel`` has not), this raises
-        ``ValueError`` so a wrap cannot prepare under one schema and then
-        save/graduate under another. Set the schema before ``prepare_wrap``.
+        This refuses a change once a wrap has **started**: if a wrap is in
+        progress (``prepare_wrap`` has run but ``validated_save_continuity`` /
+        ``wrap-cancel`` has not), this raises ``ValueError``. Set the schema
+        before ``prepare_wrap``.
+
+        **Scope of that guarantee (honest):** the refusal closes the common
+        single-writer case. It does NOT, by itself, defend the narrow window
+        between ``prepare_wrap`` *reading* the live schema (via
+        :meth:`section_schema_for_wrap`) and its ``wrap_started()`` — a
+        concurrent/cross-process ``set_section_schema`` committing there leaves
+        the wrap's prepared instructions on the old schema while save reads the
+        new one. The wrap reads the live schema at both prepare and save rather
+        than a frozen snapshot, so the complete fix is to freeze the schema into
+        the wrap snapshot at ``wrap_started`` (tracked as AM-SCHEMASNAPSHOT,
+        mirroring the episode-id freeze). The single-writer consolidate model
+        does not exercise that window.
 
         Note: passing ``section_schema=`` to the ``Store`` constructor is also a
         write and is *authoritative* — reconstructing a store with an explicit
@@ -2773,6 +2908,11 @@ class Store:
                 "save agree on routing. Complete or cancel the wrap first, or "
                 "set the schema before prepare_wrap."
             )
+        # Capture the prior schema for the audit record before overwriting it —
+        # a schema migration changes which sections are required and whether the
+        # felt-layer gate fires, so it belongs in the audit chain (without this,
+        # a store that later fails to validate has no trail of when it flipped).
+        old_headings = [s["heading"] for s in self.section_schema]
         normalized = validate_schema(schema)
         with self._db_boundary("set_section_schema"):
             self._conn.execute(
@@ -2780,6 +2920,19 @@ class Store:
                 ("section_schema", json.dumps(normalized)),
             )
             self._conn.commit()
+        # Best-effort audit AFTER the durable write (mirrors _batch's post-commit
+        # policy): the schema is persisted, so an audit-append failure must not
+        # surface as a failed migration. Warn, don't raise.
+        try:
+            self._audit_log("section_schema_set", {
+                "from": old_headings,
+                "to": [s["heading"] for s in normalized],
+            })
+        except OSError as exc:
+            warnings.warn(
+                f"section_schema persisted but audit log append failed: {exc}",
+                stacklevel=2,
+            )
         return normalized
 
     # -- Internal helpers --

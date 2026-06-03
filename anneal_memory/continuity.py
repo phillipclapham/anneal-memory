@@ -904,7 +904,14 @@ def prepare_wrap(
     # build succeeded, so a failure anywhere above leaves the store
     # in a clean no-wrap-in-progress state.
     wrap_token = uuid.uuid4().hex
-    store.wrap_started(token=wrap_token, episode_ids=episode_ids)
+    # AM-SCHEMASNAPSHOT: freeze the EXACT schema we read above (line ~884) into
+    # the wrap snapshot, so validated_save_continuity reads back this same schema
+    # rather than re-reading a possibly-concurrently-changed live schema. Passing
+    # the already-read `schema` (not letting wrap_started re-read live) closes the
+    # read→wrap_started micro-window airtight.
+    store.wrap_started(
+        token=wrap_token, episode_ids=episode_ids, section_schema=schema
+    )
 
     # Move #4 library layer (v0.3.2): surface the list of existing
     # Proven (2x/3x) pattern names so the methodology-layer

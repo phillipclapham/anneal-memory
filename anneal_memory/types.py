@@ -249,7 +249,18 @@ class WrapPackageDict(TypedDict):
     episode_count: int
     continuity: str | None  # Current continuity text, or None for first wrap
     stale_patterns: list[StalePatternDict]
-    instructions: str  # Compression instructions for the agent
+    # AM-CONTRASCAN-EMIT (v0.4.3): existing Proven (2x/3x) pattern names the
+    # agent must run the contradiction-scan discipline against before any new
+    # Proven graduation this wrap. Computed once here (from the existing
+    # continuity) so the scan INSTRUCTION embedded in ``instructions`` and the
+    # ``uncovered_proven_to_check`` field on PrepareWrapResult are the same
+    # list — one source of truth, no drift between the discipline and its data.
+    # NOTE: this is ALL existing Proven — the scan-AGAINST set — NOT a filtered
+    # "undeclared" subset. The ``uncovered`` name is historical (it mirrors the
+    # pre-existing ``PrepareWrapResult.uncovered_proven_to_check``); the
+    # agent-facing instruction renders it as "Existing Proven to scan against".
+    uncovered_proven: list[str]
+    instructions: str  # Compression instructions for the agent (incl. contradiction scan)
     today: str  # YYYY-MM-DD (may be caller-pinned for determinism)
     max_chars: int  # Target max size for the compressed continuity
 

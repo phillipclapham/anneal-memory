@@ -325,12 +325,23 @@ def validate_graduations(
        the prior session's explanation. This catches sycophantic
        accumulation where each session rephrases the same claim with
        overlapping vocabulary — closes the slow-drift attack from
-       Bold Stand Phase 1b probe #1 (2026-05-21).
+       Bold Stand Phase 1b probe #1 (2026-05-21). Evaluated whenever
+       check 1 passes (a cited ID resolves), INDEPENDENT of check 2's
+       explanation-grounding result — see AM-XSESSION-LINKGATE below.
 
-    If validation check 1 or 2 fails, demotes the graduation (3x->2x,
-    2x->1x) and marks ``(ungrounded)``. If check 3 fails, demotes and
-    marks ``(cross-session-overlap)`` instead — operator-distinguishable
-    failure modes.
+    If check 1 fails (no cited ID resolves) the line demotes and marks
+    ``(ungrounded)``. If check 2 fails (explanation doesn't reference any
+    cited episode's content) the line demotes and marks ``(ungrounded)``.
+    If check 3 fails the line demotes and marks ``(cross-session-overlap)``.
+    Check 3 takes precedence on the marker: a line that is BOTH ungrounded
+    (check 2) and cross-session-overlapping (check 3) is marked
+    ``(cross-session-overlap)`` — the more specific immune signal — and its
+    Hebbian co-citation link is suppressed (AM-XSESSION-LINKGATE, v0.4.3).
+    Before AM-QUOTEFOOTGUN (v0.4.1) check 3 ran only on the validated
+    path, so gating it on check 2 was harmless; once 0.4.1 decoupled link
+    formation from grounding, the gate had to follow the link onto the
+    demoted path or a sycophantic re-graduation with a fresh-but-ungrounded
+    explanation would form an unsuppressed link.
 
     Args:
         text: The continuity file text (full markdown).
@@ -423,14 +434,39 @@ def validate_graduations(
                         break
 
             # Cross-session sycophantic-accumulation check (Phase 1b probe #1).
-            # Runs ONLY after the within-session checks pass — there is
-            # no point comparing across sessions when the citation
-            # itself is ungrounded today. If pattern_history_lookup is
-            # None (library caller not wiring history through), check
-            # is skipped entirely and the pre-Move-#3 behavior holds.
+            # AM-XSESSION-LINKGATE (v0.4.3): computed whenever the citation
+            # resolves (``ids_valid``) and the pattern has prior history —
+            # INDEPENDENT of ``explanation_valid`` (the within-session
+            # grounding result). Pre-AM-QUOTEFOOTGUN (v0.4.1) this gate only
+            # had to cover the validated path, so requiring explanation_valid
+            # here was harmless. But 0.4.1 decoupled Hebbian link formation
+            # from grounding — the co-citation block below fires on the
+            # demoted-grounding path too — so the cross-session gate must run
+            # there as well, or a sycophantic re-graduation carrying a
+            # fresh-but-ungrounded explanation would form an unsuppressed
+            # link. Gating on ``ids_valid`` (not ``explanation_valid``) aligns
+            # this check with the link-formation precondition at the
+            # co-citation block (``if ids_valid and not
+            # cross_session_overlap_words``) for operator-NAMED patterns. If
+            # pattern_history_lookup is None (library caller not wiring history
+            # through), the check is skipped and pre-Move-#3 behavior holds.
+            #
+            # Two paths can still form a co-citation link this gate cannot
+            # reach — both PRE-EXISTING blind spots of the whole per-name
+            # immune layer (Move #2/#3/#4), NOT introduced by this change:
+            #   (a) ``and explanation`` — a bare ``[evidence: id]`` citation
+            #       has no explanation text to compare across sessions.
+            #   (b) unnamed/freeform lines (``thought:`` / ``{topic:}``-grouped)
+            #       match _GRADUATION_RE but not _NAMED_PATTERN_RE, so
+            #       cross_session_overlap_words can never be set for them (the
+            #       name_match block below is its only writer) — and per-name
+            #       history was never anchored to them, so the lookup returns
+            #       None regardless.
+            # AM-XSESSION-LINKGATE closes the hole for the NAMED patterns the
+            # gate was ever able to cover; it does not widen coverage to (a)/(b).
             cross_session_overlap_words: list[str] = []
             prior_explanation_for_check = ""
-            if ids_valid and explanation_valid and pattern_history_lookup is not None and explanation:
+            if ids_valid and pattern_history_lookup is not None and explanation:
                 name_match = _NAMED_PATTERN_RE.match(line)
                 if name_match is not None:
                     pattern_name = name_match.group(1)

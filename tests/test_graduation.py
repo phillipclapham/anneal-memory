@@ -847,10 +847,15 @@ class TestCrossSessionGraduationCheck:
         assert result.cross_session_collisions == []
 
     def test_ungrounded_graduation_skips_cross_session_check(self):
-        """Within-session check fails first (no matching episode);
-        cross-session check should NOT also fire — operators see one
-        failure reason at a time, and the within-session failure is
-        more fundamental."""
+        """Check 1 (no cited ID resolves) fails: the cross-session gate
+        does NOT fire, because the gate is keyed on ``ids_valid`` — a line
+        whose citation resolves to no real episode forms no Hebbian link
+        anyway, so there is nothing for the cross-session gate to suppress.
+        The line is marked ``(ungrounded)``.
+
+        Distinct from the demoted-GROUNDING case (check 1 passes, check 2
+        fails) which AM-XSESSION-LINKGATE (v0.4.3) DOES cross-session-check
+        — see ``test_demoted_grounding_with_overlap_gates_link``."""
         text = """## State\nungrounded.\n## Patterns
 - alpha | 2x (2026-05-21) [evidence: deadbeef "standup consensus decision quick agreement architectural"]
 ## Decisions
@@ -910,6 +915,89 @@ class TestCrossSessionGraduationCheck:
         # The immune gate still protects the graph: no link forms.
         assert result.direct_co_citations == []
         assert result.all_validated_ids == []
+
+    def test_demoted_grounding_with_overlap_gates_link(self):
+        """AM-XSESSION-LINKGATE (v0.4.3): a graduation whose explanation
+        FAILS the within-session grounding check (explanation_valid=False)
+        but reuses >=threshold vocabulary from the prior session must STILL
+        be caught by the cross-session gate.
+
+        Pre-0.4.3 the gate only computed when explanation_valid was True, so
+        this line slipped through as plain ``(ungrounded)`` while
+        AM-QUOTEFOOTGUN's decoupled link formation (which fires on the
+        demoted-grounding path) formed an UNSUPPRESSED Hebbian link from the
+        gamed accumulation. Now the gate runs on the demoted path: the line
+        is marked ``(cross-session-overlap)`` (the more specific signal wins
+        over ``(ungrounded)`` on the both-apply line) and the link is
+        suppressed."""
+        text = """## State\ndemoted-grounding rephrase.\n## Patterns
+- alpha | 2x (2026-05-21) [evidence: abc12345, def67890 "governance topology substrate boundary"]
+## Decisions
+.
+## Context
+.
+"""
+        # Episode bodies share NOTHING meaningful with the explanation ->
+        # explanation_valid is False for both cited ids (demoted-grounding).
+        node_content = {
+            "abc12345": "the cat sat quietly on a warm rug by the door",
+            "def67890": "sunlight came through the kitchen window this morning",
+        }
+        # Prior session shares 4 meaningful words -> cross-session fires.
+        prior = "governance topology substrate boundary observed earlier"
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345", "def67890"},
+            today="2026-05-21",
+            node_content_map=node_content,
+            pattern_history_lookup=self._stub_lookup(alpha=prior),
+        )
+        assert result.validated == 0
+        assert result.demoted == 1
+        # Cross-session marker WINS over (ungrounded) on the both-apply line.
+        assert "(cross-session-overlap)" in result.text
+        assert "(ungrounded)" not in result.text
+        assert len(result.cross_session_collisions) == 1
+        # The decoupled link MUST be suppressed — the hole this closes.
+        assert result.direct_co_citations == []
+        assert result.all_validated_ids == []
+        # AM-WARN's resolved-citation signal is independent of the gate.
+        assert result.any_citation_resolved is True
+
+    def test_demoted_grounding_without_overlap_keeps_link(self):
+        """Control for AM-XSESSION-LINKGATE: a demoted-grounding line with
+        NO cross-session overlap stays ``(ungrounded)`` and KEEPS its
+        decoupled Hebbian link — AM-QUOTEFOOTGUN's decouple for
+        legitimately-paraphrased citations is preserved; only the
+        sycophantic-overlap case is gated."""
+        text = """## State\nparaphrased but honest.\n## Patterns
+- alpha | 2x (2026-05-21) [evidence: abc12345, def67890 "governance topology substrate boundary"]
+## Decisions
+.
+## Context
+.
+"""
+        node_content = {
+            "abc12345": "the cat sat quietly on a warm rug by the door",
+            "def67890": "sunlight came through the kitchen window this morning",
+        }
+        # Prior shares ZERO meaningful words -> no cross-session collision.
+        prior = "completely unrelated zebra giraffe elephant antelope vocabulary"
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345", "def67890"},
+            today="2026-05-21",
+            node_content_map=node_content,
+            pattern_history_lookup=self._stub_lookup(alpha=prior),
+        )
+        assert result.validated == 0
+        assert result.demoted == 1
+        assert "(ungrounded)" in result.text
+        assert "(cross-session-overlap)" not in result.text
+        assert result.cross_session_collisions == []
+        # Decouple preserved: the link forms for the honest paraphrase.
+        assert result.direct_co_citations == [("abc12345", "def67890")]
+        assert result.all_validated_ids == [{"abc12345", "def67890"}]
 
 
 class TestFlowScriptPrefixedPatterns:

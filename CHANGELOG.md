@@ -2,6 +2,26 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] — 2026-06-02
+
+Immune-system release: two changes that close gaps the 0.4.x arc opened — the cross-session demotion semantics and the contradiction-scan discipline's *delivery*. Both are immune-*trigger* changes (they alter what the immune system catches / what discipline it requires), deliberately held to their own dedicated apparatus pass. No breaking changes; additive + behavior-narrowing only. 1007 tests, mypy clean. Full 4-layer apparatus on the combined diff (L1 + L2 → fixes → codex L3 clean → L4 end-to-end through the real save pipeline).
+
+### Fixed — AM-XSESSION-LINKGATE: the cross-session anti-sycophancy gate now follows the Hebbian link onto the demoted-grounding path
+
+AM-QUOTEFOOTGUN (0.4.1) decoupled Hebbian co-citation link formation from the explanation-grounding gate, so links now form on the *demoted-grounding* path (a graduation whose explanation does not reference the cited episode's content). But the cross-session overlap check — the anti-sycophancy defense that refuses to strengthen the graph from a re-graduation reusing a prior session's vocabulary — was still gated on `explanation_valid`, so it never ran on that demoted path. A sycophantic re-graduation carrying a fresh-but-ungrounded explanation could therefore form an **unsuppressed** co-citation link.
+
+- `validate_graduations` now computes the cross-session overlap whenever a cited id resolves (`ids_valid`) and the pattern has prior history — **independent of explanation grounding** — aligning the check with the link-formation precondition for operator-named patterns.
+- A line that is both ungrounded **and** cross-session-overlapping now demotes with the more specific `(cross-session-overlap)` marker (was `(ungrounded)`), records a `CrossSessionCollision`, and has its co-citation link suppressed.
+- **Narrowing only.** The single outcome that changes is that a demoted-grounding line which *also* recycles prior-session vocabulary is now caught (marker + link-suppression + collision audit). The validated path, the legitimately-paraphrased demoted path (AM-QUOTEFOOTGUN's decouple, which keeps its link), AM-WARN's gate-independent `any_citation_resolved` signal, and pattern-history persistence are all unchanged. Bare `[evidence: id]` citations and unnamed/freeform (`thought:` / `{topic:}`) lines remain outside the per-name immune layer — a pre-existing, documented blind spot this change does not claim to close.
+
+### Added — AM-CONTRASCAN-EMIT: `prepare_wrap` emits the contradiction-scan *instruction*, not just its data
+
+The methodology-layer contradiction-scan discipline — before graduating a new Proven, declare a `[contradicts: ...]` or `[no-contradicts]` stance against the existing Proven — used to live only in an external protocol doc (Levain `WRAP_PROTOCOL.md`). `prepare_wrap` surfaced the *data* (`uncovered_proven_to_check`, the existing Proven names) but never the *instruction* that consumes it, and the canonical text transport (`format_wrap_package_text`) did not even render that field. So when an entity retired its local copy of the protocol doc, the discipline silently vanished while the data kept shipping — an `invisible_infrastructure_failure`.
+
+- `_build_wrap_package` now computes the existing-Proven list **once** and threads it into the agent-facing `instructions`, which emit a "Contradiction Scan" block listing the Proven names plus the exact `[contradicts: name_a, name_b]` / `[no-contradicts]` marker contract (verified against the save-side detectors `extract_contradiction_declarations` / `detect_proven_without_declaration` — the instruction teaches exactly what the detector parses). The block lives in `instructions`, so every transport renders it; emitted only when the schema has a graduating section and at least one prior Proven exists.
+- New `WrapPackageDict.uncovered_proven` field: the list feeds both the emitted instruction and `PrepareWrapResult.uncovered_proven_to_check` from a single computation, so the discipline and its data cannot drift. `prepare_wrap` no longer recomputes it.
+- The discipline now travels **with** the package as agent-facing text — `structural_invariants_beat_discipline`: no entity can drop the scan by editing a doc it no longer reads. Audit-only semantics preserved (a new Proven without a stance is flagged for operator review, not refused).
+
 ## [0.4.2] — 2026-06-02
 
 Critical-path de-risk release: three independent hardenings for a **stranger-seeded partnership entity** (the Levain consumer), each a structural fix for a flat-default or single-caller assumption that does not hold once the library — not flow's CLI wrapper — is the integration surface. No breaking changes; additive throughout. 1000 tests, mypy clean.

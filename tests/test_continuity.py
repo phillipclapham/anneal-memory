@@ -359,6 +359,11 @@ class TestTypedDictReturnShapes:
                 "episode_count",
                 "continuity",
                 "stale_patterns",
+                # Added v0.4.3 (AM-CONTRASCAN-EMIT): existing Proven names,
+                # computed once here so the scan instruction embedded in
+                # `instructions` and prepare_wrap's uncovered_proven_to_check
+                # are the same list.
+                "uncovered_proven",
                 "instructions",
                 "today",
                 "max_chars",
@@ -3774,6 +3779,85 @@ class TestMove4LibraryLayerIntegration:
                 "alpha_proven", "beta_proven"
             }
             store.wrap_cancelled()  # don't actually save session 2
+        finally:
+            store.close()
+
+    def test_contradiction_scan_instruction_emitted_when_proven_exists(self, tmp_path):
+        """AM-CONTRASCAN-EMIT (v0.4.3): once a store has Proven patterns, the
+        NEXT prepare_wrap embeds the contradiction-scan instruction (the
+        existing-Proven list + the marker contract) directly in the
+        agent-facing instructions — so the discipline travels WITH the
+        package, not in a separate protocol doc an entity can retire. The
+        block renders through the canonical MCP/CLI text transport."""
+        from anneal_memory import Store, prepare_wrap, validated_save_continuity
+        from anneal_memory.continuity import format_wrap_package_text
+
+        db = tmp_path / "store.db"
+        store = Store(db, project_name="ScanEmit")
+        try:
+            ep_ids = self._record_episodes(store)
+            s1 = self._render(
+                "## State\nseed.\n\n## Patterns\n"
+                "- alpha_proven | 2x (2026-05-21) [evidence: {ep0} "
+                '"substrate observation discipline"] [no-contradicts]\n'
+                "- beta_proven | 2x (2026-05-21) [evidence: {ep1} "
+                '"contradiction declaration topic"] [no-contradicts]\n\n'
+                "## Decisions\n- decided.\n\n## Context\n- context.\n",
+                ep_ids,
+            )
+            w1 = prepare_wrap(store, max_chars=20000)
+            # First wrap: no prior Proven -> NO scan block emitted.
+            assert "Contradiction Scan" not in w1["package"]["instructions"]
+            validated_save_continuity(
+                store, s1, today="2026-05-21", wrap_token=w1["wrap_token"]
+            )
+
+            self._record_episodes(store)
+            w2 = prepare_wrap(store, max_chars=20000)
+            instr = w2["package"]["instructions"]
+            assert "Contradiction Scan" in instr
+            assert "alpha_proven" in instr and "beta_proven" in instr
+            assert "[contradicts:" in instr
+            assert "[no-contradicts]" in instr
+            # Renders through the canonical transport agents actually read.
+            assert "Contradiction Scan" in format_wrap_package_text(w2)
+            store.wrap_cancelled()
+        finally:
+            store.close()
+
+    def test_uncovered_proven_single_source_of_truth(self, tmp_path):
+        """The scan instruction and prepare_wrap's uncovered_proven_to_check
+        derive from ONE computation: the package's uncovered_proven field
+        equals the result's uncovered_proven_to_check, and every name in it
+        appears in the emitted instruction — they cannot drift apart."""
+        from anneal_memory import Store, prepare_wrap, validated_save_continuity
+
+        db = tmp_path / "store.db"
+        store = Store(db, project_name="OneSource")
+        try:
+            ep_ids = self._record_episodes(store)
+            s1 = self._render(
+                "## State\nseed.\n\n## Patterns\n"
+                "- alpha_proven | 2x (2026-05-21) [evidence: {ep0} "
+                '"substrate observation discipline"] [no-contradicts]\n'
+                "- beta_proven | 2x (2026-05-21) [evidence: {ep1} "
+                '"contradiction declaration topic"] [no-contradicts]\n\n'
+                "## Decisions\n- decided.\n\n## Context\n- context.\n",
+                ep_ids,
+            )
+            w1 = prepare_wrap(store, max_chars=20000)
+            validated_save_continuity(
+                store, s1, today="2026-05-21", wrap_token=w1["wrap_token"]
+            )
+            self._record_episodes(store)
+            w2 = prepare_wrap(store, max_chars=20000)
+            assert w2["package"]["uncovered_proven"] == w2["uncovered_proven_to_check"]
+            assert set(w2["uncovered_proven_to_check"]) == {
+                "alpha_proven", "beta_proven"
+            }
+            for name in w2["uncovered_proven_to_check"]:
+                assert name in w2["package"]["instructions"]
+            store.wrap_cancelled()
         finally:
             store.close()
 

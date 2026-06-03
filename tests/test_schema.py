@@ -297,6 +297,37 @@ class TestWrapInstructionsSchema:
         assert "Pattern lines in `## Proven`" in instr
         assert "Pattern lines in `## Patterns`" not in instr
 
+    def test_contradiction_scan_emitted_with_proven(self):
+        """AM-CONTRASCAN-EMIT (v0.4.3): a non-empty uncovered_proven list +
+        a graduating schema emits the scan block — names + marker contract."""
+        out = _build_wrap_instructions(
+            "p", 20000, "2026-06-02", None, ["alpha_proven", "beta_proven"]
+        )
+        assert "Contradiction Scan" in out
+        assert "alpha_proven" in out and "beta_proven" in out
+        assert "[contradicts:" in out and "[no-contradicts]" in out
+
+    def test_contradiction_scan_absent_when_no_proven_or_omitted(self):
+        """No scan block when uncovered_proven is omitted (default None) or
+        empty — backward-compatible for direct callers + first wraps."""
+        none_out = _build_wrap_instructions("p", 20000, "2026-06-02")
+        empty_out = _build_wrap_instructions("p", 20000, "2026-06-02", None, [])
+        assert "Contradiction Scan" not in none_out
+        assert "Contradiction Scan" not in empty_out
+
+    def test_contradiction_scan_absent_without_graduating_section(self):
+        """A schema with no graduating section emits no scan block even when
+        Proven names are passed — there is no Proven tier to graduate into,
+        so the scan discipline does not apply."""
+        sch = [
+            {"heading": "State", "role": "live-state"},
+            {"heading": "Context", "role": "narrative"},
+        ]
+        out = _build_wrap_instructions(
+            "p", 20000, "2026-06-02", sch, ["alpha_proven"]
+        )
+        assert "Contradiction Scan" not in out
+
 
 # -- Tier 2: graduation gate honors the schema --
 

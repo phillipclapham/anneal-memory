@@ -440,14 +440,33 @@ def _build_wrap_package(
             for s in stale
         ]
 
-    # Build instructions
-    instructions = _build_wrap_instructions(project_name, max_chars, today, schema)
+    # AM-CONTRASCAN-EMIT (v0.4.3): compute the existing-Proven list ONCE here
+    # (single source of truth) — it feeds BOTH the contradiction-scan
+    # instruction emitted inside _build_wrap_instructions AND prepare_wrap's
+    # uncovered_proven_to_check (read back from the returned package). One
+    # computation site means the discipline and its data cannot drift.
+    from .graduation import extract_proven_patterns
+    uncovered_proven = (
+        extract_proven_patterns(
+            existing_continuity,
+            graduating_headings=graduating_headings(schema),
+        )
+        if existing_continuity
+        else []
+    )
+
+    # Build instructions (the contradiction-scan block is emitted from
+    # uncovered_proven when there is a graduating section + prior Proven).
+    instructions = _build_wrap_instructions(
+        project_name, max_chars, today, schema, uncovered_proven
+    )
 
     return WrapPackageDict(
         episodes=formatted_episodes,
         episode_count=len(episodes),
         continuity=existing_continuity,
         stale_patterns=stale_patterns,
+        uncovered_proven=uncovered_proven,
         instructions=instructions,
         today=today,
         max_chars=max_chars,
@@ -459,6 +478,7 @@ def _build_wrap_instructions(
     max_chars: int | None,
     today: str,
     schema: list[SectionSpec] | None = None,
+    uncovered_proven: list[str] | None = None,
 ) -> str:
     """Build the compression instructions the agent receives via prepare_wrap.
 
@@ -469,6 +489,13 @@ def _build_wrap_instructions(
     structure, the named failure modes (Recency / Compression / Stateless-Reset),
     and the implementation-claims guardrail — a quality win for every entity
     with a narrative section, not just partnership entities.
+
+    ``uncovered_proven`` (AM-CONTRASCAN-EMIT, v0.4.3): the existing Proven
+    pattern names to scan against. When non-empty AND the schema has a
+    graduating section, a contradiction-scan instruction block is emitted
+    inline with the list so the methodology-layer discipline travels WITH the
+    package rather than living in a separate protocol doc an entity can retire.
+    Defaults to ``None`` (no block) so direct callers stay backward-compatible.
     """
     if schema is None:
         schema = DEFAULT_SCHEMA
@@ -539,6 +566,14 @@ def _build_wrap_instructions(
     ]
     if has_graduating:
         parts += [marker_ref, ""]
+    # AM-CONTRASCAN-EMIT (v0.4.3): emit the methodology-layer contradiction-
+    # scan instruction inline with the existing-Proven list, so the discipline
+    # travels WITH the package (not in a separate doc an entity can retire).
+    # Only when there's a graduating section AND prior Proven to scan against —
+    # a first wrap (or a store with no Proven yet) has nothing to declare a
+    # stance against, so no block is emitted.
+    if has_graduating and uncovered_proven:
+        parts += [_contradiction_scan_block(uncovered_proven), ""]
     parts += ["**How to compress:**", *how_lines, ""]
     parts += [
         "**Quality:** One insightful line > three vague ones. If removing something",
@@ -653,6 +688,47 @@ Use `[decided(rationale: "why", on: "date")] choice` markers.
 - Existing decisions still referenced by active State/Patterns → keep
 - 3+ related decisions pointing same direction → extract principle to Patterns, archive individuals
 - Decisions >30 days old referencing nothing active → remove"""
+
+
+def _contradiction_scan_block(uncovered_proven: list[str]) -> str:
+    """The contradiction-scan instruction emitted into the wrap package.
+
+    AM-CONTRASCAN-EMIT (v0.4.3): the methodology-layer contradiction-scan
+    discipline used to live only in an external protocol doc (Levain
+    ``WRAP_PROTOCOL.md``). When an entity retired its local copy of that doc
+    the discipline silently vanished — even though ``prepare_wrap`` still
+    surfaced the ``uncovered_proven_to_check`` DATA. The data shipped without
+    the instruction that consumes it: a downstream-consumer-lost-its-input
+    ``invisible_infrastructure_failure``. Emitting the instruction here, inline
+    with the list, makes the discipline travel WITH the package as agent-facing
+    text that every transport renders (``format_wrap_package_text`` puts
+    ``instructions`` first); no entity can drop it by editing a doc it no
+    longer reads. ``structural_invariants_beat_discipline``.
+
+    The marker contract matches the save-side detector EXACTLY
+    (:func:`~anneal_memory.graduation.extract_contradiction_declarations` /
+    :func:`~anneal_memory.graduation.detect_proven_without_declaration`):
+    ``[contradicts: name_a, name_b]`` or ``[no-contradicts]``. The signal is
+    audit-only — a new Proven without a stance is logged for operator review
+    (the Diogenes contradiction sweep), not refused at save.
+    """
+    proven_list = "\n".join(f"- {name}" for name in uncovered_proven)
+    return f"""### Contradiction Scan (REQUIRED before graduating any new Proven)
+
+Before you graduate a pattern to 2x or 3x (Proven tier) in this wrap, scan it
+against your existing Proven patterns listed below. On the line of EACH pattern
+you newly graduate to Proven tier, declare a contradiction-stance:
+
+- `[contradicts: name_a, name_b]` — the new pattern opposes or supersedes one
+  or more existing Proven (name them), OR
+- `[no-contradicts]` — the new pattern is genuinely orthogonal to all of them.
+
+A new Proven graduation carrying NEITHER marker is logged for operator review
+(it is not refused — the immune system flags it for the contradiction sweep to
+inspect for semantic opposition).
+
+Existing Proven to scan against:
+{proven_list}"""
 
 
 def prepare_wrap(
@@ -834,17 +910,11 @@ def prepare_wrap(
     # Proven (2x/3x) pattern names so the methodology-layer
     # contradiction-scan discipline can require the agent to declare
     # contradiction-stance against each before any new Proven
-    # graduation in this wrap.
-    from .graduation import extract_proven_patterns
-    uncovered_proven = (
-        extract_proven_patterns(
-            existing or "",
-            graduating_headings=graduating_headings(schema),
-        )
-        if existing
-        else []
-    )
-
+    # graduation in this wrap. AM-CONTRASCAN-EMIT (v0.4.3): the list is
+    # computed once inside _build_wrap_package (which also emits the scan
+    # INSTRUCTION from it) — read it back from the package so the data
+    # the caller inspects and the instruction the agent reads can never
+    # drift apart.
     return PrepareWrapResult(
         status="ready",
         message=f"Ready to compress {len(episodes)} episode(s).",
@@ -852,7 +922,7 @@ def prepare_wrap(
         package=package,
         assoc_context=assoc_context,
         wrap_token=wrap_token,
-        uncovered_proven_to_check=uncovered_proven,
+        uncovered_proven_to_check=package["uncovered_proven"],
     )
 
 

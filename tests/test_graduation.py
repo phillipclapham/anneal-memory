@@ -1158,6 +1158,189 @@ After.
         assert result.cross_session_collisions[0].name == "acid_compliance_over_speed"
 
 
+class TestBulletlessGroupedPatterns:
+    """AM-HISTUPSERT-BULLET (v0.4.5): the leading ``- `` bullet on a pattern
+    line is OPTIONAL. An entity that groups its patterns under header lines
+    with *indented, bullet-less* operator-named members (flow's
+    ``{{topic: ...}}`` convention) was matched by _GRADUATION_RE (the
+    demoter, bullet-agnostic) but NOT by _NAMED_PATTERN_RE (the per-name
+    immune system) — so its patterns were demoted yet never protected and
+    pattern_history stayed empty (0 rows / 20+ wraps; an
+    ``invisible_infrastructure_failure``). These tests pin the dash-optional
+    behavior so the two halves stay symmetric. The single-token
+    ``name | Nx`` shape — NOT the dash — remains the false-positive guard."""
+
+    def _grouped_continuity(self) -> str:
+        """A continuity in flow's real shape: a ``{{topic — desc:}}`` group
+        header with indented, bullet-less operator-named members."""
+        return """## State
+.
+## Patterns
+
+{{partnership & verification — the load-bearing set:
+  verify_or_surface_before_acting | 3x (2026-05-21) [evidence: abc12345 "x"]
+  tool_output_can_be_fabricated | 2x (2026-05-21) [evidence: def67890 "y"]
+}}
+
+{{memory architecture:
+  tasks_are_not_memory | 1x (2026-05-21)
+}}
+## Context
+.
+"""
+
+    def test_bulletless_grouped_members_match(self):
+        """The operator-named members inside a {{group}} are extracted even
+        with no leading dash — this is the core fix."""
+        result = extract_pattern_names(self._grouped_continuity())
+        assert result == {
+            "verify_or_surface_before_acting": 3,
+            "tool_output_can_be_fabricated": 2,
+            "tasks_are_not_memory": 1,
+        }
+
+    def test_group_header_line_is_not_a_pattern(self):
+        """The ``{{topic ...:}}`` header lines must NOT be mistaken for
+        patterns — they start with ``{``, not an operator name."""
+        result = extract_pattern_names(self._grouped_continuity())
+        # No spurious key from a header line.
+        assert all(not k.startswith("{") for k in result)
+        assert "partnership" not in result
+        assert "memory" not in result
+
+    def test_bulletless_flowscript_marker(self):
+        """A FlowScript marker prefix with no dash (``  ! name | Nx``) still
+        matches — marker is optional AND dash is optional, independently."""
+        text = """## Patterns
+  ! urgent_pattern | 2x (2026-05-21) [evidence: abc12345 "x"]
+  ? open_pattern | 1x (2026-05-21)
+"""
+        assert extract_pattern_names(text) == {
+            "urgent_pattern": 2,
+            "open_pattern": 1,
+        }
+
+    def test_mixed_dash_and_bulletless_in_one_section(self):
+        """Dash-bulleted (canonical) and bullet-less (grouped) lines coexist
+        in the same section — both are recognized."""
+        text = """## Patterns
+- dash_bulleted_pattern | 2x (2026-05-21) [evidence: abc12345 "x"]
+  bulletless_pattern | 3x (2026-05-21) [evidence: def67890 "y"]
+"""
+        assert extract_pattern_names(text) == {
+            "dash_bulleted_pattern": 2,
+            "bulletless_pattern": 3,
+        }
+
+    def test_bulletless_multiword_prose_still_excluded(self):
+        """A bullet-less prose line with a spaced phrase before ``| Nx`` does
+        NOT match — the single-token name guard holds without the dash."""
+        text = """## Patterns
+  some prose sentence with a | 2x marker buried in it
+  thought: freeform note | 3x (2026-05-21)
+  legit_pattern | 1x (2026-05-21)
+"""
+        # Only the operator-named line matches; prose and thought: do not.
+        assert extract_pattern_names(text) == {"legit_pattern": 1}
+
+    def test_dash_bulleted_canonical_form_still_matches(self):
+        """Regression guard: making the dash optional must not break the
+        canonical dash-bulleted format the template still teaches first."""
+        text = """## Patterns
+- canonical_pattern | 2x (2026-05-21) [evidence: abc12345 "x"]
+"""
+        assert extract_pattern_names(text) == {"canonical_pattern": 2}
+
+    def test_column0_single_word_prose_excluded(self):
+        """M1 (L1 review): dash-optional must NOT let a column-0 single
+        capitalized prose word + `| Nx` become a phantom pattern. The
+        explicit signal (dash / marker / indentation) — not the operator-name
+        token alone — is the guard against column-0 prose. Without it,
+        `Throughput | 3x` and `Total | 2x` summary/metadata lines would be
+        extracted as phantom graduated patterns and feed false omission
+        signals downstream."""
+        text = """## Patterns
+Throughput | 3x when batched is higher
+Total | 2x summary metadata line
+  indented_member | 1x (2026-05-21)
+"""
+        # Only the indented member is a pattern; column-0 prose words are not.
+        assert extract_pattern_names(text) == {"indented_member": 1}
+
+    def test_cross_session_check_fires_on_bulletless_member(self):
+        """validate_graduations' cross-session sycophancy gate must fire on a
+        bullet-less grouped member — before the fix, name_match was None so
+        the gate silently skipped flow's entire pattern set."""
+        text = """## State
+.
+## Patterns
+
+{{database:
+  acid_compliance_over_speed | 2x (2026-05-21) [evidence: abc12345 "PostgreSQL chosen for ACID guarantees"]
+}}
+## Context
+.
+"""
+        prior_explanation = "PostgreSQL deployed for strong ACID guarantees on reads"
+
+        def lookup(name):
+            if name == "acid_compliance_over_speed":
+                return {
+                    "max_level_reached": 2,
+                    "explanation_corpus": prior_explanation,
+                    "last_explanation": prior_explanation,
+                    "last_seen_at": "2026-05-20T00:00:00Z",
+                    "last_wrap_id": None,
+                }
+            return None
+
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-21",
+            node_content_map={"abc12345": "PostgreSQL chosen for ACID compliance"},
+            pattern_history_lookup=lookup,
+        )
+        # Shared meaningful words postgresql/acid/guarantees ≥3 → demote.
+        assert result.demoted == 1
+        assert "(cross-session-overlap)" in result.text
+        assert len(result.cross_session_collisions) == 1
+        assert result.cross_session_collisions[0].name == "acid_compliance_over_speed"
+
+    def test_omission_audit_fires_on_bulletless(self):
+        """detect_pattern_omissions surfaces a dropped Proven pattern when
+        both prior and new are bullet-less grouped format."""
+        prior = self._grouped_continuity()
+        new = """## State
+.
+## Patterns
+
+{{partnership & verification — the load-bearing set:
+  verify_or_surface_before_acting | 3x (2026-05-21) [evidence: abc12345 "x"]
+}}
+## Context
+.
+"""
+        omissions = detect_pattern_omissions(prior, new, min_level=2)
+        # tool_output_can_be_fabricated was 2x in prior, absent in new.
+        assert [op.name for op in omissions] == ["tool_output_can_be_fabricated"]
+        assert omissions[0].prior_level == 2
+
+    def test_anti_patterns_bulletless_members_still_rejected(self):
+        """The section guard (not the dash) excludes ``## Anti-Patterns`` —
+        bullet-less members there must still be skipped after the fix."""
+        text = """## Patterns
+  real_pattern | 2x (2026-05-21) [evidence: abc12345 "x"]
+## Anti-Patterns
+  avoid_this_pattern | 3x (2026-05-21) [evidence: bad11111 "x"]
+## Context
+.
+"""
+        result = extract_pattern_names(text)
+        assert result == {"real_pattern": 2}
+        assert "avoid_this_pattern" not in result
+
+
 class TestAntiPatternsSectionRejection:
     """v0.3.2 fix: ``## Anti-Patterns`` (and other ``pattern``-substring
     section names) must NOT be parsed as the graduated-patterns

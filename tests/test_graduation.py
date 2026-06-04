@@ -6,6 +6,7 @@ from anneal_memory.graduation import (
     CrossSessionCollision,
     GraduationResult,
     OmittedPattern,
+    _NAMED_PATTERN_RE,
     _meaningful_word_overlap,
     check_explanation_overlap,
     detect_citation_gaming,
@@ -1266,6 +1267,42 @@ Total | 2x summary metadata line
 """
         # Only the indented member is a pattern; column-0 prose words are not.
         assert extract_pattern_names(text) == {"indented_member": 1}
+
+    def test_column0_flowscript_marker_no_dash_no_indent_matches(self):
+        """F2 (complement L1 verify pass): branch (c) — the zero-width
+        lookahead admitting a FlowScript marker at column 0 with NO dash and
+        NO indentation — is the trickiest new grammar piece. Pin it directly
+        so a future "simplify the alternation" edit that drops branch (c)
+        cannot pass the suite silently. Every other marker test uses a dash
+        (branch a) or indentation (branch b)."""
+        text = """## Patterns
+! urgent_pattern | 2x (2026-05-21) [evidence: abc12345 "x"]
+? open_pattern | 1x (2026-05-21)
+* starred_pattern | 3x (2026-05-21) [evidence: def67890 "y"]
+✓ done_pattern | 2x (2026-05-21) [evidence: aaa11111 "z"]
+"""
+        assert extract_pattern_names(text) == {
+            "urgent_pattern": 2,
+            "open_pattern": 1,
+            "starred_pattern": 3,
+            "done_pattern": 2,
+        }
+        # Direct on the regex: a column-0 marker is the ONLY branch-(c) path.
+        assert _NAMED_PATTERN_RE.match("! urgent | 2x") is not None
+
+    def test_raw_newline_is_not_indentation(self):
+        """F3 (complement L1 verify pass): the indentation branch uses
+        horizontal whitespace `[ \\t]`, NOT `\\s` — so a raw leading newline
+        cannot count as "indentation" if the helper is ever reused on raw
+        multi-line text (all current callers split on "\\n" first, but the
+        guard should survive a future caller that doesn't). A revert to `\\s`
+        — a plausible "normalize whitespace classes" cleanup — would silently
+        re-open the footgun; this pins it."""
+        assert _NAMED_PATTERN_RE.match("\nFoo | 2x") is None
+        assert _NAMED_PATTERN_RE.match("\rFoo | 2x") is None
+        # but real horizontal indentation still matches
+        assert _NAMED_PATTERN_RE.match("  Foo | 2x") is not None
+        assert _NAMED_PATTERN_RE.match("\tFoo | 2x") is not None
 
     def test_cross_session_check_fires_on_bulletless_member(self):
         """validate_graduations' cross-session sycophancy gate must fire on a

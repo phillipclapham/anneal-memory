@@ -871,6 +871,12 @@ class TestCrossSessionGraduationCheck:
             valid_ids={"abc12345"},
             today="2026-05-21",
             pattern_history_lookup=self._stub_lookup(alpha=prior),
+            # Isolate the ungrounded-demotion mechanic: the stub returns a warm
+            # at-peak (2x/max=2) history, which AM-CARRYFORWARD (v0.4.6) would
+            # otherwise HOLD instead of demote. Disable it here so this test
+            # keeps verifying the ungrounded-path demotion + marker; the hold
+            # behavior has dedicated coverage in TestCarryforward.
+            carryforward_cold_days=None,
         )
         assert result.validated == 0
         assert result.demoted == 1
@@ -990,6 +996,12 @@ class TestCrossSessionGraduationCheck:
             today="2026-05-21",
             node_content_map=node_content,
             pattern_history_lookup=self._stub_lookup(alpha=prior),
+            # Isolate the demoted-grounding LINK-keeping behavior: the stub's
+            # warm at-peak history would otherwise let AM-CARRYFORWARD (v0.4.6)
+            # HOLD the line instead of demoting it. Disable it so the test keeps
+            # verifying that the co-citation link forms on the demoted path
+            # (AM-QUOTEFOOTGUN decouple). TestCarryforward covers the hold path.
+            carryforward_cold_days=None,
         )
         assert result.validated == 0
         assert result.demoted == 1
@@ -1999,3 +2011,348 @@ class TestV033NormalizeOrderOfOpsRegression:
             assert _normalize_explanation_for_dedup(v) == canonical, (
                 f"Variant {v!r} did not normalize to canonical {canonical!r}"
             )
+
+
+class TestCarryforward:
+    """AM-CARRYFORWARD (v0.4.6): on the ungrounded-citation demotion path, a
+    pattern at/below its earned high-water mark AND grounded recently (warm)
+    is HELD at its level instead of ratcheting down. Cold / never-earned /
+    no-history / disabled all fall through to the pre-0.4.6 demotion. The
+    (cross-session-overlap) immune path is NEVER carried forward."""
+
+    PATTERNS = "## Patterns"
+
+    def _lookup(self, max_level, last_seen):
+        def _l(name):
+            if name == "alpha":
+                return {
+                    "max_level_reached": max_level,
+                    "last_seen_at": last_seen,
+                    "explanation_corpus": "",
+                    "last_explanation": "",
+                    "last_wrap_id": None,
+                }
+            return None
+        return _l
+
+    def _text(self, level):
+        return (
+            "## State\n.\n## Patterns\n"
+            f'- alpha | {level}x (2026-06-04) [evidence: deadbeef "thin overlap fails to ground"]\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+
+    def _line(self, result):
+        return next(l for l in result.text.splitlines() if l.startswith("- alpha"))
+
+    def test_warm_at_peak_held_not_demoted(self):
+        r = validate_graduations(
+            text=self._text(3), valid_ids=set(), today="2026-06-04",
+            pattern_history_lookup=self._lookup(3, "2026-06-02T10:00:00Z"),
+        )
+        assert r.demoted == 0
+        assert len(r.carried_forward) == 1
+        cf = r.carried_forward[0]
+        assert (cf.name, cf.held_level, cf.max_level_reached, cf.days_since_grounded) == (
+            "alpha", 3, 3, 2)
+        assert "| 3x (2026-06-04) (carried-forward)" in self._line(r)
+        assert "(ungrounded)" not in r.text
+
+    def test_cold_pattern_ages_out(self):
+        r = validate_graduations(
+            text=self._text(3), valid_ids=set(), today="2026-06-04",
+            pattern_history_lookup=self._lookup(3, "2026-05-01T10:00:00Z"),
+        )
+        assert r.demoted == 1
+        assert r.carried_forward == []
+        assert "| 2x (2026-06-04) (ungrounded)" in self._line(r)
+
+    def test_unearned_level_demotes(self):
+        # Line is 3x but high-water mark is only 2 — never earned 3x.
+        r = validate_graduations(
+            text=self._text(3), valid_ids=set(), today="2026-06-04",
+            pattern_history_lookup=self._lookup(2, "2026-06-03T10:00:00Z"),
+        )
+        assert r.demoted == 1
+        assert r.carried_forward == []
+
+    def test_protects_below_peak(self):
+        # 2x line, earned 3x before, warm -> held (level <= max_level).
+        r = validate_graduations(
+            text=self._text(2), valid_ids=set(), today="2026-06-04",
+            pattern_history_lookup=self._lookup(3, "2026-06-03T10:00:00Z"),
+        )
+        assert r.demoted == 0
+        assert len(r.carried_forward) == 1
+        assert r.carried_forward[0].held_level == 2
+        assert "| 2x (2026-06-04) (carried-forward)" in self._line(r)
+
+    def test_no_history_demotes(self):
+        r = validate_graduations(
+            text=self._text(3), valid_ids=set(), today="2026-06-04",
+            pattern_history_lookup=lambda n: None,
+        )
+        assert r.demoted == 1
+        assert r.carried_forward == []
+
+    def test_disabled_via_none_demotes_even_when_warm(self):
+        r = validate_graduations(
+            text=self._text(3), valid_ids=set(), today="2026-06-04",
+            pattern_history_lookup=self._lookup(3, "2026-06-04T10:00:00Z"),
+            carryforward_cold_days=None,
+        )
+        assert r.demoted == 1
+        assert r.carried_forward == []
+
+    def test_no_lookup_wired_demotes(self):
+        # pattern_history_lookup defaults to None -> carryforward inert.
+        r = validate_graduations(
+            text=self._text(3), valid_ids=set(), today="2026-06-04",
+        )
+        assert r.demoted == 1
+        assert r.carried_forward == []
+
+    def test_cold_boundary_inclusive(self):
+        # Exactly cold_days (7) -> still warm (held); cold_days+1 -> aged out.
+        # The graduation line's date must equal `today` or validate_graduations
+        # skips it as non-today before the carryforward path is reached.
+        def text(line_date):
+            return (
+                "## State\n.\n## Patterns\n"
+                f'- alpha | 3x ({line_date}) [evidence: deadbeef "thin overlap"]\n'
+                "## Decisions\n.\n## Context\n.\n"
+            )
+        held = validate_graduations(
+            text=text("2026-06-08"), valid_ids=set(), today="2026-06-08",
+            pattern_history_lookup=self._lookup(3, "2026-06-01T00:00:00Z"),
+            carryforward_cold_days=7,
+        )
+        assert held.demoted == 0 and len(held.carried_forward) == 1
+        aged = validate_graduations(
+            text=text("2026-06-09"), valid_ids=set(), today="2026-06-09",
+            pattern_history_lookup=self._lookup(3, "2026-06-01T00:00:00Z"),
+            carryforward_cold_days=7,
+        )
+        assert aged.demoted == 1 and aged.carried_forward == []
+
+    def test_far_future_last_seen_rejected_not_warm(self):
+        # A last_seen_at clearly in the future (> 1 day) is untrustworthy
+        # (clock corruption / leaked date) — it must NOT read as maximally
+        # warm. Conservative-demotion: reject (demote), don't protect.
+        r = validate_graduations(
+            text=self._text(3), valid_ids=set(), today="2026-06-04",
+            pattern_history_lookup=self._lookup(3, "2026-06-10T00:00:00Z"),
+        )
+        assert r.demoted == 1
+        assert r.carried_forward == []
+
+    def test_one_day_utc_skew_tolerated(self):
+        # A last_seen_at exactly 1 day "future" is the legitimate UTC-vs-local
+        # skew (store stamps UTC; a real evening grounding reads as tomorrow
+        # UTC against a local `today`). Tolerated as warm → held (codex L3).
+        r = validate_graduations(
+            text=self._text(3), valid_ids=set(), today="2026-06-04",
+            pattern_history_lookup=self._lookup(3, "2026-06-05T01:00:00Z"),
+        )
+        assert r.demoted == 0
+        assert len(r.carried_forward) == 1
+        assert r.carried_forward[0].days_since_grounded == 0  # clamped, not -1
+
+    def test_malformed_two_marker_not_held_with_wrong_name(self):
+        # codex L3 repro: a malformed line whose FIRST marker is demoted
+        # (evidence stripped) and a LATER marker carries the (dead) evidence
+        # validation matches. The line-start name (name_a) is warm at-peak in
+        # history — but carryforward must NOT hold the LATER marker using
+        # name_a's history. The combined regex fails to match (first marker has
+        # no evidence) → decline → demote. Name↔marker binding is airtight.
+        text = (
+            "## State\n.\n## Patterns\n"
+            "- name_a | 3x (2026-06-04) (ungrounded) "
+            'name_b | 3x (2026-06-04) [evidence: deadbeef "later marker"]\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        # name_a is warm at-peak; name_b has no history.
+        def lk(name):
+            if name == "name_a":
+                return {"max_level_reached": 3, "last_seen_at": "2026-06-03T00:00:00Z",
+                        "explanation_corpus": "", "last_explanation": "", "last_wrap_id": None}
+            return None
+        r = validate_graduations(
+            text=text, valid_ids=set(), today="2026-06-04",
+            pattern_history_lookup=lk,
+        )
+        assert r.carried_forward == []  # name_a's history NOT used to hold name_b
+        assert r.demoted == 1
+
+    def test_leading_1x_marker_does_not_cross_bind_to_later_3x(self):
+        # codex L3 re-verify edge: the combined regex is any-level, but
+        # _GRADUATION_RE is 2x/3x-only. A malformed line with a LEADING
+        # 1x-with-evidence marker and a LATER 3x-with-evidence marker: the
+        # combined regex binds name_a's 1x, validation matched name_b's 3x. The
+        # level-alignment guard ("1" != "3") must reject the cross-bind so
+        # name_a's warm-at-peak history is NOT used to hold name_b's 3x marker.
+        text = (
+            "## State\n.\n## Patterns\n"
+            '- name_a | 1x (2026-06-04) [evidence: aaaaaaaa "seed one"] '
+            'name_b | 3x (2026-06-04) [evidence: deadbeef "later marker"]\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        def lk(name):
+            if name == "name_a":
+                return {"max_level_reached": 3, "last_seen_at": "2026-06-03T00:00:00Z",
+                        "explanation_corpus": "", "last_explanation": "", "last_wrap_id": None}
+            return None
+        r = validate_graduations(
+            text=text, valid_ids=set(), today="2026-06-04",
+            pattern_history_lookup=lk,
+        )
+        assert r.carried_forward == []  # no cross-level cross-bind
+        assert r.demoted == 1
+
+    def test_sycophantic_overlap_not_carried(self):
+        # codex L3: a warm at-peak pattern with a DEAD citation whose
+        # explanation reuses prior-session vocabulary (sycophancy signal) must
+        # NOT be carried forward — even though the cross-session immune demote
+        # never runs on the dead-id path. The overlap check inside the
+        # carryforward decision refuses protection → demote.
+        prior = "standup consensus decision quick agreement architectural"
+        text = (
+            "## State\n.\n## Patterns\n"
+            f'- alpha | 3x (2026-06-04) [evidence: deadbeef "{prior}"]\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        def lk(name):
+            if name == "alpha":
+                return {"max_level_reached": 3, "last_seen_at": "2026-06-03T00:00:00Z",
+                        "explanation_corpus": prior, "last_explanation": prior,
+                        "last_wrap_id": None}
+            return None
+        r = validate_graduations(
+            text=text, valid_ids=set(), today="2026-06-04",
+            pattern_history_lookup=lk,
+        )
+        assert r.carried_forward == []  # sycophantic overlap → not protected
+        assert r.demoted == 1
+
+    def test_distinct_vocab_dead_id_still_carried(self):
+        # Control for the sycophancy check: a warm at-peak pattern with a dead
+        # citation but a DISTINCT-vocabulary explanation (no overlap with prior)
+        # is still legitimately held — the overlap guard is precise, not a
+        # blanket dead-id veto.
+        prior = "completely unrelated zebra giraffe elephant antelope"
+        text = (
+            "## State\n.\n## Patterns\n"
+            '- alpha | 3x (2026-06-04) [evidence: deadbeef "governance topology substrate boundary"]\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        def lk(name):
+            if name == "alpha":
+                return {"max_level_reached": 3, "last_seen_at": "2026-06-03T00:00:00Z",
+                        "explanation_corpus": prior, "last_explanation": prior,
+                        "last_wrap_id": None}
+            return None
+        r = validate_graduations(
+            text=text, valid_ids=set(), today="2026-06-04",
+            pattern_history_lookup=lk,
+        )
+        assert r.demoted == 0
+        assert len(r.carried_forward) == 1
+
+    def test_held_line_loses_evidence_tag(self):
+        # Held line must NOT retain an [evidence:] tag — that's the property
+        # that prevents it upserting pattern_history, so warmth decays on its
+        # own and a chronically-failing pattern eventually ages out.
+        r = validate_graduations(
+            text=self._text(3), valid_ids=set(), today="2026-06-04",
+            pattern_history_lookup=self._lookup(3, "2026-06-03T10:00:00Z"),
+        )
+        assert "[evidence:" not in self._line(r)
+
+    def test_cross_session_overlap_never_carried_forward(self):
+        # The sycophancy immune path must demote even for a warm at-peak
+        # pattern: carryforward must not blunt the anti-sycophancy defense.
+        prior = "standup consensus decision quick agreement architectural pattern"
+        text = (
+            "## State\n.\n## Patterns\n"
+            f'- alpha | 3x (2026-06-04) [evidence: abc12345 "{prior}"]\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        node = {"abc12345": prior}
+        def lk(name):
+            if name == "alpha":
+                return {"max_level_reached": 3, "last_seen_at": "2026-06-03T00:00:00Z",
+                        "explanation_corpus": prior, "last_explanation": prior,
+                        "last_wrap_id": None}
+            return None
+        r = validate_graduations(
+            text=text, valid_ids={"abc12345"}, today="2026-06-04",
+            node_content_map=node, pattern_history_lookup=lk,
+        )
+        assert len(r.cross_session_collisions) == 1
+        assert r.demoted == 1
+        assert r.carried_forward == []
+        assert "(cross-session-overlap)" in r.text
+        assert "(carried-forward)" not in r.text
+
+    def test_freeform_unnamed_line_not_carried(self):
+        # A non-operator-named line (no _NAMED_PATTERN_RE match) has no
+        # per-name history to consult -> demotes as before.
+        text = (
+            "## State\n.\n## Patterns\n"
+            'thought: ACID compliance outweighs raw speed | 3x (2026-06-04) [evidence: deadbeef "x"]\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        # Even with a permissive lookup, the unnamed line can't bind a name.
+        r = validate_graduations(
+            text=text, valid_ids=set(), today="2026-06-04",
+            pattern_history_lookup=self._lookup(3, "2026-06-03T10:00:00Z"),
+        )
+        assert r.carried_forward == []
+
+
+class TestPerNameLineBind:
+    """AM-PERNAME-LINEBIND (v0.4.6): per-name functions bind level/date/
+    evidence/declaration to the SAME physical line, not via name-keyed maps."""
+
+    def test_combined_regex_binds_same_marker(self):
+        from anneal_memory.graduation import _NAMED_PATTERN_WITH_EVIDENCE_RE as R
+        m = R.match('  alpha | 3x (2026-06-04) [evidence: a1b2c3d4 "held here"]')
+        assert m is not None
+        assert (m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)) == (
+            "alpha", "3", "2026-06-04", "a1b2c3d4", "held here")
+
+    def test_combined_regex_two_marker_line_no_cross_bind(self):
+        # First marker demoted (no evidence tag) + second marker has evidence.
+        # The anchored combined regex must NOT bind the second marker's
+        # evidence to the first name -> returns None (no upsert, no pollution).
+        from anneal_memory.graduation import _NAMED_PATTERN_WITH_EVIDENCE_RE as R
+        line = "  name_a | 3x (2026-06-04) (ungrounded) name_b | 2x (2026-06-04) [evidence: deadbeef \"second\"]"
+        assert R.match(line) is None
+
+    def test_combined_regex_no_evidence_no_match(self):
+        from anneal_memory.graduation import _NAMED_PATTERN_WITH_EVIDENCE_RE as R
+        assert R.match("- alpha | 2x (2026-06-04)") is None  # 1x/2x without evidence tag
+
+    def test_duplicate_name_declaration_not_false_suppressed(self):
+        # A 3x graduating line with NO contradiction stance, plus a 1x dup of
+        # the SAME name carrying [no-contradicts]. The 1x dup's stance must NOT
+        # satisfy the 3x line's missing declaration (the name-keyed-map bug).
+        from anneal_memory.graduation import detect_proven_without_declaration
+        prior = "## Patterns\n- alpha | 1x (2026-06-01) [evidence: abc12345 \"early\"]\n"
+        new = (
+            "## Patterns\n"
+            '- alpha | 3x (2026-06-04) [evidence: abc12345 "graduated no stance"]\n'
+            "- alpha | 1x (2026-06-04) [no-contradicts]\n"
+        )
+        flagged = detect_proven_without_declaration(prior, new, today="2026-06-04")
+        names = [p.name for p in flagged]
+        assert "alpha" in names
+        assert flagged[0].level == 3  # the graduating line's level, not the dup's
+
+    def test_well_formed_declared_graduation_not_flagged(self):
+        # Control: a single well-formed 3x line WITH a stance is not flagged.
+        from anneal_memory.graduation import detect_proven_without_declaration
+        prior = "## Patterns\n- alpha | 2x (2026-06-01) [evidence: abc12345 \"prior\"]\n"
+        new = '## Patterns\n- alpha | 3x (2026-06-04) [evidence: abc12345 "now"] [no-contradicts]\n'
+        flagged = detect_proven_without_declaration(prior, new, today="2026-06-04")
+        assert [p.name for p in flagged] == []

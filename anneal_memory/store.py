@@ -165,6 +165,7 @@ StoreOperation = Literal[
     # probe #1 sycophantic-accumulation gap)
     "get_pattern_history",
     "upsert_pattern_history",
+    "seed_pattern_max_level",
     "prune",
     "schema_init",
     "batch_commit",
@@ -2349,6 +2350,79 @@ class Store:
                        last_seen_at = excluded.last_seen_at,
                        last_wrap_id = excluded.last_wrap_id""",
                 (pattern_name, level, new_corpus, explanation, ts, wrap_id),
+            )
+            if not self._defer_commit:
+                self._conn.commit()
+
+    def seed_pattern_max_level(
+        self,
+        pattern_name: str,
+        max_level: int,
+        *,
+        last_seen_at: str | None = None,
+    ) -> None:
+        """One-time backfill: seed a pattern's ``max_level_reached`` high-water
+        mark (and recency baseline) WITHOUT touching its ``explanation_corpus``.
+
+        AM-CARRYFORWARD (v0.4.6) consumer surface. ``max_level_reached`` is the
+        signal carryforward consults to decide whether a pattern earned the
+        level it is being held at — but the field only began populating once
+        AM-HISTUPSERT-BULLET (v0.4.5) let bullet-less grouped patterns into the
+        upsert path. Patterns that earned 2x/3x BEFORE that have no recorded
+        high-water mark, so carryforward could not protect them. This method
+        reconstructs the earned level for such patterns (the clean oracles —
+        a git-tracked continuity, a per-pattern audit level — do not exist, so
+        the reconstruction is operator-judgment, seeded once).
+
+        Unlike :meth:`upsert_pattern_history`, this does NOT append to
+        ``explanation_corpus`` or set ``last_explanation`` — so it cannot
+        perturb the cross-session sycophancy check (which compares against the
+        corpus). It only seeds the high-water mark and a recency floor.
+
+        Fully monotonic: BOTH ``max_level_reached`` (``MAX`` clamp) AND
+        ``last_seen_at`` (lexicographic ``MAX`` on fixed-width ISO-8601, which
+        is chronological) are clamped on conflict, so a seed never LOWERS an
+        earned mark NOR regresses a recency already established by a real
+        graduation. This makes the seed a recency FLOOR, not a last-writer
+        overwrite — re-running the backfill, or seeding an explicit OLD date on
+        a pattern that has since ground for real, can never silently cold-out a
+        genuinely-warm pattern (L1+L2 convergent MEDIUM, v0.4.6). On a fresh
+        INSERT the provided/default value is used as-is; the ``MAX`` clamp only
+        governs the ON CONFLICT path. ``last_seen_at`` defaults to now (UTC) —
+        a warm baseline so freshly-seeded patterns are protected initially and
+        age naturally if they keep failing to ground; pass an explicit ISO
+        value to seed a specific recency (used by tests for determinism).
+
+        Args:
+            pattern_name: The pattern identifier (operator-style name).
+            max_level: The earned high-water level to seed (clamped to the
+                stored max, never lowered).
+            last_seen_at: Optional ISO recency floor. MUST be a canonical
+                fixed-width form — ``YYYY-MM-DD`` or ``YYYY-MM-DDTHH:MM:SSZ``
+                (UTC ``Z``, the form the store itself writes) — because the
+                ON CONFLICT clamp is a LEXICOGRAPHIC ``MAX`` that is
+                chronological only for those forms. A timezone-OFFSET string
+                (``...+05:00``) can sort non-chronologically and is NOT
+                supported (codex L3, v0.4.6). Defaults to now (UTC), a warm
+                baseline. Clamped to ``MAX`` against any existing value on
+                conflict (the clamp governs only the conflict path; a fresh
+                INSERT stores the value as-is).
+
+        Raises:
+            StoreDatabaseError: On any database failure.
+        """
+        from datetime import datetime as _dt, timezone as _tz
+        ts = last_seen_at or _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self._db_boundary("seed_pattern_max_level"):
+            self._conn.execute(
+                """INSERT INTO pattern_history
+                       (pattern_name, max_level_reached, explanation_corpus,
+                        last_explanation, last_seen_at, last_wrap_id)
+                   VALUES (?, ?, '', '', ?, NULL)
+                   ON CONFLICT(pattern_name) DO UPDATE SET
+                       max_level_reached = MAX(max_level_reached, excluded.max_level_reached),
+                       last_seen_at = MAX(last_seen_at, excluded.last_seen_at)""",
+                (pattern_name, max_level, ts),
             )
             if not self._defer_commit:
                 self._conn.commit()

@@ -2,6 +2,30 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.6] — 2026-06-04
+
+### Changed — AM-CARRYFORWARD: activation-aware demotion (stop eroding load-bearing patterns by session-domain)
+
+Before 0.4.6, the citation check demoted any `2x`/`3x` `## Patterns` line one level whenever **this wrap's** evidence citation failed to resolve — a thin/paraphrased explanation, or (the common real cause) an id minted in another namespace. That conflated "this session's domain didn't cleanly re-ground the pattern" with "the pattern is fading," so a Proven that simply wasn't the topic this session ratcheted down. Demotion decayed by session-*domain*, not by importance.
+
+- On the ungrounded-citation demotion path **only**, demotion now consults the pattern's `pattern_history`. If the line is **at or below its earned `max_level_reached`** high-water mark **and** was grounded recently (`last_seen_at` within `carryforward_cold_days`, default **7**), the line is **held** at its level instead of demoted — its `[evidence: …]` tag is replaced with `(carried-forward)` and the hold is recorded on `GraduationResult.carried_forward` / `SaveContinuityResult["carried_forward"]`.
+- **The `(cross-session-overlap)` immune demotion is never carried forward.** Carryforward is also refused when the line's explanation sycophantically overlaps the pattern's prior history (the same per-prior overlap test the cross-session gate uses, run here independent of id-resolution so a dead-id sycophantic re-citation can't slip through). Forgetting stays ruthless where it should be; only domain-blind erosion of a genuinely-warm, genuinely-earned pattern is prevented.
+- **Aging is self-driven, no new state:** because a held line loses its evidence tag, it does not upsert `pattern_history`, so `last_seen_at` does not advance. A pattern that keeps failing to ground decays toward cold on its own and eventually ages out — the recency signal *is* the failing-streak signal.
+- A **top-tier (`max_level_reached >= 3`) carry** emits an assisted `"graduate OUT to partnership.md or retire"` `UserWarning` — a permanent truth that keeps needing the hold is surfaced for an explicit decision, never silently lost.
+- Carryforward counts toward AM-WARN: `cited_graduations` includes `len(carried_forward)`, so the dead-namespace alarm (a citation resolving to zero episodes) still fires for held lines — carryforward protects the *level* without masking the root-cause namespace mis-wire.
+- Opt out with `validated_save_continuity(..., carryforward_cold_days=None)`. Inert for any store with no `pattern_history` (the lookup returns `None` → demote as before), so adoption is gated by accumulated data.
+
+New backfill surface `Store.seed_pattern_max_level(name, max_level, *, last_seen_at=None)` seeds a pattern's high-water mark (and a warm recency floor) **without** touching `explanation_corpus`, for reconstructing earned levels of patterns that predate `pattern_history` population (0.4.5). Fully monotonic — both `max_level_reached` and `last_seen_at` are `MAX`-clamped on conflict, so re-running the backfill or seeding an old date can never lower an earned mark or cold-out a genuinely-warm pattern.
+
+### Fixed — AM-PERNAME-LINEBIND: per-name functions bind to the matched line, not a name-keyed map
+
+Two pre-existing malformed-input edges in the per-name immune path (surfaced by codex L3 during the 0.4.5 review, deferred to this pass per the isolate-immune-changes discipline):
+
+- The `pattern_history` upsert matched the name with an anchored `_NAMED_PATTERN_RE` and the evidence separately with an **unanchored** `_PATTERN_LINE_WITH_EVIDENCE_RE.search`. On a line carrying two `name | Nx [evidence:]` markers whose first marker had been demoted (evidence stripped), the unanchored search bound the **second** marker's evidence to the **first** name, polluting `pattern_history`. A new anchored combined regex `_NAMED_PATTERN_WITH_EVIDENCE_RE` captures name + level + date + ids + explanation in one match, making the binding structural. The cross-session sycophancy read and the AM-CARRYFORWARD decision use the same line-bound name, with a level-alignment guard so a leading `1x [evidence:]` marker can't bind its name to a later `2x`/`3x` marker the citation check actually matched.
+- `detect_proven_without_declaration` built three independent name-keyed maps (level / date / contradiction-stance). On a duplicate-name line set, a `1x` dup's `[no-contradicts]` could satisfy a `3x` line's *missing* stance (a false-negative audit). It now builds one per-line record keyed to the highest-level line per name, so level + date + stance stay coherent. Behavior-identical on well-formed unique-name input.
+
+No breaking changes (additive `carried_forward` field on `SaveContinuityResult`; new opt-out kwarg; new store method). Full 4-layer apparatus: L1 session-review + L2 immune-grammar lens (converged on the `seed_pattern_max_level` recency-monotonicity fix + the future-date conservative-rejection), then **L3 codex across three passes** — non-replaceable for this regex/state-machine class — which caught (and confirmed the fixes for) carryforward name cross-binding, dead-id sycophancy reaching the hold, a UTC-vs-local skew false-rejection (resolved with a 1-day tolerance), and a leading-`1x`-marker cross-bind in the first name-binding fix (resolved by the level-alignment guard, proven airtight on the convergence pass). 1094 tests, mypy clean.
+
 ## [0.4.5] — 2026-06-04
 
 ### Fixed — AM-HISTUPSERT-BULLET: the per-name immune system now sees bullet-less grouped patterns

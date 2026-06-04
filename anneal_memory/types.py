@@ -404,6 +404,21 @@ class SaveContinuityResult(TypedDict):
     # when no new Provens graduated this wrap, or all new Provens
     # carried explicit contradiction-stance declarations.
     proven_without_contradicts_declaration: list[dict[str, Any]]
+    # AM-CARRYFORWARD (v0.4.6): patterns HELD at their graduation level this
+    # wrap instead of demoted, because they are at/below their earned
+    # ``max_level_reached`` high-water mark AND were grounded recently (warm).
+    # The pre-0.4.6 demoter ratcheted any 2x/3x line whose THIS-wrap citation
+    # failed to resolve — eroding a load-bearing Proven by session-domain
+    # rather than by importance. Carryforward holds it (level kept, evidence
+    # tag replaced with ``(carried-forward)``) on the ungrounded path only; the
+    # ``(cross-session-overlap)`` immune demotion is never carried forward.
+    # Because a held line does not upsert pattern_history, its warmth decays on
+    # its own — a pattern that keeps failing to ground ages out. Each entry:
+    # ``{"name": str, "held_level": int, "max_level_reached": int,
+    #  "days_since_grounded": int}``. Empty when nothing was held. Top-tier
+    # (3x) carries also emit a "graduate OUT to partnership.md or retire"
+    # ``UserWarning`` (assisted, not silent-loss).
+    carried_forward: list[dict[str, Any]]
     associations_formed: int
     associations_strengthened: int
     associations_decayed: int

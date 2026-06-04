@@ -35,8 +35,7 @@ from .graduation import (
     detect_stale_patterns,
     extract_pattern_names,
     validate_graduations,
-    _NAMED_PATTERN_RE,
-    _PATTERN_LINE_WITH_EVIDENCE_RE,
+    _NAMED_PATTERN_WITH_EVIDENCE_RE,
     _is_graduating_heading,
 )
 from .schema import (
@@ -1010,6 +1009,7 @@ def validated_save_continuity(
     today: str | None = None,
     wrap_token: str | None = None,
     allow_shrink: bool = False,
+    carryforward_cold_days: int | None = 7,
 ) -> SaveContinuityResult:
     """Save continuity with the full validation pipeline.
 
@@ -1330,6 +1330,12 @@ def validated_save_continuity(
         # reuse rather than independent evidence).
         pattern_history_lookup=store.get_pattern_history,
         graduating_headings=grad_headings,
+        # AM-CARRYFORWARD (v0.4.6): hold a load-bearing pattern at its level
+        # instead of ratcheting it down when THIS wrap's citation fails to
+        # resolve, IF it is at/below its earned high-water mark and was grounded
+        # within carryforward_cold_days (warm). Ungrounded path only; the
+        # cross-session immune demotion is untouched. None disables it.
+        carryforward_cold_days=carryforward_cold_days,
     )
 
     # Detect Proven-tier (2x/3x) patterns silently dropped between the
@@ -1523,38 +1529,42 @@ def validated_save_continuity(
                     continue
                 if not in_patterns_section:
                     continue
-                name_match = _NAMED_PATTERN_RE.match(line)
-                if name_match is None:
-                    continue
-                # Use the any-level evidence regex (not the 2x/3x-only
-                # GRADUATION_RE) so 1x mentions with explanations also
-                # anchor cross-session history. Without this, the
-                # first graduation step (1x → 2x) would have no prior
-                # explanation to compare against and the cross-session
-                # defense would always skip on the FIRST graduation —
-                # exactly the step Phase 1b probe #1 exploits.
-                evidence_match = _PATTERN_LINE_WITH_EVIDENCE_RE.search(line)
-                if evidence_match is None:
-                    # No [evidence: ...] tag (1x without explanation,
-                    # or a demoted line) — nothing to anchor the
-                    # cross-session check against.
+                # AM-PERNAME-LINEBIND (v0.4.6): capture the name AND its
+                # evidence tag in ONE anchored match, so the level/date/
+                # explanation are guaranteed to belong to the SAME marker as
+                # the name. The pre-0.4.6 path matched the name with
+                # _NAMED_PATTERN_RE.match (anchored, first marker) and the
+                # evidence separately with _PATTERN_LINE_WITH_EVIDENCE_RE.search
+                # (UNANCHORED) — on a malformed line carrying two
+                # ``name | Nx [evidence:]`` markers whose first marker had been
+                # demoted (evidence tag stripped), the unanchored search bound
+                # the SECOND marker's evidence to the FIRST marker's name,
+                # polluting pattern_history. The combined regex matches the
+                # any-level evidence form (not the 2x/3x-only GRADUATION_RE) so
+                # 1x mentions with explanations still anchor cross-session
+                # history (the 1x → 2x first-graduation step Phase 1b probe #1
+                # exploits). A line with no ``[evidence:]`` simply doesn't match
+                # (1x without explanation, or a demoted line) — nothing to
+                # anchor against — preserving the prior skip.
+                ev_match = _NAMED_PATTERN_WITH_EVIDENCE_RE.match(line)
+                if ev_match is None:
                     continue
                 # Today-only gate (Codex MEDIUM v0.3.2): only upsert
                 # for lines authored this wrap. Carried-forward lines
                 # with non-today dates are skipped to keep the
                 # cross-session corpus authoritative.
-                line_date = evidence_match.group(2)
+                line_date = ev_match.group(3)
                 if line_date != today_str:
                     continue
-                explanation = evidence_match.group(4)
+                explanation = ev_match.group(5)
                 if not explanation:
                     continue
                 try:
-                    pattern_level = int(name_match.group(2))
+                    pattern_level = int(ev_match.group(2))
                 except ValueError:
                     continue
                 store.upsert_pattern_history(
-                    pattern_name=name_match.group(1),
+                    pattern_name=ev_match.group(1),
                     level=pattern_level,
                     explanation=explanation,
                     wrap_id=None,
@@ -1768,6 +1778,19 @@ def validated_save_continuity(
         {"name": p.name, "level": p.level}
         for p in proven_without_declaration
     ]
+    # AM-CARRYFORWARD (v0.4.6): patterns HELD at their level this wrap instead
+    # of demoted (at/below their earned high-water mark and warm). Surfaced as
+    # an audit signal so operators/flow can see what the domain-blind demoter
+    # would otherwise have eroded.
+    carried_forward_payload: list[dict[str, Any]] = [
+        {
+            "name": cf.name,
+            "held_level": cf.held_level,
+            "max_level_reached": cf.max_level_reached,
+            "days_since_grounded": cf.days_since_grounded,
+        }
+        for cf in grad_result.carried_forward
+    ]
 
     # AM-WARN (v0.4.2): detect the dead-Hebbian-graph mis-wire. Two structural
     # signals, both false-positive-free — a healthy wrap that simply had nothing
@@ -1779,7 +1802,21 @@ def validated_save_continuity(
     #   (B) co-citation pairs WERE available but nothing formed or strengthened
     #       -> the association write path itself is mis-wired.
     association_warning: str | None = None
-    cited_graduations = grad_result.validated + grad_result.demoted
+    # AM-CARRYFORWARD (v0.4.6) interaction: a carried-forward line is a
+    # graduation that carried a citation which failed to resolve this wrap —
+    # held instead of demoted. It MUST count toward cited_graduations or
+    # carryforward would silently MASK AM-WARN Signal A: flow's real
+    # wrong-namespace bug (all citations resolve to zero episodes) demotes
+    # pre-0.4.6 → cited_graduations > 0 → the namespace alarm fires; with
+    # carryforward those same warm at-peak lines are HELD → demoted drops to 0,
+    # and without this term the alarm would go silent (re-creating the very
+    # invisible_infrastructure_failure AM-WARN exists to catch). Carryforward
+    # protects the LEVEL; AM-WARN must still surface the root-cause namespace
+    # mis-wire (AM-IDALIAS territory). any_citation_resolved already accounts
+    # for held lines whose ids DID resolve, so a healthy held line stays silent.
+    cited_graduations = (
+        grad_result.validated + grad_result.demoted + len(grad_result.carried_forward)
+    )
     # Read the GATE-INDEPENDENT resolution signal, NOT any(all_validated_ids):
     # all_validated_ids is suppressed on a cross-session-overlap demote (the
     # immune gate firing on the EXPLANATION, not the ids), so a healthy
@@ -1814,6 +1851,29 @@ def validated_save_continuity(
     if association_warning is not None:
         warnings.warn(association_warning, UserWarning, stacklevel=2)
 
+    # AM-CARRYFORWARD (v0.4.6): assisted "graduate OUT or retire" surface.
+    # A TOP-tier pattern (max_level_reached >= 3) that needed the hold this
+    # wrap is a candidate to either graduate OUT to a stable home (e.g.
+    # partnership.md, where a permanent truth lives without the per-wrap
+    # citation treadmill) or RETIRE — never silently lost. Emitted as a
+    # UserWarning (mirroring AM-WARN) so the signal is loud, not buried in a
+    # return field. Lower-tier carries (2x) are held silently — they are the
+    # normal domain-blind-erosion-fix case, not a graduate-out decision.
+    graduate_out = sorted(
+        {cf.name for cf in grad_result.carried_forward if cf.max_level_reached >= 3}
+    )
+    if graduate_out:
+        warnings.warn(
+            f"{len(graduate_out)} top-tier (3x) pattern(s) were carried forward "
+            f"this wrap (held at level despite an ungrounded citation): "
+            f"{', '.join(graduate_out)}. A permanent truth that keeps needing the "
+            f"hold is a candidate to graduate OUT to a stable home (e.g. "
+            f"partnership.md) or retire — review, don't leave it on the citation "
+            f"treadmill.",
+            UserWarning,
+            stacklevel=2,
+        )
+
     return SaveContinuityResult(
         path=path,
         chars=len(grad_result.text),
@@ -1828,6 +1888,7 @@ def validated_save_continuity(
         omitted_patterns=omitted_patterns_payload,
         cross_session_collisions=cross_session_collisions_payload,
         proven_without_contradicts_declaration=proven_without_declaration_payload,
+        carried_forward=carried_forward_payload,
         associations_formed=assoc_formed,
         associations_strengthened=assoc_strengthened,
         associations_decayed=assoc_decayed,

@@ -13,7 +13,7 @@ Zero dependencies beyond Python stdlib.
 from __future__ import annotations
 
 import re
-from datetime import datetime as _datetime
+from datetime import datetime as _datetime, date as _date
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -126,6 +126,39 @@ _NAMED_PATTERN_RE = re.compile(
     r"(?:(?:!!|!|\?|✓|\*)[ \t]+)?"              # optional FlowScript marker prefix
     r"([A-Za-z][A-Za-z0-9_.\-]*)"               # operator-style identifier (ASCII)
     r"[ \t]*\|[ \t]*(\d+)x"                     # graduation marker
+)
+
+# AM-PERNAME-LINEBIND (v0.4.6): the name AND its evidence tag captured in ONE
+# anchored match, so the level/date/ids/explanation are guaranteed to belong to
+# the SAME marker as the name. The pre-0.4.6 upsert path matched the name with
+# ``_NAMED_PATTERN_RE.match`` (anchored, grabs the FIRST marker) and the
+# evidence with ``_PATTERN_LINE_WITH_EVIDENCE_RE.search`` (UNANCHORED, grabs the
+# first WELL-FORMED ``| Nx (date) [evidence:]`` anywhere on the line). On a
+# malformed line carrying TWO ``name | Nx [evidence:]`` markers, if the first
+# marker had been demoted (``_demote_line`` strips its evidence tag), the
+# unanchored search skipped past the now-tagless first marker and bound the
+# SECOND marker's level/date/explanation to the FIRST marker's name — polluting
+# pattern_history with a mismatched (name, level, explanation) tuple. Capturing
+# both in one anchored regex makes the binding structural (codex L3, 0.4.5 — a
+# pre-existing per-name edge proven on clean main, deferred into this pass).
+# Groups: (1) name, (2) level, (3) date, (4) ids, (5) explanation (optional).
+# The name prefix mirrors _NAMED_PATTERN_RE exactly; the tail mirrors
+# _PATTERN_LINE_WITH_EVIDENCE_RE exactly. A line with no ``[evidence:]`` simply
+# does not match (the upsert path already skips such lines), preserving behavior
+# on every well-formed single-marker line.
+_NAMED_PATTERN_WITH_EVIDENCE_RE = re.compile(
+    r"^(?:"
+    r"[ \t]*-[ \t]+"
+    r"|[ \t]+"
+    r"|(?=(?:!!|!|\?|✓|\*)[ \t])"
+    r")"
+    r"(?:(?:!!|!|\?|✓|\*)[ \t]+)?"
+    r"([A-Za-z][A-Za-z0-9_.\-]*)"               # (1) operator-style identifier
+    r"[ \t]*\|[ \t]*(\d+)x"                     # (2) level
+    r"[ \t]*\((\d{4}-\d{2}-\d{2})\)"            # (3) date
+    r"[ \t]*\[evidence:[ \t]*"
+    r"([a-fA-F0-9][a-fA-F0-9, ]*)"              # (4) cited ids
+    r'(?:[ \t]+"([^"]*)")?[ \t]*\]'             # (5) explanation (optional)
 )
 
 # Matches `[contradicts: name_a, name_b, ...]` annotation on a pattern
@@ -258,6 +291,13 @@ class GraduationResult:
     # 1b probe #1. The graduation in the text was demoted (same
     # mechanic as the ungrounded path) when this list is non-empty.
     cross_session_collisions: list["CrossSessionCollision"] = field(default_factory=list)
+    # AM-CARRYFORWARD (v0.4.6): graduated lines HELD at their level instead of
+    # demoted, because they are at/below their earned high-water mark and were
+    # grounded recently (warm). The ungrounded-citation demotion path only —
+    # the (cross-session-overlap) immune path is never carried forward. Each
+    # entry is a CarriedForward. Empty when nothing was held (no history, cold,
+    # or never earned the level). See CarriedForward for the full mechanism.
+    carried_forward: list["CarriedForward"] = field(default_factory=list)
 
 
 @dataclass
@@ -304,6 +344,42 @@ class CrossSessionCollision:
 
 
 @dataclass
+class CarriedForward:
+    """A graduated pattern HELD at its level instead of demoted, because it
+    is at/below its earned high-water mark AND was grounded recently (warm).
+
+    AM-CARRYFORWARD (v0.4.6). The pre-0.4.6 demoter ratcheted a 2x/3x line
+    down by one level whenever THIS wrap's citation failed to resolve — but a
+    failed citation means "this session's domain did not cleanly re-ground the
+    pattern," NOT "the pattern is fading." A load-bearing Proven decayed by
+    session-domain rather than by importance (``decays_by_session_domain_not_importance``).
+
+    Carryforward consults the pattern's ``pattern_history``: if the line is at
+    or below its ``max_level_reached`` (it genuinely earned this level before)
+    AND its last successful grounding (``last_seen_at``) is within
+    ``carryforward_cold_days``, the line HOLDS — its level is kept and its
+    ``[evidence:]`` tag is replaced with ``(carried-forward)``. Because a held
+    line loses its evidence tag, it does NOT upsert pattern_history this wrap,
+    so ``last_seen_at`` does not advance: a pattern that keeps failing to ground
+    decays toward cold on its own and eventually ages out (the recency signal
+    IS the failing-streak signal — no separate tracking). Scope: the
+    ungrounded-citation path ONLY. The ``(cross-session-overlap)`` immune
+    demotion is never carried forward — that path is the anti-sycophancy
+    defense, and protecting it would blunt it.
+
+    A carried-forward pattern at the TOP graduation tier (max_level_reached
+    >= 3) that keeps needing the hold is a candidate to GRADUATE OUT to a
+    stable home (e.g. partnership.md) or RETIRE — surfaced as an assisted
+    notice on the save result, never silently lost.
+    """
+
+    name: str  # Pattern identifier (operator-style name)
+    held_level: int  # The level the line was held at (NOT demoted from)
+    max_level_reached: int  # The pattern's recorded high-water mark
+    days_since_grounded: int  # Whole days since last_seen_at (recency)
+
+
+@dataclass
 class OmittedPattern:
     """A pattern that was at Proven-tier (2x/3x) in the prior continuity
     but is absent at any level in the new continuity.
@@ -346,6 +422,7 @@ def validate_graduations(
     pattern_history_lookup: "Callable[[str], dict[str, Any] | None] | None" = None,
     cross_session_overlap_threshold: int = 3,
     graduating_headings: frozenset[str] = DEFAULT_GRADUATING,
+    carryforward_cold_days: int | None = 7,
 ) -> GraduationResult:
     """Validate evidence citations on graduated patterns.
 
@@ -418,6 +495,7 @@ def validate_graduations(
     # (see the field docstring on GraduationResult).
     any_citation_resolved = False
     cross_session_collisions: list[CrossSessionCollision] = []
+    carried_forward: list[CarriedForward] = []
 
     for i, line in enumerate(lines):
         # Track section boundaries
@@ -505,8 +583,25 @@ def validate_graduations(
             cross_session_overlap_words: list[str] = []
             prior_explanation_for_check = ""
             if ids_valid and pattern_history_lookup is not None and explanation:
-                name_match = _NAMED_PATTERN_RE.match(line)
-                if name_match is not None:
+                # AM-PERNAME-LINEBIND (codex L3, v0.4.6): bind the name to its
+                # OWN evidence marker (combined regex, anchored), not a
+                # line-anchored _NAMED_PATTERN_RE.match that always returns the
+                # FIRST name. On a malformed two-marker line whose first marker
+                # was demoted (stripped) and a LATER marker carries the evidence
+                # validation matched, the old binding attributed the later
+                # marker's explanation to the first name's history. The combined
+                # regex matches only when the line-start marker carries
+                # evidence (= the marker validation matched), so name↔marker
+                # stay aligned; otherwise it returns None and the cross-session
+                # check correctly skips this malformed line.
+                # The trailing level guard (``name_match.group(2) == str(level)``)
+                # is the same level-alignment fix as in _carryforward_decision:
+                # the combined regex is any-level + anchored while _GRADUATION_RE
+                # is 2x/3x-only, so on a malformed line with a leading
+                # ``1x [evidence:]`` and a later 2x/3x marker, the name must bind
+                # to the marker validation actually matched (codex L3 re-verify).
+                name_match = _NAMED_PATTERN_WITH_EVIDENCE_RE.match(line)
+                if name_match is not None and name_match.group(2) == str(level):
                     pattern_name = name_match.group(1)
                     history = pattern_history_lookup(pattern_name)
                     if history:
@@ -605,8 +700,30 @@ def validate_graduations(
                     prior_explanation=prior_explanation_for_check,
                 ))
             else:
-                demoted += 1
-                lines[i] = _demote_line(line, match, level)
+                # AM-CARRYFORWARD (v0.4.6): the ungrounded-citation demotion
+                # path. Before ratcheting the level down, check whether this is
+                # a load-bearing pattern whose grounding merely failed THIS
+                # session — at/below its earned high-water mark AND grounded
+                # recently (warm). If so, HOLD it instead of demoting. Cold or
+                # never-earned-this-level → demote as before. This consults the
+                # SAME pattern_history the cross-session gate uses, but on the
+                # ungrounded path (ids may not resolve), so it does its own
+                # name-bound lookup; the (cross-session-overlap) immune branch
+                # above is deliberately NOT carried forward.
+                held = _carryforward_decision(
+                    line=line,
+                    level=level,
+                    today=today,
+                    pattern_history_lookup=pattern_history_lookup,
+                    carryforward_cold_days=carryforward_cold_days,
+                    cross_session_overlap_threshold=cross_session_overlap_threshold,
+                )
+                if held is not None:
+                    lines[i] = _carryforward_line(line, match, level)
+                    carried_forward.append(held)
+                else:
+                    demoted += 1
+                    lines[i] = _demote_line(line, match, level)
 
             # Decoupled co-citation extraction (AM-QUOTEFOOTGUN). Record the
             # Hebbian co-occurrence for any line citing real episodes,
@@ -675,6 +792,7 @@ def validate_graduations(
         all_validated_ids=all_validated_ids,
         any_citation_resolved=any_citation_resolved,
         cross_session_collisions=cross_session_collisions,
+        carried_forward=carried_forward,
     )
 
 
@@ -1067,48 +1185,77 @@ def detect_proven_without_declaration(
         downstream output.
     """
     prior_levels = extract_pattern_names(prior_text, graduating_headings)
-    new_levels = extract_pattern_names(new_text, graduating_headings)
-    declarations = extract_contradiction_declarations(new_text, graduating_headings)
 
-    # v0.3.3 MEDIUM #4 fix: extract the date per pattern line in new
-    # text so we can gate to today-authored graduations only. Pre-fix
-    # behavior compared prior/new levels with no date awareness — a
-    # restored/imported old-date Proven line absent from prior was
-    # flagged as a "new graduation" needing a declaration even though
-    # the agent didn't author it in this wrap.
-    new_pattern_dates: dict[str, str] = {}
-    if today is not None:
-        in_patterns = False
-        for line in new_text.split("\n"):
-            if line.startswith("## "):
-                in_patterns = _is_graduating_heading(line, graduating_headings)
-                continue
-            if not in_patterns:
-                continue
-            name_match = _NAMED_PATTERN_RE.match(line)
-            if not name_match:
-                continue
-            date_match = _PATTERN_RE.search(line)
-            if date_match is not None:
-                new_pattern_dates[name_match.group(1)] = date_match.group(2)
+    # AM-PERNAME-LINEBIND (v0.4.6): bind level + date + contradiction-stance
+    # to the SAME physical line a name graduated on, instead of three
+    # independent name-keyed maps. Pre-0.4.6 combined extract_pattern_names
+    # (max-level per name), a separate last-wins name->date map, and
+    # extract_contradiction_declarations (name->stance, also last-wins). On a
+    # malformed line set carrying the SAME name twice — e.g. a 3x line with NO
+    # stance plus a 1x dup carrying [no-contradicts] — the name-keyed
+    # declaration map let the 1x dup's stance satisfy the 3x line's MISSING
+    # declaration (a false-negative audit), and the name-keyed date map could
+    # bind the wrong line's date. Scanning per-line and keeping the record of
+    # the HIGHEST-level line per name (first such line on a tie, deterministic)
+    # keeps the (level, date, stance) tuple coherent. On well-formed
+    # unique-name input the recorded level equals extract_pattern_names'
+    # max-level and the date/stance come from that same line, so this is
+    # behavior-identical there. (codex L3, 0.4.5 — a pre-existing per-name
+    # edge proven on clean main, deferred into this pass.)
+    #
+    # v0.3.3 MEDIUM #4 (today-awareness) preserved: when ``today`` is given,
+    # only graduation lines dated today are eligible — a restored/imported
+    # old-date Proven line absent from prior is NOT flagged as a new
+    # graduation needing a declaration.
+    new_records: dict[str, tuple[int, str | None, bool]] = {}
+    in_patterns = False
+    for line in new_text.split("\n"):
+        if line.startswith("## "):
+            in_patterns = _is_graduating_heading(line, graduating_headings)
+            continue
+        if not in_patterns:
+            continue
+        name_match = _NAMED_PATTERN_RE.match(line)
+        if name_match is None:
+            continue
+        try:
+            line_level = int(name_match.group(2))
+        except ValueError:
+            continue
+        name = name_match.group(1)
+        existing = new_records.get(name)
+        if existing is not None and existing[0] >= line_level:
+            # Already recorded a line at this level or higher (first-wins
+            # on ties) — keep the graduating line's coherent record.
+            continue
+        date_match = _PATTERN_RE.search(line)
+        line_date = date_match.group(2) if date_match is not None else None
+        # Contradiction stance on THIS line. Evidence-stripped so an
+        # explanation that quotes "[no-contradicts]"/"[contradicts: X]"
+        # cannot spoof the stance (same guard as
+        # extract_contradiction_declarations, v0.3.3 MEDIUM #3).
+        evidence_stripped = _PATTERN_LINE_WITH_EVIDENCE_RE.sub("", line)
+        has_declaration = bool(
+            _NO_CONTRADICTS_RE.search(evidence_stripped)
+            or _CONTRADICTS_RE.search(evidence_stripped)
+        )
+        new_records[name] = (line_level, line_date, has_declaration)
 
     new_provens: list[ProvenWithoutDeclaration] = []
-    for name, new_level in new_levels.items():
+    for name, (new_level, line_date, has_declaration) in new_records.items():
         if new_level < min_level:
             continue
         prior_level = prior_levels.get(name, 0)
         if prior_level >= new_level:
             # Carried forward at same or higher level — not a new graduation
             continue
-        if today is not None:
-            line_date = new_pattern_dates.get(name)
-            if line_date != today:
-                # Not authored this wrap — restored/imported old-date
-                # line that the discipline cannot require to carry a
-                # contradiction declaration for "today's graduation."
-                continue
-        # This is a new Proven graduation. Check for declaration.
-        if name in declarations:
+        if today is not None and line_date != today:
+            # Not authored this wrap — restored/imported old-date line
+            # that the discipline cannot require to carry a contradiction
+            # declaration for "today's graduation."
+            continue
+        if has_declaration:
+            # The graduating line itself carried an explicit stance.
             continue
         new_provens.append(ProvenWithoutDeclaration(name=name, level=new_level))
 
@@ -1186,5 +1333,165 @@ def _demote_line(
         marker, new_marker
     )
     # Positional replacement — immune to duplicate marker text elsewhere in line
+    start, end = match.span()
+    return line[:start] + new_marker + line[end:]
+
+
+def _days_between(last_seen_at: Any, today: str) -> int | None:
+    """Whole days from ``last_seen_at`` to ``today``.
+
+    Both are ISO; only the leading ``YYYY-MM-DD`` is read, so a full
+    timestamp like ``2026-06-04T14:00:00Z`` (the format
+    ``upsert_pattern_history`` stores) parses fine. Returns ``None`` if
+    either value is missing or unparseable — callers treat ``None`` as
+    "no recency signal" and fall through to demotion (conservative: no
+    recency → no carryforward protection). A negative result
+    (``last_seen_at`` in the future relative to ``today``) is returned
+    as-is — this is an honest date-diff util; the carryforward POLICY
+    (:func:`_carryforward_decision`) decides how to treat negatives (it
+    rejects them as untrustworthy rather than maximally warm).
+    """
+    if not isinstance(last_seen_at, str) or len(last_seen_at) < 10:
+        return None
+    if not isinstance(today, str) or len(today) < 10:
+        return None
+    try:
+        prior = _date.fromisoformat(last_seen_at[:10])
+        now = _date.fromisoformat(today[:10])
+    except ValueError:
+        return None
+    return (now - prior).days
+
+
+def _carryforward_decision(
+    line: str,
+    level: int,
+    today: str,
+    pattern_history_lookup: Callable[[str], dict[str, Any] | None] | None,
+    carryforward_cold_days: int | None,
+    cross_session_overlap_threshold: int = 3,
+) -> CarriedForward | None:
+    """Decide whether an ungrounded 2x/3x line should be HELD instead of
+    demoted (AM-CARRYFORWARD, v0.4.6). Returns a :class:`CarriedForward`
+    to hold the line, or ``None`` to fall through to demotion.
+
+    Holds iff ALL of:
+      * carryforward is enabled (``carryforward_cold_days`` is not None);
+      * a ``pattern_history_lookup`` is wired;
+      * the line's NAME binds to its OWN evidence marker via
+        :data:`_NAMED_PATTERN_WITH_EVIDENCE_RE` (anchored at line start) —
+        anonymous/freeform lines, and malformed multi-marker lines whose
+        line-start marker does NOT carry the evidence (so a LATER marker is
+        what validation matched), return None and demote. Binding the name to
+        its own marker is what stops a held marker from using a DIFFERENT
+        pattern's history on a malformed line (AM-PERNAME-LINEBIND; codex L3).
+      * the line's explanation does NOT sycophantically overlap the pattern's
+        prior history (see below);
+      * the pattern has history with an integer ``max_level_reached``;
+      * ``level <= max_level_reached`` (it genuinely earned this level);
+      * ``last_seen_at`` is within ``carryforward_cold_days`` of today
+        (warm — grounded recently in SOME prior session, independent of
+        this session's failed citation).
+
+    See :class:`CarriedForward` for the full rationale (domain-blind
+    erosion fix; warmth decays on its own because a held line does not
+    upsert pattern_history).
+    """
+    if carryforward_cold_days is None or pattern_history_lookup is None:
+        return None
+    # AM-PERNAME-LINEBIND (codex L3, v0.4.6): bind the name to its OWN evidence
+    # marker. The combined regex is anchored at line start and requires the
+    # line-start marker to carry well-formed evidence — its evidence syntax is
+    # equivalent to _GRADUATION_RE's, so when it matches, its marker IS the
+    # first evidence marker (the one _GRADUATION_RE.search found), guaranteeing
+    # name↔marker alignment. When it returns None, the marker validation
+    # matched is a LATER marker the line-start name does not own (e.g. the
+    # first marker was demoted and stripped) → decline, demote. This replaces
+    # a line-anchored _NAMED_PATTERN_RE.match that always returned the FIRST
+    # name and could cross-bind it to a later marker's level on a malformed
+    # two-marker line.
+    name_match = _NAMED_PATTERN_WITH_EVIDENCE_RE.match(line)
+    if name_match is None:
+        return None
+    # Level-alignment guard (codex L3 re-verify, v0.4.6): the combined regex is
+    # ANY-level + anchored, but validation matched a 2x/3x marker
+    # (_GRADUATION_RE is 2x/3x-only + unanchored). On a malformed line whose
+    # LEADING marker is e.g. ``1x [evidence:]`` and a LATER marker is the 3x
+    # validation matched, the combined regex binds the leading 1x name while
+    # `level` is the later marker's — a cross-bind. Requiring the bound marker's
+    # level to equal the validation `level` closes this: when they match, the
+    # combined regex's (first, line-start) evidence marker IS a 2x/3x marker, so
+    # nothing with evidence precedes it and it is necessarily the same marker
+    # _GRADUATION_RE.search found. Mismatch → the line-start name does not own
+    # the validated marker → decline.
+    if name_match.group(2) != str(level):
+        return None
+    name = name_match.group(1)
+    explanation = name_match.group(5)
+    history = pattern_history_lookup(name)
+    if not history:
+        return None
+    # AM-CARRYFORWARD scope-airtightness (codex L3, v0.4.6): NEVER carry forward
+    # a line whose explanation sycophantically overlaps the pattern's prior
+    # history. The cross-session immune demotion only runs on the ids-RESOLVING
+    # path (AM-XSESSION-LINKGATE keys it on ``ids_valid``), so a warm at-peak
+    # pattern with a DEAD citation and a vocabulary-reused explanation would
+    # otherwise skip the overlap check entirely and be HELD — shielding a
+    # suspected sycophantic re-citation. Run the same per-prior overlap test
+    # here, independent of id resolution: if it trips, decline (the line falls
+    # through to plain ``(ungrounded)`` demotion). This refuses PROTECTION to a
+    # suspicious line; it does not alter the cross-session collision REPORTING
+    # or the immune trigger (no link to suppress on the dead-id path).
+    if explanation:
+        corpus = history.get("explanation_corpus") or history.get("last_explanation") or ""
+        for prior in (e for e in corpus.split("\n") if e.strip()):
+            if len(_meaningful_word_overlap(explanation, prior)) >= cross_session_overlap_threshold:
+                return None
+    max_level = history.get("max_level_reached")
+    if not isinstance(max_level, int):
+        return None
+    if level > max_level:
+        # Never earned this level — don't protect an un-earned rung.
+        return None
+    days = _days_between(history.get("last_seen_at"), today)
+    if days is None or days < -1 or days > carryforward_cold_days:
+        # No recency signal, a clearly-FUTURE last_seen_at (more than one day
+        # ahead = clock corruption / leaked future date — not trustworthy, do
+        # NOT treat as maximally warm), or grounded too long ago (cold) → age
+        # out. The -1 tolerance absorbs the legitimate ≤1-day skew between the
+        # store's UTC ``last_seen_at`` and a local-calendar ``today`` (a real
+        # grounding in US evening hours is stamped "tomorrow UTC"); rejecting
+        # it would false-cold a genuinely-warm pattern (codex L3). Conservative-
+        # demotion otherwise: absent/untrustworthy recency → no protection.
+        return None
+    return CarriedForward(
+        name=name,
+        held_level=level,
+        max_level_reached=max_level,
+        # Clamp the reported recency to >= 0: the decision tolerates a -1 UTC/
+        # local skew, but a negative "days since grounded" would read oddly in
+        # the audit surface.
+        days_since_grounded=max(0, days),
+    )
+
+
+def _carryforward_line(line: str, match: re.Match, level: int) -> str:
+    """Hold a graduated line at its level (AM-CARRYFORWARD), replacing the
+    ``[evidence: ...]`` tag with a ``(carried-forward)`` marker.
+
+    Mirrors :func:`_demote_line`'s positional rewrite but does NOT
+    decrement the level. Stripping the evidence tag is intentional: a
+    carried-forward line does not match the upsert path's
+    evidence-bearing regex, so it does not upsert pattern_history and
+    ``last_seen_at`` does not advance — the warmth that protected it
+    decays naturally, and a pattern that keeps failing to ground ages
+    out on its own (the recency signal IS the failing-streak signal).
+    """
+    old_marker = match.group(0)
+    new_marker = re.sub(
+        r'\[evidence:\s*[a-fA-F0-9][a-fA-F0-9, ]*(?:\s+"[^"]*")?\s*\]',
+        "(carried-forward)",
+        old_marker,
+    )
     start, end = match.span()
     return line[:start] + new_marker + line[end:]

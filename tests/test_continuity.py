@@ -21,6 +21,7 @@ from anneal_memory.continuity import (
     measure_sections,
     prepare_wrap,
     validate_structure,
+    validated_save_continuity,
 )
 from anneal_memory.store import Store, StoreError
 from anneal_memory.types import Episode, EpisodeType
@@ -408,6 +409,10 @@ class TestTypedDictReturnShapes:
                 # operator-review (Diogenes) to know which new Provens
                 # need semantic-opposition inspection.
                 "proven_without_contradicts_declaration",
+                # AM-CARRYFORWARD (v0.4.6): graduated patterns HELD at level
+                # this wrap instead of demoted (at/below earned high-water mark
+                # AND warm). Audit signal; empty when nothing was held.
+                "carried_forward",
                 "associations_formed",
                 "associations_strengthened", "associations_decayed",
                 # AM-WARN (v0.4.2): dead-Hebbian-graph mis-wire warning
@@ -4714,5 +4719,211 @@ class TestBulletlessUpsertIntegration:
             # The protective half fired for flow's format (was dead pre-fix).
             assert r2["demoted"] >= 1
             assert r2["graduations_validated"] == 0
+        finally:
+            store.close()
+
+
+class TestCarryforwardEndToEnd:
+    """AM-CARRYFORWARD (v0.4.6) through the real save pipeline: a seeded warm
+    at-peak pattern with an ungrounded citation is HELD, surfaced on the
+    result, and — critically — does NOT mask the AM-WARN namespace alarm."""
+
+    def _save(self, tmp_path, name, db="cf.db", cited="deadbeef", expl="thin overlap"):
+        store = Store(str(tmp_path / db), project_name="CF")
+        store.record("An observation", EpisodeType.OBSERVATION)
+        # Seed a warm (today) high-water mark of 3 for `name`.
+        store.seed_pattern_max_level(name, 3, last_seen_at="2026-06-04T00:00:00Z")
+        text = (
+            "# CF — Memory (v1)\n\n## State\nActive.\n\n## Patterns\n"
+            f'- {name} | 3x (2026-06-05) [evidence: {cited} "{expl}"]\n\n'
+            "## Decisions\nNone.\n\n## Context\nFirst session.\n"
+        )
+        prepare_wrap(store)
+        return store, text
+
+    def test_seeded_warm_pattern_held_through_save(self, tmp_path):
+        store, text = self._save(tmp_path, "alpha")
+        try:
+            with pytest.warns(UserWarning):  # graduate-out notice (top tier)
+                result = validated_save_continuity(store, text, today="2026-06-05")
+            assert result["demoted"] == 0
+            assert len(result["carried_forward"]) == 1
+            cf = result["carried_forward"][0]
+            assert cf["name"] == "alpha" and cf["held_level"] == 3
+            assert cf["max_level_reached"] == 3
+            with open(result["path"]) as f:
+                saved = f.read()
+            assert "alpha | 3x (2026-06-05) (carried-forward)" in saved
+            assert "(ungrounded)" not in saved
+        finally:
+            store.close()
+
+    def test_carryforward_does_not_mask_am_warn_namespace(self, tmp_path):
+        # The interaction guard: the cited id resolves to ZERO episodes (wrong
+        # namespace). Pre-0.4.6 the line would demote -> AM-WARN Signal A fires.
+        # With carryforward the warm at-peak line is HELD instead — AM-WARN must
+        # STILL fire (carryforward protects the level, not the root-cause bug).
+        store, text = self._save(tmp_path, "alpha", db="cf_warn.db", cited="badc0ffe")
+        try:
+            with pytest.warns(UserWarning):
+                result = validated_save_continuity(store, text, today="2026-06-05")
+            assert len(result["carried_forward"]) == 1  # held, not demoted
+            assert result["demoted"] == 0
+            # The namespace alarm survives the hold.
+            assert result["association_warning"] is not None
+            assert "ZERO episodes" in result["association_warning"]
+        finally:
+            store.close()
+
+    def test_graduate_out_warning_for_top_tier_carry(self, tmp_path):
+        store, text = self._save(tmp_path, "alpha", db="cf_grad.db")
+        try:
+            with pytest.warns(UserWarning, match="graduate OUT"):
+                validated_save_continuity(store, text, today="2026-06-05")
+        finally:
+            store.close()
+
+    def test_held_line_does_not_advance_last_seen(self, tmp_path):
+        # The aging mechanism: a held line loses its evidence tag so it does NOT
+        # upsert pattern_history -> last_seen_at stays put -> warmth decays on
+        # its own, and a chronically-failing pattern eventually goes cold.
+        store, text = self._save(tmp_path, "alpha", db="cf_age.db")
+        try:
+            with pytest.warns(UserWarning):
+                validated_save_continuity(store, text, today="2026-06-05")
+            hist = store.get_pattern_history("alpha")
+            assert hist is not None
+            assert hist["last_seen_at"] == "2026-06-04T00:00:00Z"  # unchanged
+            assert hist["max_level_reached"] == 3
+        finally:
+            store.close()
+
+    def test_disabled_carryforward_demotes_through_save(self, tmp_path):
+        store, text = self._save(tmp_path, "alpha", db="cf_off.db")
+        try:
+            result = validated_save_continuity(
+                store, text, today="2026-06-05", carryforward_cold_days=None
+            )
+            assert result["carried_forward"] == []
+            assert result["demoted"] == 1
+        finally:
+            store.close()
+
+    def test_healthy_hold_resolving_id_keeps_am_warn_silent(self, tmp_path):
+        # Complement of the does-not-mask test: a held line whose id RESOLVES
+        # to a real episode (but whose explanation is too thin to ground) is a
+        # HEALTHY hold — the namespace is correct, so AM-WARN Signal A must stay
+        # SILENT (association_warning is None) even though the line was held.
+        store = Store(str(tmp_path / "cf_healthy.db"), project_name="CF")
+        try:
+            ep = store.record("the cat sat quietly on a warm rug", EpisodeType.OBSERVATION)
+            real_id = ep.id[:8].lower()
+            store.seed_pattern_max_level("alpha", 3, last_seen_at="2026-06-04T00:00:00Z")
+            text = (
+                "# CF — Memory (v1)\n\n## State\nActive.\n\n## Patterns\n"
+                f'- alpha | 3x (2026-06-05) [evidence: {real_id} "governance topology substrate boundary"]\n\n'
+                "## Decisions\nNone.\n\n## Context\nFirst session.\n"
+            )
+            prepare_wrap(store)
+            with pytest.warns(UserWarning, match="graduate OUT"):
+                result = validated_save_continuity(store, text, today="2026-06-05")
+            assert len(result["carried_forward"]) == 1  # held (thin explanation)
+            assert result["demoted"] == 0
+            # The id resolved → namespace is healthy → no dead-graph alarm.
+            assert result["association_warning"] is None
+        finally:
+            store.close()
+
+
+class TestSeedPatternMaxLevel:
+    """AM-CARRYFORWARD (v0.4.6) backfill surface: seed max_level_reached
+    without perturbing the cross-session explanation_corpus."""
+
+    def test_seed_sets_max_level(self, tmp_path):
+        store = Store(str(tmp_path / "seed.db"), project_name="Seed")
+        try:
+            store.seed_pattern_max_level("alpha", 3)
+            hist = store.get_pattern_history("alpha")
+            assert hist is not None and hist["max_level_reached"] == 3
+        finally:
+            store.close()
+
+    def test_seed_is_monotonic(self, tmp_path):
+        store = Store(str(tmp_path / "seed_mono.db"), project_name="Seed")
+        try:
+            store.seed_pattern_max_level("alpha", 3)
+            store.seed_pattern_max_level("alpha", 2)  # must NOT lower
+            assert store.get_pattern_history("alpha")["max_level_reached"] == 3
+        finally:
+            store.close()
+
+    def test_seed_does_not_pollute_corpus(self, tmp_path):
+        store = Store(str(tmp_path / "seed_corpus.db"), project_name="Seed")
+        try:
+            store.seed_pattern_max_level("alpha", 3)
+            hist = store.get_pattern_history("alpha")
+            assert hist["explanation_corpus"] == ""
+            assert hist["last_explanation"] == ""
+        finally:
+            store.close()
+
+    def test_seed_custom_last_seen(self, tmp_path):
+        store = Store(str(tmp_path / "seed_ls.db"), project_name="Seed")
+        try:
+            store.seed_pattern_max_level("alpha", 3, last_seen_at="2026-01-01T00:00:00Z")
+            assert store.get_pattern_history("alpha")["last_seen_at"] == "2026-01-01T00:00:00Z"
+        finally:
+            store.close()
+
+    def test_seed_recency_is_monotonic_floor(self, tmp_path):
+        # L1+L2 convergent MEDIUM: a real grounding establishes a recent
+        # last_seen_at; a later backfill with an OLD date must NOT regress it
+        # (which would silently cold-out a genuinely-warm pattern). last_seen_at
+        # is MAX-clamped, never lowered.
+        store = Store(str(tmp_path / "seed_floor.db"), project_name="Seed")
+        try:
+            store.upsert_pattern_history("alpha", 2, "real recent grounding here")
+            real_recency = store.get_pattern_history("alpha")["last_seen_at"]
+            assert real_recency  # a real (now-ish) timestamp
+            # Backfill with an explicit OLD date — must NOT lower recency.
+            store.seed_pattern_max_level("alpha", 3, last_seen_at="2026-01-01T00:00:00Z")
+            hist = store.get_pattern_history("alpha")
+            assert hist["last_seen_at"] == real_recency  # unchanged (floor held)
+            assert hist["max_level_reached"] == 3  # level still advanced
+            # A NEWER seed date DOES advance the floor.
+            store.seed_pattern_max_level("alpha", 3, last_seen_at="2099-01-01T00:00:00Z")
+            assert store.get_pattern_history("alpha")["last_seen_at"] == "2099-01-01T00:00:00Z"
+        finally:
+            store.close()
+
+
+class TestPerNameLineBindEndToEnd:
+    """AM-PERNAME-LINEBIND (v0.4.6) through the save pipeline: a malformed
+    two-marker line whose first marker is demoted must NOT pollute
+    pattern_history by binding the second marker's evidence to the first
+    name."""
+
+    def test_two_marker_line_no_pollution(self, tmp_path):
+        store = Store(str(tmp_path / "linebind.db"), project_name="LB")
+        try:
+            ep = store.record("real grounding episode content here", EpisodeType.OBSERVATION)
+            real_id = ep.id[:8].lower()
+            # name_a cites a non-resolving id (will demote, fresh store = no
+            # history = no carryforward); name_b (NOT at line start) cites the
+            # real episode. Pre-0.4.6 the unanchored evidence search bound
+            # name_b's evidence to name_a -> pollution.
+            text = (
+                "# LB — Memory (v1)\n\n## State\nActive.\n\n## Patterns\n"
+                f'- name_a | 3x (2026-06-05) [evidence: deadbeef "wont resolve"] '
+                f'name_b | 2x (2026-06-05) [evidence: {real_id} "real second"]\n\n'
+                "## Decisions\nNone.\n\n## Context\nFirst session.\n"
+            )
+            prepare_wrap(store)
+            validated_save_continuity(store, text, today="2026-06-05")
+            # name_a must NOT have been upserted with name_b's evidence.
+            hist = store.get_pattern_history("name_a")
+            if hist is not None:
+                assert "real second" not in hist["explanation_corpus"]
+                assert "real second" not in hist["last_explanation"]
         finally:
             store.close()

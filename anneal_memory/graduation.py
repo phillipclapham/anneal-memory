@@ -56,38 +56,76 @@ _PATTERN_LINE_WITH_EVIDENCE_RE = re.compile(
 # Matches a full pattern line in ## Patterns, capturing the pattern name
 # (operator-style identifier following any optional FlowScript marker prefix)
 # and the graduation level. Used by extract_pattern_names() /
-# detect_pattern_omissions() / cross-session history upsert.
+# detect_pattern_omissions() / extract_contradiction_declarations() /
+# detect_proven_without_declaration() / the cross-session history upsert.
 #
 # Grammar:
-#     - [optional FlowScript markers] operator_style_name | Nx
+#     [explicit pattern signal][optional FlowScript markers] operator_style_name | Nx
 #
-# Operator-style names are intentionally narrow — alphanumeric + underscore +
-# period + hyphen, must start with a letter — so arbitrary bullet text in
-# adjacent sections containing ``| Nx`` does not get mistaken for a pattern.
+# The "explicit pattern signal" is ONE of: a ``- `` dash bullet (canonical), a
+# FlowScript marker (``!`` ``!!`` ``?`` ``✓`` ``*``), OR leading INDENTATION
+# (an indented member under a group header). Operator-style names are
+# intentionally narrow — alphanumeric + underscore + period + hyphen, must
+# start with a letter.
 #
-# FlowScript marker prefixes (``!``, ``!!``, ``?``, ``✓``, ``*``) may appear
-# between the bullet and the name; this is the convention flow's continuity
-# uses heavily and is now supported as canonical. Examples that match:
+# AM-HISTUPSERT-BULLET (v0.4.5): the leading ``- `` bullet is OPTIONAL. The
+# per-name immune system (history upsert, cross-session sycophancy gate,
+# omission/contradiction/level extraction) previously required a dash bullet,
+# so an entity that grouped its patterns under header lines with *indented,
+# bullet-less* operator-named members (flow's ``{{topic: ...}}`` convention)
+# matched _GRADUATION_RE (the demoter, bullet-agnostic) but NOT this regex —
+# its patterns were demoted but never protected, and pattern_history stayed
+# empty (0 rows / 20+ wraps; an ``invisible_infrastructure_failure``). Making
+# the dash optional re-symmetrises the two: the same lines the demoter sees
+# now also anchor the per-name defenses.
+#
+# WHY a bullet-less line still needs an explicit signal (dash/marker/indent):
+# without one, a single capitalized prose word at column 0 followed by
+# ``| Nx`` (``Throughput | 3x when batched``, ``Total | 3x``) would be read as
+# a phantom pattern — the operator-name token alone is NOT a sufficient
+# false-positive guard for column-0 prose. Requiring indentation (or a
+# dash/marker) when the dash is absent cleanly separates flow's real grouped
+# members (always indented under a ``{{header}}``) from top-level prose. The
+# residual ambiguity — an INDENTED single-word line that is prose, not a
+# pattern — is irreducible (indentation is exactly what makes a grouped member
+# a member); inside ``## Patterns`` an indented ``name | Nx`` is taken to BE a
+# pattern by convention. (Verified against a live grouped continuity: 15 named
+# members matched, 0 spurious matches on group headers or prose.)
+#
+# FlowScript marker prefixes may appear between the (optional) bullet and the
+# name; this is the convention flow's continuity uses heavily. Examples match:
 #     - pattern_name | 2x (2026-05-21) [evidence: abc12345 "..."]
 #     - !! pattern_name | 3x (2026-05-21) [evidence: abc12345 "..."]
-#     - ? pattern_name | 1x (2026-05-21)
-#     - ✓ pattern_name | 2x (2026-05-21) [evidence: abc12345 "..."]
+#       pattern_name | 1x (2026-05-21)            # INDENTED, bullet-less (grouped)
+#       ✓ pattern_name | 2x (2026-05-21) [evidence: abc12345 "..."]   # indent + marker
+#     ! pattern_name | 1x (2026-05-21)            # column-0 marker (explicit signal)
 #
-# Legacy format that does NOT match (intentional — see Move #1 naming-honesty
-# Round 2, v0.3.2):
+# Lines that do NOT match (intentional):
 #     thought: ACID compliance outweighs raw speed | 2x ...
-#         ↑ no bullet, no operator-style name
-#     {topic: ...}-grouped freeform thoughts
-#         ↑ same — they validate via _GRADUATION_RE but do not anchor the
-#           per-name immune system (Move #2 omission audit, Move #3
-#           cross-session check, Move #4 contradicts registry). Operators
-#           who want the per-name defenses must use the canonical
-#           operator-style name format taught in _marker_reference().
+#         ↑ ``thought`` is followed by ``:`` not ``| Nx`` — no operator name
+#     {topic: ...}                                 # a group HEADER line
+#         ↑ starts with ``{``, not a letter — header lines never carry the
+#           ``name | Nx`` shape, so they are skipped; only members count
+#     some prose sentence with | 2x buried in it
+#         ↑ the multi-word phrase has a space before ``|`` — no single-token name
+#     Throughput | 3x when batched                 # column-0 single-word prose
+#         ↑ no dash, no marker, no indentation — rejected as prose (the
+#           indent/dash/marker signal is what distinguishes it from a member)
+# NOTE: whitespace is matched as HORIZONTAL only (``[ \t]``, not ``\s``). All
+# callers split on "\n" before matching, so a line never contains a newline —
+# but using ``\s`` for the indentation branch (b) would let ``\n`` count as
+# "indentation" if this helper were ever reused on raw multi-line text
+# (``_NAMED_PATTERN_RE.match("\nFoo | 2x")`` would match), crossing logical
+# lines. ``[ \t]`` keeps "indentation" meaning indentation. (codex L3, v0.4.5.)
 _NAMED_PATTERN_RE = re.compile(
-    r"^\s*-\s+"                                  # bullet
-    r"(?:(?:!!|!|\?|✓|\*)\s+)?"                 # optional FlowScript marker prefix
+    r"^(?:"
+    r"[ \t]*-[ \t]+"                            # (a) "- " dash bullet (canonical), any indent
+    r"|[ \t]+"                                  # (b) leading indentation (grouped member)
+    r"|(?=(?:!!|!|\?|✓|\*)[ \t])"               # (c) FlowScript marker at column 0 (zero-width)
+    r")"
+    r"(?:(?:!!|!|\?|✓|\*)[ \t]+)?"              # optional FlowScript marker prefix
     r"([A-Za-z][A-Za-z0-9_.\-]*)"               # operator-style identifier (ASCII)
-    r"\s*\|\s*(\d+)x"                            # graduation marker
+    r"[ \t]*\|[ \t]*(\d+)x"                     # graduation marker
 )
 
 # Matches `[contradicts: name_a, name_b, ...]` annotation on a pattern

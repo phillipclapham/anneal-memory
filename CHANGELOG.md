@@ -2,6 +2,21 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] — 2026-06-04
+
+### Fixed — AM-HISTUPSERT-BULLET: the per-name immune system now sees bullet-less grouped patterns
+
+`_NAMED_PATTERN_RE` — the regex the per-name immune system uses to find pattern lines in `## Patterns` — hard-required a leading `- ` dash bullet. An entity that groups its patterns under `{{topic: ...}}` header lines with **indented, bullet-less** operator-named members matched `_GRADUATION_RE` (the bullet-agnostic demoter) but NOT `_NAMED_PATTERN_RE` (the protector). The result: those patterns were demoted by the citation check yet **never protected** — `pattern_history` stayed empty (0 rows across 20+ wraps in the affected store), so the cross-session anti-sycophancy gate and the monotonic high-water mark never fired, and Proven patterns eroded by session-*domain* instead of importance. Healthy-by-surface, broken-by-structure. The `prepare` instruction even claimed "the immune system does not require any specific grouping syntax," which was false — the matcher silently required dashes.
+
+- The leading `- ` bullet is now **optional**. A bullet-less line must instead carry an explicit pattern signal — a FlowScript marker (`!` `!!` `?` `✓` `*`) **or leading indentation** — followed by the `operator_name | Nx` shape. Indentation is what distinguishes a real grouped member (always indented under a `{{header}}`) from a column-0 prose line like `Throughput | 3x`, which is correctly rejected. The operator-name token alone is *not* a sufficient guard against column-0 prose; the dash/marker/indent signal is. (Verified empirically against a live grouped continuity: 15 named members matched, 0 spurious matches on group headers or prose.)
+- All five `_NAMED_PATTERN_RE` call sites inherit the wider match: the cross-session sycophancy read, `extract_pattern_names`, `extract_contradiction_declarations`, `detect_proven_without_declaration`, and the `pattern_history` upsert. This re-symmetrises the demoter and the protector — the same lines one acts on, the other now anchors.
+- Whitespace in the regex is matched as **horizontal only** (`[ \t]`, not `\s`), so a newline can never count as "indentation" if the helper is reused on raw multi-line text.
+- The `_marker_reference()` instruction is corrected to state the real requirement (grouping is fine, bullet optional, but each line needs the `operator_name | Nx` shape, and a non-pattern note must not be written in that shape).
+
+**Behavior note for grouped-format adopters:** because `detect_proven_without_declaration` now sees grouped Provens, an entity that graduates patterns to Proven tier in bullet-less grouped format will begin emitting the audit signal `proven_without_contradicts_declaration` for any such graduation lacking a `[contradicts: ...]`/`[no-contradicts]` stance. This is the methodology layer (AM-CONTRASCAN-EMIT, v0.4.3) correctly waking up for a format it previously couldn't see — not a regression. Add the contradiction stance `prepare` already instructs.
+
+No breaking changes. The dash-bulleted canonical format is unaffected; `thought:` lines, `{topic: ...}` group headers, multi-word prose, and column-0 single-word prose are all correctly excluded. Full 4-layer apparatus (L1 session-review + L2 immune-grammar lens → M1 column-0-prose false-positive fixed; L3 codex → regex grammar/lookahead/ReDoS clean, one `\n`-as-indent footgun fixed, two pre-existing malformed-input edges in the per-name path documented for a follow-up pass, not bundled here; L4 end-to-end through the real save pipeline). 1058 tests, mypy clean.
+
 ## [0.4.4] — 2026-06-03
 
 ### Added — AM-INITSCHEMA: select the continuity section schema from the CLI

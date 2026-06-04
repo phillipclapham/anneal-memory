@@ -673,8 +673,17 @@ names so the immune system can protect your patterns.
   genuinely distinct words to re-graduate.
 - Patterns at 3x: extract the PRINCIPLE, not the surface observations.
 - Patterns older than 7 days with no new validation → remove (stale).
-- Group related patterns visually with a header line above them; the immune
-  system does not require any specific grouping syntax.
+- Group related patterns visually with a header line above them if you like —
+  grouping is fine and the `- ` bullet is OPTIONAL. Each pattern LINE needs an
+  explicit signal — a `- ` bullet, a FlowScript marker, OR indentation under a
+  group header — followed by the `operator_name | Nx` shape, to be protected. A
+  free-form prose line with no `name | Nx` marker is invisible to the per-name
+  immune system (it can be demoted by the citation check yet is never protected
+  by the cross-session sycophancy gate or the high-water mark). Header lines
+  (e.g. `{{topic: ...}}`) are skipped because they don't carry the `name | Nx`
+  shape. One caution: do NOT write a non-pattern note in the `operator_name | Nx`
+  shape as an INDENTED line under a pattern — any such line in this section is
+  read as a pattern.
 
 **Example:**
 ```

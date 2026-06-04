@@ -4634,3 +4634,85 @@ class TestAmWarn:
         assert result["association_warning"] is not None
         assert "mis-wired" in result["association_warning"]
         assert result["associations_formed"] == 0
+
+
+class TestBulletlessUpsertIntegration:
+    """AM-HISTUPSERT-BULLET (v0.4.5) end-to-end through the real save
+    pipeline. The bug: the pattern_history upsert (continuity.py) and the
+    cross-session sycophancy READ (graduation.py) both gated on a
+    dash-required _NAMED_PATTERN_RE, so an entity grouping its patterns as
+    bullet-less ``{{topic: ...}}`` members (flow) demoted them via the
+    bullet-agnostic _GRADUATION_RE yet NEVER upserted history — 0 rows
+    across 20+ wraps, the protective half dead-by-data. These tests drive
+    the FULL pipeline (prepare_wrap -> validated_save_continuity -> Store)
+    and assert pattern_history is populated and the cross-session defense
+    fires for the grouped, bullet-less format. On clean main both assertions
+    fail (history stays None; the gate never fires)."""
+
+    def test_bulletless_grouped_continuity_seeds_pattern_history(self, tmp_path):
+        from anneal_memory import prepare_wrap, validated_save_continuity
+        store = Store(tmp_path / "bulletless.db", project_name="Bulletless")
+        try:
+            VOCAB = "substrate observation discipline rotation memory"
+            ep = store.record(f"{VOCAB} seeded in the store",
+                              EpisodeType.OBSERVATION)
+            p = prepare_wrap(store)
+            # flow's real shape: a {{group: header}} with an indented,
+            # bullet-less operator-named member.
+            text = (
+                "## State\nactive.\n\n## Patterns\n\n"
+                "{{verification — the grouped set:\n"
+                f'  verify_before_acting | 2x (2026-06-02) [evidence: {ep.id} "{VOCAB}"]\n'
+                "}}\n\n## Decisions\n- d.\n\n## Context\n- c.\n"
+            )
+            r = validated_save_continuity(
+                store, text, today="2026-06-02", wrap_token=p["wrap_token"],
+            )
+            assert r["graduations_validated"] == 1  # validated, not demoted
+            # THE fix: the upsert fired for the bullet-less grouped member.
+            history = store.get_pattern_history("verify_before_acting")
+            assert history is not None
+            assert history["max_level_reached"] == 2
+            assert "substrate" in history["explanation_corpus"]
+        finally:
+            store.close()
+
+    def test_bulletless_cross_session_defense_alive_end_to_end(self, tmp_path):
+        from anneal_memory import prepare_wrap, validated_save_continuity
+        store = Store(tmp_path / "xsession_bulletless.db",
+                      project_name="XSession")
+        try:
+            VOCAB = "standup consensus decision agreement architectural rotation"
+            # Wrap 1: first graduation of a bullet-less member seeds history.
+            ep1 = store.record(f"{VOCAB} observed", EpisodeType.OBSERVATION)
+            p1 = prepare_wrap(store)
+            text1 = (
+                "## State\nactive.\n\n## Patterns\n\n"
+                "{{group:\n"
+                f'  recurring_claim | 2x (2026-06-02) [evidence: {ep1.id} "{VOCAB}"]\n'
+                "}}\n\n## Decisions\n- d.\n\n## Context\n- c.\n"
+            )
+            r1 = validated_save_continuity(
+                store, text1, today="2026-06-02", wrap_token=p1["wrap_token"],
+            )
+            assert r1["graduations_validated"] == 1
+            assert store.get_pattern_history("recurring_claim") is not None
+
+            # Wrap 2: re-graduate reusing wrap-1 vocabulary (still bullet-less)
+            # -> the now-alive cross-session gate must demote it.
+            ep2 = store.record(f"{VOCAB} observed again", EpisodeType.OBSERVATION)
+            p2 = prepare_wrap(store)
+            text2 = (
+                "## State\nactive.\n\n## Patterns\n\n"
+                "{{group:\n"
+                f'  recurring_claim | 3x (2026-06-02) [evidence: {ep2.id} "{VOCAB}"]\n'
+                "}}\n\n## Decisions\n- d.\n\n## Context\n- c.\n"
+            )
+            r2 = validated_save_continuity(
+                store, text2, today="2026-06-02", wrap_token=p2["wrap_token"],
+            )
+            # The protective half fired for flow's format (was dead pre-fix).
+            assert r2["demoted"] >= 1
+            assert r2["graduations_validated"] == 0
+        finally:
+            store.close()

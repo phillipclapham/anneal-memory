@@ -28,6 +28,8 @@ Usage:
     anneal-memory graph --format dot -o graph.dot # Association graph
     anneal-memory stats                           # Detailed analytics
     anneal-memory history --limit 10              # Wrap history timeline
+    anneal-memory migrate check                   # Self-migration proposals for your core files
+    anneal-memory migrate ack                     # Record core files reconciled to this version
 
 Environment variables:
     ANNEAL_MEMORY_DB       Default database path (overridden by --db)
@@ -55,6 +57,13 @@ from .continuity import (
     format_wrap_package_text,
     prepare_wrap as _lib_prepare_wrap,
     validated_save_continuity as _lib_validated_save_continuity,
+)
+from .migration import (
+    _version_tuple,
+    marker_path_for,
+    pending_migrations,
+    read_marker,
+    write_marker,
 )
 from .schema import (
     SCHEMA_NAMES,
@@ -2056,6 +2065,99 @@ def _require_spore_subcommand(args: argparse.Namespace) -> None:
     sys.exit(1)
 
 
+# -- migrate (self-migration notices) --
+
+def cmd_migrate_check(args: argparse.Namespace) -> None:
+    """Report self-migration proposals newer than the acknowledged version.
+
+    Read-only: it PROPOSES core-file edits, it never writes them. The driving
+    AI applies the suggestions to its own CLAUDE.md/AGENTS.md/GEMINI.md under
+    operator review, then runs ``migrate ack``. The db need not exist — the
+    acknowledgement marker is an independent sibling file.
+    """
+    db_path = Path(args.db).expanduser()
+    marker = marker_path_for(db_path)
+    acknowledged = read_marker(marker)
+    pending = pending_migrations(acknowledged)
+
+    if args.json:
+        _print_json({
+            "installed_version": __version__,
+            "acknowledged_version": acknowledged,
+            "pending": pending,
+        })
+        return
+
+    if not pending:
+        print(f"Core files up to date — installed {__version__}, "
+              f"acknowledged {acknowledged or 'none'}. Nothing to migrate.")
+        return
+
+    since = (f"since you acknowledged {acknowledged}" if acknowledged
+             else "you've acknowledged none yet")
+    print(f"anneal-memory {__version__}: {len(pending)} self-migration "
+          f"proposal(s) — {since}.")
+    print("These are PROPOSALS for your own instruction files — review and "
+          "apply them yourself. anneal never edits your files.\n")
+    for entry in pending:
+        files = " / ".join(entry["files"])
+        print(f"[{entry['version']}] {entry['feature']}")
+        print(f"  What changed: {entry['summary']}")
+        print(f"  Suggested edit ({files}):")
+        print(f"    {entry['suggested_edit']}")
+        print()
+    print("When you've applied (or deliberately skipped) these, record it:")
+    print(f"  anneal-memory migrate ack          # acknowledges {__version__}")
+
+
+def cmd_migrate_ack(args: argparse.Namespace) -> None:
+    """Record that core files have been reconciled up to a version.
+
+    Sets the per-store acknowledgement marker (last-writer-wins) so future
+    ``migrate check`` runs only surface newer proposals. With no argument it
+    uses the installed version. An explicit *lower* version is allowed and
+    simply re-surfaces the newer entries — a safe, intentional escape hatch,
+    since a re-proposed edit the agent already applied is a no-op.
+    """
+    db_path = Path(args.db).expanduser()
+    # `args.version is None` ONLY for the genuine no-argument case (the positional
+    # is `nargs="?"`, default None). An explicit empty string is malformed input
+    # and must reach the guard below, not silently fall through to the default.
+    version = __version__ if args.version is None else args.version
+    # Guard the explicit-version escape hatch. Acknowledging a version AHEAD of
+    # what's installed would silently suppress every current proposal — the
+    # worst failure direction for a drift-prevention tool — and an unparseable
+    # version would reset acknowledgement to nothing. Refuse both; the no-arg
+    # default (the installed version) always passes.
+    parsed = _version_tuple(version)
+    if not parsed:
+        print(f"Error: {version!r} is not a parseable version.", file=sys.stderr)
+        sys.exit(1)
+    if parsed > _version_tuple(__version__):
+        print(f"Error: refusing to acknowledge {version} — it is ahead of the "
+              f"installed version {__version__}. Acknowledge what you've "
+              f"actually reconciled (omit the argument to use the installed "
+              f"version).", file=sys.stderr)
+        sys.exit(1)
+    marker = marker_path_for(db_path)
+    try:
+        write_marker(marker, version)
+    except OSError as exc:
+        print(f"Error: could not write marker {marker}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        _print_json({"acknowledged_version": version, "marker": str(marker)})
+        return
+    print(f"Acknowledged migrations up to {version}. (marker: {marker})")
+
+
+def _require_migrate_subcommand(args: argparse.Namespace) -> None:
+    """``anneal-memory migrate`` with no action — point at the available actions."""
+    print("Error: 'migrate' requires a subcommand: check / ack.",
+          file=sys.stderr)
+    sys.exit(1)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
     json_parent = _json_parent()
@@ -2403,6 +2505,34 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--top-of-mind", action="store_true",
                     help="Only the ToM contribution (hot or growing, ranked)")
     sp.set_defaults(func=cmd_spore_surface)
+
+    # -- migrate (self-migration notices: propose instruction-file edits on upgrade) --
+    migrate_parser = subparsers.add_parser(
+        "migrate",
+        help="Self-migration notices: propose instruction-file edits after an upgrade",
+    )
+    migrate_parser.set_defaults(func=_require_migrate_subcommand)
+    migrate_sub = migrate_parser.add_subparsers(dest="migrate_command")
+
+    mg = migrate_sub.add_parser(
+        "check",
+        help="Show migration proposals newer than the acknowledged version (read-only)",
+        parents=[json_parent],
+    )
+    mg.set_defaults(func=cmd_migrate_check)
+
+    mg = migrate_sub.add_parser(
+        "ack",
+        help="Record that core files are reconciled up to a version (default: installed)",
+        parents=[json_parent],
+    )
+    mg.add_argument(
+        "version",
+        nargs="?",
+        default=None,
+        help="Version to acknowledge (default: the installed version)",
+    )
+    mg.set_defaults(func=cmd_migrate_ack)
 
     return parser
 

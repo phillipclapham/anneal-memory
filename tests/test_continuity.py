@@ -4938,3 +4938,117 @@ class TestPerNameLineBindEndToEnd:
                 assert "real second" not in hist["last_explanation"]
         finally:
             store.close()
+
+
+class TestBarePreserveEndToEnd:
+    """AM-PRESERVE-BARE-PATH (v0.5.0) through the real save pipeline: a Proven
+    carried forward BARE (re-stamped to today, no fresh citation) in a store that
+    has seen citations is HELD on its earned-level + warmth, not sunset-demoted —
+    the bare-path analogue of TestCarryforwardEndToEnd. A brand-new bald claim
+    with no history, or a cold pattern, still sunsets. Hermetic: pattern_history
+    is seeded deterministically and citations_seen is set via meta (the upsert's
+    last_seen_at uses wall-clock, so a two-real-wrap setup would be date-coupled).
+
+    Regression anchor: flow's 2026-06-05 wrap bare-demoted
+    verify_or_surface_before_acting 3x->1x while the cited
+    structural_invariants_beat_discipline was correctly held."""
+
+    def _prime(self, tmp_path, db, name, max_level, last_seen):
+        store = Store(str(tmp_path / db), project_name="BARECF")
+        # Store has SEEN citations (the bare sunset gate) ...
+        meta = store.load_meta()
+        meta["citations_seen"] = True
+        store.save_meta(meta)
+        # ... with a deterministic warm/cold high-water mark for `name`.
+        store.seed_pattern_max_level(name, max_level, last_seen_at=last_seen)
+        # An (unrelated) episode so prepare_wrap has something to compress.
+        store.record("a second-session observation", EpisodeType.OBSERVATION)
+        return store
+
+    def _text(self, body):
+        return (
+            "# BARECF — Memory (v1)\n\n## State\nActive.\n\n## Patterns\n"
+            f"{body}\n\n## Decisions\nNone.\n\n## Context\nSession.\n"
+        )
+
+    def test_warm_at_peak_bare_held_through_save(self, tmp_path):
+        store = self._prime(tmp_path, "bare_cf.db", "verify", 3, "2026-06-04T00:00:00Z")
+        try:
+            text = self._text(
+                "  verify | 3x (2026-06-05) — carried forward, not re-grounded this wrap"
+            )
+            prepare_wrap(store)
+            # A top-tier (3x) carry also emits the graduate-OUT notice, same as
+            # the cited path — the warning logic reads carried_forward, which is
+            # now fed by the bare path too.
+            with pytest.warns(UserWarning, match="graduate OUT"):
+                r = validated_save_continuity(store, text, today="2026-06-05")
+            assert r["bare_demoted"] == 0
+            assert len(r["carried_forward"]) == 1
+            cf = r["carried_forward"][0]
+            assert cf["name"] == "verify" and cf["held_level"] == 3
+            assert cf["max_level_reached"] == 3
+            assert cf["cited"] is False  # bare carry: carried no citation
+            # AM-WARN must NOT fabricate a dead-namespace alarm: this wrap has no
+            # citations at all, so the bare carry is excluded from
+            # cited_graduations (protection must not CREATE a false diagnostic —
+            # the mirror of the masking hazard the cited path guards against).
+            assert r["association_warning"] is None
+            with open(r["path"]) as f:
+                saved = f.read()
+            assert "verify | 3x (2026-06-05) (carried-forward)" in saved
+            assert "(needs-evidence)" not in saved
+            # Aging intact: a held bare line never matched the evidence-bearing
+            # upsert, so last_seen_at did NOT advance.
+            assert store.get_pattern_history("verify")["last_seen_at"] == "2026-06-04T00:00:00Z"
+        finally:
+            store.close()
+
+    def test_below_peak_bare_held_through_save(self, tmp_path):
+        # 2x line, earned 3x before, warm -> held at 2x (not a top-tier carry).
+        store = self._prime(tmp_path, "bare_below.db", "verify", 3, "2026-06-04T00:00:00Z")
+        try:
+            text = self._text("  verify | 2x (2026-06-05) — carried forward at 2x")
+            prepare_wrap(store)
+            r = validated_save_continuity(store, text, today="2026-06-05")
+            assert r["bare_demoted"] == 0
+            assert len(r["carried_forward"]) == 1
+            assert r["carried_forward"][0]["held_level"] == 2
+            assert r["carried_forward"][0]["cited"] is False
+            assert r["association_warning"] is None  # no false dead-namespace alarm
+            with open(r["path"]) as f:
+                assert "verify | 2x (2026-06-05) (carried-forward)" in f.read()
+        finally:
+            store.close()
+
+    def test_new_bald_claim_still_sunset_through_save(self, tmp_path):
+        # A brand-new bald `novel | 2x` with NO history, in a store that HAS
+        # seen citations, still sunsets. The fix does not shield unearned claims.
+        store = self._prime(tmp_path, "bare_new.db", "verify", 3, "2026-06-04T00:00:00Z")
+        try:
+            text = self._text(
+                "  novel | 2x (2026-06-05) — asserted with no evidence, no history"
+            )
+            prepare_wrap(store)
+            r = validated_save_continuity(store, text, today="2026-06-05")
+            assert r["bare_demoted"] == 1
+            assert r["carried_forward"] == []
+            with open(r["path"]) as f:
+                saved = f.read()
+            assert "novel | 1x (2026-06-05)" in saved and "(needs-evidence)" in saved
+        finally:
+            store.close()
+
+    def test_cold_bare_ages_out_through_save(self, tmp_path):
+        # Seeded high-water 3 but COLD (last_seen far past) -> sunset, not held.
+        store = self._prime(tmp_path, "bare_cold.db", "verify", 3, "2026-05-01T00:00:00Z")
+        try:
+            text = self._text("  verify | 3x (2026-06-05) — stale, long unseen")
+            prepare_wrap(store)
+            r = validated_save_continuity(store, text, today="2026-06-05")
+            assert r["bare_demoted"] == 1
+            assert r["carried_forward"] == []
+            with open(r["path"]) as f:
+                assert "(needs-evidence)" in f.read()
+        finally:
+            store.close()

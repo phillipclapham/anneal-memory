@@ -1797,6 +1797,11 @@ def validated_save_continuity(
             "held_level": cf.held_level,
             "max_level_reached": cf.max_level_reached,
             "days_since_grounded": cf.days_since_grounded,
+            # AM-PRESERVE-BARE-PATH (v0.5.0): True = a cited line whose citation
+            # failed to resolve (v0.4.6 path); False = a bare preservation with
+            # no citation (v0.5.0 path). Lets operators reconcile AM-WARN's
+            # cited_graduations count against the held set.
+            "cited": cf.cited,
         }
         for cf in grad_result.carried_forward
     ]
@@ -1811,7 +1816,7 @@ def validated_save_continuity(
     #   (B) co-citation pairs WERE available but nothing formed or strengthened
     #       -> the association write path itself is mis-wired.
     association_warning: str | None = None
-    # AM-CARRYFORWARD (v0.4.6) interaction: a carried-forward line is a
+    # AM-CARRYFORWARD (v0.4.6) interaction: a CITED carried-forward line is a
     # graduation that carried a citation which failed to resolve this wrap —
     # held instead of demoted. It MUST count toward cited_graduations or
     # carryforward would silently MASK AM-WARN Signal A: flow's real
@@ -1823,8 +1828,19 @@ def validated_save_continuity(
     # protects the LEVEL; AM-WARN must still surface the root-cause namespace
     # mis-wire (AM-IDALIAS territory). any_citation_resolved already accounts
     # for held lines whose ids DID resolve, so a healthy held line stays silent.
+    #
+    # AM-PRESERVE-BARE-PATH (v0.5.0) interaction — the MIRROR-IMAGE hazard: a
+    # BARE carried-forward line carried NO citation at all (a preserved Proven
+    # re-stamped to today without re-grounding). Counting it would FABRICATE a
+    # "citation resolved to zero episodes" alarm on a wrap that has no citations
+    # to diagnose — protection-creating-a-false-diagnostic, the inverse of the
+    # masking above. So count ONLY ``cited`` carries here. This does NOT re-open
+    # the masking hole: a real namespace bug still demotes/holds its CITED lines,
+    # whose count drives the alarm; the bare carries were never part of that
+    # signal (no citation = nothing to resolve to zero).
+    cited_carried = sum(1 for cf in grad_result.carried_forward if cf.cited)
     cited_graduations = (
-        grad_result.validated + grad_result.demoted + len(grad_result.carried_forward)
+        grad_result.validated + grad_result.demoted + cited_carried
     )
     # Read the GATE-INDEPENDENT resolution signal, NOT any(all_validated_ids):
     # all_validated_ids is suppressed on a cross-session-overlap demote (the

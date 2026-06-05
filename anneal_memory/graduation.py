@@ -29,8 +29,15 @@ _GRADUATION_RE = re.compile(
 )
 
 # Matches bare graduations (2x or 3x) WITHOUT [evidence:] tags.
+# The negative lookahead runs BEFORE consuming trailing whitespace and spans the
+# optional space itself (``(?![ \t]*\[evidence:)``). The prior form
+# ``\s*(?!\[evidence:)`` could backtrack ``\s*`` to zero spaces so the zero-width
+# lookahead sat on a SPACE (not ``[``) and passed — misclassifying
+# ``| 3x (date) [evidence: ...]`` (incl. malformed-hex evidence that
+# _GRADUATION_RE rejects) as a BARE line, which the v0.5.0 hold would then
+# preserve. Checking ``[ \t]*\[evidence:`` atomically closes that (codex L3).
 _BARE_GRADUATION_RE = re.compile(
-    r"\|\s*([23])x\s*\((\d{4}-\d{2}-\d{2})\)\s*(?!\[evidence:)"
+    r"\|\s*([23])x\s*\((\d{4}-\d{2}-\d{2})\)(?![ \t]*\[evidence:)[ \t]*"
 )
 
 # Matches any pattern with temporal marker (Nx)
@@ -291,12 +298,14 @@ class GraduationResult:
     # 1b probe #1. The graduation in the text was demoted (same
     # mechanic as the ungrounded path) when this list is non-empty.
     cross_session_collisions: list["CrossSessionCollision"] = field(default_factory=list)
-    # AM-CARRYFORWARD (v0.4.6): graduated lines HELD at their level instead of
-    # demoted, because they are at/below their earned high-water mark and were
-    # grounded recently (warm). The ungrounded-citation demotion path only —
-    # the (cross-session-overlap) immune path is never carried forward. Each
-    # entry is a CarriedForward. Empty when nothing was held (no history, cold,
-    # or never earned the level). See CarriedForward for the full mechanism.
+    # AM-CARRYFORWARD (v0.4.6) + AM-PRESERVE-BARE-PATH (v0.5.0): graduated lines
+    # HELD at their level instead of demoted, because they are at/below their
+    # earned high-water mark and were grounded recently (warm). Covers BOTH the
+    # ungrounded-citation demotion path (v0.4.6) AND the bare-graduation sunset
+    # path (v0.5.0 — a Proven re-stamped to today without a fresh citation); the
+    # (cross-session-overlap) immune path is never carried forward. Each entry is
+    # a CarriedForward. Empty when nothing was held (no history, cold, or never
+    # earned the level). See CarriedForward for the full mechanism.
     carried_forward: list["CarriedForward"] = field(default_factory=list)
 
 
@@ -377,6 +386,15 @@ class CarriedForward:
     held_level: int  # The level the line was held at (NOT demoted from)
     max_level_reached: int  # The pattern's recorded high-water mark
     days_since_grounded: int  # Whole days since last_seen_at (recency)
+    # AM-PRESERVE-BARE-PATH (v0.5.0): did this carried line carry a CITATION
+    # that failed to resolve this wrap (cited path, v0.4.6) — or was it a BARE
+    # graduation with no citation at all (bare path, v0.5.0)? Load-bearing for
+    # AM-WARN: a cited carry MUST count toward ``cited_graduations`` so the hold
+    # cannot MASK a dead-namespace alarm (a real citation that resolved to zero
+    # episodes); a bare carry carried NO citation, so counting it would FABRICATE
+    # a "citation resolved to zero" alarm on a wrap that has no citations. True
+    # for the cited path (default, backward-compatible), False for the bare path.
+    cited: bool = True
 
 
 @dataclass
@@ -800,22 +818,49 @@ def validate_graduations(
             skipped_non_today += 1
             continue
 
+        # AM-PRESERVE-BARE-PATH (v0.5.0): before the fail-safe sunset ratchets
+        # this bare graduation down, check whether it is a load-bearing Proven
+        # carried forward — at/below its earned high-water mark AND warm. The
+        # cited ungrounded path gained this hold in v0.4.6 (AM-CARRYFORWARD); the
+        # bare path did not, so a stable Proven re-stamped to today without a
+        # fresh citation eroded one level every wrap (domain-blind erosion, the
+        # exact fault carryforward exists to stop). Hold it on the same
+        # discriminator; a genuinely-new bald ``name | Nx`` (no history / above
+        # its earned mark / cold) returns None and is sunset as before.
+        bare_held = _bare_carryforward_decision(
+            line=line,
+            level=bare_level,
+            today=today,
+            bare_match=bare_match,
+            pattern_history_lookup=pattern_history_lookup,
+            carryforward_cold_days=carryforward_cold_days,
+        )
+        if bare_held is not None:
+            lines[i] = _bare_carryforward_line(line, bare_match)
+            carried_forward.append(bare_held)
+            continue
+
         bare_demoted += 1
-        old_marker = bare_match.group(0)
-        # Diogenes 2026-05-22 LOW fix: parallel to the v0.3.3 _demote_line
-        # treatment. `_BARE_GRADUATION_RE` accepts `\|\s*Nx` (space-optional),
-        # so on `|2x` input the literal `.replace(f"| {N}x", ...)` no-op'd
-        # and `bare_demoted` incremented while the text retained the old
-        # level. State corruption mirroring the original `_demote_line` bug.
-        # Use the same regex substitution against `\|\s*Nx` so all spacing
-        # variants demote correctly. count=1 keeps the rewrite scoped.
+        bstart, bend = bare_match.span()
+        # Demote the matched bare marker by one level and mark it.
+        # Diogenes 2026-05-22 LOW fix: substitute against `\|\s*Nx` (count=1) so
+        # all spacing variants demote — a literal `| Nx` replace no-op'd on `|2x`
+        # and left the old level while bare_demoted incremented.
+        # codex L3 convergence (v0.5.0): rewrite ONLY the matched span (parallel
+        # to _bare_carryforward_line / _demote_line), NOT a global
+        # `line.replace(old_marker, ...)`. On a malformed same-line row with two
+        # identical marker texts the global replace rewrote BOTH occurrences —
+        # including one the tightened bare regex correctly skipped — while
+        # bare_demoted counted once.
         new_marker = re.sub(
             rf"\|\s*{bare_level}x",
             f"| {bare_level - 1}x",
-            old_marker,
+            bare_match.group(0).rstrip(),
             count=1,
         )
-        lines[i] = line.replace(old_marker, new_marker + " (needs-evidence)")
+        rest = line[bend:]
+        sep = " " if rest and not rest.startswith(" ") else ""
+        lines[i] = f"{line[:bstart]}{new_marker} (needs-evidence){sep}{rest}"
 
     reuse_max = max(citation_counts.values()) if citation_counts else 0
     gaming_suspects = detect_citation_gaming(citation_counts)
@@ -1434,6 +1479,63 @@ def _days_between(last_seen_at: Any, today: str) -> int | None:
     return (now - prior).days
 
 
+def _carryforward_history_decision(
+    name: str,
+    level: int,
+    history: dict[str, Any],
+    today: str,
+    carryforward_cold_days: int,
+    *,
+    cited: bool,
+) -> CarriedForward | None:
+    """The shared level+warmth core of the carryforward decision.
+
+    Given a NAME already bound to its own graduation marker and that pattern's
+    ``pattern_history`` row, decide HOLD (return a :class:`CarriedForward`) vs
+    fall-through-to-demotion (return ``None``) on the two structural gates both
+    the cited and the bare path share:
+
+      * ``level <= max_level_reached`` — the line genuinely earned this rung
+        before (blocks inflation: a bald level-UP has no protected high-water);
+      * ``last_seen_at`` within ``carryforward_cold_days`` of ``today`` (warm —
+        grounded recently in SOME prior session).
+
+    The path-specific work — name-binding, and (cited path only) the
+    sycophancy-overlap refusal — lives in the callers
+    (:func:`_carryforward_decision`, :func:`_bare_carryforward_decision`). This
+    is the genuinely-common discriminator extracted so the bare path
+    (AM-PRESERVE-BARE-PATH, v0.5.0) cannot drift from the cited path
+    (AM-CARRYFORWARD, v0.4.6).
+    """
+    max_level = history.get("max_level_reached")
+    if not isinstance(max_level, int):
+        return None
+    if level > max_level:
+        # Never earned this level — don't protect an un-earned rung.
+        return None
+    days = _days_between(history.get("last_seen_at"), today)
+    if days is None or days < -1 or days > carryforward_cold_days:
+        # No recency signal, a clearly-FUTURE last_seen_at (more than one day
+        # ahead = clock corruption / leaked future date — not trustworthy, do
+        # NOT treat as maximally warm), or grounded too long ago (cold) → age
+        # out. The -1 tolerance absorbs the legitimate ≤1-day skew between the
+        # store's UTC ``last_seen_at`` and a local-calendar ``today`` (a real
+        # grounding in US evening hours is stamped "tomorrow UTC"); rejecting
+        # it would false-cold a genuinely-warm pattern (codex L3). Conservative-
+        # demotion otherwise: absent/untrustworthy recency → no protection.
+        return None
+    return CarriedForward(
+        name=name,
+        held_level=level,
+        max_level_reached=max_level,
+        # Clamp the reported recency to >= 0: the decision tolerates a -1 UTC/
+        # local skew, but a negative "days since grounded" would read oddly in
+        # the audit surface.
+        days_since_grounded=max(0, days),
+        cited=cited,
+    )
+
+
 def _carryforward_decision(
     line: str,
     level: int,
@@ -1524,31 +1626,86 @@ def _carryforward_decision(
             for prior in priors:
                 if len(_meaningful_word_overlap(explanation, prior)) >= cross_session_overlap_threshold:
                     return None
-    max_level = history.get("max_level_reached")
-    if not isinstance(max_level, int):
+    # carryforward_cold_days narrowed to int by the early-return guard above. The
+    # cited path carried a CITATION that failed to resolve this wrap -> cited=True
+    # so AM-WARN's cited_graduations count still surfaces a dead-namespace bug.
+    return _carryforward_history_decision(
+        name, level, history, today, carryforward_cold_days, cited=True
+    )
+
+
+def _bare_carryforward_decision(
+    line: str,
+    level: int,
+    today: str,
+    bare_match: re.Match,
+    pattern_history_lookup: Callable[[str], dict[str, Any] | None] | None,
+    carryforward_cold_days: int | None,
+) -> CarriedForward | None:
+    """Decide whether a BARE 2x/3x graduation (no ``[evidence:]`` tag) should be
+    HELD instead of sunset-demoted (AM-PRESERVE-BARE-PATH, v0.5.0) — the
+    bare-path analogue of :func:`_carryforward_decision`.
+
+    The fail-safe sunset (``validate_graduations``) demotes any today-dated bare
+    graduation once the store has seen citations (``citations_seen``). But a
+    bare line can also be a load-bearing Proven carried forward from a prior
+    session and re-stamped to today WITHOUT a fresh citation — the common case:
+    the agent didn't re-exercise the pattern this wrap, so there is no
+    current-window episode to cite. Pre-fix that line had NO carryforward
+    interception (only the *cited* ungrounded path did, since v0.4.6), so a
+    stable Proven eroded one level every wrap by session-domain — the exact
+    domain-blind erosion AM-CARRYFORWARD fixed for the cited path. (Live repro:
+    flow's 2026-06-05 wrap bare-demoted ``verify_or_surface_before_acting``
+    3x→1x while the cited ``structural_invariants_beat_discipline`` was correctly
+    held by AM-CARRYFORWARD.)
+
+    Holds on the SAME earned-level + warmth discriminator
+    (:func:`_carryforward_history_decision`). Two deliberate differences from
+    the cited path:
+
+      * Name binds via :data:`_NAMED_PATTERN_RE` — a bare line has no evidence
+        marker for :data:`_NAMED_PATTERN_WITH_EVIDENCE_RE` to anchor. A
+        SPAN-alignment guard (``name_match.span(2) == bare_match.span(1)``) keeps
+        the line-start name bound to the EXACT marker the sunset matched. A
+        level-string compare alone is defeated when two markers share a level
+        (``name_a | 2x ... name_b | 2x``): ``_NAMED_PATTERN_RE.match`` binds the
+        first name while ``_BARE_GRADUATION_RE.search`` may have matched a later
+        marker, and ``"2" == "2"`` would wrongly hold name_b's marker using
+        name_a's history — comparing the level-digit positions is exact
+        (codex L3 + complement L1).
+      * No sycophancy-overlap refusal: a bare line carries no explanation to
+        re-word, and the bare path forms no co-citation link, so neither the
+        vocabulary-gaming nor the graph-poisoning risk the cited exemption
+        guards against can arise here. The ``level <= max_level_reached`` guard
+        in the shared tail still blocks inflation — a brand-new bald
+        ``foo | 3x`` (no history, or above its earned mark) falls through to the
+        sunset.
+    """
+    if carryforward_cold_days is None or pattern_history_lookup is None:
         return None
-    if level > max_level:
-        # Never earned this level — don't protect an un-earned rung.
+    name_match = _NAMED_PATTERN_RE.match(line)
+    if name_match is None:
         return None
-    days = _days_between(history.get("last_seen_at"), today)
-    if days is None or days < -1 or days > carryforward_cold_days:
-        # No recency signal, a clearly-FUTURE last_seen_at (more than one day
-        # ahead = clock corruption / leaked future date — not trustworthy, do
-        # NOT treat as maximally warm), or grounded too long ago (cold) → age
-        # out. The -1 tolerance absorbs the legitimate ≤1-day skew between the
-        # store's UTC ``last_seen_at`` and a local-calendar ``today`` (a real
-        # grounding in US evening hours is stamped "tomorrow UTC"); rejecting
-        # it would false-cold a genuinely-warm pattern (codex L3). Conservative-
-        # demotion otherwise: absent/untrustworthy recency → no protection.
+    # Span-alignment guard (codex L3 + complement L1, v0.5.0): the bound name's
+    # level marker must be the SAME physical occurrence the sunset matched.
+    # _BARE_GRADUATION_RE matched the demoting marker via UNANCHORED search, while
+    # _NAMED_PATTERN_RE.match binds the FIRST line-start marker. On a malformed
+    # multi-marker line these can differ — and a level-STRING compare is defeated
+    # when both markers share a level (``name_a | 2x ... name_b | 2x`` would hold
+    # name_b's marker using name_a's warm history). Requiring the level-digit
+    # SPANS to coincide (name_match group 2 == bare_match group 1) is exact:
+    # equal spans ⇒ the same physical marker ⇒ the line-start name owns it.
+    if name_match.span(2) != bare_match.span(1):
         return None
-    return CarriedForward(
-        name=name,
-        held_level=level,
-        max_level_reached=max_level,
-        # Clamp the reported recency to >= 0: the decision tolerates a -1 UTC/
-        # local skew, but a negative "days since grounded" would read oddly in
-        # the audit surface.
-        days_since_grounded=max(0, days),
+    name = name_match.group(1)
+    history = pattern_history_lookup(name)
+    if not history:
+        return None
+    # carryforward_cold_days narrowed to int by the early-return guard above. The
+    # bare path carried NO citation -> cited=False so AM-WARN does NOT fabricate a
+    # "citation resolved to zero episodes" alarm on a wrap that has no citations.
+    return _carryforward_history_decision(
+        name, level, history, today, carryforward_cold_days, cited=False
     )
 
 
@@ -1572,3 +1729,46 @@ def _carryforward_line(line: str, match: re.Match, level: int) -> str:
     )
     start, end = match.span()
     return line[:start] + new_marker + line[end:]
+
+
+def _bare_carryforward_line(line: str, match: re.Match) -> str:
+    """Hold a BARE graduated line at its level (AM-PRESERVE-BARE-PATH),
+    inserting ``(carried-forward)`` after the graduation marker WITHOUT
+    decrementing — the bare-path analogue of :func:`_carryforward_line`.
+
+    A bare line has no ``[evidence:]`` tag to strip (the cited hold strips it so
+    the held line will not re-upsert pattern_history and advance
+    ``last_seen_at``); a bare line never matched the evidence-bearing upsert
+    regex to begin with, so it ALREADY does not advance recency and its warmth
+    still decays on its own. The marker is inserted positionally at the end of
+    the ``_BARE_GRADUATION_RE`` match — parallel to where the sunset appends
+    ``(needs-evidence)`` — normalizing the regex's trailing ``\\s*`` to a single
+    separating space.
+
+    Idempotent + marker-coherent: a held line keeps its ``(carried-forward)``
+    marker in the saved text, and the agent can re-emit that line (re-stamped to
+    today) on a later wrap — the exact "carried forward again" case this path
+    exists for. The WHOLE leading run of generated status markers
+    (``(carried-forward)`` / ``(needs-evidence)`` / ``(ungrounded)``) is stripped
+    from the tail before re-appending a single ``(carried-forward)``. This:
+    (a) prevents accreting ``(carried-forward) (carried-forward)`` wrap-over-wrap;
+    (b) self-heals a pre-existing duplicate run (``+`` strips ALL, not one —
+    complement L1 FINDING-4); and (c) avoids a contradictory
+    ``(carried-forward) (needs-evidence)`` when a previously-sunset line is
+    re-held (codex L3 + complement L1) — the line is being HELD now, so a stale
+    demotion marker is wrong. ``structural_invariants`` over trusting the agent
+    to strip markers. The sunset's own marker handling is untouched.
+
+    Args:
+        line: The full line being held.
+        match: The ``_BARE_GRADUATION_RE`` match object (``| Nx (date)``).
+    """
+    start, end = match.span()
+    marker = match.group(0).rstrip()  # "| Nx (date)" without the regex's trailing ws
+    rest = re.sub(
+        r"^(?:[ \t]*\((?:carried-forward|needs-evidence|ungrounded)\))+",
+        "",
+        line[end:],
+    )
+    sep = " " if rest and not rest.startswith(" ") else ""
+    return f"{line[:start]}{marker} (carried-forward){sep}{rest}"

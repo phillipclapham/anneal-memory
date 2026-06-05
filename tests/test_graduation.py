@@ -2058,6 +2058,7 @@ class TestCarryforward:
         cf = r.carried_forward[0]
         assert (cf.name, cf.held_level, cf.max_level_reached, cf.days_since_grounded) == (
             "alpha", 3, 3, 2)
+        assert cf.cited is True  # cited path: carried a citation -> counts toward AM-WARN
         assert "| 3x (2026-06-04) (carried-forward)" in self._line(r)
         assert "(ungrounded)" not in r.text
 
@@ -2605,3 +2606,360 @@ class TestVerbatimPreservation:
             assert result.demoted == 1, f"node_content_map={ncm!r}"
             assert "(cross-session-overlap)" in result.text, f"node_content_map={ncm!r}"
             assert result.direct_co_citations == [], f"node_content_map={ncm!r}"
+
+
+class TestBareCarryforward:
+    """AM-PRESERVE-BARE-PATH (v0.5.0): the bare-graduation sunset path now HOLDS
+    a load-bearing Proven (at/below its earned high-water mark AND warm) instead
+    of ratcheting it down, exactly as AM-CARRYFORWARD (v0.4.6) does for the cited
+    ungrounded path. A bare line carried forward without a fresh citation is the
+    common case (the agent didn't re-exercise the pattern this wrap, so it has no
+    current-window episode to cite) — pre-fix it eroded one level every wrap.
+    Brand-new bald claims (no history / unearned / cold) still sunset.
+
+    Regression anchor: flow's 2026-06-05 wrap bare-demoted
+    verify_or_surface_before_acting 3x->1x (max_level_reached=3, warm) while the
+    cited structural_invariants_beat_discipline was correctly held by v0.4.6."""
+
+    def _lookup(self, max_level, last_seen, name="alpha"):
+        def _l(n):
+            if n == name:
+                return {
+                    "max_level_reached": max_level,
+                    "last_seen_at": last_seen,
+                    "explanation_corpus": "",
+                    "last_explanation": "",
+                    "last_wrap_id": None,
+                }
+            return None
+        return _l
+
+    def _text(self, level, *, dashed=False, trailing=""):
+        # Bare graduation: NO [evidence:] tag. Flow's real format is an indented,
+        # bullet-less grouped member; dashed=True exercises the canonical
+        # stranger-adopter "- name | Nx" form (the generality regression).
+        prefix = "- " if dashed else "  "
+        return (
+            "## State\n.\n## Patterns\n"
+            f"{prefix}alpha | {level}x (2026-06-04){trailing}\n"
+            "## Decisions\n.\n## Context\n.\n"
+        )
+
+    def _line(self, result):
+        return next(ln for ln in result.text.splitlines() if "alpha |" in ln)
+
+    def _run(self, text, lookup, *, today="2026-06-04", cold_days=7):
+        return validate_graduations(
+            text=text, valid_ids=set(), today=today, citations_seen=True,
+            pattern_history_lookup=lookup, carryforward_cold_days=cold_days,
+        )
+
+    def test_warm_at_peak_bare_held(self):
+        r = self._run(self._text(3), self._lookup(3, "2026-06-02T10:00:00Z"))
+        assert r.bare_demoted == 0
+        assert r.demoted == 0
+        assert len(r.carried_forward) == 1
+        cf = r.carried_forward[0]
+        assert (cf.name, cf.held_level, cf.max_level_reached, cf.days_since_grounded) == (
+            "alpha", 3, 3, 2)
+        assert cf.cited is False  # bare path: no citation -> excluded from AM-WARN count
+        assert "| 3x (2026-06-04) (carried-forward)" in self._line(r)
+        assert "(needs-evidence)" not in r.text
+        # Level was NOT decremented.
+        assert "| 2x" not in r.text and "| 1x" not in r.text
+
+    def test_cold_bare_ages_out(self):
+        r = self._run(self._text(3), self._lookup(3, "2026-05-01T10:00:00Z"))
+        assert r.bare_demoted == 1
+        assert r.carried_forward == []
+        assert "| 2x (2026-06-04) (needs-evidence)" in self._line(r)
+        assert "(carried-forward)" not in r.text
+
+    def test_unearned_bare_demotes(self):
+        # Bare 3x but high-water mark is only 2 -- never earned 3x (inflation
+        # block: a bald level-UP has no protected high-water).
+        r = self._run(self._text(3), self._lookup(2, "2026-06-03T10:00:00Z"))
+        assert r.bare_demoted == 1
+        assert r.carried_forward == []
+
+    def test_protects_below_peak_bare(self):
+        # Bare 2x, earned 3x before, warm -> held at 2x (level <= max_level).
+        r = self._run(self._text(2), self._lookup(3, "2026-06-03T10:00:00Z"))
+        assert r.bare_demoted == 0
+        assert len(r.carried_forward) == 1
+        assert r.carried_forward[0].held_level == 2
+        assert "| 2x (2026-06-04) (carried-forward)" in self._line(r)
+
+    def test_no_history_bare_demotes(self):
+        # The genuinely-new bald "alpha | 3x" with no history -> sunset. This is
+        # the case the fail-safe sunset exists for; carryforward must not shield it.
+        r = self._run(self._text(3), lambda n: None)
+        assert r.bare_demoted == 1
+        assert r.carried_forward == []
+
+    def test_disabled_via_none_bare_demotes_even_when_warm(self):
+        r = self._run(self._text(3), self._lookup(3, "2026-06-04T10:00:00Z"), cold_days=None)
+        assert r.bare_demoted == 1
+        assert r.carried_forward == []
+
+    def test_no_lookup_wired_bare_demotes(self):
+        # pattern_history_lookup defaults to None -> bare carryforward inert.
+        r = validate_graduations(
+            text=self._text(3), valid_ids=set(), today="2026-06-04",
+            citations_seen=True,
+        )
+        assert r.bare_demoted == 1
+        assert r.carried_forward == []
+
+    def test_ignored_without_citations_seen_even_when_warm(self):
+        # If the store has not seen citations, the bare sunset never runs -- so
+        # neither does the carryforward. Nothing touched.
+        r = validate_graduations(
+            text=self._text(3), valid_ids=set(), today="2026-06-04",
+            citations_seen=False, pattern_history_lookup=self._lookup(3, "2026-06-03T10:00:00Z"),
+        )
+        assert r.bare_demoted == 0
+        assert r.carried_forward == []
+        assert "(carried-forward)" not in r.text
+
+    def test_dashed_stranger_adopter_bare_held(self):
+        # GENERALITY regression (the dogfood discriminator, in a test): the
+        # canonical "- name | Nx" dashed format -- a stranger adopter who never
+        # used flow's indented grouping -- is held identically. The fix keys on
+        # pattern_history + _NAMED_PATTERN_RE, not on flow's format. This is why
+        # AM-PRESERVE-BARE-PATH is a general bug, not a flow-N-of-1 fix.
+        r = self._run(self._text(3, dashed=True), self._lookup(3, "2026-06-03T10:00:00Z"))
+        assert r.bare_demoted == 0
+        assert len(r.carried_forward) == 1
+        assert "- alpha | 3x (2026-06-04) (carried-forward)" in self._line(r)
+
+    def test_far_future_last_seen_bare_rejected(self):
+        # A last_seen_at clearly in the future (> 1 day) is untrustworthy --
+        # do not read as maximally warm; conservative-demote.
+        r = self._run(self._text(3), self._lookup(3, "2026-06-10T00:00:00Z"))
+        assert r.bare_demoted == 1
+        assert r.carried_forward == []
+
+    def test_one_day_utc_skew_bare_tolerated(self):
+        # The legitimate <=1-day UTC-vs-local skew is tolerated as warm -> held.
+        r = self._run(self._text(3), self._lookup(3, "2026-06-05T01:00:00Z"))
+        assert r.bare_demoted == 0
+        assert len(r.carried_forward) == 1
+        assert r.carried_forward[0].days_since_grounded == 0  # clamped, not -1
+
+    def test_cold_boundary_inclusive_bare(self):
+        # Exactly cold_days (7) -> warm (held); cold_days+1 -> aged out.
+        def text(d):
+            return (
+                "## State\n.\n## Patterns\n"
+                f"  alpha | 3x ({d})\n"
+                "## Decisions\n.\n## Context\n.\n"
+            )
+        held = validate_graduations(
+            text=text("2026-06-08"), valid_ids=set(), today="2026-06-08",
+            citations_seen=True,
+            pattern_history_lookup=self._lookup(3, "2026-06-01T00:00:00Z"),
+            carryforward_cold_days=7,
+        )
+        assert held.bare_demoted == 0 and len(held.carried_forward) == 1
+        aged = validate_graduations(
+            text=text("2026-06-09"), valid_ids=set(), today="2026-06-09",
+            citations_seen=True,
+            pattern_history_lookup=self._lookup(3, "2026-06-01T00:00:00Z"),
+            carryforward_cold_days=7,
+        )
+        assert aged.bare_demoted == 1 and aged.carried_forward == []
+
+    def test_non_today_bare_skipped_not_held(self):
+        # A bare line whose date != today is a legitimately carried-forward
+        # pattern the agent did NOT re-stamp -- already skipped by the sunset
+        # (skipped_non_today), never reaching the carryforward path. No erosion,
+        # no hold; the line is left exactly as-is. (This is why branch-(c) of
+        # AM-PRESERVE-VS-SYCOPHANCY -- "keep the original date" -- is the
+        # behavioral prevention and this fix is the structural backstop for when
+        # the agent re-stamps anyway.)
+        r = validate_graduations(
+            text=self._text(3), valid_ids=set(), today="2026-06-05",
+            citations_seen=True,
+            pattern_history_lookup=self._lookup(3, "2026-06-02T10:00:00Z"),
+        )
+        assert r.bare_demoted == 0
+        assert r.carried_forward == []
+        assert r.skipped_non_today == 1
+        assert "| 3x (2026-06-04)" in self._line(r)  # untouched
+        assert "(carried-forward)" not in r.text
+
+    def test_held_bare_preserves_trailing_prose(self):
+        # flow's real lines carry " - explanation" after the marker; the rewrite
+        # must keep it with a single separating space and not mangle it.
+        r = self._run(
+            self._text(3, trailing=" — cached state is a SNAPSHOT"),
+            self._lookup(3, "2026-06-03T10:00:00Z"),
+        )
+        assert len(r.carried_forward) == 1
+        assert (
+            "| 3x (2026-06-04) (carried-forward) — cached state is a SNAPSHOT"
+            in self._line(r)
+        )
+
+    def test_no_space_pipe_variant_bare_held(self):
+        # "|3x" (no space after pipe) must bind + hold correctly -- the
+        # Diogenes-LOW spacing class, on the hold path.
+        r = self._run(
+            "## State\n.\n## Patterns\n  alpha |3x (2026-06-04)\n## Decisions\n.\n## Context\n.\n",
+            self._lookup(3, "2026-06-03T10:00:00Z"),
+        )
+        assert r.bare_demoted == 0
+        assert len(r.carried_forward) == 1
+        assert "(carried-forward)" in self._line(r)
+        # The original level marker survives intact (not decremented).
+        assert "| 2x" not in r.text and "| 1x" not in r.text
+
+    def test_bare_level_misalign_not_held(self):
+        # Malformed two-marker bare line: line-start name_a is 1x (does not match
+        # _BARE_GRADUATION_RE, which is 2x/3x-only); a LATER name_b | 3x is the
+        # marker the sunset found. _NAMED_PATTERN_RE binds name_a @ "1"; the level
+        # guard ("1" != "3") declines, so name_a's warm-at-peak history is NOT
+        # used to hold name_b's 3x. Falls through to sunset. (Bare-path mirror of
+        # test_leading_1x_marker_does_not_cross_bind_to_later_3x.)
+        text = (
+            "## State\n.\n## Patterns\n"
+            "  name_a | 1x (2026-06-04) name_b | 3x (2026-06-04)\n"
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        def lk(n):
+            if n == "name_a":
+                return {"max_level_reached": 3, "last_seen_at": "2026-06-03T00:00:00Z",
+                        "explanation_corpus": "", "last_explanation": "", "last_wrap_id": None}
+            return None
+        r = validate_graduations(
+            text=text, valid_ids=set(), today="2026-06-04", citations_seen=True,
+            pattern_history_lookup=lk,
+        )
+        assert r.carried_forward == []  # name_a history NOT used to hold name_b
+        assert r.bare_demoted == 1
+
+    def test_rehold_idempotent_no_duplicate_marker(self):
+        # A line held in a prior wrap keeps its `(carried-forward)` marker in the
+        # saved text; the agent re-emits it re-stamped to today. Re-holding must
+        # NOT accrete a second marker (structural_invariants over trusting the
+        # agent to strip it). Exactly one `(carried-forward)`, prose preserved.
+        line_body = "  alpha | 3x (2026-06-04) (carried-forward) — preserved prose"
+        text = f"## State\n.\n## Patterns\n{line_body}\n## Decisions\n.\n## Context\n.\n"
+        r = self._run(text, self._lookup(3, "2026-06-03T10:00:00Z"))
+        assert r.bare_demoted == 0
+        assert len(r.carried_forward) == 1
+        held = self._line(r)
+        assert held.count("(carried-forward)") == 1  # not duplicated
+        assert held == "  alpha | 3x (2026-06-04) (carried-forward) — preserved prose"
+
+    def test_rehold_idempotent_no_trailing_prose(self):
+        # Same, but the held line had no trailing prose: `... (carried-forward)`
+        # alone must re-hold to exactly one marker, no dangling double space.
+        text = (
+            "## State\n.\n## Patterns\n"
+            "  alpha | 3x (2026-06-04) (carried-forward)\n"
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        r = self._run(text, self._lookup(3, "2026-06-03T10:00:00Z"))
+        assert len(r.carried_forward) == 1
+        held = self._line(r)
+        assert held.count("(carried-forward)") == 1
+        assert held == "  alpha | 3x (2026-06-04) (carried-forward)"
+
+    def test_same_level_multimarker_cross_bind_not_held(self):
+        # codex L3 + complement L1 (MEDIUM, convergent): two markers at the SAME
+        # level on one malformed line. name_a (warm at-peak) is the line-start
+        # name; name_b's marker is what the sunset finds (name_a's has malformed
+        # `[evidence:]` so the tightened bare regex skips it). A level-STRING
+        # guard ("2"=="2") would hold name_b's marker using name_a's history; the
+        # SPAN-alignment guard declines (different marker positions). Without the
+        # fix `carried_forward` would credit name_a — with it, no cross-bind.
+        text = (
+            "## State\n.\n## Patterns\n"
+            "  name_a | 2x (2026-06-04)[evidence: nothex] name_b | 2x (2026-06-04)\n"
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        def lk(n):
+            if n == "name_a":
+                return {"max_level_reached": 2, "last_seen_at": "2026-06-03T00:00:00Z",
+                        "explanation_corpus": "", "last_explanation": "", "last_wrap_id": None}
+            return None  # name_b has no history
+        r = validate_graduations(
+            text=text, valid_ids=set(), today="2026-06-04", citations_seen=True,
+            pattern_history_lookup=lk,
+        )
+        assert r.carried_forward == []  # name_a's history NOT used to hold name_b
+
+    def test_malformed_evidence_line_not_classified_bare(self):
+        # codex L3 (MEDIUM): `| 3x (date) [evidence: nothex]` — invalid-hex
+        # evidence that _GRADUATION_RE rejects — must NOT be misclassified as a
+        # BARE line and held. The tightened _BARE_GRADUATION_RE lookahead spans
+        # the optional space, so an evidence-bearing line never matches bare. The
+        # line is left untouched (not held, not bare-demoted).
+        text = (
+            "## State\n.\n## Patterns\n"
+            "  alpha | 3x (2026-06-04) [evidence: nothex]\n"
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        r = self._run(text, self._lookup(3, "2026-06-03T10:00:00Z"))
+        assert r.carried_forward == []
+        assert r.bare_demoted == 0
+        assert "(carried-forward)" not in r.text
+        assert "  alpha | 3x (2026-06-04) [evidence: nothex]" in r.text  # untouched
+
+    def test_rehold_strips_stale_needs_evidence(self):
+        # codex L3 + complement L1 (LOW/info, convergent): a line previously
+        # sunset to `(needs-evidence)` then re-stamped at its (demoted) level,
+        # warm + at/below max_level, is HELD — and the stale `(needs-evidence)`
+        # is stripped, NOT left as a contradictory `(carried-forward) (needs-evidence)`.
+        text = (
+            "## State\n.\n## Patterns\n"
+            "  alpha | 2x (2026-06-04) (needs-evidence)\n"
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        r = self._run(text, self._lookup(3, "2026-06-03T10:00:00Z"))  # earned 3x
+        assert len(r.carried_forward) == 1
+        held = self._line(r)
+        assert "(carried-forward)" in held
+        assert "(needs-evidence)" not in held
+        assert held == "  alpha | 2x (2026-06-04) (carried-forward)"
+
+    def test_rehold_collapses_preexisting_duplicate_run(self):
+        # complement L1 FINDING-4: the strip removes the WHOLE leading run, so a
+        # pre-existing duplicate (from before this fix, or a prior cross-bind)
+        # self-heals to exactly one marker rather than netting strip-one-add-one.
+        text = (
+            "## State\n.\n## Patterns\n"
+            "  alpha | 3x (2026-06-04) (carried-forward) (carried-forward) — prose\n"
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        r = self._run(text, self._lookup(3, "2026-06-03T10:00:00Z"))
+        assert len(r.carried_forward) == 1
+        held = self._line(r)
+        assert held.count("(carried-forward)") == 1
+        assert held == "  alpha | 3x (2026-06-04) (carried-forward) — prose"
+
+    def test_sunset_positional_does_not_touch_skipped_marker(self):
+        # codex L3 convergence (LOW): the bare SUNSET must rewrite only the
+        # matched span. On `name_a | 2x ...[evidence: nothex] name_b | 2x ...`
+        # (identical marker texts), the prior global `line.replace` demoted BOTH
+        # — including name_a's, which the tightened bare regex correctly skipped
+        # (evidence follows it). Positional rewrite touches only name_b.
+        text = (
+            "## State\n.\n## Patterns\n"
+            "  name_a | 2x (2026-06-04)[evidence: nothex] name_b | 2x (2026-06-04)\n"
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        r = validate_graduations(
+            text=text, valid_ids=set(), today="2026-06-04", citations_seen=True,
+            pattern_history_lookup=lambda n: None,  # neither has history -> sunset
+        )
+        line = self._line_named(r, "name_a")
+        assert "name_a | 2x (2026-06-04)[evidence: nothex]" in line  # name_a untouched
+        assert "name_b | 1x (2026-06-04) (needs-evidence)" in line   # only name_b demoted
+        assert line.count("(needs-evidence)") == 1
+        assert r.bare_demoted == 1
+
+    def _line_named(self, result, needle):
+        return next(ln for ln in result.text.splitlines() if needle in ln)

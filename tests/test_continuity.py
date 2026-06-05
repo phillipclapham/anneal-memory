@@ -271,6 +271,17 @@ class TestBuildWrapPackage:
         )
         assert "2026-03-31" in pkg["instructions"]
 
+    def test_instructions_include_date_preservation_rule(self):
+        """AM-PRESERVE-VS-SYCOPHANCY (c): the instructions tell the agent to KEEP
+        the existing date on a preserved (un-re-exercised) pattern rather than
+        re-stamping today — re-stamping is what needlessly demotes it."""
+        pkg = _build_wrap_package(
+            SAMPLE_EPISODES, None, "Test", today="2026-03-31"
+        )
+        instructions = pkg["instructions"]
+        assert "do NOT re-stamp" in instructions
+        assert "KEEP the pattern's" in instructions
+
     def test_detects_stale_patterns(self):
         from anneal_memory.continuity import _build_wrap_package
 

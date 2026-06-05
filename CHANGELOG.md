@@ -4,6 +4,17 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — AM-PRESERVE-VS-SYCOPHANCY: stop demoting verbatim-preserved patterns
+
+The anti-sycophancy defense used "high vocabulary overlap with a prior explanation" as the sycophancy signal at two sites — the cross-session-overlap gate in `validate_graduations` and `_carryforward_decision`'s internal guard. A pattern PRESERVED verbatim across a wrap (today's explanation byte-identical to a prior) is 100% overlap, so both sites treated preservation as sycophancy and demoted load-bearing patterns merely carried forward unchanged (observed: high-value patterns demoted across consecutive wraps). A sycophant RE-WORDS to fake fresh evidence; preservation is byte-IDENTICAL — so byte-identity is the discriminator.
+
+- New `_is_verbatim_preservation(explanation, priors)` — true when the explanation is byte-identical (whitespace-normalized) to a prior. Both sycophancy sites now exempt verbatim preservation, while a re-worded high-overlap explanation still trips the gate.
+- **Exemption is gated against inflation:** it applies only when the line is held **at/below its earned `max_level_reached`**. A byte-identical LEVEL-UP (claiming a new high with the exact prior words) is still demoted — preservation never inflates. (Site 1 enforces this via its existing `level > max_level` check; Site 2 via an inline level gate.)
+- **Exemption requires current grounding** (`grounding_checked` — that `node_content_map` was actually present and evaluated, not `explanation_valid`'s optimistic default). This closes a graph-poisoning path where a byte-identical explanation citing live-but-ungrounding episodes would otherwise forge a Hebbian co-citation link between unrelated episodes (codex L3). A direct caller that omits `node_content_map` (or passes `{}`) gets no exemption.
+- `prepare_wrap` now instructs the agent to KEEP the original date on a pattern it did NOT re-exercise this session (the validator only checks `date == today` lines, so a preserved line with its prior date never enters validation — the primary, structural prevention; the byte-identity exemption is the backstop for when the agent re-stamps today).
+
+No breaking changes. Full 4-layer apparatus, codex L3 to convergence: codex caught a graph-poisoning HIGH that both Claude-lineage reviewers missed (they assumed resolving ids imply grounding), then a MEDIUM in the first fix (vacuous-grounding default), both fixed and pinned; the convergence pass confirmed airtight (None / `{}` / production paths). `detect_citation_gaming` still backstops repeated-citation gaming on grounded verbatim lines.
+
 ### Added — AM-RECALL-ALIAS: `recall` CLI verb (alias of `search`)
 
 The library and MCP retrieval verb is `recall` (`Store.recall` / the `recall` MCP tool), but the CLI exposed it only as `search`. A CLI-only session — notably a Codex adapter with no MCP server loaded — following a memory seed that teaches `recall` as the canonical retrieval verb hit `invalid choice: 'recall'`. The `search` subcommand now also accepts `recall` as an alias: `anneal recall "<query>"` is identical to `anneal search "<query>"`. This is exact, not a relabel — `cmd_search` already calls `store.recall(keyword=...)`. One-surface verb consistency across the library / MCP / CLI; no behavior change to `search`, and the no-subcommand server-delegate path is unaffected (the alias sets `args.command="recall"`, still non-`None`).

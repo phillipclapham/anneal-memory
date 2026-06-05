@@ -3,10 +3,13 @@
 import pytest
 
 from anneal_memory.graduation import (
+    CarriedForward,
     CrossSessionCollision,
     GraduationResult,
     OmittedPattern,
     _NAMED_PATTERN_RE,
+    _carryforward_decision,
+    _is_verbatim_preservation,
     _meaningful_word_overlap,
     check_explanation_overlap,
     detect_citation_gaming,
@@ -2210,28 +2213,30 @@ class TestCarryforward:
         assert r.demoted == 1
 
     def test_sycophantic_overlap_not_carried(self):
-        # codex L3: a warm at-peak pattern with a DEAD citation whose
-        # explanation reuses prior-session vocabulary (sycophancy signal) must
-        # NOT be carried forward — even though the cross-session immune demote
-        # never runs on the dead-id path. The overlap check inside the
-        # carryforward decision refuses protection → demote.
-        prior = "standup consensus decision quick agreement architectural"
+        # codex L3 + AM-PRESERVE-VS-SYCOPHANCY: a warm at-peak pattern with a
+        # DEAD citation whose explanation RE-WORDS prior-session vocabulary (the
+        # sycophancy signal — high overlap but NOT byte-identical) must NOT be
+        # carried forward; carryforward's overlap guard refuses protection →
+        # demote. (A byte-IDENTICAL explanation would be PRESERVATION and IS held
+        # — see TestVerbatimPreservation.)
+        corpus_prior = "standup consensus decision quick agreement architectural"
+        reworded = "standup consensus decision rotated into fresh phrasing"  # 3 shared, not identical
         text = (
             "## State\n.\n## Patterns\n"
-            f'- alpha | 3x (2026-06-04) [evidence: deadbeef "{prior}"]\n'
+            f'- alpha | 3x (2026-06-04) [evidence: deadbeef "{reworded}"]\n'
             "## Decisions\n.\n## Context\n.\n"
         )
         def lk(name):
             if name == "alpha":
                 return {"max_level_reached": 3, "last_seen_at": "2026-06-03T00:00:00Z",
-                        "explanation_corpus": prior, "last_explanation": prior,
+                        "explanation_corpus": corpus_prior, "last_explanation": corpus_prior,
                         "last_wrap_id": None}
             return None
         r = validate_graduations(
             text=text, valid_ids=set(), today="2026-06-04",
             pattern_history_lookup=lk,
         )
-        assert r.carried_forward == []  # sycophantic overlap → not protected
+        assert r.carried_forward == []  # re-worded sycophantic overlap → not protected
         assert r.demoted == 1
 
     def test_distinct_vocab_dead_id_still_carried(self):
@@ -2269,19 +2274,24 @@ class TestCarryforward:
         assert "[evidence:" not in self._line(r)
 
     def test_cross_session_overlap_never_carried_forward(self):
-        # The sycophancy immune path must demote even for a warm at-peak
-        # pattern: carryforward must not blunt the anti-sycophancy defense.
-        prior = "standup consensus decision quick agreement architectural pattern"
+        # The sycophancy immune path must demote even for a warm at-peak pattern:
+        # carryforward must not blunt the anti-sycophancy defense. AM-PRESERVE-
+        # VS-SYCOPHANCY: the sycophancy signal is RE-WORDED overlap (not byte-
+        # identical, which is preservation). A re-worded high-overlap explanation
+        # at the earned level still cross-session-demotes, and that demotion is
+        # never carried forward.
+        corpus_prior = "standup consensus decision quick agreement architectural pattern"
+        reworded = "standup consensus decision rotated into fresh phrasing again"  # 3 shared, not identical
         text = (
             "## State\n.\n## Patterns\n"
-            f'- alpha | 3x (2026-06-04) [evidence: abc12345 "{prior}"]\n'
+            f'- alpha | 3x (2026-06-04) [evidence: abc12345 "{reworded}"]\n'
             "## Decisions\n.\n## Context\n.\n"
         )
-        node = {"abc12345": prior}
+        node = {"abc12345": reworded}
         def lk(name):
             if name == "alpha":
                 return {"max_level_reached": 3, "last_seen_at": "2026-06-03T00:00:00Z",
-                        "explanation_corpus": prior, "last_explanation": prior,
+                        "explanation_corpus": corpus_prior, "last_explanation": corpus_prior,
                         "last_wrap_id": None}
             return None
         r = validate_graduations(
@@ -2356,3 +2366,242 @@ class TestPerNameLineBind:
         new = '## Patterns\n- alpha | 3x (2026-06-04) [evidence: abc12345 "now"] [no-contradicts]\n'
         flagged = detect_proven_without_declaration(prior, new, today="2026-06-04")
         assert [p.name for p in flagged] == []
+
+
+class TestVerbatimPreservation:
+    """AM-PRESERVE-VS-SYCOPHANCY: a pattern carried forward VERBATIM (today's
+    explanation byte-identical to a prior session's) is PRESERVATION, not
+    sycophantic re-wording. Both sycophancy sites — the cross-session-overlap
+    gate and ``_carryforward_decision``'s internal guard — must exempt it, while
+    a RE-WORDED high-overlap explanation still trips them."""
+
+    PRIOR = "standup consensus decision architecture sync quick agreement"
+    REWORDED = "standup consensus decision quick agreement architectural"  # 5 shared, NOT identical
+
+    def _lookup(self, *, max_level=3, last_seen="2026-05-21T00:00:00Z", corpus=None):
+        corpus = corpus if corpus is not None else self.PRIOR
+
+        def _l(name):
+            if name == "alpha":
+                return {
+                    "max_level_reached": max_level,
+                    "explanation_corpus": corpus,
+                    "last_explanation": corpus,
+                    "last_seen_at": last_seen,
+                    "last_wrap_id": None,
+                }
+            return None
+        return _l
+
+    # -- the helper --
+    def test_helper_identical_is_preservation(self):
+        assert _is_verbatim_preservation("a b c", ["x y", "a b c"]) is True
+
+    def test_helper_whitespace_reflow_is_preservation(self):
+        # Re-wrapping changes whitespace, not words.
+        assert _is_verbatim_preservation("a  b\n c", ["a b c"]) is True
+
+    def test_helper_reworded_is_not_preservation(self):
+        assert _is_verbatim_preservation("a c b d", ["a b c"]) is False
+
+    def test_helper_empty_is_not_preservation(self):
+        assert _is_verbatim_preservation("", ["a b c"]) is False
+        assert _is_verbatim_preservation("a b c", []) is False
+
+    # -- Site 2: the cross-session-overlap gate --
+    def test_verbatim_preserved_not_cross_session_demoted(self):
+        """Byte-identical explanation + a still-resolving citation: VALIDATED,
+        not (cross-session-overlap) demoted."""
+        text = (
+            "## State\nverbatim carry.\n## Patterns\n"
+            f'- alpha | 3x (2026-05-22) [evidence: abc12345 "{self.PRIOR}"]\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-22",
+            node_content_map={"abc12345": self.PRIOR + " meeting"},
+            pattern_history_lookup=self._lookup(),
+        )
+        assert result.demoted == 0
+        assert "(cross-session-overlap)" not in result.text
+        assert result.cross_session_collisions == []
+        assert result.validated == 1
+
+    def test_reworded_overlap_still_cross_session_demoted(self):
+        """Regression: a RE-WORDED high-overlap explanation (NOT byte-identical)
+        still demotes — the exemption is byte-identity, not high overlap."""
+        text = (
+            "## State\nreword.\n## Patterns\n"
+            f'- alpha | 3x (2026-05-22) [evidence: abc12345 "{self.REWORDED}"]\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-22",
+            node_content_map={"abc12345": self.REWORDED + " meeting"},
+            pattern_history_lookup=self._lookup(),
+        )
+        assert result.demoted == 1
+        assert "(cross-session-overlap)" in result.text
+        assert len(result.cross_session_collisions) == 1
+
+    # -- Site 1: carryforward's internal sycophancy-guard --
+    def test_verbatim_preserved_ungrounded_carried_forward(self):
+        """The real bug: an UNGROUNDED line (citation does not resolve this wrap)
+        whose explanation is byte-identical to the prior is a warm, at-peak
+        pattern preserved verbatim — carryforward HOLDS it instead of its own
+        overlap-guard declining it into a demotion."""
+        text = (
+            "## State\nungrounded verbatim.\n## Patterns\n"
+            f'- alpha | 3x (2026-05-22) [evidence: deadbee1 "{self.PRIOR}"]\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        # deadbee1 is NOT in valid_ids -> ungrounded -> carryforward path.
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-22",
+            node_content_map={},
+            pattern_history_lookup=self._lookup(max_level=3),
+            carryforward_cold_days=7,
+        )
+        assert result.demoted == 0
+        assert len(result.carried_forward) == 1
+        assert "(carried-forward)" in result.text
+        assert "alpha | 3x" in result.text  # level HELD, not decremented
+
+    def test_carryforward_decision_holds_verbatim(self):
+        """Unit: _carryforward_decision returns a CarriedForward (hold) for a
+        verbatim-preserved explanation its sycophancy-guard would otherwise
+        decline."""
+        line = f'- alpha | 3x (2026-05-22) [evidence: deadbee1 "{self.PRIOR}"]'
+        held = _carryforward_decision(
+            line=line,
+            level=3,
+            today="2026-05-22",
+            pattern_history_lookup=self._lookup(max_level=3),
+            carryforward_cold_days=7,
+        )
+        assert isinstance(held, CarriedForward)
+        assert held.held_level == 3
+
+    def test_carryforward_decision_declines_reworded(self):
+        """Unit regression: a RE-WORDED high-overlap explanation is still
+        declined (returns None -> demotes)."""
+        line = f'- alpha | 3x (2026-05-22) [evidence: deadbee1 "{self.REWORDED}"]'
+        held = _carryforward_decision(
+            line=line,
+            level=3,
+            today="2026-05-22",
+            pattern_history_lookup=self._lookup(max_level=3),
+            carryforward_cold_days=7,
+        )
+        assert held is None
+
+    # -- codex L3 (HIGH + missing-coverage) regressions --
+    def test_verbatim_but_ungrounded_live_ids_demoted_no_poison(self):
+        """codex L3 HIGH: a byte-identical explanation whose cited LIVE ids do NOT
+        ground it (explanation_valid False) must demote (cross-session-overlap) and
+        form NO co-citation link — an exact-copy citing unrelated real episodes
+        would otherwise poison the Hebbian graph."""
+        text = (
+            "## State\npoison attempt.\n## Patterns\n"
+            f'- alpha | 3x (2026-05-22) [evidence: abc12345, def67890 "{self.PRIOR}"]\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        # Both ids resolve, but neither episode's content grounds the explanation.
+        node = {"abc12345": "completely unrelated runtime telemetry payload",
+                "def67890": "another orthogonal database migration note"}
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345", "def67890"},
+            today="2026-05-22",
+            node_content_map=node,
+            pattern_history_lookup=self._lookup(max_level=3),
+        )
+        assert result.demoted == 1
+        assert "(cross-session-overlap)" in result.text
+        assert result.carried_forward == []
+        assert result.direct_co_citations == []  # no poison link forged
+
+    def test_verbatim_level_up_still_demoted(self):
+        """A byte-identical LEVEL-UP (claim a new high with the exact prior words
+        + a resolving episode) is NOT preservation — it inflates past the earned
+        mark and must still cross-session-demote."""
+        text = (
+            "## State\nlevel up.\n## Patterns\n"
+            f'- alpha | 3x (2026-05-22) [evidence: abc12345 "{self.PRIOR}"]\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        # max_level=2 -> claiming 3x is inflation; the exemption's level gate fails.
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-22",
+            node_content_map={"abc12345": self.PRIOR + " meeting"},
+            pattern_history_lookup=self._lookup(max_level=2),
+        )
+        assert result.demoted == 1
+        assert "(cross-session-overlap)" in result.text
+
+    def test_missing_max_level_demotes_at_site2(self):
+        """No integer max_level_reached -> the Site 2 exemption does not apply
+        (conservative) -> a byte-identical overlap still demotes."""
+        text = (
+            "## State\nno max.\n## Patterns\n"
+            f'- alpha | 3x (2026-05-22) [evidence: abc12345 "{self.PRIOR}"]\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        def lk(name):
+            if name == "alpha":
+                # NOTE: no max_level_reached key.
+                return {"explanation_corpus": self.PRIOR, "last_explanation": self.PRIOR,
+                        "last_seen_at": "2026-05-21T00:00:00Z", "last_wrap_id": None}
+            return None
+        result = validate_graduations(
+            text=text, valid_ids={"abc12345"}, today="2026-05-22",
+            node_content_map={"abc12345": self.PRIOR + " meeting"},
+            pattern_history_lookup=lk,
+        )
+        assert result.demoted == 1
+        assert "(cross-session-overlap)" in result.text
+
+    def test_carryforward_decision_declines_verbatim_level_up(self):
+        """L1: a byte-identical explanation claiming a level ABOVE the earned mark
+        is declined at Site 1 — the `level > max_level` check fires after the
+        verbatim exemption. Pins the anti-inflation clause for the verbatim path
+        (the single most security-relevant line in the change)."""
+        line = f'- alpha | 3x (2026-05-22) [evidence: deadbee1 "{self.PRIOR}"]'
+        held = _carryforward_decision(
+            line=line,
+            level=3,
+            today="2026-05-22",
+            pattern_history_lookup=self._lookup(max_level=2),  # earned only 2x
+            carryforward_cold_days=7,
+        )
+        assert held is None
+
+    def test_omitted_node_content_map_no_vacuous_exemption(self):
+        """codex L3 convergence (MED): a direct caller passing valid_ids + history
+        but with NO usable node_content_map (None OR empty {}) must NOT earn the
+        preservation exemption via explanation_valid's vacuous default — the
+        exact-copy poison stays closed (demote, no co-citation link)."""
+        text = (
+            "## State\nno content map.\n## Patterns\n"
+            f'- alpha | 3x (2026-05-22) [evidence: abc12345, def67890 "{self.PRIOR}"]\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        for ncm in (None, {}):  # grounding cannot be evaluated in either case
+            result = validate_graduations(
+                text=text,
+                valid_ids={"abc12345", "def67890"},
+                today="2026-05-22",
+                node_content_map=ncm,
+                pattern_history_lookup=self._lookup(max_level=3),
+            )
+            assert result.demoted == 1, f"node_content_map={ncm!r}"
+            assert "(cross-session-overlap)" in result.text, f"node_content_map={ncm!r}"
+            assert result.direct_co_citations == [], f"node_content_map={ncm!r}"

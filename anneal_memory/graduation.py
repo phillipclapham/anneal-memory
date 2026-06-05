@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from datetime import datetime as _datetime, date as _date
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 from .schema import DEFAULT_GRADUATING
 
@@ -1189,6 +1189,178 @@ def extract_proven_patterns(
     level_map = extract_pattern_names(text, graduating_headings)
     names = [name for name, lvl in level_map.items() if lvl >= min_level]
     return sorted(names)
+
+
+# AM-SEMDUP (v0.5.0): strippers for the one-line meaning-snippet a pattern line
+# carries. The scaffolding strip is TARGETED — only the known immune/graduation
+# bracket tags — NOT a broad ``\[[^\]]*\]`` (which would also delete legitimate
+# bracketed prose, e.g. "a principle [rare edge case]"; L2 HIGH). Wikilinks
+# ``[[name]]`` reference a sibling pattern: keep the referenced NAME (otherwise a
+# broad strip leaves a stray ``]`` and loses the reference; L1 H1).
+_WIKILINK_RE = re.compile(r"\[\[([^\[\]]+)\]\]")
+# A WELL-FORMED [evidence:] tag — whose quoted explanation may contain "]" (codex
+# L3 M1) — is removed by SPAN via _PATTERN_LINE_WITH_EVIDENCE_RE in _pattern_summary
+# BEFORE this regex runs (that regex is hex-id-anchored, so it is quote-aware AND
+# cannot scan-to-EOF on a corrupted line). So this is a MOP-UP for a malformed /
+# leftover evidence tag plus [contradicts:] and the fixed-string state/level tags.
+# It is the simple strip-to-"]" form (no quote-awareness — that would reintroduce
+# an unterminated-quote garbage case, codex L3 convergence #1). The colon-body
+# alternatives use ``[^\]]*\]?`` — an UNBOUNDED non-"]" run with an OPTIONAL close:
+# this matches a closed tag up to its "]", AND consumes an unclosed body all the
+# way to end-of-line (so an unclosed tag => empty summary, never garbage, even when
+# the body exceeds any fixed bound — codex L3 convergence #2/#3). Crucially the
+# match ALWAYS succeeds (the "]" is optional), so .sub() never fails-and-rescans at
+# every "[evidence:" start = the quadratic a closing-"]"-required form would hit on
+# a corrupted line (codex L3 M2); a single greedy match consumes the whole tag in
+# one left-to-right pass. ``[^\]]*\]?`` has no quantifier ambiguity => no ReDoS.
+_SCAFFOLD_TAG_RE = re.compile(
+    r"\[evidence:[^\]]*\]?"
+    r"|\[contradicts:[^\]]*\]?"
+    r"|\[(?:no-contradicts|Proven|Developing|ungrounded|needs-evidence"
+    r"|cross-session-overlap|carried-forward)\]",
+    re.IGNORECASE,
+)
+# A leading ``(YYYY-MM-DD)`` left over after the name|Nx marker is stripped.
+_LEADING_DATE_RE = re.compile(r"^[ \t]*\(\d{4}-\d{2}-\d{2}\)")
+# The immune-system state parentheticals (the ``(ungrounded)`` etc. demotion
+# annotations the wrap pipeline appends), so they don't pollute the summary.
+_STATE_PAREN_RE = re.compile(
+    r"\((?:ungrounded|cross-session-overlap|carried-forward|needs-evidence|"
+    r"no-contradicts)\)",
+    re.IGNORECASE,
+)
+
+
+class PatternSummary(NamedTuple):
+    """One row of :func:`extract_pattern_summaries` — a graduated pattern's
+    name, its max graduation level, and a compact one-line meaning-snippet.
+
+    A ``NamedTuple`` so the public API is self-documenting (``row.name`` /
+    ``row.level`` / ``row.summary``) while staying tuple-compatible (unpacks +
+    indexes exactly like the ``(str, int, str)`` it replaces)."""
+
+    name: str
+    level: int
+    summary: str
+
+
+def _pattern_summary(line: str, max_chars: int = 120) -> str:
+    """A compact meaning-snippet for a pattern line (AM-SEMDUP).
+
+    Takes the descriptive prose AFTER the marker — the felt prose (flow
+    ``{{topic:}}`` form) or, failing that, the quoted
+    ``[evidence: <id> "explanation"]`` text (standard form).
+
+    A WELL-FORMED ``[evidence:]`` tag is removed by SPAN via
+    :data:`_PATTERN_LINE_WITH_EVIDENCE_RE` (which is quote-aware — its explanation
+    may contain ``]`` — and hex-id-anchored so it can't scan-to-EOF on a corrupted
+    line); the prose is then whatever FOLLOWS that tag, and the captured
+    explanation is the fallback meaning when no felt prose follows. When there is
+    no well-formed evidence tag, the function anchors on :data:`_NAMED_PATTERN_RE`
+    (the same date-OPTIONAL gate the extractor uses) so a dateless line doesn't
+    fall through to the whole line and leak the ``name | Nx`` scaffolding, then
+    strips a leftover ``(date)``. Either way it converts ``[[wikilink]]``
+    sibling-refs to their bare name (keeping the reference), mops up the known
+    immune/graduation bracket tags + state parentheticals (legitimate bracketed
+    prose survives), collapses whitespace and truncates. Returns ``""`` when the
+    line carries no human-readable meaning.
+    """
+    # Remove a WELL-FORMED evidence tag by span (quote-aware) and keep its
+    # explanation as the fallback meaning. _NAMED_PATTERN_WITH_EVIDENCE_RE is
+    # ANCHORED (^), so it binds the FIRST marker's evidence to this line's name —
+    # the unanchored .search would bind a LATER marker's explanation on a
+    # multi-marker line (codex L3 convergence #2; the AM-PERNAME-LINEBIND
+    # principle). group(5) is the quoted explanation; the prose after the tag is
+    # pure felt prose. A malformed/absent first-marker evidence tag falls through
+    # to the marker anchor below and is mopped up (to empty, never garbage).
+    ev = _NAMED_PATTERN_WITH_EVIDENCE_RE.match(line)
+    if ev:
+        evidence_expl = (ev.group(5) or "").strip()
+        prose = line[ev.end():]
+    else:
+        evidence_expl = ""
+        m = _NAMED_PATTERN_RE.match(line)
+        prose = line[m.end():] if m else line
+        prose = _LEADING_DATE_RE.sub("", prose, count=1)  # the marker's "(date)"
+
+    prose = _WIKILINK_RE.sub(r"\1", prose)            # [[name]] -> name (keep ref)
+    prose = _SCAFFOLD_TAG_RE.sub(" ", prose)          # mop up leftover/known tags
+    prose = _STATE_PAREN_RE.sub(" ", prose)           # (ungrounded)/(carried-forward)
+    prose = prose.lstrip(" \t—-–:")                   # leading em-dash / separator
+    prose = re.sub(r"\s+", " ", prose).strip()
+
+    summary = prose or evidence_expl
+    if len(summary) > max_chars:
+        summary = summary[: max_chars - 1].rstrip() + "…"
+    return summary
+
+
+def extract_pattern_summaries(
+    text: str,
+    graduating_headings: frozenset[str] = DEFAULT_GRADUATING,
+    min_level: int = 1,
+    max_summary_chars: int = 120,
+) -> list[PatternSummary]:
+    """Return ``(name, max_level, meaning-summary)`` for named patterns in the
+    graduating section(s) — the corpus AM-SEMDUP surfaces so the agent can spot
+    a pattern it is about to re-graduate under fresh vocabulary and a new name.
+
+    Unlike :func:`extract_proven_patterns` (names only, 2x+), this returns a
+    one-line MEANING per pattern (so semantic — not just name — overlap is
+    judgeable) over ALL named levels by default (``min_level=1``): a fresh-vocab
+    duplicate most dangerously enters as a NEW 1x under a new name, fragmenting
+    what should have been a re-graduation of an existing pattern.
+
+    One entry per pattern NAME (highest level wins, mirroring
+    :func:`extract_pattern_names`; the summary is taken from the highest-level
+    occurrence). Sorted by ``(level desc, name)`` so the caller can cap
+    deterministically — highest-tier (most-established, most-costly-to-fork)
+    first.
+
+    Pattern matching uses the SAME ``_NAMED_PATTERN_RE`` gate as
+    :func:`extract_pattern_names` — deliberately, so the dedup scan and the
+    immune system agree on what counts as a pattern line. That gate matches
+    ``Nx`` as a token prefix (a malformed ``| 2xperiment`` reads as level 2);
+    hardening the boundary belongs in the shared regex (it would touch the whole
+    immune system), not here — diverging would make a line a pattern for the
+    immune system but not for this scan.
+
+    Args:
+        text: The continuity file text.
+        graduating_headings: The schema's graduating-section markers.
+        min_level: Minimum level to include. Default 1 (all named patterns).
+        max_summary_chars: Truncation bound for each meaning-snippet.
+
+    Returns:
+        ``list[PatternSummary]`` (``name``, ``level``, ``summary``) sorted by
+        level desc then name.
+    """
+    by_name: dict[str, tuple[int, str]] = {}
+    in_section = False
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            in_section = _is_graduating_heading(line, graduating_headings)
+            continue
+        if not in_section:
+            continue
+        match = _NAMED_PATTERN_RE.match(line)
+        if not match:
+            continue
+        name = match.group(1)
+        try:
+            level = int(match.group(2))
+        except ValueError:
+            continue
+        if level < min_level:
+            continue
+        prior = by_name.get(name)
+        if prior is None or level > prior[0]:
+            by_name[name] = (level, _pattern_summary(line, max_summary_chars))
+    result = [
+        PatternSummary(name, lvl, summ) for name, (lvl, summ) in by_name.items()
+    ]
+    result.sort(key=lambda r: (-r.level, r.name))
+    return result
 
 
 def extract_contradiction_declarations(

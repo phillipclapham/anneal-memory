@@ -1,6 +1,6 @@
 """anneal-memory: Living memory for AI agents. Episodes compress into identity."""
 
-__version__ = "0.4.8"
+__version__ = "0.5.0"
 
 from .store import (
     AnnealMemoryError,
@@ -39,6 +39,7 @@ from .schema import (
     name_for_schema,
     required_headings,
     schema_by_name,
+    schema_role_warning,
     sections_by_role,
     validate_schema,
 )
@@ -55,9 +56,11 @@ from .graduation import (
     check_explanation_overlap,
     detect_pattern_omissions,
     detect_proven_without_declaration,
+    PatternSummary,
     detect_stale_patterns,
     extract_contradiction_declarations,
     extract_pattern_names,
+    extract_pattern_summaries,
     extract_proven_patterns,
     extract_session_co_citations,
     validate_graduations,
@@ -117,6 +120,7 @@ __all__ = [
     "graduating_headings",
     "required_headings",
     "sections_by_role",
+    "schema_role_warning",
     "heading_marker",
     "validate_structure",
     "prepare_wrap",
@@ -127,6 +131,8 @@ __all__ = [
     "detect_stale_patterns",
     "extract_session_co_citations",
     "extract_pattern_names",
+    "extract_pattern_summaries",
+    "PatternSummary",
     "detect_pattern_omissions",
     "OmittedPattern",
     "CrossSessionCollision",

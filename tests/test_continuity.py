@@ -365,6 +365,10 @@ class TestTypedDictReturnShapes:
                 # contradiction-scan discipline must check against
                 # before any new Proven graduation this wrap.
                 "uncovered_proven_to_check",
+                # Added v0.5.0 (AM-ROLECHECK): warning when the section
+                # schema validates but is mis-roled into a thinner package
+                # (None when known-good/benign or on the empty path).
+                "schema_warning",
             }
             assert set(result["package"].keys()) == {
                 "episodes",
@@ -3975,6 +3979,145 @@ class TestMove4LibraryLayerIntegration:
             )
             # [no-contradicts] satisfies the discipline; audit must be empty
             assert result["proven_without_contradicts_declaration"] == []
+        finally:
+            store.close()
+
+
+class TestSemanticDedupBlock:
+    """AM-SEMDUP (v0.5.0): the merge-don't-fork dedup scan travels in the wrap
+    package (sibling of the contradiction scan), surfacing the existing
+    graduated corpus over ALL named levels so the agent can catch a pattern it
+    is about to re-graduate under fresh vocabulary + a new name."""
+
+    def _record_episodes(self, store, count: int = 3):
+        ep_ids = []
+        for i in range(count):
+            ep = store.record(
+                f"episode {i}: substrate observation about dedup topic {i}.",
+                "observation",
+            )
+            ep_ids.append(ep.id)
+        return ep_ids
+
+    def _render(self, template, ep_ids):
+        out = template
+        for i, ep_id in enumerate(ep_ids):
+            out = out.replace(f"{{ep{i}}}", ep_id)
+        return out
+
+    def test_dedup_block_emitted_with_existing_patterns(self, tmp_path):
+        from anneal_memory import Store, prepare_wrap, validated_save_continuity
+        from anneal_memory.continuity import format_wrap_package_text
+
+        store = Store(tmp_path / "dedup.db", project_name="Dedup")
+        try:
+            ep_ids = self._record_episodes(store)
+            s1 = self._render(
+                "## State\nseed.\n\n## Patterns\n"
+                "- alpha_proven | 2x (2026-05-21) [evidence: {ep0} "
+                '"substrate observation dedup"] [no-contradicts]\n'
+                "- beta_developing | 1x (2026-05-21) — a developing principle\n\n"
+                "## Decisions\n- decided.\n\n## Context\n- context.\n",
+                ep_ids,
+            )
+            w1 = prepare_wrap(store, max_chars=20000)
+            # First wrap: no prior patterns -> NO dedup block.
+            assert "Pattern Dedup Scan" not in w1["package"]["instructions"]
+            validated_save_continuity(
+                store, s1, today="2026-05-21", wrap_token=w1["wrap_token"]
+            )
+
+            self._record_episodes(store)
+            w2 = prepare_wrap(store, max_chars=20000)
+            instr = w2["package"]["instructions"]
+            assert "Pattern Dedup Scan" in instr
+            assert "merge" in instr.lower() and "fork" in instr.lower()
+            # ALL named levels surface — the 1x developing pattern too (the
+            # behavior that distinguishes it from the 2x+ contradiction scan).
+            assert "alpha_proven" in instr
+            assert "beta_developing" in instr
+            # Renders through the canonical transport agents actually read.
+            assert "Pattern Dedup Scan" in format_wrap_package_text(w2)
+            store.wrap_cancelled()
+        finally:
+            store.close()
+
+    def test_no_dedup_block_on_first_wrap(self, tmp_path):
+        from anneal_memory import Store, prepare_wrap
+
+        store = Store(tmp_path / "first.db", project_name="First")
+        try:
+            store.record("an observation", "observation")
+            w = prepare_wrap(store, max_chars=20000)
+            assert "Pattern Dedup Scan" not in w["package"]["instructions"]
+            store.wrap_cancelled()
+        finally:
+            store.close()
+
+    def test_dedup_cap_and_overflow_note(self):
+        # Unit-test the block builder directly for the no-silent-truncation
+        # discipline: a pathologically large set is capped with an announced
+        # overflow (the full set always lives in the in-package continuity).
+        from anneal_memory.continuity import _semantic_dedup_block, _SEMDUP_CAP
+
+        summaries = [(f"pat_{i:03d}", 1, f"meaning {i}") for i in range(_SEMDUP_CAP + 7)]
+        block = _semantic_dedup_block(summaries)
+        assert "pat_000" in block
+        assert f"…plus 7 more graduated pattern(s)" in block
+        # Exactly _SEMDUP_CAP listed (the (Nx) marker appears once per shown row).
+        assert block.count("(1x)") == _SEMDUP_CAP
+
+
+class TestRoleCheckPrepareIntegration:
+    """AM-ROLECHECK (v0.5.0): prepare_wrap surfaces a schema-role warning both
+    loudly (UserWarning) and structurally (the schema_warning field)."""
+
+    def test_known_good_schema_no_warning(self, tmp_path):
+        from anneal_memory import Store, prepare_wrap
+        from anneal_memory.schema import FLOW_SCHEMA
+
+        store = Store(tmp_path / "good.db", project_name="Good",
+                      section_schema=FLOW_SCHEMA)
+        try:
+            store.record("an observation", "observation")
+            result = prepare_wrap(store, max_chars=25500)
+            assert result["schema_warning"] is None
+            store.wrap_cancelled()
+        finally:
+            store.close()
+
+    def test_misroled_schema_warns_loud_and_structured(self, tmp_path):
+        from anneal_memory import Store, prepare_wrap
+        from anneal_memory.schema import FLOW_SCHEMA
+
+        # Understanding demoted narrative-timeless -> narrative: keeps a
+        # graduating section (passes validate_schema / persists) but silently
+        # drops the felt proportion-check. The prepare-reachable, load-bearing case.
+        misroled = [dict(s) for s in FLOW_SCHEMA]
+        for s in misroled:
+            if s["heading"] == "Understanding":
+                s["role"] = "narrative"
+
+        store = Store(tmp_path / "bad.db", project_name="Bad")
+        try:
+            store.set_section_schema(misroled)
+            store.record("an observation", "observation")
+            with pytest.warns(UserWarning, match="Understanding"):
+                result = prepare_wrap(store, max_chars=25500)
+            assert result["schema_warning"] is not None
+            assert "narrative-timeless" in result["schema_warning"]
+            store.wrap_cancelled()
+        finally:
+            store.close()
+
+    def test_empty_path_schema_warning_none(self, tmp_path):
+        from anneal_memory import Store, prepare_wrap
+
+        store = Store(tmp_path / "empty.db", project_name="Empty")
+        try:
+            result = prepare_wrap(store)  # no episodes
+            assert result["status"] == "empty"
+            assert result["schema_warning"] is None
         finally:
             store.close()
 

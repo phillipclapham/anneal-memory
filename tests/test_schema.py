@@ -28,6 +28,7 @@ from anneal_memory.schema import (
     name_for_schema,
     required_headings,
     schema_by_name,
+    schema_role_warning,
     sections_by_role,
     validate_schema,
 )
@@ -729,3 +730,75 @@ class TestDefaultMaxChars:
         assert "within 20000 characters" in d
         f = _build_wrap_instructions("flow", None, "2026-06-02", FLOW_SCHEMA)
         assert "within 25500 characters" in f
+
+
+class TestSchemaRoleWarning:
+    """AM-ROLECHECK (v0.5.0): schema_role_warning — surface a VALID-but-mis-roled
+    schema that would silently thin the prepare_wrap package, without
+    false-warning on the known-good or benign-reorder cases."""
+
+    def _misrole(self, schema, heading, new_role):
+        out = [dict(s) for s in schema]
+        for s in out:
+            if s["heading"] == heading:
+                s["role"] = new_role
+        return out
+
+    def test_known_good_named_schemas_silent(self):
+        # Exact named schemas are correct by construction — never warn.
+        assert schema_role_warning(DEFAULT_SCHEMA) is None
+        assert schema_role_warning(FLOW_SCHEMA) is None
+
+    def test_reorder_only_is_benign(self):
+        # A reordering of a named schema (e.g. a future Understanding-at-primacy
+        # profile) keeps every role — must NOT warn. Guards the CHIPSCHEMA path.
+        reordered = [s for s in FLOW_SCHEMA if s["heading"] == "Understanding"] + [
+            s for s in FLOW_SCHEMA if s["heading"] != "Understanding"
+        ]
+        assert name_for_schema(reordered) is None  # not an exact named match
+        assert schema_role_warning(reordered) is None
+
+    def test_felt_misrole_is_the_load_bearing_catch(self):
+        # The prepare-reachable, load-bearing case: Understanding demoted from
+        # narrative-timeless to narrative — keeps a graduating section (passes
+        # validate_schema) but silently drops the felt proportion-check + the
+        # shrink-gate's felt protection.
+        misroled = self._misrole(FLOW_SCHEMA, "Understanding", "narrative")
+        validate_schema(misroled)  # still valid (has graduating, valid roles)
+        warning = schema_role_warning(misroled)
+        assert warning is not None
+        assert "Understanding" in warning
+        assert "narrative-timeless" in warning
+        assert "partnership" in warning
+
+    def test_misrole_off_default_schema(self):
+        # Heading-set match against DEFAULT with a differing role also fires.
+        misroled = self._misrole(DEFAULT_SCHEMA, "Context", "decisions")
+        assert name_for_schema(misroled) is None
+        warning = schema_role_warning(misroled)
+        assert warning is not None
+        assert "Context" in warning and "default" in warning
+
+    def test_no_graduating_floor_is_a_backstop(self):
+        # validate_schema HARD-REFUSES a 0-graduating schema at persist, so the
+        # floor only fires for a raw schema passed directly to this function.
+        raw = [
+            {"heading": "State", "role": "live-state"},
+            {"heading": "Notes", "role": "narrative"},
+        ]
+        with pytest.raises(ValueError):
+            validate_schema(raw)  # the store path would never persist this
+        warning = schema_role_warning(raw)
+        assert warning is not None
+        assert "no 'graduating' section" in warning
+
+    def test_valid_custom_novel_headings_silent(self):
+        # A legitimate custom schema (novel headings, has graduating) — no
+        # named-schema heading-set match and a graduating section → no warning.
+        custom = [
+            {"heading": "Now", "role": "live-state"},
+            {"heading": "Principles", "role": "graduating"},
+            {"heading": "Log", "role": "narrative"},
+        ]
+        validate_schema(custom)
+        assert schema_role_warning(custom) is None

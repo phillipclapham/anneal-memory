@@ -11,13 +11,16 @@ from anneal_memory.graduation import (
     _carryforward_decision,
     _is_verbatim_preservation,
     _meaningful_word_overlap,
+    _pattern_summary,
     check_explanation_overlap,
     detect_citation_gaming,
     detect_pattern_omissions,
     detect_stale_patterns,
     extract_pattern_names,
+    extract_pattern_summaries,
     validate_graduations,
 )
+from anneal_memory.schema import FLOW_SCHEMA, graduating_headings
 
 # -- Test fixtures --
 
@@ -2963,3 +2966,211 @@ class TestBareCarryforward:
 
     def _line_named(self, result, needle):
         return next(ln for ln in result.text.splitlines() if needle in ln)
+
+
+class TestPatternSummary:
+    """AM-SEMDUP (v0.5.0): _pattern_summary — a compact meaning-snippet that
+    survives the format variety of real pattern lines."""
+
+    def test_felt_prose_form(self):
+        line = (
+            "  verify_or_surface | 2x (2026-06-05) (cross-session-overlap) "
+            "[no-contradicts] — cached state is a SNAPSHOT; verify or surface. [Proven]"
+        )
+        s = _pattern_summary(line)
+        assert s.startswith("cached state is a SNAPSHOT")
+        # scaffolding stripped
+        assert "[no-contradicts]" not in s
+        assert "cross-session-overlap" not in s
+        assert "[Proven]" not in s
+
+    def test_evidence_quote_fallback(self):
+        line = (
+            '- acid_over_speed | 2x (2026-06-05) '
+            '[evidence: 4931b6a8 "PostgreSQL chosen for ACID guarantees"]'
+        )
+        # No trailing felt prose -> falls back to the quoted evidence explanation.
+        assert _pattern_summary(line) == "PostgreSQL chosen for ACID guarantees"
+
+    def test_bare_line_has_empty_summary(self):
+        assert _pattern_summary("- bare_dev | 1x (2026-06-05)") == ""
+
+    def test_truncation_adds_ellipsis(self):
+        long = "x" * 300
+        line = f"- p | 1x (2026-06-05) — {long}"
+        s = _pattern_summary(line, max_chars=50)
+        assert len(s) == 50
+        assert s.endswith("…")
+
+    def test_truncation_word_boundary_is_le_not_eq(self):
+        # L1 L3: with spaces near the cut, rstrip yields <= max_chars (not ==);
+        # the prior == assertion was accidentally specific to space-free input.
+        line = "- p | 1x (2026-06-05) — word " + "y " * 40
+        s = _pattern_summary(line, max_chars=20)
+        assert len(s) <= 20
+        assert s.endswith("…")
+
+    def test_wikilink_reference_preserved(self):
+        # L1 H1 (live-data bug): a [[sibling]] ref must keep the referenced NAME,
+        # not leave a stray "]" and lose the reference.
+        line = ("- decompose | 2x (2026-06-05) — separate concerns. "
+                "Sibling of [[invisible_infrastructure_failure]].")
+        s = _pattern_summary(line)
+        assert "invisible_infrastructure_failure" in s
+        assert "[" not in s and "]" not in s
+
+    def test_dateless_line_no_scaffolding_leak(self):
+        # L1 M1: a graduated line with no (date) must not leak "name | Nx".
+        assert _pattern_summary("- no_date_pat | 3x — a real principle") == \
+            "a real principle"
+
+    def test_legit_bracketed_prose_preserved(self):
+        # L2 HIGH: only KNOWN scaffolding tags are stripped — legitimate
+        # bracketed prose survives (the broad strip would have deleted it).
+        s = _pattern_summary("- p | 1x (2026-06-05) — a principle [rare edge case] applies")
+        assert s == "a principle [rare edge case] applies"
+
+    def test_flowscript_marker_prefix(self):
+        # A "! urgent" FlowScript-prefixed line still summarizes cleanly.
+        s = _pattern_summary("  ! urgent_pat | 3x (2026-06-05) — drop everything")
+        assert s == "drop everything"
+
+    def test_evidence_explanation_with_bracket_is_quote_aware(self):
+        # codex L3 M1: an [evidence:] explanation containing "]" must NOT be
+        # cut at the inner "]" (which left garbage prose + suppressed the
+        # evidence fallback). Quote-aware strip returns the full explanation.
+        s = _pattern_summary(
+            '- p | 2x (2026-06-05) [evidence: abc12345 "works for bracketed [rare] cases"]'
+        )
+        assert s == "works for bracketed [rare] cases"
+
+    def test_unclosed_scaffold_tags_do_not_blow_up(self):
+        # codex L3 M2: a corrupted line with many unclosed "[evidence:" must not
+        # make the scaffold strip quadratic. The {0,512} bound keeps it linear;
+        # 30k repeats completes well under a second (was ~quadratic before).
+        import time
+        line = "- p | 1x (2026-06-05) — " + ("[evidence:" * 30000)
+        t = time.time()
+        s = _pattern_summary(line)
+        assert time.time() - t < 1.5  # bounded; unbounded-quadratic ~2.6s+
+        assert isinstance(s, str)
+
+    def test_unterminated_quote_yields_empty_not_garbage(self):
+        # codex L3 convergence: an [evidence:] tag with an UNTERMINATED quote must
+        # strip to empty (the safe fallback), NOT leak the raw tag as garbage. The
+        # quote-aware regex form regressed this (empty -> garbage); the span +
+        # bounded-mop-up architecture restores empty.
+        s = _pattern_summary('- p | 2x (2026-06-05) [evidence: abc123 "unterminated]')
+        assert s == ""
+
+    def test_malformed_evidence_keeps_trailing_felt_prose(self):
+        # A malformed evidence tag is mopped up to its first "]"; felt prose after
+        # it survives.
+        s = _pattern_summary('- p | 2x (2026-06-05) [evidence: bad "unterm] — felt tail')
+        assert s == "felt tail"
+
+    def test_multimarker_binds_first_markers_meaning_not_a_later_one(self):
+        # codex L3 convergence #2: the evidence binding is ANCHORED to the FIRST
+        # marker — a malformed multi-marker line must NOT bind a LATER marker's
+        # explanation as this name's summary (the AM-PERNAME-LINEBIND principle).
+        s = _pattern_summary(
+            "- first | 2x (2026-06-05) — FIRST FELT. "
+            'second | 2x (2026-06-05) [evidence: abc12345 "SECOND EXPL"]'
+        )
+        assert "FIRST FELT" in s
+        assert "SECOND EXPL" not in s
+
+    def test_evidence_with_no_closing_bracket_yields_empty_not_garbage(self):
+        # codex L3 convergence #2: a fully-unclosed "[evidence:" (no "]" at all)
+        # must strip to empty, not leak the raw tag.
+        assert _pattern_summary('- p | 2x (2026-06-05) [evidence: abc123 "unterminated') == ""
+        assert _pattern_summary('- p | 2x (2026-06-05) [evidence: abc "x — felt') == ""
+
+    def test_unclosed_evidence_longer_than_512_yields_empty(self):
+        # codex L3 convergence #3: an unclosed evidence body LONGER than any fixed
+        # bound must still strip to empty — the unbounded "[^\]]*\]?" form consumes
+        # the whole tag to EOL (a {0,512} bound leaked the overflow tail).
+        assert _pattern_summary("- p | 2x (2026-06-05) [evidence: " + "a" * 512) == ""
+        assert _pattern_summary("- p | 2x (2026-06-05) " + ("[evidence:" * 53)) == ""
+
+    def test_scaffold_strip_is_linear_on_megabyte_garbage(self):
+        # The "always-succeeds" match means .sub() never fail-rescans => linear,
+        # not quadratic, even on a 1 MB unclosed body.
+        import time
+        line = "- p | 1x (2026-06-05) [evidence: " + ("a" * 1_000_000)
+        t = time.time()
+        s = _pattern_summary(line)
+        assert time.time() - t < 1.0  # ~0.02s linear; quadratic would be minutes
+        assert s == ""
+
+
+class TestExtractPatternSummaries:
+    """AM-SEMDUP (v0.5.0): extract_pattern_summaries — the corpus the
+    merge-don't-fork dedup scan surfaces."""
+
+    GRAD = graduating_headings(FLOW_SCHEMA)
+
+    TEXT = (
+        "# x — Memory (v1)\n"
+        "## Patterns\n"
+        "{{topic:\n"
+        "  verify_or_surface | 2x (2026-06-05) [no-contradicts] — cached state is a "
+        "SNAPSHOT; verify or surface.\n"
+        "}}\n"
+        "- acid_over_speed | 3x (2026-06-05) [evidence: 4931b6a8 \"ACID over speed\"]\n"
+        "- bare_dev | 1x (2026-06-05)\n"
+        "## Decisions\n"
+        "- some_decision | 2x (2026-06-05) [evidence: deadbeef \"not a pattern\"]\n"
+    )
+
+    def test_returns_name_level_summary_over_all_levels(self):
+        rows = extract_pattern_summaries(self.TEXT, graduating_headings=self.GRAD)
+        names = {r[0] for r in rows}
+        # 1x developing patterns ARE included (min_level=1) — the distinguishing
+        # behavior vs extract_proven_patterns (2x+).
+        assert names == {"verify_or_surface", "acid_over_speed", "bare_dev"}
+        # Decisions section is NOT scanned (only graduating sections).
+        assert "some_decision" not in names
+
+    def test_sorted_by_level_desc_then_name(self):
+        rows = extract_pattern_summaries(self.TEXT, graduating_headings=self.GRAD)
+        assert [r[0] for r in rows] == ["acid_over_speed", "verify_or_surface", "bare_dev"]
+        assert [r[1] for r in rows] == [3, 2, 1]
+
+    def test_min_level_filter(self):
+        rows = extract_pattern_summaries(
+            self.TEXT, graduating_headings=self.GRAD, min_level=2
+        )
+        assert {r[0] for r in rows} == {"acid_over_speed", "verify_or_surface"}
+
+    def test_summaries_carry_meaning(self):
+        rows = dict((r[0], r[2]) for r in extract_pattern_summaries(
+            self.TEXT, graduating_headings=self.GRAD))
+        assert "SNAPSHOT" in rows["verify_or_surface"]
+        assert rows["acid_over_speed"] == "ACID over speed"
+        assert rows["bare_dev"] == ""
+
+    def test_highest_level_wins_on_duplicate_name(self):
+        text = (
+            "## Patterns\n"
+            "- dup | 1x (2026-06-01) — low form\n"
+            "- dup | 3x (2026-06-05) [evidence: aabbccdd \"high form\"]\n"
+        )
+        rows = extract_pattern_summaries(text)
+        assert len(rows) == 1
+        name, level, summary = rows[0]
+        assert (name, level) == ("dup", 3)
+        assert summary == "high form"
+
+    def test_empty_text_yields_nothing(self):
+        assert extract_pattern_summaries("") == []
+
+    def test_rows_are_named_tuples_and_tuple_compatible(self):
+        from anneal_memory.graduation import PatternSummary
+        rows = extract_pattern_summaries(self.TEXT, graduating_headings=self.GRAD)
+        r = rows[0]
+        assert isinstance(r, PatternSummary)
+        # self-documenting field access AND positional/unpack compatibility
+        assert (r.name, r.level, r.summary) == (r[0], r[1], r[2])
+        name, level, summary = r
+        assert name == r.name and level == r.level and summary == r.summary

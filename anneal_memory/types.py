@@ -341,6 +341,15 @@ class PrepareWrapResult(TypedDict):
     # catches what slips through. ``[]`` when no Proven patterns exist
     # yet (cold-start case) or status is ``"empty"``.
     uncovered_proven_to_check: list[str]
+    # AM-ROLECHECK (v0.5.0): a human-readable warning when the persisted section
+    # schema VALIDATES but assigns a role that would silently thin the wrap
+    # package (e.g. no ``graduating`` section → no immune system / pattern-line
+    # format; a section mis-roled off a named schema → a lost felt
+    # proportion-check). ``None`` when the schema is known-good or the divergence
+    # is benign, and always ``None`` on the ``"empty"`` path (no package built).
+    # Also emitted as a ``UserWarning`` at ``prepare_wrap`` (mirrors AM-WARN's
+    # ``association_warning``) so the signal is loud, not only structured.
+    schema_warning: str | None
 
 
 class SaveContinuityResult(TypedDict):

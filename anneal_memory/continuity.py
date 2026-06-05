@@ -31,9 +31,11 @@ from typing import TYPE_CHECKING, Any
 from .graduation import (
     CrossSessionCollision,
     OmittedPattern,
+    PatternSummary,
     detect_pattern_omissions,
     detect_stale_patterns,
     extract_pattern_names,
+    extract_pattern_summaries,
     validate_graduations,
     _NAMED_PATTERN_WITH_EVIDENCE_RE,
     _is_graduating_heading,
@@ -44,6 +46,7 @@ from .schema import (
     default_max_chars,
     graduating_headings,
     required_headings,
+    schema_role_warning,
 )
 from .store import StoreError, WrapInProgressError, _fsync_dir, _safe_unlink
 from .types import (
@@ -445,19 +448,34 @@ def _build_wrap_package(
     # uncovered_proven_to_check (read back from the returned package). One
     # computation site means the discipline and its data cannot drift.
     from .graduation import extract_proven_patterns
+    grad_headings = graduating_headings(schema)
     uncovered_proven = (
         extract_proven_patterns(
             existing_continuity,
-            graduating_headings=graduating_headings(schema),
+            graduating_headings=grad_headings,
         )
         if existing_continuity
         else []
     )
 
-    # Build instructions (the contradiction-scan block is emitted from
-    # uncovered_proven when there is a graduating section + prior Proven).
+    # AM-SEMDUP (v0.5.0): the existing graduated corpus (name + level + a
+    # one-line meaning) over ALL named levels (min_level=1) — a fresh-vocab
+    # duplicate most dangerously enters as a NEW 1x under a new name. Computed
+    # once here so the dedup-scan block in _build_wrap_instructions and any
+    # downstream inspection derive from one extraction.
+    pattern_summaries = (
+        extract_pattern_summaries(
+            existing_continuity,
+            graduating_headings=grad_headings,
+        )
+        if existing_continuity
+        else []
+    )
+
+    # Build instructions (the contradiction-scan + dedup-scan blocks are emitted
+    # when there is a graduating section + the relevant existing patterns).
     instructions = _build_wrap_instructions(
-        project_name, max_chars, today, schema, uncovered_proven
+        project_name, max_chars, today, schema, uncovered_proven, pattern_summaries
     )
 
     return WrapPackageDict(
@@ -478,6 +496,7 @@ def _build_wrap_instructions(
     today: str,
     schema: list[SectionSpec] | None = None,
     uncovered_proven: list[str] | None = None,
+    pattern_summaries: list[PatternSummary] | None = None,
 ) -> str:
     """Build the compression instructions the agent receives via prepare_wrap.
 
@@ -573,6 +592,14 @@ def _build_wrap_instructions(
     # stance against, so no block is emitted.
     if has_graduating and uncovered_proven:
         parts += [_contradiction_scan_block(uncovered_proven), ""]
+    # AM-SEMDUP (v0.5.0): the merge-don't-fork dedup scan — sibling of the
+    # contradiction scan. Surfaces the existing graduated corpus (name + a
+    # one-line meaning) so the agent can catch a pattern it is about to
+    # re-graduate under fresh vocabulary + a new name (which the lexical
+    # cross-session immune gate structurally cannot see). Only when there's a
+    # graduating section AND existing named patterns to scan against.
+    if has_graduating and pattern_summaries:
+        parts += [_semantic_dedup_block(pattern_summaries), ""]
     parts += ["**How to compress:**", *how_lines, ""]
     parts += [
         "**Quality:** One insightful line > three vague ones. If removing something",
@@ -748,6 +775,64 @@ Existing Proven to scan against:
 {proven_list}"""
 
 
+# AM-SEMDUP (v0.5.0): cap the rendered dedup list. The full set always lives in
+# the in-package continuity's graduating section; the cap bounds the agent-facing
+# block for a pathologically large pattern set (graduation is ruthless by design,
+# so a real store rarely approaches this) and the overflow is announced — never
+# silently truncated.
+_SEMDUP_CAP = 50
+
+
+def _semantic_dedup_block(summaries: list[PatternSummary]) -> str:
+    """The merge-don't-fork dedup-scan instruction emitted into the wrap package.
+
+    AM-SEMDUP (v0.5.0): the cross-session immune system catches a pattern
+    re-cited with overlapping VOCABULARY (citation overlap) and a pattern that
+    CONTRADICTS an existing one (the contradiction scan), but NOT the same
+    PRINCIPLE re-graduated under FRESH words and a NEW name — a silent duplicate
+    that forks the pattern graph (two names for one principle, each accruing half
+    the evidence). Fresh vocabulary is, by definition, LOW lexical overlap, so a
+    lexical/citation check structurally cannot see it; only the agent's
+    (vocabulary-invariant) semantic judgment can. So — like AM-CONTRASCAN-EMIT —
+    the library SURFACES the existing graduated corpus (name + level + a one-line
+    meaning, so semantic not just name overlap is judgeable) plus the merge
+    instruction; the agent decides (the no-LLM-as-judge axiom: the library cannot
+    decide semantic identity). ``structural_invariants_beat_discipline``: the
+    discipline travels WITH the package — flow carried it as a retired hand rule
+    (the WRAP_PROTOCOL pre-wrap pattern recall) that an entity could silently
+    drop by editing a doc it no longer reads.
+
+    ``summaries`` are sorted ``(level desc, name)``; capped at
+    :data:`_SEMDUP_CAP` with an explicit overflow note.
+    """
+    shown = summaries[:_SEMDUP_CAP]
+    overflow = len(summaries) - len(shown)
+    listing = "\n".join(
+        f"- {name} ({level}x)" + (f": {summary}" if summary else "")
+        for name, level, summary in shown
+    )
+    overflow_note = (
+        f"\n- …plus {overflow} more graduated pattern(s) in your continuity's "
+        f"graduating section — scan those too."
+        if overflow > 0
+        else ""
+    )
+    return f"""### Pattern Dedup Scan (merge, don't fork — before composing ANY new pattern)
+
+The immune system catches a pattern re-cited with overlapping VOCABULARY and a
+pattern that CONTRADICTS an existing one — but it CANNOT catch the same
+PRINCIPLE re-graduated under FRESH words and a NEW name. That silent duplicate
+forks your pattern graph: two names for one principle, each accruing half the
+evidence. Before composing ANY new pattern (any level), scan it against your
+existing graduated patterns below:
+
+{listing}{overflow_note}
+
+If your new pattern is the SAME principle as one of these under different words,
+MERGE it — re-graduate the EXISTING name with your new evidence — instead of
+forking a new name. Fork only when the principle is genuinely distinct."""
+
+
 def prepare_wrap(
     store: Store,
     *,
@@ -866,6 +951,7 @@ def prepare_wrap(
             assoc_context=None,
             wrap_token=None,
             uncovered_proven_to_check=[],
+            schema_warning=None,
         )
 
     # AM-PREPARE-GUARD (0.4.2): real episodes to compress AND a wrap
@@ -899,6 +985,15 @@ def prepare_wrap(
     # behavior (which would disable the catastrophic-shrink gate). Read once
     # here; reuse for the package build + graduating-heading extraction below.
     schema = store.section_schema_for_wrap()
+    # AM-ROLECHECK (v0.5.0): a VALID-but-mis-roled schema yields a silently
+    # thinner package (the immune/pattern format, contradiction scan, felt
+    # proportion-check all emit by ROLE) — the v0.3.5 shrink gate only refuses
+    # CORRUPT schemas. Warn loudly (UserWarning, mirroring AM-WARN) + surface
+    # structurally on the result, so an entity that trusts the generator and
+    # dropped its static reference still notices the generator under-delivered.
+    schema_warning = schema_role_warning(schema)
+    if schema_warning is not None:
+        warnings.warn(schema_warning, UserWarning, stacklevel=2)
     package = _build_wrap_package(
         episodes,
         existing,
@@ -947,6 +1042,7 @@ def prepare_wrap(
         assoc_context=assoc_context,
         wrap_token=wrap_token,
         uncovered_proven_to_check=package["uncovered_proven"],
+        schema_warning=schema_warning,
     )
 
 

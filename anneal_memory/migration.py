@@ -122,6 +122,30 @@ MIGRATION_MANIFEST: list[MigrationEntry] = [
         ),
         "files": list(CORE_FILES),
     },
+    {
+        "version": "0.4.8",
+        "feature": "AM-PRESERVE-BARE-PATH",
+        "summary": (
+            "Demotion fix: a graduated Proven carried forward WITHOUT a fresh "
+            "citation (a `name | Nx (date)` line with no `[evidence:]` tag, "
+            "re-stamped to today) is now HELD at its level when it is at/below "
+            "its earned high-water mark and was grounded within the warm window "
+            "— instead of being demoted one level every wrap. This completes "
+            "AM-CARRYFORWARD (0.4.6), which had protected only the cited "
+            "demotion path. Transparent: carried-forward patterns stop eroding "
+            "by session-domain; no data was lost (only the level marker moved)."
+        ),
+        "suggested_edit": (
+            "No instruction-file edit is required — this is a transparent engine "
+            "fix. One optional relaxation: if your wrap guidance tells the agent "
+            "it MUST re-cite every Proven each wrap or lose its level, you can "
+            "soften that — a Proven carried forward bare (re-stamped to today, no "
+            "citation) at/below its earned level and still warm is now held, not "
+            "eroded. Brand-new bald `name | Nx` claims with no earned history "
+            "still demote, so inflation is unaffected."
+        ),
+        "files": list(CORE_FILES),
+    },
 ]
 
 

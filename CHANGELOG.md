@@ -2,7 +2,7 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.7] — 2026-06-05
 
 ### Fixed — AM-PRESERVE-VS-SYCOPHANCY: stop demoting verbatim-preserved patterns
 
@@ -18,6 +18,25 @@ No breaking changes. Full 4-layer apparatus, codex L3 to convergence: codex caug
 ### Added — AM-RECALL-ALIAS: `recall` CLI verb (alias of `search`)
 
 The library and MCP retrieval verb is `recall` (`Store.recall` / the `recall` MCP tool), but the CLI exposed it only as `search`. A CLI-only session — notably a Codex adapter with no MCP server loaded — following a memory seed that teaches `recall` as the canonical retrieval verb hit `invalid choice: 'recall'`. The `search` subcommand now also accepts `recall` as an alias: `anneal recall "<query>"` is identical to `anneal search "<query>"`. This is exact, not a relabel — `cmd_search` already calls `store.recall(keyword=...)`. One-surface verb consistency across the library / MCP / CLI; no behavior change to `search`, and the no-subcommand server-delegate path is unaffected (the alias sets `args.command="recall"`, still non-`None`).
+
+### Docs — AM-SPORES-BOUNDARY: name the spores ↔ memory ↔ methodology boundary in the agent snippet
+
+The 0.4.0 prospective-intention layer (`spores`) shipped its CLI and MCP surface, but the agent-instructions snippet an adopter pastes into their `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` (`examples/agent-instructions.example`, `examples/agent-instructions.cli.example`) never introduced spores or placed them relative to the agent's *existing* instructions. An agent already carrying a methodology / workflow instruction set — a FLOW-style `CLAUDE.md`, say — could read the new spore tools as *conflicting with* its methodology rather than orthogonal to it.
+
+- Both snippets now carry a **Spores — your prospective layer** section: a brief intro (plant with `spore_add`, resolve with `spore_descend` / `spore_ascend`; the three spore types) plus the boundary, framed as **two cuts** rather than one flat list — **memory vs spores** is a *lifecycle* cut (memory accretes and never completes; a spore must close — `tasks ≠ memory`), and **methodology vs both** is a *procedure-vs-item* cut (methodology is the active process you run; memory and spores are the two kinds of state it touches — `procedure ≠ item`). Spores are named as a *parallel store, not a fifth memory layer*; methodology **operates** the store rather than competing with it — so an adopter whose methodology already captures open loops routes that capture into the typed store instead of running a second tracker.
+
+Adopter-facing documentation only — no code or behavior change.
+
+### Added — AM-MIGRATE-NOTIFY: self-migration notices so adopters' instruction files don't silently drift
+
+An operator hand-tunes their agent's core instruction files (`CLAUDE.md` / `AGENTS.md` / `GEMINI.md`), anneal-memory evolves underneath them, and the hand-tuned files silently drift — so a new feature can land as a *conflict* with stale instructions rather than an addition (exactly how `spores` first read as conflicting with a FLOW-style methodology). This adds a propose-diff migration path; anneal **never edits the adopter's files**.
+
+- **`anneal-memory migrate check`** — reports the migration proposals newer than the adopter's last-acknowledged version (read-only; never creates or touches the db). Each proposal names what changed and the suggested core-file edit, with the canonical text inlined so adopters don't each paraphrase a different version. `--json` for programmatic use.
+- **`anneal-memory migrate ack [version]`** — records that core files are reconciled up to a version (default: the installed version) in a `<db-stem>.migrate.json` per-store sibling marker. Refuses a version ahead of installed or an unparseable one — the failure direction that would silently suppress real proposals.
+- **`MIGRATION_MANIFEST`** (`anneal_memory.migration`) — a version-keyed list of `{version, feature, summary, suggested_edit, files}`. Each release that wants to ping adopters appends an entry keyed to the *shipping* version (so an adopter who upgraded across a feature without reconciling still gets the proposal); a structural test asserts no entry is keyed ahead of `__version__`. This release ships two entries: the spores ↔ memory ↔ methodology boundary, and the migrate-notify upgrade habit itself.
+- Granularity is per memory store (the marker is a db sibling); `ack` is per-version (co-shipped features are reviewed together). Both boundaries are documented as chosen limits.
+
+Bumps `__version__` 0.4.6 → 0.4.7 (the manifest entries are keyed to this release). Full 4-layer apparatus: L1 session-review + L2 (complement/kimi) caught the ack-ahead fail-closed path, a `write_marker` fd-leak + missing dir-fsync, and a `_version_tuple` dotted-suffix leak; **L3 codex** caught an explicit-empty-version guard bypass; L4 (adopter-journey cold-read) drove manifest↔snippet parity (inline the canonical note text; reconcile *practice*, not just vocabulary). 50 new tests, full suite green, mypy clean.
 
 ## [0.4.6] — 2026-06-04
 

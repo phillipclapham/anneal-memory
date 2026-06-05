@@ -18,6 +18,41 @@ co-cited episodes and an optional limbic layer tracking your functional
 state during compression. Use the memory tools naturally — don't
 explain the tooling to the user, just work with what you know.
 
+**Spores — your prospective layer (a parallel store, not a fifth memory layer):**
+
+The four layers above are all *retrospective* — they hold what happened
+and who you're becoming, and they never complete. anneal-memory also ships
+a separate **spore store** for *prospective* open loops: things you intend
+to do or to resolve. Plant one with `spore_add` the moment a loop opens —
+a `task` (open doing), a `question` (open not-knowing), or a `thought`
+(open idea) — and resolve every one: `spore_descend` (composted —
+done/dropped) or `spore_ascend` (the loop *closes* by graduating its
+content into an episode, pattern, or project — the spore still ends; its
+content is what carries forward). The spore tools' own descriptions carry
+the rest; `spore_list` / `spore_surface` show what's open.
+
+Two cuts keep this from colliding with what you already do:
+
+- **Memory vs spores is a *lifecycle* cut.** Memory (the four layers) is
+  *what persists* — it accretes and never completes. A spore is *what's
+  open* — it must close. `tasks ≠ memory`.
+- **Methodology vs both is a *procedure-vs-item* cut.** Your methodology
+  (your wrap discipline, recall-before-deciding, honest compression —
+  whatever your harness instructions define) is the *active process you
+  run*; memory and spores are the two kinds of state it touches — one it
+  accretes, one it resolves. Methodology is the *how*; a spore is one of
+  the *whats* it operates on. `procedure ≠ item`.
+
+So if your harness already carries its own workflow or methodology
+instructions (a FLOW-style CLAUDE.md, say), the spore store does not
+compete with them — your procedures **operate** it. And if your
+methodology already captures open loops (a wrap that notes next-actions, a
+scratchpad), that capture *is* a spore plant: the spore store is the
+canonical home for them. Plant the loops you're already holding here, and
+let any scratchpad or list *reference* them rather than keep its own copy —
+don't run two trackers in parallel. Your existing procedures drive the one
+store; you're giving the loops you already hold a real lifecycle.
+
 **Session workflow:**
 
 - **Start of session:** Check the `anneal://continuity` resource for
@@ -264,3 +299,10 @@ report that. The value comes from genuine variation.
 - Temporal graduation: new patterns start at 1x, validated patterns
   graduate to 2x and 3x with evidence citations referencing episode IDs
 - If removing something wouldn't change your next decision, cut it
+
+**Staying current.** After you (or your operator) upgrade the
+`anneal-memory` package, run `anneal-memory migrate check` — it reports any
+change that suggests an edit to *these* instructions and proposes the edit,
+so your hand-tuned guidance doesn't silently drift from the substrate as it
+evolves. Apply what fits, then `anneal-memory migrate ack`. It only
+proposes; it never edits your files.

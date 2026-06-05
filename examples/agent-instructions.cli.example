@@ -22,6 +22,43 @@ tooling to the user, just work with what you know.
 Set `ANNEAL_MEMORY_DB` to your database path, or use `--db` on every command.
 First run: `anneal-memory init` creates the database and continuity file.
 
+**Spores — your prospective layer (a parallel store, not a fifth memory layer):**
+
+The four layers above are all *retrospective* — they hold what happened
+and who you're becoming, and they never complete. anneal-memory also ships
+a separate **spore store** for *prospective* open loops: things you intend
+to do or to resolve. Plant one with `anneal-memory spore add` the moment a
+loop opens — a `task` (open doing), a `question` (open not-knowing), or a
+`thought` (open idea) — and resolve every one: `anneal-memory spore
+descend` (composted — done/dropped) or `anneal-memory spore ascend` (the
+loop *closes* by graduating its content into an episode, pattern, or
+project — the spore still ends; its content is what carries forward).
+`anneal-memory spore list` / `anneal-memory spore surface` show what's open
+(the spore store is a `<db-stem>.spores.json` sibling, created on first
+write — no `init` needed).
+
+Two cuts keep this from colliding with what you already do:
+
+- **Memory vs spores is a *lifecycle* cut.** Memory (the four layers) is
+  *what persists* — it accretes and never completes. A spore is *what's
+  open* — it must close. `tasks ≠ memory`.
+- **Methodology vs both is a *procedure-vs-item* cut.** Your methodology
+  (your wrap discipline, recall-before-deciding, honest compression —
+  whatever your harness instructions define) is the *active process you
+  run*; memory and spores are the two kinds of state it touches — one it
+  accretes, one it resolves. Methodology is the *how*; a spore is one of
+  the *whats* it operates on. `procedure ≠ item`.
+
+So if your harness already carries its own workflow or methodology
+instructions (a FLOW-style CLAUDE.md, say), the spore store does not
+compete with them — your procedures **operate** it. And if your
+methodology already captures open loops (a wrap that notes next-actions, a
+scratchpad), that capture *is* a spore plant: the spore store is the
+canonical home for them. Plant the loops you're already holding here, and
+let any scratchpad or list *reference* them rather than keep its own copy —
+don't run two trackers in parallel. Your existing procedures drive the one
+store; you're giving the loops you already hold a real lifecycle.
+
 **Session workflow:**
 
 - **Start of session:** Read your continuity file:
@@ -289,3 +326,10 @@ anneal-memory prune --older-than 90 --dry-run   # Preview what would be pruned
 **Environment variables:**
 - `ANNEAL_MEMORY_DB` — default database path (overridden by `--db`)
 - `ANNEAL_MEMORY_SOURCE` — default source for `record` (overridden by `--source`)
+
+**Staying current.** After you (or your operator) upgrade the
+`anneal-memory` package, run `anneal-memory migrate check` — it reports any
+change that suggests an edit to *these* instructions and proposes the edit,
+so your hand-tuned guidance doesn't silently drift from the substrate as it
+evolves. Apply what fits, then `anneal-memory migrate ack`. It only
+proposes; it never edits your files.

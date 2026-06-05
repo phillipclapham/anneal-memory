@@ -316,3 +316,79 @@ class TestVersionConsistency:
                 f"server.json package version {pkg['version']!r} != "
                 f"__version__ {anneal_memory.__version__!r}"
             )
+
+
+class TestSkillManifest:
+    """The Claude Code Skill must keep a valid, routable frontmatter.
+
+    The Skill + lean snippets are **repository artifacts** — distributed via
+    this repo (and the sdist), deliberately NOT bundled in the wheel (Claude
+    Code skills ship via repos/marketplaces, not PyPI). So resolving them
+    through the source tree (``__file__.parent.parent``) is the correct guard:
+    it validates the copy adopters actually fetch. It does NOT — and is not
+    meant to — assert wheel delivery.
+
+    A SKILL.md with a missing/empty ``name`` or ``description`` silently
+    fails to register or auto-activate — an invisible-infrastructure failure
+    the adopter only discovers when memory work doesn't happen. The
+    ``description`` is the routing field (it decides *when* the skill loads),
+    so it must be present, descriptive, and name the wrap so the skill routes
+    at session end as well as start. Stdlib-only parse (the library is
+    zero-dep; the test stays so too).
+    """
+
+    def _repo_root(self) -> Path:
+        import anneal_memory
+        return Path(anneal_memory.__file__).parent.parent
+
+    def _frontmatter(self, text: str) -> dict[str, str]:
+        assert text.startswith("---\n"), (
+            "SKILL.md must open with a '---' YAML frontmatter fence"
+        )
+        end = text.find("\n---", 4)
+        assert end != -1, "SKILL.md frontmatter is not closed by a '---' fence"
+        fm: dict[str, str] = {}
+        for line in text[4:end].splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            key, sep, val = line.partition(":")
+            assert sep, f"malformed frontmatter line: {line!r}"
+            fm[key.strip()] = val.strip()
+        return fm
+
+    def test_skill_frontmatter_valid(self):
+        skill = self._repo_root() / "skill" / "anneal-memory" / "SKILL.md"
+        assert skill.exists(), "shipped skill/anneal-memory/SKILL.md missing"
+        fm = self._frontmatter(skill.read_text())
+        assert fm.get("name") == "anneal-memory", (
+            f"SKILL.md name must be 'anneal-memory', got {fm.get('name')!r}"
+        )
+        desc = fm.get("description", "")
+        assert len(desc) >= 40, (
+            "SKILL.md description is the routing field — it must be present "
+            f"and descriptive (got {len(desc)} chars)"
+        )
+        assert "wrap" in desc.lower(), (
+            "SKILL.md description should mention the wrap so the skill routes "
+            "at session end, not only at session start"
+        )
+
+    def test_lean_snippets_point_to_skill(self):
+        """Regression guard: each lean snippet file references the Skill.
+
+        Scope note: this checks the whole file, so the human-facing comment
+        header (which tells the adopter to install the Skill) satisfies it —
+        it does not assert the agent-pasted ``## Memory`` body names the Skill
+        (the body delegates depth generically). It catches removal of the
+        Skill pointer from the file, which is the regression that matters.
+        """
+        examples = self._repo_root() / "examples"
+        for name in (
+            "agent-instructions.lean.example",
+            "agent-instructions.lean.cli.example",
+        ):
+            p = examples / name
+            assert p.exists(), f"lean snippet examples/{name} missing"
+            assert "SKILL" in p.read_text(), (
+                f"{name} should point adopters to the SKILL for depth"
+            )

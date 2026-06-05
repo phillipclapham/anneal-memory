@@ -2,6 +2,20 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+> Delivered to the GitHub repo now (the Skill + snippets are repo artifacts); the **PyPI release is intentionally batched** — this entry ships to PyPI with the next library-code items (AM-SEMDUP / AM-ROLECHECK / AM-CHIPSCHEMA) as 0.4.8/0.5.0, not as a docs-only point release. See the cadence note in `projects/anneal_memory/next.md`.
+
+### Added — AM-SKILL: a Claude Code Skill + lean agent-instructions snippets
+
+Adopter-facing onboarding was a single 309-line `agent-instructions.example` — too long to paste into a `CLAUDE.md` — and there was no Claude Code Skill at all (both surfaced by an operator running anneal-memory live on their own hardware). This release adds two leaner on-ramps and demotes the long reference. The Skill and snippets are **repository artifacts** — they ship in the GitHub repo (and the source distribution), **not in the pip/uvx wheel**; fetch them from the repo. (A bundled `anneal-memory skill install` helper for pip/uvx adopters is a planned follow-up.)
+
+- **`skill/anneal-memory/SKILL.md`** — a Claude Code Agent Skill (progressive-disclosure: model-invoked on-demand when the agent is doing memory work, primarily before decisions and on wrap). Carries the full workflow — the four layers, spores, recall-before-decisions, the `prepare_wrap` → compress → `save_continuity` sequence, the immune-system honest-scope summary, stuck-wrap recovery, and a CLI-primary / MCP-parallel commands table. Fetch `skill/anneal-memory/` from the repo and copy it into `.claude/skills/` (per-project) or `~/.claude/skills/` (global). It is depth-on-demand, *paired with* the lean snippet (which carries the always-loaded start-of-session step), not a replacement for it.
+- **`examples/agent-instructions.lean.example`** (MCP) + **`examples/agent-instructions.lean.cli.example`** (CLI) — ~45-line always-loaded minimums for a `CLAUDE.md` / `AGENTS.md` / `GEMINI.md`: the act-correctly workflow (start-of-session load, record, recall-before-decisions, the wrap sequence), with depth delegated to the Skill / README / full example. Copy-paste text; self-contained.
+- The prior comprehensive snippets are **renamed** `examples/agent-instructions.full.example` / `.full.cli.example` (the deep reference — content unchanged).
+
+Docs-only: no library code changes. The README gains a "Claude Code / agent-harness adopters" quickstart, and a structural test asserts the repo's `SKILL.md` keeps a valid, routable frontmatter (name + description present) and that the lean snippets point adopters to the Skill.
+
 ## [0.4.7] — 2026-06-05
 
 ### Fixed — AM-PRESERVE-VS-SYCOPHANCY: stop demoting verbatim-preserved patterns

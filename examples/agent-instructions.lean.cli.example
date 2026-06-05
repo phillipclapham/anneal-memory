@@ -1,0 +1,49 @@
+# anneal-memory CLI — LEAN Agent-Instructions Snippet
+#
+# Paste the section below into your harness's agent-instructions file
+# (CLAUDE.md / AGENTS.md / GEMINI.md). This is the always-loaded MINIMUM —
+# the workflow an agent needs to act correctly. For the full reference
+# (immune-system internals, affective-state shape, operator commands),
+# install the anneal-memory SKILL (skill/anneal-memory/SKILL.md), which
+# loads on-demand, or see examples/agent-instructions.full.cli.example.
+#
+# Requires: pip install anneal-memory; set ANNEAL_MEMORY_DB (or use --db).
+
+## Memory (anneal-memory CLI)
+
+This project uses anneal-memory for persistent memory across sessions —
+four retrospective layers (episodes compress into continuity; Hebbian
+links + a limbic tag form automatically) plus a **spore** store for
+prospective open loops (`task`/`question`/`thought`, planted then
+resolved). Use memory naturally; don't narrate the tooling.
+
+**Start:** `anneal-memory continuity` (run `anneal-memory init` first if
+the DB doesn't exist). If it prints "No continuity file yet" and exits
+non-zero, this is the first session — just start recording (not an error).
+
+**During work:** record as things happen — the *reasoning*, not just the
+fact:
+  anneal-memory record "Chose X because Y" --type decision
+Types: decision · observation · tension · question · outcome · context.
+Record proactively; target 5–15 episodes a session. Plant a spore the
+moment a loop opens: `anneal-memory spore add --type task --text "…"`.
+
+**Before decisions (NON-NEGOTIABLE):** `anneal-memory recall "<surface
+area>"` and integrate what comes back. If nothing returns, proceed and
+note recall fired clean. Skipping this is the dead-store failure mode —
+the store grows while decisions get made blind to it.
+
+**Wrap (at "wrap up" / "save memory" / "we're done"):** run the full
+sequence, once — `anneal-memory prepare-wrap` → compress per its
+instructions (this step IS the thinking; principles over facts) →
+`anneal-memory save-continuity continuity.md`. Demoted graduations are
+the validation pipeline working, not an error; don't re-run to chase a
+clean report. Cite real episode IDs honestly — you are the first line of
+defense, the library is the second.
+
+**Operator inspection:** `status` · `stats` · `graph` · `history` ·
+`audit` · `verify` · `export` (all support `--json`).
+
+**Staying current:** after upgrading the package, run `anneal-memory
+migrate check` — it proposes edits to *these* instructions so they don't
+drift from the substrate (it never edits your files); then `migrate ack`.

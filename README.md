@@ -159,6 +159,16 @@ anneal-memory works with any agent framework through the Python library. Each gu
 
 These guides show integration patterns based on each framework's current API. The library works with any Python framework — the pattern is always the same: initialize a `Store`, call `record()` at meaningful moments, `recall()` before decisions, and run the wrap sequence at session end. **Don't see your framework?** The [library quickstart](docs/library-quickstart.md) shows the 4-function pattern that works everywhere.
 
+## Claude Code / agent-harness adopters (Skill + snippet)
+
+Using anneal-memory inside an agent harness — Claude Code, Codex, Gemini CLI — rather than a Python framework? The Skill and snippets are **repository artifacts**: they live in this GitHub repo (and the source distribution), **not in the pip/uvx wheel** — clone the repo or download the files directly from GitHub to use them. They layer, they aren't a menu: the lean snippet is the always-loaded baseline; the Skill adds depth on demand.
+
+- **Lean snippet — the always-loaded baseline.** Paste [`examples/agent-instructions.lean.example`](examples/agent-instructions.lean.example) (MCP) or [`examples/agent-instructions.lean.cli.example`](examples/agent-instructions.lean.cli.example) (CLI) into your `CLAUDE.md` / `AGENTS.md` / `GEMINI.md`. ~45 lines, always in context — the **start-of-session continuity load**, recording, recall-before-decisions, and the wrap sequence, with depth delegated to the Skill. (Copy-paste text; nothing to install.)
+- **The Skill — depth on demand.** Copy the [`skill/anneal-memory/`](skill/anneal-memory) directory into `.claude/skills/` (per-project) or `~/.claude/skills/` (global). [`SKILL.md`](skill/anneal-memory/SKILL.md) carries the comprehensive workflow and is model-invoked when you're doing memory work — primarily **before decisions and on wrap**. It is *depth-on-demand, not a replacement for the lean snippet*: a model-invoked skill won't reliably fire at a bare session start, so keep the lean snippet in place for the start-of-session step.
+- **The full reference — everything inline.** [`examples/agent-instructions.full.example`](examples/agent-instructions.full.example) / [`.full.cli.example`](examples/agent-instructions.full.cli.example) are the complete snippets (immune-system internals, the affective-state shape, the operator-command catalog) for adopters who'd rather keep it all in their instructions file than install a Skill.
+
+After upgrading the package, run `anneal-memory migrate check` — it proposes edits to your instructions so they don't silently drift from the substrate (it never edits your files), then `anneal-memory migrate ack`.
+
 ## Why This Exists
 
 Three independent production failures share one root cause: no quality mechanism between memory write and memory read.

@@ -2162,8 +2162,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--tags", help="Comma-separated tags")
     sub.set_defaults(func=cmd_record)
 
-    # -- search --
-    sub = subparsers.add_parser("search", help="Search episodes by keyword", parents=[json_parent])
+    # -- search (alias: recall) --
+    # `recall` is the verb the library (Store.recall) and MCP tool expose, and
+    # the one partnership seeds teach as canonical. cmd_search already calls
+    # store.recall(keyword=...), so the CLI alias is exact, not a paper-over —
+    # it keeps the retrieval verb consistent across the library/MCP/CLI surfaces
+    # (AM-RECALL-ALIAS).
+    sub = subparsers.add_parser(
+        "search",
+        aliases=["recall"],
+        help="Search/recall episodes by keyword (alias: recall)",
+        parents=[json_parent],
+    )
     sub.add_argument("query", help="Search keyword")
     sub.add_argument("--since", help="Filter results to after duration (e.g. 3d)")
     sub.add_argument("--type", choices=[t.value for t in EpisodeType], help="Filter by episode type")

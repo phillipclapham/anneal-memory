@@ -2,6 +2,12 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — AM-RECALL-ALIAS: `recall` CLI verb (alias of `search`)
+
+The library and MCP retrieval verb is `recall` (`Store.recall` / the `recall` MCP tool), but the CLI exposed it only as `search`. A CLI-only session — notably a Codex adapter with no MCP server loaded — following a memory seed that teaches `recall` as the canonical retrieval verb hit `invalid choice: 'recall'`. The `search` subcommand now also accepts `recall` as an alias: `anneal recall "<query>"` is identical to `anneal search "<query>"`. This is exact, not a relabel — `cmd_search` already calls `store.recall(keyword=...)`. One-surface verb consistency across the library / MCP / CLI; no behavior change to `search`, and the no-subcommand server-delegate path is unaffected (the alias sets `args.command="recall"`, still non-`None`).
+
 ## [0.4.6] — 2026-06-04
 
 ### Changed — AM-CARRYFORWARD: activation-aware demotion (stop eroding load-bearing patterns by session-domain)

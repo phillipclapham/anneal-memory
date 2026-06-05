@@ -856,6 +856,24 @@ class TestParser:
         assert args.command == "search"
         assert args.query == "test query"
 
+    def test_recall_alias_parses(self):
+        """`recall` is an alias for `search` — same handler, same args (AM-RECALL-ALIAS)."""
+        parser = build_parser()
+        args = parser.parse_args(["recall", "test query", "--since", "3d", "--limit", "5"])
+        # argparse sets `command` to the invoked alias name, not the canonical.
+        assert args.command == "recall"
+        # but it dispatches to the same handler and binds the same args as search.
+        assert args.func is cmd_search
+        assert args.query == "test query"
+        assert args.since == "3d"
+        assert args.limit == 5
+
+    def test_recall_alias_command_not_none(self):
+        """The recall alias must not trip the no-subcommand server-delegate path."""
+        parser = build_parser()
+        args = parser.parse_args(["recall", "x"])
+        assert args.command is not None
+
     def test_delete_with_force(self):
         parser = build_parser()
         args = parser.parse_args(["delete", "abc123", "--force"])
@@ -1007,6 +1025,49 @@ class TestSubprocess:
         )
         assert result.returncode == 0
         assert "subprocess" in result.stdout.lower()
+
+    def test_cli_recall_alias_matches_search(self, tmp_path):
+        """`anneal recall X` == `anneal search X` at the real CLI boundary (AM-RECALL-ALIAS)."""
+        db_path = str(tmp_path / "test.db")
+        init_res = subprocess.run(
+            [sys.executable, "-m", "anneal_memory.cli", "--db", db_path, "init"],
+            capture_output=True,
+        )
+        record_res = subprocess.run(
+            [
+                sys.executable, "-m", "anneal_memory.cli", "--db", db_path,
+                "record", "The recall alias dispatches like search", "--type", "outcome",
+            ],
+            capture_output=True,
+        )
+        # Assert setup succeeded — without this, an env failure (import error,
+        # locked DB) could make both verbs fail identically and pass/fail the
+        # byte-identity check below for the wrong reason (L2/kimi apparatus catch).
+        assert init_res.returncode == 0
+        assert record_res.returncode == 0
+
+        def _run(verb: str) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                [
+                    sys.executable, "-m", "anneal_memory.cli", "--db", db_path,
+                    verb, "recall", "--json",
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+        search_res = _run("search")
+        recall_res = _run("recall")
+        assert search_res.returncode == 0
+        assert recall_res.returncode == 0
+        # --json carries the episode's fixed record timestamp (not a query-time
+        # field), so both verbs must produce byte-identical output — proving the
+        # alias is the same handler + same args, not a near-miss. The single
+        # seeded episode also keeps result order trivially deterministic; add a
+        # sort tiebreaker before seeding multiple here (recall orders by
+        # timestamp DESC with no tiebreaker — L1+L2 convergent apparatus note).
+        assert recall_res.stdout == search_res.stdout
+        assert '"id"' in recall_res.stdout
 
     def test_cli_json_output(self, tmp_path):
         """Test JSON output works in subprocess."""

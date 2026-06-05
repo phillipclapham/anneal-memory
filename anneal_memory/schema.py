@@ -56,6 +56,7 @@ __all__ = [
     "required_headings",
     "sections_by_role",
     "default_max_chars",
+    "schema_role_warning",
 ]
 
 SectionRole = Literal[
@@ -350,6 +351,117 @@ def default_max_chars(schema: list[SectionSpec]) -> int:
         else:
             budget += _BUDGET_EXTRA.get(role, 0)
     return budget
+
+
+def schema_role_warning(schema: list[SectionSpec]) -> str | None:
+    """AM-ROLECHECK (v0.5.0): warn when a schema's ROLE assignment would
+    silently thin the ``prepare_wrap`` package.
+
+    The wrap package is built conditionally on section ROLES, not headings
+    (``continuity._build_wrap_instructions``): the pattern-line / immune format
+    and the contradiction scan emit only for a ``graduating`` role; the felt
+    proportion-check only for ``narrative-timeless``; the failure-mode
+    discipline only for a ``narrative`` role. A schema that VALIDATES
+    (:func:`validate_schema` passes) but assigns the WRONG role to a section
+    produces a silently thinner package — and the v0.3.5 catastrophic-shrink
+    gate only refuses CORRUPT schemas, never a valid-but-mis-roled one. Once an
+    entity trusts the generator and drops its own static reference, nothing
+    lets it notice the generator under-delivered (spore-013, anansi L3).
+
+    Returns a single human-readable warning string, or ``None`` when the schema
+    is a known-good named schema OR a benign custom schema. Two checks,
+    most-specific first:
+
+    1. **Role drift off a named schema** — the schema's heading SET exactly
+       matches a named schema (:data:`SCHEMA_NAMES`) but a heading is assigned
+       a DIFFERENT role than that named schema gives it. The precise "I
+       hand-built a partnership-shaped schema and mis-roled a section" case
+       (e.g. ``Understanding`` as ``narrative`` not ``narrative-timeless`` →
+       loses the felt proportion-check AND the shrink-gate protection; or
+       ``Patterns`` as ``narrative`` not ``graduating`` → loses the immune
+       system). A mere REORDERING of a named schema's sections is NOT flagged
+       (roles unchanged) — that's a legitimate custom profile.
+    2. **No graduating section** — zero ``graduating`` roles means the immune
+       system, the pattern-line format, and the contradiction scan are never
+       emitted and patterns can never graduate. This is a BACKSTOP only: the
+       canonical store path already HARD-REFUSES a 0-graduating schema at
+       persist time (:func:`validate_schema` raises), so this check fires only
+       for a caller passing a raw/unvalidated schema directly to this function.
+       It never false-fires on a validated schema (which always has graduating).
+
+    Note the division of labour: :func:`validate_schema` refuses the CORRUPT
+    and graduating-LESS cases at persist; the v0.3.5 shrink gate refuses
+    catastrophic felt collapse at save. AM-ROLECHECK covers the gap between
+    them — a schema that VALIDATES and KEEPS a graduating section but is
+    mis-roled elsewhere (the prepare-reachable, load-bearing case is
+    ``narrative-timeless`` → ``narrative``, which silently drops the felt
+    proportion-check and the shrink-gate's felt protection while passing every
+    other guard).
+
+    Like AM-WARN (``association_warning``), this WARNS — it does not refuse; the
+    signal is loud (a ``UserWarning`` at ``prepare_wrap``) and structured (the
+    ``schema_warning`` field on ``PrepareWrapResult``).
+
+    **Known limitation (deliberate):** check 1 only catches a mis-role on a
+    schema whose heading SET matches a NAMED schema. A fully CUSTOM partnership
+    schema — novel headings AND a felt section mis-roled ``narrative`` instead
+    of ``narrative-timeless`` — is NOT caught (there is no named reference to
+    drift from). A role-shape heuristic was considered and rejected: it
+    false-fires on legitimate ops-plus-extra schemas. This boundary should be
+    revisited when a trusted-single-operator / Understanding-at-primacy profile
+    (AM-CHIPSCHEMA, deferred to v2) ships, since that lands more custom
+    partnership-shaped schemas.
+    """
+    # A known-good named schema (exact ordered heading+role match) is correct
+    # by construction — never warn (no false positives for default/partnership).
+    if name_for_schema(schema) is not None:
+        return None
+
+    # Check 1: role drift off a named schema with the SAME heading set. The
+    # named schemas have unique headings, so a heading->role dict is lossless
+    # for them; the drift scan iterates the candidate's sections in order so a
+    # candidate with a duplicate heading is still checked entry-by-entry.
+    target_headings = [s["heading"].strip().lower() for s in schema]
+    target_heading_set = set(target_headings)
+    for nm, named in _SCHEMAS_BY_NAME.items():
+        named_role_by_heading = {
+            s["heading"].strip().lower(): s["role"] for s in named
+        }
+        if target_heading_set == set(named_role_by_heading):
+            drifts = [
+                (s["heading"], s["role"], named_role_by_heading[h])
+                for s, h in zip(schema, target_headings)
+                if s["role"] != named_role_by_heading[h]
+            ]
+            if drifts:
+                detail = "; ".join(
+                    f"section {heading!r} is role {actual!r} where the "
+                    f"{nm!r} schema assigns {expected!r}"
+                    for heading, actual, expected in drifts
+                )
+                return (
+                    f"Section schema has the same sections as the {nm!r} schema "
+                    f"but different role assignments: {detail}. This changes what "
+                    f"prepare_wrap emits (the immune/pattern-line format keys off "
+                    f"the 'graduating' role; the felt proportion-check off "
+                    f"'narrative-timeless') — the package may be silently thinner "
+                    f"than the {nm!r} schema intends. Re-check the role on the "
+                    f"section(s) above, or ignore if the divergence is deliberate."
+                )
+
+    # Check 2 (universal floor): a schema with no graduating section silently
+    # loses the immune system, the pattern-line format, and the contradiction
+    # scan, and no pattern can graduate.
+    if not any(s["role"] == "graduating" for s in schema):
+        return (
+            "Section schema has no 'graduating' section — the immune system, the "
+            "pattern-line format, and the contradiction scan will NOT be emitted "
+            "into the wrap package, and patterns cannot graduate (1x->2x->3x). If "
+            "this store is meant to develop graduated principles, mark a section "
+            "with role 'graduating' (e.g. 'Patterns')."
+        )
+
+    return None
 
 
 # Derived once at import: the default graduating-heading set. graduation.py

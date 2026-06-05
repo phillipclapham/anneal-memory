@@ -666,6 +666,15 @@ names so the immune system can protect your patterns.
 - Validates existing 1x → `- pattern_name | 2x ({today}) [evidence: <episode_id> "explanation"]`
 - Validates existing 2x → `- pattern_name | 3x ({today}) [evidence: <episode_id> "explanation"]`
 - Evidence citations REQUIRED for graduations (2x and 3x). Cite the episode's 8-char ID.
+- **Preserved (still true, but NOT re-exercised this session): KEEP the pattern's
+  EXISTING date and evidence — do NOT re-stamp `({today})`.** The date marks when the
+  pattern was last genuinely grounded. Re-stamping today's date on a pattern you only
+  carried forward unchanged falsely claims you re-grounded it today, and the immune
+  system validates ONLY today-dated lines — so a today-stamped-but-not-re-grounded
+  pattern is needlessly demoted (`(ungrounded)` / `(cross-session-overlap)`). Use
+  `({today})` ONLY when you genuinely re-exercised the pattern with NEW evidence this
+  session; otherwise carry it forward verbatim with its prior date, and it ages out
+  naturally at 7 days (below) if never re-grounded.
 - Patterns marked `(ungrounded)` need FRESH evidence from THIS session to re-graduate.
 - Patterns marked `(cross-session-overlap)` were demoted because today's explanation
   reused too much vocabulary from prior sessions; compose new evidence with

@@ -538,9 +538,21 @@ def validate_graduations(
             # Check 1: at least one cited ID exists
             ids_valid = bool(cited_ids & valid_ids)
 
-            # Check 2: explanation references ANY cited episode's content
+            # Check 2: explanation references ANY cited episode's content.
+            # ``grounding_checked`` records whether grounding was ACTUALLY
+            # evaluated (node_content_map present) — distinct from
+            # ``explanation_valid``'s optimistic default. The AM-PRESERVE-VS-
+            # SYCOPHANCY exemption (Site 2) requires grounding_checked, so a direct
+            # caller that passes valid_ids + history but OMITS node_content_map
+            # cannot earn the exemption by vacuous default and re-open the
+            # exact-copy graph-poison (codex L3 convergence MEDIUM).
+            grounding_checked = bool(ids_valid and explanation and node_content_map)
             explanation_valid = True
-            if ids_valid and explanation and node_content_map:
+            # ``and node_content_map is not None`` is implied by grounding_checked
+            # (which is bool(... and node_content_map)); the explicit clause narrows
+            # the type for mypy WITHOUT an assert (-O-safe, matching the codebase's
+            # invariant-check style).
+            if grounding_checked and node_content_map is not None:
                 # Check all valid cited IDs — pass if ANY has content overlap
                 explanation_valid = False
                 for cid in cited_ids & valid_ids:
@@ -643,7 +655,36 @@ def validate_graduations(
                         prior_explanations = [
                             e for e in corpus.split("\n") if e.strip()
                         ]
-                        if prior_explanations:
+                        # AM-PRESERVE-VS-SYCOPHANCY: exempt VERBATIM preservation
+                        # (byte-identical explanation) — but ONLY when the line is
+                        # held at/below its earned high-water mark, i.e. NOT
+                        # inflating. A byte-identical LEVEL-UP (claiming a new high
+                        # with the exact prior words + a fresh episode) is still
+                        # suspect and stays caught; preservation never inflates.
+                        # (Carryforward applies the same level gate via its own
+                        # ``level > max_level`` check.) A re-worded high-overlap
+                        # explanation also still trips the gate.
+                        max_level_hist = history.get("max_level_reached")
+                        # codex L3 (HIGH): require CURRENT grounding for the
+                        # exemption. A byte-identical explanation whose cited LIVE
+                        # episodes do NOT ground it (``explanation_valid`` False)
+                        # must still demote — otherwise the co-citation block below
+                        # (gated on ``not cross_session_overlap_words``) forges a
+                        # Hebbian link between the unrelated cited episodes from an
+                        # exact-copy accumulation (graph poisoning). The core
+                        # preservation case (a dead citation carried forward) never
+                        # reaches Site 2 — ``ids_valid`` is False there — and is held
+                        # by carryforward, which forms no link.
+                        is_preservation = (
+                            grounding_checked
+                            and explanation_valid
+                            and isinstance(max_level_hist, int)
+                            and level <= max_level_hist
+                            and _is_verbatim_preservation(
+                                explanation, prior_explanations
+                            )
+                        )
+                        if prior_explanations and not is_preservation:
                             best_overlap: set[str] = set()
                             best_prior = ""
                             for prior in prior_explanations:
@@ -811,6 +852,36 @@ def _meaningful_word_overlap(text_a: str, text_b: str) -> set[str]:
             if len(w) > 2 and w not in _STOP_WORDS
         }
     return words(text_a) & words(text_b)
+
+
+def _is_verbatim_preservation(explanation: str, priors: list[str]) -> bool:
+    """True if ``explanation`` is byte-identical (whitespace-normalized) to any
+    of ``priors`` — the pattern line was PRESERVED verbatim, not re-worded.
+
+    AM-PRESERVE-VS-SYCOPHANCY: both sycophancy sites — the cross-session-overlap
+    gate and :func:`_carryforward_decision`'s internal guard — treat high
+    vocabulary overlap with a prior explanation as suspected sycophantic
+    re-graduation. But a verbatim-PRESERVED explanation is 100% overlap, so the
+    very mechanism built to protect a warm, at-peak pattern (carryforward)
+    refuses to protect the ones carried forward unchanged — the gate erodes the
+    most-stable, highest-value patterns *because* they are stable. A sycophant
+    RE-WORDS (overlap high, text different); preservation is text-IDENTICAL.
+    Byte-identity is the un-fakeable discriminator, and it cannot be gamed for
+    gain: a verbatim copy can only HOLD a level (carryforward holds at/below
+    ``max_level_reached``; the cross-session exemption only avoids a demotion),
+    never inflate past the earned high-water mark. So a byte-identical
+    explanation is exempt from the overlap demotion at both sites, while a
+    merely-overlapping (re-worded) explanation still trips the gate.
+
+    Normalization collapses internal whitespace and strips the ends, so a
+    preserved line that was only re-wrapped still reads as preservation —
+    re-wrapping changes no words, and a sycophantic re-graduation changes
+    words, not just whitespace.
+    """
+    norm = " ".join(explanation.split())
+    if not norm:
+        return False
+    return any(norm == " ".join(p.split()) for p in priors)
 
 
 def check_explanation_overlap(explanation: str, episode_content: str) -> bool:
@@ -1444,9 +1515,15 @@ def _carryforward_decision(
     # or the immune trigger (no link to suppress on the dead-id path).
     if explanation:
         corpus = history.get("explanation_corpus") or history.get("last_explanation") or ""
-        for prior in (e for e in corpus.split("\n") if e.strip()):
-            if len(_meaningful_word_overlap(explanation, prior)) >= cross_session_overlap_threshold:
-                return None
+        priors = [e for e in corpus.split("\n") if e.strip()]
+        # AM-PRESERVE-VS-SYCOPHANCY: a byte-identical explanation is verbatim
+        # PRESERVATION, not sycophantic re-wording — hold it (a sycophant
+        # re-words; preservation is identical). Only a re-worded high-overlap
+        # explanation refuses the carryforward protection.
+        if not _is_verbatim_preservation(explanation, priors):
+            for prior in priors:
+                if len(_meaningful_word_overlap(explanation, prior)) >= cross_session_overlap_threshold:
+                    return None
     max_level = history.get("max_level_reached")
     if not isinstance(max_level, int):
         return None

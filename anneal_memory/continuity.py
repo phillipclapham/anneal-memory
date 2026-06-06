@@ -313,14 +313,16 @@ def _crystallization_credit(
     over-detecting survivors under-credits, the safe bias."""
     if crystal_store is None or not prior_text:
         return {}
-    try:
-        crystallized_names = {
-            c.get("name")
-            for c in crystal_store.active()  # status == "crystallized" only
-            if isinstance(c.get("name"), str)
-        }
-    except CrystalError:
-        return {}
+    # Route active() through _crystal_active_safe so the credit path inherits the SAME
+    # (CrystalError, OSError) fault barrier + degrade-but-warn as the package build —
+    # a crystal fault yields no-credit (the gate stays strict), never breaks the save.
+    # Was a CrystalError-only catch that let an OSError escape and abort the wrap
+    # (codex L3, 2026-06-06).
+    crystallized_names = {
+        c.get("name")
+        for c in _crystal_active_safe(crystal_store)  # status == "crystallized" only
+        if isinstance(c.get("name"), str)
+    }
     if not crystallized_names:
         return {}
 
@@ -530,12 +532,29 @@ def format_episodes_for_wrap(episodes: list[Episode]) -> str:
 
 def _crystal_active_safe(crystal_store: CrystalStore | None) -> list:
     """The live crystallized corpus, or ``[]`` — a crystal-store fault must NEVER
-    break a wrap (the wrap pipeline degrades to no-crystal behavior, not failure)."""
+    break a wrap (the wrap pipeline degrades to no-crystal behavior, not failure).
+
+    Catches BOTH ``CrystalError`` (corrupt/invalid store, schema-too-new) AND raw
+    ``OSError`` (PermissionError, disk I/O, IsADirectoryError). ``CrystalStore._load``
+    re-raises malformed JSON as ``CrystalError`` and returns the empty shape on
+    ``FileNotFoundError``, but lets an ordinary ``OSError`` escape — which would
+    otherwise abort the wrap through every read site and violate the invariant above
+    (codex L3, 2026-06-06). Degrade-but-SURFACE: the wrap drops the crystallized tier
+    yet emits a ``UserWarning`` so the fault keeps a diagnostic (a guard must not
+    silently mask the root cause it protects against). The crystal tier is ADDITIVE —
+    losing it for one wrap is safe; breaking the wrap is not."""
     if crystal_store is None:
         return []
     try:
         return crystal_store.active()
-    except CrystalError:
+    except (CrystalError, OSError) as exc:
+        warnings.warn(
+            f"crystal store unreadable ({type(exc).__name__}: {exc}); this wrap "
+            f"proceeds WITHOUT the crystallized tier (contradiction/dedup scans and "
+            f"shrink-credit degrade to no-crystal). Inspect the store by hand.",
+            UserWarning,
+            stacklevel=2,
+        )
         return []
 
 
@@ -681,7 +700,11 @@ def _build_wrap_package(
                     str(c["name"])
                     for c in crystal_store.surface_rewarm_candidates(today=today_date)
                 ]
-            except (CrystalError, ValueError):
+            except (CrystalError, ValueError, OSError):
+                # OSError added (codex L3, 2026-06-06): same crystal-fault-never-breaks
+                # -a-wrap invariant as _crystal_active_safe. rewarm is a cosmetic propose
+                # -not-auto hint, so it degrades silently (the load-bearing active()/credit
+                # paths warn via _crystal_active_safe; a lost hint needs no alarm).
                 rewarm_candidates = []
 
     # Crystallization candidates: cold-Proven patterns in ## Patterns ready to route

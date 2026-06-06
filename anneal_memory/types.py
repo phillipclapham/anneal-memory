@@ -178,6 +178,68 @@ class RecallResult:
     query_params: dict[str, Any] = field(default_factory=dict)
 
 
+# -- On-demand relevance retrieval (AM-CRYSTAL-RECALL, v0.6) --
+#
+# The shapes returned by ``anneal_memory.retrieval.retrieve_relevant`` — the
+# unified, query-relevant surface a harness's per-turn recall hook renders. This
+# is the v2-consumer contract: the hook calls ONE library function and gets back
+# both kinds of relevant memory (distilled crystallized PATTERNS + raw EPISODES),
+# already scored and ranked, with zero harness-side query logic. Both halves are
+# frozen dataclasses (like ``Episode`` / ``RecallResult``), not TypedDicts: this
+# is a retrieval/domain operation, and the consumer reads attributes rather than
+# serializing the result over a transport.
+
+
+@dataclass(frozen=True)
+class RelevantPattern:
+    """A crystallized pattern scored as relevant to a query.
+
+    ``score`` is the weighted keyword-overlap score (distinctive snake_case /
+    hyphenated / long terms weigh more). ``activation`` is the read-time tier
+    (``hot``/``warm``/``cold``/``dormant``) computed at retrieval time. The
+    snake_case ``name`` is itself high-signal — a query word matches it as a
+    substring (``structural`` ⊂ ``structural_invariants_beat_discipline``)."""
+
+    name: str
+    level: int
+    explanation: str
+    tags: list[str]
+    activation: str
+    score: float
+
+
+@dataclass(frozen=True)
+class ScoredEpisode:
+    """An episode scored as relevant to a query.
+
+    Flat projection of :class:`Episode` plus the relevance ``score`` — the shape a
+    recall hook injects. ``source`` is the agent/source attribution (an anneal
+    ``Episode`` has no separate ``agent`` field; ``source`` IS the attribution)."""
+
+    id: str
+    timestamp: str
+    type: str
+    source: str
+    content: str
+    score: float
+
+
+@dataclass
+class RelevantResult:
+    """The unified result of :func:`anneal_memory.retrieval.retrieve_relevant`.
+
+    Two kinds kept SEPARATE (not merged) because they are different in nature —
+    distilled wisdom vs raw events — and a consumer surfacing them typically puts
+    crystallized ``patterns`` ABOVE ``episodes`` (distilled > raw for decision-time
+    recall). ``query_keywords`` is the distinctive terms the query was reduced to
+    — exposed for hit-rate measurement (``stability_is_observed_not_declared``: the
+    keyword baseline a future associative backend must beat)."""
+
+    patterns: list[RelevantPattern]
+    episodes: list[ScoredEpisode]
+    query_keywords: list[str] = field(default_factory=list)
+
+
 # -- TypedDict return shapes for the canonical pipeline --
 #
 # These describe the dict shapes returned by ``prepare_wrap`` and
@@ -260,6 +322,15 @@ class WrapPackageDict(TypedDict):
     # pre-existing ``PrepareWrapResult.uncovered_proven_to_check``); the
     # agent-facing instruction renders it as "Existing Proven to scan against".
     uncovered_proven: list[str]
+    # AM-CRYSTAL-MIGRATE (v0.6): cold-Proven (2x/3x + stale) patterns in the
+    # graduating section ready to route OUT — the composer judges each (→ always-on
+    # constitution / → crystallized store / → compost). Subset of stale_patterns;
+    # ``[]`` when no crystal store is passed or none qualify. Propose-not-auto.
+    crystallization_candidates: list["StalePatternDict"]
+    # AM-CRYSTAL-MIGRATE (v0.6): names of HOT crystallized patterns the working set
+    # should consider re-caching into ## Patterns (the prefetch half of
+    # activation-driven working⇄crystallized movement). ``[]`` without a crystal store.
+    rewarm_candidates: list[str]
     instructions: str  # Compression instructions for the agent (incl. contradiction scan)
     today: str  # YYYY-MM-DD (may be caller-pinned for determinism)
     max_chars: int  # Target max size for the compressed continuity
@@ -350,6 +421,14 @@ class PrepareWrapResult(TypedDict):
     # Also emitted as a ``UserWarning`` at ``prepare_wrap`` (mirrors AM-WARN's
     # ``association_warning``) so the signal is loud, not only structured.
     schema_warning: str | None
+    # AM-CRYSTAL-MIGRATE (v0.6): the crystallization routing surface, read back from
+    # the package so the data the caller inspects and the instruction the agent
+    # reads share one computation. ``crystallization_candidates`` = cold-Proven
+    # patterns ready to route OUT (constitution / crystallize / compost);
+    # ``rewarm_candidates`` = hot crystallized pattern names to consider pulling
+    # back IN. Both ``[]`` on the empty path or when no crystal store is passed.
+    crystallization_candidates: list["StalePatternDict"]
+    rewarm_candidates: list[str]
 
 
 class SaveContinuityResult(TypedDict):

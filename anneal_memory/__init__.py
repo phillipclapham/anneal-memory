@@ -98,7 +98,7 @@ from .crystal import (
     RetirementDict,
     activation_tier,
 )
-from .retrieval import extract_keywords, retrieve_relevant
+from .retrieval import extract_keywords, retrieve_patterns, retrieve_relevant
 from .server import Server
 
 __all__ = [
@@ -187,6 +187,7 @@ __all__ = [
     "VALID_LEVELS",
     "RETIRE_KINDS",
     "retrieve_relevant",
+    "retrieve_patterns",
     "extract_keywords",
     "RelevantResult",
     "RelevantPattern",

@@ -8,7 +8,7 @@ a recall hook can consume the result with zero adapter (the v2-consumer contract
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date
 
 import pytest
 
@@ -17,6 +17,7 @@ from anneal_memory import (
     RelevantResult,
     Store,
     extract_keywords,
+    retrieve_patterns,
     retrieve_relevant,
 )
 from anneal_memory.types import EpisodeType
@@ -270,3 +271,85 @@ class TestHookConsumerContract:
         b = retrieve_relevant(store, crystal, "apparatus routing codex", now=NOW, today=T0)
         assert [p.name for p in a.patterns] == [p.name for p in b.patterns]
         assert [e.id for e in a.episodes] == [e.id for e in b.episodes]
+
+
+# -- retrieve_patterns: the patterns-only entry (no episodic Store) ---------
+class TestRetrievePatterns:
+    def test_parity_with_retrieve_relevant_patterns(self, stores):
+        """The contract: retrieve_patterns(crystal, q) is byte-for-byte the pattern
+        half of retrieve_relevant(..., max_episodes=0) — so a hook can switch to it
+        without changing what surfaces, while constructing no episodic Store."""
+        store, crystal = stores
+        _seed_crystal(crystal)
+        q = "structural invariants discipline verification apparatus"
+        only = retrieve_patterns(crystal, q, today=T0)
+        full = retrieve_relevant(store, crystal, q, max_episodes=0, today=T0).patterns
+
+        # Total field tuple — a forever-public parity guarantee must cover EVERY
+        # RelevantPattern field, incl. explanation + tags (a future _score_patterns
+        # refactor could otherwise silently diverge on a content field).
+        def _tot(p):
+            return (p.name, p.level, p.score, p.activation, p.explanation, tuple(p.tags))
+        assert [_tot(p) for p in only] == [_tot(p) for p in full]
+        assert only  # non-empty — the query genuinely matches seeded patterns
+
+    def test_needs_no_store(self, tmp_path):
+        """The whole point: works from a CrystalStore alone, no Store anywhere."""
+        crystal = CrystalStore(tmp_path / "mem.crystal.json")
+        _seed_crystal(crystal)
+        out = retrieve_patterns(crystal, "structural invariants discipline", today=T0)
+        names = [p.name for p in out]
+        assert "structural_invariants_beat_discipline" in names
+
+    def test_none_crystal_store_returns_empty(self):
+        assert retrieve_patterns(None, "structural invariants discipline", today=T0) == []
+
+    def test_too_few_keywords_returns_empty(self, stores):
+        _, crystal = stores
+        _seed_crystal(crystal)
+        assert retrieve_patterns(crystal, "apparatus", today=T0) == []  # 1 keyword < MIN_KEYWORDS
+
+    def test_nonpositive_cap_returns_empty(self, stores):
+        _, crystal = stores
+        _seed_crystal(crystal)
+        assert retrieve_patterns(crystal, "structural invariants discipline", max_patterns=0, today=T0) == []
+
+    def test_irrelevant_query_surfaces_nothing(self, stores):
+        _, crystal = stores
+        _seed_crystal(crystal)
+        assert retrieve_patterns(crystal, "quantum chromodynamics lagrangian", today=T0) == []
+
+    def test_max_patterns_cap_and_ranking(self, tmp_path):
+        crystal = CrystalStore(tmp_path / "mem.crystal.json")
+        crystal.crystallize(name="a_pat", level=2, explanation="apparatus verification routing", tags=[], today=T0)
+        crystal.crystallize(name="b_pat", level=3, explanation="apparatus verification routing", tags=[], today=T0)
+        crystal.crystallize(name="c_pat", level=2, explanation="apparatus verification routing", tags=[], today=T0)
+        out = retrieve_patterns(crystal, "apparatus verification routing", max_patterns=2, today=T0)
+        assert len(out) == 2
+        assert out[0].level == 3  # equal score → higher graduation level wins the tie
+
+    def test_malformed_tags_coerced_not_crashed(self, tmp_path):
+        """A hand-edited store with non-str / non-list tags must NOT raise a raw
+        TypeError from the read path, and RelevantPattern.tags stays list[str]
+        (codex L3). Structural store corruption still raises upstream in _load — this
+        only guards a malformed FIELD inside an otherwise-valid row."""
+        import json
+        p = tmp_path / "mem.crystal.json"
+        crystal = CrystalStore(p)
+        crystal.crystallize(name="int_tag_pat", level=2,
+                            explanation="apparatus verification routing", tags=["keep"], today=T0)
+        crystal.crystallize(name="bare_tag_pat", level=2,
+                            explanation="apparatus verification routing", tags=["x"], today=T0)
+        data = json.loads(p.read_text())
+        for row in data["crystal"]:
+            if row["name"] == "int_tag_pat":
+                row["tags"] = [1, "keep", 2]    # mixed int/str — non-str members dropped
+            elif row["name"] == "bare_tag_pat":
+                row["tags"] = "apparatus"        # bare string — ONE tag, not char-split
+        p.write_text(json.dumps(data))
+
+        out = retrieve_patterns(crystal, "apparatus verification routing", max_patterns=10, today=T0)
+        by_name = {pp.name: pp for pp in out}
+        assert all(isinstance(t, str) for pp in out for t in pp.tags)  # no list[int] leak
+        assert by_name["int_tag_pat"].tags == ["keep"]
+        assert by_name["bare_tag_pat"].tags == ["apparatus"]  # NOT "a p p a r a t u s"

@@ -6,6 +6,16 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 > The remaining adopter-facing convenience item (AM-CHIPSCHEMA, a trusted-single-operator schema profile) is deferred to the Levain v2 reload, where it composes with the held attention-zone schema work (AM-ATTENTIONZONE) it overlaps. See `projects/anneal_memory/next.md`. Also pending (AM-CRYSTAL follow-ons): MCP `crystal` lifecycle tools + `retrieve_relevant` parity, and the associative (Hebbian) retrieval backend gated on the keyword hit-rate measurement.
 
+### Added — `retrieve_patterns`: patterns-only on-demand recall (no episodic Store)
+
+`retrieve_relevant(store, crystal_store, query, ...)` is the full recall contract (patterns AND episodes) but requires an episodic `Store` even with `max_episodes=0`. A harness's per-turn recall hook that wants ONLY the crystallized tier (its episodes live elsewhere) would otherwise construct + open a sqlite `Store` on every prompt purely to satisfy the signature — a real per-prompt cost and a write-lock contention risk against a concurrent single-writer wrap. `retrieve_patterns(crystal_store, query, *, max_patterns=MAX_PATTERNS, today=None) -> list[RelevantPattern]` is that hook's contract: the SAME shared `_score_patterns` scoring and precision bias as the pattern half of `retrieve_relevant`, with no `Store` touched. A test locks byte-parity (`retrieve_patterns(cs, q)` equals `retrieve_relevant(<any store>, cs, q, max_episodes=0, today=today).patterns`). It does NOT fail soft on a corrupt store — `CrystalError`/`OSError` propagate (the deliberate fail-closed-on-corruption design); a hook wanting "no recall beats a crash" wraps the call at its own layer. New public `retrieve_patterns` (exported in `__all__`).
+
+### Fixed — read-path `tags` normalization (hardens the shared pattern projection)
+
+A hand-edited crystal row with a non-`str`/non-list `tags` field could make the read path raise a raw `TypeError` from `' '.join` (bypassing the library's documented error boundary) or emit a `RelevantPattern` whose `tags` violated its `list[str]` contract (a `list[int]` leak); a bare-string `tags` was char-joined, silently weakening recall. A new `_pattern_tags` normalizer coerces to `list[str]` (bare string → one tag; non-`str` members dropped) in both `_pattern_text` and the `RelevantPattern` projection — shared by `retrieve_relevant` and `retrieve_patterns`. Structural store corruption still raises `CrystalError` upstream in `_load`; this only guards a malformed field in an otherwise-valid row.
+
+(Both surfaced by the AM-WORKINGSET hook-half build — flow's recall hook is the first consumer; codex L3 caught the `tags` `TypeError` + the `list[str]` contract violation and vetoed a fail-soft swallow as conflicting with the fail-closed design. 1334 tests, mypy + ruff clean.)
+
 ## [0.6.0] — 2026-06-06
 
 ### Added — AM-CRYSTAL: the crystallized-pattern tier (the on-demand graduated memory layer)

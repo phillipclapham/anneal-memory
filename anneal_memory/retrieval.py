@@ -126,10 +126,27 @@ def _score_text(text: str, keywords: list[str], weights: dict[str, float]) -> tu
     return score, hits
 
 
+def _pattern_tags(crystal: CrystalDict) -> list[str]:
+    """Coerce a crystal row's ``tags`` to ``list[str]`` for the read path. The library
+    treats a corrupt store as a first-class operational state, so a hand-edited row may
+    carry a non-list ``tags`` or non-str members. Normalize rather than (a) let a raw
+    ``TypeError`` from ``' '.join`` escape the library's documented error boundary, or
+    (b) emit a :class:`RelevantPattern` whose ``tags`` violates its ``list[str]``
+    contract. A bare string becomes a SINGLE tag (not char-joined into "a p p a r…").
+    Structural store corruption still raises ``CrystalError`` upstream in ``_load`` —
+    this only guards a malformed field inside an otherwise-valid row."""
+    raw = crystal.get("tags") or []
+    if isinstance(raw, str):
+        return [raw]
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [t for t in raw if isinstance(t, str) and t]
+
+
 def _pattern_text(crystal: CrystalDict) -> str:
     """The searchable text of a crystallized pattern: its (high-signal snake_case)
     name + explanation + tags."""
-    tags = crystal.get("tags") or []
+    tags = _pattern_tags(crystal)
     return f"{crystal.get('name', '')} {crystal.get('explanation', '')} {' '.join(tags)}"
 
 
@@ -157,7 +174,7 @@ def _score_patterns(
                 # doesn't read as 1 (write-path forbids bool; this guards a bad store).
                 level=_lvl if isinstance(_lvl, int) and not isinstance(_lvl, bool) else 0,
                 explanation=str(c.get("explanation", "")),
-                tags=list(c.get("tags") or []),
+                tags=_pattern_tags(c),
                 activation=activation_tier(c, today),
                 score=round(score, 2),
             )
@@ -266,6 +283,70 @@ def retrieve_relevant(
         )
 
     return RelevantResult(patterns=patterns, episodes=episodes, query_keywords=keywords)
+
+
+def retrieve_patterns(
+    crystal_store: CrystalStore | None,
+    query: str,
+    *,
+    max_patterns: int = MAX_PATTERNS,
+    today: date | None = None,
+) -> list[RelevantPattern]:
+    """Patterns-only on-demand recall — the crystallized tier WITHOUT an episodic Store.
+
+    :func:`retrieve_relevant` is the full contract (patterns AND episodes), but it
+    requires a :class:`Store` even when ``max_episodes=0`` — so a harness hook that
+    only wants the graduated-pattern tier (its episodes live elsewhere, or it wants
+    none) would otherwise construct and open an episodic ``Store`` on EVERY turn
+    purely to satisfy the signature. That per-turn open is a real cost + a
+    write-lock contention risk against a concurrent single-writer wrap. This is that
+    hook's contract: the SAME ``_score_patterns`` scoring and precision bias as the
+    pattern half of :func:`retrieve_relevant`, with no ``Store`` touched.
+
+    Args:
+        crystal_store: the :class:`CrystalStore` for the on-demand graduated tier,
+            or ``None`` (an entity with no crystallized patterns yet → ``[]``).
+        query: the prompt / text to find relevant patterns for.
+        max_patterns: cap (precision bias).
+        today: logical date for crystallized-pattern activation tiers (+ determinism);
+            defaults to ``date.today()``.
+
+    Returns:
+        a scored/ranked ``list[RelevantPattern]`` (best score first, a higher
+        graduation level breaking ties), capped at ``max_patterns``. Empty when
+        ``crystal_store`` is ``None``, ``max_patterns <= 0``, the query has fewer
+        than :data:`MIN_KEYWORDS` distinctive keywords, or nothing clears the
+        precision threshold — surface nothing rather than noise.
+
+    Raises:
+        CrystalError: if the crystal store is structurally corrupt or written by a
+            newer schema (``CrystalStore._load`` deliberately surfaces a corrupt store
+            rather than silently treating it as empty memory).
+        OSError: on a filesystem access failure (permission denied, I/O error).
+
+        This does NOT fail soft — a harness hook that wants "no recall beats a crash"
+        wraps the call at ITS layer (``try: ... except Exception: return []``); hiding
+        corruption in the library would defeat the fail-closed-on-corruption design.
+
+    Parity:
+        For a valid ``str`` query this equals ``retrieve_relevant(<any store>,
+        crystal_store, query, max_patterns=max_patterns, max_episodes=0,
+        today=today).patterns`` — same keywords, weights, and ``_score_patterns``
+        call — but builds no episodic Store. Two caveats: a ``None`` ``crystal_store``
+        short-circuits to ``[]`` here without inspecting the query, and pass the SAME
+        explicit ``today`` to both if comparing outputs (each defaults it independently,
+        so a midnight-straddling pair can label ``activation`` differently).
+    """
+    today = today or date.today()
+    if crystal_store is None or max_patterns <= 0:
+        return []
+    keywords = extract_keywords(query)
+    if len(keywords) < MIN_KEYWORDS:
+        return []
+    weights = {kw: _keyword_weight(kw) for kw in keywords}
+    return _score_patterns(
+        crystal_store, keywords, weights, max_patterns=max_patterns, today=today
+    )
 
 
 def _recent_cutoff(exclude_recent_minutes: int | None, now: str | None) -> str | None:

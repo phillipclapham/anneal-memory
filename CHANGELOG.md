@@ -16,6 +16,10 @@ A hand-edited crystal row with a non-`str`/non-list `tags` field could make the 
 
 (Both surfaced by the AM-WORKINGSET hook-half build — flow's recall hook is the first consumer; codex L3 caught the `tags` `TypeError` + the `list[str]` contract violation and vetoed a fail-soft swallow as conflicting with the fail-closed design. 1334 tests, mypy + ruff clean.)
 
+### Fixed — crystal-read sites degrade-but-warn on `OSError`, never break the wrap
+
+`_crystal_active_safe`, `_crystallization_credit`, and the `_build_wrap_package` re-warm path each caught `CrystalError` only. `CrystalStore._load` re-raises malformed JSON as `CrystalError` and returns the empty shape on `FileNotFoundError`, but lets an ordinary `OSError` (PermissionError, disk I/O, IsADirectoryError) escape — which would abort the wrap through any of those read sites, violating `_crystal_active_safe`'s own "a crystal-store fault must NEVER break a wrap" contract. All three now catch `(CrystalError, OSError)` and degrade to no-crystal behavior; `_crystal_active_safe` emits a `UserWarning` (degrade-but-surface — a guard must not silently mask the fault it protects against), and the credit path is DRY'd through it. The re-warm path (a cosmetic propose-not-auto hint) degrades silently. Two regression tests (the credit path + a prepare-side `active()` fault). (Surfaced by flow's AM-WORKINGSET B2 — the first real `crystal_store` consumer; codex L3 finding, convergence-clean.)
+
 ## [0.6.0] — 2026-06-06
 
 ### Added — AM-CRYSTAL: the crystallized-pattern tier (the on-demand graduated memory layer)

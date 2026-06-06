@@ -1,6 +1,6 @@
 """anneal-memory: Living memory for AI agents. Episodes compress into identity."""
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 from .store import (
     AnnealMemoryError,
@@ -18,7 +18,10 @@ from .types import (
     EpisodeType,
     PrepareWrapResult,
     RecallResult,
+    RelevantPattern,
+    RelevantResult,
     SaveContinuityResult,
+    ScoredEpisode,
     StalePatternDict,
     StoreStatus,
     Tombstone,
@@ -80,6 +83,22 @@ from .spores import (
     Tier,
     germination_tier,
 )
+from .crystal import (
+    RETIRE_KINDS,
+    VALID_ACTIVATION_MODES,
+    VALID_ACTIVATIONS,
+    VALID_LEVELS,
+    VALID_PERMANENCE,
+    Activation,
+    ActivationMode,
+    CrystalDict,
+    CrystalError,
+    CrystalStore,
+    Permanence,
+    RetirementDict,
+    activation_tier,
+)
+from .retrieval import extract_keywords, retrieve_relevant
 from .server import Server
 
 __all__ = [
@@ -154,4 +173,22 @@ __all__ = [
     "VALID_TIERS",
     "DESCEND_BY_TYPE",
     "ASCEND_BY_TYPE",
+    "CrystalStore",
+    "CrystalError",
+    "CrystalDict",
+    "RetirementDict",
+    "Permanence",
+    "ActivationMode",
+    "Activation",
+    "activation_tier",
+    "VALID_PERMANENCE",
+    "VALID_ACTIVATION_MODES",
+    "VALID_ACTIVATIONS",
+    "VALID_LEVELS",
+    "RETIRE_KINDS",
+    "retrieve_relevant",
+    "extract_keywords",
+    "RelevantResult",
+    "RelevantPattern",
+    "ScoredEpisode",
 ]

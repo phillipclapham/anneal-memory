@@ -369,6 +369,10 @@ class TestTypedDictReturnShapes:
                 # schema validates but is mis-roled into a thinner package
                 # (None when known-good/benign or on the empty path).
                 "schema_warning",
+                # Added v0.6 (AM-CRYSTAL-MIGRATE): the crystallization routing
+                # surface — cold-Proven to route OUT + hot crystallized to pull IN.
+                "crystallization_candidates",
+                "rewarm_candidates",
             }
             assert set(result["package"].keys()) == {
                 "episodes",
@@ -380,6 +384,9 @@ class TestTypedDictReturnShapes:
                 # `instructions` and prepare_wrap's uncovered_proven_to_check
                 # are the same list.
                 "uncovered_proven",
+                # Added v0.6 (AM-CRYSTAL-MIGRATE): crystallization routing surface.
+                "crystallization_candidates",
+                "rewarm_candidates",
                 "instructions",
                 "today",
                 "max_chars",

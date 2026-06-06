@@ -37,6 +37,7 @@ from .graduation import (
     extract_pattern_names,
     extract_pattern_summaries,
     validate_graduations,
+    _NAMED_PATTERN_RE,
     _NAMED_PATTERN_WITH_EVIDENCE_RE,
     _is_graduating_heading,
 )
@@ -48,6 +49,7 @@ from .schema import (
     required_headings,
     schema_role_warning,
 )
+from .crystal import CrystalError, CrystalStore
 from .store import StoreError, WrapInProgressError, _fsync_dir, _safe_unlink
 from .types import (
     AffectiveState,
@@ -190,6 +192,16 @@ def measure_sections(text: str) -> dict[str, int]:
 # the whole document >=25%. Sections / documents below the char floor are never
 # gated (thin sections cannot meaningfully "collapse"). A deliberate diet
 # (one-time migration recompression) passes ``allow_shrink=True``.
+# AM-CRYSTAL-MIGRATE: a DELIBERATELY-LOOSE scan for "is this pattern still present
+# in the new working set" — matches a ``name | Nx`` graduation marker ANYWHERE on a
+# line (column-0, bullet, indented, OR a second marker merged onto another line),
+# unlike the anchored first-marker ``_NAMED_PATTERN_RE``. It is used ONLY to CANCEL
+# credit (decide a pattern survived), so over-detection is the SAFE bias: a survivor
+# that dodges the anchored regex (a column-0 bare line, a merged second marker) is
+# still caught here → not credited as departed → the gate stays strict. The earn-
+# credit side keeps the strict anchored regex (under-detection there is also safe).
+_ANY_GRADUATION_MARKER_RE = re.compile(r"([A-Za-z][A-Za-z0-9_.\-]*)[ \t]*\|[ \t]*\d+x")
+
 _SHRINK_GATE_MIN_PRIOR_CHARS = 500
 _SHRINK_RETAIN_FRACTION: dict[str, float] = {
     "narrative-timeless": 0.5,
@@ -235,12 +247,119 @@ def _schema_section_masses(text: str, schema: list[SectionSpec]) -> dict[str, in
     return masses
 
 
+def _role_section_body(text: str, schema: list[SectionSpec], role: str) -> list[str]:
+    """Body lines (header lines excluded) of every section whose schema role is
+    ``role``. Used by the crystallization-credit accounting to find a departed
+    pattern's prior line mass. Mirrors :func:`_schema_section_masses`'s
+    single-credit walk: an ambiguous header credits NONE."""
+    target = {s["heading"].lower() for s in schema if s["role"] == role}
+    if not target:
+        return []
+    required = {h.lower() for h in required_headings(schema)}
+    out: list[str] = []
+    in_target = False
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            matched = _matching_required_headings(line.lower(), required)
+            in_target = len(matched) == 1 and matched[0] in target
+            continue  # header line excluded — patterns live in the body
+        if in_target:
+            out.append(line)
+    return out
+
+
+def _crystallization_credit(
+    prior_text: str | None,
+    new_text: str,
+    schema: list[SectionSpec],
+    crystal_store: CrystalStore | None,
+) -> dict[str, int]:
+    """Char credit, per protected role, for graduated patterns that DEPARTED the
+    ``## Patterns`` working set into the crystallized store this wrap.
+
+    The structural distinction the shrink gate needs (``structural_invariants_
+    beat_discipline``): a pattern that vanished from ``## Patterns`` because it was
+    *crystallized out* is NOT lost — it's recoverable from the crystal store (via
+    recall / re-warm), so its departure can never be catastrophic identity loss; a
+    pattern that vanished because the wrap *recency-trapped* the section IS lost. The
+    crystal store is the un-fakeable anchor: a recency-trapped pattern is NOT in the
+    store, so it earns zero credit and (via the ``(prior - credit)`` gate formula)
+    is still gated independently. **Provenance by recoverability, not by date** — we
+    deliberately do NOT gate on ``crystallized_on == today``: a date is a coarse,
+    spoofable proxy (a stale same-day row, or a re-crystallized-after-re-warm pattern
+    whose origin date is old) and the recoverability invariant is the real safety
+    property. Any pattern currently LIVE in the store whose defining line left
+    ``## Patterns`` is recoverable, full stop.
+
+    Returns a ``{role: credited_chars}`` map (only the ``graduating`` role can earn
+    credit — crystallization is a graduating-section concept). Empty (gate behaves
+    exactly as pre-AM-CRYSTAL) when there's no crystal store, no prior text, or
+    nothing departed. A corrupt crystal store earns no credit (gate stays strict —
+    a crystal-store fault must never WEAKEN the gate; ``active()`` also filters out a
+    drifting ``status != "crystallized"`` row).
+
+    ACCOUNTING (the safety-critical part — credit must never EXCEED genuinely
+    departed mass): credit is keyed on each prior line's OWNER pattern — the
+    ``name | Nx`` the immune system parses via :data:`_NAMED_PATTERN_RE` (the same
+    records graduation validation accepts) — NOT any name merely MENTIONED in the
+    line. So a line counts at most ONCE (one owner per line), a ``[[sibling]]``
+    cross-reference to a departed pattern does NOT credit the referencing line (its
+    owner stayed), and a substring name can't leak credit (the regex binds the owner
+    token exactly). A line is credited iff its owner is a live crystallized pattern
+    AND its name no longer appears as a graduation marker anywhere in the new working
+    set — a deliberately-LOOSE all-markers scan (:data:`_ANY_GRADUATION_MARKER_RE`),
+    so a survivor that dodges the anchored first-marker regex (a column-0 bare line
+    or a merged second marker) is still seen as present and NOT credited;
+    over-detecting survivors under-credits, the safe bias."""
+    if crystal_store is None or not prior_text:
+        return {}
+    try:
+        crystallized_names = {
+            c.get("name")
+            for c in crystal_store.active()  # status == "crystallized" only
+            if isinstance(c.get("name"), str)
+        }
+    except CrystalError:
+        return {}
+    if not crystallized_names:
+        return {}
+
+    prior_body = _role_section_body(prior_text, schema, "graduating")
+    new_body_text = "\n".join(_role_section_body(new_text, schema, "graduating"))
+    # Names still PRESENT as a marker anywhere in the new working set. GENEROUS
+    # (loose all-markers) scan, not the anchored first-marker regex: a survivor that
+    # dodges anchoring (a column-0 bare line, OR a second marker merged onto another
+    # pattern's line) is still detected here → NOT credited as departed. Over-detect
+    # = under-credit = the gate stays strict. This is the cancel-credit side; the
+    # earn-credit side below stays strict-anchored.
+    new_present = {m.group(1) for m in _ANY_GRADUATION_MARKER_RE.finditer(new_body_text)}
+
+    credit = 0
+    for line in prior_body:
+        m = _NAMED_PATTERN_RE.match(line)
+        if m is None:
+            continue  # not a pattern-definition line → no owner → never credited
+        # A line carrying MORE THAN ONE graduation marker is ambiguous/malformed:
+        # crediting its full length on the anchored (first) owner would also credit a
+        # SECOND pattern's mass that hitchhiked onto the line — and that second
+        # pattern may NOT be recoverable (not in the store), masking a recency-trap of
+        # its mass. A well-formed pattern line has exactly one marker; a multi-marker
+        # line earns ZERO credit (its mass stays in the protected baseline). Safe bias.
+        if len(_ANY_GRADUATION_MARKER_RE.findall(line)) != 1:
+            continue
+        owner = m.group(1)
+        if owner in crystallized_names and owner not in new_present:
+            credit += len(line) + 1  # this owner's defining line genuinely departed
+    return {"graduating": credit} if credit else {}
+
+
 def _check_no_catastrophic_shrink(
     prior_text: str | None,
     new_text: str,
     schema: list[SectionSpec],
     *,
     allow_shrink: bool,
+    crystallized_credit: dict[str, int] | None = None,
 ) -> None:
     """Refuse a wrap that collapses a protected-role section or the whole
     neocortex, unless ``allow_shrink`` is set.
@@ -251,6 +370,18 @@ def _check_no_catastrophic_shrink(
     boundary (raising :class:`ValueError`, leaving the wrap in progress so the
     agent can re-wrap — identical handling to a structure-validation failure).
     Deliberate diets pass ``allow_shrink=True``.
+
+    ``crystallized_credit`` (AM-CRYSTAL-MIGRATE) maps a protected role → chars that
+    DEPARTED to the crystallized store this wrap (computed, and crystal-store-
+    grounded by recoverability, by :func:`_crystallization_credit`). The credited
+    mass is SUBTRACTED from PRIOR (the protected baseline) before the retain check —
+    NOT added to new — because crystallized-out patterns are recoverable from the
+    store, so they leave the "must still be here" baseline. The retain floor then
+    applies to the non-crystallized remainder, so a wrap crystallizing patterns OUT
+    is recognized as a recoverable MOVE while the UN-credited (recency-trapped) loss
+    is gated on its own: a near-total collapse can't slip through just because half
+    of it was legitimate crystallization. The gate stays ON (no blanket
+    ``allow_shrink``). ``None`` ⇒ no credit ⇒ byte-identical to pre-AM-CRYSTAL.
 
     No-ops when there is no prior continuity (first wrap) or the relevant prior
     side is below :data:`_SHRINK_GATE_MIN_PRIOR_CHARS` (nothing meaningful to
@@ -264,6 +395,8 @@ def _check_no_catastrophic_shrink(
         return
     if not prior_text or not prior_text.strip():
         return
+
+    credit = crystallized_credit or {}
 
     # Partnership entities only (see module comment). An entity that declared a
     # narrative-timeless felt section is opting into felt/identity protection;
@@ -297,28 +430,52 @@ def _check_no_catastrophic_shrink(
     for role, heading_lowers in headings_by_role.items():
         retain = _SHRINK_RETAIN_FRACTION[role]
         prior_mass = sum(prior_masses.get(h, 0) for h in heading_lowers)
-        if prior_mass < _SHRINK_GATE_MIN_PRIOR_CHARS:
-            continue
+        # Crystallized-out patterns are RECOVERABLE (in the store), so they leave the
+        # PROTECTED baseline: the retain floor applies to what should still be HERE
+        # (the non-crystallized mass), not the original total. Subtract credit from
+        # prior — NOT add to new — so the UN-credited (recency-trapped) loss is gated
+        # on its own and a near-total collapse can't slip through merely because half
+        # of it was legitimate crystallization. Credit is bounded to [0, prior_mass].
+        role_credit = min(max(credit.get(role, 0), 0), prior_mass)
+        effective_prior = prior_mass - role_credit
+        if effective_prior < _SHRINK_GATE_MIN_PRIOR_CHARS:
+            continue  # the non-crystallized remainder is sub-floor — nothing meaningful to collapse
         new_mass = sum(new_masses.get(h, 0) for h in heading_lowers)
-        if new_mass < prior_mass * retain:
-            pct = round(100 * (1 - new_mass / prior_mass))
+        if new_mass < effective_prior * retain:
+            pct = round(100 * (1 - new_mass / effective_prior))
             label = " + ".join(f"'{display_by_lower[h]}'" for h in heading_lowers)
+            credited = (
+                f" ({role_credit} chars crystallized out → recoverable; "
+                f"{effective_prior} should remain)"
+                if role_credit else ""
+            )
             offenders.append(
                 f"  - {label} ({role}): "
-                f"{prior_mass} -> {new_mass} chars "
-                f"({pct}% smaller; must retain >={int(retain * 100)}%)"
+                f"{prior_mass} -> {new_mass} chars{credited} "
+                f"({pct}% smaller vs the non-crystallized baseline; "
+                f"must retain >={int(retain * 100)}%)"
             )
 
-    prior_total = len(prior_text)
-    new_total = len(new_text)
+    # Whole-document backstop — computed EXCLUDING the graduating section. The
+    # graduating layer is already per-role checked at the stronger 50% floor, and it
+    # is the crystallization site; removing it from both sides makes crystallization
+    # NEUTRAL to this backstop (no fungible "credit" that could offset a recency-trap
+    # of an unprotected section like Decisions/Context elsewhere in the doc). So this
+    # backstop protects the non-graduating remainder at its design-chosen 25% — the
+    # same with or without crystallization. (No credit term here: graduating is gone.)
+    grad_lowers = headings_by_role.get("graduating", [])
+    grad_prior = sum(prior_masses.get(h, 0) for h in grad_lowers)
+    grad_new = sum(new_masses.get(h, 0) for h in grad_lowers)
+    nongrad_prior = len(prior_text) - grad_prior
+    nongrad_new = len(new_text) - grad_new
     if (
-        prior_total >= _SHRINK_GATE_MIN_PRIOR_CHARS
-        and new_total < prior_total * _DOC_SHRINK_RETAIN_FRACTION
+        nongrad_prior >= _SHRINK_GATE_MIN_PRIOR_CHARS
+        and nongrad_new < nongrad_prior * _DOC_SHRINK_RETAIN_FRACTION
     ):
-        pct = round(100 * (1 - new_total / prior_total))
+        pct = round(100 * (1 - nongrad_new / nongrad_prior))
         offenders.append(
-            f"  - whole continuity: {prior_total} -> {new_total} chars "
-            f"({pct}% smaller; must retain "
+            f"  - whole continuity (excl. graduating): {nongrad_prior} -> "
+            f"{nongrad_new} chars ({pct}% smaller; must retain "
             f">={int(_DOC_SHRINK_RETAIN_FRACTION * 100)}%)"
         )
 
@@ -371,6 +528,17 @@ def format_episodes_for_wrap(episodes: list[Episode]) -> str:
     return "\n".join(lines)
 
 
+def _crystal_active_safe(crystal_store: CrystalStore | None) -> list:
+    """The live crystallized corpus, or ``[]`` — a crystal-store fault must NEVER
+    break a wrap (the wrap pipeline degrades to no-crystal behavior, not failure)."""
+    if crystal_store is None:
+        return []
+    try:
+        return crystal_store.active()
+    except CrystalError:
+        return []
+
+
 def _build_wrap_package(
     episodes: list[Episode],
     existing_continuity: str | None,
@@ -380,6 +548,7 @@ def _build_wrap_package(
     today: str | None = None,
     staleness_days: int = 7,
     schema: list[SectionSpec] | None = None,
+    crystal_store: CrystalStore | None = None,
 ) -> WrapPackageDict:
     """Pure helper — build an agent-facing compression package from pre-fetched inputs.
 
@@ -472,10 +641,63 @@ def _build_wrap_package(
         else []
     )
 
+    # AM-CRYSTAL-MIGRATE: the crystallized tier is the 2nd surfacing point. The
+    # bulk of Proven wisdom lives in the crystal store (OUT of ## Patterns), so the
+    # contradiction + dedup scans must ALSO scan it — else a wrap silently re-forks
+    # or contradicts a pattern it can no longer see. Extend both corpora with the
+    # live crystal patterns (dedup by name; the crystal level wins a tie since a
+    # crystallized pattern is the canonical home once it has left the working set).
+    crystallization_candidates: list[StalePatternDict] = []
+    rewarm_candidates: list[str] = []
+    crystal_active = _crystal_active_safe(crystal_store)
+    if crystal_active:
+        # Route level coercion through CrystalStore._safe_level so a hand-edited /
+        # migrated non-numeric row level can't crash the wrap (the crystal-fault-
+        # never-breaks-a-wrap invariant; bool-safe — _safe_level rejects nothing but
+        # never raises).
+        _proven_seen = set(uncovered_proven)
+        for c in crystal_active:
+            name = c.get("name")
+            if (isinstance(name, str) and CrystalStore._safe_level(c.get("level")) >= 2
+                    and name not in _proven_seen):
+                uncovered_proven.append(name)
+                _proven_seen.add(name)
+        _summary_names = {s.name for s in pattern_summaries}
+        for c in crystal_active:
+            name = c.get("name")
+            if isinstance(name, str) and name not in _summary_names:
+                pattern_summaries.append(
+                    PatternSummary(name, CrystalStore._safe_level(c.get("level")),
+                                   str(c.get("explanation", ""))[:120])
+                )
+                _summary_names.add(name)
+        pattern_summaries.sort(key=lambda r: (-r.level, r.name))
+        # Re-warm candidates: hot crystallized patterns the working set should
+        # re-cache (propose-not-auto — the composer decides what returns to ## Patterns).
+        if crystal_store is not None:
+            try:
+                today_date = date.fromisoformat(today)
+                rewarm_candidates = [
+                    str(c["name"])
+                    for c in crystal_store.surface_rewarm_candidates(today=today_date)
+                ]
+            except (CrystalError, ValueError):
+                rewarm_candidates = []
+
+    # Crystallization candidates: cold-Proven patterns in ## Patterns ready to route
+    # OUT (constitution / crystallize / compost — composer-judged). The cold signal
+    # is the staleness flag; the Proven (2x/3x) filter is the high-water proxy. Only
+    # surfaced when a crystal store is present (no store ⇒ no crystallization tier ⇒
+    # byte-identical pre-AM-CRYSTAL package, consistent with the gate's None path).
+    if crystal_store is not None:
+        crystallization_candidates = [s for s in stale_patterns if s["level"] >= 2]
+
     # Build instructions (the contradiction-scan + dedup-scan blocks are emitted
     # when there is a graduating section + the relevant existing patterns).
     instructions = _build_wrap_instructions(
-        project_name, max_chars, today, schema, uncovered_proven, pattern_summaries
+        project_name, max_chars, today, schema, uncovered_proven, pattern_summaries,
+        crystallization_candidates=crystallization_candidates,
+        rewarm_candidates=rewarm_candidates,
     )
 
     return WrapPackageDict(
@@ -484,6 +706,8 @@ def _build_wrap_package(
         continuity=existing_continuity,
         stale_patterns=stale_patterns,
         uncovered_proven=uncovered_proven,
+        crystallization_candidates=crystallization_candidates,
+        rewarm_candidates=rewarm_candidates,
         instructions=instructions,
         today=today,
         max_chars=max_chars,
@@ -497,6 +721,9 @@ def _build_wrap_instructions(
     schema: list[SectionSpec] | None = None,
     uncovered_proven: list[str] | None = None,
     pattern_summaries: list[PatternSummary] | None = None,
+    *,
+    crystallization_candidates: list[StalePatternDict] | None = None,
+    rewarm_candidates: list[str] | None = None,
 ) -> str:
     """Build the compression instructions the agent receives via prepare_wrap.
 
@@ -600,6 +827,12 @@ def _build_wrap_instructions(
     # graduating section AND existing named patterns to scan against.
     if has_graduating and pattern_summaries:
         parts += [_semantic_dedup_block(pattern_summaries), ""]
+    # AM-CRYSTAL-MIGRATE: the crystallization routing block — only when there's a
+    # graduating section AND something to route (cold-Proven OUT or hot patterns IN).
+    if has_graduating and (crystallization_candidates or rewarm_candidates):
+        parts += [
+            _crystallization_block(crystallization_candidates, rewarm_candidates), ""
+        ]
     parts += ["**How to compress:**", *how_lines, ""]
     parts += [
         "**Quality:** One insightful line > three vague ones. If removing something",
@@ -833,11 +1066,72 @@ MERGE it — re-graduate the EXISTING name with your new evidence — instead of
 forking a new name. Fork only when the principle is genuinely distinct."""
 
 
+def _crystallization_block(
+    crystallization_candidates: list[StalePatternDict] | None,
+    rewarm_candidates: list[str] | None,
+) -> str:
+    """The crystallization routing instruction emitted into the wrap package
+    (AM-CRYSTAL-MIGRATE). The ``## Patterns`` working set had no OUT path — a
+    one-way 3x ratchet that monotonically bloats until an always-loaded list stops
+    *working* (attention doesn't scale). This surfaces the two movements across the
+    working⇄crystallized membrane so the composer can keep the working set bounded:
+
+      - cold-Proven patterns ready to route OUT — composer-judged 3 ways:
+        → CONSTITUTION (a miss CORRUPTS the substrate — keep always-loaded, in the
+          harness's bedrock, NOT the on-demand store)
+        → CRYSTALLIZE (timeless + just-in-time — the bulk; ``anneal-memory crystal
+          crystallize``, retrieved on cue, off the always-loaded budget)
+        → COMPOST (phase-specific + cold — drop it; its episodes remain as the
+          re-graduation safety net)
+      - hot crystallized patterns to consider pulling back IN (the work re-warmed
+        their domain — re-add to ``## Patterns`` if currently load-bearing).
+
+    Propose-not-auto: the library SURFACES; the composer (or operator) decides + acts
+    (the no-LLM-as-judge axiom — the library cannot judge permanence vs activation-
+    mode). The risk gate is non-negotiable: only ever COMPOST a phase-specific
+    pattern, NEVER a timeless one (episodic recall is the backstop, but forgetting is
+    the dangerous direction)."""
+    out_list = ""
+    if crystallization_candidates:
+        out_list = "\n".join(
+            f"- {c['content'].strip()}  (cold {c['days_stale']}d)"
+            for c in crystallization_candidates
+        )
+    in_list = ""
+    if rewarm_candidates:
+        in_list = "\n".join(f"- {name}" for name in rewarm_candidates)
+
+    parts = ["### Crystallization Routing (keep the working set bounded)", ""]
+    if out_list:
+        parts += [
+            "These Proven patterns have gone COLD in your working set — route each "
+            "(propose, don't auto-apply): → CONSTITUTION (catastrophic-if-missed → "
+            "the harness's always-loaded bedrock), → CRYSTALLIZE (timeless + "
+            "just-in-time → the on-demand crystal store, off the always-loaded "
+            "budget), or → COMPOST (phase-specific + cold → drop; episodes remain "
+            "for re-graduation). Risk gate: only ever COMPOST a phase-specific "
+            "pattern, NEVER a timeless one.",
+            "",
+            out_list,
+            "",
+        ]
+    if in_list:
+        parts += [
+            "These crystallized patterns are HOT again (their domain re-warmed) — "
+            "consider pulling them back INTO `## Patterns` if currently load-bearing:",
+            "",
+            in_list,
+            "",
+        ]
+    return "\n".join(parts).rstrip()
+
+
 def prepare_wrap(
     store: Store,
     *,
     max_chars: int | None = None,
     staleness_days: int = 7,
+    crystal_store: CrystalStore | None = None,
 ) -> PrepareWrapResult:
     """Run the full store-aware prepare_wrap pipeline.
 
@@ -917,6 +1211,20 @@ def prepare_wrap(
             the empty path. Transports should round-trip this back to
             :func:`validated_save_continuity` to opt into explicit
             mismatch detection.
+          - ``crystallization_candidates`` (list[StalePatternDict]):
+            cold-Proven patterns ready to route OUT (constitution /
+            crystallize / compost). ``[]`` when no ``crystal_store`` is
+            passed, none qualify, or on the empty path.
+          - ``rewarm_candidates`` (list[str]): names of HOT crystallized
+            patterns to consider re-caching into ``## Patterns``. ``[]``
+            without a ``crystal_store`` or on the empty path.
+
+    Args (crystal):
+        crystal_store: optional :class:`CrystalStore` (the on-demand
+            crystallized tier). When passed, the wrap surfaces the two
+            routing lists above + extends the dedup/contradiction scans
+            to read the crystal corpus. ``None`` ⇒ byte-identical to the
+            pre-AM-CRYSTAL behavior.
 
     Raises:
         WrapInProgressError: If a wrap is already in progress
@@ -952,6 +1260,8 @@ def prepare_wrap(
             wrap_token=None,
             uncovered_proven_to_check=[],
             schema_warning=None,
+            crystallization_candidates=[],
+            rewarm_candidates=[],
         )
 
     # AM-PREPARE-GUARD (0.4.2): real episodes to compress AND a wrap
@@ -1001,6 +1311,7 @@ def prepare_wrap(
         max_chars=max_chars,
         staleness_days=staleness_days,
         schema=schema,
+        crystal_store=crystal_store,
     )
     episode_ids = [ep.id for ep in episodes]
     assoc_context = store.get_association_context(episode_ids) or None
@@ -1043,6 +1354,8 @@ def prepare_wrap(
         wrap_token=wrap_token,
         uncovered_proven_to_check=package["uncovered_proven"],
         schema_warning=schema_warning,
+        crystallization_candidates=package["crystallization_candidates"],
+        rewarm_candidates=package["rewarm_candidates"],
     )
 
 
@@ -1115,6 +1428,7 @@ def validated_save_continuity(
     wrap_token: str | None = None,
     allow_shrink: bool = False,
     carryforward_cold_days: int | None = 7,
+    crystal_store: CrystalStore | None = None,
 ) -> SaveContinuityResult:
     """Save continuity with the full validation pipeline.
 
@@ -1392,8 +1706,16 @@ def validated_save_continuity(
     # felt/identity layers preserved (or passes allow_shrink for a deliberate
     # diet) without losing the prepared wrap.
     prior_continuity = store.load_continuity()
+    # AM-CRYSTAL-MIGRATE: credit chars that crystallized OUT of the graduating
+    # section this wrap (crystal-store-grounded, by recoverability not date), so the
+    # gate reads a crystallization as a recoverable MOVE — the (prior - credit) gate
+    # formula then gates the UN-credited (recency-trapped) loss independently.
+    crystallized_credit = _crystallization_credit(
+        prior_continuity, text, section_schema, crystal_store
+    )
     _check_no_catastrophic_shrink(
-        prior_continuity, text, section_schema, allow_shrink=allow_shrink
+        prior_continuity, text, section_schema, allow_shrink=allow_shrink,
+        crystallized_credit=crystallized_credit,
     )
 
     # Get current session's episodes for citation validation.

@@ -39,6 +39,7 @@ from .spores import (
     SporeStore,
     germination_tier,
 )
+from .crystal import CrystalStore
 from .store import Store, StoreError, _WRAP_TOKEN_RE
 from .types import AffectiveState
 
@@ -134,6 +135,11 @@ class Server:
         # Created on first write, so it need not pre-exist.
         base = Path(store.path) if store.path is not None else Path("memory.db")
         self._spore_store = SporeStore(base.parent / f"{base.stem}.spores.json")
+        # The crystallized-pattern store is another JSON sibling
+        # (``<stem>.crystal.json``) — the on-demand graduated tier (AM-CRYSTAL).
+        # Passed into prepare/save so the wrap surfaces crystallization routing and
+        # the shrink gate credits crystallized-out departures; empty ⇒ no change.
+        self._crystal_store = CrystalStore(base.parent / f"{base.stem}.crystal.json")
         self._handlers: dict[str, Any] = {
             "initialize": self._handle_initialize,
             "ping": self._handle_ping,
@@ -375,6 +381,7 @@ class Server:
             self._store,
             max_chars=max_chars,
             staleness_days=staleness_days,
+            crystal_store=self._crystal_store,
         )
 
         text = format_wrap_package_text(result)
@@ -468,6 +475,7 @@ class Server:
                 affective_state=affective_state,
                 wrap_token=wrap_token,
                 allow_shrink=allow_shrink,
+                crystal_store=self._crystal_store,
             )
         except ValueError as exc:
             return _tool_result(f"Error: {exc}", is_error=True)

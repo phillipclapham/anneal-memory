@@ -83,6 +83,17 @@ from .spores import (
     SporeStore,
     germination_tier,
 )
+from .crystal import (
+    RETIRE_KINDS,
+    VALID_ACTIVATION_MODES,
+    VALID_ACTIVATIONS,
+    VALID_LEVELS,
+    VALID_PERMANENCE,
+    CrystalDict,
+    CrystalError,
+    CrystalStore,
+    activation_tier,
+)
 from .store import Store, StoreError, WrapInProgressError, _WRAP_TOKEN_RE
 from .types import AffectiveState, AssociationStats, EpisodeType
 
@@ -766,6 +777,10 @@ def cmd_prepare_wrap(args: argparse.Namespace) -> None:
                 store,
                 max_chars=args.max_chars,
                 staleness_days=args.staleness_days,
+                # AM-CRYSTAL-MIGRATE: the crystallized tier lives beside the db
+                # (<stem>.crystal.json). Auto-passed — empty/absent ⇒ no behavior
+                # change, so existing wraps are unaffected until crystallization starts.
+                crystal_store=_open_crystal_store(args),
             )
         except WrapInProgressError as exc:
             # AM-PREPARE-GUARD (0.4.2): a wrap is already open. main()
@@ -893,6 +908,11 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 affective_state=affective_state,
                 wrap_token=wrap_token,
                 allow_shrink=getattr(args, "allow_shrink", False),
+                # AM-CRYSTAL-MIGRATE: pass the crystal store so the shrink gate
+                # CREDITS patterns that legitimately crystallized OUT this wrap
+                # (grounded in <stem>.crystal.json). Empty/absent ⇒ no credit ⇒
+                # identical pre-crystal gate behavior.
+                crystal_store=_open_crystal_store(args),
             )
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
@@ -2065,6 +2085,200 @@ def _require_spore_subcommand(args: argparse.Namespace) -> None:
     sys.exit(1)
 
 
+# -- Crystal subcommands (the on-demand graduated tier) --
+
+def _open_crystal_store(args: argparse.Namespace) -> CrystalStore:
+    """Open the CrystalStore beside the episodic db (``<stem>.crystal.json``).
+
+    Mirrors :func:`_open_spore_store`: the file need NOT pre-exist —
+    ``CrystalStore`` creates it on first write, so patterns can be crystallized
+    into a fresh store location (the crystallized tier is independent of the
+    episodic db, exactly like the spore layer)."""
+    db_path = Path(args.db).expanduser()
+    return CrystalStore(db_path.parent / f"{db_path.stem}.crystal.json")
+
+
+def _crystal_row(c: CrystalDict, today: date) -> dict[str, Any]:
+    """A JSON-serializable crystal dict annotated with its computed activation tier."""
+    row: dict[str, Any] = dict(c)
+    row["activation"] = activation_tier(c, today)
+    return row
+
+
+def cmd_crystal_crystallize(args: argparse.Namespace) -> None:
+    """Crystallize a graduated pattern out of the working set (upsert by name)."""
+    store = _open_crystal_store(args)
+    try:
+        item = store.crystallize(
+            name=args.name,
+            level=args.level,
+            explanation=args.explanation,
+            evidence=args.evidence or None,
+            permanence=args.permanence,
+            activation_mode=args.activation_mode,
+            tags=args.tags or None,
+            source=args.source,
+        )
+    except (CrystalError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        _print_json(item)
+        return
+    print(f"Crystallized: {item['name']} ({item['level']}x, {item['permanence']}/"
+          f"{item['activation_mode']}) {_truncate(item['explanation'], 70)}")
+
+
+def cmd_crystal_get(args: argparse.Namespace) -> None:
+    """Show a single crystallized pattern by name (searches live then retired)."""
+    store = _open_crystal_store(args)
+    item = store.get(args.name)
+    if item is None:
+        print(f"Crystallized pattern {args.name!r} not found.", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        _print_json(item)
+        return
+    print(f"{item['name']} ({item.get('level')}x, status={item.get('status')}, "
+          f"{activation_tier(item)})")
+    print(f"  {item.get('explanation', '')}")
+    print(f"  permanence={item.get('permanence')} activation_mode={item.get('activation_mode')} "
+          f"tags={item.get('tags')}")
+    print(f"  crystallized_on={item.get('crystallized_on')} "
+          f"last_activated_on={item.get('last_activated_on')}")
+    if item.get("evidence"):
+        print(f"  evidence={item['evidence']}")
+    if item.get("source"):
+        print(f"  source={item['source']}")
+    ret = item.get("retirement")
+    if ret:
+        tail = f" — {ret.get('reason')}" if ret.get("reason") else ""
+        print(f"  retired: {ret.get('kind')} on {ret.get('on')}{tail}")
+    for note in item.get("notes", []):
+        print(f"  note: {note}")
+
+
+def cmd_crystal_list(args: argparse.Namespace) -> None:
+    """List live crystallized patterns (filtered, ranked activation -> level -> recency)."""
+    store = _open_crystal_store(args)
+    today = date.today()
+    items = store.list_crystal(
+        permanence=args.permanence,
+        activation_mode=args.activation_mode,
+        tag=args.tag,
+        activation=args.activation,
+        today=today,
+    )
+    if args.json:
+        _print_json([_crystal_row(c, today) for c in items])
+        return
+    if not items:
+        print("No crystallized patterns match.")
+        return
+    for c in items:
+        act = activation_tier(c, today)
+        print(f"  {c['name']} ({c.get('level')}x/{act}) {_truncate(c.get('explanation', ''), 80)}")
+        if args.verbose:
+            print(f"      {c.get('permanence')}/{c.get('activation_mode')} tags={c.get('tags')} "
+                  f"last_activated={c.get('last_activated_on')}")
+    dormant = [c for c in items if activation_tier(c, today) == "dormant"]
+    if dormant:
+        print(f"\n{len(dormant)} dormant — recall-reachable, or ready to retire?")
+
+
+def cmd_crystal_touch(args: argparse.Namespace) -> None:
+    """Record activation: last_activated_on -> today (re-heats the tier)."""
+    store = _open_crystal_store(args)
+    try:
+        item = store.touch(args.name)
+    except CrystalError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        _print_json(item)
+        return
+    print(f"Touched {item['name']} last_activated_on -> {item['last_activated_on']} "
+          f"({activation_tier(item)})")
+
+
+def cmd_crystal_update(args: argparse.Namespace) -> None:
+    """Metadata surgery on a live pattern (re-route axes, re-tag, sharpen). Only the
+    flags you pass change; pass an empty string to --source to clear it."""
+    store = _open_crystal_store(args)
+    kwargs: dict[str, Any] = {}
+    if args.explanation is not None:
+        kwargs["explanation"] = args.explanation
+    if args.level is not None:
+        kwargs["level"] = args.level
+    if args.evidence is not None:
+        kwargs["evidence"] = args.evidence
+    if args.permanence is not None:
+        kwargs["permanence"] = args.permanence
+    if args.activation_mode is not None:
+        kwargs["activation_mode"] = args.activation_mode
+    if args.tags is not None:
+        kwargs["tags"] = args.tags
+    if args.source is not None:
+        kwargs["source"] = args.source
+    if args.add_note:
+        kwargs["add_note"] = args.add_note
+    if not kwargs:
+        print("No changes specified. Use --explanation/--level/--evidence/"
+              "--permanence/--activation-mode/--tags/--source/--add-note.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        item = store.update(args.name, **kwargs)
+    except (CrystalError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        _print_json(item)
+        return
+    print(f"Updated {item['name']}")
+
+
+def cmd_crystal_retire(args: argparse.Namespace) -> None:
+    """Retire a crystallized pattern (falsified/superseded/merged/obsolete). Kept in
+    the retired set for audit + as the re-graduation trail — never silently dropped."""
+    store = _open_crystal_store(args)
+    try:
+        item = store.retire(args.name, kind=args.kind, reason=args.reason)
+    except (CrystalError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        _print_json(item)
+        return
+    print(f"Retired {item['name']} ({args.kind}). Kept in the retired set; its "
+          f"evidence episodes remain for re-graduation.")
+
+
+def cmd_crystal_rewarm(args: argparse.Namespace) -> None:
+    """The re-warm surface: hot crystallized patterns the working set should cache.
+    Propose-not-auto — the wrap composer decides which return to ## Patterns."""
+    store = _open_crystal_store(args)
+    today = date.today()
+    items = store.surface_rewarm_candidates(today=today)
+    if args.json:
+        _print_json([_crystal_row(c, today) for c in items])
+        return
+    if not items:
+        print("No re-warm candidates (no crystallized pattern is currently hot).")
+        return
+    print(f"**Re-warm candidates** — {len(items)} hot pattern(s); consider pulling "
+          f"into the ## Patterns working set:")
+    for c in items:
+        print(f"- {c['name']} ({c.get('level')}x) {_truncate(c.get('explanation', ''), 120)}")
+
+
+def _require_crystal_subcommand(args: argparse.Namespace) -> None:
+    """``anneal-memory crystal`` with no action — point at the available actions."""
+    print("Error: 'crystal' requires a subcommand: "
+          "crystallize / get / list / touch / update / retire / rewarm.",
+          file=sys.stderr)
+    sys.exit(1)
+
+
 # -- migrate (self-migration notices) --
 
 def cmd_migrate_check(args: argparse.Namespace) -> None:
@@ -2505,6 +2719,76 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--top-of-mind", action="store_true",
                     help="Only the ToM contribution (hot or growing, ranked)")
     sp.set_defaults(func=cmd_spore_surface)
+
+    # -- crystal (the on-demand graduated tier: crystallized proven patterns) --
+    crystal_parser = subparsers.add_parser(
+        "crystal",
+        help="Crystallized-pattern tier: proven wisdom retrieved on-demand, not always loaded",
+    )
+    crystal_parser.set_defaults(func=_require_crystal_subcommand)
+    crystal_sub = crystal_parser.add_subparsers(dest="crystal_command")
+
+    cp = crystal_sub.add_parser(
+        "crystallize", help="Crystallize a graduated pattern out of the working set (upsert by name)",
+        parents=[json_parent],
+    )
+    cp.add_argument("--name", required=True, help="The pattern slug (snake_case)")
+    cp.add_argument("--level", type=int, choices=VALID_LEVELS, required=True,
+                    help="Graduation level (2 or 3 — Proven-tier)")
+    cp.add_argument("--explanation", required=True, help="The pattern's felt-prose / mechanism body")
+    cp.add_argument("--evidence", nargs="*", help="Evidence episode ids (associative-retrieval substrate)")
+    cp.add_argument("--permanence", choices=VALID_PERMANENCE, default="timeless")
+    cp.add_argument("--activation-mode", dest="activation_mode",
+                    choices=VALID_ACTIVATION_MODES, default="just-in-time")
+    cp.add_argument("--tags", nargs="*", help="Topic/domain tags")
+    cp.add_argument("--source", help="Provenance (which entity/wrap crystallized it)")
+    cp.set_defaults(func=cmd_crystal_crystallize)
+
+    cp = crystal_sub.add_parser("get", help="Show a crystallized pattern by name", parents=[json_parent])
+    cp.add_argument("name", help="Pattern slug")
+    cp.set_defaults(func=cmd_crystal_get)
+
+    cp = crystal_sub.add_parser("list", help="List live crystallized patterns", parents=[json_parent])
+    cp.add_argument("--permanence", choices=VALID_PERMANENCE)
+    cp.add_argument("--activation-mode", dest="activation_mode", choices=VALID_ACTIVATION_MODES)
+    cp.add_argument("--activation", choices=VALID_ACTIVATIONS)
+    cp.add_argument("--tag")
+    cp.add_argument("--verbose", "-v", action="store_true")
+    cp.set_defaults(func=cmd_crystal_list)
+
+    cp = crystal_sub.add_parser(
+        "touch", help="Record activation: last_activated_on=today (re-heats the tier)",
+        parents=[json_parent],
+    )
+    cp.add_argument("name", help="Pattern slug")
+    cp.set_defaults(func=cmd_crystal_touch)
+
+    cp = crystal_sub.add_parser("update", help="Metadata surgery on a live pattern", parents=[json_parent])
+    cp.add_argument("name", help="Pattern slug")
+    cp.add_argument("--explanation")
+    cp.add_argument("--level", type=int, choices=VALID_LEVELS)
+    cp.add_argument("--evidence", nargs="*")
+    cp.add_argument("--permanence", choices=VALID_PERMANENCE)
+    cp.add_argument("--activation-mode", dest="activation_mode", choices=VALID_ACTIVATION_MODES)
+    cp.add_argument("--tags", nargs="*")
+    cp.add_argument("--source", help="Set/replace source (empty string clears)")
+    cp.add_argument("--add-note")
+    cp.set_defaults(func=cmd_crystal_update)
+
+    cp = crystal_sub.add_parser(
+        "retire", help="Retire a pattern (kept in the retired set for audit + re-graduation)",
+        parents=[json_parent],
+    )
+    cp.add_argument("name", help="Pattern slug")
+    cp.add_argument("--kind", choices=RETIRE_KINDS, required=True)
+    cp.add_argument("--reason", help="Optional free-text reason")
+    cp.set_defaults(func=cmd_crystal_retire)
+
+    cp = crystal_sub.add_parser(
+        "rewarm", help="Surface hot patterns the working set should re-cache (propose-not-auto)",
+        parents=[json_parent],
+    )
+    cp.set_defaults(func=cmd_crystal_rewarm)
 
     # -- migrate (self-migration notices: propose instruction-file edits on upgrade) --
     migrate_parser = subparsers.add_parser(

@@ -155,6 +155,20 @@ class TestCrystallizationCredit:
         # must NOT raise, and must NOT credit (gate stays strict on a store fault)
         assert _crystallization_credit(prior, "x", FLOW_SCHEMA, crystal) == {}
 
+    def test_oserror_crystal_store_no_credit_no_raise_warns(self):
+        # codex L3 (2026-06-06): the credit path caught CrystalError ONLY, so a raw
+        # OSError (PermissionError, disk I/O) ESCAPED and broke the SAVE — violating
+        # the crystal-fault-never-breaks-a-wrap invariant the corrupt-JSON case above
+        # honors. It must degrade to no-credit AND surface a diagnostic (degrade-but
+        # -warn; a guard must not silently mask the fault it protects against).
+        class _FaultStore:
+            def active(self):
+                raise PermissionError("simulated EACCES on memory.crystal.json")
+
+        prior = _flow_doc(_patterns_section(_PAT_NAMES))
+        with pytest.warns(UserWarning, match="crystal store unreadable"):
+            assert _crystallization_credit(prior, "x", FLOW_SCHEMA, _FaultStore()) == {}
+
 
 # -- credit OWNER accounting (regression for the L1 HIGH over-credit) ------
 
@@ -438,3 +452,24 @@ class TestPrepareSurfacing:
         result = prepare_wrap(store)  # no crystal_store
         assert result["rewarm_candidates"] == []
         assert result["crystallization_candidates"] == []
+
+    def test_oserror_on_active_does_not_break_prepare(self, tmp_path, monkeypatch):
+        # codex L3 (2026-06-06): an OSError reading the crystal store during prepare
+        # (active() in the package build) must NOT abort prepare_wrap — aborting would
+        # strand a wrap-in-progress over a fault in an ADDITIVE tier. _crystal_active_safe
+        # now catches (CrystalError, OSError) + warns; the wrap proceeds with the
+        # crystallized tier degraded to empty rather than breaking.
+        store = self._store(tmp_path)
+        crystal = CrystalStore(tmp_path / "mem.crystal.json")
+        crystal.crystallize(name="hot_pattern", level=3, explanation="x", today=T0)
+        store.record("an episode about substrate topics worth at least eighty characters here now.",
+                     "observation")
+
+        def _boom(self, *a, **k):
+            raise PermissionError("simulated EACCES on memory.crystal.json")
+
+        monkeypatch.setattr(CrystalStore, "active", _boom)
+        with pytest.warns(UserWarning, match="crystal store unreadable"):
+            result = prepare_wrap(store, crystal_store=crystal)
+        assert result["status"] == "ready"        # the wrap is NOT broken by the fault
+        assert result["rewarm_candidates"] == []  # crystal tier degraded, not fatal

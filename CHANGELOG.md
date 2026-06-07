@@ -6,6 +6,20 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 > The remaining adopter-facing convenience item (AM-CHIPSCHEMA, a trusted-single-operator schema profile) is deferred to the Levain v2 reload, where it composes with the held attention-zone schema work (AM-ATTENTIONZONE) it overlaps. See `projects/anneal_memory/next.md`. Also pending (AM-CRYSTAL follow-ons): MCP `crystal` lifecycle tools + `retrieve_relevant` parity, and the associative (Hebbian) retrieval backend gated on the keyword hit-rate measurement.
 
+## [0.7.2] — 2026-06-07
+
+The **AM-PRESERVE-VS-SYCOPHANCY** completion: the cross-session-overlap immune gate no longer erodes its own load-bearing antibodies.
+
+### Fixed — the anti-sycophancy gate's autoimmune failure mode
+
+The cross-session-overlap gate (and `_carryforward_decision`'s internal overlap refusal) used vocabulary-overlap-with-a-prior-explanation as the sole sycophancy signal, exempting ONLY byte-identical preservation. A load-bearing invariant re-grounded with FRESH evidence each wrap is RE-WORDED (its explanation references the new episode), so it is not byte-identical — yet its core vocabulary necessarily recurs *because the principle is stable* → ≥3-word overlap → demoted one level per wrap, even when it cited a fresh valid episode, validly grounded in it, and sat at its earned high-water mark. The immune system was attacking the most stable, highest-value patterns *because* they were stable.
+
+The preservation exemption at both sites now widens from byte-identity to **byte-identical OR (non-inflating AND warm AND — at the grounded site — re-grounded with a fresh *specific*)**. "Warm + at-peak" is carryforward's own discriminator, applied consistently. The grounded (cross-session) site additionally requires **fresh-specific grounding**: the explanation must ground in a cited episode via at least one meaningful word ABSENT from the pattern's prior-corpus vocabulary — a genuine re-validation cites a new episode and carries its specifics; a cheap longevity-pump just recycles the principle's own words. This closes the warm-stickiness pump (a warm-held line VALIDATES → upserts `last_seen_at` → would otherwise stay warm forever on cheap fresh text) while preserving stable invariants.
+
+Teeth retained for: COLD overlap (ages out — activation-aware), INFLATING level-ups (the `level <= max_level_reached` backstop), and re-worded overlap WITHOUT fresh-specific grounding. **Co-citation hygiene:** a preservation-exempt line that suppressed a would-be demotion now forms Hebbian links only among individually-grounding cited ids — no graph-poison edge to an unrelated co-cited episode. The determined adversary who manufactures one novel word echoed in a fresh episode is explicitly out of scope here — that is the poisoning layer's responsibility (source-diversity / quorum), not this gate's.
+
+No public API change (new `_is_warm` / `_meaningful_words` private helpers). Full 4-layer apparatus; **codex L3 to convergence across three rounds** — it confirmed the warm-stickiness pump, caught a co-citation graph-poison both Claude-lineage reviewers missed, then caught an over-broad `is_preservation` flag in the first fix that would have dropped legitimate co-citations on normal warm lines. 1412 tests, including end-to-end coverage proving a load-bearing antibody survives a real two-wrap cycle and the pump is closed end-to-end.
+
 ## [0.7.1] — 2026-06-06
 
 A documentation release — **no library behavior change**. It brings the human-facing and AI-facing docs up to the shipped 0.6.0-0.7.0 reality: the **spores** prospective layer (0.4.0) and the **crystallized-pattern tier** (0.6.0-0.7.0) were under-documented in the README and the agent-instruction surfaces.

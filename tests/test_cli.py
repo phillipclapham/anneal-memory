@@ -48,8 +48,10 @@ from anneal_memory.cli import (
     cmd_wrap_token_current,
     main,
     parse_duration,
+    _open_crystal_store_for_wrap,
 )
 from anneal_memory.store import StoreError
+from anneal_memory.crystal import CrystalStore
 
 
 # -- Fixtures --
@@ -2861,3 +2863,147 @@ class TestSporeCLI:
         out = self._run("--db", tmp_db, "spore", "surface", "--top-of-mind").stdout
         assert "hot one" in out          # tier == hot -> included
         assert "parked one" not in out   # parked: not hot, not growing -> excluded
+
+
+class TestCrystalOptInGate:
+    """AM-CRYSTAL-OPTIN: the crystallized tier is opt-in on the CLI wrap path —
+    passed to prepare/save only when its file exists or --crystal is set;
+    otherwise None => byte-identical pre-crystal wrap (no crystallize-OUT proposals)."""
+
+    def _args(self, tmp_path):
+        return Namespace(db=str(tmp_path / "mem.db"))
+
+    def test_no_store_no_flag_returns_none(self, tmp_path):
+        assert _open_crystal_store_for_wrap(self._args(tmp_path)) is None
+
+    def test_flag_bootstraps_store_without_existing_file(self, tmp_path):
+        args = self._args(tmp_path)
+        args.crystal = True
+        cs = _open_crystal_store_for_wrap(args)
+        assert isinstance(cs, CrystalStore)
+        cs.crystallize(name="boot", level=2, explanation="y")
+        assert (tmp_path / "mem.crystal.json").exists()
+
+    def test_existing_file_enables_without_flag(self, tmp_path):
+        CrystalStore(tmp_path / "mem.crystal.json").crystallize(
+            name="seed_pattern", level=3, explanation="x")
+        cs = _open_crystal_store_for_wrap(self._args(tmp_path))
+        assert isinstance(cs, CrystalStore)
+        assert any(c["name"] == "seed_pattern" for c in cs.active())
+
+    def test_flag_enables_wrap_but_does_not_persist(self, tmp_path):
+        # codex L3 LOW-1: --crystal enables THIS wrap but does NOT create the file
+        # (CrystalStore is lazy) -> opt-in does not persist without crystallizing.
+        args = self._args(tmp_path)
+        args.crystal = True
+        assert isinstance(_open_crystal_store_for_wrap(args), CrystalStore)
+        assert not (tmp_path / "mem.crystal.json").exists()
+        assert _open_crystal_store_for_wrap(self._args(tmp_path)) is None
+
+    def test_argparse_wires_crystal_flag_to_helper(self, tmp_path):
+        # complement L3 MEDIUM-1: close the argparse->helper wiring gap end-to-end.
+        from anneal_memory.cli import build_parser
+        db = str(tmp_path / "mem.db")
+        parser = build_parser()
+        ns = parser.parse_args(["--db", db, "prepare-wrap", "--crystal"])
+        assert ns.crystal is True
+        assert isinstance(_open_crystal_store_for_wrap(ns), CrystalStore)
+        ns2 = parser.parse_args(["--db", db, "prepare-wrap"])
+        assert ns2.crystal is False
+        assert _open_crystal_store_for_wrap(ns2) is None
+
+
+class TestCrystalIndexAndRecallCLI:
+    """AM-CRYSTAL-INDEX + AM-CRYSTAL-CLI: the subprocess-reachable surfaces a
+    harness wrapper shells — `crystal index --json` (always-on name+clause menu)
+    + `crystal recall <query> --json` (run-context expansion via retrieve_patterns)."""
+
+    def _crystallize(self, tmp_path, name, level, explanation):
+        CrystalStore(tmp_path / "mem.crystal.json").crystallize(
+            name=name, level=level, explanation=explanation)
+
+    def _idx_args(self, tmp_path, json_out=True):
+        return Namespace(db=str(tmp_path / "mem.db"), json=json_out)
+
+    def test_index_json_sorted_name_and_clause_only(self, tmp_path, capsys):
+        import json as _json
+        from anneal_memory.cli import cmd_crystal_index
+        self._crystallize(tmp_path, "zeta_pattern", 3, "the long zeta explanation body")
+        self._crystallize(tmp_path, "alpha_pattern", 2, "alpha body")
+        cmd_crystal_index(self._idx_args(tmp_path))
+        out = _json.loads(capsys.readouterr().out)
+        assert [r["name"] for r in out] == ["alpha_pattern", "zeta_pattern"]  # sorted
+        assert set(out[0].keys()) == {"name", "clause"}                       # thin: no level/id
+
+    def test_index_clause_truncated(self, tmp_path, capsys):
+        import json as _json
+        from anneal_memory.cli import cmd_crystal_index
+        self._crystallize(tmp_path, "p", 2, "x" * 300)
+        cmd_crystal_index(self._idx_args(tmp_path))
+        out = _json.loads(capsys.readouterr().out)
+        assert len(out[0]["clause"]) <= 100  # _truncate caps total length at 100 (ellipsis included)
+
+    def test_index_empty_store_json(self, tmp_path, capsys):
+        import json as _json
+        from anneal_memory.cli import cmd_crystal_index
+        cmd_crystal_index(self._idx_args(tmp_path))
+        assert _json.loads(capsys.readouterr().out) == []
+
+    def test_recall_json_returns_scored_relevant_pattern(self, tmp_path, capsys):
+        import json as _json
+        from anneal_memory.cli import cmd_crystal_recall
+        self._crystallize(tmp_path, "structural_invariants_beat_discipline", 3,
+                          "an invariant refuses; make the guard structurally unskippable")
+        args = Namespace(db=str(tmp_path / "mem.db"), json=True, max_patterns=3,
+                         query="make a guard structurally unskippable invariant")
+        cmd_crystal_recall(args)
+        out = _json.loads(capsys.readouterr().out)
+        assert len(out) == 1 and out[0]["name"] == "structural_invariants_beat_discipline"
+        assert set(out[0].keys()) == {"name", "level", "explanation", "tags", "activation", "score"}
+
+    def test_recall_thin_query_returns_empty(self, tmp_path, capsys):
+        import json as _json
+        from anneal_memory.cli import cmd_crystal_recall
+        self._crystallize(tmp_path, "structural_invariants_beat_discipline", 3,
+                          "an invariant refuses; make the guard structurally unskippable")
+        args = Namespace(db=str(tmp_path / "mem.db"), json=True, max_patterns=3, query="the a")
+        cmd_crystal_recall(args)
+        assert _json.loads(capsys.readouterr().out) == []
+
+    def test_recall_no_store_returns_empty(self, tmp_path, capsys):
+        import json as _json
+        from anneal_memory.cli import cmd_crystal_recall
+        args = Namespace(db=str(tmp_path / "mem.db"), json=True, max_patterns=3,
+                         query="structurally unskippable invariant guard")
+        cmd_crystal_recall(args)
+        assert _json.loads(capsys.readouterr().out) == []
+
+    def test_index_corrupt_store_fails_closed(self, tmp_path, capsys):
+        # MED-1 regression (codex/L1): a non-UTF-8 / corrupt crystal store exits 1
+        # cleanly with an Error: line, not a raw traceback (fail-closed contract).
+        from anneal_memory.cli import cmd_crystal_index
+        (tmp_path / "mem.crystal.json").write_bytes(b"\xff\xfe not valid json")
+        with pytest.raises(SystemExit) as ei:
+            cmd_crystal_index(self._idx_args(tmp_path))
+        assert ei.value.code == 1
+        assert "Error:" in capsys.readouterr().err
+
+    def test_recall_corrupt_store_fails_closed(self, tmp_path, capsys):
+        from anneal_memory.cli import cmd_crystal_recall
+        (tmp_path / "mem.crystal.json").write_bytes(b"\xff\xfe not valid json")
+        args = Namespace(db=str(tmp_path / "mem.db"), json=True, max_patterns=3,
+                         query="structurally unskippable invariant guard")
+        with pytest.raises(SystemExit) as ei:
+            cmd_crystal_recall(args)
+        assert ei.value.code == 1
+
+    def test_recall_max_patterns_caps(self, tmp_path, capsys):
+        import json as _json
+        from anneal_memory.cli import cmd_crystal_recall
+        for i in range(4):
+            self._crystallize(tmp_path, f"invariant_guard_pattern_{i}", 3,
+                              "make the guard structurally unskippable invariant discipline drift")
+        args = Namespace(db=str(tmp_path / "mem.db"), json=True, max_patterns=2,
+                         query="structurally unskippable invariant guard discipline")
+        cmd_crystal_recall(args)
+        assert 1 <= len(_json.loads(capsys.readouterr().out)) <= 2

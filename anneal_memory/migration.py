@@ -146,6 +146,60 @@ MIGRATION_MANIFEST: list[MigrationEntry] = [
         ),
         "files": list(CORE_FILES),
     },
+    {
+        "version": "0.7.1",
+        "feature": "AM-CRYSTAL",
+        "summary": (
+            "anneal-memory 0.6.0-0.7.0 added the CRYSTALLIZED PATTERN TIER — a "
+            "long-term semantic store (`<db-stem>.crystal.json`) that holds "
+            "proven, stable patterns OUT of the always-loaded continuity and "
+            "surfaces them ON CUE, so a large body of graduated wisdom stays "
+            "effective without clogging attention. The always-loaded `## "
+            "Patterns` section shrinks to the working set (developing + "
+            "recently-used); the deep, stable bulk moves to the store and is "
+            "recalled when relevant. This completes the memory architecture as "
+            "Complementary Learning Systems: episodic (hippocampus) -> "
+            "working-set continuity -> crystallized store (cortical semantic "
+            "memory) -> constitution. The tier is OPT-IN (inert — wraps stay "
+            "byte-identical — until you crystallize a pattern or pass `--crystal`) "
+            "and HARNESS-FIRED (per-turn recall is a harness hook's job; raw, use "
+            "`anneal-memory crystal index` / `crystal recall`). If your "
+            "instruction files describe the memory system, they predate this "
+            "tier and may not teach the agent it exists or how to route "
+            "crystallization at wrap. This guidance is formalized in the 0.7.1 "
+            "release; the tier itself landed across 0.6.0-0.7.0, so if you "
+            "upgraded straight past those you are seeing it now — nothing was "
+            "missed."
+        ),
+        "suggested_edit": (
+            "In the section of your file that describes anneal-memory, add a "
+            "short 'Crystallized patterns — long-term semantic tier' note. "
+            "Suggested text (use it directly so adopters don't each paraphrase a "
+            "different version): \"anneal-memory holds proven, stable patterns in "
+            "a crystallized store — OUT of always-loaded context, recalled on cue "
+            "— so `## Patterns` stays the working set (developing + hot), not an "
+            "ever-growing list (attention doesn't scale; a bigger continuity is "
+            "not a smarter one). Opt-in + harness-fired: a per-turn recall hook "
+            "surfaces the relevant crystallized patterns automatically; without "
+            "one, recall is manual via `crystal index` / `crystal recall`. At "
+            "wrap, once opted in, `prepare_wrap` surfaces cold Proven patterns as "
+            "crystallization candidates — route each one (crystallize / "
+            "constitution / compost) in the decision block prepare_wrap "
+            "describes. Only crystallize OUT when a retrieval surface exists "
+            "(a recall hook, or `crystal index`/`crystal recall`) — else the "
+            "pattern leaves always-loaded context with no way back. NEVER "
+            "compost a TIMELESS pattern (the library refuses "
+            "that structurally, but hold the rule yourself — on-demand recall is "
+            "the safety net for just-in-time wisdom, not for timeless "
+            "principles).\" "
+            "If your harness has a UserPromptSubmit-style recall hook, point it "
+            "at the crystallized tier too — that is what turns anneal from a "
+            "store you remember to query into memory that fires at the right "
+            "moment. Full reference: the project README section 'The Memory "
+            "Architecture (Complementary Learning Systems)'."
+        ),
+        "files": list(CORE_FILES),
+    },
 ]
 
 

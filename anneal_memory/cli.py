@@ -2371,7 +2371,8 @@ def cmd_crystal_rewarm(args: argparse.Namespace) -> None:
 def _require_crystal_subcommand(args: argparse.Namespace) -> None:
     """``anneal-memory crystal`` with no action — point at the available actions."""
     print("Error: 'crystal' requires a subcommand: "
-          "crystallize / get / list / touch / update / retire / rewarm.",
+          "crystallize / get / list / touch / update / retire / rewarm / "
+          "index / recall.",
           file=sys.stderr)
     sys.exit(1)
 

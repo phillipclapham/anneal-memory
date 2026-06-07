@@ -14,7 +14,7 @@ Persistent user memory profiles [increase agent sycophancy 16–45% across model
 
 anneal-memory adds structural defenses at the citation layer that no other agent memory ships today. Patterns earn promotion through cited episode evidence with lexical-overlap explanation-grounding, fabricated citations get demoted, per-ID citation gaming surfaces a flag, replay attempts against stale episodes fail by construction, and the audit chain is SHA-256 hash-chained and tamper-evident. Stale patterns surface for the agent to act on; associations form through consolidation. These are narrow, structural primitives — not a complete defense against every form of memory drift. See *Honest scope* below for what these primitives catch and what they don't.
 
-Four cognitive layers: episodic store, compressed continuity, Hebbian associations, and affective state tracking. Zero dependencies (Python stdlib only). Works with any agent framework.
+Four cognitive layers — episodic store, compressed continuity, Hebbian associations, affective state tracking — plus two sibling stores: prospective **spores** (what the agent intends to do next) and a **crystallized** pattern store (graduated wisdom held *out* of always-loaded context and recalled on cue, so a large body of proven knowledge stays effective without clogging attention). Together they implement Complementary Learning Systems — see *The Memory Architecture* below. Zero dependencies (Python stdlib only). Works with any agent framework.
 
 ## Quick Start
 
@@ -301,9 +301,14 @@ This is experimental infrastructure. The associations and strength model work wi
 **Four cognitive layers, modeled on how memory actually works:**
 
 1. **Episodic store** (SQLite) — timestamped, typed episodes. Fast writes, indexed queries. Cheap to accumulate. The hippocampus.
-2. **Continuity file** (Markdown) — compressed session memory. Always loaded at session start. Rewritten (not appended) at each session boundary. The neocortex. Its structure is a configurable section schema (below) — four sections by default; partnership entities add a timeless felt layer.
+2. **Continuity file** (Markdown) — compressed session memory. Always loaded at session start. Rewritten (not appended) at each session boundary. The neocortex's always-loaded **working set** (its long-term semantic half is the crystallized store, below). Its structure is a configurable section schema (below) — four sections by default; partnership entities add a timeless felt layer.
 3. **Hebbian associations** (SQLite) — lateral links between episodes, formed through co-citation during compression. Strengthen with reuse, decay without it. The association cortex.
 4. **Affective layer** (on associations) — functional state tags recorded during compression. Intensity modulates association strength. Persistent state infrastructure.
+
+These four describe how the store *works*. Two sibling stores sit alongside them (separate files, same atomic-write durability discipline) and address a different axis — *when* a thing is loaded, and whether it's retrospective or prospective:
+
+- **Crystallized pattern store** (`<stem>.crystal.json`) — proven, stable patterns held *out* of the always-loaded continuity and recalled on cue. The long-term semantic store that splits working memory from long-term memory; see *The Memory Architecture (Complementary Learning Systems)* below for why this completes the design.
+- **Spore store** (`<stem>.spores.json`) — prospective tasks that open and self-clean. Memory's forward-looking sibling; see *Prospective memory — spores* below.
 
 **Six episode types** give the immune system richer signal:
 
@@ -335,7 +340,8 @@ store.set_section_schema(FLOW_SCHEMA)   # validated; frozen during an active wra
 
 | | anneal-memory | Anthropic Official | Mem0 | Ori-Mnemos | BrainBox |
 |---|---|---|---|---|---|
-| **Architecture** | Episodic + continuity + associations | JSONL flat file (graph-shaped) | Vector + graph | Retrieval + Hebbian | Memory + Hebbian |
+| **Architecture** | Episodic + continuity + associations + crystallized tier | JSONL flat file (graph-shaped) | Vector + graph | Retrieval + Hebbian | Memory + Hebbian |
+| **Attention management** | Working-set / crystallized split — graduated wisdom recalled on cue, not always loaded | None | None | None | None |
 | **Compression** | Session-boundary rewrite | None | One-pass extraction | None | None |
 | **Quality mechanism** | Structural citation-layer primitives (cited episode IDs verified + lexical-overlap explanation check + ungrounded-citation demotion + per-ID gaming flag + audit chain) | None | None | NPMI normalization | None |
 | **Association formation** | Co-citation during consolidation | None | None | Co-retrieval at runtime | Co-access at runtime |
@@ -343,6 +349,41 @@ store.set_section_schema(FLOW_SCHEMA)   # validated; frozen during an active wra
 | **Audit trail** | Hash-chained JSONL | None | None | None | None |
 | **Access patterns** | Library + CLI + MCP | MCP only | REST API | Python only | MCP only |
 | **Dependencies** | Zero (Python stdlib) | Node.js | Docker + cloud | Embeddings model | Not specified |
+
+## The Memory Architecture (Complementary Learning Systems)
+
+The immune system above answers one question: *is this memory any good?* This section answers a different one: *where does good memory live so it stays usable?* The two are independent — and the second is where most agent-memory architectures quietly fail. Nothing here is a feature picked off a list: the tiers fall out of a single problem — graduated wisdom has to stay *retrievable* without staying *always-loaded* — and the crystallized tier in particular is forced by the one below it, not chosen. That coherence is the point.
+
+**The problem isn't storage — it's attention.** Graduation runs one way: a pattern earns 1x → 2x → 3x and then it lives in the always-loaded continuity. There was no path back *out*, so the working set only ever grew. That looks like a budget problem — "the continuity file is getting big" — but the budget is the symptom. The disease is that **attention doesn't scale**: past a few dozen always-loaded patterns they drown each other out (the Lost-in-the-Middle effect), and a pattern's value is *firing at the right moment*, not *being present*. A bigger continuity is not a smarter one — the right handful surfaced at the right moment beats a wall of always-on ones.
+
+**The brain solved this a long time ago, and the solution has a name.** Complementary Learning Systems ([McClelland, McNaughton & O'Reilly, 1995](https://pubmed.ncbi.nlm.nih.gov/7624455/)) describes how biological memory avoids exactly this failure: a fast hippocampal store captures experience cheaply, slow consolidation distills it, and — the load-bearing part — the neocortex itself *splits*. You do not hold everything you know in working memory. You hold a small active set and retrieve the relevant piece from a vast long-term store when the context calls for it. Recall is on-cue, not always-on. (This is the same consolidation-as-sleep process described under *Session Hygiene* below — here it's the architecture, not the analogy.)
+
+anneal maps onto the first three tiers concretely — each is a real file/mechanism, not a metaphor; the fourth, constitution, completes the CLS model but is the *harness's* always-load layer, not anneal's (named here to make the architecture legible, not to claim it). Note this is a *different axis* than the four substrate layers described under *Architecture* above: those are **how the store works** (storage, association, affect); these are the **retrieval economy** — *where* graduated wisdom lives relative to the always-loaded budget.
+
+| Tier | Brain analog | Where it lives | Loaded |
+|---|---|---|---|
+| **Episodic** | hippocampus | `episodic.db` (SQLite, typed episodes) | on cue (`recall`) |
+| **Working set** | working memory | continuity `## Patterns` — developing (1x/2x) + recently-used | **always** |
+| **Crystallized** | cortical semantic store | `<stem>.crystal.json` (`CrystalStore`) | **on cue** (harness recall hook) |
+| **Constitution** | core identity / deep priors | the harness's always-load layer | **always** |
+
+The wrap is the consolidation step that moves a pattern between tiers: a cold, stable Proven crystallizes *out* of the working set into the store; a re-heating one is surfaced as a re-warm candidate to pull back *in*.
+
+**The crystallized tier is the piece that completes the architecture (v0.6.0–0.7.0).** Before it, anneal had the hippocampus (episodic) and the consolidation act (the wrap) but *no cortical semantic store*. A pattern that graduated to Proven had exactly one place to live: the always-loaded continuity. That conflates working memory with long-term memory — the one thing CLS specifically does *not* do — which is why graduation was a one-way ratchet. `CrystalStore` is that missing store: a JSON sibling of the spore store (same atomic-write + `fcntl` durability, read-time activation tiering, typed lifecycle) that holds every proven-and-stable pattern *retrievably* — out of the always-loaded set, surfaced on cue. The working set shrinks to what's developing or hot; the body of graduated wisdom moves to a store and is recalled when relevant. The ratchet finally has its OUT path. This wasn't bolted on — the architecture revealed the gap, and the gap had a known shape.
+
+**anneal is the substrate; the harness fires it.** The library owns the crystallized store and the on-demand recall API — `retrieve_patterns(crystal_store, query)`, plus `anneal-memory crystal index --json` (the always-on menu of what's in the store) and `anneal-memory crystal recall <query> --json` (run-context expansion). It does not — and cannot — fire on its own: surfacing the right pattern at the right moment requires a per-turn hook, and a hook is harness-specific (a Claude Code hook would break the 12-framework neutrality the library guarantees). So raw anneal gives you the store, the API, and *manual* recall — you query if you remember to, which is the dead-store failure mode that discipline always rots into. A harness with hooks runs that recall on every prompt and surfaces the relevant crystallized patterns on cue — the *check* becomes an invariant instead of a discipline you remember (or forget). **flow** does this today; **[Levain](https://github.com/levainhq/levain)** fires the prospective (spore) layer today, with per-turn crystallized recall landing as its v2 opening slice. The boundary is deliberate: **the store is universal; the firing is the harness's job.** This is also exactly why anneal stays zero-dep and framework-neutral while a harness can be opinionated on top of it.
+
+### Prospective memory — spores
+
+Everything above is *retrospective*: what already happened, and what was learned from it. Agents also need the opposite — a record of what they intend to do *next*. That's a different kind of object with a different lifecycle, and conflating it with memory corrupts both.
+
+anneal ships **spores** (v0.4.0) as a separate sibling store (`<stem>.spores.json`) for exactly this: prospective tasks that open, get worked, and *close* — they self-clean when done. Memory accretes and never completes; a spore must complete, or it's noise. Three temporal layers, kept distinct on purpose:
+
+- **Retrospective** — what persisted (episodic + continuity + crystallized). It accretes.
+- **Prospective** — what you intend (spores). It completes and clears.
+- **Methodology** — the procedure you run (your wrap discipline, your recall habits). It operates on the other two.
+
+If you're integrating anneal into an existing agent that already tracks open loops, spores is the typed store those loops route *into* — your methodology *operates* the spore store, it doesn't compete with it.
 
 ## The Consolidation Landscape (2026)
 

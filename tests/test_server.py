@@ -20,6 +20,7 @@ from anneal_memory.server import (
 )
 from anneal_memory.store import Store
 from anneal_memory.integrity import TOOLS, RESOURCES
+from anneal_memory.crystal import CrystalStore
 
 
 @pytest.fixture
@@ -1114,3 +1115,22 @@ class TestSporeTools:
         text = _text_from_result(r)
         assert "hot one" in text           # tier == hot -> included
         assert "parked one" not in text    # parked: not hot, not growing -> excluded
+
+
+class TestCrystalOptInGateMCP:
+    """AM-CRYSTAL-OPTIN (MCP): the crystal tier is passed to the wrap pipeline
+    only when its file already exists (MCP has no per-call flag); else None."""
+
+    def test_no_crystal_file_returns_none(self, tmp_path):
+        store = Store(tmp_path / "mem.db", project_name="flow")
+        srv = Server(store)
+        assert srv._crystal_store_for_wrap() is None
+
+    def test_existing_crystal_file_returns_store(self, tmp_path):
+        CrystalStore(tmp_path / "mem.crystal.json").crystallize(
+            name="seed_pattern", level=3, explanation="x")
+        store = Store(tmp_path / "mem.db", project_name="flow")
+        srv = Server(store)
+        cs = srv._crystal_store_for_wrap()
+        assert isinstance(cs, CrystalStore)
+        assert any(c["name"] == "seed_pattern" for c in cs.active())

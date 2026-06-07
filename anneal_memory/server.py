@@ -137,9 +137,14 @@ class Server:
         self._spore_store = SporeStore(base.parent / f"{base.stem}.spores.json")
         # The crystallized-pattern store is another JSON sibling
         # (``<stem>.crystal.json``) — the on-demand graduated tier (AM-CRYSTAL).
-        # Passed into prepare/save so the wrap surfaces crystallization routing and
-        # the shrink gate credits crystallized-out departures; empty ⇒ no change.
-        self._crystal_store = CrystalStore(base.parent / f"{base.stem}.crystal.json")
+        # AM-CRYSTAL-OPTIN: store the PATH only; the wrap handlers pass it into
+        # prepare/save ONLY when the file already exists (the opt-in signal), so an
+        # MCP operator who never crystallized is never dropped into the
+        # crystallize-OUT regime — byte-identical pre-crystal wrap. Persistent
+        # opt-in = `crystal crystallize` writes the file (then every wrap, CLI +
+        # MCP, auto-enables); `prepare-wrap --crystal` enables a single CLI wrap
+        # but does NOT itself create the store.
+        self._crystal_path = base.parent / f"{base.stem}.crystal.json"
         self._handlers: dict[str, Any] = {
             "initialize": self._handle_initialize,
             "ping": self._handle_ping,
@@ -350,6 +355,22 @@ class Server:
 
         return _tool_result("\n".join(lines))
 
+    def _crystal_store_for_wrap(self) -> CrystalStore | None:
+        """AM-CRYSTAL-OPTIN: the crystal tier on the MCP wrap path is opt-in.
+
+        Returns the ``CrystalStore`` only when its file already exists (the
+        opt-in signal — created when a pattern is first crystallized via the CLI
+        ``crystal crystallize``; ``CrystalStore(path)`` is lazy and does not
+        create it on open); otherwise ``None`` ⇒ byte-identical pre-crystal
+        wrap. An MCP operator who never crystallized is never dropped into the
+        crystallize-OUT regime. MCP has no per-call flag, so file existence is
+        the only opt-in signal here — bootstrap by crystallizing via the CLI.
+        """
+        return (
+            CrystalStore(self._crystal_path)
+            if self._crystal_path.exists() else None
+        )
+
     def _tool_prepare_wrap(self, args: dict[str, Any]) -> dict[str, Any]:
         """MCP transport adapter for the library prepare_wrap pipeline.
 
@@ -381,7 +402,8 @@ class Server:
             self._store,
             max_chars=max_chars,
             staleness_days=staleness_days,
-            crystal_store=self._crystal_store,
+            # AM-CRYSTAL-OPTIN: opt-in gate — pass the store only when it exists.
+            crystal_store=self._crystal_store_for_wrap(),
         )
 
         text = format_wrap_package_text(result)
@@ -475,7 +497,8 @@ class Server:
                 affective_state=affective_state,
                 wrap_token=wrap_token,
                 allow_shrink=allow_shrink,
-                crystal_store=self._crystal_store,
+                # AM-CRYSTAL-OPTIN: opt-in gate — pass the store only when it exists.
+                crystal_store=self._crystal_store_for_wrap(),
             )
         except ValueError as exc:
             return _tool_result(f"Error: {exc}", is_error=True)

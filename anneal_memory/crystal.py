@@ -307,7 +307,11 @@ class CrystalStore:
                 "retired": [],
                 "schema_version": CRYSTAL_SCHEMA_VERSION,
             }
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            # UnicodeDecodeError (a ValueError, NOT an OSError) is the non-UTF-8
+            # corruption path — normalize it to CrystalError at the source so every
+            # reader (the wrap path + the CLI index/recall surfaces) is covered by
+            # its existing `except CrystalError`, not a per-caller broadening.
             raise CrystalError(
                 f"{self.path} is not valid JSON ({e}); refusing to proceed so "
                 f"recoverable crystallized patterns aren't overwritten on the next "

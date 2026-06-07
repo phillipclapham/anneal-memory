@@ -94,6 +94,7 @@ from .crystal import (
     CrystalStore,
     activation_tier,
 )
+from .retrieval import retrieve_patterns, MAX_PATTERNS
 from .store import Store, StoreError, WrapInProgressError, _WRAP_TOKEN_RE
 from .types import AffectiveState, AssociationStats, EpisodeType
 
@@ -777,10 +778,11 @@ def cmd_prepare_wrap(args: argparse.Namespace) -> None:
                 store,
                 max_chars=args.max_chars,
                 staleness_days=args.staleness_days,
-                # AM-CRYSTAL-MIGRATE: the crystallized tier lives beside the db
-                # (<stem>.crystal.json). Auto-passed — empty/absent ⇒ no behavior
-                # change, so existing wraps are unaffected until crystallization starts.
-                crystal_store=_open_crystal_store(args),
+                # AM-CRYSTAL-MIGRATE + AM-CRYSTAL-OPTIN: the crystallized tier lives
+                # beside the db (<stem>.crystal.json). OPT-IN — passed only when the
+                # operator has a crystal store (file exists) or --crystal is set; else
+                # None ⇒ byte-identical pre-crystal wrap (no crystallize-OUT proposals).
+                crystal_store=_open_crystal_store_for_wrap(args),
             )
         except WrapInProgressError as exc:
             # AM-PREPARE-GUARD (0.4.2): a wrap is already open. main()
@@ -908,11 +910,11 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 affective_state=affective_state,
                 wrap_token=wrap_token,
                 allow_shrink=getattr(args, "allow_shrink", False),
-                # AM-CRYSTAL-MIGRATE: pass the crystal store so the shrink gate
-                # CREDITS patterns that legitimately crystallized OUT this wrap
-                # (grounded in <stem>.crystal.json). Empty/absent ⇒ no credit ⇒
-                # identical pre-crystal gate behavior.
-                crystal_store=_open_crystal_store(args),
+                # AM-CRYSTAL-MIGRATE + AM-CRYSTAL-OPTIN: pass the crystal store so the
+                # shrink gate CREDITS patterns that crystallized OUT this wrap — but
+                # only when opted in (file exists or --crystal); else None ⇒ no credit
+                # ⇒ byte-identical pre-crystal gate behavior. Symmetric with prepare.
+                crystal_store=_open_crystal_store_for_wrap(args),
             )
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
@@ -2098,6 +2100,43 @@ def _open_crystal_store(args: argparse.Namespace) -> CrystalStore:
     return CrystalStore(db_path.parent / f"{db_path.stem}.crystal.json")
 
 
+def _open_crystal_store_for_wrap(args: argparse.Namespace) -> CrystalStore | None:
+    """Opt-in gate for the crystallized tier on the prepare/save wrap path.
+
+    AM-CRYSTAL-OPTIN: the crystallized-pattern tier is OPT-IN on the wrap path,
+    not auto-on. Returns the ``CrystalStore`` only when the operator has opted
+    in — either the crystal file already EXISTS (it is created when a pattern is
+    first crystallized via ``crystal crystallize``; ``CrystalStore(path)`` is
+    lazy and does NOT create it on open) OR ``--crystal`` is passed on this wrap.
+    Note ``--crystal`` enables the tier for THIS wrap only (e.g. to surface
+    crystallize-OUT proposals before anything has been crystallized) — it does
+    NOT itself create the store, so persistent opt-in comes from actually
+    crystallizing a pattern, after which every wrap (CLI + MCP) auto-enables.
+    Otherwise returns ``None`` ⇒ the wrap is byte-identical to the pre-crystal
+    pipeline: no crystallize-OUT proposals, no shrink-gate credit.
+
+    Race note (acceptable): if the file is deleted between this existence check
+    and the library's use, ``active()`` degrades to empty for that one wrap —
+    proposals may surface once, but nothing is auto-applied and the save
+    shrink-gate credit stays strict. Tolerable given the single-writer wrap.
+
+    Why: the CLI/MCP previously auto-opened a store on every wrap, so
+    ``crystallization_candidates`` fired (``continuity.py`` gates on
+    ``crystal_store is not None``) for any operator with cold Proven patterns —
+    surfacing OUT-proposals to a raw solo operator who has no retrieval harness
+    to fire the patterns back in. That asymmetry (OUT default-on, fire-back-in
+    harness-gated) is the defect this closes: a no-retrieval operator is never
+    silently walked into shrinking their working set. The ``crystal``
+    subcommands keep ``_open_crystal_store`` (create-on-write) — creating the
+    store IS the opt-in act.
+    """
+    db_path = Path(args.db).expanduser()
+    crystal_path = db_path.parent / f"{db_path.stem}.crystal.json"
+    if getattr(args, "crystal", False) or crystal_path.exists():
+        return CrystalStore(crystal_path)
+    return None
+
+
 def _crystal_row(c: CrystalDict, today: date) -> dict[str, Any]:
     """A JSON-serializable crystal dict annotated with its computed activation tier."""
     row: dict[str, Any] = dict(c)
@@ -2156,6 +2195,64 @@ def cmd_crystal_get(args: argparse.Namespace) -> None:
         print(f"  retired: {ret.get('kind')} on {ret.get('on')}{tail}")
     for note in item.get("notes", []):
         print(f"  note: {note}")
+
+
+def cmd_crystal_index(args: argparse.Namespace) -> None:
+    """The always-on crystallized INDEX — a name + one-clause menu of the live
+    crystal corpus (AM-CRYSTAL-INDEX). A harness injects this every turn so the
+    agent isn't blind to its own crystallized wisdom; the bodies fill on-cue via
+    ``crystal recall``. Deliberately thin (name + clause ONLY — no level /
+    activation / id): the menu is always-loaded, so inflating it re-creates the
+    attention-doesn't-scale disease the crystal tier exists to cure. Sorted by
+    name for a stable, churn-free always-on artifact. ``--json`` →
+    ``[{"name", "clause"}]`` for a subprocess harness to render."""
+    try:
+        store = _open_crystal_store(args)
+        items = sorted(store.active(), key=lambda c: str(c.get("name", "")))
+    except (CrystalError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    rows = [
+        {"name": str(c.get("name", "")),
+         "clause": _truncate(str(c.get("explanation", "")), 100)}
+        for c in items
+    ]
+    if args.json:
+        _print_json(rows)
+        return
+    if not rows:
+        print("No crystallized patterns.")
+        return
+    for r in rows:
+        print(f"{r['name']}: {r['clause']}")
+
+
+def cmd_crystal_recall(args: argparse.Namespace) -> None:
+    """Retrieve crystallized patterns relevant to a free-text query
+    (AM-CRYSTAL-CLI — the CLI binding for
+    :func:`anneal_memory.retrieval.retrieve_patterns`). A subprocess harness
+    (e.g. the hub's codex-exec wrapper) shells this to inject run-context
+    patterns into a prompt. Precision-biased: a thin query (< 2 distinctive
+    keywords) or nothing clearing the threshold returns empty, by design —
+    surface nothing rather than noise. ``--json`` → the scored
+    ``[{name, level, explanation, tags, activation, score}]`` list. Fail-CLOSED:
+    a corrupt store exits non-zero (the calling wrapper treats that as no
+    recall)."""
+    try:
+        store = _open_crystal_store(args)
+        results = retrieve_patterns(store, args.query, max_patterns=args.max_patterns)
+    except (CrystalError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        _print_json([asdict(p) for p in results])
+        return
+    if not results:
+        print("No crystallized patterns matched.")
+        return
+    for p in results:
+        print(f"{p.name} ({p.level}x, {p.activation}, score={p.score:.1f}): "
+              f"{_truncate(p.explanation, 100)}")
 
 
 def cmd_crystal_list(args: argparse.Namespace) -> None:
@@ -2532,6 +2629,17 @@ def build_parser() -> argparse.ArgumentParser:
                           "default (20000 for the standard schema, larger for a "
                           "richer schema like FLOW_SCHEMA).")
     sub.add_argument("--staleness-days", type=int, default=7, help="Days before flagging stale patterns (default: 7)")
+    sub.add_argument(
+        "--crystal",
+        action="store_true",
+        help="Enable the crystallized-pattern tier for THIS wrap (surface "
+             "crystallize-OUT proposals). OPT-IN: auto-enabled when a crystal "
+             "store already exists beside the db (created when you first "
+             "crystallize a pattern). This flag enables a single wrap; it does "
+             "NOT itself create the store, so persistent opt-in comes from "
+             "crystallizing a pattern. Without it (and no existing store) the "
+             "wrap is byte-identical to the pre-crystal pipeline.",
+    )
     sub.set_defaults(func=cmd_prepare_wrap)
 
     # -- save-continuity --
@@ -2563,6 +2671,15 @@ def build_parser() -> argparse.ArgumentParser:
             "refused as a likely recency-trap/stateless-reset failure. Pass "
             "this only for a deliberate diet / migration recompression."
         ),
+    )
+    sub.add_argument(
+        "--crystal",
+        action="store_true",
+        help="Enable the crystallized-pattern tier for this wrap (credit "
+             "crystallized-OUT departures in the shrink gate). OPT-IN: "
+             "auto-enabled when a crystal store already exists; pass this only "
+             "to bootstrap the credit when no crystal store exists yet (normally "
+             "the existing store auto-enables it).",
     )
     sub.set_defaults(func=cmd_save_continuity)
 
@@ -2789,6 +2906,25 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[json_parent],
     )
     cp.set_defaults(func=cmd_crystal_rewarm)
+
+    cp = crystal_sub.add_parser(
+        "index",
+        help="The always-on crystallized index: name + one-clause menu (for harness injection)",
+        parents=[json_parent],
+    )
+    cp.set_defaults(func=cmd_crystal_index)
+
+    cp = crystal_sub.add_parser(
+        "recall",
+        help="Retrieve crystallized patterns relevant to a free-text query",
+        parents=[json_parent],
+    )
+    cp.add_argument("query", help="Free-text query (run-context: topic + surface + active "
+                    "entities). Pass as a SINGLE argument — quote it if it contains spaces; a "
+                    "subprocess wrapper passes it as one argv element.")
+    cp.add_argument("--max-patterns", type=int, default=MAX_PATTERNS,
+                    help=f"Cap on patterns returned (default {MAX_PATTERNS}, precision-biased)")
+    cp.set_defaults(func=cmd_crystal_recall)
 
     # -- migrate (self-migration notices: propose instruction-file edits on upgrade) --
     migrate_parser = subparsers.add_parser(

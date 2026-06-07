@@ -612,6 +612,16 @@ def validate_graduations(
             # gate was ever able to cover; it does not widen coverage to (a)/(b).
             cross_session_overlap_words: list[str] = []
             prior_explanation_for_check = ""
+            # AM-PRESERVE-VS-SYCOPHANCY: is_preservation = this line QUALIFIES for
+            # the exemption (byte-identical, or warm+fresh-specific, non-inflating).
+            # preservation_exempted_overlap = the NARROW case where a would-be
+            # cross-session-overlap demotion was actually SUPPRESSED by it — and
+            # THAT (not mere is_preservation) is what restricts co-citation linking
+            # to individually-grounding ids at the co-citation block (codex L3 r2
+            # F1: a normal warm validated line whose overlap is BELOW threshold
+            # never needed the exemption, so its links must stay unchanged).
+            is_preservation = False
+            preservation_exempted_overlap = False
             if ids_valid and pattern_history_lookup is not None and explanation:
                 # AM-PERNAME-LINEBIND (codex L3, v0.4.6): bind the name to its
                 # OWN evidence marker (combined regex, anchored), not a
@@ -693,16 +703,91 @@ def validate_graduations(
                         # preservation case (a dead citation carried forward) never
                         # reaches Site 2 — ``ids_valid`` is False there — and is held
                         # by carryforward, which forms no link.
+                        # AM-PRESERVE-VS-SYCOPHANCY (warm-at-peak widening): the
+                        # exemption holds for byte-identical preservation OR for a
+                        # freshly-grounded, non-inflating, WARM invariant. The
+                        # surrounding conjuncts already require non-inflation
+                        # (``level <= max_level_hist``) and fresh grounding this
+                        # wrap (``grounding_checked and explanation_valid`` — the
+                        # cited episode resolves in ``valid_ids`` and the
+                        # explanation references its content). Adding ``or _is_warm``
+                        # closes the real defect: a load-bearing antibody
+                        # re-grounded with FRESH evidence each wrap is re-worded
+                        # (normal drift, NOT byte-identical), so byte-identity
+                        # missed it and the gate eroded it one level per wrap
+                        # *because* its core vocabulary is stable. Re-validation
+                        # against fresh this-wrap reality at/below the earned mark
+                        # while warm IS purifying selection, not a pump — the pump
+                        # the gate must still catch is re-worded overlap WITHOUT
+                        # fresh grounding (handled below) or an inflating level-up
+                        # (blocked by the non-inflation conjunct).
+                        # AM-PRESERVE-VS-SYCOPHANCY (fresh-specific grounding —
+                        # codex L3 F1): the WARM exemption additionally requires the
+                        # explanation to ground in a cited episode via at least one
+                        # meaningful word ABSENT from the pattern's prior-session
+                        # vocabulary. A genuine re-grounding of a stable invariant
+                        # cites a NEW episode and picks up its specifics (novel
+                        # words); a longevity-pump just recycles the principle's own
+                        # core vocabulary — all already in the prior corpus — to
+                        # clear the cheap 2-word ``explanation_valid`` bar. Without
+                        # this, a warm at-peak line VALIDATES → the save upserts
+                        # ``last_seen_at`` → it stays warm forever (the self-renewing
+                        # stickiness carryforward lacks, since carryforward holds
+                        # WITHOUT upserting), so an at-peak false pattern would be
+                        # immortal on cheap fresh text. Byte-identical preservation
+                        # is exempt from this novelty requirement — it cannot pump
+                        # (it never changes) and is held by the verbatim clause. The
+                        # determined adversary who manufactures a novel word echoed
+                        # in a fresh episode defeats this — that residual is the
+                        # poisoning layer's (source-diversity / quorum), NOT this
+                        # gate's (protection_must_not_mask_or_fabricate_the_diagnostic).
+                        has_fresh_specific_grounding = False
+                        if node_content_map is not None:
+                            prior_vocab: set[str] = set()
+                            for _p in prior_explanations:
+                                prior_vocab |= _meaningful_words(_p)
+                            grounding_overlap: set[str] = set()
+                            for _cid in cited_ids & valid_ids:
+                                _content = node_content_map.get(_cid, "")
+                                # codex L3 r2 F2: the novel word must come from an
+                                # episode that INDIVIDUALLY grounds the explanation
+                                # (passes check_explanation_overlap), not a co-cited
+                                # bystander that merely happens to echo one fresh
+                                # word — consistent with the link restriction below.
+                                if _content and check_explanation_overlap(
+                                    explanation, _content
+                                ):
+                                    grounding_overlap |= _meaningful_word_overlap(
+                                        explanation, _content
+                                    )
+                            has_fresh_specific_grounding = bool(
+                                grounding_overlap - prior_vocab
+                            )
                         is_preservation = (
                             grounding_checked
                             and explanation_valid
                             and isinstance(max_level_hist, int)
                             and level <= max_level_hist
-                            and _is_verbatim_preservation(
-                                explanation, prior_explanations
+                            and (
+                                _is_verbatim_preservation(
+                                    explanation, prior_explanations
+                                )
+                                or (
+                                    _is_warm(
+                                        history.get("last_seen_at"),
+                                        today,
+                                        carryforward_cold_days,
+                                    )
+                                    and has_fresh_specific_grounding
+                                )
                             )
                         )
-                        if prior_explanations and not is_preservation:
+                        # codex L3 r2 F1: compute the would-be overlap ALWAYS (not
+                        # gated on ``not is_preservation``) so we can distinguish
+                        # "preservation suppressed a real would-be demotion" from
+                        # "a warm validated line that never had an overlap problem."
+                        # Only the former narrows co-citation linking.
+                        if prior_explanations:
                             best_overlap: set[str] = set()
                             best_prior = ""
                             for prior in prior_explanations:
@@ -711,8 +796,14 @@ def validate_graduations(
                                     best_overlap = shared
                                     best_prior = prior
                             if len(best_overlap) >= cross_session_overlap_threshold:
-                                cross_session_overlap_words = sorted(best_overlap)
-                                prior_explanation_for_check = best_prior
+                                if is_preservation:
+                                    # The overlap gate WOULD have demoted; the
+                                    # preservation clause held the line. Mark this
+                                    # narrow case for the co-citation link filter.
+                                    preservation_exempted_overlap = True
+                                else:
+                                    cross_session_overlap_words = sorted(best_overlap)
+                                    prior_explanation_for_check = best_prior
 
             # AM-QUOTEFOOTGUN (v0.4.1): compute the co-cited episode set up
             # front so Hebbian link formation can be DECOUPLED from the
@@ -794,14 +885,30 @@ def validate_graduations(
             # block runs even on the demoted explanation path, so a real
             # but paraphrased co-citation keeps its link.
             if ids_valid and not cross_session_overlap_words:
-                if len(valid_cited) >= 2:
-                    for idx_a in range(len(valid_cited)):
-                        for idx_b in range(idx_a + 1, len(valid_cited)):
+                # codex L3 F2: a preservation-exempt line (byte-identical or
+                # warm+fresh-specific) SKIPPED the overlap demotion, but
+                # ``explanation_valid`` passes on ANY one grounding id — so linking
+                # ALL co-cited ids would forge a Hebbian edge between the single
+                # grounding episode and an unrelated co-cited one (graph poison,
+                # made easier to hit via the warm-reworded path). On exempt lines,
+                # link only the ids that INDIVIDUALLY ground the explanation. The
+                # normal validated path is unchanged (links all co-cited, as before).
+                link_ids = valid_cited
+                if preservation_exempted_overlap and node_content_map is not None:
+                    link_ids = sorted(
+                        cid for cid in valid_cited
+                        if check_explanation_overlap(
+                            explanation, node_content_map.get(cid, "")
+                        )
+                    )
+                if len(link_ids) >= 2:
+                    for idx_a in range(len(link_ids)):
+                        for idx_b in range(idx_a + 1, len(link_ids)):
                             direct_co_citations.append(
-                                (valid_cited[idx_a], valid_cited[idx_b])
+                                (link_ids[idx_a], link_ids[idx_b])
                             )
                 # Per-line co-cited IDs feed session-level co-citation
-                all_validated_ids.append(set(valid_cited))
+                all_validated_ids.append(set(link_ids))
             continue
 
         # Fail-safe sunset: bare graduations without evidence
@@ -891,12 +998,17 @@ def _meaningful_word_overlap(text_a: str, text_b: str) -> set[str]:
     surface which specific words triggered a cross-session collision —
     valuable for the audit log and for operator review.
     """
-    def words(text: str) -> set[str]:
-        return {
-            w for w in re.split(r"[^a-zA-Z0-9]+", text.lower())
-            if len(w) > 2 and w not in _STOP_WORDS
-        }
-    return words(text_a) & words(text_b)
+    return _meaningful_words(text_a) & _meaningful_words(text_b)
+
+
+def _meaningful_words(text: str) -> set[str]:
+    """The meaningful-word set of a text: lowercased alnum tokens of length >2,
+    minus stop words. Shared tokenizer for :func:`_meaningful_word_overlap` and
+    the AM-PRESERVE fresh-specific-grounding novelty check (codex L3)."""
+    return {
+        w for w in re.split(r"[^a-zA-Z0-9]+", text.lower())
+        if len(w) > 2 and w not in _STOP_WORDS
+    }
 
 
 def _is_verbatim_preservation(explanation: str, priors: list[str]) -> bool:
@@ -1651,6 +1763,32 @@ def _days_between(last_seen_at: Any, today: str) -> int | None:
     return (now - prior).days
 
 
+def _is_warm(last_seen_at: Any, today: str, carryforward_cold_days: int | None) -> bool:
+    """True if ``last_seen_at`` is within the carryforward warmth window of today.
+
+    AM-PRESERVE-VS-SYCOPHANCY (the warm-at-peak widening): the shared warmth
+    predicate used by BOTH sycophancy sites' preservation exemption (the
+    cross-session-overlap gate and :func:`_carryforward_decision`'s internal
+    refusal). It is the exact warmth gate :func:`_carryforward_history_decision`
+    applies (``-1 <= days <= cold_days``), extracted so the exemption cannot
+    drift from carryforward's own at-peak+warm discriminator. A pattern that is
+    warm — grounded recently in SOME prior session — and at/below its earned
+    high-water mark is being PRESERVED (purifying selection), not sycophantically
+    re-worded: its core vocabulary recurs *because the principle is stable*. The
+    byte-identity exemption was a too-narrow special case of this (it caught only
+    the verbatim sub-case; a load-bearing antibody re-grounded with FRESH
+    evidence each wrap is re-worded, not byte-identical, so it has normal drift
+    and only this warmth signal — not text-stability — distinguishes it from a
+    genuine sycophantic pump). Returns False on no/untrustworthy recency
+    (conservative: absent signal → no protection), mirroring
+    :func:`_carryforward_history_decision`.
+    """
+    if carryforward_cold_days is None:
+        return False
+    days = _days_between(last_seen_at, today)
+    return days is not None and -1 <= days <= carryforward_cold_days
+
+
 def _carryforward_history_decision(
     name: str,
     level: int,
@@ -1794,7 +1932,22 @@ def _carryforward_decision(
         # PRESERVATION, not sycophantic re-wording — hold it (a sycophant
         # re-words; preservation is identical). Only a re-worded high-overlap
         # explanation refuses the carryforward protection.
-        if not _is_verbatim_preservation(explanation, priors):
+        # AM-PRESERVE-VS-SYCOPHANCY (warm-at-peak widening): skip the overlap
+        # refusal for byte-identical preservation OR a WARM pattern — the same
+        # widening applied at the cross-session-overlap gate (Site 1), kept
+        # consistent across both sycophancy sites. A warm pattern is one grounded
+        # recently in SOME prior session; refusing carryforward protection to it
+        # *because* its stable principle's vocabulary recurs is the autoimmune
+        # defect carryforward exists to prevent, one level deeper. Letting it
+        # through here does NOT shield an inflation attempt: the downstream
+        # ``_carryforward_history_decision`` still enforces ``level <=
+        # max_level_reached`` (structural inflation backstop) AND re-checks
+        # warmth, so only a warm AT-PEAK line is actually held. A COLD
+        # overlapping line still refuses here and falls through to demotion
+        # (cold = not load-bearing now; let it age out — activation-aware).
+        if not _is_verbatim_preservation(explanation, priors) and not _is_warm(
+            history.get("last_seen_at"), today, carryforward_cold_days
+        ):
             for prior in priors:
                 if len(_meaningful_word_overlap(explanation, prior)) >= cross_session_overlap_threshold:
                     return None

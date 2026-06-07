@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import uuid
+import warnings
 from datetime import date
 
 import pytest
@@ -5086,6 +5087,104 @@ class TestPerNameLineBindEndToEnd:
             if hist is not None:
                 assert "real second" not in hist["explanation_corpus"]
                 assert "real second" not in hist["last_explanation"]
+        finally:
+            store.close()
+
+
+class TestWarmRewordedPreservationEndToEnd:
+    """AM-PRESERVE-VS-SYCOPHANCY (warm-at-peak widening) through the REAL save
+    pipeline across TWO wraps: a load-bearing antibody graduated to 3x in wrap 1,
+    then re-grounded in wrap 2 with FRESH evidence (reworded, overlapping prior
+    vocabulary, but carrying a novel specific from the new episode), is HELD at
+    3x — not eroded by the cross-session-overlap gate. This is the end-to-end
+    proof of the fix: the gate eroded verify_or_surface / four_layer_apparatus one
+    level per wrap because a stable principle's core vocabulary necessarily recurs.
+    The companion test proves the pump is closed: a wrap-2 re-grounding in PURE
+    prior vocabulary (no novel specific) still demotes."""
+
+    EXPL1 = ("verify or surface before acting on cached state, "
+             "ground truth not the cached story")
+
+    def _wrap1(self, tmp_path, db):
+        """Wrap 1: graduate 'verify_invariant' to 3x citing a real episode →
+        populates pattern_history (max_level 3, explanation_corpus=EXPL1,
+        last_seen 2026-06-04) through the real pipeline."""
+        store = Store(str(tmp_path / db), project_name="WR")
+        ep = store.record(
+            "Phill pushed past a done claim asking to verify against ground "
+            "truth not the cached story while reviewing",
+            EpisodeType.OBSERVATION,
+        )
+        idA = ep.id[:8].lower()
+        text = (
+            "# WR — Memory (v1)\n\n## State\nActive.\n\n## Patterns\n"
+            f'- verify_invariant | 3x (2026-06-04) [evidence: {idA} "{self.EXPL1}"]\n\n'
+            "## Decisions\nNone.\n\n## Context\nFirst session.\n"
+        )
+        prepare_wrap(store)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            r1 = validated_save_continuity(store, text, today="2026-06-04")
+        assert r1["graduations_validated"] == 1  # graduated + corpus seeded for real
+        return store
+
+    def test_warm_reworded_fresh_specific_held_through_save(self, tmp_path):
+        store = self._wrap1(tmp_path, "wr_held.db")
+        try:
+            ep = store.record(
+                "the live handshake at the integration seam caught the stale "
+                "state before the claim shipped",
+                EpisodeType.OBSERVATION,
+            )
+            idB = ep.id[:8].lower()
+            # Reworded (overlaps EXPL1: verify/surface/acting/cached/state) AND
+            # grounds in episode B via NOVEL specifics (integration/seam/live/
+            # handshake ∉ prior corpus). Warm (4d), at-peak (3x) → HELD.
+            expl2 = ("verify or surface before acting on cached state at the "
+                     "integration seam; the live handshake is the oracle")
+            text2 = (
+                "# WR — Memory (v1)\n\n## State\nActive.\n\n## Patterns\n"
+                f'- verify_invariant | 3x (2026-06-08) [evidence: {idB} "{expl2}"]\n\n'
+                "## Decisions\nNone.\n\n## Context\nSecond session.\n"
+            )
+            prepare_wrap(store)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                r2 = validated_save_continuity(store, text2, today="2026-06-08")
+            assert r2["demoted"] == 0
+            assert r2["graduations_validated"] == 1   # held at level, re-validated
+            with open(r2["path"]) as f:
+                saved = f.read()
+            assert "verify_invariant | 3x (2026-06-08)" in saved  # NOT eroded to 2x
+            assert "(cross-session-overlap)" not in saved
+        finally:
+            store.close()
+
+    def test_warm_pure_prior_vocab_pump_demoted_through_save(self, tmp_path):
+        store = self._wrap1(tmp_path, "wr_pump.db")
+        try:
+            ep = store.record(
+                "verify surface acting cached state ground truth story recap",
+                EpisodeType.OBSERVATION,
+            )
+            idB = ep.id[:8].lower()
+            # Reworded but grounds ONLY in prior-corpus vocabulary (no novel
+            # specific) → a cheap longevity-pump signature → DEMOTED even though
+            # warm + at-peak. Closes the warm-stickiness pump end-to-end.
+            expl2 = "verify surface acting cached state ground truth story"
+            text2 = (
+                "# WR — Memory (v1)\n\n## State\nActive.\n\n## Patterns\n"
+                f'- verify_invariant | 3x (2026-06-08) [evidence: {idB} "{expl2}"]\n\n'
+                "## Decisions\nNone.\n\n## Context\nSecond session.\n"
+            )
+            prepare_wrap(store)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                r2 = validated_save_continuity(store, text2, today="2026-06-08")
+            assert r2["demoted"] == 1
+            with open(r2["path"]) as f:
+                saved = f.read()
+            assert "(cross-session-overlap)" in saved
         finally:
             store.close()
 

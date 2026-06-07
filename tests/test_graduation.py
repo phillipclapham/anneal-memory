@@ -817,12 +817,21 @@ class TestCrossSessionGraduationCheck:
             "abc12345":
             "standup quick reactive observation pivot detection finding"
         }
+        # COLD history (last_seen 20d before today) so the AM-PRESERVE warm+fresh-
+        # specific exemption does not apply — this test isolates the operator-tunable
+        # THRESHOLD mechanism (at threshold=2 even a 2-word overlap demotes), not
+        # warmth. (The warm at-peak case is held — see TestVerbatimPreservation.)
+        def _cold_lookup(name):
+            if name == "alpha":
+                return {"max_level_reached": 2, "last_explanation": prior,
+                        "last_seen_at": "2026-05-01T00:00:00Z", "last_wrap_id": None}
+            return None
         result = validate_graduations(
             text=text,
             valid_ids={"abc12345"},
             today="2026-05-21",
             node_content_map=node_content,
-            pattern_history_lookup=self._stub_lookup(alpha=prior),
+            pattern_history_lookup=_cold_lookup,
             cross_session_overlap_threshold=2,
         )
         assert result.validated == 0
@@ -1156,7 +1165,10 @@ After.
                     "max_level_reached": 2,
                     "explanation_corpus": prior_explanation,
                     "last_explanation": prior_explanation,
-                    "last_seen_at": "2026-05-20T00:00:00Z",
+                    # COLD (31d before today) so the AM-PRESERVE warm+fresh-specific
+                    # exemption does not apply — this test isolates canonical-format
+                    # PARSING of the cross-session gate, not warmth.
+                    "last_seen_at": "2026-04-20T00:00:00Z",
                     "last_wrap_id": None,
                 }
             return None
@@ -1344,7 +1356,10 @@ Total | 2x summary metadata line
                     "max_level_reached": 2,
                     "explanation_corpus": prior_explanation,
                     "last_explanation": prior_explanation,
-                    "last_seen_at": "2026-05-20T00:00:00Z",
+                    # COLD (31d before today) so the AM-PRESERVE warm+fresh-specific
+                    # exemption does not apply — this test isolates bulletless-grouped
+                    # member PARSING of the cross-session gate, not warmth.
+                    "last_seen_at": "2026-04-20T00:00:00Z",
                     "last_wrap_id": None,
                 }
             return None
@@ -2216,13 +2231,14 @@ class TestCarryforward:
         assert r.carried_forward == []  # no cross-level cross-bind
         assert r.demoted == 1
 
-    def test_sycophantic_overlap_not_carried(self):
-        # codex L3 + AM-PRESERVE-VS-SYCOPHANCY: a warm at-peak pattern with a
-        # DEAD citation whose explanation RE-WORDS prior-session vocabulary (the
-        # sycophancy signal — high overlap but NOT byte-identical) must NOT be
-        # carried forward; carryforward's overlap guard refuses protection →
-        # demote. (A byte-IDENTICAL explanation would be PRESERVATION and IS held
-        # — see TestVerbatimPreservation.)
+    def test_sycophantic_overlap_not_carried_when_cold(self):
+        # AM-PRESERVE-VS-SYCOPHANCY (warm-at-peak widening): a COLD at-peak pattern
+        # with a DEAD citation whose explanation RE-WORDS prior-session vocabulary
+        # (high overlap, NOT byte-identical) is NOT carried forward — the overlap
+        # guard refuses protection → demote. A WARM at-peak reworded line is now
+        # HELD (see test_carryforward_decision_holds_warm_reworded); the overlap
+        # guard's surviving teeth are the COLD case. (Byte-identical is preservation
+        # and held regardless of warmth.)
         corpus_prior = "standup consensus decision quick agreement architectural"
         reworded = "standup consensus decision rotated into fresh phrasing"  # 3 shared, not identical
         text = (
@@ -2232,7 +2248,7 @@ class TestCarryforward:
         )
         def lk(name):
             if name == "alpha":
-                return {"max_level_reached": 3, "last_seen_at": "2026-06-03T00:00:00Z",
+                return {"max_level_reached": 3, "last_seen_at": "2026-05-20T00:00:00Z",
                         "explanation_corpus": corpus_prior, "last_explanation": corpus_prior,
                         "last_wrap_id": None}
             return None
@@ -2240,7 +2256,7 @@ class TestCarryforward:
             text=text, valid_ids=set(), today="2026-06-04",
             pattern_history_lookup=lk,
         )
-        assert r.carried_forward == []  # re-worded sycophantic overlap → not protected
+        assert r.carried_forward == []  # cold re-worded overlap → not protected
         assert r.demoted == 1
 
     def test_distinct_vocab_dead_id_still_carried(self):
@@ -2278,12 +2294,13 @@ class TestCarryforward:
         assert "[evidence:" not in self._line(r)
 
     def test_cross_session_overlap_never_carried_forward(self):
-        # The sycophancy immune path must demote even for a warm at-peak pattern:
-        # carryforward must not blunt the anti-sycophancy defense. AM-PRESERVE-
-        # VS-SYCOPHANCY: the sycophancy signal is RE-WORDED overlap (not byte-
-        # identical, which is preservation). A re-worded high-overlap explanation
-        # at the earned level still cross-session-demotes, and that demotion is
-        # never carried forward.
+        # The sycophancy immune path demotes a COLD re-worded high-overlap pattern,
+        # and that (cross-session-overlap) demotion is NEVER carried forward —
+        # carryforward must not blunt the anti-sycophancy defense on the path that
+        # DOES still fire. AM-PRESERVE-VS-SYCOPHANCY (warm-at-peak widening): a WARM
+        # at-peak fresh-specifically-grounded reworded line is HELD instead (see
+        # test_warm_reworded_fresh_specific_held); this pins that when the gate DOES
+        # demote (cold here), carryforward does not catch it.
         corpus_prior = "standup consensus decision quick agreement architectural pattern"
         reworded = "standup consensus decision rotated into fresh phrasing again"  # 3 shared, not identical
         text = (
@@ -2294,7 +2311,7 @@ class TestCarryforward:
         node = {"abc12345": reworded}
         def lk(name):
             if name == "alpha":
-                return {"max_level_reached": 3, "last_seen_at": "2026-06-03T00:00:00Z",
+                return {"max_level_reached": 3, "last_seen_at": "2026-05-20T00:00:00Z",
                         "explanation_corpus": corpus_prior, "last_explanation": corpus_prior,
                         "last_wrap_id": None}
             return None
@@ -2433,9 +2450,13 @@ class TestVerbatimPreservation:
         assert result.cross_session_collisions == []
         assert result.validated == 1
 
-    def test_reworded_overlap_still_cross_session_demoted(self):
-        """Regression: a RE-WORDED high-overlap explanation (NOT byte-identical)
-        still demotes — the exemption is byte-identity, not high overlap."""
+    def test_reworded_overlap_cold_still_cross_session_demoted(self):
+        """A RE-WORDED high-overlap explanation (NOT byte-identical) that is COLD
+        still demotes — the exemptions are byte-identity OR warm+fresh-specific
+        grounding (AM-PRESERVE-VS-SYCOPHANCY warm-at-peak widening), NOT high
+        overlap alone. Cold (last_seen 21d before today) → no warm exemption →
+        demote. (The warm+fresh-specific HELD case is covered by
+        ``test_warm_reworded_fresh_specific_held`` below.)"""
         text = (
             "## State\nreword.\n## Patterns\n"
             f'- alpha | 3x (2026-05-22) [evidence: abc12345 "{self.REWORDED}"]\n'
@@ -2446,7 +2467,7 @@ class TestVerbatimPreservation:
             valid_ids={"abc12345"},
             today="2026-05-22",
             node_content_map={"abc12345": self.REWORDED + " meeting"},
-            pattern_history_lookup=self._lookup(),
+            pattern_history_lookup=self._lookup(last_seen="2026-05-01T00:00:00Z"),
         )
         assert result.demoted == 1
         assert "(cross-session-overlap)" in result.text
@@ -2492,18 +2513,132 @@ class TestVerbatimPreservation:
         assert isinstance(held, CarriedForward)
         assert held.held_level == 3
 
-    def test_carryforward_decision_declines_reworded(self):
-        """Unit regression: a RE-WORDED high-overlap explanation is still
-        declined (returns None -> demotes)."""
+    def test_carryforward_decision_declines_reworded_when_cold(self):
+        """Unit regression: a RE-WORDED high-overlap explanation that is COLD is
+        still declined (returns None -> demotes). AM-PRESERVE-VS-SYCOPHANCY
+        warm-at-peak widening: a WARM at-peak reworded line is now HELD at Site 2
+        (carryforward holds it WITHOUT upserting, so warmth self-decays and it
+        ages out if the citation stays dead) — see
+        ``test_carryforward_decision_holds_warm_reworded``. The overlap refusal's
+        surviving teeth are the COLD case."""
         line = f'- alpha | 3x (2026-05-22) [evidence: deadbee1 "{self.REWORDED}"]'
         held = _carryforward_decision(
             line=line,
             level=3,
             today="2026-05-22",
-            pattern_history_lookup=self._lookup(max_level=3),
+            pattern_history_lookup=self._lookup(max_level=3, last_seen="2026-05-01T00:00:00Z"),
             carryforward_cold_days=7,
         )
         assert held is None
+
+    # -- AM-PRESERVE-VS-SYCOPHANCY warm-at-peak widening: the NEW behavior --
+    def test_warm_reworded_fresh_specific_held(self):
+        """THE CORE FIX: a WARM, at-peak, RE-WORDED explanation that grounds in a
+        fresh episode via a word ABSENT from the prior corpus ('architectural' ∉
+        prior) is purifying selection — re-validation against fresh reality — and
+        is HELD (validated), not demoted. This is the load-bearing-antibody case
+        (verify_or_surface / four_layer_apparatus) the gate eroded one level per
+        wrap because a stable principle's core vocabulary necessarily recurs."""
+        text = (
+            "## State\nwarm reword.\n## Patterns\n"
+            f'- alpha | 3x (2026-05-22) [evidence: abc12345 "{self.REWORDED}"]\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-22",
+            node_content_map={"abc12345": self.REWORDED + " meeting"},
+            pattern_history_lookup=self._lookup(),  # default warm (last_seen 2026-05-21)
+        )
+        assert result.validated == 1
+        assert result.demoted == 0
+        assert "(cross-session-overlap)" not in result.text
+        assert result.cross_session_collisions == []
+
+    def test_warm_reworded_core_vocab_only_demoted(self):
+        """codex L3 F1 (fresh-specific grounding): a WARM, at-peak, reworded line
+        whose grounding shares ONLY prior-corpus vocabulary with the cited episode
+        (no novel word) is a cheap longevity-pump signature, not re-validation —
+        DEMOTED. Closes the warm-stickiness pump: a warm-held line VALIDATES →
+        upserts last_seen → would otherwise stay warm forever on cheap fresh text."""
+        text = (
+            "## State\npump.\n## Patterns\n"
+            f'- alpha | 3x (2026-05-22) [evidence: abc12345 "{self.REWORDED}"]\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        # node shares ONLY PRIOR-vocab words with the explanation (no novel grounding)
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-22",
+            node_content_map={"abc12345": "standup consensus decision quick agreement meeting"},
+            pattern_history_lookup=self._lookup(),  # warm
+        )
+        assert result.demoted == 1
+        assert "(cross-session-overlap)" in result.text
+
+    def test_warm_reworded_two_ids_only_one_grounds_no_poison(self):
+        """codex L3 F2: a preservation-exempt (warm+fresh-specific) line citing TWO
+        ids where only ONE grounds the explanation must NOT form a Hebbian
+        co-citation between the grounding episode and the unrelated co-cited one.
+        Link only individually-grounding ids."""
+        text = (
+            "## State\nco-cite.\n## Patterns\n"
+            f'- alpha | 3x (2026-05-22) [evidence: abc12345, def67890 "{self.REWORDED}"]\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345", "def67890"},
+            today="2026-05-22",
+            node_content_map={
+                "abc12345": self.REWORDED + " meeting",   # grounds (novel: architectural)
+                "def67890": "wholly unrelated runtime telemetry payload",  # does NOT ground
+            },
+            pattern_history_lookup=self._lookup(),  # warm
+        )
+        assert result.validated == 1            # held via warm + fresh-specific
+        assert result.direct_co_citations == []  # only 1 id grounds -> no pair -> no poison edge
+
+    def test_cold_byte_identical_still_held(self):
+        """L1 coverage gap: byte-identical preservation is exempt regardless of
+        warmth (it cannot pump — it never changes). A COLD byte-identical
+        explanation is still HELD, so a future refactor can't silently drop
+        _is_verbatim_preservation thinking the warm clause subsumes it."""
+        text = (
+            "## State\ncold verbatim.\n## Patterns\n"
+            f'- alpha | 3x (2026-05-22) [evidence: abc12345 "{self.PRIOR}"]\n'
+            "## Decisions\n.\n## Context\n.\n"
+        )
+        result = validate_graduations(
+            text=text,
+            valid_ids={"abc12345"},
+            today="2026-05-22",
+            node_content_map={"abc12345": self.PRIOR + " meeting"},
+            pattern_history_lookup=self._lookup(last_seen="2026-05-01T00:00:00Z"),  # COLD
+        )
+        assert result.validated == 1
+        assert result.demoted == 0
+        assert "(cross-session-overlap)" not in result.text
+
+    def test_carryforward_decision_holds_warm_reworded(self):
+        """Site 2 warm-at-peak widening: a WARM, at-peak, RE-WORDED explanation on
+        the carryforward (dead-citation) path is now HELD — the overlap refusal is
+        skipped for warm patterns. carryforward holds WITHOUT upserting (the held
+        line loses its evidence tag), so warmth self-decays and a perpetually-dead
+        pattern still ages out — no pump (codex L3: Site 2 cannot fuel the
+        longevity pump Site 1's novelty gate guards)."""
+        line = f'- alpha | 3x (2026-05-22) [evidence: deadbee1 "{self.REWORDED}"]'
+        held = _carryforward_decision(
+            line=line,
+            level=3,
+            today="2026-05-22",
+            pattern_history_lookup=self._lookup(max_level=3),  # default warm
+            carryforward_cold_days=7,
+        )
+        assert isinstance(held, CarriedForward)
+        assert held.held_level == 3
 
     # -- codex L3 (HIGH + missing-coverage) regressions --
     def test_verbatim_but_ungrounded_live_ids_demoted_no_poison(self):

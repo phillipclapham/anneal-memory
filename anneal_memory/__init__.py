@@ -1,6 +1,6 @@
 """anneal-memory: Living memory for AI agents. Episodes compress into identity."""
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 from .store import (
     AnnealMemoryError,
@@ -89,14 +89,18 @@ from .crystal import (
     VALID_ACTIVATIONS,
     VALID_LEVELS,
     VALID_PERMANENCE,
+    VALID_ROUTES,
     Activation,
     ActivationMode,
+    CrystalDecision,
     CrystalDict,
     CrystalError,
     CrystalStore,
     Permanence,
     RetirementDict,
+    Route,
     activation_tier,
+    parse_crystal_decisions,
 )
 from .retrieval import extract_keywords, retrieve_patterns, retrieve_relevant
 from .server import Server
@@ -176,14 +180,18 @@ __all__ = [
     "CrystalStore",
     "CrystalError",
     "CrystalDict",
+    "CrystalDecision",
     "RetirementDict",
     "Permanence",
     "ActivationMode",
     "Activation",
+    "Route",
     "activation_tier",
+    "parse_crystal_decisions",
     "VALID_PERMANENCE",
     "VALID_ACTIVATION_MODES",
     "VALID_ACTIVATIONS",
+    "VALID_ROUTES",
     "VALID_LEVELS",
     "RETIRE_KINDS",
     "retrieve_relevant",

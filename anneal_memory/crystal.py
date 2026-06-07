@@ -89,11 +89,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
+import warnings
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Iterator, Literal, TypedDict, cast
+from typing import Iterator, Literal, NamedTuple, TypedDict, cast
 
 try:  # POSIX advisory locking; absent on Windows (see CrystalStore._transaction).
     import fcntl
@@ -108,10 +110,18 @@ Permanence = Literal["timeless", "phase-specific"]
 ActivationMode = Literal["just-in-time", "catastrophic"]
 Activation = Literal["hot", "warm", "cold", "dormant"]
 CrystalStatus = Literal["crystallized", "retired"]
+# AM-CRYSTAL-DECISION-CHANNEL: the agent's explicit OUT-routing verb for a cold
+# Proven pattern. ``constitution`` → the harness's always-loaded bedrock (NOT this
+# store; a catastrophic-if-missed pattern must never be on-demand); ``crystallize``
+# → this on-demand store (the timeless × just-in-time bulk); ``compost`` → drop
+# (its episodes remain as the re-graduation backstop). The route is the agent's
+# decision; permanence × activation_mode are crystallize's routing metadata.
+Route = Literal["constitution", "crystallize", "compost"]
 
 VALID_PERMANENCE: tuple[Permanence, ...] = ("timeless", "phase-specific")
 VALID_ACTIVATION_MODES: tuple[ActivationMode, ...] = ("just-in-time", "catastrophic")
 VALID_ACTIVATIONS: tuple[Activation, ...] = ("hot", "warm", "cold", "dormant")
+VALID_ROUTES: tuple[Route, ...] = ("constitution", "crystallize", "compost")
 
 # Only Proven-tier wisdom crystallizes — a pattern graduates IN to the working set
 # at 2x/3x; crystallization is the stage PAST 3x (or a stable 2x leaving the hot set).
@@ -806,3 +816,277 @@ def _recency_key(value: object) -> float:
     if d is None:
         return float("inf")
     return -float(d.toordinal())
+
+
+# ---------------------------------------------------------------------------
+# AM-CRYSTAL-DECISION-CHANNEL — the structured routing-decision return.
+#
+# ``prepare_wrap`` surfaces cold-Proven crystallization candidates and asks the
+# composer to route each (constitution / crystallize / compost). This channel
+# carries that decision BACK in a machine-parseable form so a consumer (flow's
+# consolidate, the Argus node-3 hub wrapper) can EXECUTE it without re-parsing
+# free prose. anneal PARSES; the harness ROUTES (store-in-anneal, firing-in-
+# harness) — :func:`parse_crystal_decisions` returns the decisions; the consumer
+# calls :meth:`CrystalStore.crystallize` / drops / hands to its bedrock layer.
+#
+# Format LOCKED to a FENCED PIPE block (empirically grounded, Argus 2026-06-06):
+# the constellation agents already emit ``name | Nx | [evidence]`` pipe rows
+# flawlessly mid-wrap, so a pipe decision-block is ZERO idiom-switch; JSON would
+# be a novel mid-wrap context-switch with no in-context precedent.
+#
+#     ```crystal-decisions
+#     name | route | permanence | activation_mode
+#     ```
+#
+# Tolerant row-parse: split on ``|``, strip, validate enums, SKIP a malformed row
+# (wrong cell count, unknown enum, a markdown header/separator) — NEVER abort, so
+# one fat-fingered row can't sink the whole channel. ``level`` / ``explanation`` /
+# ``evidence_ids`` are pulled from the pattern's own ``name | Nx (date) [evidence:]
+# — prose`` line elsewhere in the wrap (best-effort; absent → None / "" / []).
+#
+# ★ The parser is the STRUCTURAL home of the one non-negotiable risk gate:
+# ``route=compost`` + ``permanence=timeless`` is REFUSED (excluded + a UserWarning
+# names it) — ``structural_invariants_beat_discipline`` on the forget-path,
+# enforced ONCE here for every consumer rather than trusted to each. Forgetting is
+# the dangerous direction; a timeless pattern is never dropped. (Note the
+# asymmetry: a *malformed* row is skipped SILENTLY — header/separator noise — but a
+# *well-formed* compost-a-timeless is a real, dangerous decision worth surfacing.)
+# ---------------------------------------------------------------------------
+
+# A fenced ```crystal-decisions block; the body is captured up to the closing
+# fence. MULTILINE so ``^`` anchors the fences to line starts; DOTALL so the body
+# spans rows. Tolerant of a leading indent and trailing fence-info on the open line.
+_DECISION_FENCE_RE = re.compile(
+    r"^[ \t]*```[ \t]*crystal-decisions[^\n]*\n(.*?)^[ \t]*```",
+    re.DOTALL | re.MULTILINE,
+)
+# A markdown table separator row (``---|:--:|---``) — all dashes/colons/pipes/space.
+_TABLE_SEPARATOR_RE = re.compile(r"^[\s|:\-]+$")
+
+
+def _strip_emphasis(cell: str) -> str:
+    """Strip surrounding markdown emphasis (``*`` / backtick — NOT ``_``, a valid
+    name char) and outer whitespace, so an agent that bolds a cell (``**crystallize**``)
+    still parses. The NAME cell gets ONLY this — its exact inner text (dashes, dots,
+    unicode) is preserved, because folding a dash there would ground an em-dash name
+    onto a different ASCII-hyphen pattern line (a wrong-line match — codex L3)."""
+    return cell.strip().strip("*`").strip()
+
+
+def _normalize_enum_cell(cell: str) -> str:
+    """An ENUM cell additionally folds en/em-dashes to a plain hyphen so an agent's
+    ``just–in–time`` / ``phase–specific`` en-dash typo still validates. NEVER applied
+    to the name cell (see :func:`_strip_emphasis`). The enum vocabularies contain no
+    legitimate dash other than the hyphen, so the fold is lossless for them."""
+    return _strip_emphasis(cell).replace("–", "-").replace("—", "-")
+
+
+class CrystalDecision(NamedTuple):
+    """One parsed routing decision from a ```crystal-decisions``` block.
+
+    ``route`` is the composer's explicit verb; ``permanence`` × ``activation_mode``
+    are crystallize's 2-axis metadata. ``level`` / ``explanation`` / ``evidence_ids``
+    are the grounding pulled best-effort from the pattern's graduation line elsewhere
+    in the wrap text; they are ``None`` / ``""`` / ``[]`` when no matching line was
+    found (a ``constitution`` or ``compost`` decision needs no grounding, so a missing
+    line is not an error).
+
+    Contract for a ``crystallize`` consumer (the parser is a PURE parser — it does NOT
+    enforce route×level coherence, by design): ``level`` is whatever ``Nx`` was written
+    on the line (any integer, or ``None`` if grounding failed). :meth:`CrystalStore.
+    crystallize` requires ``level`` ∈ {2, 3} and a non-empty ``explanation`` and will
+    raise ``ValueError`` otherwise. So a consumer routing ``crystallize`` MUST guard
+    ``level in (2, 3)`` (and ``level is None`` ⇒ grounding failed ⇒ surface back to the
+    composer, do not crystallize) rather than passing every row blindly to the store."""
+
+    name: str
+    route: Route
+    permanence: Permanence
+    activation_mode: ActivationMode
+    level: int | None
+    explanation: str
+    evidence_ids: list[str]
+
+
+# Quote-aware (codex L3): a ``]`` INSIDE the quoted "why" must NOT close the tag —
+# match runs of non-]/non-" OR whole "..." segments up to the close ``]`` OUTSIDE
+# quotes. The two alternatives are first-char-disjoint (``[^\]"]`` excludes ``"``),
+# so the repetition is unambiguous. An unbalanced quote degrades to no-match
+# (graceful — no evidence, never a raise). The body is BOUNDED (``{0,4096}``); the
+# caller ``find``s the first ``[evidence:`` and ``match``es THERE (not ``search``), so
+# a single bounded attempt — no O(n×bound) retry over every opener, no wrong-capture
+# of a far-close chunk (codex L3). A real evidence tag is a few hundred chars.
+_EVIDENCE_TAG_RE = re.compile(r'\[evidence:\s*((?:[^\]"]|"[^"]*"){0,4096})\]')
+
+
+def _extract_pattern_meta(wrap_text: str, name: str) -> tuple[int | None, str, list[str]]:
+    """Best-effort pull of ``(level, explanation, evidence_ids)`` from ``name``'s own
+    ``name | Nx (date) [evidence: id, id "why"] — felt prose`` line in ``wrap_text``.
+
+    The name is bounded BOTH ways so it can't match a substring of a longer sibling:
+    structurally on the left (it must be the first content token after the line's
+    indent + bullet/marker prefix — so ``bar`` can't grab ``foo/bar | 3x``) and at the
+    trailing ``|`` on the right (so ``verify_or_surface`` can't grab
+    ``verify_or_surface_before_acting | …``). The left anchor is positional, not an
+    enumerated name-char alphabet (which is always one character short).
+
+    When ``name`` appears on MORE THAN ONE line (a 2x line superseded by a sharpened
+    3x line in the same wrap, or a bare ``name | Nx`` mention in prose preceding the
+    real graduation line), the BEST line wins — preferring a dated graduation line
+    over an undated prose mention, then the highest level, then the latest occurrence.
+    First-match would otherwise ground on stale evidence / a lower level / a decoy.
+
+    The match is against the VERBATIM graduation-line name: a line whose name carries
+    markdown emphasis (``- **foo** | 3x …``) won't match (the ``**`` sits between the
+    name and the ``|``). That is a SAFE miss — grounding returns ``None`` and a
+    ``crystallize`` consumer surfaces it back to the composer rather than corrupting
+    the store; the instruction directs the composer to write plain names on both
+    surfaces. Returns ``(None, "", [])`` when no line matches."""
+    # STRUCTURAL anchor, NOT an enumerated name-char alphabet (codex L3 ×3 proved the
+    # alphabet is always one char short — ``/``, a space, an accented letter all leaked
+    # a short name onto a longer sibling). A graduation line is
+    # ``[indent][bullet/marker prefix] NAME | Nx (date)``, so the name must be the FIRST
+    # content token: after ``^[ \t]*`` and an optional run of bullet/marker chars
+    # (``- * • > ! ✓``). A short name that is the SUFFIX of a longer one (``bar`` in
+    # ``foo/bar | 3x``) can NEVER match — the prefix cannot consume ``foo/``. This also
+    # drops a mid-prose ``… name | Nx`` decoy outright (it isn't at the structural
+    # start). Per-line search (no MULTILINE) so ``^`` anchors the line. The marker date
+    # is captured HERE (group 2), not searched line-wide, so a date elsewhere can't fake
+    # ``has_date``; digits bounded (``\d{1,3}``) so a giant ``Nx`` can't ``ValueError``
+    # int() (no-raise contract). ``structural_invariants_beat_discipline``.
+    marker_re = re.compile(
+        rf"^[ \t]*(?:[-*•>!✓][ \t]*)*{re.escape(name)}[ \t]*\|[ \t]*(\d{{1,3}})x\b"
+        rf"[ \t]*(\(\d{{4}}-\d{{2}}-\d{{2}}\))?"
+    )
+    best_key: tuple[int, int, int] | None = None  # (has_date, level, order)
+    best_line: str | None = None
+    best_level: int | None = None
+    for idx, line in enumerate(wrap_text.splitlines()):
+        m = marker_re.search(line)
+        if not m:
+            continue
+        level = int(m.group(1))
+        has_date = 1 if m.group(2) else 0
+        key = (has_date, level, idx)
+        if best_key is None or key > best_key:
+            best_key, best_line, best_level = key, line, level
+    if best_line is None:
+        return None, "", []
+
+    # Work on the TAIL after the ``name | Nx (date)`` marker, never the whole line —
+    # an em-dash IN THE NAME (``foo—bar``) must not be mistaken for the structural
+    # separator (codex L3 convergence). The marker (incl. the optional date) is
+    # consumed by marker_re, so the tail is exactly ``[evidence: …] — felt prose``.
+    m = marker_re.search(best_line)
+    tail = best_line[m.end():] if m else best_line
+    evidence_ids: list[str] = []
+    quoted_why = ""
+    # Anchor the evidence match at the FIRST ``[evidence:`` (``find`` = O(n) literal
+    # scan) and ``match`` there — NOT ``search``, which would retry at every opener and,
+    # on a malformed repeated-opener body, do O(n×bound) work + wrong-capture a chunk
+    # (codex L3). A graduation line has at most one evidence tag, so the first is it;
+    # the bounded body caps the single attempt at O(4096).
+    ev = None
+    _ev_start = tail.find("[evidence:")
+    if _ev_start != -1:
+        ev = _EVIDENCE_TAG_RE.match(tail, _ev_start)
+    if ev:
+        inner = ev.group(1)
+        # ids precede the quoted "why": ``id, id "why"`` → keep the id part.
+        evidence_ids = [t.strip() for t in inner.split('"', 1)[0].split(",") if t.strip()]
+        qm = re.search(r'"([^"]*)"', inner)
+        if qm:
+            quoted_why = qm.group(1).strip()
+
+    # Strip the [evidence: …] span (quote-aware) so an em-dash / ``]`` INSIDE the "why"
+    # can't hijack the split, then the felt prose is the part after the structural
+    # em-dash; fall back to the de-evidenced tail, then to the quoted "why" itself (the
+    # quoted-only form that would otherwise yield "" → ValueError in crystallize).
+    detail = (tail[: ev.start()] + tail[ev.end():]) if ev else tail
+    explanation = ""
+    if "—" in detail:
+        explanation = detail.split("—", 1)[1].strip(" \t—-|")
+    if not explanation:
+        explanation = detail.strip(" \t—-|")
+    if not explanation:
+        explanation = quoted_why
+    return best_level, explanation, evidence_ids
+
+
+def parse_crystal_decisions(wrap_text: str) -> list[CrystalDecision]:
+    """Parse the ```crystal-decisions``` routing block(s) out of a completed wrap.
+
+    Scans ``wrap_text`` for every fenced ``crystal-decisions`` block and returns one
+    :class:`CrystalDecision` per WELL-FORMED, gate-passing row (in document order).
+    The channel is deliberately tolerant — a malformed row (wrong cell count, an
+    unknown enum value, a markdown header or ``---`` separator) is SKIPPED, never
+    raised, so a single bad row cannot sink the whole decision set.
+
+    The one hard refusal is the non-negotiable forget-path gate: a ``compost`` +
+    ``timeless`` row is REJECTED (excluded from the result) and surfaced via a
+    :class:`UserWarning` — a timeless pattern is never dropped (episodic recall is
+    only a backstop; forgetting is the dangerous direction). This gate lives HERE so
+    every consumer inherits it structurally rather than re-implementing it.
+
+    Grounding (``level`` / ``explanation`` / ``evidence_ids``) is pulled best-effort
+    from each pattern's graduation line elsewhere in ``wrap_text``. No matching block
+    → ``[]``. Duplicate names are returned as-is (the consumer owns conflict
+    resolution); the parser stays a pure parser.
+
+    Fence grammar: only a triple-backtick ``` ```crystal-decisions ``` ``` fence is
+    recognized (the instruction the composer reads models exactly that, so the agent
+    mirrors it). A tilde (``~~~``) or ≥4-backtick fence is a deliberate non-match."""
+    decisions: list[CrystalDecision] = []
+    for block in _DECISION_FENCE_RE.finditer(wrap_text):
+        for raw in block.group(1).splitlines():
+            row = raw.strip()
+            if not row or _TABLE_SEPARATOR_RE.match(row):
+                continue
+            cells = [c.strip() for c in row.split("|")]
+            # Tolerate markdown border pipes: ``| a | b |`` → ['', 'a', 'b', ''].
+            while cells and cells[0] == "":
+                cells.pop(0)
+            while cells and cells[-1] == "":
+                cells.pop()
+            if len(cells) != 4:
+                continue  # malformed — skip, never abort (locked)
+            # The NAME keeps its exact text (emphasis stripped only — dashes/unicode
+            # preserved so it grounds to its OWN line); the three ENUM cells also fold
+            # en/em-dash so a typo'd `just–in–time` still validates (codex L3).
+            name = _strip_emphasis(cells[0])
+            route = _normalize_enum_cell(cells[1])
+            permanence = _normalize_enum_cell(cells[2])
+            activation_mode = _normalize_enum_cell(cells[3])
+            if (
+                not name
+                or route not in VALID_ROUTES
+                or permanence not in VALID_PERMANENCE
+                or activation_mode not in VALID_ACTIVATION_MODES
+            ):
+                continue  # unknown enum / empty name / header row — skip
+            if route == "compost" and permanence == "timeless":
+                warnings.warn(
+                    f"crystal-decisions: refused to compost the TIMELESS pattern "
+                    f"{name!r} — the forget-path is gated structurally (a timeless "
+                    f"pattern is never dropped). Re-route it to crystallize or "
+                    f"constitution, or mark it phase-specific. It was excluded from "
+                    f"the parsed decisions and stays in the working set.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                continue
+            level, explanation, evidence_ids = _extract_pattern_meta(wrap_text, name)
+            # route / permanence / activation_mode are narrowed to their Literal
+            # types by the ``not in VALID_*`` guards above — no cast needed.
+            decisions.append(
+                CrystalDecision(
+                    name=name,
+                    route=route,
+                    permanence=permanence,
+                    activation_mode=activation_mode,
+                    level=level,
+                    explanation=explanation,
+                    evidence_ids=evidence_ids,
+                )
+            )
+    return decisions

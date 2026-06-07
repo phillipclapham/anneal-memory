@@ -1137,6 +1137,29 @@ def _crystallization_block(
             "",
             out_list,
             "",
+            # AM-CRYSTAL-DECISION-CHANNEL: ask for the decision back in a machine-
+            # parseable form so a consumer executes it (parse_crystal_decisions),
+            # rather than re-reading free prose. The enum spellings MUST match
+            # VALID_ROUTES / VALID_PERMANENCE / VALID_ACTIVATION_MODES exactly.
+            "After you decide, record your routing as a fenced `crystal-decisions` "
+            "block — one pipe-delimited row per pattern you are routing OUT, so the "
+            "decision is executed structurally (not re-parsed from prose):",
+            "",
+            "```crystal-decisions",
+            "name | route | permanence | activation_mode",
+            "```",
+            "",
+            "where `route` ∈ {constitution, crystallize, compost}, `permanence` ∈ "
+            "{timeless, phase-specific}, and `activation_mode` ∈ {just-in-time, "
+            "catastrophic}. Write each pattern's name PLAINLY — exactly as it reads "
+            "in `## Patterns`, with no markdown emphasis — so the row grounds back to "
+            "its graduation line. Prerequisite: only `crystallize` a pattern when a "
+            "retrieval surface exists (a recall hook or the crystallized index), "
+            "else it leaves the always-loaded set with no way back. A `compost` + "
+            "`timeless` row is REFUSED (the forget-path is gated structurally) — "
+            "re-route it or mark it phase-specific. Omit a pattern to leave it in "
+            "the working set; a malformed row is skipped, never fatal.",
+            "",
         ]
     if in_list:
         parts += [

@@ -16,7 +16,10 @@ This project uses anneal-memory for persistent memory across sessions —
 four retrospective layers (episodes compress into continuity; Hebbian
 links + a limbic tag form automatically) plus a **spore** store for
 prospective open loops (`task`/`question`/`thought`, planted then
-resolved). Use memory naturally; don't narrate the tooling.
+resolved) and an on-demand **crystallized** tier that holds proven, stable
+patterns *out* of always-loaded context and surfaces them on cue (opt-in +
+harness-fired — see the SKILL or full snippet). Use memory naturally; don't
+narrate the tooling.
 
 **Start:** read the `anneal://continuity` resource. Empty = first session.
 

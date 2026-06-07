@@ -1,6 +1,6 @@
 ---
 name: anneal-memory
-description: Persistent four-layer agent memory (episodic + continuity + Hebbian + limbic) plus a prospective spore layer, via anneal-memory. Use in any project wired for anneal-memory — an `ANNEAL_MEMORY_DB` env var, an `anneal://continuity` MCP resource, or memory instructions referencing `recall`/`prepare_wrap`/`save_continuity`. Use it before any architectural decision or rule change (recall prior patterns first), while recording decisions/observations/tensions/outcomes during work, and when the user signals the session is ending ("wrap up", "save memory", "we're done") to run the prepare_wrap → compress → save_continuity wrap sequence. It also carries the start-of-session continuity load.
+description: Persistent four-layer agent memory (episodic + continuity + Hebbian + limbic) plus a prospective spore layer and an on-demand crystallized-pattern tier, via anneal-memory. Use in any project wired for anneal-memory — an `ANNEAL_MEMORY_DB` env var, an `anneal://continuity` MCP resource, or memory instructions referencing `recall`/`prepare_wrap`/`save_continuity`. Use it before any architectural decision or rule change (recall prior patterns first), while recording decisions/observations/tensions/outcomes during work, and when the user signals the session is ending ("wrap up", "save memory", "we're done") to run the prepare_wrap → compress → save_continuity wrap sequence. It also carries the start-of-session continuity load.
 license: MIT
 ---
 
@@ -29,6 +29,17 @@ Two cuts keep this from colliding with what you already do:
 - **Methodology vs both is a *procedure-vs-item* cut.** Your methodology (wrap discipline, recall-before-deciding, honest compression) is the *active process you run*; memory and spores are the two kinds of state it touches. Methodology is the *how*; a spore is one of the *whats* it operates on. `procedure ≠ item`.
 
 So if your harness already carries its own workflow instructions, the spore store does **not** compete with them — your procedures **operate** it. If your methodology already captures open loops (a wrap's next-actions, a scratchpad), that capture *is* a spore plant: the spore store is their canonical home. Don't run two trackers in parallel — plant the loops here and let any list *reference* them.
+
+## Crystallized patterns — your long-term semantic tier (on-demand)
+
+Graduated patterns (1x→2x→3x) live in continuity's `## Patterns`, always loaded — which works until there are too many: past a few dozen, always-loaded patterns drown each other out and the right one stops surfacing (**attention doesn't scale**; a bigger continuity is not a smarter one). The **crystallized store** (`<db-stem>.crystal.json`) is the fix — a long-term semantic store holding proven, stable patterns *out* of the always-loaded set and surfacing them *on cue*. `## Patterns` shrinks to the working set (developing + recently-used); the deep stable wisdom moves to the store and returns when relevant. This completes the architecture as Complementary Learning Systems: episodic (hippocampus) → working-set continuity → crystallized (cortical semantic store) → constitution.
+
+It is **opt-in** (inert — wraps stay byte-identical — until you crystallize a pattern or pass `--crystal`) and **harness-fired**:
+
+- **Recall is the harness's job.** A per-turn recall hook runs on every prompt and surfaces the relevant crystallized patterns on cue — you don't poll (flow does this today; Levain fires the spore layer today, crystal recall landing in its v2 adapter). Without such a hook, recall is manual: `anneal-memory crystal index` (a name + one-clause menu of the store) and `anneal-memory crystal recall "<query>"` (the patterns relevant to a query) — run them before deciding, the way you `recall` episodes. Dedicated crystal MCP tools aren't exposed yet; reach the tier via a hook or the CLI.
+- **Crystallizing happens at wrap.** Once a crystal store exists, `prepare_wrap` surfaces cold, stable Proven patterns as *crystallization candidates*. Route each one in the decision block `prepare_wrap` describes — **crystallize** (move to the store), **constitution** (catastrophic-if-missed → your always-loaded harness identity layer, not on-demand), or **compost** (phase-specific + cold → drop; the episodic trail keeps it). Only crystallize OUT when a retrieval surface exists (a recall hook, or the `crystal index`/`crystal recall` CLI) — else the pattern leaves the working set with no way back.
+
+**Non-negotiable:** never compost a *timeless* pattern — on-demand recall is the safety net for just-in-time wisdom, but a timeless principle wrongly dropped corrupts the substrate. The library refuses a `compost`+`timeless` decision structurally; hold the rule yourself anyway.
 
 ## Session workflow
 
@@ -105,6 +116,8 @@ CLI and MCP forms of the same loop. Set `ANNEAL_MEMORY_DB` (or pass `--db`) for 
 | Plant a spore | `anneal-memory spore add --type task --text "…"` | `spore_add` |
 | List / surface spores | `anneal-memory spore list` · `spore surface` | `spore_list` · `spore_surface` |
 | Resolve a spore | `anneal-memory spore descend …` · `spore ascend …` | `spore_descend` · `spore_ascend` |
+| Crystallized index / recall | `anneal-memory crystal index` · `crystal recall "<query>"` | — (harness hook, or CLI) |
+| Crystallize a pattern out | `anneal-memory crystal crystallize …` | — (CLI / library) |
 | Store status / health | `anneal-memory status` | `status` |
 | Delete an episode | `anneal-memory delete <id> --force` | `delete_episode` |
 | Recover a stuck wrap | `anneal-memory wrap-status` · `wrap-cancel` | — (CLI only) |

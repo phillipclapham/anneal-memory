@@ -59,6 +59,52 @@ let any scratchpad or list *reference* them rather than keep its own copy —
 don't run two trackers in parallel. Your existing procedures drive the one
 store; you're giving the loops you already hold a real lifecycle.
 
+**Crystallized patterns — your long-term semantic tier (on-demand, opt-in):**
+
+Graduated patterns (1x->2x->3x) live in your continuity's `## Patterns` —
+always loaded. That works until there are too many: past a few dozen,
+always-loaded patterns drown each other out and the right one stops
+surfacing (attention doesn't scale — a bigger continuity is not a smarter
+one). anneal-memory's **crystallized store** (`<db-stem>.crystal.json`) is
+the fix: a long-term semantic store that holds proven, stable patterns
+*out* of the always-loaded set and surfaces them *on cue*. `## Patterns`
+shrinks to what's developing or recently-used; the deep stable wisdom moves
+to the store and comes back when a query is relevant to it. (This completes
+the memory architecture as Complementary Learning Systems — see *The Memory
+Architecture* in the project README.)
+
+It is **opt-in and harness-fired** — two things to know:
+
+- **Recall is the harness's job, not yours to poll.** A per-turn recall hook
+  runs on every prompt and surfaces the relevant crystallized patterns on cue
+  (flow does this today; Levain fires the spore layer today, crystal recall
+  landing in its v2 adapter). Without one, recall is manual:
+  ```bash
+  anneal-memory crystal index            # name + one-clause menu of the store
+  anneal-memory crystal recall "topic"   # patterns relevant to a query
+  ```
+  Run them before deciding, the same way you `search` episodes (both support
+  `--json`).
+- **Crystallizing happens at wrap, only when you've opted in.** The crystal
+  store (`<db-stem>.crystal.json`) is created when you first
+  `anneal-memory crystal crystallize …` or accept a candidate at wrap. Once
+  it exists, `prepare-wrap` surfaces cold, stable Proven patterns as
+  *crystallization candidates*, and you route each one in the decision block
+  it describes: **crystallize** (move it to the store), **constitution**
+  (catastrophic-if-missed → your always-loaded harness identity layer, not
+  on-demand), or **compost** (phase-specific and cold → drop it; the
+  episodic trail keeps it). **Only crystallize OUT when a retrieval surface
+  exists** (a recall hook, or `crystal index` / `crystal recall`) — else the
+  pattern strands with no way back. Pass `--crystal` on a wrap to preview
+  proposals before anything is crystallized. Until then, wraps are
+  byte-identical to before.
+
+**One non-negotiable rule:** never compost a *timeless* pattern. On-demand
+recall is the safety net for just-in-time wisdom; a timeless principle
+wrongly dropped corrupts the substrate. (The library refuses a
+`compost`+`timeless` decision structurally — but hold the rule yourself,
+don't lean on the backstop.)
+
 **Session workflow:**
 
 - **Start of session:** Read your continuity file:

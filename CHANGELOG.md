@@ -6,6 +6,20 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 > The remaining adopter-facing convenience item (AM-CHIPSCHEMA, a trusted-single-operator schema profile) is deferred to the Levain v2 reload, where it composes with the held attention-zone schema work (AM-ATTENTIONZONE) it overlaps. See `projects/anneal_memory/next.md`. Also pending (AM-CRYSTAL follow-ons): MCP `crystal` lifecycle tools + `retrieve_relevant` parity, and the associative (Hebbian) retrieval backend gated on the keyword hit-rate measurement.
 
+## [0.7.1] — 2026-06-06
+
+A documentation release — **no library behavior change**. It brings the human-facing and AI-facing docs up to the shipped 0.6.0-0.7.0 reality: the **spores** prospective layer (0.4.0) and the **crystallized-pattern tier** (0.6.0-0.7.0) were under-documented in the README and the agent-instruction surfaces.
+
+### Documentation
+
+- **README** — a new section *The Memory Architecture (Complementary Learning Systems)*: the four retrieval tiers (episodic -> working-set continuity -> crystallized store -> constitution), the attention-doesn't-scale problem the crystallized tier solves (graduation was a one-way ratchet; a bigger continuity is not a smarter one), the substrate-vs-harness boundary ("anneal is the substrate; the harness fires it"), and a *Prospective memory — spores* subsection. The intro and the *Architecture* substrate inventory now name the crystallized + spore sibling stores, and the comparison table gains an *Attention management* row. The "four substrate layers" (how the store works) and the four CLS retrieval tiers (where graduated wisdom lives) are explicitly distinguished so they don't conflate.
+- **Agent-instruction snippets + Skill** — `examples/agent-instructions.full[.cli].example`, `.lean[.cli].example`, and `skill/anneal-memory/SKILL.md` now teach the crystallized tier: opt-in + harness-fired, the wrap-time crystallization-routing decision (crystallize / constitution / compost) and the **never-compost-timeless** safety rule, and manual recall via `crystal index` / `crystal recall` on the CLI path. The exact decision-block format is deferred to what `prepare_wrap` emits, so the snippets can't drift from the generator. The MCP snippet is explicit that dedicated crystal MCP tools are not yet exposed.
+- **Self-migration** — a new `AM-CRYSTAL` entry in `MIGRATION_MANIFEST`, so `anneal-memory migrate check` proposes the crystallized-tier instruction-file edits to a driving AI on upgrade (the same mechanism that carried the spores boundary).
+
+### Fixed
+
+- `anneal-memory crystal` with no subcommand listed only seven of its nine subcommands — the `index` and `recall` surfaces added in 0.7.0 were missing from the usage hint. It now lists all nine.
+
 ## [0.7.0] — 2026-06-06
 
 The **AM-CRYSTAL-SOLO-SAFETY** release: the crystallized-pattern tier (0.6.0) is now opt-in for solo CLI/MCP operators, ships an always-on index + a recall CLI surface, and carries a structured decision-channel parser. Together these let a subprocess-driven harness (e.g. a `codex exec` hub wrapper that shells `anneal-memory … --json`) drive crystallization end-to-end. Also rolls up the previously-`[Unreleased]` items (`retrieve_patterns`, the read-path `tags` fix, the crystal-read `OSError` fix).

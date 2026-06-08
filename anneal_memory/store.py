@@ -773,6 +773,14 @@ class Store:
         audit: Enable hash-chained JSONL audit trail. Default True.
         audit_retention_days: Auto-cleanup for rotated audit files. None = keep forever.
         on_audit_event: Optional callback receiving each audit entry dict after write.
+        read_only: Open a pure-reader handle for per-turn recall consumers (e.g. a
+            recall hook firing on every prompt). The connection rejects writes
+            (``PRAGMA query_only=ON``) and the constructor SKIPS all schema-init,
+            migration, metadata-write, WAL-pragma, and orphan-detection steps — a
+            normal (write-capable) open runs DDL + a commit on every construction,
+            which contends with a concurrent single-writer wrap. Assumes the db
+            already exists and is schema-current (a reader cannot migrate); audit is
+            disabled. Default False (full read-write store).
     """
 
     def __init__(
@@ -785,8 +793,13 @@ class Store:
         audit: bool = True,
         audit_retention_days: int | None = None,
         on_audit_event: Callable | None = None,
+        read_only: bool = False,
     ) -> None:
         self._path = Path(path)
+        # Read-only mode (per-turn recall consumers): the connection rejects writes and
+        # the DB-setup branch below skips ALL init writes, so a per-prompt open can't
+        # contend with a concurrent single-writer wrap. See the schema_init block.
+        self._read_only: bool = read_only
         self._retention_days = retention_days
         self._keep_tombstones = keep_tombstones
         self._project_name = project_name or "Agent"
@@ -817,17 +830,26 @@ class Store:
             tuple[str, dict[str, Any] | None, dict[str, Any]]
         ] = []
 
-        # Audit trail — hash-chained JSONL sidecar
+        # Audit trail — hash-chained JSONL sidecar (writers only; a read-only handle
+        # must not write an audit sidecar on every per-turn open).
         self._audit: AuditTrail | None = None
-        if audit:
+        if audit and not read_only:
             self._audit = AuditTrail(
                 self._path,
                 retention_days=audit_retention_days,
                 on_event=on_audit_event,
             )
 
-        # Ensure parent directory exists
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        # Ensure parent directory exists (writers only — a read-only open never creates).
+        if not read_only:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+        elif not self._path.exists():
+            # A reader must not CREATE the db (sqlite3.connect(path) would). Fail
+            # clearly — per-turn callers should guard existence themselves.
+            raise FileNotFoundError(
+                f"read_only Store requires an existing database at {self._path}; "
+                f"refusing to create one."
+            )
 
         # 10.5c.6: wrap the entire constructor DB-setup path in a
         # single _db_boundary so construction failures surface as
@@ -872,6 +894,19 @@ class Store:
             with self._db_boundary("schema_init"):
                 self._conn = sqlite3.connect(str(self._path))
                 self._conn.row_factory = sqlite3.Row
+                if self._read_only:
+                    # Pure-reader open (per-turn recall): reject writes via query_only
+                    # and SKIP every init write below (WAL/synchronous pragmas,
+                    # _init_schema, migrations, the metadata INSERT, orphan detection) —
+                    # a write-capable open runs DDL + a commit on EVERY construction,
+                    # contending with a concurrent single-writer wrap. The handle is
+                    # read-WRITE so the WAL -shm wal-index attaches (a true mode=ro open
+                    # of a LIVE WAL db is the fragile path — it needs -shm write access);
+                    # query_only then makes any write impossible. The db is assumed to
+                    # exist + be schema-current — a reader cannot migrate; a stale-schema
+                    # read surfaces as a normal query error to the caller's handling.
+                    self._conn.execute("PRAGMA query_only=ON")
+                    return
                 self._conn.execute("PRAGMA journal_mode=WAL")
                 # synchronous=FULL makes commit() fsync the WAL so a
                 # successful COMMIT is durable at the block-device layer.

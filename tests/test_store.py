@@ -2356,3 +2356,49 @@ class TestDbBoundaryErrorWrapping:
         finally:
             store_a.close()
             store_b.close()
+
+
+# -- Read-only mode (per-turn recall consumers; query_only + no init writes) --
+
+
+class TestReadOnlyStore:
+    def test_reads_work_writes_rejected(self, tmp_path):
+        path = str(tmp_path / "ro.db")
+        # Seed with a normal store, then close it.
+        w = Store(path, project_name="T")
+        w.record("a substantive episode about apparatus routing drift in review",
+                 EpisodeType.DECISION, source="t")
+        w.close()
+        # Open read-only: reads work, writes are rejected by query_only.
+        ro = Store(path, read_only=True)
+        try:
+            assert ro.recall(keyword="apparatus").episodes  # read OK
+            with pytest.raises(Exception):
+                ro.record("nope", EpisodeType.OBSERVATION, source="t")  # write rejected
+        finally:
+            ro.close()
+
+    def test_missing_db_refuses_to_create(self, tmp_path):
+        missing = tmp_path / "does_not_exist.db"
+        with pytest.raises(FileNotFoundError):
+            Store(str(missing), read_only=True)
+        assert not missing.exists()  # the open did NOT create it
+
+    def test_no_audit_sidecar_written(self, tmp_path):
+        path = str(tmp_path / "ro2.db")
+        Store(path, project_name="T").close()  # create the db (+ its audit)
+        before = set(p.name for p in tmp_path.iterdir())
+        ro = Store(path, read_only=True)
+        ro.recall(keyword="anything")
+        ro.close()
+        after = set(p.name for p in tmp_path.iterdir())
+        # A read-only open writes NOTHING new (no audit sidecar, no extra files
+        # beyond sqlite's own -wal/-shm read artifacts which the writer already made).
+        assert after - before <= {f"{Path(path).name}-wal", f"{Path(path).name}-shm"}
+
+    def test_context_manager_closes(self, tmp_path):
+        path = str(tmp_path / "ro3.db")
+        Store(path, project_name="T").close()
+        with Store(path, read_only=True) as ro:
+            ro.recall(keyword="x")
+        assert ro._closed  # __exit__ closed it

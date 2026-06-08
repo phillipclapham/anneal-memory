@@ -287,7 +287,7 @@ def get_associations(
             FROM associations
             WHERE (episode_a IN ({placeholders}) OR episode_b IN ({placeholders}))
               AND strength >= ?
-            ORDER BY strength DESC
+            ORDER BY strength DESC, episode_a ASC, episode_b ASC
             LIMIT ?""",
         [*episode_ids, *episode_ids, min_strength, limit],
     ).fetchall()

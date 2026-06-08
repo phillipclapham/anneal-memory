@@ -23,24 +23,37 @@ bears on the query. Injecting noise would dilute the exact salience on-demand
 recall exists to protect. Hence: a minimum distinctive-keyword count, a per-item
 ≥2-keyword-hit floor, and a weighted-overlap threshold.
 
-RETRIEVAL BACKEND — keyword-first, associative STAGED. v1 is weighted keyword
-overlap. The reliability story for the crystallized tier wants *associative*
-retrieval (a query → relevant episodes → Hebbian co-cited episodes → the
-crystallized patterns whose evidence cites them), which removes the
-keyword-guessing failure mode. That backend is deliberately deferred behind the
-measurement (``stability_is_observed_not_declared``): the keyword hit-rate flow
-dogfoods IS the baseline an associative backend must beat, and is itself
-decision-relevant (if keyword retrieval can't find the right pattern, that is the
-empirical case for wiring the Hebbian layer in here). The seam: a future
-``retrieve_relevant(..., associative=True)`` expands the candidate set via
-:meth:`Store.get_associations` before scoring; the result shape and the consumer
-do not change.
+RETRIEVAL BACKEND — keyword PLUS associative (Hebbian), LIVE. The episode tier is
+weighted keyword overlap and is reliable (episodes carry rich, varied vocabulary).
+The crystallized PATTERN tier is not: a graduated pattern is compressed to a sparse
+name + clause, so its relevance to a query is usually SEMANTIC, not lexical — and
+keyword scoring is blind to that (flow's dogfood measured it firing on ~2% of
+relevant prompts, surfacing the wrong patterns on coincidental token overlap while
+the genuinely-relevant ones stayed cold). So pattern retrieval is AUGMENTED with the
+associative backend: query → keyword-matched episodes (the seed set) → their Hebbian
+co-cited episodes (one hop) → the patterns whose ``evidence`` cites any of them. A
+pattern grounded in an episode the query matched surfaces even with zero query-keyword
+overlap — the keyword-orthogonal miss is fixed.
+
+It is strictly additive (``retrieve_relevant(..., associative=True)``, default on):
+the associative pass UNIONS extra patterns under the SAME precision gate + cap, never
+removing a keyword hit, and it inherits the episode tier's precision (a pattern can
+surface only if the query first matched an episode → no seed, no associative pattern).
+That makes it regime-adaptive WITHOUT a flag: on an entity-dense corpus where keyword
+already works, the associative pass surfaces what keyword found (or nothing clears the
+gate); on a conceptual/partnership corpus it surfaces the cold patterns keyword can't
+reach. The result shape and the consumer do not change — one backend swap under this
+function lights up every harness (flow, Chip, the Levain/OpenHands adapters). It needs
+the episodic :class:`Store` (the association graph lives there), so the Store-free
+:func:`retrieve_patterns` stays keyword-only by design.
 """
 
 from __future__ import annotations
 
 import re
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
+from math import log
 
 from .crystal import CrystalDict, CrystalStore, activation_tier
 from .store import Store
@@ -57,6 +70,26 @@ SCORE_THRESHOLD = 2.5     # weighted-overlap floor to surface at all (precision 
 MIN_HITS = 2              # require ≥ this many DISTINCT keyword hits, always
 MIN_EPISODE_LEN = 80      # skip trivially short episodes (not applied to patterns)
 CANDIDATE_LIMIT_PER_KEYWORD = 400  # per-keyword recall fetch cap before scoring
+
+# --- Associative (Hebbian) pattern retrieval (AM-CRYSTAL-RECALL backend) ---
+# The fix for keyword-ORTHOGONAL pattern relevance: a pattern whose distilled text
+# shares no distinctive keyword with the query, but which was GROUNDED in an episode
+# the query matched (or one co-cited with it). The keyword episode tier is reliable
+# (rich, varied episode vocabulary); ``pattern.evidence`` + the co-citation graph
+# carry that reliability into the sparse pattern tier. A Levain adapter would expose
+# these as config; defaults are precision-first (better to miss than to flood).
+ASSOC_SEED_LIMIT = 20          # cap keyword-matched episodes used as graph seeds
+ASSOC_FETCH_LIMIT = 200        # cap on associations fetched for the one Hebbian hop.
+# Fetched as ONE strength-ranked query across all seeds, so on a DENSE graph a
+# high-degree seed could monopolize the budget and starve other seeds' hops — a
+# recall-only bound (precision is unaffected, and the hop is a marginal extension over
+# the direct evidence-citation path). 200 is ample headroom for current corpus sizes;
+# per-seed-fair fetching is the follow-up IF the graph densifies AND the hop proves
+# load-bearing (it is near-dead on today's sparse, decayed graphs — avg strength ~0.27).
+ASSOC_MIN_STRENGTH = 0.5       # ignore decayed/noise-level links (mirrors wrap-context default)
+ASSOC_HOP_FACTOR = 0.6         # discount one Hebbian hop vs a direct seed citation
+ASSOC_STRENGTH_NORM = 2.0      # link strength at/above this passes full hop weight
+ASSOC_SCORE_THRESHOLD = SCORE_THRESHOLD  # summed-reach floor to surface (same precision bar)
 
 # Episode types that carry higher-signal prior thinking than the rest — the anneal
 # analog of the prototype hook's "findings/decisions weigh more": a committed
@@ -179,22 +212,27 @@ def _score_patterns(
                 score=round(score, 2),
             )
         )
-    # Best score first; a higher graduation level breaks ties (3x before 2x).
-    scored.sort(key=lambda p: (p.score, p.level), reverse=True)
+    # Best score first; higher level then name break ties (a total order →
+    # deterministic cap selection, not SQLite/insertion-order dependent).
+    scored.sort(key=lambda p: (-p.score, -p.level, p.name))
     return scored[:max_patterns]
 
 
-def _score_episodes(
+def _scored_episode_candidates(
     store: Store,
     keywords: list[str],
     weights: dict[str, float],
     *,
-    max_episodes: int,
     until: str | None,
 ) -> list[ScoredEpisode]:
-    """Fetch episode candidates via the public ``Store.recall`` (one bounded LIKE
-    query per keyword, unioned by id), then score by full weighted overlap. Reuses
-    the public API — no new SQL, no Store internals."""
+    """The FULL ranked set of episodes clearing the precision bar (NOT capped). Fetch
+    candidates via the public ``Store.recall`` (one bounded LIKE query per keyword,
+    unioned by id), then score by full weighted overlap. Reuses the public API — no
+    new SQL, no Store internals.
+
+    Returned uncapped because it serves two consumers: the displayed episode tier
+    (sliced to ``max_episodes`` by :func:`_score_episodes`) AND the SEED set for
+    associative pattern reach (which wants the wider relevant set, not just the top 3)."""
     candidates: dict[str, Episode] = {}
     for kw in keywords:
         result = store.recall(keyword=kw, until=until, limit=CANDIDATE_LIMIT_PER_KEYWORD)
@@ -223,9 +261,145 @@ def _score_episodes(
                 score=round(score, 2),
             )
         )
-    # Best score first; recency breaks ties.
-    scored.sort(key=lambda e: (e.score, e.timestamp), reverse=True)
-    return scored[:max_episodes]
+    # Best score first; recency then id break ties (a total order → deterministic
+    # selection under the display cap and the associative seed slice).
+    scored.sort(key=lambda e: (e.score, e.timestamp, e.id), reverse=True)
+    return scored
+
+
+def _score_episodes(
+    store: Store,
+    keywords: list[str],
+    weights: dict[str, float],
+    *,
+    max_episodes: int,
+    until: str | None,
+) -> list[ScoredEpisode]:
+    """The displayed episode tier: :func:`_scored_episode_candidates` capped at
+    ``max_episodes``. Kept as the stable named entry for the episode-only path."""
+    return _scored_episode_candidates(store, keywords, weights, until=until)[:max_episodes]
+
+
+def _associative_patterns(
+    store: Store,
+    crystal_store: CrystalStore,
+    seed_episodes: list[ScoredEpisode],
+    *,
+    max_patterns: int,
+    today: date,
+    exclude_names: set[str],
+) -> list[RelevantPattern]:
+    """Surface crystallized patterns the keyword pass MISSED, by reach through the
+    Hebbian substrate: query → keyword-matched episodes (the seeds) → their co-cited
+    episodes (one Hebbian hop) → the patterns whose ``evidence`` cites any of them.
+
+    This is the canonical-Hebbian fix for keyword-ORTHOGONAL relevance — a pattern
+    whose compressed text shares no distinctive keyword with the query, but which was
+    GROUNDED in an episode the query matched (the ``pattern.evidence`` edge), or in
+    one co-cited with such an episode during a past graduation (the association graph).
+
+    Precision is INHERITED from the episode tier: a pattern surfaces ONLY if the query
+    first matched an episode (no seed → empty ``reach`` → nothing), and only when its
+    STRONGEST IDF-weighted episode reach clears ``ASSOC_SCORE_THRESHOLD``. Three guards
+    keep it precision-first: (1) a directly-cited seed (the clean signal — every seed
+    cleared the episode ``SCORE_THRESHOLD``) can clear the bar, but its contribution is
+    down-weighted by an **evidence-IDF** so a *hub* episode (evidence for many patterns)
+    the query merely brushed cannot float them all; (2) surfacing is decided by the
+    single strongest reach, NOT the sum (summing rewards citation breadth over
+    relevance), with multiplicity a small bounded rank bonus only; (3) a lone weak
+    one-hop reach is discounted (strength × ``ASSOC_HOP_FACTOR``) below the bar.
+    ``exclude_names`` drops patterns the keyword pass already surfaced (no double-count)."""
+    if not seed_episodes:
+        return []
+    # episode id -> reach weight. A directly keyword-matched seed contributes its own
+    # episode score (it already cleared the episode precision bar, so >= SCORE_THRESHOLD).
+    reach: dict[str, float] = {e.id: e.score for e in seed_episodes}
+    # Only the top-N seeds fan out a Hebbian hop (a cost bound); the FULL reach dict
+    # above is kept for DIRECT evidence scoring below, so the hop cap can never drop a
+    # directly-cited pattern. seed_episodes arrives score-sorted from the caller, so this
+    # takes the highest-scoring seeds (made explicit, not insertion-order-implicit).
+    seed_ids = [e.id for e in seed_episodes[:ASSOC_SEED_LIMIT]]
+    seed_set = set(seed_ids)
+    # The FULL seed set, not just the top-N that fan out a hop: a seed's DIRECT keyword
+    # reach is authoritative and must never be overwritten by an indirect hop. seed_set
+    # ⊆ all_seed_set, so a pair between a top-N seed and seed #N+1 (absent from seed_set)
+    # would otherwise treat #N+1 as a hop `dst` and clobber its direct reach.
+    all_seed_set = {e.id for e in seed_episodes}
+
+    # One Hebbian hop: episodes co-cited with a seed during past graduations. The
+    # non-seed side of each link is REACHED, weighted by its seed neighbour's score ×
+    # the normalized link strength × a one-hop discount — so a hop alone rarely clears
+    # the gate (precision-first), but a strong/multiply-reached one can boost a pattern.
+    pairs = store.get_associations(
+        seed_ids, min_strength=ASSOC_MIN_STRENGTH, limit=ASSOC_FETCH_LIMIT
+    )
+    for p in pairs:
+        a_seed, b_seed = p.episode_a in seed_set, p.episode_b in seed_set
+        if a_seed == b_seed:
+            continue  # both seeds (already weighted) or neither (unreachable) — skip
+        src, dst = (p.episode_a, p.episode_b) if a_seed else (p.episode_b, p.episode_a)
+        hop = (
+            reach.get(src, 0.0)
+            * min(p.strength / ASSOC_STRENGTH_NORM, 1.0)
+            * ASSOC_HOP_FACTOR
+        )
+        if dst in all_seed_set:
+            continue  # dst is itself a seed — its direct keyword reach is authoritative
+        # max-merge (NOT sum): a destination reached by several seeds keeps the single
+        # strongest hop, so multiple weak hops can't accumulate past the gate.
+        if hop > reach.get(dst, 0.0):
+            reach[dst] = hop
+
+    # evidence-IDF: an episode cited as evidence by MANY patterns is a weak relevance
+    # discriminator — a hub episode the query merely brushed must not float every
+    # pattern citing it. Count citations across the live corpus once and down-weight a
+    # reached episode's contribution by its popularity (citing[e] >= 1 for any episode a
+    # pattern cites, so log(1)=0 → a distinctive citation keeps full weight).
+    active = list(crystal_store.active())
+    citing: Counter[str] = Counter()
+    for c in active:
+        ev = c.get("evidence")
+        if isinstance(ev, list):
+            for e in ev:
+                if isinstance(e, str):
+                    citing[e] += 1
+
+    scored: list[RelevantPattern] = []
+    for c in active:
+        name = str(c.get("name", ""))
+        if name in exclude_names:
+            continue
+        evidence = c.get("evidence")
+        if not isinstance(evidence, list):  # defensive: a hand-corrupted row
+            continue
+        weighted = [
+            reach[e] / (1.0 + log(citing[e]))
+            for e in evidence
+            if isinstance(e, str) and e in reach
+        ]
+        if not weighted:
+            continue
+        # max-aggregation: surfacing is decided by the SINGLE strongest distinctive
+        # reach (NOT the sum — summing rewards citation breadth over relevance and lets
+        # several weak reaches accumulate past the gate). Multiplicity is only a small
+        # bounded rank bonus, never enough to clear the gate on its own.
+        strongest = max(weighted)
+        if strongest < ASSOC_SCORE_THRESHOLD:
+            continue
+        score = strongest + min(len(weighted) - 1, 3) * 0.1
+        _lvl = c.get("level")
+        scored.append(
+            RelevantPattern(
+                name=name,
+                level=_lvl if isinstance(_lvl, int) and not isinstance(_lvl, bool) else 0,
+                explanation=str(c.get("explanation", "")),
+                tags=_pattern_tags(c),
+                activation=activation_tier(c, today),
+                score=round(score, 2),
+            )
+        )
+    scored.sort(key=lambda p: (-p.score, -p.level, p.name))
+    return scored[:max_patterns]
 
 
 def retrieve_relevant(
@@ -238,6 +412,7 @@ def retrieve_relevant(
     exclude_recent_minutes: int | None = None,
     now: str | None = None,
     today: date | None = None,
+    associative: bool = True,
 ) -> RelevantResult:
     """Surface the memory relevant to ``query`` — crystallized patterns AND episodes
     — scored, ranked, and capped. THE on-demand recall contract a harness hook calls.
@@ -255,6 +430,14 @@ def retrieve_relevant(
             defaults to wall-clock. Only consulted when ``exclude_recent_minutes`` is set.
         today: logical date for crystallized-pattern activation tiers (+ determinism);
             defaults to ``date.today()``.
+        associative: when ``True`` (default), pattern retrieval is AUGMENTED with the
+            Hebbian backend — patterns whose ``evidence`` cites a keyword-matched
+            episode (or one co-cited with it) surface even with zero query-keyword
+            overlap, fixing the keyword-orthogonal miss. Strictly additive: it unions
+            extra patterns under the SAME precision gate + cap, so it never removes a
+            keyword hit and (a) needs the episodic ``Store`` (the association graph
+            lives there) and (b) is a no-op when nothing keyword-matched an episode.
+            Set ``False`` for pure keyword scoring (the pre-backend behavior).
 
     Returns:
         :class:`RelevantResult` with ``patterns`` + ``episodes`` (each scored/ranked)
@@ -269,18 +452,38 @@ def retrieve_relevant(
 
     weights = {kw: _keyword_weight(kw) for kw in keywords}
 
+    # The keyword-matched episode candidates are computed ONCE and serve two roles:
+    # the displayed episode tier (capped) AND the SEED set for associative pattern
+    # reach. The associative path needs them even when episodes aren't displayed
+    # (max_episodes=0), so compute whenever EITHER consumer wants them.
+    want_assoc = associative and crystal_store is not None and max_patterns > 0
+    seed_episodes: list[ScoredEpisode] = []
+    if max_episodes > 0 or want_assoc:
+        until = _recent_cutoff(exclude_recent_minutes, now)
+        seed_episodes = _scored_episode_candidates(store, keywords, weights, until=until)
+    episodes = seed_episodes[:max_episodes] if max_episodes > 0 else []
+
     patterns: list[RelevantPattern] = []
     if crystal_store is not None and max_patterns > 0:
         patterns = _score_patterns(
             crystal_store, keywords, weights, max_patterns=max_patterns, today=today
         )
-
-    episodes: list[ScoredEpisode] = []
-    if max_episodes > 0:
-        until = _recent_cutoff(exclude_recent_minutes, now)
-        episodes = _score_episodes(
-            store, keywords, weights, max_episodes=max_episodes, until=until
-        )
+        # Keyword-first: the associative pass fills only the slots the keyword pass left
+        # UNUSED. A keyword hit (overlap on the pattern's OWN text) is strictly
+        # higher-confidence than evidence-mediated reach, so it can never be displaced
+        # by a numerically-larger associative score — "strictly additive" by
+        # construction, and regime-adaptive (a dense corpus fills its slots on keyword,
+        # so the associative pass naturally no-ops).
+        remaining = max_patterns - len(patterns)
+        if want_assoc and seed_episodes and remaining > 0:
+            patterns += _associative_patterns(
+                store,
+                crystal_store,
+                seed_episodes,
+                max_patterns=remaining,
+                today=today,
+                exclude_names={p.name for p in patterns},
+            )
 
     return RelevantResult(patterns=patterns, episodes=episodes, query_keywords=keywords)
 
@@ -331,11 +534,15 @@ def retrieve_patterns(
     Parity:
         For a valid ``str`` query this equals ``retrieve_relevant(<any store>,
         crystal_store, query, max_patterns=max_patterns, max_episodes=0,
-        today=today).patterns`` — same keywords, weights, and ``_score_patterns``
-        call — but builds no episodic Store. Two caveats: a ``None`` ``crystal_store``
-        short-circuits to ``[]`` here without inspecting the query, and pass the SAME
-        explicit ``today`` to both if comparing outputs (each defaults it independently,
-        so a midnight-straddling pair can label ``activation`` differently).
+        associative=False, today=today).patterns`` — same keywords, weights, and
+        ``_score_patterns`` call — but builds no episodic Store. The ``associative=False``
+        is load-bearing: with the default ``associative=True`` the full function ALSO
+        does Hebbian pattern reach (which needs the Store), so this Store-free entry is
+        keyword-only by design — there is no associative path here. Two further caveats:
+        a ``None`` ``crystal_store`` short-circuits to ``[]`` here without inspecting the
+        query, and pass the SAME explicit ``today`` to both if comparing outputs (each
+        defaults it independently, so a midnight-straddling pair can label ``activation``
+        differently).
     """
     today = today or date.today()
     if crystal_store is None or max_patterns <= 0:

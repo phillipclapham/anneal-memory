@@ -2402,3 +2402,21 @@ class TestReadOnlyStore:
         with Store(path, read_only=True) as ro:
             ro.recall(keyword="x")
         assert ro._closed  # __exit__ closed it
+
+
+def test_recall_corrupt_row_type_raises_store_error(tmp_path):
+    """A row whose `type` isn't a valid EpisodeType surfaces as StoreError from
+    _row_to_episode (which runs OUTSIDE the SQL _db_boundary), not a raw ValueError
+    escaping the store's documented error contract. (codex L3 HIGH, spore-059.)"""
+    import sqlite3
+    db = str(tmp_path / "mem.db")
+    with Store(db) as s:
+        s.record("a findable observation about apparatus routing", EpisodeType.OBSERVATION)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE episodes SET type = 'not_a_real_type'")
+    conn.commit()
+    conn.close()
+    with Store(db) as s:
+        with pytest.raises(StoreError) as ei:
+            s.recall(keyword="apparatus")
+    assert ei.value.operation == "row_to_episode"

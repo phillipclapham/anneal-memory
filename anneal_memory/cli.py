@@ -94,9 +94,9 @@ from .crystal import (
     CrystalStore,
     activation_tier,
 )
-from .retrieval import retrieve_patterns, MAX_PATTERNS
+from .retrieval import retrieve_patterns, retrieve_relevant, MAX_PATTERNS
 from .store import Store, StoreError, WrapInProgressError, _WRAP_TOKEN_RE
-from .types import AffectiveState, AssociationStats, EpisodeType
+from .types import AffectiveState, AssociationStats, EpisodeType, RelevantPattern
 
 
 # -- Time parsing --
@@ -2229,18 +2229,44 @@ def cmd_crystal_index(args: argparse.Namespace) -> None:
 
 def cmd_crystal_recall(args: argparse.Namespace) -> None:
     """Retrieve crystallized patterns relevant to a free-text query
-    (AM-CRYSTAL-CLI — the CLI binding for
-    :func:`anneal_memory.retrieval.retrieve_patterns`). A subprocess harness
-    (e.g. the hub's codex-exec wrapper) shells this to inject run-context
-    patterns into a prompt. Precision-biased: a thin query (< 2 distinctive
-    keywords) or nothing clearing the threshold returns empty, by design —
-    surface nothing rather than noise. ``--json`` → the scored
-    ``[{name, level, explanation, tags, activation, score}]`` list. Fail-CLOSED:
-    a corrupt store exits non-zero (the calling wrapper treats that as no
-    recall)."""
+    (AM-CRYSTAL-CLI — the CLI binding for the on-demand graduated tier). A
+    subprocess harness (e.g. the hub's codex-exec wrapper) shells this to inject
+    run-context patterns into a prompt.
+
+    Backend (AM-CRYSTAL-RECALL, 0.8.0): associative (Hebbian) by DEFAULT — the
+    same backend library consumers get from :func:`retrieve_relevant`, so a
+    pattern grounded in an episode the query matched surfaces even with zero
+    query-keyword overlap (the keyword-orthogonal miss the keyword-only path
+    can't reach). It needs the episodic association graph, so this opens the
+    episodic db beside the crystal store **read-only** (``Store(read_only=True)``
+    — a pure reader that can't contend with a concurrent single-writer wrap).
+    When no episodic db is resolvable (a crystal-only deployment) it
+    AUTO-DEGRADES to keyword-only :func:`retrieve_patterns` — the associative
+    tier is a best-effort augmentation, never a hard requirement. ``--no-associative``
+    forces the keyword-only path (the pre-0.8.0 behavior).
+
+    Precision-biased: a thin query (< 2 distinctive keywords) or nothing clearing
+    the threshold returns empty, by design — surface nothing rather than noise.
+    ``--json`` → the scored ``[{name, level, explanation, tags, activation,
+    score}]`` list — the field shape is identical on both backends (``score`` is
+    keyword-overlap on the keyword path and evidence-reach on the associative path:
+    same scale + threshold, different basis). ORDERING on the associative path is
+    keyword-matches first, then associative reaches — NOT strictly global-score-
+    descending: a keyword hit (overlap on the pattern's own text) is higher-confidence
+    than evidence-mediated reach and is never displaced by a numerically larger
+    associative score, so don't assume best-score-first across the full list.
+    Fail-CLOSED on the CRYSTAL store: a
+    corrupt crystal store exits non-zero (the calling wrapper treats that as no
+    recall). An EPISODIC-db problem never exits — an absent db degrades QUIETLY to
+    keyword-only; a present-but-faulting db degrades with a stderr breadcrumb."""
     try:
-        store = _open_crystal_store(args)
-        results = retrieve_patterns(store, args.query, max_patterns=args.max_patterns)
+        crystal_store = _open_crystal_store(args)
+        if getattr(args, "no_associative", False):
+            results = retrieve_patterns(
+                crystal_store, args.query, max_patterns=args.max_patterns
+            )
+        else:
+            results = _crystal_recall_associative(args, crystal_store)
     except (CrystalError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -2253,6 +2279,65 @@ def cmd_crystal_recall(args: argparse.Namespace) -> None:
     for p in results:
         print(f"{p.name} ({p.level}x, {p.activation}, score={p.score:.1f}): "
               f"{_truncate(p.explanation, 100)}")
+
+
+def _crystal_recall_associative(
+    args: argparse.Namespace, crystal_store: CrystalStore
+) -> list[RelevantPattern]:
+    """Associative (Hebbian) crystal recall against the episodic association graph,
+    degrading to keyword-only when the graph isn't reachable.
+
+    Opens the episodic db beside the crystal store as a **read-only** ``Store``
+    (no per-call init writes → no contention with a concurrent single-writer wrap)
+    and routes to :func:`retrieve_relevant` with ``max_episodes=0`` (patterns only,
+    the same ``list[RelevantPattern]`` shape the keyword path returns). When the
+    episodic db is absent / unreadable / un-migrated — or an episodic query faults
+    mid-scan — the association graph is unavailable, so this falls back to
+    keyword-only :func:`retrieve_patterns`: the associative tier is a best-effort
+    augmentation over keyword recall. The crystal store stays the FAIL-CLOSED
+    primary — a :class:`CrystalError` (crystal corruption) is NOT caught here and
+    propagates to the caller's exit-1 handler; only episodic ``StoreError`` /
+    ``OSError`` degrade."""
+    # Parity with retrieve_patterns' own short-circuit: max_patterns <= 0 means "no
+    # patterns" — return [] WITHOUT opening the episodic Store, so a no-op recall can't
+    # emit a spurious degrade breadcrumb against a present-but-faulting episodic db.
+    if args.max_patterns <= 0:
+        return []
+    db_path = Path(args.db).expanduser()
+    try:
+        with Store(db_path, read_only=True) as store:
+            return retrieve_relevant(
+                store,
+                crystal_store,
+                args.query,
+                max_patterns=args.max_patterns,
+                max_episodes=0,
+                associative=True,
+            ).patterns
+    except FileNotFoundError:
+        # No episodic db at all — the EXPECTED crystal-only deployment. The
+        # association graph simply doesn't exist here, so degrade QUIETLY to
+        # keyword-only: this is a supported configuration, not a fault.
+        return retrieve_patterns(
+            crystal_store, args.query, max_patterns=args.max_patterns
+        )
+    except (StoreError, OSError) as exc:
+        # A PRESENT episodic db that won't open or faults mid-scan (corruption,
+        # permission, un-migrated schema, I/O). The associative tier is best-effort,
+        # so still return keyword-only recall — but leave a stderr breadcrumb so a
+        # genuinely broken backend isn't INVISIBLE (an operator who expected the
+        # associative cure but silently gets keyword-only forever = the
+        # invisible_infrastructure_failure shape). stdout / the --json contract stay
+        # pristine; the wrapper acts on exit code + stdout, never stderr. Degrade the
+        # symptom, surface the cause.
+        print(
+            f"anneal: episodic association graph unavailable "
+            f"({type(exc).__name__}: {exc}); crystal recall degraded to keyword-only.",
+            file=sys.stderr,
+        )
+        return retrieve_patterns(
+            crystal_store, args.query, max_patterns=args.max_patterns
+        )
 
 
 def cmd_crystal_list(args: argparse.Namespace) -> None:
@@ -2918,6 +3003,12 @@ def build_parser() -> argparse.ArgumentParser:
     cp = crystal_sub.add_parser(
         "recall",
         help="Retrieve crystallized patterns relevant to a free-text query",
+        description="Retrieve crystallized patterns relevant to a free-text query. "
+                    "Default backend (0.8.0+): associative (Hebbian) recall against the "
+                    "episodic association graph (surfaces patterns grounded in a matched "
+                    "episode even with zero keyword overlap), auto-degrading to keyword-only "
+                    "when no episodic db is resolvable. Use --no-associative for the "
+                    "pre-0.8.0 keyword-only backend.",
         parents=[json_parent],
     )
     cp.add_argument("query", help="Free-text query (run-context: topic + surface + active "
@@ -2925,6 +3016,9 @@ def build_parser() -> argparse.ArgumentParser:
                     "subprocess wrapper passes it as one argv element.")
     cp.add_argument("--max-patterns", type=int, default=MAX_PATTERNS,
                     help=f"Cap on patterns returned (default {MAX_PATTERNS}, precision-biased)")
+    cp.add_argument("--no-associative", dest="no_associative", action="store_true",
+                    help="Force the pre-0.8.0 keyword-only backend (skip the associative "
+                         "Hebbian pass and the read-only episodic Store open).")
     cp.set_defaults(func=cmd_crystal_recall)
 
     # -- migrate (self-migration notices: propose instruction-file edits on upgrade) --

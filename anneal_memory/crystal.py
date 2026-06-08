@@ -327,6 +327,17 @@ class CrystalStore:
                 f"recoverable crystallized patterns aren't overwritten on the next "
                 f"save — inspect it (and any .tmp sidecar) by hand."
             ) from e
+        except OSError as e:
+            # A PRESENT crystal file that won't read — permission denied, is-a-directory,
+            # I/O error — NOT the absent-file FileNotFoundError handled above. Normalize
+            # to CrystalError at the source, symmetric with the decode path: a crystal-
+            # store fault always surfaces as the crystal store's OWN error type, never a
+            # bare OSError a caller (e.g. the CLI recall associative degrade, which
+            # catches OSError as an EPISODIC-store signal) would misclassify.
+            raise CrystalError(
+                f"{self.path} could not be read ({e}); refusing to proceed — "
+                f"inspect it (and any .tmp sidecar) by hand."
+            ) from e
         if not isinstance(data, dict):
             raise CrystalError(
                 f"{self.path} must contain a JSON object, got {type(data).__name__}."

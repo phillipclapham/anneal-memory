@@ -148,6 +148,10 @@ StoreOperation = Literal[
     "delete",
     "recall",
     "episodes_since_wrap",
+    # Row materialization (post-SQL): a corrupt/legacy/badly-imported row whose
+    # ``type`` isn't a valid EpisodeType (ValueError) surfaces here as a StoreError
+    # rather than escaping the store's documented error boundary as a raw built-in.
+    "row_to_episode",
     "status",
     "wrap_started",
     "wrap_cancelled",
@@ -3096,9 +3100,20 @@ class Store:
     # helper inside wrap_started/wrap_cancelled/wrap_completed.
 
 
-    @staticmethod
-    def _row_to_episode(row: sqlite3.Row) -> Episode:
-        """Convert a database row to an Episode."""
+    def _row_to_episode(self, row: sqlite3.Row) -> Episode:
+        """Convert a database row to an Episode.
+
+        Runs OUTSIDE the SQL ``_db_boundary`` (it materializes already-fetched
+        rows), so a corrupt/legacy/badly-imported row whose ``type`` isn't a valid
+        EpisodeType would otherwise let a raw ``ValueError`` escape the store's
+        documented error contract. Normalized to :class:`StoreError` here so every
+        reader (``recall`` / ``get`` / ``episodes_since_wrap`` and their downstream
+        consumers, e.g. a per-turn recall hook) is covered by its existing
+        ``except StoreError`` — a data-integrity failure surfaces as the store's
+        own error type, not a bare ``ValueError`` that escapes the boundary uncaught.
+        (``metadata`` needs no such guard: a TEXT-affinity column only ever yields
+        ``None``/``str``/``bytes``, all of which ``json.loads`` accepts — a malformed
+        value is a ``JSONDecodeError``, already tolerated below.)"""
         meta = None
         if row["metadata"]:
             try:
@@ -3109,10 +3124,19 @@ class Store:
                     f"[anneal-memory] WARNING: corrupt metadata JSON for episode {row['id']}",
                     file=sys.stderr,
                 )
+        try:
+            episode_type = EpisodeType(row["type"])
+        except ValueError as e:
+            raise StoreError(
+                f"corrupt episode row {row['id']!r}: {row['type']!r} is not a valid "
+                f"EpisodeType: {e}",
+                operation="row_to_episode",
+                path=str(self._path),
+            ) from e
         return Episode(
             id=row["id"],
             timestamp=row["timestamp"],
-            type=EpisodeType(row["type"]),
+            type=episode_type,
             content=row["content"],
             source=row["source"],
             session_id=row["session_id"],

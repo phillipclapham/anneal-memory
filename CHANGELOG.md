@@ -4,7 +4,26 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
-> Pending (AM-CRYSTAL follow-ons): **CLI/MCP associative parity** — `crystal recall` + the MCP recall tool still call keyword-only `retrieve_patterns`, so CLI / MCP / constellation-hub adopters do not yet get AM-CRYSTAL-RECALL (library `retrieve_relevant` consumers do); plus MCP `crystal` lifecycle tools. AM-CHIPSCHEMA stays deferred to the Levain v2 reload (it composes with the held AM-ATTENTIONZONE). See `projects/anneal_memory/next.md`.
+> Pending (AM-CRYSTAL follow-ons): **MCP associative parity** — the MCP server has no crystal-recall tool at all (its `recall` tool is episodic; `retrieve_relevant`/`retrieve_patterns` are unexposed over MCP), so MCP-in-conversation adopters do not yet get AM-CRYSTAL-RECALL; plus MCP `crystal` lifecycle tools. (The CLI half shipped in 0.8.1; the constellation hub shells the CLI, so it is already covered.) AM-CHIPSCHEMA stays deferred to the Levain v2 reload (it composes with the held AM-ATTENTIONZONE). See `projects/anneal_memory/next.md`.
+
+## [0.8.1] — 2026-06-08
+
+The **CLI associative parity** release (the fast-follow to 0.8.0's backend): `crystal recall` now uses the associative (Hebbian) backend by default, so the constellation hub and CLI-pip adopters get AM-CRYSTAL-RECALL with no wrapper change — and two read-path error boundaries were hardened so a corrupt store degrades cleanly instead of crashing.
+
+### Changed — `crystal recall` defaults to associative (Hebbian) recall
+
+`anneal-memory crystal recall <query>` previously called keyword-only `retrieve_patterns` (no episodic store). It now routes to `retrieve_relevant(..., max_episodes=0, associative=True)` against the episodic db beside the crystal store, opened **read-only** (`Store(read_only=True)`, so a subprocess harness firing per-prompt can't contend with a concurrent single-writer wrap) — the same associative backend library consumers got in 0.8.0. A pattern grounded in an episode the query matched now surfaces even with zero query-keyword overlap. The `--json` field shape is unchanged (`[{name, level, explanation, tags, activation, score}]`); a subprocess wrapper (e.g. the constellation hub's codex-exec recall) gets the backend with **no invocation change**. Results are ordered keyword-matches first, then associative reaches (a keyword hit on a pattern's own text outranks an evidence-mediated reach, so the list is not strictly global-score-descending).
+
+When no episodic db is resolvable (a crystal-only deployment) it **auto-degrades** to keyword-only `retrieve_patterns` — quietly, since that is an expected configuration. When a *present* episodic db can't open or faults mid-scan, it still degrades to keyword-only but emits a one-line **stderr breadcrumb** (the `--json` stdout stays pristine) so a genuinely broken backend isn't invisible. The crystal store stays the fail-closed primary: a corrupt crystal store still exits non-zero. A new `--no-associative` flag forces the prior keyword-only backend.
+
+### Fixed — read-path error boundaries surface each store's own error type
+
+- **`Store.recall` / `get` / `episodes_since_wrap`:** a corrupt/legacy/badly-imported episodic row whose `type` is not a valid `EpisodeType` previously raised a raw `ValueError` from `_row_to_episode` (which runs *outside* the SQL `_db_boundary`), escaping the store's documented error contract. It now raises `StoreError(operation="row_to_episode")`, so every reader (and downstream consumers like a per-turn recall hook) catches a data-integrity failure as the store's own error type. New `"row_to_episode"` member on the `StoreOperation` Literal.
+- **`CrystalStore._load`:** a present-but-unreadable crystal file (permission denied, is-a-directory, I/O error — distinct from the absent-file `FileNotFoundError`, which still returns an empty store) now surfaces as `CrystalError` rather than a bare `OSError`, symmetric with the existing decode-error normalization — so a crystal-store fault is never misclassified as an episodic-store fault by a caller.
+
+### Apparatus
+
+Full 4-layer. L1 + L2 converged on a silent-degrade-masks-the-diagnostic finding (fixed: the quiet-vs-breadcrumb split). **codex L3 to convergence** caught the `_row_to_episode` raw-`ValueError` leak (the HIGH above) and a crystal `OSError` misclassification; the convergence pass verified zero blast-radius across the three `recall` / `get` / `episodes_since_wrap` callers. L4 ran the real `anneal-memory crystal recall --json` end-to-end (cure fires, `--no-associative` misses, quiet degrade, breadcrumb-on-fault, hub binary invocation). 1437 tests, mypy + ruff clean.
 
 ## [0.8.0] — 2026-06-08
 

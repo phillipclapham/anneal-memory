@@ -3007,3 +3007,150 @@ class TestCrystalIndexAndRecallCLI:
                          query="structurally unskippable invariant guard discipline")
         cmd_crystal_recall(args)
         assert 1 <= len(_json.loads(capsys.readouterr().out)) <= 2
+
+    # -- associative (Hebbian) backend parity (AM-CRYSTAL-RECALL / spore-059) --------
+    # The cure: a pattern grounded in a keyword-matched EPISODE surfaces even with ZERO
+    # query-keyword overlap with its OWN text. CLI default is associative;
+    # --no-associative forces keyword-only; an absent episodic db auto-degrades. Mirrors
+    # the known-good fixture in test_retrieval.TestAssociativeRetrieval.
+
+    _DRIFT_EPISODE = (
+        "The master_plan document drifted from reality after the retired scheduler "
+        "file kept being referenced by eleven downstream readers."
+    )
+    _DRIFT_QUERY = "why did the master_plan document drift from reality"
+
+    def _seed_orthogonal(self, tmp_path):
+        """An episode the query matches + a crystal pattern grounded in it whose OWN
+        text shares no query keyword — so only the evidence edge can reach it."""
+        from anneal_memory.types import EpisodeType
+        with Store(tmp_path / "mem.db") as store:
+            e = store.record(self._DRIFT_EPISODE, EpisodeType.DECISION, source="flow")
+        CrystalStore(tmp_path / "mem.crystal.json").crystallize(
+            name="invisible_infrastructure_failure", level=3,
+            explanation="healthy by surface, broken by structure; a feature inert across many surfaces",
+            evidence=[e.id], tags=["substrate"],
+        )
+
+    def _recall_args(self, tmp_path, *, no_associative=False, max_patterns=3, query=None):
+        return Namespace(db=str(tmp_path / "mem.db"), json=True, max_patterns=max_patterns,
+                         query=query or self._DRIFT_QUERY, no_associative=no_associative)
+
+    def test_recall_associative_surfaces_keyword_orthogonal_pattern(self, tmp_path, capsys):
+        # The headline cure: default (associative) recall reaches a pattern via its
+        # evidence edge to a keyword-matched episode, despite zero keyword overlap.
+        import json as _json
+        from anneal_memory.cli import cmd_crystal_recall
+        self._seed_orthogonal(tmp_path)
+        cmd_crystal_recall(self._recall_args(tmp_path))
+        out = _json.loads(capsys.readouterr().out)
+        assert "invisible_infrastructure_failure" in {r["name"] for r in out}
+
+    def test_recall_no_associative_flag_misses_orthogonal_pattern(self, tmp_path, capsys):
+        # --no-associative = the pre-0.8.0 keyword-only backend: the orthogonal pattern
+        # is missed (proving the flag toggles the backend, and the default is what
+        # surfaces it). Output shape is identical (a bare list) on both paths.
+        import json as _json
+        from anneal_memory.cli import cmd_crystal_recall
+        self._seed_orthogonal(tmp_path)
+        cmd_crystal_recall(self._recall_args(tmp_path, no_associative=True))
+        assert _json.loads(capsys.readouterr().out) == []
+
+    def test_recall_degrades_to_keyword_when_no_episodic_db(self, tmp_path, capsys):
+        # A crystal-only deployment (no episodic db): the read_only Store open fails,
+        # so the default associative path AUTO-DEGRADES to keyword-only — no crash,
+        # exit 0, and a keyword-matchable pattern still surfaces.
+        import json as _json
+        from anneal_memory.cli import cmd_crystal_recall
+        self._crystallize(tmp_path, "structural_invariants_beat_discipline", 3,
+                          "an invariant refuses; make the guard structurally unskippable")
+        assert not (tmp_path / "mem.db").exists()
+        cmd_crystal_recall(self._recall_args(
+            tmp_path, query="make a guard structurally unskippable invariant"))
+        captured = capsys.readouterr()
+        assert {r["name"] for r in _json.loads(captured.out)} == {"structural_invariants_beat_discipline"}
+        assert captured.err == ""  # absent db = expected crystal-only config → QUIET degrade
+
+    def test_recall_breadcrumb_when_present_episodic_db_faults(self, tmp_path, capsys, monkeypatch):
+        # A PRESENT episodic db that faults mid-scan degrades to keyword-only (the
+        # associative tier is best-effort) BUT leaves a stderr breadcrumb — a real
+        # backend fault must not be invisible. stdout/--json stays clean; no exit.
+        import json as _json
+        from anneal_memory.cli import cmd_crystal_recall
+        from anneal_memory.types import EpisodeType
+        with Store(tmp_path / "mem.db") as store:
+            store.record(self._DRIFT_EPISODE, EpisodeType.DECISION, source="flow")
+        self._crystallize(tmp_path, "structural_invariants_beat_discipline", 3,
+                          "an invariant refuses; make the guard structurally unskippable")
+        monkeypatch.setattr(
+            Store, "recall",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("simulated episodic I/O fault")),
+        )
+        cmd_crystal_recall(self._recall_args(
+            tmp_path, query="make a guard structurally unskippable invariant"))
+        captured = capsys.readouterr()
+        assert {r["name"] for r in _json.loads(captured.out)} == {"structural_invariants_beat_discipline"}
+        assert "degraded to keyword-only" in captured.err  # the breadcrumb fired
+
+    def test_recall_breadcrumb_on_corrupt_episodic_row(self, tmp_path, capsys):
+        # A corrupt episodic row (invalid EpisodeType) now surfaces as StoreError from
+        # _row_to_episode (it runs OUTSIDE the SQL _db_boundary) instead of a raw
+        # ValueError escaping the degrade uncaught — so the associative path degrades
+        # to keyword-only WITH a breadcrumb, no crash. (codex L3 HIGH.)
+        import json as _json
+        import sqlite3
+        from anneal_memory.cli import cmd_crystal_recall
+        from anneal_memory.types import EpisodeType
+        with Store(tmp_path / "mem.db") as store:
+            store.record(self._DRIFT_EPISODE, EpisodeType.DECISION, source="flow")
+        conn = sqlite3.connect(str(tmp_path / "mem.db"))
+        conn.execute("UPDATE episodes SET type = 'not_a_real_type'")
+        conn.commit()
+        conn.close()
+        self._crystallize(tmp_path, "master_plan_drift_guard", 3,
+                          "keep the master_plan document from drifting from reality")
+        cmd_crystal_recall(self._recall_args(tmp_path))  # _DRIFT_QUERY, default associative
+        captured = capsys.readouterr()
+        assert {r["name"] for r in _json.loads(captured.out)} == {"master_plan_drift_guard"}
+        assert "degraded to keyword-only" in captured.err  # corrupt row → StoreError → degrade
+
+    def test_recall_max_patterns_zero_skips_episodic_open(self, tmp_path, capsys):
+        # max_patterns <= 0 returns [] without opening the episodic Store, so a
+        # present-but-faulting db can't emit a spurious degrade breadcrumb for a no-op.
+        import json as _json
+        import sqlite3
+        from anneal_memory.cli import cmd_crystal_recall
+        from anneal_memory.types import EpisodeType
+        with Store(tmp_path / "mem.db") as store:
+            store.record(self._DRIFT_EPISODE, EpisodeType.DECISION, source="flow")
+        conn = sqlite3.connect(str(tmp_path / "mem.db"))
+        conn.execute("UPDATE episodes SET type = 'not_a_real_type'")  # would fault IF opened
+        conn.commit()
+        conn.close()
+        cmd_crystal_recall(self._recall_args(tmp_path, max_patterns=0))
+        captured = capsys.readouterr()
+        assert _json.loads(captured.out) == []
+        assert captured.err == ""  # no Store opened → no breadcrumb
+
+    def test_recall_corrupt_crystal_fails_closed_even_with_episodic_db(self, tmp_path, capsys):
+        # The degrade except (StoreError/OSError) must NOT swallow a CrystalError: with a
+        # VALID episodic db the associative path runs, and crystal corruption still
+        # fail-closes (exit 1) — the crystal store stays the primary, fail-closed surface.
+        from anneal_memory.cli import cmd_crystal_recall
+        from anneal_memory.types import EpisodeType
+        with Store(tmp_path / "mem.db") as store:
+            store.record(self._DRIFT_EPISODE, EpisodeType.DECISION, source="flow")
+        (tmp_path / "mem.crystal.json").write_bytes(b"\xff\xfe not valid json")
+        with pytest.raises(SystemExit) as ei:
+            cmd_crystal_recall(self._recall_args(tmp_path))
+        assert ei.value.code == 1
+        assert "Error:" in capsys.readouterr().err
+
+    def test_argparse_wires_no_associative_flag(self, tmp_path):
+        from anneal_memory.cli import build_parser
+        db = str(tmp_path / "mem.db")
+        parser = build_parser()
+        ns = parser.parse_args(["--db", db, "crystal", "recall", "q", "--no-associative"])
+        assert ns.no_associative is True
+        ns2 = parser.parse_args(["--db", db, "crystal", "recall", "q"])
+        assert ns2.no_associative is False

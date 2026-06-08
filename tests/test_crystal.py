@@ -367,3 +367,14 @@ class TestConcurrency:
             assert p.exitcode == 0
         store = CrystalStore(path)
         assert len(store.active()) == n_workers * per_worker  # no lost updates
+
+
+def test_load_present_but_unreadable_raises_crystal_error(tmp_path):
+    """A present-but-unreadable crystal path (here: a directory at the file path) makes
+    open() raise IsADirectoryError (an OSError, NOT FileNotFoundError) — normalized to
+    CrystalError at the source so a crystal fault always surfaces as the crystal store's
+    OWN error type, never a bare OSError a caller misclassifies. (codex L3 MED, spore-059.)"""
+    p = tmp_path / "mem.crystal.json"
+    p.mkdir()
+    with pytest.raises(CrystalError):
+        CrystalStore(p).active()

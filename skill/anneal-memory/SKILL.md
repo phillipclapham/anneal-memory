@@ -36,7 +36,7 @@ Graduated patterns (1x→2x→3x) live in continuity's `## Patterns`, always loa
 
 It is **opt-in** (inert — wraps stay byte-identical — until you crystallize a pattern or pass `--crystal`) and **harness-fired**:
 
-- **Recall is the harness's job.** A per-turn recall hook runs on every prompt and surfaces the relevant crystallized patterns on cue — you don't poll (flow does this today; Levain fires the spore layer today, crystal recall landing in its v2 adapter). Without such a hook, recall is manual: `anneal-memory crystal index` (a name + one-clause menu of the store) and `anneal-memory crystal recall "<query>"` (the patterns relevant to a query) — run them before deciding, the way you `recall` episodes. Dedicated crystal MCP tools aren't exposed yet; reach the tier via a hook or the CLI.
+- **Recall is the harness's job.** A per-turn recall hook runs on every prompt and surfaces the relevant crystallized patterns on cue — you don't poll (flow does this today; Levain fires the spore layer today, crystal recall landing in its v2 adapter). Without such a hook, recall is manual: `anneal-memory crystal index` (a name + one-clause menu of the store) and `anneal-memory crystal recall "<query>"` (the patterns relevant to a query) — run them before deciding, the way you `recall` episodes. An MCP-in-conversation agent can call the same two surfaces directly as the `crystal_index` / `crystal_recall` MCP tools (the read tier is exposed over MCP as of 0.8.2). Crystallizing *out* stays a wrap-time / CLI / library action — there is no crystallize MCP tool (it carries the opt-in + decision-channel governance).
 - **Crystallizing happens at wrap.** Once a crystal store exists, `prepare_wrap` surfaces cold, stable Proven patterns as *crystallization candidates*. Route each one in the decision block `prepare_wrap` describes — **crystallize** (move to the store), **constitution** (catastrophic-if-missed → your always-loaded harness identity layer, not on-demand), or **compost** (phase-specific + cold → drop; the episodic trail keeps it). Only crystallize OUT when a retrieval surface exists (a recall hook, or the `crystal index`/`crystal recall` CLI) — else the pattern leaves the working set with no way back.
 
 **Non-negotiable:** never compost a *timeless* pattern — on-demand recall is the safety net for just-in-time wisdom, but a timeless principle wrongly dropped corrupts the substrate. The library refuses a `compost`+`timeless` decision structurally; hold the rule yourself anyway.
@@ -116,7 +116,7 @@ CLI and MCP forms of the same loop. Set `ANNEAL_MEMORY_DB` (or pass `--db`) for 
 | Plant a spore | `anneal-memory spore add --type task --text "…"` | `spore_add` |
 | List / surface spores | `anneal-memory spore list` · `spore surface` | `spore_list` · `spore_surface` |
 | Resolve a spore | `anneal-memory spore descend …` · `spore ascend …` | `spore_descend` · `spore_ascend` |
-| Crystallized index / recall | `anneal-memory crystal index` · `crystal recall "<query>"` | — (harness hook, or CLI) |
+| Crystallized index / recall | `anneal-memory crystal index` · `crystal recall "<query>"` | `crystal_index` · `crystal_recall` |
 | Crystallize a pattern out | `anneal-memory crystal crystallize …` | — (CLI / library) |
 | Store status / health | `anneal-memory status` | `status` |
 | Delete an episode | `anneal-memory delete <id> --force` | `delete_episode` |

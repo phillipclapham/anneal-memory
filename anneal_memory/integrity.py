@@ -305,6 +305,70 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "crystal_recall",
+        "description": (
+            "Recall crystallized patterns relevant to a free-text query — the "
+            "on-demand graduated tier (AM-CRYSTAL). Crystallized patterns are "
+            "proven-and-stable wisdom that graduated OUT of the always-loaded "
+            "working set into a retrievable store, so a large body of wisdom stays "
+            "effective without clogging context. Call this when a decision, design "
+            "choice, or question touches a topic where prior graduated wisdom might "
+            "apply — recall surfaces the relevant patterns on cue (pair it with "
+            "crystal_index, the always-on menu of what exists). Associative by "
+            "default: a pattern grounded in an episode your query matched surfaces "
+            "even with zero keyword overlap (the Hebbian backend). Returns scored "
+            "patterns (name, level, activation, explanation, tags); precision-biased "
+            "— a thin query or no match returns none, by design (surface nothing "
+            "rather than noise)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "The free-text query (a prompt, a decision surface, a topic) "
+                        "to find relevant crystallized patterns for."
+                    ),
+                },
+                "max_patterns": {
+                    "type": "integer",
+                    "description": (
+                        "Maximum patterns to surface (precision cap). Default 3."
+                    ),
+                    "default": 3,
+                },
+                "associative": {
+                    "type": "boolean",
+                    "description": (
+                        "When true (default), augment keyword recall with the Hebbian "
+                        "backend — patterns whose evidence cites an episode your query "
+                        "matched surface even with zero keyword overlap. Set false for "
+                        "pure keyword scoring (the pre-0.8.0 path)."
+                    ),
+                    "default": True,
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "crystal_index",
+        "description": (
+            "List the always-on crystallized INDEX — a name + one-clause menu of "
+            "every live crystallized pattern (AM-CRYSTAL-INDEX). Call this at "
+            "session start, or any time you want to know what graduated wisdom "
+            "exists, so you aren't blind to your own crystallized corpus; then pull "
+            "a body on cue with crystal_recall. Deliberately thin (name + clause "
+            "only) — the menu is meant to be cheap to keep in view. Sorted by name. "
+            "Returns nothing when no patterns have been crystallized yet."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
         "name": "spore_add",
         "description": (
             "Plant a spore — an open cognitive loop in the PROSPECTIVE layer (a "

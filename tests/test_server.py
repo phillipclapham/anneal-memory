@@ -18,9 +18,9 @@ from anneal_memory.server import (
     Server, _tool_result, _response, _error_response,
     _read_message, _write_message, _EOF, _MAX_MESSAGE_SIZE,
 )
-from anneal_memory.store import Store
+from anneal_memory.store import Store, StoreError
 from anneal_memory.integrity import TOOLS, RESOURCES
-from anneal_memory.crystal import CrystalStore
+from anneal_memory.crystal import CrystalStore, CrystalError
 
 
 @pytest.fixture
@@ -78,7 +78,13 @@ class TestPing:
 class TestToolsList:
     def test_returns_all_tools(self, server):
         result = server._handle_tools_list({})
-        assert len(result["tools"]) == 14  # 6 core + 8 spore tools
+        assert len(result["tools"]) == 16  # 6 core + 2 crystal + 8 spore tools
+
+    def test_crystal_tools_registered(self, server):
+        names = {t["name"] for t in server._handle_tools_list({})["tools"]}
+        assert {"crystal_recall", "crystal_index"} <= names
+        # every advertised tool has a dispatch handler (no schema-without-handler)
+        assert names == set(server._tool_handlers.keys())
 
     def test_tools_match_integrity_definitions(self, server):
         result = server._handle_tools_list({})
@@ -116,7 +122,9 @@ class TestResourcesRead:
         assert "record" in manifest["tools"]
         assert "delete_episode" in manifest["tools"]
         assert "spore_add" in manifest["tools"]
-        assert len(manifest["tools"]) == 14  # 6 core + 8 spore tools
+        assert "crystal_recall" in manifest["tools"]
+        assert "crystal_index" in manifest["tools"]
+        assert len(manifest["tools"]) == 16  # 6 core + 2 crystal + 8 spore tools
 
     def test_unknown_uri_returns_empty(self, server):
         result = server._handle_resources_read({"uri": "anneal://unknown"})
@@ -1134,3 +1142,218 @@ class TestCrystalOptInGateMCP:
         cs = srv._crystal_store_for_wrap()
         assert isinstance(cs, CrystalStore)
         assert any(c["name"] == "seed_pattern" for c in cs.active())
+
+
+# -- Crystallized-pattern recall + index (AM-CRYSTAL, spore-062) --
+
+
+def _seed_crystal(server) -> CrystalStore:
+    """Open the CrystalStore the server resolves (``<stem>.crystal.json`` beside
+    the db) so a test can seed live patterns the tool will read."""
+    return CrystalStore(server._crystal_path)
+
+
+class TestToolCrystalRecall:
+    """crystal_recall — the on-demand graduated tier's MCP read surface."""
+
+    def test_empty_store_returns_no_match(self, server):
+        r = _call(server, "crystal_recall", {"query": "anything relevant at all here"})
+        assert not _is_error(r)
+        assert _text_from_result(r) == "No crystallized patterns matched."
+
+    def test_keyword_hit_formats_pattern(self, server):
+        _seed_crystal(server).crystallize(
+            name="structural_invariants_beat_discipline",
+            level=3,
+            explanation="make the guard structurally unskippable rather than trusting a contract",
+            tags=["design"],
+        )
+        r = _call(server, "crystal_recall",
+                  {"query": "structural invariants guard contract discipline"})
+        assert not _is_error(r)
+        text = _text_from_result(r)
+        assert "structural_invariants_beat_discipline" in text
+        assert "3x" in text          # level rendered
+        assert "[design]" in text    # tags rendered
+
+    def test_associative_default_reaches_via_evidence(self, server, store):
+        """Default associative=True surfaces a pattern with ZERO query-keyword
+        overlap on its OWN text, reached through the evidence-cited episode."""
+        ep = store.record(
+            content="Decided the quarterly revenue projections spreadsheet needs "
+                    "forecasting headcount and fiscal planning before the board review.",
+            episode_type="decision", source="agent")
+        _seed_crystal(server).crystallize(
+            name="verify_before_acting_on_cached_state",
+            level=2,
+            explanation="continuity is a snapshot; on conflict with ground truth verify or surface",
+            evidence=[ep.id],
+        )
+        # query matches the EPISODE, not the pattern's name/explanation
+        r = _call(server, "crystal_recall",
+                  {"query": "quarterly revenue forecasting spreadsheet fiscal headcount"})
+        assert not _is_error(r)
+        assert "verify_before_acting_on_cached_state" in _text_from_result(r)
+
+    def test_no_associative_misses_evidence_only_reach(self, server, store):
+        """associative=False is pure keyword scoring on the pattern's own text —
+        the evidence-only pattern is NOT reached (proves the routing fork)."""
+        ep = store.record(
+            content="Decided the quarterly revenue projections spreadsheet needs "
+                    "forecasting headcount and fiscal planning before the board review.",
+            episode_type="decision", source="agent")
+        _seed_crystal(server).crystallize(
+            name="verify_before_acting_on_cached_state",
+            level=2,
+            explanation="continuity is a snapshot; on conflict with ground truth verify or surface",
+            evidence=[ep.id],
+        )
+        r = _call(server, "crystal_recall",
+                  {"query": "quarterly revenue forecasting spreadsheet fiscal headcount",
+                   "associative": False})
+        assert not _is_error(r)
+        assert _text_from_result(r) == "No crystallized patterns matched."
+
+    def test_missing_query_fails(self, server):
+        r = _call(server, "crystal_recall", {})
+        assert _is_error(r)
+        assert "query must be a non-empty string" in _text_from_result(r)
+
+    def test_whitespace_query_fails(self, server):
+        r = _call(server, "crystal_recall", {"query": "   "})
+        assert _is_error(r)
+        assert "query must be a non-empty string" in _text_from_result(r)
+
+    def test_non_string_query_fails(self, server):
+        # a JSON number/list must be rejected, not coerced via str() into the backend
+        for bad in [123, ["a", "b"], {"x": 1}]:
+            r = _call(server, "crystal_recall", {"query": bad})
+            assert _is_error(r), f"query={bad!r} should be rejected"
+            assert "query must be a non-empty string" in _text_from_result(r)
+
+    def test_max_patterns_bool_rejected(self, server):
+        # bool is an int subclass — must be rejected explicitly, not coerced
+        r = _call(server, "crystal_recall", {"query": "x y z", "max_patterns": True})
+        assert _is_error(r)
+        assert "max_patterns must be an integer" in _text_from_result(r)
+
+    def test_max_patterns_string_rejected(self, server):
+        r = _call(server, "crystal_recall", {"query": "x y z", "max_patterns": "3"})
+        assert _is_error(r)
+        assert "max_patterns must be an integer" in _text_from_result(r)
+
+    def test_associative_non_bool_rejected(self, server):
+        # a JSON-stringy "false" must be rejected, NOT coerced to truthy (which would
+        # silently STAY associative — the opposite of the caller's intent)
+        for bad in ["false", 0, 1, "true"]:
+            r = _call(server, "crystal_recall", {"query": "x y z", "associative": bad})
+            assert _is_error(r), f"associative={bad!r} should be rejected"
+            assert "associative must be a boolean" in _text_from_result(r)
+
+    def test_thin_query_disambiguates_empty_result(self, server):
+        _seed_crystal(server).crystallize(
+            name="some_pattern", level=3, explanation="a non-empty corpus exists")
+        # a one-keyword query is below MIN_KEYWORDS → the message tells the agent to
+        # rephrase rather than implying the corpus is empty
+        r = _call(server, "crystal_recall", {"query": "the"})
+        assert not _is_error(r)
+        assert "query too thin" in _text_from_result(r)
+
+    def test_max_patterns_zero_returns_no_match_without_touching_store(self, server, store):
+        """max_patterns<=0 short-circuits to empty WITHOUT opening the episodic
+        store (no spurious degrade breadcrumb on a no-op recall)."""
+        _seed_crystal(server).crystallize(
+            name="some_pattern", level=3, explanation="present but capped out")
+        for mp in (0, -1):  # the short-circuit is `<= 0`, not just `== 0`
+            with patch.object(server, "_crystal_recall_associative") as assoc:
+                r = _call(server, "crystal_recall",
+                          {"query": "some pattern present", "max_patterns": mp})
+            assoc.assert_not_called()
+            assert not _is_error(r)
+            assert _text_from_result(r) == "No crystallized patterns matched."
+
+    def test_episodic_fault_degrades_to_keyword(self, server, monkeypatch, caplog):
+        """A StoreError from the associative backend degrades QUIETLY to keyword-only
+        recall (best-effort augmentation), not an error — AND leaves a logged
+        breadcrumb so the degrade isn't invisible (the invisible_infrastructure_failure
+        guard the helper's docstring names)."""
+        _seed_crystal(server).crystallize(
+            name="degrade_target_pattern",
+            level=3,
+            explanation="surfaces on the keyword fallback after an episodic fault",
+            tags=["x"],
+        )
+        import logging
+        import anneal_memory.server as srv_mod
+
+        def _boom(*a, **k):
+            raise StoreError("episodic db exploded", operation="recall")
+
+        monkeypatch.setattr(srv_mod, "retrieve_relevant", _boom)
+        with caplog.at_level(logging.WARNING, logger="anneal-memory"):
+            r = _call(server, "crystal_recall",
+                      {"query": "degrade target pattern keyword fallback"})
+        assert not _is_error(r)  # degraded, not failed
+        assert "degrade_target_pattern" in _text_from_result(r)
+        # the breadcrumb fired (the guard against a silent forever-keyword degrade)
+        assert any("degraded to keyword-only" in rec.message for rec in caplog.records)
+
+    def test_crystal_fault_fails_closed(self, server, monkeypatch):
+        """A CrystalError (crystal corruption) is fail-CLOSED — an error result,
+        never a silent empty or a keyword degrade."""
+        import anneal_memory.server as srv_mod
+
+        def _boom(*a, **k):
+            raise CrystalError("crystal store corrupt")
+
+        monkeypatch.setattr(srv_mod, "retrieve_relevant", _boom)
+        r = _call(server, "crystal_recall", {"query": "x y z distinctive words"})
+        assert _is_error(r)
+        assert "crystal store corrupt" in _text_from_result(r)
+
+
+class TestToolCrystalIndex:
+    """crystal_index — the always-on name + one-clause menu."""
+
+    def test_empty_store(self, server):
+        r = _call(server, "crystal_index", {})
+        assert not _is_error(r)
+        assert _text_from_result(r) == "No crystallized patterns."
+
+    def test_lists_name_and_clause_sorted(self, server):
+        cs = _seed_crystal(server)
+        cs.crystallize(name="zeta_pattern", level=3, explanation="the last one alphabetically")
+        cs.crystallize(name="alpha_pattern", level=2, explanation="the first one alphabetically")
+        r = _call(server, "crystal_index", {})
+        assert not _is_error(r)
+        text = _text_from_result(r)
+        assert "alpha_pattern: the first one alphabetically" in text
+        assert "zeta_pattern: the last one alphabetically" in text
+        # sorted by name → alpha before zeta
+        assert text.index("alpha_pattern") < text.index("zeta_pattern")
+        # thin menu: no level/activation/score leaked into the index
+        assert "3x" not in text and "score=" not in text
+
+    def test_clause_truncated_at_100(self, server):
+        long_clause = "w " * 200  # 400 chars
+        _seed_crystal(server).crystallize(
+            name="long_pattern", level=3, explanation=long_clause.strip())
+        r = _call(server, "crystal_index", {})
+        line = _text_from_result(r)
+        assert line.endswith("...")
+        # "name: " + truncated(100) — clause portion is exactly 100 chars
+        clause = line.split(": ", 1)[1]
+        assert len(clause) == 100
+
+    def test_crystal_fault_fails_closed(self, server, monkeypatch):
+        """A corrupt/unreadable crystal store is fail-CLOSED on the index path too
+        (an error result), parity with crystal_recall."""
+        import anneal_memory.crystal as crys_mod
+
+        def _boom(*a, **k):
+            raise CrystalError("crystal store corrupt")
+
+        monkeypatch.setattr(crys_mod.CrystalStore, "active", _boom)
+        r = _call(server, "crystal_index", {})
+        assert _is_error(r)
+        assert "crystal store corrupt" in _text_from_result(r)

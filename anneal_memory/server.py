@@ -1,7 +1,7 @@
 """MCP server for anneal-memory.
 
 Implements the Model Context Protocol over stdio transport (JSON-RPC 2.0,
-newline-delimited). 6 tools + 2 resources. Zero dependencies beyond Python
+newline-delimited). 16 tools + 2 resources. Zero dependencies beyond Python
 stdlib.
 
 Usage:
@@ -15,7 +15,6 @@ import argparse
 import json
 import logging
 import os
-import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -39,9 +38,16 @@ from .spores import (
     SporeStore,
     germination_tier,
 )
-from .crystal import CrystalStore
+from .crystal import CrystalError, CrystalStore
+from .retrieval import (
+    MAX_PATTERNS,
+    MIN_KEYWORDS,
+    extract_keywords,
+    retrieve_patterns,
+    retrieve_relevant,
+)
 from .store import Store, StoreError, _WRAP_TOKEN_RE
-from .types import AffectiveState
+from .types import AffectiveState, RelevantPattern
 
 logger = logging.getLogger("anneal-memory")
 
@@ -110,6 +116,13 @@ def _tool_result(text: str, is_error: bool = False) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": text}], "isError": is_error}
 
 
+def _truncate(text: str, max_len: int = 100) -> str:
+    """Truncate text with an ellipsis (parity with the CLI ``_truncate``)."""
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
+
+
 # -- JSON-RPC Error Codes --
 _PARSE_ERROR = -32700
 _INVALID_REQUEST = -32600
@@ -160,6 +173,8 @@ class Server:
             "save_continuity": self._tool_save_continuity,
             "delete_episode": self._tool_delete_episode,
             "status": self._tool_status,
+            "crystal_recall": self._tool_crystal_recall,
+            "crystal_index": self._tool_crystal_index,
             "spore_add": self._tool_spore_add,
             "spore_get": self._tool_spore_get,
             "spore_list": self._tool_spore_list,
@@ -626,6 +641,168 @@ class Server:
             lines.append("Audit: disabled")
 
         return _tool_result("\n".join(lines))
+
+    # -- Crystallized-pattern tools (AM-CRYSTAL — the on-demand graduated tier) --
+
+    def _tool_crystal_recall(self, args: dict[str, Any]) -> dict[str, Any]:
+        """MCP transport adapter for on-demand crystallized-pattern recall (AM-CRYSTAL).
+
+        The crystallized tier's READ surface for MCP-in-conversation adopters — the
+        parity of the CLI ``crystal recall`` and of the per-turn recall hook a harness
+        fires. Associative (Hebbian) by DEFAULT (AM-CRYSTAL-RECALL, 0.8.0): a pattern
+        grounded in an episode the query matched surfaces even with ZERO query-keyword
+        overlap (the keyword-orthogonal miss keyword-only recall cannot reach). It
+        reuses the server's already-open episodic ``self._store`` for the association
+        graph (a read-only ACCESS PATTERN over the server's normal read-write handle —
+        ``retrieve_relevant`` only READS the store; the store itself is not opened
+        read-only). Unlike the CLI (a cold subprocess that may have no db, hence its
+        separate ``Store(read_only=True)`` open) the MCP server is the single process
+        holding the handle, so there is no second-handle contention to avoid and no
+        extra open. ``associative=false`` forces the keyword-only path (the pre-0.8.0
+        behavior).
+
+        Precision-biased: a thin query (< 2 distinctive keywords) or nothing clearing
+        the threshold returns no patterns, by design — surface nothing rather than
+        noise. Fail-CLOSED on a corrupt CRYSTAL store (an error result ⇒ the caller
+        treats it as no recall); a faulting EPISODIC query degrades QUIETLY to
+        keyword-only (logged breadcrumb on stderr, the JSON-RPC stdout channel and the
+        result contract stay pristine) — the associative tier is best-effort
+        augmentation, never a hard requirement.
+        """
+        query = args.get("query")
+        if not isinstance(query, str) or not query.strip():
+            # require a non-empty STRING — a non-str (e.g. a JSON number) would slip
+            # past a bare `not query` truthy check into extract_keywords / the backend
+            return _tool_result(
+                "Error: query must be a non-empty string", is_error=True
+            )
+        query = query.strip()
+        max_patterns = args.get("max_patterns", MAX_PATTERNS)
+        if not isinstance(max_patterns, int) or isinstance(max_patterns, bool):
+            return _tool_result(
+                "Error: max_patterns must be an integer", is_error=True
+            )
+        # Reject a non-bool ``associative`` rather than coercing it (a JSON-stringy
+        # "false" is truthy → would silently STAY associative, the opposite of intent).
+        # Mirrors the strict bool handling on the sibling MCP flags (save_continuity's
+        # allow_shrink, spore_surface's top_of_mind).
+        associative = args.get("associative", True)
+        if not isinstance(associative, bool):
+            return _tool_result(
+                "Error: associative must be a boolean", is_error=True
+            )
+
+        try:
+            crystal_store = CrystalStore(self._crystal_path)
+            if max_patterns <= 0:
+                # Parity with retrieve_patterns' own short-circuit — "no patterns"
+                # without touching the episodic store, so a no-op recall can't emit a
+                # spurious degrade breadcrumb.
+                patterns = []
+            elif not associative:
+                patterns = retrieve_patterns(
+                    crystal_store, query, max_patterns=max_patterns
+                )
+            else:
+                patterns = self._crystal_recall_associative(
+                    crystal_store, query, max_patterns
+                )
+        except (CrystalError, OSError) as exc:
+            # Fail-CLOSED on the crystal store (corruption / unreadable file): the
+            # crystal tier is the primary, so a fault is an error result, not a
+            # silent empty. An EPISODIC fault never lands here — it degrades inside
+            # _crystal_recall_associative (which catches StoreError). The OSError arm
+            # is defensive: CrystalStore._load already normalizes OSError -> CrystalError,
+            # so in practice only CrystalError arrives, but the broader catch keeps CLI
+            # parity (cli.cmd_crystal_recall) and is belt-and-suspenders at the boundary.
+            return _tool_result(f"Error: {exc}", is_error=True)
+
+        if not patterns:
+            # Disambiguate the retry signal for an LLM consumer: a thin query (the
+            # library floors recall at MIN_KEYWORDS distinctive keywords) is fixable by
+            # rephrasing; a genuine miss is not. Only when we actually attempted recall
+            # (max_patterns > 0) — a capped-out call isn't a "thin query".
+            if max_patterns > 0 and len(extract_keywords(query)) < MIN_KEYWORDS:
+                return _tool_result(
+                    "No crystallized patterns matched (query too thin — give it at "
+                    f"least {MIN_KEYWORDS} distinctive keywords, or check crystal_index "
+                    "for what exists)."
+                )
+            return _tool_result("No crystallized patterns matched.")
+        lines = [f"Found {len(patterns)} crystallized pattern(s):"]
+        for p in patterns:
+            tag_info = f" [{', '.join(p.tags)}]" if p.tags else ""
+            lines.append(
+                f"- {p.name} ({p.level}x, {p.activation}, score={p.score:.1f})"
+                f"{tag_info}: {p.explanation}"
+            )
+        return _tool_result("\n".join(lines))
+
+    def _crystal_recall_associative(
+        self, crystal_store: CrystalStore, query: str, max_patterns: int
+    ) -> list[RelevantPattern]:
+        """Associative (Hebbian) crystal recall over the server's OPEN episodic store,
+        degrading to keyword-only when an episodic query faults.
+
+        Mirrors the CLI ``_crystal_recall_associative`` but reuses ``self._store``
+        (already open, read-only usage) instead of opening a read-only subprocess
+        ``Store``. Routes to ``retrieve_relevant`` with ``max_episodes=0`` (patterns
+        only). A crystal fault (:class:`CrystalError` / file ``OSError``) raised inside
+        ``retrieve_relevant`` is NOT caught here — it propagates to the caller's
+        fail-closed handler. Only an episodic :class:`StoreError` degrades: the
+        association graph is then unavailable, so fall back to keyword-only
+        :func:`retrieve_patterns` and leave a breadcrumb so a genuinely broken backend
+        isn't INVISIBLE (the operator who expected the associative cure but silently
+        got keyword-only forever = the invisible_infrastructure_failure shape)."""
+        try:
+            return retrieve_relevant(
+                self._store,
+                crystal_store,
+                query,
+                max_patterns=max_patterns,
+                max_episodes=0,
+                associative=True,
+            ).patterns
+        except StoreError as exc:
+            logger.warning(
+                "episodic association graph unavailable (%s: %s); "
+                "crystal recall degraded to keyword-only.",
+                type(exc).__name__,
+                exc,
+            )
+            return retrieve_patterns(
+                crystal_store, query, max_patterns=max_patterns
+            )
+
+    def _tool_crystal_index(self, args: dict[str, Any]) -> dict[str, Any]:
+        """MCP transport adapter for the always-on crystallized INDEX (AM-CRYSTAL-INDEX).
+
+        A name + one-clause menu of the LIVE crystal corpus so an MCP adopter isn't
+        blind to its own crystallized wisdom; the bodies fill on cue via
+        ``crystal_recall``. Deliberately THIN (name + clause ONLY — no level /
+        activation / id): the menu is meant to be always-loaded, so inflating it
+        re-creates the attention-doesn't-scale disease the crystal tier exists to cure.
+        Sorted by name for a stable, churn-free artifact. Fail-CLOSED on a corrupt
+        crystal store (error result)."""
+        try:
+            crystal_store = CrystalStore(self._crystal_path)
+            items = sorted(
+                crystal_store.active(), key=lambda c: str(c.get("name", ""))
+            )
+        except (CrystalError, OSError) as exc:
+            return _tool_result(f"Error: {exc}", is_error=True)
+        rows = [
+            (
+                str(c.get("name", "")),
+                _truncate(str(c.get("explanation", "")), 100),
+            )
+            for c in items
+        ]
+        if not rows:
+            return _tool_result("No crystallized patterns.")
+        return _tool_result(
+            "\n".join(f"{name}: {clause}" for name, clause in rows)
+        )
 
     # -- Spore tools (prospective-intention layer) --
     # SporeError / ValueError raised by the store propagate to

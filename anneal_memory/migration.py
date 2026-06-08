@@ -200,6 +200,43 @@ MIGRATION_MANIFEST: list[MigrationEntry] = [
         ),
         "files": list(CORE_FILES),
     },
+    {
+        "version": "0.8.2",
+        "feature": "AM-MCP-CRYSTAL",
+        "summary": (
+            "anneal-memory 0.8.2 exposes the crystallized-pattern tier over MCP: "
+            "two new READ tools, `crystal_recall` (on-demand recall of relevant "
+            "crystallized patterns — associative/Hebbian by default, so a pattern "
+            "grounded in an episode your query matched surfaces even with zero "
+            "keyword overlap) and `crystal_index` (the always-on name + one-clause "
+            "menu of the live corpus). Before 0.8.2 the MCP server had NO crystal "
+            "tool — the tier was reachable only via a harness hook or the CLI — so "
+            "an MCP-in-conversation agent was blind to its own crystallized wisdom. "
+            "If your instruction files describe the MCP tool surface (or state that "
+            "no crystal MCP tools exist), they predate this and should teach the "
+            "agent to use the two new tools. NOTE the WRITE side is still not over "
+            "MCP: crystallizing OUT remains a CLI / library / harness action at "
+            "wrap (it needs the opt-in + decision-channel governance), so a "
+            "pure-MCP project still has no crystal store until one is created "
+            "out-of-band — but once it does, recall + index are now first-class."
+        ),
+        "suggested_edit": (
+            "In the section of your file that describes the anneal-memory MCP "
+            "tools, add (or correct any 'no crystal MCP tools yet' claim to): "
+            "\"The crystallized tier is reachable over MCP via two READ tools — "
+            "`crystal_index` (call it to see the menu of what graduated wisdom "
+            "exists, so you aren't blind to your own corpus) and `crystal_recall` "
+            "(call it on a decision/design surface to pull the relevant patterns "
+            "on cue; associative by default). These are the manual MCP stand-in "
+            "for a per-turn recall hook. Crystallizing OUT is still not an MCP "
+            "tool — that stays a CLI / library / harness action at wrap.\" "
+            "If your harness has no per-turn recall hook, make calling "
+            "`crystal_recall` before a non-trivial decision part of your routine "
+            "(and `crystal_index` at session start) — that is how the crystallized "
+            "tier fires for a pure-MCP entity."
+        ),
+        "files": list(CORE_FILES),
+    },
 ]
 
 

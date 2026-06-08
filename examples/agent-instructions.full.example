@@ -74,9 +74,12 @@ It is **opt-in and harness-fired** — two things to know:
   — you don't fetch them (flow does this today; Levain fires the prospective
   (spore) layer today, with per-turn crystal recall landing in its v2 adapter).
   Without such a hook the store still exists but recall is manual; nothing is
-  lost, it just won't fire on its own. (Dedicated crystal MCP tools are not
-  exposed yet — the crystallized tier is reached via a harness hook or the CLI,
-  not an MCP tool call.)
+  lost, it just won't fire on its own. (As of 0.8.2 the **read** tools
+  `crystal_recall` and `crystal_index` ARE exposed over MCP — `crystal_recall`
+  pulls the relevant graduated patterns on a decision surface, `crystal_index`
+  is the always-on menu of what exists; they are the manual MCP stand-in for a
+  per-turn hook. Without a hook OR these calls, the crystallized tier is reached
+  via the CLI.)
 - **Crystallizing happens at wrap, only when you've opted in.** Once a
   crystal store exists for this project, `prepare_wrap` surfaces cold, stable
   Proven patterns as *crystallization candidates*, and you route each one in
@@ -88,9 +91,10 @@ It is **opt-in and harness-fired** — two things to know:
   `crystal index` / `crystal recall` CLI — else the pattern leaves the
   always-loaded set with no way back. Until a crystal store exists this is all
   inert: no proposals, wraps byte-identical to before. (Bootstrapping
-  crystallization is a CLI / library / harness action — there is no crystallize
-  MCP tool yet, so a pure-MCP project has no crystal store until one is created
-  out-of-band.)
+  crystallization is a CLI / library / harness action — the crystallize/compost
+  WRITE path is not an MCP tool, so a pure-MCP project has no crystal store until
+  one is created out-of-band. Once it exists, the `crystal_recall` / `crystal_index`
+  READ tools surface it over MCP.)
 
 **One non-negotiable rule:** never compost a *timeless* pattern. On-demand
 recall is the safety net for just-in-time wisdom; a timeless principle

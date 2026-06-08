@@ -17,12 +17,13 @@ class TestToolDefinitions:
     """Verify canonical tool definitions are well-formed."""
 
     def test_tool_count(self):
-        assert len(TOOLS) == 14  # 6 core + 8 spore (prospective layer)
+        assert len(TOOLS) == 16  # 6 core + 2 crystal + 8 spore (prospective layer)
 
     def test_tool_names(self):
         names = {t["name"] for t in TOOLS}
         assert names == {
             "record", "recall", "prepare_wrap", "save_continuity", "delete_episode", "status",
+            "crystal_recall", "crystal_index",
             "spore_add", "spore_get", "spore_list", "spore_touch",
             "spore_update", "spore_descend", "spore_ascend", "spore_surface",
         }
@@ -201,7 +202,7 @@ class TestVerifyIntegrity:
         path.write_text(json.dumps({"version": 1, "tools": {}}))
         valid, issues = verify_integrity(path)
         assert valid is False
-        assert len(issues) == 14  # All 14 tools missing
+        assert len(issues) == 16  # All 16 tools missing
 
 
 class TestShippedManifest:

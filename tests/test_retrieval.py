@@ -353,3 +353,257 @@ class TestRetrievePatterns:
         assert all(isinstance(t, str) for pp in out for t in pp.tags)  # no list[int] leak
         assert by_name["int_tag_pat"].tags == ["keep"]
         assert by_name["bare_tag_pat"].tags == ["apparatus"]  # NOT "a p p a r a t u s"
+
+
+# -- associative (Hebbian) pattern retrieval -------------------------------
+
+
+class TestAssociativeRetrieval:
+    """The Hebbian backend: a pattern grounded in a keyword-matched episode (or one
+    co-cited with it) surfaces even with ZERO query-keyword overlap with the pattern's
+    own compressed text — the keyword-orthogonal miss Step C measured. Precision is
+    inherited from the episode tier: no episode match → no associative pattern."""
+
+    # An episode the query matches strongly; its DISTINCTIVE keywords (master_plan /
+    # document / drifted / reality / scheduler) appear in NONE of the pattern texts
+    # below — so a keyword pass over the patterns scores 0 and the link is the only
+    # path. ≥ MIN_EPISODE_LEN, ≥ 2 distinctive keywords.
+    _DRIFT_EPISODE = (
+        "The master_plan document drifted from reality after the retired scheduler "
+        "file kept being referenced by eleven downstream readers."
+    )
+    _QUERY = "why did the master_plan document drift from reality"
+
+    def test_keyword_orthogonal_pattern_surfaces_via_evidence(self, stores):
+        store, crystal = stores
+        e = store.record(
+            self._DRIFT_EPISODE, EpisodeType.DECISION, source="flow",
+            timestamp="2026-06-06T09:00:00Z",
+        )
+        crystal.crystallize(
+            name="invisible_infrastructure_failure", level=3,
+            explanation="healthy by surface, broken by structure; a feature inert across many surfaces",
+            evidence=[e.id], tags=["substrate"], today=T0,
+        )
+        # keyword-only: the pattern's compressed text shares no query keyword → missed.
+        kw = retrieve_relevant(store, crystal, self._QUERY, now=NOW, today=T0, associative=False)
+        assert "invisible_infrastructure_failure" not in {p.name for p in kw.patterns}
+        # associative: surfaces via the evidence edge to the matched episode.
+        a = retrieve_relevant(store, crystal, self._QUERY, now=NOW, today=T0, associative=True)
+        assert "invisible_infrastructure_failure" in {p.name for p in a.patterns}
+
+    def test_associative_is_on_by_default(self, stores):
+        store, crystal = stores
+        e = store.record(
+            self._DRIFT_EPISODE, EpisodeType.DECISION, source="flow",
+            timestamp="2026-06-06T09:00:00Z",
+        )
+        crystal.crystallize(
+            name="invisible_infrastructure_failure", level=3,
+            explanation="healthy by surface, broken by structure; a feature inert across many surfaces",
+            evidence=[e.id], today=T0,
+        )
+        r = retrieve_relevant(store, crystal, self._QUERY, now=NOW, today=T0)  # no flag
+        assert "invisible_infrastructure_failure" in {p.name for p in r.patterns}
+
+    def test_precision_inherited_no_episode_match_no_pattern(self, stores):
+        store, crystal = stores
+        e = store.record(
+            self._DRIFT_EPISODE, EpisodeType.DECISION, source="flow",
+            timestamp="2026-06-06T09:00:00Z",
+        )
+        crystal.crystallize(
+            name="invisible_infrastructure_failure", level=3,
+            explanation="healthy by surface, broken by structure; a feature inert",
+            evidence=[e.id], today=T0,
+        )
+        # Query matches NO episode → no seed → associative reach is empty.
+        r = retrieve_relevant(
+            store, crystal, "quantum chromodynamics lagrangian gauge symmetry", now=NOW, today=T0
+        )
+        assert r.patterns == []
+
+    def test_hebbian_hop_reaches_co_cited_episode_pattern(self, stores):
+        store, crystal = stores
+        e_match = store.record(
+            self._DRIFT_EPISODE, EpisodeType.DECISION, source="flow",
+            timestamp="2026-06-06T09:00:00Z",
+        )
+        e_other = store.record(
+            "A separate consolidation about governance ledgers, audit chains, and "
+            "provenance proofs across the precedent registry tier.",
+            EpisodeType.DECISION, source="flow", timestamp="2026-06-06T09:05:00Z",
+        )
+        # Strongly associate the two episodes (3 direct co-citations ≥ ASSOC_STRENGTH_NORM).
+        for _ in range(3):
+            store.record_associations(direct_pairs={(e_match.id, e_other.id)})
+        # The pattern is grounded ONLY in e_other and shares no query keyword.
+        crystal.crystallize(
+            name="memory_is_governance", level=3,
+            explanation="audit ledger chains prove provenance across the registry",
+            evidence=[e_other.id], today=T0,
+        )
+        r = retrieve_relevant(store, crystal, self._QUERY, now=NOW, today=T0)
+        # e_other is reached via the strong Hebbian hop from the matched seed e_match.
+        assert "memory_is_governance" in {p.name for p in r.patterns}
+
+    def test_weak_hop_alone_does_not_clear_gate(self, stores):
+        store, crystal = stores
+        e_match = store.record(
+            self._DRIFT_EPISODE, EpisodeType.DECISION, source="flow",
+            timestamp="2026-06-06T09:00:00Z",
+        )
+        e_other = store.record(
+            "A separate consolidation about governance ledgers, audit chains, and "
+            "provenance proofs across the precedent registry tier.",
+            EpisodeType.OBSERVATION, source="flow", timestamp="2026-06-06T09:05:00Z",
+        )
+        # A single SESSION co-citation = weak link (0.3) → the one-hop reach is far
+        # below the precision gate, so a pattern grounded only there must NOT surface.
+        store.record_associations(direct_pairs=set(), session_pairs={(e_match.id, e_other.id)})
+        crystal.crystallize(
+            name="memory_is_governance", level=3,
+            explanation="audit ledger chains prove provenance across the registry",
+            evidence=[e_other.id], today=T0,
+        )
+        r = retrieve_relevant(store, crystal, self._QUERY, now=NOW, today=T0)
+        assert "memory_is_governance" not in {p.name for p in r.patterns}
+
+    def test_no_duplicate_when_both_keyword_and_associative(self, stores):
+        store, crystal = stores
+        e = store.record(
+            "The apparatus routing drift let the cross_substrate review path skip the "
+            "non-replaceable codex reviewer on state-machine code.",
+            EpisodeType.DECISION, source="flow", timestamp="2026-06-06T09:00:00Z",
+        )
+        # Pattern keyword-matches the query AND cites the matched episode → must appear ONCE.
+        crystal.crystallize(
+            name="apparatus_routing", level=3,
+            explanation="the apparatus routing drift on the cross_substrate review path",
+            evidence=[e.id], tags=["apparatus"], today=T0,
+        )
+        r = retrieve_relevant(
+            store, crystal, "apparatus routing drift cross_substrate review", now=NOW, today=T0
+        )
+        names = [p.name for p in r.patterns]
+        assert names.count("apparatus_routing") == 1
+
+    def test_union_respects_max_patterns_cap(self, stores):
+        store, crystal = stores
+        e = store.record(
+            self._DRIFT_EPISODE, EpisodeType.DECISION, source="flow",
+            timestamp="2026-06-06T09:00:00Z",
+        )
+        for i in range(4):
+            crystal.crystallize(
+                name=f"orthogonal_pattern_{i}", level=3,
+                explanation="healthy by surface broken by structure inert feature substrate",
+                evidence=[e.id], today=T0,
+            )
+        r = retrieve_relevant(store, crystal, self._QUERY, now=NOW, today=T0, max_patterns=2)
+        assert len(r.patterns) == 2
+
+    def test_corrupt_evidence_field_is_skipped(self, stores, tmp_path):
+        store, crystal = stores
+        e = store.record(
+            self._DRIFT_EPISODE, EpisodeType.DECISION, source="flow",
+            timestamp="2026-06-06T09:00:00Z",
+        )
+        crystal.crystallize(
+            name="invisible_infrastructure_failure", level=3,
+            explanation="healthy by surface, broken by structure; a feature inert",
+            evidence=[e.id], today=T0,
+        )
+        # Hand-corrupt the evidence field to a non-list — the read path must not crash.
+        import json
+        data = json.loads(crystal.path.read_text())
+        data["crystal"][0]["evidence"] = "not-a-list"
+        crystal.path.write_text(json.dumps(data))
+        r = retrieve_relevant(store, crystal, self._QUERY, now=NOW, today=T0)
+        assert "invisible_infrastructure_failure" not in {p.name for p in r.patterns}
+
+    def test_evidence_idf_prevents_hub_episode_flood(self, stores):
+        store, crystal = stores
+        hub = store.record(
+            "The apparatus routing drift in the cross_substrate review path skipped "
+            "the codex reviewer on the state-machine code path entirely.",
+            EpisodeType.DECISION, source="flow", timestamp="2026-06-06T09:00:00Z",
+        )
+        distinct = store.record(
+            "A distinct governance ledger about provenance chains and audit trails "
+            "across the precedent registry tier in this consolidation.",
+            EpisodeType.DECISION, source="flow", timestamp="2026-06-06T09:05:00Z",
+        )
+        # 5 patterns cite ONLY the hub episode; 1 cites the distinctively-cited one.
+        for i in range(5):
+            crystal.crystallize(
+                name=f"hub_citer_{i}", level=3,
+                explanation="unrelated distilled wisdom inert across surfaces here",
+                evidence=[hub.id], today=T0,
+            )
+        crystal.crystallize(
+            name="distinct_citer", level=3,
+            explanation="separate distilled wisdom inert across surfaces here",
+            evidence=[distinct.id], today=T0,
+        )
+        # Query brushes BOTH episodes at the minimum (2 keyword hits each).
+        names = {
+            p.name for p in retrieve_relevant(
+                store, crystal, "apparatus routing governance ledger",
+                now=NOW, today=T0, max_patterns=10,
+            ).patterns
+        }
+        # The hub episode (cited by 5 patterns) is IDF-down-weighted below the gate →
+        # none of the hub-only citers flood; the distinctively-cited pattern surfaces.
+        assert not any(n.startswith("hub_citer_") for n in names)
+        assert "distinct_citer" in names
+
+    def test_keyword_pattern_not_displaced_by_associative(self, stores):
+        store, crystal = stores
+        e = store.record(
+            "The apparatus routing drift on the cross_substrate review path with the "
+            "codex reviewer skipped on state-machine code here.",
+            EpisodeType.DECISION, source="flow", timestamp="2026-06-06T09:00:00Z",
+        )
+        # A keyword-matching pattern (matches the query on its OWN text)...
+        crystal.crystallize(
+            name="apparatus_keyword_hit", level=2,
+            explanation="the apparatus routing review path discipline",
+            today=T0,
+        )
+        # ...and an associative-only pattern grounded in the matched episode.
+        crystal.crystallize(
+            name="orthogonal_assoc", level=3,
+            explanation="totally separate distilled wisdom about proofing sourdough",
+            evidence=[e.id], today=T0,
+        )
+        out = retrieve_relevant(
+            store, crystal, "apparatus routing review", now=NOW, today=T0, max_patterns=1
+        )
+        # 1 slot, keyword-first: the keyword hit takes it; associative can't displace it.
+        assert [p.name for p in out.patterns] == ["apparatus_keyword_hit"]
+
+    def test_max_aggregation_not_sum(self, stores):
+        store, crystal = stores
+        e1 = store.record(
+            "The apparatus routing concern on the cross_substrate review path here "
+            "with assorted detail to clear the length floor comfortably.",
+            EpisodeType.OBSERVATION, source="flow", timestamp="2026-06-06T09:00:00Z",
+        )
+        e2 = store.record(
+            "A governance ledger about provenance and audit trails across the registry "
+            "tier with assorted detail to clear the length floor comfortably.",
+            EpisodeType.OBSERVATION, source="flow", timestamp="2026-06-06T09:05:00Z",
+        )
+        # Pattern cites BOTH matched episodes; under SUM it'd score ~5, under MAX ~2.5.
+        crystal.crystallize(
+            name="multi_cite", level=3,
+            explanation="separate distilled wisdom inert across surfaces here",
+            evidence=[e1.id, e2.id], today=T0,
+        )
+        out = retrieve_relevant(
+            store, crystal, "apparatus routing governance ledger", now=NOW, today=T0
+        )
+        p = next(pp for pp in out.patterns if pp.name == "multi_cite")
+        # Strongest single reach (~2.5) + a small multi-hit bonus — NOT the sum (~5.0).
+        assert p.score < 4.0

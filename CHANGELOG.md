@@ -4,7 +4,11 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
-> The remaining adopter-facing convenience item (AM-CHIPSCHEMA, a trusted-single-operator schema profile) is deferred to the Levain v2 reload, where it composes with the held attention-zone schema work (AM-ATTENTIONZONE) it overlaps. See `projects/anneal_memory/next.md`. Also pending (AM-CRYSTAL follow-ons): MCP `crystal` lifecycle tools + `retrieve_relevant`/`retrieve_patterns` MCP parity.
+> Pending (AM-CRYSTAL follow-ons): **CLI/MCP associative parity** — `crystal recall` + the MCP recall tool still call keyword-only `retrieve_patterns`, so CLI / MCP / constellation-hub adopters do not yet get AM-CRYSTAL-RECALL (library `retrieve_relevant` consumers do); plus MCP `crystal` lifecycle tools. AM-CHIPSCHEMA stays deferred to the Levain v2 reload (it composes with the held AM-ATTENTIONZONE). See `projects/anneal_memory/next.md`.
+
+## [0.8.0] — 2026-06-08
+
+The **AM-CRYSTAL-RECALL** release: the crystallized-pattern tier now recalls by *meaning* (associative / Hebbian), not just keyword overlap — and the episodic store can be opened read-only so a per-turn recall hook fires safely on every prompt.
 
 ### Added — AM-CRYSTAL-RECALL: associative (Hebbian) retrieval backend
 

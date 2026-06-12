@@ -24,6 +24,10 @@ The **AM-LINKGATE-DECAY Slice B** release — the *cortical* (pattern-level) ass
 - New `Store` methods: `seed_pattern_co_graduation`, `drain_co_surface_events`, `get_pattern_associations`, `pattern_association_stats`, `rename_pattern_association`, `sever_pattern_concept`, `gc_pattern_associations` (all `read_only`-rejecting + `_defer_commit`-aware). New `PatternAssociationPair` / `PatternAssociationStats` types. `GraduationResult.graduated_names` (the co-activation set, derived at the validated site).
 - New CLI subcommand `anneal pattern-associations` (`--stats` graph health incl. the echo-chamber `concentration` canary; `--name` lists incident edges by effective strength). Shadow-mode telemetry surface.
 
+### Fixed — AM-STATUS-HARDEN (spore-084)
+
+- `Store.status()` did an unguarded `continuity_path.read_text(encoding="utf-8")` — a corrupt / non-UTF8 continuity (or a delete/permission race after the `exists()` check) faulted `status()` ITSELF with `UnicodeDecodeError`, breaking every `status()` consumer (health surfaces, dashboards). The read is now guarded; on failure `continuity_chars` degrades to `None` (already its value when the file is absent) instead of crashing the whole status call.
+
 ### Apparatus
 
 Full 4-layer. L2 caught a rename provenance-corruption bug; **L3 codex (non-replaceable) caught two HIGH** — best-effort seeding rolling back the wrap's Hebbian DML inside the batch, and a producer-write vs spool-rotation race — both fixed (post-commit seeding; deferred-unlink rotation) with regression tests; plus the logical-clock-at-the-wrapper-default and per-drain burst-damp findings. kimi caught within-batch event_id dedup. L4 verified the assembled pipeline end-to-end (11/11) including the load-bearing shadow invariant (a recall-hook run leaves the pattern graph untouched). 34 new library tests (1502 total), mypy clean. The flow-side producer (recall hook spool) + drain (`anneal_dualwrite`) + validation oracle (`pattern_graph_oracle.py`) live in the flow harness, not the library (harness-neutral by design).

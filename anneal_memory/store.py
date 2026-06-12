@@ -2301,8 +2301,15 @@ class Store:
         level: int,
         explanation: str,
         wrap_id: int | None = None,
+        *,
+        seen_at: str | None = None,
     ) -> None:
         """Record or update a pattern's cross-session graduation history.
+
+        ``seen_at`` (optional ``YYYY-MM-DD``): the pipeline's logical ``today``,
+        used as the ``last_seen_at`` recency baseline so deterministic/backdated
+        runs stay coherent with the warmth gate (see the body comment). Defaults
+        to wall-clock now when omitted or when it equals the wall-clock date.
 
         Appends today's explanation to the pattern's accumulated
         ``explanation_corpus`` (deduplicated — identical re-citations
@@ -2330,12 +2337,42 @@ class Store:
                 ``[evidence: ID "explanation"]`` tag.
             wrap_id: Optional pointer to the wrap that recorded this
                 appearance.
+            seen_at: Optional ``YYYY-MM-DD`` (a full ISO-Z is also tolerated —
+                only the date is used) — the pipeline's logical ``today``,
+                anchored as the ``last_seen_at`` recency baseline so the warmth
+                gate stays clock-coherent on deterministic/backdated runs.
+                Defaults to wall-clock now when omitted or malformed.
 
         Raises:
             StoreDatabaseError: On any database failure.
         """
-        from datetime import datetime as _dt, timezone as _tz
+        from datetime import datetime as _dt, timezone as _tz, date as _date
+        # AM-PRESERVE determinism (spore-081): last_seen_at is the recency baseline
+        # the cross-session preservation gate compares against the pipeline's
+        # `today` (_is_warm: today minus last_seen_at, date-granular). It MUST share
+        # the pipeline's clock, so when the caller supplies `seen_at` (always the
+        # pipeline's `today`) we anchor last_seen_at to THAT logical date — never
+        # wall-clock. Two failure modes this closes: (1) a deterministic/backdated
+        # run (the whole reason `today` exists) otherwise gets a wall-clock baseline
+        # sitting in the FUTURE of `today` -> negative days -> the warm carve-out can
+        # NEVER fire -> a warm-at-peak load-bearing antibody erodes a level per wrap;
+        # (2) the local/UTC evening-skew window (the pipeline's `today` is local
+        # `date.today()` while wall-clock UTC is already the next day) otherwise
+        # stored a date one AHEAD of `today`. Anchoring to the logical date is
+        # coherent in BOTH. Normalize to the date + re-anchor at midnight (the time
+        # component is not load-bearing: _days_between reads the first 10 chars; the
+        # lexicographic MAX recency clamp in seed_pattern_max_level stays
+        # chronological; precise write-time lives in the hash-chained audit trail,
+        # not here). A malformed `seen_at` degrades to wall-clock, never an invalid
+        # ISO-Z.
         ts = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if seen_at:
+            seen_date = seen_at[:10]  # tolerate a full ISO-Z; we only need the date
+            try:
+                _date.fromisoformat(seen_date)
+                ts = f"{seen_date}T00:00:00Z"
+            except ValueError:
+                pass  # not a real date -> keep the wall-clock fallback
         with self._db_boundary("upsert_pattern_history"):
             # Fetch the current row to maintain the corpus correctly.
             # The two-step "read then write" inside a single

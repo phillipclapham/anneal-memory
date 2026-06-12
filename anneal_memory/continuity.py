@@ -2067,6 +2067,11 @@ def validated_save_continuity(
                     level=pattern_level,
                     explanation=explanation,
                     wrap_id=None,
+                    # AM-PRESERVE determinism (spore-081): anchor the recency
+                    # baseline to the pipeline's `today`, not wall-clock, so the
+                    # warm-preservation gate's (today − last_seen_at) stays
+                    # coherent on deterministic/backdated runs.
+                    seen_at=today_str,
                 )
             # Batch context manager commits here on successful exit.
 

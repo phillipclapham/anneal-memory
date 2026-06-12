@@ -1295,6 +1295,40 @@ def _valid_continuity_text(today: str, evidence: str = "") -> str:
     )
 
 
+class TestUpsertPatternHistorySeenAt:
+    """spore-081: upsert_pattern_history anchors last_seen_at to the pipeline's
+    logical `seen_at` (the warmth gate's clock), not wall-clock — so deterministic/
+    backdated runs stay coherent. Pins the three branches directly (the end-to-end
+    proof lives in TestWarmRewordedPreservationEndToEnd; these lock the unit
+    contract so a future regression of the seen_at handling is caught here)."""
+
+    def test_backdated_seen_at_anchors_to_logical_date(self, store):
+        store.upsert_pattern_history("p_back", 2, "expl", seen_at="2026-06-04")
+        h = store.get_pattern_history("p_back")
+        assert h["last_seen_at"] == "2026-06-04T00:00:00Z"
+
+    def test_full_iso_seen_at_normalized_to_date(self, store):
+        # codex LOW: a full ISO-Z must not produce a double-suffixed invalid value.
+        store.upsert_pattern_history("p_iso", 2, "expl",
+                                     seen_at="2026-06-04T12:34:56Z")
+        h = store.get_pattern_history("p_iso")
+        assert h["last_seen_at"] == "2026-06-04T00:00:00Z"
+
+    def test_malformed_seen_at_degrades_to_wallclock(self, store):
+        store.upsert_pattern_history("p_bad", 2, "expl", seen_at="not-a-date")
+        h = store.get_pattern_history("p_bad")
+        # Wall-clock fallback: today's date, with a real (non-midnight-by-default)
+        # timestamp shape — never the invalid "not-a-dateT00:00:00Z".
+        assert h["last_seen_at"].startswith(date.today().isoformat())
+        assert h["last_seen_at"].endswith("Z")
+        assert "not-a-date" not in h["last_seen_at"]
+
+    def test_omitted_seen_at_uses_wallclock(self, store):
+        store.upsert_pattern_history("p_none", 2, "expl")
+        h = store.get_pattern_history("p_none")
+        assert h["last_seen_at"].startswith(date.today().isoformat())
+
+
 class TestGetWrapHistory:
     """Tests for Store.get_wrap_history() and the WrapRecord dataclass."""
 

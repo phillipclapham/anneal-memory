@@ -2100,6 +2100,26 @@ def validated_save_continuity(
         # point forward, failure must NOT unlink the tmp files.
         db_committed = True
 
+        # AM-LINKGATE-DECAY (Slice B): seed weak cortical links between the
+        # patterns that GRADUATED together this wrap. Recall-INDEPENDENT (the
+        # exploration / selection-bias channel the keyword recall hook is blind
+        # to) and SHADOW-MODE (nothing reads the pattern graph for recall yet).
+        # Runs as a SEPARATE post-commit transaction, NOT inside the batch above
+        # (codex L3 HIGH): a fault here must be best-effort, but inside the batch
+        # the Store's _db_boundary rolls back the WHOLE open transaction on any
+        # error — so a seeding fault swallowed by this try/except would silently
+        # discard the episode-Hebbian DML written by process_wrap_associations,
+        # and the wrap would still "succeed." Post-commit, the wrap's DB state is
+        # already durable, so a seeding failure can only cost the (non-load-bearing,
+        # self-healing) seed itself.
+        try:
+            if len(grad_result.graduated_names) >= 2:
+                store.seed_pattern_co_graduation(
+                    grad_result.graduated_names, today=today_str
+                )
+        except Exception:
+            pass
+
         # Phase 3: DB commit succeeded — externalize files.
         # At this point cont_tmp is still the Path returned from
         # _prepare_continuity_write (we only clear it to None after the

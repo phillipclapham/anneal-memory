@@ -336,6 +336,10 @@ class GraduationResult:
     # — the silent-evidence-drop class. Surfaced as a loud UserWarning at the save
     # layer; the lines themselves are left UNCHANGED (non-destructive).
     malformed_evidence_carries: list[str] = field(default_factory=list)
+    # AM-LINKGATE-DECAY (Slice B): names of patterns that genuinely graduated
+    # (fresh evidence, today) this wrap. The recall-INDEPENDENT co-activation set
+    # the cortical pattern-graph seeds weak links across (store.seed_pattern_co_graduation).
+    graduated_names: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -550,6 +554,11 @@ def validate_graduations(
     citation_counts: dict[str, int] = {}
     direct_co_citations: list[tuple[str, str]] = []
     all_validated_ids: list[set[str]] = []
+    # AM-LINKGATE-DECAY (Slice B): names of patterns that genuinely GRADUATED
+    # (fresh evidence, today) this wrap — the recall-INDEPENDENT co-activation set
+    # the cortical pattern-graph seeds weak links across. Re-derived from the line
+    # at the validated site (not the conditionally-set ``pattern_name`` var).
+    graduated_names: list[str] = []
     # AM-WARN (v0.4.2): tracked independent of the cross-session immune gate
     # (see the field docstring on GraduationResult).
     any_citation_resolved = False
@@ -870,6 +879,13 @@ def validate_graduations(
 
             if ids_valid and explanation_valid and not cross_session_overlap_words:
                 validated += 1
+                # AM-LINKGATE-DECAY: a genuine graduation this wrap. Re-derive
+                # the name from the line with the same level-guarded binding the
+                # cross-session check uses (the ``pattern_name`` var is only set
+                # when pattern_history_lookup is non-None — don't depend on it).
+                grad_name_match = _NAMED_PATTERN_WITH_EVIDENCE_RE.match(line)
+                if grad_name_match is not None and grad_name_match.group(2) == str(level):
+                    graduated_names.append(grad_name_match.group(1))
             elif cross_session_overlap_words:
                 # Cross-session check fired: today's explanation reuses
                 # vocabulary from the pattern's prior-session
@@ -1059,6 +1075,7 @@ def validate_graduations(
         cross_session_collisions=cross_session_collisions,
         carried_forward=carried_forward,
         malformed_evidence_carries=malformed_evidence_carries,
+        graduated_names=graduated_names,
     )
 
 

@@ -608,6 +608,80 @@ def cmd_search(args: argparse.Namespace) -> None:
             print()
 
 
+def cmd_pattern_associations(args: argparse.Namespace) -> None:
+    """Inspect the cortical pattern-association graph (AM-LINKGATE-DECAY, Slice B).
+
+    SHADOW-MODE telemetry surface — the observable half of the shadow phase, and
+    the input to the Slice-C GO/NO-GO validation oracle. ``--stats`` reports the
+    graph health (effective strengths after calendar decay; the ``concentration``
+    field is the echo-chamber canary); ``--name`` lists the edges incident to a
+    pattern, ranked by effective strength."""
+    with _open_store(args) as store:
+        if args.name:
+            pairs = store.get_pattern_associations(
+                names=[args.name], min_strength=args.min_strength, limit=args.limit
+            )
+            if args.json:
+                _print_json([
+                    {
+                        "name_a": p.name_a, "name_b": p.name_b,
+                        "strength": p.strength, "stored_strength": p.stored_strength,
+                        "co_surface_count": p.co_surface_count,
+                        "co_surface_session_count": p.co_surface_session_count,
+                        "last_co_surfaced_at": p.last_co_surfaced_at,
+                        "formation_source": p.formation_source,
+                    }
+                    for p in pairs
+                ])
+                return
+            if not pairs:
+                print(f"No pattern associations for '{args.name}'.")
+                return
+            print(f"Pattern associations for '{args.name}' (effective strength):")
+            for p in pairs:
+                print(f"  {p.name_a} <-> {p.name_b}  strength={p.strength:.3f} "
+                      f"(stored={p.stored_strength:.3f})  co-surf={p.co_surface_count}"
+                      f"  sessions={p.co_surface_session_count}  [{p.formation_source}]")
+            return
+
+        # Default + --stats: the graph-health telemetry surface.
+        stats = store.pattern_association_stats(top_n=args.limit)
+        if args.json:
+            _print_json({
+                "total_links": stats.total_links,
+                "retrievable_links": stats.retrievable_links,
+                "avg_strength": stats.avg_strength,
+                "max_strength": stats.max_strength,
+                "concentration": stats.concentration,
+                "by_formation_source": stats.by_formation_source,
+                "strongest_pairs": [
+                    {
+                        "name_a": p.name_a, "name_b": p.name_b,
+                        "strength": p.strength, "co_surface_count": p.co_surface_count,
+                        "co_surface_session_count": p.co_surface_session_count,
+                        "formation_source": p.formation_source,
+                    }
+                    for p in stats.strongest_pairs
+                ],
+            })
+            return
+        print("Pattern Association Graph (cortical / AM-LINKGATE-DECAY, SHADOW):")
+        print(f"  Total links:        {stats.total_links}")
+        print(f"  Retrievable (>=0.2):{stats.retrievable_links:>5}")
+        print(f"  Avg strength:       {stats.avg_strength:.3f}")
+        print(f"  Max strength:       {stats.max_strength:.3f}")
+        print(f"  Concentration:      {stats.concentration:.3f}  (top-edge share — echo-chamber canary)")
+        print(f"  By formation:       {stats.by_formation_source}")
+        if stats.strongest_pairs:
+            print()
+            print("  Strongest pairs (effective strength):")
+            for p in stats.strongest_pairs:
+                print(f"    {p.name_a} <-> {p.name_b}  strength={p.strength:.3f}  "
+                      f"co-surf={p.co_surface_count}  sessions={p.co_surface_session_count}  "
+                      f"[{p.formation_source}]")
+        return
+
+
 def cmd_associations(args: argparse.Namespace) -> None:
     """Query Hebbian associations."""
     with _open_store(args) as store:
@@ -2687,6 +2761,19 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--min-strength", type=float, default=0.0, help="Minimum strength filter")
     sub.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
     sub.set_defaults(func=cmd_associations)
+
+    # -- pattern-associations (cortical graph / AM-LINKGATE-DECAY shadow telemetry) --
+    sub = subparsers.add_parser(
+        "pattern-associations",
+        help="Inspect the cortical pattern-association graph (shadow-mode telemetry)",
+        parents=[json_parent],
+    )
+    sub.add_argument("--name", help="Pattern name to list incident edges for")
+    sub.add_argument("--stats", action="store_true", help="Show graph health (default)")
+    sub.add_argument("--min-strength", type=float, default=0.2,
+                     help="Minimum effective strength filter for --name (default: 0.2)")
+    sub.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
+    sub.set_defaults(func=cmd_pattern_associations)
 
     # -- delete --
     sub = subparsers.add_parser("delete", help="Delete an episode", parents=[json_parent])

@@ -44,6 +44,16 @@ from .associations import (
     record_associations as _record_associations,
 )
 from .audit import AuditTrail
+from .pattern_associations import (
+    PATTERN_ASSOCIATIONS_SCHEMA,
+    drain_co_surface_events as _drain_co_surface_events,
+    gc_pattern_associations as _gc_pattern_associations,
+    get_pattern_associations as _get_pattern_associations,
+    pattern_association_stats as _pattern_association_stats,
+    rename_pattern as _rename_pattern,
+    seed_co_graduation as _seed_co_graduation,
+    sever_pattern_concept as _sever_pattern_concept,
+)
 from .schema import DEFAULT_SCHEMA, SectionSpec, validate_schema
 from .types import (
     AffectiveState,
@@ -51,6 +61,8 @@ from .types import (
     AssociationStats,
     Episode,
     EpisodeType,
+    PatternAssociationPair,
+    PatternAssociationStats,
     RecallResult,
     StoreStatus,
     Tombstone,
@@ -162,6 +174,14 @@ StoreOperation = Literal[
     "get_associations",
     "get_association_context",
     "association_stats",
+    # Pattern-level cortical association graph (AM-LINKGATE-DECAY, Slice B)
+    "seed_pattern_co_graduation",
+    "drain_co_surface_events",
+    "get_pattern_associations",
+    "pattern_association_stats",
+    "gc_pattern_associations",
+    "rename_pattern_association",
+    "sever_pattern_concept",
     # Pluggable section schema (v0.3.4)
     "section_schema",
     "set_section_schema",
@@ -609,6 +629,12 @@ CREATE TABLE IF NOT EXISTS pattern_history (
 # Appended separately so existing DBs get the new table via CREATE IF NOT EXISTS
 _ASSOCIATIONS_SCHEMA_SQL = ASSOCIATIONS_SCHEMA
 
+# Pattern-level cortical association graph (AM-LINKGATE-DECAY, Slice B). A
+# SEPARATE table set from the episode `associations` above — pattern names and
+# episode ids are different namespaces with different lifecycles. Appended the
+# same way so existing DBs upgrade additively via CREATE IF NOT EXISTS.
+_PATTERN_ASSOCIATIONS_SCHEMA_SQL = PATTERN_ASSOCIATIONS_SCHEMA
+
 _DEFAULT_METADATA = {
     "format_version": str(_SCHEMA_VERSION),
     "project_name": "Agent",
@@ -666,6 +692,18 @@ _DEFAULT_METADATA = {
 def _now_utc() -> str:
     """Current time as ISO 8601 UTC string with microsecond precision."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _today_local() -> str:
+    """Local calendar date (YYYY-MM-DD) — the SAME clock the wrap pipeline uses
+    (continuity.py defaults ``today`` to ``date.today().isoformat()``). The
+    pattern-graph (AM-LINKGATE-DECAY) Store wrappers default to THIS, not
+    ``_now_utc()[:10]``: co-graduation seeding threads the wrap's local
+    ``today_str`` while the co-surface drain / rename / sever / gc take the
+    wrapper default, so both must anchor decay to the SAME day. UTC would diverge
+    from the local wrap date in the evening-UTC-rollover window (the spore-081
+    class, one layer out — codex L3 MED)."""
+    return datetime.now().strftime("%Y-%m-%d")
 
 
 def _episode_id(content: str, timestamp: str, nonce: int = 0) -> str:
@@ -977,6 +1015,7 @@ class Store:
         """Initialize database schema and default metadata."""
         self._conn.executescript(_SCHEMA_SQL)
         self._conn.executescript(_ASSOCIATIONS_SCHEMA_SQL)
+        self._conn.executescript(_PATTERN_ASSOCIATIONS_SCHEMA_SQL)
         # Migrate existing associations tables to include affective columns
         # (safe no-op if columns already exist or table was just created)
         _migrate_affective(self._conn)
@@ -2636,6 +2675,120 @@ class Store:
         with self._db_boundary("association_stats"):
             total = self._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
             return _association_stats(self._conn, total)
+
+    # -- Pattern associations (cortical layer / AM-LINKGATE-DECAY, Slice B) --
+    #
+    # The pattern-level associative graph: links between graduated PATTERNS keyed
+    # on stable names, strengthened on co-RETRIEVAL (the harness recall hook logs
+    # co-surfaced pairs → drain at wrap), decayed on calendar-DISUSE. SHADOW MODE
+    # — nothing reads this for recall yet; the producer (recall hook) + drain
+    # build + telemeter it, recall stays graph-independent until Slice C clears
+    # the validation oracle. See pattern_associations.py for the full rationale.
+
+    def seed_pattern_co_graduation(
+        self, graduated_names: list[str], today: str | None = None
+    ) -> int:
+        """Seed weak pattern links from co-graduation (same wrap).
+
+        The recall-INDEPENDENT exploration channel — fires inside the wrap
+        pipeline whenever 2+ patterns graduate together, seeding the pairs the
+        keyword recall hook is blind to. Returns links newly seeded.
+        """
+        day = today or _today_local()
+        with self._db_boundary("seed_pattern_co_graduation"):
+            formed = _seed_co_graduation(
+                self._conn, graduated_names, day, commit=not self._defer_commit
+            )
+        if formed:
+            self._audit_log("pattern_associations_seeded", {"formed": formed})
+        return formed
+
+    def drain_co_surface_events(
+        self, events: list[dict[str, Any]], today: str | None = None
+    ) -> dict[str, int]:
+        """Drain a batch of co-surface events into the pattern graph (idempotent).
+
+        The consumer-of-log half: the harness feeds the recall-hook spool here at
+        wrap time. event_id dedup makes a re-fed spool safe; per-session
+        burst-damp + provenance-gating + calendar lazy-decay + homeostatic
+        normalization all run in one transaction. Returns a metrics dict.
+        """
+        day = today or _today_local()
+        with self._db_boundary("drain_co_surface_events"):
+            metrics = _drain_co_surface_events(
+                self._conn, events, day, commit=not self._defer_commit
+            )
+        if metrics.get("events_applied"):
+            self._audit_log("pattern_co_surface_drained", metrics)
+        return metrics
+
+    def get_pattern_associations(
+        self,
+        names: list[str],
+        today: str | None = None,
+        min_strength: float = 0.2,
+        limit: int = 50,
+    ) -> list[PatternAssociationPair]:
+        """Pattern associations incident to ``names``, ranked by EFFECTIVE
+        (decayed-to-today) strength. Read-only; does not mutate the graph. The
+        surface Slice C will consume — telemetry only in Slice B."""
+        day = today or _today_local()
+        with self._db_boundary("get_pattern_associations"):
+            return _get_pattern_associations(
+                self._conn, names, day, min_strength=min_strength, limit=limit
+            )
+
+    def pattern_association_stats(
+        self, today: str | None = None, top_n: int = 10
+    ) -> PatternAssociationStats:
+        """Pattern-graph health metrics — the shadow-phase telemetry surface."""
+        day = today or _today_local()
+        with self._db_boundary("pattern_association_stats"):
+            return _pattern_association_stats(self._conn, day, top_n=top_n)
+
+    def gc_pattern_associations(self, today: str | None = None) -> int:
+        """Periodic full-graph GC: delete edges decayed below the GC floor.
+        NOT per-wrap (that re-introduces the regime-variant cost the calendar
+        model avoids) — a harness calls it occasionally. Returns rows deleted."""
+        day = today or _today_local()
+        with self._db_boundary("gc_pattern_associations"):
+            gced = _gc_pattern_associations(
+                self._conn, day, commit=not self._defer_commit
+            )
+        if gced:
+            self._audit_log("pattern_associations_gc", {"deleted": gced})
+        return gced
+
+    def rename_pattern_association(
+        self, old_name: str, new_name: str, today: str | None = None
+    ) -> int:
+        """Rename a pattern, carrying its earned cortical edges to the new name
+        (first-class alias — the SAME concept under a new name; edges merge if the
+        target pair exists). Returns edges re-keyed."""
+        day = today or _today_local()
+        with self._db_boundary("rename_pattern_association"):
+            rekeyed = _rename_pattern(
+                self._conn, old_name, new_name, day, commit=not self._defer_commit
+            )
+        if rekeyed:
+            self._audit_log(
+                "pattern_association_renamed",
+                {"old": old_name, "new": new_name, "rekeyed": rekeyed},
+            )
+        return rekeyed
+
+    def sever_pattern_concept(self, name: str, today: str | None = None) -> int:
+        """Homonym guard: a pattern's concept left (composted/retired) → delete
+        its edges + bump its generation so a future homonym starts clean. Returns
+        edges severed."""
+        day = today or _today_local()
+        with self._db_boundary("sever_pattern_concept"):
+            severed = _sever_pattern_concept(
+                self._conn, name, day, commit=not self._defer_commit
+            )
+        if severed:
+            self._audit_log("pattern_concept_severed", {"name": name, "severed": severed})
+        return severed
 
     # -- Pruning --
 

@@ -169,6 +169,44 @@ class AssociationStats:
     local_density: float = 0.0  # Density among connected episodes only (episodes with >= 1 association). More useful than global density for network health.
 
 
+@dataclass(frozen=True)
+class PatternAssociationPair:
+    """A cortical association between two graduated PATTERNS (AM-LINKGATE-DECAY).
+
+    The sibling of :class:`AssociationPair` one layer up: keyed on stable pattern
+    NAMES (canonical order ``name_a < name_b``), strengthened on co-RETRIEVAL,
+    decayed on calendar-DISUSE. ``strength`` is the EFFECTIVE value (decayed to
+    the query date); ``stored_strength`` is the un-decayed value as-of
+    ``last_decay_at`` (forensics — lets telemetry see the lazy-decay gap).
+    """
+
+    name_a: str
+    name_b: str
+    strength: float  # effective (decayed-to-today) strength
+    stored_strength: float  # un-decayed value as-of last_decay_at
+    direction: str  # 'undirected' (v1); ACT-R fan-effect affordance
+    first_linked_at: str  # ISO date (logical)
+    last_strengthened_at: str  # ISO date — last reinforcement (any source)
+    last_co_surfaced_at: str  # ISO date — last co-retrieval
+    last_decay_at: str  # ISO date — strength materialized as-of this date
+    co_surface_count: int  # raw co-surface events
+    co_surface_session_count: int  # distinct sessions (burst-damped)
+    formation_source: str  # 'co_graduation' | 'co_surface' | 'co_touch'
+
+
+@dataclass
+class PatternAssociationStats:
+    """Pattern-graph health metrics — the AM-LINKGATE-DECAY shadow-phase telemetry."""
+
+    total_links: int
+    retrievable_links: int  # edges with effective strength >= retrieval threshold
+    avg_strength: float  # mean EFFECTIVE strength
+    max_strength: float  # strongest EFFECTIVE edge
+    concentration: float  # top-edge share of total effective strength (echo-chamber canary)
+    by_formation_source: dict[str, int] = field(default_factory=dict)
+    strongest_pairs: list[PatternAssociationPair] = field(default_factory=list)
+
+
 @dataclass
 class RecallResult:
     """Result of a recall query."""

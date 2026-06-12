@@ -6,6 +6,28 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 > Pending: MCP crystal **lifecycle** tools (`crystallize` / `get` / `list` over MCP) for full CLI symmetry — deferred, because crystallizing OUT is a WRITE surface that pulls in the AM-CRYSTAL-OPTIN + decision-channel governance and is the wrong shape for a single MCP verb (the READ surface — recall + index — shipped in 0.8.2). AM-CHIPSCHEMA stays deferred to the Levain v2 reload (it composes with the held AM-ATTENTIONZONE). See `projects/anneal_memory/next.md`.
 
+## [0.9.0] — 2026-06-12
+
+The **AM-LINKGATE-DECAY Slice B** release — the *cortical* (pattern-level) associative graph, built in **SHADOW MODE**. The sibling of the episode-level Hebbian layer one tier up: where that layer links EPISODES (volatile ids, co-CITATION at graduation, per-WRAP decay), this links graduated PATTERNS by their stable NAMES, strengthened on co-RETRIEVAL, decayed on calendar-DISUSE. Drive the associative layer by **USE + PROVENANCE**, not by sparse graduation-events + regime-variant wrap-count. Nothing READS the graph for recall yet — a producer logs co-surface events, a drain strengthens the graph at wrap time, telemetry observes it; recall stays graph-independent so an echo-chamber structurally cannot form. Graph-consuming recall (Slice C) is future and gated on a validation oracle.
+
+### Added — the pattern-association graph (`pattern_associations.py`)
+
+- Three new tables (additive via `CREATE IF NOT EXISTS`, zero existing-DB impact): `pattern_associations` (`CHECK (name_a < name_b)` canonical PK; effective strength via lazy calendar decay; an ACT-R fan-effect `direction` affordance column), `pattern_aliases` (rename + homonym generation), `processed_co_surface_events` (idempotency backstop).
+- **Formation**: weak (~0.3) co-graduation seeding — recall-INDEPENDENT, the exploration / selection-bias channel keyword recall is blind to. Fires automatically POST-COMMIT in the wrap pipeline (a separate transaction, NOT inside the wrap's DB batch, so a seeding fault can never roll back the episode-Hebbian DML).
+- **Strengthening**: the idempotent co-surface drain — `event_id` dedup (within-batch AND cross-drain), per-SESSION burst-damp (`log1p`), provenance-gated reinforcement (graph-mediated co-surfaces reinforce at 0 — the structural echo-chamber guard that exists in Slice B and binds in Slice C).
+- **Decay**: lazy calendar decay (`effective = stored · decay^days_since_last_decay`), materialized on touch, regime-INVARIANT (no per-wrap sweep). Separate retrieval threshold (0.2 → goes silent) from GC threshold (0.03 → deleted) + homeostatic per-node-outgoing-budget normalization (single-pass, deterministic — the Matthew/concentration fix).
+- **Lifecycle**: rename as a first-class alias (carries earned edges, preserving `first_linked_at`); the **homonym guard** — composting/severing a concept deletes its edges and bumps its generation so a future pattern re-using the NAME starts clean (`semantic_homonym_edge_contamination` structurally prevented).
+- All logical-clock-threaded (`today`, never wall-clock inside the mechanics; decay floors at 0 days — the spore-081 discipline); the Store-wrapper date default is the LOCAL wrap clock, matching `validated_save_continuity`.
+
+### Added — public API + CLI
+
+- New `Store` methods: `seed_pattern_co_graduation`, `drain_co_surface_events`, `get_pattern_associations`, `pattern_association_stats`, `rename_pattern_association`, `sever_pattern_concept`, `gc_pattern_associations` (all `read_only`-rejecting + `_defer_commit`-aware). New `PatternAssociationPair` / `PatternAssociationStats` types. `GraduationResult.graduated_names` (the co-activation set, derived at the validated site).
+- New CLI subcommand `anneal pattern-associations` (`--stats` graph health incl. the echo-chamber `concentration` canary; `--name` lists incident edges by effective strength). Shadow-mode telemetry surface.
+
+### Apparatus
+
+Full 4-layer. L2 caught a rename provenance-corruption bug; **L3 codex (non-replaceable) caught two HIGH** — best-effort seeding rolling back the wrap's Hebbian DML inside the batch, and a producer-write vs spool-rotation race — both fixed (post-commit seeding; deferred-unlink rotation) with regression tests; plus the logical-clock-at-the-wrapper-default and per-drain burst-damp findings. kimi caught within-batch event_id dedup. L4 verified the assembled pipeline end-to-end (11/11) including the load-bearing shadow invariant (a recall-hook run leaves the pattern graph untouched). 34 new library tests (1502 total), mypy clean. The flow-side producer (recall hook spool) + drain (`anneal_dualwrite`) + validation oracle (`pattern_graph_oracle.py`) live in the flow harness, not the library (harness-neutral by design).
+
 ## [0.8.5] — 2026-06-12
 
 The **AM-PROVENANCE** release (Slice A of the AM-LINKGATE-DECAY arc — the *grounding* half). A mature top-tier pattern can now record WHY it earned its level without being nagged to retire it every wrap. A 3x/2x Proven carried forward (re-stamped today, no fresh citation) is HELD by the v0.4.6/v0.5.0 carryforward machinery but then trips the assisted "graduate OUT or retire" `UserWarning` on EVERY wrap — a cry-wolf for a healthy stable pattern whose domain is low-variance (an ops entity wrapping nightly on near-identical telemetry — e.g. a stable email-triage rule — hit this every night). The escape it lacked: a way to stay grounded WITHOUT either re-citing near-identical evidence (which trips the cross-session-overlap "citation-pumping" gate) or going bare (no audit of why it's Nx).

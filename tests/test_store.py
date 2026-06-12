@@ -985,14 +985,18 @@ class TestValidatedSaveContinuity:
         # Mark wrap as in progress
         prepare_wrap(store)
 
-        # Build continuity with a real 2x citation so graduation fires
+        # Build continuity with a real 2x citation so graduation fires. Co-cite
+        # BOTH episodes (the slow-load observation AND the caching decision) so the
+        # graduation forms a Hebbian link — models correct co-citation and keeps
+        # AM-LINKGATE Signal C silent (a lone-id citation here would nudge).
         text = (
             f"# Test — Memory (v1)\n\n"
             f"## State\nWorking on performance.\n\n"
             f"## Patterns\n"
             f"thought: database slow under load triggers caching"
             f" | 2x ({today})"
-            f" [evidence: {ep1.id[:8]} \"database slow under load\"]\n\n"
+            f" [evidence: {ep1.id[:8]}, {ep2.id[:8]} \"the slow-load"
+            f" observation and the caching decision both validate this\"]\n\n"
             f"## Decisions\n"
             f"[decided(rationale: \"speed\", on: \"{today}\")] Use caching\n\n"
             f"## Context\nOptimizing database layer.\n"

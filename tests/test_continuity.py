@@ -4724,6 +4724,58 @@ class TestAmWarn:
         assert result["association_warning"] is None
         assert result["associations_formed"] == 0
 
+    def test_amlinkgate_warns_on_multiepisode_single_citation(self, tmp_path):
+        # Signal C (AM-LINKGATE): a multi-episode session graduates a pattern but
+        # cites a SINGLE episode -> no co-citation pair offered -> 0 links form.
+        # v0.4.2 excused this as "nothing to co-cite = healthy"; that hid the
+        # dominant under-wiring habit. Signal C surfaces it — but as a DISCIPLINE
+        # REMINDER, not a proven defect (this same shape is the benign lone-genuine-
+        # evidence case when only one episode truly applies). So the warning must
+        # fire AND be worded as a nudge with the no-padding carve-out, never as a
+        # structural defect claim.
+        text = (
+            "## State\nactive.\n\n"
+            "## Patterns\n"
+            '- under_wired | 2x (2026-06-02) [evidence: {ep0} '
+            '"single substrate observation discipline rotation citation"]\n\n'
+            "## Decisions\n- d.\n\n"
+            "## Context\n- c.\n"
+        )
+        with pytest.warns(UserWarning, match="AM-LINKGATE"):
+            result = self._save(tmp_path, text, n_episodes=2)
+        warn = result["association_warning"]
+        assert warn is not None
+        assert "AM-LINKGATE" in warn
+        # Reframed as a nudge: it must carry the no-padding carve-out + the benign
+        # exception, NOT claim the wrap is definitionally broken.
+        low = warn.lower()
+        assert "do not pad" in low
+        assert "single genuinely-relevant episode is fine" in low
+        # And it must NOT teach the unfollowable strengthen-via-wrap guidance.
+        assert "strengthen" not in low
+        assert result["associations_formed"] == 0
+        assert result["graduations_validated"] == 1
+
+    def test_prepare_instructions_require_co_citation(self, tmp_path):
+        # The root-cause fix: prepare_wrap's guidance now tells the agent to
+        # co-cite 2+ episodes to FORM a Hebbian link (a single citation wires
+        # nothing) — the instructions used to teach single-id evidence only.
+        from anneal_memory import prepare_wrap
+        store = Store(tmp_path / "instr.db", project_name="Instr")
+        store.record(
+            "a substrate observation about discipline rotation",
+            EpisodeType.OBSERVATION,
+        )
+        pkg = prepare_wrap(store)
+        store.close()
+        blob = str(pkg).lower()
+        # Assert the SPECIFIC co-citation guidance, not a generic "single"
+        # substring (brittle — "single" appears in unrelated prose). The
+        # instructions must name the FORM mechanism (co-cite 2+) AND the failure
+        # mode (a lone single-id graduation wires no direct link).
+        assert "co-cite 2+" in blob
+        assert "wires no direct link" in blob
+
     def test_silent_on_cross_session_demote_with_resolving_ids(self, tmp_path):
         """H1 regression (v0.4.2): when the ONLY graduation in a wrap is
         cross-session-demoted by the immune gate but its cited id resolves
@@ -4801,6 +4853,30 @@ class TestAmWarn:
         assert result["association_warning"] is not None
         assert "mis-wired" in result["association_warning"]
         assert result["associations_formed"] == 0
+
+    def test_amlinkgate_silent_on_cross_line_session_pair(self, tmp_path):
+        # C-vs-B boundary lock: two graduations each cite ONE different real
+        # episode. That is NOT under-wiring — the two single-id lines form a
+        # CROSS-LINE SESSION pair (ep0, ep1), so a real Hebbian link forms.
+        # cocitation_available is True (via the session pair), so Signal C's
+        # `not cocitation_available` guard excludes it; Signal B stays silent
+        # because the link DID form. No warning — single-id-per-line is fine when
+        # the lines co-form a pair. (Without this lock, a future regression could
+        # let C misfire on the exact case B already covers.)
+        text = (
+            "## State\nactive.\n\n## Patterns\n"
+            '- pattern_a | 2x (2026-06-02) [evidence: {ep0} '
+            '"first discipline rotation substrate observation"]\n'
+            '- pattern_b | 2x (2026-06-02) [evidence: {ep1} '
+            '"second discipline rotation substrate observation"]\n\n'
+            "## Decisions\n- d.\n\n## Context\n- c.\n"
+        )
+        import warnings as _w
+        with _w.catch_warnings():
+            _w.simplefilter("error")  # any AM-WARN/AM-LINKGATE warning would raise
+            result = self._save(tmp_path, text, n_episodes=2)
+        assert result["association_warning"] is None
+        assert result["associations_formed"] >= 1
 
 
 class TestBulletlessUpsertIntegration:

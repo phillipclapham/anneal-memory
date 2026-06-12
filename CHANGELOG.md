@@ -6,6 +6,19 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 > Pending: MCP crystal **lifecycle** tools (`crystallize` / `get` / `list` over MCP) for full CLI symmetry — deferred, because crystallizing OUT is a WRITE surface that pulls in the AM-CRYSTAL-OPTIN + decision-channel governance and is the wrong shape for a single MCP verb (the READ surface — recall + index — shipped in 0.8.2). AM-CHIPSCHEMA stays deferred to the Levain v2 reload (it composes with the held AM-ATTENTIONZONE). See `projects/anneal_memory/next.md`.
 
+## [0.8.4] — 2026-06-12
+
+Determinism fix for the AM-PRESERVE warm-preservation gate. `Store.upsert_pattern_history` wrote `last_seen_at` from wall-clock `datetime.now()`, ignoring the pipeline's `today`. The cross-session preservation carve-out (`_is_warm`: `today − last_seen_at`) therefore only held when `today` == wall-clock; under a deterministic/backdated run (the reason the `today` kwarg exists) the wall-clock baseline sat in the *future* of `today` → negative days → the warm carve-out could never fire → a warm-at-peak load-bearing antibody eroded one level per wrap. The same latent off-by-one existed in the production local/UTC evening-skew window (the pipeline's `today` is local `date.today()` while wall-clock UTC is already the next day).
+
+### Fixed — `last_seen_at` anchored to the pipeline clock
+
+- `upsert_pattern_history` gained a keyword-only `seen_at` (the pipeline's `today`); the canonical save pipeline passes it. `last_seen_at` is anchored to that logical date (midnight ISO-Z), coherent with the warmth gate in every case (production, evening-skew, and deterministic/backdated). The time component is not load-bearing — `_days_between` reads the date, the lexicographic recency clamp stays chronological, and precise write-time lives in the hash-chained audit trail. A full ISO-Z `seen_at` is normalized to its date; a malformed value degrades to wall-clock rather than storing an invalid timestamp.
+- This makes the `today` kwarg's deterministic-dating contract actually hold for the warm-preservation gate — previously only the per-wrap dating and saved-line dates honored it.
+
+### Apparatus
+
+Full 4-layer on the pipeline change. L1 + codex L3 converged on a local-vs-UTC guard subtlety in the first cut → resolved by always-anchoring to the logical date (eliminating the dual-clock comparison) plus `[:10]` normalization + date validation. New `TestUpsertPatternHistorySeenAt` pins all branches; the previously-red end-to-end `TestWarmRewordedPreservationEndToEnd` (the only test exercising warm-preservation through the real pipeline with deterministic dates) is now green. 1463 tests pass, mypy clean.
+
 ## [0.8.3] — 2026-06-12
 
 The **AM-LINKGATE** release: the immune system now surfaces the dominant Hebbian under-wiring habit. A graduation that cites a SINGLE episode validates the pattern but forms NO co-citation link — a direct link forms only between episodes co-cited in one evidence tag — so a single-id habit lets the association graph decay wrap after wrap until associative recall goes dark, and it never errors (the silent failure that collapsed a real graph 106 → 11 links across ~39 of 53 wraps before it was caught). This release adds a third immune signal plus corrected co-citation guidance in `prepare_wrap`, framed as a discipline reminder — not a structural defect — with an explicit no-padding carve-out.

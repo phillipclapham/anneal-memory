@@ -910,7 +910,7 @@ def _marker_reference(
 Pattern lines in {grad_sections} MUST follow this shape:
 
 ```
-- pattern_name | Nx ({today}) [evidence: <episode_id> "how episode validates pattern"]
+- pattern_name | Nx ({today}) [evidence: <episode_id1>, <episode_id2> "how BOTH episodes validate the pattern"]
 ```
 
 Required elements:
@@ -919,7 +919,11 @@ Required elements:
   digits, underscores, dots, hyphens. Examples: `acid_compliance_over_speed`,
   `connection_pooling_is_bottleneck`, `partnership_challenge_at_X_boundary`.
 - Graduation marker `| Nx ({today})` where N is 1, 2, or 3
-- For 2x and 3x: `[evidence: <8-char-episode-id> "explanation"]` is REQUIRED
+- For 2x and 3x: an `[evidence: ... "explanation"]` tag is REQUIRED (the TAG is
+  required, not a particular id count). Include 2+ episode ids when more than one
+  genuinely supports the pattern — co-citation is what FORMS the Hebbian link (see
+  "Wiring the associative graph" below). A single id is fine when only one episode
+  truly applies; do not pad to reach two.
 
 Optional FlowScript marker prefix (supported by the immune system):
 - `!` urgent / load-bearing → `- ! pattern_name | 1x ({today})`
@@ -946,9 +950,12 @@ names so the immune system can protect your patterns.
 
 ### Temporal Graduation (this is what makes the system learn)
 - New pattern from THIS session → `- pattern_name | 1x ({today})`
-- Validates existing 1x → `- pattern_name | 2x ({today}) [evidence: <episode_id> "explanation"]`
-- Validates existing 2x → `- pattern_name | 3x ({today}) [evidence: <episode_id> "explanation"]`
-- Evidence citations REQUIRED for graduations (2x and 3x). Cite the episode's 8-char ID.
+- Validates existing 1x → `- pattern_name | 2x ({today}) [evidence: <id1>, <id2> "how both episodes validate"]`
+- Validates existing 2x → `- pattern_name | 3x ({today}) [evidence: <id1>, <id2> "how both episodes validate"]`
+- Evidence citations REQUIRED for graduations (2x and 3x). Cite 2+ episode 8-char
+  IDs that co-support the pattern — co-citation forms the Hebbian link. A single id
+  is acceptable ONLY when just one episode genuinely supports the pattern (do not
+  pad with unrelated ids to hit two).
 - **Preserved (still true, but NOT re-exercised this session): KEEP the pattern's
   EXISTING date and evidence — do NOT re-stamp `({today})`.** The date marks when the
   pattern was last genuinely grounded. Re-stamping today's date on a pattern you only
@@ -976,9 +983,28 @@ names so the immune system can protect your patterns.
   shape as an INDENTED line under a pattern — any such line in this section is
   read as a pattern.
 
-**Example:**
+### Wiring the associative graph (CO-CITATION — required to form Hebbian links)
+A lone single-id graduation wires no DIRECT link: a direct Hebbian link forms between
+episodes CO-CITED in ONE evidence tag (same line, 2+ ids). (Two separate single-id
+graduation lines CAN still form a weaker SESSION-level pair across the wrap — but
+rely on same-line co-citation, not that incidental path, and a single-graduation wrap
+forms nothing at all.) Otherwise the graph only decays — every wrap erodes it and
+nothing replenishes it, until associative recall (the on-demand pattern surfacing the
+whole system depends on) goes dark. So, every wrap:
+- **FORM:** co-cite 2+ THIS-session episodes in a graduating pattern's evidence —
+  `[evidence: <id1>, <id2> "how BOTH episodes validate the pattern"]`. Cite episodes
+  that genuinely co-support the pattern; do not pad with unrelated ids. A single id
+  is fine when only one episode truly applies — co-cite when more than one does.
+- A wrap that graduates patterns but forms ZERO links (every graduation cited a lone
+  id when pairs were available) is under-wired — the immune system flags it
+  (AM-LINKGATE). NOTE: strengthening EXISTING links against decay is NOT done by
+  re-citing in a wrap — wrapped episodes leave the current-wrap window, so a
+  re-citation dead-ids. A use-driven strengthening counterforce (strengthen the
+  pairs that get co-retrieved) is a separate arc; do not attempt it from the wrap.
+
+**Example (note the co-citation — two ids per graduation, not one):**
 ```
-- acid_compliance_over_speed | 2x ({today}) [evidence: 4931b6a8 "PostgreSQL chosen for ACID guarantees"]
+- acid_compliance_over_speed | 2x ({today}) [evidence: 4931b6a8, 7c2d1e90 "both the migration post-mortem AND the load-test trace chose PostgreSQL for ACID guarantees"]
 - connection_pooling_bottleneck | 1x ({today})
 - horizontal_scaling_strategy | 1x ({today})
 ```
@@ -2270,15 +2296,35 @@ def validated_save_continuity(
         for cf in grad_result.carried_forward
     ]
 
-    # AM-WARN (v0.4.2): detect the dead-Hebbian-graph mis-wire. Two structural
-    # signals, both false-positive-free — a healthy wrap that simply had nothing
-    # to co-cite (no graduations, or a single resolved citation) stays silent:
+    # AM-WARN (v0.4.2) + AM-LINKGATE (v0.8.3): detect the dead-Hebbian-graph
+    # mis-wire. THREE signals — but they are NOT all the same kind. (A) and (B)
+    # are STRUCTURAL and false-positive-free: they fire only on a genuine
+    # mis-wire (citations that resolve to nothing / a write path that drops
+    # available pairs). (C) is a DISCIPLINE REMINDER, not a structural alarm — it
+    # has a benign case (a wrap whose graduations each had only ONE genuinely
+    # relevant episode), so it is worded as a nudge, never as a proven defect, and
+    # must not push toward padding. A wrap with NO graduations at all (a pure
+    # state/narrative wrap) stays silent on all three.
     #   (A) graduated patterns carried evidence citations but NONE resolved to an
     #       episode in this store (e.g. ids minted in another namespace) -> the
     #       graph cannot form and stays dead. This is the
     #       invisible_infrastructure_failure that ran silent for ~10 wraps.
     #   (B) co-citation pairs WERE available but nothing formed or strengthened
     #       -> the association write path itself is mis-wired.
+    #   (C) AM-LINKGATE: graduations validated and their citations resolved, but
+    #       NO graduation offered a co-citation pair -> 0 links form and the graph
+    #       only decays. v0.4.2 deliberately excused this as "nothing to co-cite =
+    #       healthy"; that excusal HID the dominant under-wiring habit (single-id
+    #       graduation is the minimum that passes the format yet wires nothing).
+    #       But single-id is ALSO correct when only one episode truly supports the
+    #       pattern — so (C) REMINDS the agent to co-cite 2+ when more than one
+    #       episode genuinely applies; it must NOT push toward padding with
+    #       unrelated ids (the anti-pattern the wrap instructions forbid).
+    #       NB (AM-LINKGATE-DECAY, separate arc): (C) catches under-wiring DURING
+    #       graduations; it does NOT address decay BETWEEN them. Links form only on
+    #       graduation, but decay runs every wrap, so a sparse-graduation stretch
+    #       erodes the graph even with perfect co-citation. The use-driven
+    #       strengthening counterforce is owned by that arc, not by this signal.
     association_warning: str | None = None
     # AM-CARRYFORWARD (v0.4.6) interaction: a CITED carried-forward line is a
     # graduation that carried a citation which failed to resolve this wrap —
@@ -2336,6 +2382,35 @@ def validated_save_continuity(
         association_warning = (
             "Co-citation pairs were available this wrap but 0 associations formed "
             "or strengthened — the association write path appears mis-wired."
+        )
+    elif (
+        len(episodes) >= 2
+        and grad_result.validated > 0
+        and resolved_any
+        and not cocitation_available
+        and assoc_formed == 0
+        and assoc_strengthened == 0
+    ):
+        # Signal C (AM-LINKGATE): graduations validated + citations resolved, but
+        # NO graduation offered a co-citation pair, so 0 links formed. Gated on
+        # >=2 episodes so a legitimately tiny session (nothing to co-cite WITH) is
+        # not nagged. This is USUALLY single-id under-wiring — but a multi-episode
+        # wrap whose graduations each had only one genuinely relevant episode is a
+        # BENIGN exception, so this is a discipline reminder, not a proven defect.
+        # (assoc_formed/assoc_strengthened == 0 in the guard are DEFENSIVE
+        # INVARIANTS: with `not cocitation_available` the write path has no pair to
+        # form or strengthen, so both are necessarily 0 — kept explicit so the
+        # branch reads as "no links happened" even if a future path could feed
+        # associations without going through the co-citation set.)
+        association_warning = (
+            f"AM-LINKGATE: {grad_result.validated} graduation(s) validated this wrap "
+            f"but no graduation offered a co-citation pair, so 0 Hebbian links formed. "
+            f"A single-id citation validates the pattern yet wires NOTHING; the graph "
+            f"then only decays, wrap after wrap, until associative recall goes dark. "
+            f"Where more than one this-session episode genuinely supports a graduating "
+            f"pattern, co-cite 2+ in its evidence to FORM a link — but do NOT pad with "
+            f"unrelated ids; a graduation with a single genuinely-relevant episode is "
+            f"fine."
         )
     if association_warning is not None:
         warnings.warn(association_warning, UserWarning, stacklevel=2)

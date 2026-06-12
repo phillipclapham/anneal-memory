@@ -237,6 +237,39 @@ MIGRATION_MANIFEST: list[MigrationEntry] = [
         ),
         "files": list(CORE_FILES),
     },
+    {
+        "version": "0.8.3",
+        "feature": "AM-LINKGATE",
+        "summary": (
+            "anneal-memory 0.8.3 hardens the Hebbian-graph wiring discipline. A "
+            "graduation that cites a SINGLE episode validates the pattern but forms "
+            "NO co-citation link — a direct link forms only between episodes "
+            "CO-CITED in one evidence tag — so a habit of single-id citations lets "
+            "the association graph decay wrap after wrap until associative recall "
+            "goes dark (this is exactly how it can fail silently — it never "
+            "errors). Two changes: (1) `prepare_wrap`'s pattern-line guidance now "
+            "teaches co-citation (cite 2+ episode ids when more than one genuinely "
+            "supports the pattern; a single id is fine when only one does — do not "
+            "pad); (2) a new immune signal (AM-WARN Signal C) NUDGES at wrap when "
+            "graduations validated but none offered a co-citation pair. It is a "
+            "discipline reminder, not a hard error — a lone genuinely-relevant "
+            "episode is a benign case. Return shape is unchanged."
+        ),
+        "suggested_edit": (
+            "If your instruction files show pattern-line EVIDENCE examples, make "
+            "sure they teach CO-CITATION, not single-id. Replace any "
+            "`[evidence: <id> \"...\"]` example with "
+            "`[evidence: <id1>, <id2> \"how BOTH episodes validate the pattern\"]` "
+            "and add one line: \"Co-citing 2+ episodes in a graduation's evidence "
+            "is what FORMS the Hebbian link; a single id validates the pattern but "
+            "wires no direct link. Cite 2+ when more than one episode genuinely "
+            "supports the pattern — do not pad to reach two.\" Strengthening "
+            "existing links against decay is NOT done by re-citing at wrap "
+            "(wrapped episodes leave the current-wrap window); that is a separate, "
+            "use-driven counterforce, not something to attempt from a wrap."
+        ),
+        "files": list(CORE_FILES),
+    },
 ]
 
 

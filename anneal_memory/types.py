@@ -510,12 +510,18 @@ class SaveContinuityResult(TypedDict):
     associations_formed: int
     associations_strengthened: int
     associations_decayed: int
-    # AM-WARN (v0.4.2): a human-readable warning when this wrap's graduated
-    # patterns carried evidence citations but produced no Hebbian links — the
-    # dead-graph mis-wire (e.g. citing ids from the wrong namespace so none
-    # resolve, the invisible_infrastructure_failure that can run silent for
-    # months). ``None`` when the write path is healthy or there was simply
-    # nothing to co-cite. Also emitted as a ``UserWarning`` at save time.
+    # AM-WARN (v0.4.2) + AM-LINKGATE (v0.8.3): a human-readable warning when this
+    # wrap's graduations did not wire the Hebbian graph. Three causes (see the
+    # AM-WARN block in continuity.py): (A) cited ids resolved to no episode in
+    # this store (wrong-namespace dead-graph, the invisible_infrastructure_failure
+    # that can run silent for months); (B) co-citation pairs were available but
+    # the write path formed/strengthened nothing; (C) AM-LINKGATE discipline
+    # reminder — graduations validated but NO graduation offered a co-citation
+    # pair, so 0 links formed (a single genuinely-relevant episode per graduation
+    # is a benign cause — (C) nudges, it does not assert a defect). ``None`` when
+    # the write path is healthy AND there was nothing under-wired to flag. Also
+    # emitted as a ``UserWarning`` at save time. (Return shape unchanged from
+    # 0.4.2 — only the set of conditions that populate it expanded.)
     association_warning: str | None
     sections: dict[str, int]  # Char count per continuity section
     wrap_result: dict[str, Any]  # WrapResult-as-dict (JSON-serializable)

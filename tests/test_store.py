@@ -342,6 +342,22 @@ class TestWrapLifecycle:
         status = store.status()
         assert status.total_wraps == 2
 
+
+class TestStatusHardening:
+    """AM-STATUS-HARDEN (spore-084): status() does a convenience char-count of the
+    continuity file. A corrupt / non-UTF8 continuity must NOT fault status()
+    itself (it is a health surface read by dashboards) — it degrades to None."""
+
+    def test_status_survives_corrupt_continuity(self, store):
+        store.continuity_path.write_bytes(b"\xff\xfe corrupt non-utf8 \x80\x81")
+        st = store.status()  # was an unguarded read_text -> UnicodeDecodeError
+        assert st is not None
+        assert st.continuity_chars is None  # couldn't measure, degraded gracefully
+
+    def test_status_reports_chars_for_valid_continuity(self, store):
+        store.continuity_path.write_text("hello flow", encoding="utf-8")
+        assert store.status().continuity_chars == len("hello flow")
+
     def test_wrap_completed_auto_prunes_when_retention_set(self, tmp_db):
         """wrap_completed auto-prunes old episodes when retention_days is set."""
         s = Store(tmp_db, retention_days=30)

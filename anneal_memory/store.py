@@ -1384,11 +1384,20 @@ class Store:
             # Association network metrics (also executes SQL)
             assoc_stats = _association_stats(self._conn, total)
 
-        # Continuity file size — file read, outside the DB boundary
+        # Continuity file size — file read, outside the DB boundary.
+        # AM-STATUS-HARDEN (spore-084): guard the read. A corrupt / non-UTF8
+        # continuity (or a delete/permission race after the exists() check) must
+        # NOT fault status() ITSELF — this is a convenience char-count, and
+        # status() is a health surface read by dashboards/consumers (e.g. the
+        # Levain v2 dashboard) that must degrade gracefully. None = "couldn't
+        # measure" (already the value when the file is absent), not a crash.
         continuity_path = self.continuity_path
         continuity_chars = None
         if continuity_path.exists():
-            continuity_chars = len(continuity_path.read_text(encoding="utf-8"))
+            try:
+                continuity_chars = len(continuity_path.read_text(encoding="utf-8"))
+            except (UnicodeDecodeError, OSError):
+                continuity_chars = None
 
         # Audit health snapshot (Diogenes ARCH finding, Apr 13 2026).
         # Cheap visibility — lazy init inside stats() if needed, no chain

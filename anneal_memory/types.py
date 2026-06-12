@@ -503,8 +503,12 @@ class SaveContinuityResult(TypedDict):
     # Because a held line does not upsert pattern_history, its warmth decays on
     # its own — a pattern that keeps failing to ground ages out. Each entry:
     # ``{"name": str, "held_level": int, "max_level_reached": int,
-    #  "days_since_grounded": int}``. Empty when nothing was held. Top-tier
-    # (3x) carries also emit a "graduate OUT to partnership.md or retire"
+    #  "days_since_grounded": int, "cited": bool, "provenance": bool}``
+    # (``cited``: v0.5.0 — did the carry hold a citation that failed to resolve
+    # [True] vs no citation at all [bare, False]; ``provenance``: Slice A — did the
+    # carry record a ``[provenance: ...]`` audit marker, which EXCLUDES it from the
+    # graduate-OUT notice). Empty when nothing was held. Top-tier (3x) carries
+    # WITHOUT provenance also emit a "graduate OUT to partnership.md or retire"
     # ``UserWarning`` (assisted, not silent-loss).
     carried_forward: list[dict[str, Any]]
     associations_formed: int

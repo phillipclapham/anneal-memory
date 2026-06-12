@@ -5377,3 +5377,176 @@ class TestBarePreserveEndToEnd:
                 assert "(needs-evidence)" in f.read()
         finally:
             store.close()
+
+
+class TestProvenanceEndToEnd:
+    """AM-PROVENANCE (Slice A) through the real save pipeline: a mature Proven
+    carried forward BARE but carrying a ``[provenance: founding-ids]`` marker is
+    HELD at level (same warmth/level gate as the bare path) AND excluded from the
+    "graduate OUT or retire" assisted notice — it is a deliberately-grounded
+    mature pattern, not one stuck on the citation treadmill. Provenance is INERT:
+    it forms no Hebbian link, does not advance last_seen_at, and never fabricates
+    an AM-WARN dead-namespace alarm. It silences the NOTICE only — it does NOT
+    override the hold gate, so a COLD provenance line still ages out.
+
+    Regression anchor: Argus's stable email-classification Provens (low-variance
+    ops telemetry) tripped the graduate-OUT notice every single wrap — the
+    cry-wolf failure (protection-masks-the-diagnostic) this closes."""
+
+    def _prime(self, tmp_path, db, name, max_level, last_seen):
+        store = Store(str(tmp_path / db), project_name="PROVCF")
+        meta = store.load_meta()
+        meta["citations_seen"] = True
+        store.save_meta(meta)
+        store.seed_pattern_max_level(name, max_level, last_seen_at=last_seen)
+        store.record("a second-session observation", EpisodeType.OBSERVATION)
+        return store
+
+    def _text(self, body):
+        return (
+            "# PROVCF — Memory (v1)\n\n## State\nActive.\n\n## Patterns\n"
+            f"{body}\n\n## Decisions\nNone.\n\n## Context\nSession.\n"
+        )
+
+    def test_warm_provenance_held_and_notice_silenced(self, tmp_path):
+        store = self._prime(
+            tmp_path, "prov_warm.db", "platform_security", 3, "2026-06-04T00:00:00Z"
+        )
+        try:
+            text = self._text(
+                "  platform_security | 3x (2026-06-05) [provenance: a1b2c3d4, e5f6a7b8]"
+            )
+            prepare_wrap(store)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                r = validated_save_continuity(store, text, today="2026-06-05")
+            # Held at level, recorded as provenance, NOT counted as a live citation.
+            assert r["bare_demoted"] == 0
+            assert len(r["carried_forward"]) == 1
+            cf = r["carried_forward"][0]
+            assert cf["name"] == "platform_security" and cf["held_level"] == 3
+            assert cf["provenance"] is True
+            assert cf["cited"] is False
+            # The graduate-OUT notice is SILENCED for a provenance carry.
+            assert not any("graduate OUT" in str(w.message) for w in caught)
+            # Inert to AM-WARN: no fabricated dead-namespace alarm.
+            assert r["association_warning"] is None
+            # Provenance survives into the saved neocortex (the durable audit trail).
+            with open(r["path"]) as f:
+                saved = f.read()
+            assert "[provenance: a1b2c3d4, e5f6a7b8]" in saved
+            assert "platform_security | 3x (2026-06-05) (carried-forward)" in saved
+            # Inert to recency: a provenance carry never upserts, so last_seen_at
+            # did NOT advance (the failing-streak decay is preserved).
+            assert (
+                store.get_pattern_history("platform_security")["last_seen_at"]
+                == "2026-06-04T00:00:00Z"
+            )
+        finally:
+            store.close()
+
+    def test_bare_without_provenance_still_warns(self, tmp_path):
+        # Control: the SAME pattern carried bare WITHOUT provenance still trips the
+        # graduate-OUT notice (correctly — genuinely ungrounded), and the reworded
+        # notice names provenance as the actionable fix.
+        store = self._prime(
+            tmp_path, "prov_none.db", "platform_security", 3, "2026-06-04T00:00:00Z"
+        )
+        try:
+            text = self._text(
+                "  platform_security | 3x (2026-06-05) — carried, no grounding"
+            )
+            prepare_wrap(store)
+            with pytest.warns(
+                UserWarning, match="no resolving citation and no provenance"
+            ):
+                r = validated_save_continuity(store, text, today="2026-06-05")
+            assert r["carried_forward"][0]["provenance"] is False
+        finally:
+            store.close()
+
+    def test_cold_provenance_still_ages_out(self, tmp_path):
+        # Provenance silences the NOTICE; it does NOT override the warmth gate. A
+        # COLD mature pattern with provenance still sunsets — provenance cannot
+        # immortalize a pattern that has decayed past the cold threshold.
+        store = self._prime(
+            tmp_path, "prov_cold.db", "platform_security", 3, "2026-05-01T00:00:00Z"
+        )
+        try:
+            text = self._text(
+                "  platform_security | 3x (2026-06-05) [provenance: a1b2c3d4, e5f6a7b8]"
+            )
+            prepare_wrap(store)
+            r = validated_save_continuity(store, text, today="2026-06-05")
+            assert r["bare_demoted"] == 1
+            assert r["carried_forward"] == []
+            with open(r["path"]) as f:
+                assert "(needs-evidence)" in f.read()
+        finally:
+            store.close()
+
+    def test_cited_dead_carry_with_provenance_silenced(self, tmp_path):
+        # L1 MED-2: the CITED carryforward path (a warm at-peak line whose fresh
+        # [evidence:] failed to resolve) ALSO honors provenance, symmetric with
+        # the bare path. A stale citation PLUS provenance is a deliberately-
+        # grounded mature pattern → the graduate-OUT nag is silenced there too.
+        # AM-WARN's namespace alarm STILL fires (cited=True; provenance does not
+        # mask the real dead-id bug — the masking-hazard guard is preserved).
+        store = Store(str(tmp_path / "prov_cited.db"), project_name="PROVCF")
+        store.record("an observation", EpisodeType.OBSERVATION)
+        store.seed_pattern_max_level(
+            "platform_security", 3, last_seen_at="2026-06-04T00:00:00Z"
+        )
+        try:
+            text = self._text(
+                '  platform_security | 3x (2026-06-05) '
+                '[evidence: deadbeef "stale thin"] [provenance: a1b2c3d4, e5f6a7b8]'
+            )
+            prepare_wrap(store)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                r = validated_save_continuity(store, text, today="2026-06-05")
+            assert len(r["carried_forward"]) == 1
+            cf = r["carried_forward"][0]
+            assert cf["held_level"] == 3
+            assert cf["cited"] is True  # it DID carry a citation
+            assert cf["provenance"] is True  # ...and provenance
+            # graduate-OUT nag silenced on the cited path too (MED-2 fix).
+            assert not any("graduate OUT" in str(w.message) for w in caught)
+            # ...but the dead-namespace alarm is NOT masked.
+            assert r["association_warning"] is not None
+            assert "ZERO episodes" in r["association_warning"]
+        finally:
+            store.close()
+
+    def test_provenance_before_evidence_is_loud_not_silent(self, tmp_path):
+        # codex L3 HIGH: `[provenance:]` placed BEFORE `[evidence:]` makes the
+        # evidence non-adjacent to the marker, so _GRADUATION_RE misses it and the
+        # line routes to the bare path. Without the guard it would be SILENTLY held
+        # as a bare provenance carry, dropping the live evidence. With the guard: a
+        # LOUD warning names it, and the line is left UNCHANGED (non-destructive —
+        # not held, not demoted), so the agent fixes the tag order without losing
+        # the level.
+        store = self._prime(
+            tmp_path, "prov_malformed.db", "platform_security", 3, "2026-06-04T00:00:00Z"
+        )
+        try:
+            text = self._text(
+                "  platform_security | 3x (2026-06-05) "
+                '[provenance: a1b2c3d4] [evidence: deadbeef "x"]'
+            )
+            prepare_wrap(store)
+            with pytest.warns(UserWarning, match="NOT adjacent"):
+                r = validated_save_continuity(store, text, today="2026-06-05")
+            # Not held as a clean carry, not demoted — left intact for the agent.
+            assert r["carried_forward"] == []
+            assert r["bare_demoted"] == 0
+            with open(r["path"]) as f:
+                saved = f.read()
+            # Line survives unchanged: level intact, both tags still present.
+            assert "platform_security | 3x (2026-06-05)" in saved
+            assert "[evidence: deadbeef" in saved
+            assert "(carried-forward)" not in saved
+            assert "(needs-evidence)" not in saved
+        finally:
+            store.close()

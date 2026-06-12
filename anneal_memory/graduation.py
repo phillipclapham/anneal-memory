@@ -186,6 +186,30 @@ _CONTRADICTS_RE = re.compile(
 # surfaces as audit signal `proven_without_contradicts_declaration`.
 _NO_CONTRADICTS_RE = re.compile(r"\[no-contradicts\]")
 
+# Matches `[provenance: id, id]` — an INERT grounding-audit annotation on a
+# mature carried-forward pattern. AM-PROVENANCE (Slice A): records the founding
+# episode ids that ORIGINALLY earned the pattern its level, frozen for audit.
+# Distinct from `[evidence:]` in EVERY live-layer sense — graduation validation,
+# the cross-session immune gate, and Hebbian co-citation all key on
+# `[evidence:]`, so provenance forms NO link, advances NO `last_seen_at`, and
+# trips NO cross-session-overlap check. It is purely the durable answer to "why
+# is this 3x?" after the founding episodes have consolidated out of the live
+# citation window (the bare-carry case the AM-CARRYFORWARD "graduate OUT or
+# retire" notice otherwise nags on every wrap). The agent attaches it
+# DELIBERATELY; it is NEVER auto-minted from a failed citation (a failed
+# resolution may be wrong-namespace garbage, and the library does no semantic
+# judgment). No quoted explanation — that prose lives in
+# pattern_history.explanation_corpus. Comma-separated hex ids.
+#
+# ReDoS-safe structure (L1): the explicit ``id (, id)*`` form — NOT the
+# ``[a-fA-F0-9, ]*`` blob whose internal space overlaps a trailing ``\s*`` and
+# backtracks quadratically on an unclosed marker. Mirrors :data:`_CONTRADICTS_RE`,
+# the codebase's existing non-vulnerable idiom (rather than propagating the
+# accepted-but-quadratic class _GRADUATION_RE/_PATTERN_LINE_WITH_EVIDENCE_RE ship).
+_PROVENANCE_RE = re.compile(
+    r"\[provenance:\s*([a-fA-F0-9]+(?:\s*,\s*[a-fA-F0-9]+)*)\s*\]"
+)
+
 
 @dataclass
 class ProvenWithoutDeclaration:
@@ -307,6 +331,11 @@ class GraduationResult:
     # a CarriedForward. Empty when nothing was held (no history, cold, or never
     # earned the level). See CarriedForward for the full mechanism.
     carried_forward: list["CarriedForward"] = field(default_factory=list)
+    # AM-PROVENANCE (Slice A, codex L3 HIGH): names of today-dated 2x/3x lines that
+    # carry an [evidence:] tag non-adjacent to their marker (so it missed validation)
+    # — the silent-evidence-drop class. Surfaced as a loud UserWarning at the save
+    # layer; the lines themselves are left UNCHANGED (non-destructive).
+    malformed_evidence_carries: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -395,6 +424,18 @@ class CarriedForward:
     # a "citation resolved to zero" alarm on a wrap that has no citations. True
     # for the cited path (default, backward-compatible), False for the bare path.
     cited: bool = True
+    # AM-PROVENANCE (Slice A): did this carried line carry a
+    # ``[provenance: id, ...]`` grounding-audit marker? True = the agent
+    # deliberately recorded the pattern's founding ids → it is a grounded MATURE
+    # pattern, not one stuck on the citation treadmill, so the AM-CARRYFORWARD
+    # "graduate OUT or retire" assisted notice stays SILENT for it. ``cited``
+    # stays False for a provenance carry (it carried no live ``[evidence:]``), so
+    # AM-WARN does not fabricate a "citation resolved to zero" alarm — provenance
+    # is inert to the namespace/Hebbian signal exactly like a bare carry.
+    # Provenance silences the NOTICE only; it does NOT override the warmth/level
+    # hold gate (a cold mature pattern still ages out — graduate it OUT to a
+    # stable home rather than immortalizing it with a marker).
+    provenance: bool = False
 
 
 @dataclass
@@ -514,6 +555,10 @@ def validate_graduations(
     any_citation_resolved = False
     cross_session_collisions: list[CrossSessionCollision] = []
     carried_forward: list[CarriedForward] = []
+    # AM-PROVENANCE (Slice A, codex L3 HIGH): today-dated 2x/3x lines that carry an
+    # [evidence:] tag NOT adjacent to their marker (so _GRADUATION_RE missed it) and
+    # would otherwise be silently held as a bare carry, dropping the live evidence.
+    malformed_evidence_carries: list[str] = []
 
     for i, line in enumerate(lines):
         # Track section boundaries
@@ -925,6 +970,33 @@ def validate_graduations(
             skipped_non_today += 1
             continue
 
+        # AM-PROVENANCE (Slice A, codex L3 HIGH): a today-dated 2x/3x marker with an
+        # [evidence:] tag in ITS TAIL (after the marker) that did not match
+        # _GRADUATION_RE means the evidence is NOT adjacent to the marker (e.g. a
+        # [provenance:] tag sits between them: `name | 3x (date) [provenance: x]
+        # [evidence: y]`). Routing it through the bare carryforward below would
+        # SILENTLY hold it and drop the live evidence (no validation, no Hebbian link,
+        # no last_seen advance, no AM-WARN — the silent, text-preserving failure
+        # guidance alone cannot close). Do NOT route it: flag it loudly (UserWarning at
+        # the save layer) and leave the line UNCHANGED — non-destructive, so the agent
+        # fixes the tag order next wrap without losing the level.
+        #
+        # Scope to the TAIL after THIS bare marker (not the whole line): on a malformed
+        # MULTI-marker line `name_a | 2x (d)[evidence: x] name_b | 2x (d)`, the bare
+        # regex correctly matches name_b (name_a's marker is skipped — evidence follows
+        # it), and name_b's tail has no evidence, so name_b still sunsets normally.
+        # Whole-line scope would mis-flag name_b on account of name_a's evidence (the
+        # multi-marker span-precision class codex's prior AM-PERNAME-LINEBIND work
+        # established). The benign reverse order `[evidence:] [provenance:]` matches
+        # _GRADUATION_RE and never reaches here — so this fires ONLY on the dangerous
+        # ordering, no false positive on a legitimate cited+provenance line.
+        if "[evidence:" in line[bare_match.end():]:
+            name_m = _NAMED_PATTERN_RE.match(line)
+            malformed_evidence_carries.append(
+                name_m.group(1) if name_m else line.strip()
+            )
+            continue
+
         # AM-PRESERVE-BARE-PATH (v0.5.0): before the fail-safe sunset ratchets
         # this bare graduation down, check whether it is a load-bearing Proven
         # carried forward — at/below its earned high-water mark AND warm. The
@@ -986,6 +1058,7 @@ def validate_graduations(
         any_citation_resolved=any_citation_resolved,
         cross_session_collisions=cross_session_collisions,
         carried_forward=carried_forward,
+        malformed_evidence_carries=malformed_evidence_carries,
     )
 
 
@@ -1328,6 +1401,7 @@ _WIKILINK_RE = re.compile(r"\[\[([^\[\]]+)\]\]")
 _SCAFFOLD_TAG_RE = re.compile(
     r"\[evidence:[^\]]*\]?"
     r"|\[contradicts:[^\]]*\]?"
+    r"|\[provenance:[^\]]*\]?"  # AM-PROVENANCE: mop the audit marker from the snippet
     r"|\[(?:no-contradicts|Proven|Developing|ungrounded|needs-evidence"
     r"|cross-session-overlap|carried-forward)\]",
     re.IGNORECASE,
@@ -1797,6 +1871,7 @@ def _carryforward_history_decision(
     carryforward_cold_days: int,
     *,
     cited: bool,
+    provenance: bool = False,
 ) -> CarriedForward | None:
     """The shared level+warmth core of the carryforward decision.
 
@@ -1843,6 +1918,7 @@ def _carryforward_history_decision(
         # the audit surface.
         days_since_grounded=max(0, days),
         cited=cited,
+        provenance=provenance,
     )
 
 
@@ -1951,11 +2027,22 @@ def _carryforward_decision(
             for prior in priors:
                 if len(_meaningful_word_overlap(explanation, prior)) >= cross_session_overlap_threshold:
                     return None
+    # AM-PROVENANCE (Slice A, L1 MED-2): thread provenance through the CITED path
+    # too, symmetric with the bare path. A warm at-peak line whose fresh
+    # ``[evidence:]`` failed to resolve but which ALSO records
+    # ``[provenance: founding-ids]`` is a deliberately-grounded mature pattern →
+    # excluded from the graduate-OUT nag. Without this, the cited-but-stale carry
+    # kept nagging even when provenance was present, half-closing the cry-wolf the
+    # feature exists to shut. ``cited`` stays True (the line DID carry a citation,
+    # so AM-WARN's cited_graduations count still surfaces a real dead-namespace
+    # bug); ``provenance`` only governs the assisted notice.
+    has_provenance = _PROVENANCE_RE.search(line) is not None
     # carryforward_cold_days narrowed to int by the early-return guard above. The
     # cited path carried a CITATION that failed to resolve this wrap -> cited=True
     # so AM-WARN's cited_graduations count still surfaces a dead-namespace bug.
     return _carryforward_history_decision(
-        name, level, history, today, carryforward_cold_days, cited=True
+        name, level, history, today, carryforward_cold_days,
+        cited=True, provenance=has_provenance,
     )
 
 
@@ -2026,11 +2113,18 @@ def _bare_carryforward_decision(
     history = pattern_history_lookup(name)
     if not history:
         return None
+    # AM-PROVENANCE (Slice A): a bare carry that carries a ``[provenance: id,...]``
+    # marker is the agent's deliberate "this mature pattern is grounded, here are
+    # its founding ids" — record it so the "graduate OUT or retire" notice stays
+    # silent. Detection only; the warmth/level hold gate is UNCHANGED (provenance
+    # silences the notice, it does not immortalize a cold pattern).
+    has_provenance = _PROVENANCE_RE.search(line) is not None
     # carryforward_cold_days narrowed to int by the early-return guard above. The
     # bare path carried NO citation -> cited=False so AM-WARN does NOT fabricate a
     # "citation resolved to zero episodes" alarm on a wrap that has no citations.
     return _carryforward_history_decision(
-        name, level, history, today, carryforward_cold_days, cited=False
+        name, level, history, today, carryforward_cold_days,
+        cited=False, provenance=has_provenance,
     )
 
 

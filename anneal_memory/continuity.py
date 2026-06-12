@@ -965,6 +965,27 @@ names so the immune system can protect your patterns.
   `({today})` ONLY when you genuinely re-exercised the pattern with NEW evidence this
   session; otherwise carry it forward verbatim with its prior date, and it ages out
   naturally at 7 days (below) if never re-grounded.
+- **Mature top-tier pattern, still ACTIVE but low-variance evidence → provenance.**
+  A 3x/2x Proven re-stamped to `({today})` because it IS still live, but whose fresh
+  evidence is too near-identical to cite without tripping the `(cross-session-overlap)`
+  gate (the repetitive-domain / daily-telemetry case — e.g. a stable email-triage
+  rule), carries `[provenance: <founding_id1>, <founding_id2>]`: the episode ids that
+  ORIGINALLY earned it its level. Provenance is INERT — it forms no Hebbian link,
+  advances no recency, and is NOT re-validated — the durable audit answer to "why is
+  this Nx?" that survives after the founding episodes age out of the citation window.
+  A top-tier carry with NEITHER fresh evidence NOR provenance is nagged ("graduate OUT
+  or retire"); provenance silences that for a genuinely grounded mature pattern.
+  - **Provenance REPLACES the evidence tag — NEVER put both on one line.** If you
+    genuinely have fresh citable evidence, use `[evidence:]` (it forms Hebbian links —
+    strictly better) and you do NOT need provenance; provenance is ONLY for when fresh
+    evidence would collide on the overlap gate. A line carrying BOTH is malformed (the
+    `[evidence:]` may be silently dropped depending on tag order) — use one or the other.
+  - **Why re-stamp `({today})` here when "Preserved" above said don't?** The today-stamp
+    is exactly what exposes the line to the warmth/level hold gate — so a provenance
+    pattern that goes cold STILL ages out (provenance is not immortality; it only
+    silences the nag). An OLD-dated provenance line is simply skipped like any other
+    preserved line. Do NOT slap provenance on to dodge retirement — it does not stop
+    natural cold-decay, it only records grounding.
 - Patterns marked `(ungrounded)` need FRESH evidence from THIS session to re-graduate.
 - Patterns marked `(cross-session-overlap)` were demoted because today's explanation
   reused too much vocabulary from prior sessions; compose new evidence with
@@ -2297,6 +2318,10 @@ def validated_save_continuity(
             # no citation (v0.5.0 path). Lets operators reconcile AM-WARN's
             # cited_graduations count against the held set.
             "cited": cf.cited,
+            # AM-PROVENANCE (Slice A): True = the held line carried a
+            # ``[provenance: id, ...]`` grounding-audit marker (a deliberately-
+            # grounded mature pattern) → excluded from the graduate-OUT notice.
+            "provenance": cf.provenance,
         }
         for cf in grad_result.carried_forward
     ]
@@ -2420,25 +2445,62 @@ def validated_save_continuity(
     if association_warning is not None:
         warnings.warn(association_warning, UserWarning, stacklevel=2)
 
-    # AM-CARRYFORWARD (v0.4.6): assisted "graduate OUT or retire" surface.
-    # A TOP-tier pattern (max_level_reached >= 3) that needed the hold this
-    # wrap is a candidate to either graduate OUT to a stable home (e.g.
-    # partnership.md, where a permanent truth lives without the per-wrap
-    # citation treadmill) or RETIRE — never silently lost. Emitted as a
-    # UserWarning (mirroring AM-WARN) so the signal is loud, not buried in a
+    # AM-CARRYFORWARD (v0.4.6) + AM-PROVENANCE (Slice A): assisted "ground,
+    # graduate OUT, or retire" surface for TOP-tier patterns held this wrap.
+    # A carry that records ``[provenance: founding-ids]`` is a DELIBERATELY-
+    # grounded mature pattern — the audit answer to "why is this 3x?" survives
+    # even though its founding episodes consolidated out of the live citation
+    # window — so it is NOT on a treadmill and is EXCLUDED here (held silently).
+    # What remains are top-tier carries with NEITHER a resolving citation NOR
+    # provenance: a genuinely ungrounded permanent claim worth reviewing. Emitted
+    # as a UserWarning (mirroring AM-WARN) so the signal is loud, not buried in a
     # return field. Lower-tier carries (2x) are held silently — they are the
     # normal domain-blind-erosion-fix case, not a graduate-out decision.
+    #
+    # The prior text said "held at level despite an ungrounded CITATION" — wrong
+    # for the v0.5.0 bare path (a bare carry never had a citation to be
+    # ungrounded). Reworded to "no resolving citation and no provenance," which is
+    # accurate for both the bare and the cited-failed paths, and made actionable
+    # by naming provenance as fix (a). (This is what an ops entity on low-variance
+    # telemetry — e.g. Argus's stable email-classification Provens — hit: the
+    # notice fired every wrap on a healthy mature pattern, the cry-wolf failure
+    # mode AM-PROVENANCE closes.)
     graduate_out = sorted(
-        {cf.name for cf in grad_result.carried_forward if cf.max_level_reached >= 3}
+        {
+            cf.name
+            for cf in grad_result.carried_forward
+            if cf.max_level_reached >= 3 and not cf.provenance
+        }
     )
     if graduate_out:
         warnings.warn(
             f"{len(graduate_out)} top-tier (3x) pattern(s) were carried forward "
-            f"this wrap (held at level despite an ungrounded citation): "
-            f"{', '.join(graduate_out)}. A permanent truth that keeps needing the "
-            f"hold is a candidate to graduate OUT to a stable home (e.g. "
-            f"partnership.md) or retire — review, don't leave it on the citation "
-            f"treadmill.",
+            f"this wrap with no resolving citation and no provenance: "
+            f"{', '.join(graduate_out)}. A permanent truth held without grounding "
+            f"is a candidate to (a) record its founding episode ids as "
+            f"`[provenance: id, ...]` so the audit of why it earned its level "
+            f"survives the founding episodes ageing out, (b) graduate OUT to a "
+            f"stable home (e.g. partnership.md), or (c) retire — review, don't "
+            f"leave it on the citation treadmill.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    # AM-PROVENANCE (Slice A, codex L3 HIGH): a today-dated graduation line carrying
+    # an [evidence:] tag NON-adjacent to its `| Nx (date)` marker (e.g. a [provenance:]
+    # tag wedged between them) misses validation entirely — the evidence forms no link
+    # and does not ground the pattern, silently. This is the silent-data-loss class,
+    # not a style nit, so surface it LOUD. The line was left unchanged (non-destructive
+    # — fix the tag order next wrap, or use [provenance:] alone).
+    if grad_result.malformed_evidence_carries:
+        malformed = sorted(set(grad_result.malformed_evidence_carries))
+        warnings.warn(
+            f"{len(malformed)} graduation line(s) carry an [evidence:] tag that is "
+            f"NOT adjacent to the `| Nx (date)` marker (another tag — e.g. "
+            f"[provenance:] — sits between them): {', '.join(malformed)}. That "
+            f"evidence will NOT validate or form a Hebbian link. Move [evidence:] "
+            f"immediately after the marker, OR use [provenance:] alone (never both "
+            f"on one line). The line(s) were left unchanged.",
             UserWarning,
             stacklevel=2,
         )

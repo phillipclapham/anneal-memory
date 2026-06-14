@@ -3354,10 +3354,12 @@ class TestL3CodexFixes:
     def test_pipeline_tmp_files_share_token_prefix(
         self, tmp_path, monkeypatch
     ):
-        """Continuity + meta tmp files written by the canonical
-        pipeline must share a token prefix (the first 12 hex chars
-        of the wrap_token) so operator recovery can pair them.
-        L3 codex HIGH.
+        """Continuity + meta tmp files written by the canonical pipeline must
+        share a <token12>-<uuid8> PAIR ID so operator recovery can pair them,
+        AND the per-attempt <uuid8> makes the path unique so two concurrent
+        saves are negligibly unlikely to collide on one tmp (the pair-id's
+        <token12> prefix is the first 12 hex chars of the wrap_token). L3 codex
+        HIGH (pairing) + AM-CONTLOCK L3 codex HIGH (uniqueness).
         """
         from anneal_memory import validated_save_continuity
 
@@ -3396,9 +3398,12 @@ class TestL3CodexFixes:
             assert cont_token == meta_token, (
                 f"tmp filenames not paired: {cont_token} != {meta_token}"
             )
-            # The shared token must be the 12-char prefix of the
-            # real wrap_token.
-            assert cont_token == token[:12]
+            # The shared suffix is a <token12>-<uuid8> pair id: its prefix is the
+            # 12-char wrap_token prefix (recovery pairing), and the <uuid8>
+            # component makes it unique per save attempt (no concurrent collision).
+            prefix, sep, uniq = cont_token.partition("-")
+            assert prefix == token[:12]
+            assert sep == "-" and len(uniq) == 8 and uniq
 
             # Clean up so the fixture's tmp_path doesn't leave
             # orphans between tests.

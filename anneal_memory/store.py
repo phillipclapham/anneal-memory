@@ -9,6 +9,7 @@ Zero dependencies beyond Python stdlib.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -17,10 +18,29 @@ import sqlite3
 import uuid
 import warnings
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal
+
+try:  # POSIX advisory locking; absent on Windows (see continuity_lock).
+    import fcntl
+except ImportError:  # pragma: no cover - exercised only on non-POSIX platforms
+    fcntl = None  # type: ignore[assignment]
+
+# A lock-LESS POSIX filesystem (some NFS configs) imports ``fcntl`` fine but
+# ``flock`` raises one of these — that is "advisory locking unavailable here",
+# NOT a bug, so ``continuity_lock`` degrades to a no-op on them (see its
+# docstring) rather than propagating. ``ENOTSUP``/``EOPNOTSUPP`` are the same
+# value on macOS; both listed defensively. Any OTHER ``OSError`` from ``flock``
+# (e.g. ``EBADF``) is a real fault and is re-raised unmasked.
+_LOCK_UNAVAILABLE_ERRNOS = frozenset(
+    e for e in (
+        getattr(errno, "ENOLCK", None),
+        getattr(errno, "EOPNOTSUPP", None),
+        getattr(errno, "ENOTSUP", None),
+    ) if e is not None
+)
 
 # Shared wrap-token shape constant. Mirrors the JSON schema pattern in
 # ``integrity.py`` for the ``save_continuity`` MCP tool's
@@ -545,6 +565,93 @@ def _fsync_dir(path: Path) -> None:
             os.close(dir_fd)
         except OSError:
             pass
+
+
+@contextmanager
+def continuity_lock(continuity_path: str | os.PathLike[str]) -> Iterator[None]:
+    """Hold an exclusive cross-process advisory lock across a continuity-file
+    read-modify-write. **THE cross-process coordination primitive (AM-CONTLOCK).**
+
+    The continuity file is written by anneal's own consolidate
+    (:func:`validated_save_continuity`) AND, in a complementary harness, by an
+    external editor in ANOTHER process (e.g. Levain's governed Class-A ``State``
+    write). A threading lock inside either process is blind to the other, so a
+    wrap landing between an external editor's read and its ``os.replace`` silently
+    clobbers it (or is clobbered). This is the shared lock that closes that window.
+
+    **Protocol — an external editor MUST follow it to be coordinated:**
+
+    * The lock file is **exactly the continuity file path + ``.lock``**
+      (``memory.continuity.md`` → ``memory.continuity.md.lock``). It is a
+      separate sidecar — the continuity file itself is never opened for locking,
+      so a reader is never blocked (reads stay lock-free; the atomic
+      ``os.replace`` means a reader always sees a complete committed document).
+    * Take the lock across the ENTIRE read→modify→write (the read, any
+      stale-/CAS-check, and the atomic ``os.replace``). Releasing earlier
+      reintroduces the race.
+    * It does NOT span anneal's ``prepare_wrap`` → ``validated_save_continuity``
+      gap (two separate process invocations, an agent composing in between —
+      un-lockable). That semantic window is owned by the wrap-token CAS + the
+      arrow-of-time model, NOT this lock; this lock guards only the physical
+      write critical section against interleaving.
+    * An external editor that depends on ``anneal-memory`` should
+      ``from anneal_memory import continuity_lock`` and use THIS function rather
+      than re-implementing the idiom, so the lock-path derivation lives in one
+      place and cannot drift.
+
+    Reuses the exact idiom of :meth:`SporeStore._transaction` /
+    :meth:`CrystalStore._transaction`: an exclusive advisory ``flock`` on a
+    sibling ``.lock`` file, released when the fd closes or the process dies — a
+    crashed holder can never strand it.
+
+    **NOT reentrant** — ``flock`` is per-fd, so a holder that re-enters
+    ``continuity_lock`` on a fresh fd self-deadlocks. anneal's save path and a
+    single external write are each a flat critical section, so this never arises
+    in practice; a caller must not nest it.
+
+    Platform: ``fcntl`` is POSIX-only and reliable on a LOCAL filesystem. The
+    lock degrades to a **no-op** in TWO cases — a non-POSIX platform (``fcntl``
+    import fails) AND a lock-LESS POSIX filesystem where ``fcntl`` imports but
+    ``flock`` raises ``ENOLCK`` / ``EOPNOTSUPP`` (some NFS configs). In both the
+    write still succeeds; atomic ``os.replace`` still protects a single writer;
+    only cross-process serialization is unavailable. (Honoring the no-op on the
+    runtime ``flock`` failure is load-bearing: ``validated_save_continuity``
+    takes this lock AFTER its DB commit, so a propagating ``flock`` error would
+    otherwise leave EVERY wrap in committed-DB / unrenamed-file / orphan-tmp
+    recovery state on such a filesystem.) Any non-lock-unavailable ``OSError``
+    from ``flock`` is a real fault and propagates unmasked.
+
+    Mutual exclusion keys on the lock file's INODE, not its path string — so two
+    cooperating processes that derive the path differently (one ``.resolve()``-d,
+    one not) still serialize as long as both land on the same file. Acquiring also
+    creates the lock file's parent directory if absent (a side effect of taking the
+    lock against a not-yet-existing tree).
+    """
+    cp = Path(continuity_path)
+    lock_path = cp.with_name(cp.name + ".lock")
+    # The lock fd goes INSIDE the try so a flock failure can't leak it: the
+    # finally's None-guard covers "os.open failed (fd still None)" and any
+    # re-raised "flock failed (fd open)".
+    os.makedirs(lock_path.parent, exist_ok=True)
+    lock_fd: int | None = None
+    try:
+        if fcntl is not None:
+            lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            except OSError as exc:
+                # Lock-less POSIX FS (ENOLCK/EOPNOTSUPP): degrade to a no-op —
+                # close the fd, proceed UNLOCKED, exactly as the no-op contract
+                # promises (and so a post-commit acquire can't brick every wrap).
+                # A non-lock-unavailable OSError (e.g. EBADF) is a real bug → re-raise.
+                if exc.errno not in _LOCK_UNAVAILABLE_ERRNOS:
+                    raise
+                os.close(lock_fd)
+                lock_fd = None
+        yield
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
 
 
 # Schema version — increment on breaking changes
@@ -2875,6 +2982,18 @@ class Store:
         """
         return self._path.parent / f"{self._path.stem}.continuity.meta.json"
 
+    def continuity_lock(self) -> AbstractContextManager[None]:
+        """Convenience: :func:`continuity_lock` keyed on this store's
+        :attr:`continuity_path`. Use inside any continuity read-modify-write that
+        could race a writer in another process. See the free function for the full
+        cross-process protocol and the POSIX-only / non-reentrant caveats.
+
+        (Resolves the module-level :func:`continuity_lock` — NOT this method —
+        since a bare name in a method body binds to the module global, not the
+        class attribute; no self-recursion.)
+        """
+        return continuity_lock(self.continuity_path)
+
     def load_continuity(self) -> str | None:
         """Load the current continuity file.
 
@@ -2943,27 +3062,35 @@ class Store:
         # public-API operation name so callers see
         # ``operation="save_continuity"`` regardless of which internal
         # helper actually raised (preserves the pre-10.5c.5 contract).
-        try:
-            tmp_path = self._prepare_continuity_write(text)
-        except StoreError as exc:
-            raise StoreError(
-                str(exc).replace("tmp sidecar", "file"),
-                operation="save_continuity",
-                path=str(path),
-            ) from exc.__cause__
-        succeeded = False
-        try:
-            tmp_path.replace(path)
-            succeeded = True
-        except OSError as exc:
-            raise StoreError(
-                f"Failed to rename continuity tmp to {path}: {exc}",
-                operation="save_continuity",
-                path=str(path),
-            ) from exc
-        finally:
-            if not succeeded:
-                _safe_unlink(tmp_path)
+        # Cross-process lock (AM-CONTLOCK): this bare write is a secondary
+        # continuity-file writer (test fixtures / advanced manual wrap
+        # lifecycles), so it takes the SAME shared lock as the canonical
+        # pipeline + any external editor — the invariant is "every
+        # continuity-file writer holds the lock." Spans tmp-write → replace.
+        # No reentrancy: validated_save_continuity inlines its own write and
+        # never calls this method, so the lock is never taken twice.
+        with continuity_lock(self.continuity_path):
+            try:
+                tmp_path = self._prepare_continuity_write(text)
+            except StoreError as exc:
+                raise StoreError(
+                    str(exc).replace("tmp sidecar", "file"),
+                    operation="save_continuity",
+                    path=str(path),
+                ) from exc.__cause__
+            succeeded = False
+            try:
+                tmp_path.replace(path)
+                succeeded = True
+            except OSError as exc:
+                raise StoreError(
+                    f"Failed to rename continuity tmp to {path}: {exc}",
+                    operation="save_continuity",
+                    path=str(path),
+                ) from exc
+            finally:
+                if not succeeded:
+                    _safe_unlink(tmp_path)
 
         if self._audit is not None:
             self._audit.log("continuity_saved", {
@@ -3743,32 +3870,38 @@ class Store:
     # filesystem race is a distinct failure mode all three L3
     # reviewers flagged independently (complement F1, gemini, contrarian F2).
     #
-    # Fix: each prepare_*_write call generates a fresh ~12 char uuid
-    # suffix and writes to a unique tmp path. The suffix pattern
-    # (``continuity.{hex}.md.tmp`` / ``meta.{hex}.json.tmp``) stays
-    # globbable for startup orphan detection and operator recovery
-    # (L3 Fix #13).
+    # Fix (reconciled, AM-CONTLOCK L3 codex HIGH): the canonical pipeline
+    # passes a ``<token12>-<uuid8>`` PAIR ID as the suffix. The ``<uuid8>``
+    # restores per-attempt uniqueness (so two concurrent saves never share a
+    # tmp path — each renames its own); the ``<token12>`` prefix preserves
+    # Fix #19's recovery pairing (continuity + meta of one save share the
+    # full pair id) and the Fix #21 active-wrap filter (which matches on the
+    # token prefix). An earlier revision used a fresh full uuid (unique but
+    # unpaired); Fix #19 then made it the bare token (paired but NOT unique,
+    # re-opening this race) — the pair id is both. The suffix pattern stays
+    # globbable for startup orphan detection and operator recovery.
     _TMP_CONTINUITY_GLOB = "*.md.tmp"
     _TMP_META_GLOB = "*.json.tmp"
 
     def _continuity_tmp_path(self, token_hex: str | None = None) -> Path:
         """Return a tmp sidecar path for continuity writes.
 
-        Pattern: ``<continuity_stem>.<12hex>.md.tmp`` (sits beside
-        the real continuity file). The hex suffix is either a
-        provided token prefix (for pairing with meta tmp writes in
-        the same wrap) or a fresh ``uuid.uuid4()`` hex slice for the
-        legacy standalone caller path.
+        Pattern: ``<continuity_stem>.<suffix>.md.tmp`` (sits beside the real
+        continuity file). The suffix is either a provided value (the canonical
+        pipeline passes a ``<token12>-<uuid8>`` pair id — see below) or a fresh
+        ``uuid.uuid4()`` hex slice for the legacy standalone caller path.
 
-        **Pairing (10.5c.5 L3 Fix #19, codex HIGH).** When called
-        from the canonical pipeline, both ``_prepare_continuity_write``
-        and ``_prepare_meta_write`` pass the SAME wrap_token-derived
-        suffix so the two tmp files share an identifying prefix:
-        ``mystore.continuity.<token>.md.tmp`` +
-        ``mystore.meta.<token>.json.tmp``. Operators recovering from
-        multiple crashed wraps can pair files by token prefix,
-        which is impossible when each call uses an independent
-        random suffix.
+        **Pairing + uniqueness (10.5c.5 L3 Fix #19 + AM-CONTLOCK L3, codex
+        HIGH).** When called from the canonical pipeline, both
+        ``_prepare_continuity_write`` and ``_prepare_meta_write`` pass the SAME
+        ``<token12>-<uuid8>`` pair id, so the two tmp files share an identifying
+        suffix (``mystore.continuity.<pair>.md.tmp`` +
+        ``mystore.meta.<pair>.json.tmp``) AND the per-attempt ``<uuid8>`` makes a
+        same-path collision between two concurrent saves negligibly unlikely
+        (probabilistic, not impossible — see ``validated_save_continuity``'s
+        note). Operators pair files by the full suffix; the orphan-detector
+        matches an in-flight wrap by the ``<token12>`` prefix (the part before
+        ``-``).
         """
         suffix = token_hex or uuid.uuid4().hex[:12]
         final = self.continuity_path
@@ -3777,11 +3910,11 @@ class Store:
     def _meta_tmp_path(self, token_hex: str | None = None) -> Path:
         """Return a tmp sidecar path for meta writes.
 
-        Same pairing-via-token semantics as
-        :meth:`_continuity_tmp_path`; callers in the canonical
-        pipeline pass the wrap-token-derived suffix so continuity
-        and meta tmp files share an identifying prefix. 10.5c.5
-        L3 Fix #19.
+        Same pairing+uniqueness semantics as
+        :meth:`_continuity_tmp_path`; callers in the canonical pipeline pass the
+        SAME ``<token12>-<uuid8>`` pair id so continuity and meta tmp files
+        share an identifying suffix while staying unique per save attempt.
+        10.5c.5 L3 Fix #19 + AM-CONTLOCK L3.
         """
         suffix = token_hex or uuid.uuid4().hex[:12]
         final = self.meta_path
@@ -3791,13 +3924,14 @@ class Store:
         """Return list of orphan tmp sidecars from prior crashed pipelines.
 
         A crashed ``validated_save_continuity`` between DB commit and
-        file rename leaves tmp sidecars on disk holding committed
-        content (L3 Fix #12's unique-uuid tmp paths make this
-        detectable rather than racy). This helper globs the
-        continuity / meta sidecar directories for any matching tmp
-        files and returns them sorted. Operator recovery: rename each
-        orphan tmp file to its final destination (``mv
-        mystore.continuity.ab12cd34.md.tmp mystore.continuity.md``).
+        file rename leaves tmp sidecars on disk that MAY hold committed
+        content (a crash-before-rename orphan) OR may be a concurrent
+        save's uncommitted debris (the per-attempt ``<token12>-<uuid8>``
+        pair-id suffix keeps the two distinguishable + non-racy). This
+        helper globs the continuity / meta sidecar directories for any
+        matching tmp files and returns them sorted; classifying + recovering
+        them is a MANUAL provenance judgment (see :meth:`_warn_orphan_tmp_files`
+        for the content_hash check and the do-not-blind-delete guidance).
 
         **Active-wrap filtering (10.5c.5 L3 Fix #21, codex MEDIUM):**
         tmp files whose embedded token matches the currently-active
@@ -3843,49 +3977,55 @@ class Store:
 
         # Filter out tmp files whose embedded token matches the
         # currently-active wrap — those belong to an in-flight
-        # pipeline, not a crashed one.
+        # pipeline, not a crashed one. The embedded suffix is a
+        # ``<token12>-<uuid8>`` pair id (AM-CONTLOCK L3); the active wrap is
+        # known only by its token PREFIX, so match on the prefix component.
+        # Legacy token-only tmps (no ``-``) compare whole, unchanged.
         if not active_prefix:
             return candidates
         return [
             c for c in candidates
-            if self._token_from_orphan(c) != active_prefix
+            if self._token_from_orphan(c).split("-", 1)[0] != active_prefix
         ]
 
     def _warn_orphan_tmp_files(self) -> None:
         """Emit a ``warnings.warn`` for each orphan tmp sidecar found.
 
         Called from :meth:`__init__` before any pipeline activity
-        runs. The warning text includes the operator-recovery
-        instruction so an interactive user sees exactly what to do:
-        ``mv <tmp_path> <final_path>``. Programmatic callers that
-        filter warnings are unaffected; the detection is best-effort
-        and non-breaking.
+        runs. The warning text lays out a MANUAL provenance check (the
+        content_hash match that proves committed content vs. a concurrent
+        loser's debris) rather than a blind ``mv`` — see the emitted text.
+        Programmatic callers that filter warnings are unaffected; the
+        detection is best-effort and non-breaking.
 
-        Does NOT delete the files — they hold committed content and
-        cleanup is the operator's explicit decision.
+        Does NOT delete OR restore the files — both are the operator's
+        explicit, provenance-checked decision (a tmp may be committed content
+        OR uncommitted debris; this code cannot self-classify it).
         """
         orphans = self._find_orphan_tmp_files()
         if not orphans:
             return
 
-        # Group orphans by their embedded token prefix so paired
-        # continuity + meta tmp files surface as a single warning.
-        # The pipeline writes both tmp files with the SAME token
-        # prefix (10.5c.5 L3 Fix #19), so operators recovering
-        # multiple crashed wraps can match them: the `.md.tmp` with
-        # token X pairs with the `.json.tmp` with token X. Without
-        # this grouping, N crashed wraps would emit 2N unrelated
-        # warnings with no pairing information. 10.5c.5 L3 Fix #20.
+        # Group orphans by their embedded PAIR ID so paired continuity + meta
+        # tmp files surface as a single warning. The pipeline writes both tmp
+        # files with the SAME ``<token12>-<uuid8>`` pair id (10.5c.5 L3 Fix #19
+        # + AM-CONTLOCK L3), so operators recovering multiple crashed wraps can
+        # match them exactly: the `.md.tmp` with pair P pairs with the
+        # `.json.tmp` with pair P — and two distinct crashed saves that happened
+        # to share a wrap-token prefix stay SEPARATE groups (different uuid),
+        # not wrongly merged. Without this grouping, N crashed wraps would emit
+        # 2N unrelated warnings with no pairing information. 10.5c.5 L3 Fix #20.
         groups: dict[str, dict[str, Path]] = {}
         for orphan in orphans:
-            token = self._token_from_orphan(orphan)
-            bucket = groups.setdefault(token, {})
+            pair_id = self._token_from_orphan(orphan)
+            bucket = groups.setdefault(pair_id, {})
             if orphan.name.endswith(".md.tmp"):
                 bucket["cont"] = orphan
             elif orphan.name.endswith(".json.tmp"):
                 bucket["meta"] = orphan
 
-        for token, files in groups.items():
+        for pair_id, files in groups.items():
+            token = pair_id.split("-", 1)[0]  # the wrap-token prefix (for the audit hint)
             cont_orphan = files.get("cont")
             meta_orphan = files.get("meta")
             pair_desc_parts = []
@@ -3914,37 +4054,62 @@ class Store:
                     "incomplete — the meta sidecar will stay "
                     "stale after recovery.)"
                 )
-            # Warning text: point operators at the ``continuity_saved``
-            # audit event, which is where the ``content_hash`` field
-            # lives. (Earlier 10.5c.5 text pointed at ``wrap_completed``
-            # which has no content_hash — codex L3 MEDIUM caught the
-            # unfollowable instruction.)
+            # Warning text: recovery here is a MANUAL JUDGMENT — the audit data
+            # alone can't fully self-classify these tmps, so the warning lays out
+            # the evidence honestly rather than emitting a confident auto-action.
+            # AM-CONTLOCK L3 (codex MEDIUM + HIGH), two opposing failure modes:
+            #   * A ``continuity_saved`` event's ``content_hash`` MATCHING the
+            #     continuity ``.md`` tmp is POSITIVE proof the tmp holds committed
+            #     content (restore it). But ``continuity_saved`` fires only in
+            #     Phase 4, AFTER the renames — the canonical committed-orphan case
+            #     (crash AFTER the DB commit, BEFORE the rename) has NO
+            #     ``continuity_saved`` event, so ABSENCE of a match is INCONCLUSIVE,
+            #     NOT proof of debris. "No match ⇒ delete" would destroy committed
+            #     recovery bytes.
+            #   * Conversely a ``wrap_completed`` with this token prefix proves
+            #     *some* save committed (the CAS winner), but with concurrent saves
+            #     a CAS LOSER's crashed tmp shares the SAME token prefix while
+            #     holding uncommitted bytes — so token-prefix evidence alone can
+            #     falsely bless that debris.
+            # Hence: hash-match = restore; otherwise preserve + inspect by hand.
+            # The hash check applies to the continuity ``.md`` tmp only (the
+            # ``content_hash`` is the markdown's); the ``.json`` meta tmp pairs to
+            # it by the shared pair id and rides the continuity side's verdict.
+            # (A durable per-commit content-hash+pair-id recovery oracle — which
+            # would make this fully self-classifying even with no Phase-4 event —
+            # is a tracked follow-up; see anneal_memory/next.md.)
             warnings.warn(
                 f"anneal-memory: orphan tmp sidecar(s) detected for "
-                f"wrap token prefix '{token}' — this indicates a "
-                f"prior wrap pipeline crashed between DB commit and "
-                f"file rename. Files: {pair_desc}.{missing} "
-                f"These tmp files hold committed content and need "
-                f"manual recovery. To finish the wrap, run: "
-                f"{recovery_cmd}. If you're unsure whether these "
-                f"represent committed state or stale debris, inspect "
-                f"the audit trail for a ``continuity_saved`` event "
-                f"(which carries the content_hash) or a "
-                f"``wrap_completed`` event with wrap_token starting "
-                f"'{token}'; a paired record in the audit trail "
-                f"confirms the wrap was committed before the "
-                f"crash and the recovery is safe.",
+                f"wrap token prefix '{token}' — either a wrap that committed its "
+                f"DB state then crashed before the file rename (committed content "
+                f"awaiting recovery), OR a concurrent save that lost the commit "
+                f"race and crashed before cleanup (uncommitted debris). Files: "
+                f"{pair_desc}.{missing} RECOVER BY HAND — do not blindly restore "
+                f"or delete: (1) compute the continuity ``.md`` tmp's sha256; if it "
+                f"MATCHES a ``continuity_saved`` audit event's ``content_hash``, the "
+                f"tmp is committed content — finish the wrap with: {recovery_cmd} "
+                f"(the paired ``.json`` meta tmp rides the same pair id). (2) If it "
+                f"matches NO ``continuity_saved`` event, the result is INCONCLUSIVE "
+                f"(a crash-before-rename committed orphan has no such event yet, but "
+                f"so does a concurrent loser's debris) — check whether a "
+                f"``wrap_completed`` event with wrap_token starting '{token}' exists "
+                f"and reconcile against the live continuity file before deciding; "
+                f"PRESERVE and inspect rather than delete if you cannot establish "
+                f"provenance.",
                 UserWarning,
                 stacklevel=3,
             )
 
     @staticmethod
     def _token_from_orphan(orphan: Path) -> str:
-        """Extract the token prefix from an orphan tmp filename.
+        """Extract the pair id from an orphan tmp filename.
 
-        Pattern: ``<stem>.<12hex>.md.tmp`` → ``<12hex>``.
-        Returns ``"unknown"`` if the pattern doesn't match (legacy
-        or malformed filenames).
+        Pattern: ``<stem>.<token12>-<uuid8>.md.tmp`` → ``<token12>-<uuid8>``.
+        The full pair id is the GROUPING key (continuity + meta of the same
+        save share it); the wrap-token PREFIX is its first ``-``-component
+        (what the active-wrap filter matches on). Legacy token-only tmps
+        (``<stem>.<12hex>.md.tmp``) return ``<12hex>`` unchanged. Returns
+        ``"unknown"`` if the pattern doesn't match (malformed filenames).
         """
         parts = orphan.name.split(".")
         if len(parts) >= 4 and parts[-1] == "tmp":
@@ -3954,12 +4119,15 @@ class Store:
     @staticmethod
     def _final_path_for_orphan(orphan: Path) -> Path:
         """Derive the final destination path from an orphan tmp path.
+        Format-agnostic: drops the suffix slot regardless of its content
+        (works for the ``<token12>-<uuid8>`` pair id and the legacy ``<12hex>``).
 
-        Pattern: ``<stem>.<12hex>.md.tmp`` → ``<stem>.md``.
-        Pattern: ``<stem>.<12hex>.json.tmp`` → ``<stem>.json``.
+        Pattern: ``<stem>.<suffix>.md.tmp`` → ``<stem>.md``.
+        Pattern: ``<stem>.<suffix>.json.tmp`` → ``<stem>.json``.
         """
-        # Example: mystore.continuity.abcd12345678.md.tmp
-        # name parts split on '.': [mystore, continuity, abcd12345678, md, tmp]
+        # Example: mystore.continuity.abcd12345678-0a1b2c3d.md.tmp
+        # name parts split on '.': [mystore, continuity, abcd12345678-0a1b2c3d, md, tmp]
+        # (the pair id's '-' is not a '.', so it stays a single part)
         parts = orphan.name.split(".")
         if len(parts) >= 3 and parts[-1] == "tmp":
             # Drop the uuid (second-to-last-before-extension) and "tmp".
@@ -3976,10 +4144,12 @@ class Store:
         """Write continuity text to a tmp sidecar; do not rename.
 
         Primitive used by the 10.5c.5 two-phase commit pipeline. Writes
-        a uuid-suffixed tmp sidecar (e.g.
-        ``mystore.continuity.ab12cd34ef56.md.tmp``) with ``fsync`` so
-        the content is durable on disk, but leaves the final
-        ``continuity.md`` untouched. The caller is responsible for:
+        a suffixed tmp sidecar (the canonical pipeline passes a
+        ``<token12>-<uuid8>`` pair-id suffix, e.g.
+        ``mystore.continuity.ab12cd34ef56-0a1b2c3d.md.tmp``; a standalone
+        caller gets a fresh uuid) with ``fsync`` so the content is durable on
+        disk, but leaves the final ``continuity.md`` untouched. The caller is
+        responsible for:
 
         1. Calling :meth:`_commit` (directly or via :meth:`_batch`) on
            any DB DML that should be atomic with this write.
@@ -3993,28 +4163,24 @@ class Store:
         :meth:`save_continuity` for the full write+rename+audit
         sequence.
 
-        **Concurrent-writer safety (10.5c.5 L3 Fix #12):** each call
-        generates a unique suffix so two concurrent
-        ``validated_save_continuity`` invocations cannot race on the
-        same tmp path. Orphan tmp files from crashed pipelines are
+        **Pairing + concurrent-writer safety (10.5c.5 L3 Fix #12/#19 +
+        AM-CONTLOCK L3, codex HIGH):** the canonical pipeline passes a
+        ``<token12>-<uuid8>`` PAIR ID as ``token_hex`` — the ``<token12>``
+        prefix pairs this tmp with the meta tmp written for the same wrap
+        (operators recover by the shared pair id; the active-wrap orphan
+        filter matches the prefix), and the per-attempt ``<uuid8>`` makes a
+        same-path collision between two concurrent ``validated_save_continuity``
+        invocations negligibly unlikely (probabilistic, not impossible — see
+        ``validated_save_continuity``'s note). When ``token_hex`` is None
+        (legacy ``save_continuity`` standalone path), a fresh random uuid is
+        used — standalone writes rename immediately and never leave orphans, so
+        pairing is unnecessary. Orphan tmp files from crashed pipelines are
         discoverable via :meth:`_find_orphan_tmp_files` at store open.
-
-        **Pairing via wrap token (10.5c.5 L3 Fix #19, codex HIGH):**
-        the canonical pipeline passes a 12-char slice of the
-        current wrap_token as ``token_hex`` so the returned tmp path
-        is paired with the meta tmp path written for the same wrap.
-        Operators recovering from multiple crashed wraps can pair
-        continuity + meta tmps by their shared token prefix. When
-        ``token_hex`` is None (legacy ``save_continuity`` standalone
-        path), a fresh random uuid is used — standalone writes
-        rename immediately and never leave orphans, so pairing is
-        unnecessary.
 
         Args:
             text: Continuity markdown content.
-            token_hex: Optional pairing prefix; should be a 12-char
-                hex slice of the wrap_token to pair with the
-                corresponding meta tmp write.
+            token_hex: Optional suffix; the canonical pipeline passes a
+                ``<token12>-<uuid8>`` pair id (paired + unique per attempt).
 
         Returns:
             Path to the tmp sidecar that was written.
@@ -4059,15 +4225,15 @@ class Store:
 
         Primitive used by the 10.5c.5 two-phase commit pipeline. Same
         semantics as :meth:`_prepare_continuity_write` — passes
-        ``token_hex`` through to :meth:`_meta_tmp_path` so the tmp
-        file pairs with the corresponding continuity tmp via a
-        shared prefix. Internal use only.
+        ``token_hex`` through to :meth:`_meta_tmp_path`. The canonical pipeline
+        passes the SAME ``<token12>-<uuid8>`` pair id as the continuity tmp, so
+        the two pair (shared suffix) while staying unique per attempt. Internal
+        use only.
 
         Args:
             meta: Meta sidecar JSON-serializable dict.
-            token_hex: Optional pairing prefix; pass a 12-char hex
-                slice of the wrap_token to pair with the
-                corresponding continuity tmp write.
+            token_hex: Optional suffix; the canonical pipeline passes the SAME
+                ``<token12>-<uuid8>`` pair id as the paired continuity tmp.
 
         Returns:
             Path to the tmp sidecar that was written.

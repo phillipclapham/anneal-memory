@@ -9,6 +9,7 @@ from .store import (
     StoreError,
     StoreOperation,
     WrapInProgressError,
+    continuity_lock,
 )
 from .types import (
     AffectiveState,
@@ -112,6 +113,7 @@ __all__ = [
     "StoreError",
     "StoreOperation",
     "WrapInProgressError",
+    "continuity_lock",
     "Server",
     "AuditTrail",
     "AuditVerifyResult",

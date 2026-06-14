@@ -1943,14 +1943,27 @@ def validated_save_continuity(
     path = str(store.continuity_path)
 
     # Phase 1: continuity tmp write.
-    # Derive the tmp filename suffix from the wrap_token so
-    # continuity.tmp and meta.tmp (written later in Phase 2) share a
-    # recoverability identity — operators recovering from multiple
-    # crashed wraps can pair the two tmp files by token prefix.
-    # 10.5c.5 L3 Fix #19 (codex HIGH).
-    tmp_token_prefix: str = snapshot["token"][:12]
+    # The tmp filename suffix is a PAIR ID: ``<token12>-<uuid8>``.
+    #   * the ``<token12>`` prefix gives continuity.tmp + meta.tmp (written in
+    #     Phase 2) a shared recoverability identity, and lets the startup
+    #     orphan-detector match an in-flight wrap by its active wrap_token
+    #     prefix (10.5c.5 L3 Fix #19 + #21).
+    #   * the ``<uuid8>`` makes the path UNIQUE PER SAVE ATTEMPT. AM-CONTLOCK
+    #     L3 (codex HIGH): the Phase-1 tmp write happens BEFORE the wrap-token
+    #     CAS and OUTSIDE the Phase-3 flock, so two concurrent saves sharing one
+    #     snapshot token would otherwise write the SAME deterministic tmp path —
+    #     the loser's bytes could be renamed under the winner's committed DB row
+    #     (silent file/DB divergence). A per-attempt uuid makes a collision
+    #     negligibly unlikely — a 32-bit suffix is ~2^-32 birthday odds for two
+    #     same-snapshot saves, and the realistic concurrency is a single
+    #     consolidate plus at most one external editor — so each save renames ITS
+    #     OWN tmp. (Not a hard impossibility: an airtight version would be
+    #     O_CREAT|O_EXCL-with-retry; unwarranted at this concurrency.) This
+    #     reconciles Fix #19's pairing (kept via the token prefix) with the
+    #     uniqueness the earlier 10.5c.5 fix required (which #19 had traded away).
+    tmp_pair_id: str = f"{snapshot['token'][:12]}-{uuid.uuid4().hex[:8]}"
     cont_tmp: Path | None = store._prepare_continuity_write(
-        grad_result.text, token_hex=tmp_token_prefix
+        grad_result.text, token_hex=tmp_pair_id
     )
     meta_tmp: Path | None = None
     wrap_result = None
@@ -1976,10 +1989,10 @@ def validated_save_continuity(
             # cleanup path: if this raises, the outer ``try`` below
             # cleans up cont_tmp (and meta_tmp stays None) and the
             # batch's ``except`` rolls back the DB. The shared
-            # ``tmp_token_prefix`` pairs this tmp with cont_tmp so
-            # operator recovery can match them by prefix.
+            # ``tmp_pair_id`` pairs this tmp with cont_tmp (same
+            # ``<token12>-<uuid8>``) so operator recovery matches them.
             meta_tmp = store._prepare_meta_write(
-                meta, token_hex=tmp_token_prefix
+                meta, token_hex=tmp_pair_id
             )
 
             wrap_result = store.wrap_completed(
@@ -2125,60 +2138,86 @@ def validated_save_continuity(
         # _prepare_continuity_write (we only clear it to None after the
         # successful rename below). The type is Path | None only because
         # of the consumed-handle pattern further down.
-        assert cont_tmp is not None
-        try:
-            cont_tmp.replace(store.continuity_path)
-        except OSError as exc:
-            raise StoreError(
-                f"Failed to rename continuity tmp to "
-                f"{store.continuity_path}: {exc}. "
-                f"The DB has committed the wrap but externalization "
-                f"is incomplete; the new continuity content is "
-                f"preserved at {cont_tmp}. Manually move it to "
-                f"{store.continuity_path} to finish recovery.",
-                operation="save_continuity",
-                path=str(store.continuity_path),
-            ) from exc
-        # cont_tmp is now the final file, not a tmp file. Clear the
-        # handle so the except clause below doesn't try to preserve
-        # a path that no longer refers to a tmp sidecar.
-        cont_tmp = None
+        # AM-CONTLOCK: take the SHARED cross-process continuity lock around the
+        # externalization (both renames). This is the physical race point — an
+        # external editor (e.g. Levain's governed State write) reads the
+        # continuity file, and a rename interleaving its read→os.replace would
+        # silently clobber (or be clobbered). The lock spans Phase 3 ONLY, not
+        # the whole pipeline: anneal writes the WHOLE recomposed file (no
+        # read-merge — verified, the save reads no continuity text), so the
+        # only shared resource is the rename. The wrap-vs-edit PRECEDENCE during
+        # Phases 1–2 (an operator State edit landing while the agent composes)
+        # is the arrow-of-time case the design intends (a wrap supersedes a
+        # concurrent edit; the editor's undo refuses across the wrap), NOT a
+        # bug for the lock to prevent — see continuity_lock's docstring. The
+        # lock is held INSIDE the post-commit region. A LOCK-UNAVAILABLE flock
+        # failure (ENOLCK/EOPNOTSUPP on a lock-less FS) does NOT reach here:
+        # continuity_lock degrades it to an unlocked no-op so the write still
+        # completes. Any OTHER flock OSError (a real fault) DOES propagate, and
+        # being post-commit it lands in the existing tmp-preservation path below,
+        # exactly like a rename OSError (committed DB + recoverable tmps).
+        #
+        # LOCK ORDERING (do NOT move the acquire): the flock is taken HERE, AFTER
+        # store._batch() has fully committed the SQLite transaction (db_committed is
+        # already True). The flock and the DB lock are DISJOINT/sequential, never
+        # nested — so there is no flock↔SQLite lock-order cycle to deadlock on.
+        # Acquiring the flock earlier (around the batch) would nest them and create
+        # one; keep it scoped to the renames.
+        with store.continuity_lock():
+            assert cont_tmp is not None
+            try:
+                cont_tmp.replace(store.continuity_path)
+            except OSError as exc:
+                raise StoreError(
+                    f"Failed to rename continuity tmp to "
+                    f"{store.continuity_path}: {exc}. "
+                    f"The DB has committed the wrap but externalization "
+                    f"is incomplete; the new continuity content is "
+                    f"preserved at {cont_tmp}. Manually move it to "
+                    f"{store.continuity_path} to finish recovery.",
+                    operation="save_continuity",
+                    path=str(store.continuity_path),
+                ) from exc
+            # cont_tmp is now the final file, not a tmp file. Clear the
+            # handle so the except clause below doesn't try to preserve
+            # a path that no longer refers to a tmp sidecar.
+            cont_tmp = None
 
-        # Explicit None check instead of ``assert`` so the guard
-        # survives ``python -O`` (which strips assertions). Under
-        # ``-O`` the old assert vanished and ``meta_tmp.replace(...)``
-        # would raise ``AttributeError`` on None — wrong exception
-        # type for the transport layer. L3 complement F3 + contrarian F6.
-        if meta_tmp is None:
-            raise StoreError(
-                "internal pipeline invariant violated: meta_tmp is "
-                "None after the batch committed — this indicates a "
-                "bug in validated_save_continuity's control flow. "
-                "The DB has committed but the meta sidecar was "
-                "never staged; the store is in a partial-commit "
-                "state. Manual recovery required.",
-                operation="save_meta",
-                path=str(store.meta_path),
-            )
-        try:
-            meta_tmp.replace(store.meta_path)
-        except OSError as exc:
-            raise StoreError(
-                f"Failed to rename meta tmp to {store.meta_path}: "
-                f"{exc}. The DB has committed the wrap and the "
-                f"continuity file was externalized; only the meta "
-                f"sidecar rename failed. The new meta content is "
-                f"preserved at {meta_tmp}. Manually move it to "
-                f"{store.meta_path} to finish recovery.",
-                operation="save_meta",
-                path=str(store.meta_path),
-            ) from exc
-        meta_tmp = None
-        # Directory fsync after both renames so the rename syscalls
-        # themselves are durable. Without this, a crash immediately
-        # after a successful rename can revert to the pre-rename
-        # directory entry on some POSIX filesystems. Best-effort.
-        _fsync_dir(store.continuity_path.parent)
+            # Explicit None check instead of ``assert`` so the guard
+            # survives ``python -O`` (which strips assertions). Under
+            # ``-O`` the old assert vanished and ``meta_tmp.replace(...)``
+            # would raise ``AttributeError`` on None — wrong exception
+            # type for the transport layer. L3 complement F3 + contrarian F6.
+            if meta_tmp is None:
+                raise StoreError(
+                    "internal pipeline invariant violated: meta_tmp is "
+                    "None after the batch committed — this indicates a "
+                    "bug in validated_save_continuity's control flow. "
+                    "The DB has committed but the meta sidecar was "
+                    "never staged; the store is in a partial-commit "
+                    "state. Manual recovery required.",
+                    operation="save_meta",
+                    path=str(store.meta_path),
+                )
+            try:
+                meta_tmp.replace(store.meta_path)
+            except OSError as exc:
+                raise StoreError(
+                    f"Failed to rename meta tmp to {store.meta_path}: "
+                    f"{exc}. The DB has committed the wrap and the "
+                    f"continuity file was externalized; only the meta "
+                    f"sidecar rename failed. The new meta content is "
+                    f"preserved at {meta_tmp}. Manually move it to "
+                    f"{store.meta_path} to finish recovery.",
+                    operation="save_meta",
+                    path=str(store.meta_path),
+                ) from exc
+            meta_tmp = None
+            # Directory fsync after both renames so the rename syscalls
+            # themselves are durable. Without this, a crash immediately
+            # after a successful rename can revert to the pre-rename
+            # directory entry on some POSIX filesystems. Best-effort.
+            _fsync_dir(store.continuity_path.parent)
 
     except BaseException:
         # Cleanup policy depends on whether the DB has committed.

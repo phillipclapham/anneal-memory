@@ -4,6 +4,18 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added — AM-CONTLOCK: a shared cross-process continuity lock (`continuity_lock`)
+
+The continuity file is written by anneal's own consolidate (`validated_save_continuity`) AND, in a complementary harness, by an external editor in **another process** (e.g. Levain v2's governed Class-A `State` write). A threading lock inside either process is blind to the other, so a wrap landing between the external editor's read and its `os.replace` silently clobbers it — or is clobbered. This is the shared advisory lock that closes that window — the same proven idiom `SporeStore`/`CrystalStore` already use for their JSON stores, extended to the continuity write.
+
+- New public `continuity_lock(continuity_path)` context manager + thin `Store.continuity_lock()` convenience. Exclusive `fcntl.flock` on a sibling `<continuity_path>.lock` (so `memory.continuity.md` → `memory.continuity.md.lock`); auto-released when the fd closes or the process dies (a crashed holder can never strand it); POSIX-only, degrading to a no-op on non-POSIX / lock-less filesystems (atomic `os.replace` still protects a single writer there). NOT reentrant.
+- `validated_save_continuity` now takes the lock around its Phase-3 externalization (the continuity + meta renames) — the physical race point. It deliberately does **not** span `prepare_wrap`→save (un-lockable across two invocations; the wrap-token CAS + arrow-of-time own that semantic window). The bare `Store.save_continuity` takes the same lock, so the invariant "every continuity-file writer holds the lock" holds for both paths.
+- **Protocol for external editors:** the lock file is exactly the continuity path + `.lock`; take `LOCK_EX` across the entire read→modify→write. An adopter that depends on `anneal-memory` should `from anneal_memory import continuity_lock` rather than re-implement the idiom, so the lock-path derivation lives in one place and cannot drift. (Surfaced by Levain Slice 2b-i, whose interim `_commit` CAS fails *safe* but leaves a sub-`os.replace` race that only a shared lock closes airtight.)
+
+### Fixed — concurrent-save tmp collision (the canonical pipeline's Phase-1 tmp path)
+
+- The 2PC pipeline's Phase-1 continuity/meta tmp sidecars were named with the bare 12-char wrap-token prefix — deterministic, so two concurrent `validated_save_continuity` calls sharing one wrap snapshot wrote the SAME tmp path; since the tmp write precedes the wrap-token CAS and sits outside the new Phase-3 lock, the loser's bytes could be renamed under the winner's committed DB row (silent file/DB divergence). The earlier 10.5c.5 fix used a per-call uuid (unique) but the later "Fix #19" pairing change traded that away for the bare token (paired but no longer unique), re-opening the race. The tmp suffix is now a **`<token12>-<uuid8>` pair id**: the `<uuid8>` restores per-attempt uniqueness (each save renames its own tmp) and the `<token12>` prefix preserves both the continuity↔meta recovery pairing and the active-wrap orphan filter (which matches on the prefix). Caught by the L3 (cross-substrate) review of the AM-CONTLOCK change.
+
 > Pending: MCP crystal **lifecycle** tools (`crystallize` / `get` / `list` over MCP) for full CLI symmetry — deferred, because crystallizing OUT is a WRITE surface that pulls in the AM-CRYSTAL-OPTIN + decision-channel governance and is the wrong shape for a single MCP verb (the READ surface — recall + index — shipped in 0.8.2). AM-CHIPSCHEMA stays deferred to the Levain v2 reload (it composes with the held AM-ATTENTIONZONE). See `projects/anneal_memory/next.md`.
 
 ## [0.9.0] — 2026-06-12

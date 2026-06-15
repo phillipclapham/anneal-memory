@@ -90,12 +90,16 @@ VALID_GERMINATIONS: tuple[Germination, ...] = ("growing", "resting", "dormant", 
 # The lifecycle is shared across types; the TERMINAL kinds are type-specific —
 # descending a ``task`` as "answered" is a nonsensical terminal state. The
 # universal neglect-descent ``composted`` is valid for every type.
-DESCEND_BY_TYPE: dict[SporeType, frozenset[str]] = {
+# Public lookup tables: consumers query these by a runtime spore-``type`` string
+# (loaded from JSON, so statically ``str`` — see e.g. a dashboard rendering the
+# verbs available for a spore), so the key type is ``str``, not ``SporeType``.
+# ``.get(type, frozenset())`` returns the empty set for an unknown type.
+DESCEND_BY_TYPE: dict[str, frozenset[str]] = {
     "task": frozenset({"done", "dropped", "composted"}),
     "question": frozenset({"answered", "mooted", "composted"}),
     "thought": frozenset({"explored", "dropped", "composted"}),
 }
-ASCEND_BY_TYPE: dict[SporeType, frozenset[str]] = {
+ASCEND_BY_TYPE: dict[str, frozenset[str]] = {
     "task": frozenset({"project", "thread"}),
     "question": frozenset({"episode", "pattern"}),
     "thought": frozenset({"essay", "pattern", "project"}),

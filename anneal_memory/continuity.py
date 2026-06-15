@@ -1962,6 +1962,15 @@ def validated_save_continuity(
     #     reconciles Fix #19's pairing (kept via the token prefix) with the
     #     uniqueness the earlier 10.5c.5 fix required (which #19 had traded away).
     tmp_pair_id: str = f"{snapshot['token'][:12]}-{uuid.uuid4().hex[:8]}"
+    # AM-SNAPSHOT ①: compute the continuity content hash ONCE here, from the
+    # exact text written to the tmp sidecar (and renamed to continuity.md in
+    # Phase 3). It is passed into wrap_completed (durable in the wraps row at
+    # the Phase-2 commit, the recovery oracle) AND reused in the Phase-4
+    # continuity_saved audit payload below — single source, so the durable
+    # oracle and the audit event can never disagree about what this wrap saved.
+    content_hash: str = hashlib.sha256(
+        grad_result.text.encode("utf-8")
+    ).hexdigest()
     cont_tmp: Path | None = store._prepare_continuity_write(
         grad_result.text, token_hex=tmp_pair_id
     )
@@ -2013,6 +2022,13 @@ def validated_save_continuity(
                 # Layer 1 L3 flagged as a TOCTOU-within-TOCTOU-fix
                 # pattern.
                 wrap_token=snapshot["token"],
+                # AM-SNAPSHOT ① durable recovery oracle: persist the content
+                # hash + tmp pair id in the wraps row, atomic with this wrap's
+                # commit (inside wrap_completed's _db_boundary). Durable before
+                # the Phase-3 rename, so orphan recovery can self-classify even
+                # if the crash beat Phase 4's audit event.
+                content_hash=content_hash,
+                pair_id=tmp_pair_id,
             )
 
             # Update cross-session pattern history. Scan the
@@ -2258,9 +2274,10 @@ def validated_save_continuity(
         try:
             audit_payload: dict[str, Any] = {
                 "chars": len(grad_result.text),
-                "content_hash": hashlib.sha256(
-                    grad_result.text.encode("utf-8")
-                ).hexdigest(),
+                # AM-SNAPSHOT ①: the SAME hash persisted in the wraps row above
+                # (computed once near tmp_pair_id) — the audit event and the
+                # durable recovery oracle are guaranteed identical.
+                "content_hash": content_hash,
             }
             # Capture Proven-tier pattern omissions in the audit chain.
             # detect_pattern_omissions returns an empty list for the

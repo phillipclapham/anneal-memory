@@ -3393,8 +3393,8 @@ class TestL3CodexFixes:
             assert len(meta_tmps) == 1
 
             # Extract tokens from filenames.
-            cont_token = Store._token_from_orphan(cont_tmps[0])
-            meta_token = Store._token_from_orphan(meta_tmps[0])
+            cont_token = store._token_from_orphan(cont_tmps[0])
+            meta_token = store._token_from_orphan(meta_tmps[0])
             assert cont_token == meta_token, (
                 f"tmp filenames not paired: {cont_token} != {meta_token}"
             )
@@ -5553,5 +5553,51 @@ class TestProvenanceEndToEnd:
             assert "[evidence: deadbeef" in saved
             assert "(carried-forward)" not in saved
             assert "(needs-evidence)" not in saved
+        finally:
+            store.close()
+
+
+class TestRecoveryOracleIntegration:
+    """AM-SNAPSHOT ①: the canonical pipeline persists the recovery oracle, and
+    the wraps-row hash is identical to the continuity_saved audit event's hash
+    (single source — they can never disagree about what the wrap saved)."""
+
+    def test_pipeline_persists_recovery_oracle_matching_audit(self, tmp_path):
+        import hashlib
+
+        db_path = str(tmp_path / "oracle.db")
+        store = Store(db_path, project_name="Oracle", audit=True)
+        try:
+            store.record("An observation", EpisodeType.OBSERVATION)
+            text = (
+                "# Oracle — Memory (v1)\n\n"
+                "## State\nActive.\n\n"
+                "## Patterns\nNone yet.\n\n"
+                "## Decisions\nNone.\n\n"
+                "## Context\nFirst session.\n"
+            )
+            prepare_wrap(store)
+            validated_save_continuity(store, text)
+
+            # The continuity file now holds the externalized wrap text; the
+            # wraps row's content_hash must equal sha256 of THAT content, and
+            # pair_id must be the <token12>-<uuid8> form.
+            externalized = store.continuity_path.read_text(encoding="utf-8")
+            expected_hash = hashlib.sha256(
+                externalized.encode("utf-8")
+            ).hexdigest()
+            row = store._conn.execute(
+                "SELECT content_hash, pair_id FROM wraps ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            assert row["content_hash"] == expected_hash
+            assert row["pair_id"] and "-" in row["pair_id"]
+
+            # The continuity_saved audit event carries the SAME hash — the
+            # durable oracle and the audit event are one value, not two.
+            audit_path = store._audit._active_path
+            events = _read_audit_events(audit_path)
+            saved = [e for e in events if e.get("event") == "continuity_saved"]
+            assert saved, "no continuity_saved audit event found"
+            assert saved[-1]["data"]["content_hash"] == expected_hash
         finally:
             store.close()

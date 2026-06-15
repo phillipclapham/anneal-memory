@@ -2474,3 +2474,290 @@ def test_recall_corrupt_row_type_raises_store_error(tmp_path):
         with pytest.raises(StoreError) as ei:
             s.recall(keyword="apparatus")
     assert ei.value.operation == "row_to_episode"
+
+
+class TestRecoveryOracle:
+    """AM-SNAPSHOT ① — the durable per-commit content-hash + pair-id recovery
+    oracle (wraps.content_hash / wraps.pair_id) and the self-classifying
+    orphan-tmp recovery it powers."""
+
+    def _committed_wrap(self, store, pair_id, text):
+        """Record a wrap that durably claims pair_id + sha256(text)."""
+        import hashlib
+        h = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        store.wrap_completed(
+            episodes_compressed=1,
+            continuity_chars=len(text),
+            content_hash=h,
+            pair_id=pair_id,
+        )
+        return h
+
+    # --- schema / migration -------------------------------------------------
+
+    def test_fresh_store_has_recovery_columns(self, tmp_path):
+        with Store(str(tmp_path / "fresh.db"), project_name="Fresh") as store:
+            cols = {
+                r[1]
+                for r in store._conn.execute("PRAGMA table_info(wraps)").fetchall()
+            }
+            assert "content_hash" in cols
+            assert "pair_id" in cols
+
+    def test_legacy_wraps_table_gets_recovery_columns(self, tmp_path):
+        """A pre-① store (wraps table without the recovery columns) gains them
+        additively on open, with legacy rows reading NULL (= no oracle)."""
+        import sqlite3
+
+        db = str(tmp_path / "legacy.db")
+        conn = sqlite3.connect(db)
+        conn.execute(
+            "CREATE TABLE wraps ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "wrapped_at TEXT, episodes_compressed INTEGER, "
+            "graduations_validated INTEGER DEFAULT 0, "
+            "graduations_demoted INTEGER DEFAULT 0, "
+            "citation_reuse_max INTEGER DEFAULT 0, "
+            "continuity_chars INTEGER, patterns_extracted INTEGER DEFAULT 0, "
+            "associations_formed INTEGER NOT NULL DEFAULT 0, "
+            "associations_strengthened INTEGER NOT NULL DEFAULT 0, "
+            "associations_decayed INTEGER NOT NULL DEFAULT 0)"
+        )
+        conn.execute(
+            "INSERT INTO wraps (episodes_compressed, continuity_chars) VALUES (3, 100)"
+        )
+        conn.commit()
+        conn.close()
+        with Store(db, project_name="Legacy") as store:
+            cols = {
+                r[1]
+                for r in store._conn.execute("PRAGMA table_info(wraps)").fetchall()
+            }
+            assert "content_hash" in cols and "pair_id" in cols
+            legacy = store._conn.execute(
+                "SELECT content_hash, pair_id FROM wraps"
+            ).fetchone()
+            assert legacy["content_hash"] is None and legacy["pair_id"] is None
+            # post-migration a new wrap persists the oracle normally
+            self._committed_wrap(store, "abcabcabcabc-00001111", "body")
+            new = store._conn.execute(
+                "SELECT content_hash, pair_id FROM wraps ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            assert new["pair_id"] == "abcabcabcabc-00001111"
+
+    def test_migration_is_idempotent(self, tmp_path):
+        with Store(str(tmp_path / "idem.db"), project_name="Idem") as store:
+            store._migrate_wraps_recovery_columns()  # second call, must no-op
+            cols = [
+                r[1]
+                for r in store._conn.execute("PRAGMA table_info(wraps)").fetchall()
+            ]
+            assert cols.count("content_hash") == 1
+            assert cols.count("pair_id") == 1
+
+    # --- write path ---------------------------------------------------------
+
+    def test_wrap_completed_persists_oracle(self, tmp_path):
+        with Store(str(tmp_path / "persist.db"), project_name="Persist") as store:
+            h = self._committed_wrap(store, "aaaaaaaaaaaa-11112222", "the body")
+            row = store._conn.execute(
+                "SELECT content_hash, pair_id FROM wraps ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            assert row["content_hash"] == h
+            assert row["pair_id"] == "aaaaaaaaaaaa-11112222"
+
+    def test_direct_wrap_completed_leaves_oracle_null(self, tmp_path):
+        with Store(str(tmp_path / "nulls.db"), project_name="Nulls") as store:
+            store.wrap_completed(episodes_compressed=1, continuity_chars=4)
+            row = store._conn.execute(
+                "SELECT content_hash, pair_id FROM wraps ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            assert row["content_hash"] is None
+            assert row["pair_id"] is None
+
+    # --- verdict classifier -------------------------------------------------
+
+    def test_verdict_committed_verified(self, tmp_path):
+        with Store(str(tmp_path / "v.db"), project_name="V") as store:
+            text = "committed body\n"
+            self._committed_wrap(store, "aaaaaaaaaaaa-11111111", text)
+            tmp = store._continuity_tmp_path("aaaaaaaaaaaa-11111111")
+            tmp.write_text(text, encoding="utf-8")
+            assert store._orphan_recovery_verdict(
+                "aaaaaaaaaaaa-11111111", tmp
+            ) == ("committed_verified", 1)
+
+    def test_verdict_committed_hash_mismatch(self, tmp_path):
+        with Store(str(tmp_path / "m.db"), project_name="M") as store:
+            self._committed_wrap(store, "aaaaaaaaaaaa-11111111", "real body\n")
+            tmp = store._continuity_tmp_path("aaaaaaaaaaaa-11111111")
+            tmp.write_text("TORN truncated\n", encoding="utf-8")  # different hash
+            assert store._orphan_recovery_verdict(
+                "aaaaaaaaaaaa-11111111", tmp
+            ) == ("committed_hash_mismatch", 1)
+
+    def test_verdict_committed_unverifiable_meta_only(self, tmp_path):
+        with Store(str(tmp_path / "u.db"), project_name="U") as store:
+            self._committed_wrap(store, "aaaaaaaaaaaa-11111111", "body\n")
+            # no continuity tmp on disk → cannot integrity-check
+            assert store._orphan_recovery_verdict(
+                "aaaaaaaaaaaa-11111111", None
+            ) == ("committed_unverifiable", 1)
+
+    def test_verdict_debris_new_format(self, tmp_path):
+        with Store(str(tmp_path / "d.db"), project_name="D") as store:
+            # a committed wrap exists, but under a DIFFERENT pair id
+            self._committed_wrap(store, "aaaaaaaaaaaa-11111111", "body\n")
+            tmp = store._continuity_tmp_path("bbbbbbbbbbbb-22222222")
+            tmp.write_text("loser\n", encoding="utf-8")
+            assert store._orphan_recovery_verdict(
+                "bbbbbbbbbbbb-22222222", tmp
+            ) == ("debris", None)
+
+    def test_verdict_inconclusive_legacy_format(self, tmp_path):
+        with Store(str(tmp_path / "i.db"), project_name="I") as store:
+            tmp = store._continuity_tmp_path("cccccccccccc")  # legacy 12hex, no '-'
+            tmp.write_text("legacy\n", encoding="utf-8")
+            assert store._orphan_recovery_verdict("cccccccccccc", tmp) == (
+                "inconclusive",
+                None,
+            )
+
+    def test_verdict_inconclusive_unknown_suffix(self, tmp_path):
+        with Store(str(tmp_path / "unk.db"), project_name="Unk") as store:
+            assert store._orphan_recovery_verdict("unknown", None) == (
+                "inconclusive",
+                None,
+            )
+
+    def test_verdict_non_hex_dashed_suffix_fails_closed(self, tmp_path):
+        """L4 hardening: a suffix that has a dash but is NOT the exact
+        <12hex>-<8hex> form must fail CLOSED to inconclusive, never debris —
+        the structural match protects the one dangerous direction (suggesting
+        `rm`). This would have been mis-classified debris under the old
+        '"-" in pair_id' heuristic."""
+        with Store(str(tmp_path / "nonhex.db"), project_name="NonHex") as store:
+            assert store._orphan_recovery_verdict(
+                "notahextoken-zzzz", None
+            ) == ("inconclusive", None)
+
+    def test_verdict_inconclusive_on_query_error(self, tmp_path):
+        """The verdict degrades to inconclusive (never faults) when the recovery
+        columns are absent — e.g. a raw store that skipped the __init__
+        migration. Covers the `except sqlite3.Error` fail-safe branch."""
+        with Store(str(tmp_path / "nocol.db"), project_name="NoCol") as store:
+            store._conn.execute("ALTER TABLE wraps DROP COLUMN pair_id")
+            assert store._orphan_recovery_verdict(
+                "aaaaaaaaaaaa-11111111", None
+            ) == ("inconclusive", None)
+
+    def test_token_from_orphan_extra_dotted_name_fails_closed(self, tmp_path):
+        """codex L3 MEDIUM: an EXTRA-dotted filename that embeds a valid-looking
+        <token12>-<uuid8> must NOT have it extracted — the stem-anchored parse
+        returns 'unknown', so the structural debris guard can't be fed a
+        valid-looking value out of a name that is not the exact ① shape."""
+        with Store(str(tmp_path / "memory.db"), project_name="X") as store:
+            cp = store.continuity_path
+            bad = cp.with_name(f"{cp.stem}.future.aaaaaaaaaaaa-11111111.md.tmp")
+            assert store._token_from_orphan(bad) == "unknown"
+            # a legit single-segment suffix still parses correctly
+            good = cp.with_name(f"{cp.stem}.aaaaaaaaaaaa-11111111.md.tmp")
+            assert store._token_from_orphan(good) == "aaaaaaaaaaaa-11111111"
+
+    def test_extra_dotted_orphan_never_debris_end_to_end(self, tmp_path):
+        """codex L3 MEDIUM (end-to-end): an extra-dotted file embedding a
+        valid-looking pair id must NOT warn UNCOMMITTED DEBRIS (a false 'safe to
+        rm') — it fails closed to the inconclusive recover-by-hand path."""
+        import warnings
+
+        db = str(tmp_path / "memory.db")
+        store = Store(db, project_name="X")
+        cp = store.continuity_path
+        bad = cp.with_name(f"{cp.stem}.future.aaaaaaaaaaaa-11111111.md.tmp")
+        bad.write_text("x\n", encoding="utf-8")
+        store.close()
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            store2 = Store(db, project_name="X")
+        try:
+            msgs = [
+                str(w.message) for w in rec if "orphan tmp sidecar" in str(w.message)
+            ]
+            assert len(msgs) == 1
+            assert "UNCOMMITTED DEBRIS" not in msgs[0]
+            assert "RECOVER BY HAND" in msgs[0]  # the conservative inconclusive path
+            assert bad.exists()
+        finally:
+            store2.close()
+            bad.unlink(missing_ok=True)
+
+    def test_wrap_completed_rejects_half_oracle(self, tmp_path):
+        """codex L3 LOW: content_hash + pair_id are both-or-neither at the public
+        boundary — a half-oracle row can't be classified at recovery time."""
+        with Store(str(tmp_path / "half.db"), project_name="Half") as store:
+            with pytest.raises(StoreError):
+                store.wrap_completed(
+                    episodes_compressed=1,
+                    continuity_chars=5,
+                    pair_id="aaaaaaaaaaaa-11111111",  # pair id, no hash
+                )
+            with pytest.raises(StoreError):
+                store.wrap_completed(
+                    episodes_compressed=1,
+                    continuity_chars=5,
+                    content_hash="deadbeef",  # hash, no pair id
+                )
+            # both-present and both-absent are accepted
+            store.wrap_completed(episodes_compressed=1, continuity_chars=5)
+            self._committed_wrap(store, "bbbbbbbbbbbb-22222222", "ok")
+
+    # --- end-to-end warning text + never-auto-act ---------------------------
+
+    def test_verified_orphan_warning_and_never_unlinks(self, tmp_path):
+        import warnings
+
+        db = str(tmp_path / "verified.db")
+        store = Store(db, project_name="Verified")
+        text = "the committed body\n"
+        self._committed_wrap(store, "dddddddddddd-99999999", text)
+        tmp = store._continuity_tmp_path("dddddddddddd-99999999")
+        tmp.write_text(text, encoding="utf-8")
+        store.close()
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            store2 = Store(db, project_name="Verified")
+        try:
+            msgs = [
+                str(w.message) for w in rec if "orphan tmp sidecar" in str(w.message)
+            ]
+            assert len(msgs) == 1
+            assert "COMMITTED CONTENT" in msgs[0]
+            assert "MATCHES" in msgs[0] and "mv " in msgs[0]
+            assert tmp.exists()  # NEVER auto-renames/unlinks
+        finally:
+            store2.close()
+            tmp.unlink(missing_ok=True)
+
+    def test_debris_orphan_warning_and_never_unlinks(self, tmp_path):
+        import warnings
+
+        db = str(tmp_path / "debris.db")
+        store = Store(db, project_name="Debris")
+        self._committed_wrap(store, "aaaaaaaaaaaa-11111111", "real\n")
+        tmp = store._continuity_tmp_path("bbbbbbbbbbbb-22222222")
+        tmp.write_text("loser\n", encoding="utf-8")
+        store.close()
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            store2 = Store(db, project_name="Debris")
+        try:
+            msgs = [
+                str(w.message) for w in rec if "orphan tmp sidecar" in str(w.message)
+            ]
+            assert len(msgs) == 1
+            assert "UNCOMMITTED DEBRIS" in msgs[0]
+            assert "safe to remove" in msgs[0] and "rm " in msgs[0]
+            assert tmp.exists()  # NEVER auto-deletes
+        finally:
+            store2.close()
+            tmp.unlink(missing_ok=True)

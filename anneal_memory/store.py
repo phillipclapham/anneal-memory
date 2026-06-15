@@ -654,6 +654,29 @@ def continuity_lock(continuity_path: str | os.PathLike[str]) -> Iterator[None]:
             os.close(lock_fd)
 
 
+# AM-SNAPSHOT ① — the orphan-recovery verdict vocabulary. A Literal (not a bare
+# str) so mypy enforces the producer/consumer string chain: a typo in either a
+# ``return ("...")`` in _orphan_recovery_verdict OR a ``verdict == "..."`` in
+# _warn_orphan_tmp_files becomes a type error instead of silently routing to the
+# fail-safe branch (L1 LOW-1).
+RecoveryVerdict = Literal[
+    "committed_verified",
+    "committed_unverifiable",
+    "committed_hash_mismatch",
+    "debris",
+    "inconclusive",
+]
+
+# The EXACT ①-era tmp pair-id shape: ``<token12>-<uuid8>``, both hex (the wrap
+# token is ``uuid.uuid4().hex`` sliced to 12, the per-attempt suffix is hex
+# sliced to 8). The oracle is authoritative ONLY about suffixes of this exact
+# shape — a structural match (not a "-"-presence inference) so classification
+# fails CLOSED to ``inconclusive`` on anything else (a legacy <12hex> suffix, a
+# malformed name, or any future suffix form), protecting the one dangerous
+# direction: only a confirmed new-format id absent from ``wraps`` is ever called
+# ``debris`` (→ a suggested ``rm``). structural_invariants_beat_discipline (L2 L4).
+_NEW_FORMAT_PAIR_ID_RE = re.compile(r"[0-9a-f]{12}-[0-9a-f]{8}")
+
 # Schema version — increment on breaking changes
 _SCHEMA_VERSION = 1
 
@@ -1128,6 +1151,11 @@ class Store:
         _migrate_affective(self._conn)
         # Migrate wraps table to include association metric columns
         self._migrate_wraps_association_columns()
+        # Migrate wraps table to include the durable recovery-oracle columns
+        # (AM-SNAPSHOT ①). Runs after the association migration and BEFORE
+        # _warn_orphan_tmp_files (called later in __init__), so the orphan
+        # classifier can query pair_id on a legacy store without faulting.
+        self._migrate_wraps_recovery_columns()
 
         # Insert default metadata (ignore if already exists)
         defaults = {**_DEFAULT_METADATA, "project_name": self._project_name}
@@ -1186,6 +1214,39 @@ class Store:
         if "associations_decayed" not in existing_cols:
             self._conn.execute(
                 "ALTER TABLE wraps ADD COLUMN associations_decayed INTEGER NOT NULL DEFAULT 0"
+            )
+        self._conn.commit()
+
+    def _migrate_wraps_recovery_columns(self) -> None:
+        """Add the durable recovery-oracle columns to existing wraps tables.
+
+        AM-SNAPSHOT ① — the per-commit content-hash + pair-id that make
+        orphan-tmp recovery self-classifying. Both are written inside
+        ``wrap_completed``'s Phase-2 ``_db_boundary`` (atomic with the wraps
+        row), so they are durable the instant the wrap commits — present even
+        when a crash-before-rename means Phase 4's ``continuity_saved`` audit
+        event never fired. ``_warn_orphan_tmp_files`` reads them back to tell a
+        committed-but-unexternalized orphan (pair-id matches a committed wrap +
+        the tmp content hashes to the recorded hash → finish the rename) apart
+        from a concurrent loser's debris (no committed wrap recorded this exact
+        ``<token12>-<uuid8>`` pair id → safe to discard).
+
+        Both columns are NULLable: legacy wraps and direct ``wrap_completed``
+        calls (not routed through the canonical pipeline) leave them NULL, and
+        the orphan classifier reads NULL as "no oracle for this wrap" and falls
+        back to the conservative manual-provenance path. Safe to call on tables
+        that already have the columns (checks first). Additive, no version bump.
+        """
+        cursor = self._conn.execute("PRAGMA table_info(wraps)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+
+        if "content_hash" not in existing_cols:
+            self._conn.execute(
+                "ALTER TABLE wraps ADD COLUMN content_hash TEXT"
+            )
+        if "pair_id" not in existing_cols:
+            self._conn.execute(
+                "ALTER TABLE wraps ADD COLUMN pair_id TEXT"
             )
         self._conn.commit()
 
@@ -2036,6 +2097,8 @@ class Store:
         *,
         episode_ids: list[str] | None = None,
         wrap_token: str | None = None,
+        content_hash: str | None = None,
+        pair_id: str | None = None,
     ) -> WrapResult:
         """Record a completed wrap and clear the in-progress flag.
 
@@ -2065,6 +2128,24 @@ class Store:
                 already has the token in hand from ``load_wrap_snapshot``
                 — removes a read and removes a within-method
                 read-before-clear sequence that Layer 1 flagged.
+            content_hash: AM-SNAPSHOT ① recovery oracle — the sha256 hex of
+                the continuity content this wrap externalizes. Persisted in
+                the wraps row inside this method's Phase-2 ``_db_boundary`` so
+                it is durable the instant the wrap commits, BEFORE the Phase-3
+                rename and BEFORE Phase 4's ``continuity_saved`` audit event.
+                That closes the crash-before-rename blind spot: orphan-tmp
+                recovery can hash an orphan and prove it holds THIS wrap's
+                committed content even though no audit event fired. NULL when
+                the caller is a direct ``wrap_completed`` (no continuity write).
+            pair_id: AM-SNAPSHOT ① recovery oracle — the ``<token12>-<uuid8>``
+                tmp pair id this wrap's continuity/meta sidecars were written
+                under. Persisted alongside ``content_hash`` so recovery can
+                match an orphan tmp's filename suffix to a committed wrap. The
+                per-attempt ``<uuid8>`` is the discriminator: a CAS loser's
+                crashed tmp shares the winner's token PREFIX but has a different
+                full pair id, so it never matches a committed wrap row → it is
+                correctly classified as debris, not blessed. NULL for direct
+                ``wrap_completed`` calls.
 
         Returns:
             WrapResult with the wrap metrics.
@@ -2086,6 +2167,22 @@ class Store:
                 f"default). Chunking large wraps is scheduled for "
                 f"10.5c.5+; as a workaround, compress in two passes "
                 f"with fewer episodes per wrap.",
+                operation="wrap_completed",
+                path=str(self.path),
+            )
+
+        # AM-SNAPSHOT ① (codex L3 LOW): content_hash + pair_id are the recovery
+        # ORACLE PAIR — a row with one but not the other is meaningless (a pair
+        # id with no hash can't integrity-verify; a hash with no pair id can't be
+        # matched to an orphan). The canonical pipeline always passes both; reject
+        # a half-oracle at the public boundary rather than persisting a row that
+        # would confuse orphan classification later. Both-or-neither.
+        if (content_hash is None) != (pair_id is None):
+            raise StoreError(
+                "wrap_completed: content_hash and pair_id are the recovery "
+                "oracle pair — pass BOTH (a canonical pipeline wrap) or NEITHER "
+                "(a direct wrap_completed). A half-oracle row cannot be "
+                "classified at recovery time.",
                 operation="wrap_completed",
                 path=str(self.path),
             )
@@ -2158,8 +2255,9 @@ class Store:
                 """INSERT INTO wraps
                    (wrapped_at, episodes_compressed, continuity_chars, graduations_validated,
                     graduations_demoted, citation_reuse_max, patterns_extracted,
-                    associations_formed, associations_strengthened, associations_decayed)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    associations_formed, associations_strengthened, associations_decayed,
+                    content_hash, pair_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     _now_utc(),
                     episodes_compressed,
@@ -2171,6 +2269,8 @@ class Store:
                     associations_formed,
                     associations_strengthened,
                     associations_decayed,
+                    content_hash,
+                    pair_id,
                 ),
             )
             # Update session_id for episodes in this wrap cycle.
@@ -3988,6 +4088,87 @@ class Store:
             if self._token_from_orphan(c).split("-", 1)[0] != active_prefix
         ]
 
+    def _orphan_recovery_verdict(
+        self, pair_id: str, cont_orphan: Path | None
+    ) -> tuple[RecoveryVerdict, int | None]:
+        """Classify an orphan tmp group against the durable recovery oracle.
+
+        AM-SNAPSHOT ①. Each wrap records its continuity ``content_hash`` and the
+        ``<token12>-<uuid8>`` ``pair_id`` of its tmp sidecars in the wraps row,
+        atomically with the wrap's Phase-2 commit — durable the instant the wrap
+        commits, BEFORE the Phase-3 rename and BEFORE Phase 4's
+        ``continuity_saved`` audit event. So even a crash-before-rename (no audit
+        event) leaves an exact oracle. Returns ``(verdict, wrap_id)``:
+
+        * ``"committed_verified"`` — a committed wrap recorded this pair id AND
+          the continuity tmp's sha256 matches that wrap's recorded
+          ``content_hash``. Positive proof the tmp holds committed content;
+          finishing the rename is safe.
+        * ``"committed_unverifiable"`` — a committed wrap recorded this pair id
+          but there is no readable continuity tmp to hash (a meta-only group, an
+          unreadable tmp, or a pre-① committed wrap with a NULL ``content_hash``
+          that happens to share the id). The continuity was likely already
+          renamed; recovery is the meta sidecar.
+        * ``"committed_hash_mismatch"`` — a committed wrap recorded this pair id,
+          but the continuity tmp's hash does NOT match its recorded hash — a torn
+          write (crash mid-write before the fsync) or a modified tmp. Do NOT
+          finish blindly; preserve and inspect.
+        * ``"debris"`` — NO committed wrap recorded this exact pair id, and the
+          suffix is the NEW ``<token12>-<uuid8>`` format (so ①-era code would
+          have recorded it on commit). The save did not commit (a concurrent CAS
+          loser, or a crash before the DB commit). Safe to discard.
+        * ``"inconclusive"`` — the oracle cannot speak: a legacy-format suffix
+          (``<12hex>``, no ``-``) predating the oracle, an ``"unknown"`` suffix,
+          or a query error on a store predating the recovery columns. Falls back
+          to the conservative manual-provenance path.
+
+        Read-only; never mutates the store. Cheap — runs once per orphan group at
+        store open, only when orphans exist (rare).
+        """
+        try:
+            # pair_id is the lookup key. ORDER BY id DESC LIMIT 1 is a defensive
+            # newest-wins tie-break: pair_id has no UNIQUE constraint, but a
+            # collision needs two saves sharing the same <token12>-<uuid8> (~2^-32
+            # birthday odds, an openly-accepted residual — see
+            # validated_save_continuity). A NULL pair_id (legacy / direct
+            # wrap_completed rows) can never match a concrete ``?`` under SQL NULL
+            # semantics — load-bearing: those rows can't be falsely matched.
+            row = self._conn.execute(
+                "SELECT id, content_hash FROM wraps WHERE pair_id = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (pair_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            # Legacy store opened without the recovery columns (e.g. a raw DB
+            # constructed outside the canonical __init__ migration). Degrade to
+            # the manual path rather than faulting the orphan warning.
+            return ("inconclusive", None)
+
+        if row is None:
+            # No committed wrap claimed this exact pair id. Classify as debris
+            # ONLY when the suffix is the exact ①-era <token12>-<uuid8> form —
+            # ①-era code writes that pair_id on EVERY commit, so its absence from
+            # wraps is authoritative (the save did not commit). Any other shape
+            # (a legacy <12hex> suffix, "unknown", a malformed/future form)
+            # predates or sits outside the oracle and routes to inconclusive — a
+            # structural match that fails CLOSED on the dangerous direction (never
+            # a false "safe to rm"). structural_invariants_beat_discipline.
+            if _NEW_FORMAT_PAIR_ID_RE.fullmatch(pair_id):
+                return ("debris", None)
+            return ("inconclusive", None)
+
+        wrap_id = int(row["id"])
+        recorded_hash = row["content_hash"]
+        if recorded_hash is None or cont_orphan is None:
+            return ("committed_unverifiable", wrap_id)
+        try:
+            actual_hash = hashlib.sha256(cont_orphan.read_bytes()).hexdigest()
+        except OSError:
+            return ("committed_unverifiable", wrap_id)
+        if actual_hash == recorded_hash:
+            return ("committed_verified", wrap_id)
+        return ("committed_hash_mismatch", wrap_id)
+
     def _warn_orphan_tmp_files(self) -> None:
         """Emit a ``warnings.warn`` for each orphan tmp sidecar found.
 
@@ -3998,9 +4179,14 @@ class Store:
         Programmatic callers that filter warnings are unaffected; the
         detection is best-effort and non-breaking.
 
-        Does NOT delete OR restore the files — both are the operator's
-        explicit, provenance-checked decision (a tmp may be committed content
-        OR uncommitted debris; this code cannot self-classify it).
+        AM-SNAPSHOT ①: the per-wrap content-hash + pair-id recovery oracle (the
+        ``wraps.content_hash`` / ``wraps.pair_id`` columns, written atomically
+        with the wrap in Phase 2) makes the warning SELF-CLASSIFYING — each
+        orphan group is labelled committed-and-verified / committed-but-
+        unverifiable / hash-mismatch / uncommitted-debris / inconclusive (legacy
+        store), with the exact recovery or removal command. Still does NOT delete
+        OR restore the files — the verdict is confident, but acting on it stays
+        the operator's explicit decision (never auto-rename, never auto-unlink).
         """
         orphans = self._find_orphan_tmp_files()
         if not orphans:
@@ -4040,6 +4226,9 @@ class Store:
                 recovery_parts.append(f"mv '{meta_orphan}' '{meta_final}'")
             pair_desc = " + ".join(pair_desc_parts)
             recovery_cmd = " && ".join(recovery_parts)
+            remove_cmd = " && ".join(
+                f"rm '{p}'" for p in (cont_orphan, meta_orphan) if p is not None
+            )
             missing = ""
             if cont_orphan is None:
                 missing = (
@@ -4054,67 +4243,106 @@ class Store:
                     "incomplete — the meta sidecar will stay "
                     "stale after recovery.)"
                 )
-            # Warning text: recovery here is a MANUAL JUDGMENT — the audit data
-            # alone can't fully self-classify these tmps, so the warning lays out
-            # the evidence honestly rather than emitting a confident auto-action.
-            # AM-CONTLOCK L3 (codex MEDIUM + HIGH), two opposing failure modes:
-            #   * A ``continuity_saved`` event's ``content_hash`` MATCHING the
-            #     continuity ``.md`` tmp is POSITIVE proof the tmp holds committed
-            #     content (restore it). But ``continuity_saved`` fires only in
-            #     Phase 4, AFTER the renames — the canonical committed-orphan case
-            #     (crash AFTER the DB commit, BEFORE the rename) has NO
-            #     ``continuity_saved`` event, so ABSENCE of a match is INCONCLUSIVE,
-            #     NOT proof of debris. "No match ⇒ delete" would destroy committed
-            #     recovery bytes.
-            #   * Conversely a ``wrap_completed`` with this token prefix proves
-            #     *some* save committed (the CAS winner), but with concurrent saves
-            #     a CAS LOSER's crashed tmp shares the SAME token prefix while
-            #     holding uncommitted bytes — so token-prefix evidence alone can
-            #     falsely bless that debris.
-            # Hence: hash-match = restore; otherwise preserve + inspect by hand.
-            # The hash check applies to the continuity ``.md`` tmp only (the
-            # ``content_hash`` is the markdown's); the ``.json`` meta tmp pairs to
-            # it by the shared pair id and rides the continuity side's verdict.
-            # (A durable per-commit content-hash+pair-id recovery oracle — which
-            # would make this fully self-classifying even with no Phase-4 event —
-            # is a tracked follow-up; see anneal_memory/next.md.)
-            warnings.warn(
-                f"anneal-memory: orphan tmp sidecar(s) detected for "
-                f"wrap token prefix '{token}' — either a wrap that committed its "
-                f"DB state then crashed before the file rename (committed content "
-                f"awaiting recovery), OR a concurrent save that lost the commit "
-                f"race and crashed before cleanup (uncommitted debris). Files: "
-                f"{pair_desc}.{missing} RECOVER BY HAND — do not blindly restore "
-                f"or delete: (1) compute the continuity ``.md`` tmp's sha256; if it "
-                f"MATCHES a ``continuity_saved`` audit event's ``content_hash``, the "
-                f"tmp is committed content — finish the wrap with: {recovery_cmd} "
-                f"(the paired ``.json`` meta tmp rides the same pair id). (2) If it "
-                f"matches NO ``continuity_saved`` event, the result is INCONCLUSIVE "
-                f"(a crash-before-rename committed orphan has no such event yet, but "
-                f"so does a concurrent loser's debris) — check whether a "
-                f"``wrap_completed`` event with wrap_token starting '{token}' exists "
-                f"and reconcile against the live continuity file before deciding; "
-                f"PRESERVE and inspect rather than delete if you cannot establish "
-                f"provenance.",
-                UserWarning,
-                stacklevel=3,
-            )
+            # AM-SNAPSHOT ①: the durable per-commit content-hash + pair-id oracle
+            # (recorded in the wraps row inside Phase 2 — before the rename,
+            # before the Phase-4 audit) makes this SELF-CLASSIFYING. The warning
+            # now states a CONFIDENT provenance verdict instead of the old "audit
+            # data alone can't decide, judge by hand." The ACTION still stays the
+            # operator's: this code never auto-renames or auto-unlinks. A verdict
+            # acted on blindly is the over-correction the manual path guarded
+            # against (a_fix_can_overcorrect_into_a_worse_failure_mode) — so even
+            # "debris" only ever yields a SUGGESTED ``rm``, never an unlink here.
+            verdict, wrap_id = self._orphan_recovery_verdict(pair_id, cont_orphan)
+            if verdict == "committed_verified":
+                msg = (
+                    f"anneal-memory: orphan tmp sidecar(s) for wrap token prefix "
+                    f"'{token}' hold COMMITTED CONTENT awaiting externalization — "
+                    f"a wrap (wraps.id={wrap_id}) committed its DB state then "
+                    f"crashed before the file rename, and the continuity tmp's "
+                    f"sha256 MATCHES the hash that wrap durably recorded. Finish "
+                    f"the wrap: {recovery_cmd}. Files: {pair_desc}.{missing}"
+                )
+            elif verdict == "committed_unverifiable":
+                msg = (
+                    f"anneal-memory: orphan tmp sidecar(s) for wrap token prefix "
+                    f"'{token}' belong to a COMMITTED wrap (wraps.id={wrap_id}) "
+                    f"but could NOT be integrity-checked — either (benign) no "
+                    f"readable continuity tmp is present (the continuity file was "
+                    f"likely already renamed and only the meta sidecar remains), "
+                    f"OR (anomalous) the committed wrap recorded no content hash, "
+                    f"which should not happen for an ①-era wrap and warrants a "
+                    f"closer look. INSPECT before moving anything: reconcile "
+                    f"{pair_desc} against the live continuity file, and only then "
+                    f"finish externalization with {recovery_cmd}.{missing}"
+                )
+            elif verdict == "committed_hash_mismatch":
+                msg = (
+                    f"anneal-memory: orphan tmp sidecar(s) for wrap token prefix "
+                    f"'{token}' carry a pair id recorded by a COMMITTED wrap "
+                    f"(wraps.id={wrap_id}), but the continuity tmp's sha256 does "
+                    f"NOT match that wrap's recorded content hash — likely a torn "
+                    f"write (crash mid-write before fsync) or a modified tmp. Do "
+                    f"NOT finish the rename blindly; PRESERVE and inspect by hand. "
+                    f"Files: {pair_desc}.{missing}"
+                )
+            elif verdict == "debris":
+                msg = (
+                    f"anneal-memory: orphan tmp sidecar(s) for wrap token prefix "
+                    f"'{token}' are UNCOMMITTED DEBRIS — no committed wrap recorded "
+                    f"this exact pair id, so this save did not commit (a concurrent "
+                    f"CAS loser, or a crash before the DB commit). No committed "
+                    f"content is at risk; safe to remove: {remove_cmd}. Files: "
+                    f"{pair_desc}.{missing}"
+                )
+            else:  # "inconclusive" — a legacy store/suffix predating the oracle
+                msg = (
+                    f"anneal-memory: orphan tmp sidecar(s) detected for wrap token "
+                    f"prefix '{token}' — either a wrap that committed then crashed "
+                    f"before the file rename (committed content awaiting recovery), "
+                    f"OR a concurrent save that lost the commit race (uncommitted "
+                    f"debris). This suffix predates the durable recovery oracle (a "
+                    f"legacy <12hex> tmp, or a store without the per-wrap "
+                    f"content-hash/pair-id columns), so RECOVER BY HAND — do not "
+                    f"blindly restore or delete: compute the continuity tmp's "
+                    f"sha256 and match it against a ``continuity_saved`` audit "
+                    f"event's ``content_hash`` (match ⇒ committed, finish with "
+                    f"{recovery_cmd}); if no event matches, the result is "
+                    f"inconclusive (a crash-before-rename orphan has no such event "
+                    f"yet) — PRESERVE and inspect rather than delete. Files: "
+                    f"{pair_desc}.{missing}"
+                )
+            warnings.warn(msg, UserWarning, stacklevel=3)
 
-    @staticmethod
-    def _token_from_orphan(orphan: Path) -> str:
-        """Extract the pair id from an orphan tmp filename.
+    def _token_from_orphan(self, orphan: Path) -> str:
+        """Extract the pair id from an orphan tmp filename, STEM-ANCHORED.
 
-        Pattern: ``<stem>.<token12>-<uuid8>.md.tmp`` → ``<token12>-<uuid8>``.
-        The full pair id is the GROUPING key (continuity + meta of the same
-        save share it); the wrap-token PREFIX is its first ``-``-component
-        (what the active-wrap filter matches on). Legacy token-only tmps
-        (``<stem>.<12hex>.md.tmp``) return ``<12hex>`` unchanged. Returns
-        ``"unknown"`` if the pattern doesn't match (malformed filenames).
+        Matches EXACTLY ``<stem>.<suffix>.md.tmp`` / ``<stem>.<suffix>.json.tmp``
+        where ``<stem>`` is THIS store's continuity / meta stem and ``<suffix>``
+        is a SINGLE dot-free segment (the ``<token12>-<uuid8>`` pair id, or a
+        legacy ``<12hex>``). Returns that suffix, else ``"unknown"``.
+
+        The full pair id is the GROUPING key (continuity + meta of one save share
+        it); the wrap-token PREFIX is its first ``-``-component (the active-wrap
+        filter matches on that).
+
+        codex L3 MEDIUM: the prior positional ``parts[-3]`` parse extracted a
+        valid-looking pair id out of an EXTRA-dotted name (e.g.
+        ``<stem>.future.<pair>.md.tmp`` → ``<pair>``), which then passed the
+        ``_NEW_FORMAT_PAIR_ID_RE`` debris guard and could emit a false "safe to
+        rm" for a file that is NOT the exact ① filename shape. Anchoring the PARSE
+        to the stem + a single dot-free suffix (not just validating the extracted
+        value) makes the fail-closed promise actually hold: an extra-dotted /
+        wrong-stem / malformed name does not match → ``"unknown"`` → inconclusive.
         """
-        parts = orphan.name.split(".")
-        if len(parts) >= 4 and parts[-1] == "tmp":
-            return parts[-3]  # the token slot
-        return "unknown"
+        name = orphan.name
+        if name.endswith(".md.tmp"):
+            stem, ext = self.continuity_path.stem, "md"
+        elif name.endswith(".json.tmp"):
+            stem, ext = self.meta_path.stem, "json"
+        else:
+            return "unknown"
+        m = re.fullmatch(rf"{re.escape(stem)}\.([^.]+)\.{ext}\.tmp", name)
+        return m.group(1) if m else "unknown"
 
     @staticmethod
     def _final_path_for_orphan(orphan: Path) -> Path:
@@ -4195,7 +4423,14 @@ class Store:
         tmp_path = self._continuity_tmp_path(token_hex)
         succeeded = False
         try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
+            # newline="" disables newline translation so the on-disk bytes are
+            # EXACTLY ``text.encode("utf-8")`` on every platform. AM-SNAPSHOT ①'s
+            # recovery oracle hashes this file (via read_bytes) and compares to a
+            # hash computed on the LF text; default text-mode write translates
+            # \n→os.linesep, which on Windows (\r\n) would make a genuinely-
+            # committed orphan misread as committed_hash_mismatch (L2 M1). No-op
+            # on POSIX; also makes the externalized continuity.md byte-stable.
+            with open(tmp_path, "w", encoding="utf-8", newline="") as f:
                 f.write(text)
                 f.flush()
                 os.fsync(f.fileno())

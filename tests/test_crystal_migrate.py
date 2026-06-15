@@ -12,7 +12,7 @@ Two halves:
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -414,8 +414,19 @@ class TestPrepareSurfacing:
     def test_rewarm_candidates_surface_hot_crystal(self, tmp_path):
         store = self._store(tmp_path)
         crystal = CrystalStore(tmp_path / "mem.crystal.json")
-        crystal.crystallize(name="hot_pattern", level=3, explanation="x", today=T0)
-        crystal.crystallize(name="cold_pattern", level=2, explanation="x", today=date(2026, 1, 1))
+        # Activate `hot_pattern` relative to NOW, not a fixed fixture date:
+        # the public prepare_wrap measures activation-tier hotness against
+        # wall-clock `today` (it has no today= override), so pinning activation
+        # to a fixed past date ages the pattern out of the <7-day hot tier and
+        # surfaces no rewarm candidate. date.today() keeps it hot deterministically.
+        crystal.crystallize(name="hot_pattern", level=3, explanation="x",
+                            today=date.today())
+        # cold_pattern: also relative to now (mirrors hot_pattern), 365d ago —
+        # well past the cold/dormant thresholds, so it's clock-independent rather
+        # than a fixed date that would read as future-dated ("hot") under a
+        # pre-2026 system clock.
+        crystal.crystallize(name="cold_pattern", level=2, explanation="x",
+                            today=date.today() - timedelta(days=365))
         store.record("an episode about substrate topics worth at least eighty characters here now.",
                      "observation")
         result = prepare_wrap(store, crystal_store=crystal)
@@ -426,7 +437,12 @@ class TestPrepareSurfacing:
     def test_crystallization_block_emitted_in_instructions(self, tmp_path):
         store = self._store(tmp_path)
         crystal = CrystalStore(tmp_path / "mem.crystal.json")
-        crystal.crystallize(name="hot_pattern", level=3, explanation="x", today=T0)
+        # Activate relative to NOW (see test_rewarm_candidates_surface_hot_crystal):
+        # the routing block is only emitted when there's something to route, and the
+        # rewarm candidate is the only routable item here — so an aged-out activation
+        # date would empty it and drop the block.
+        crystal.crystallize(name="hot_pattern", level=3, explanation="x",
+                            today=date.today())
         store.record("an episode about substrate topics worth at least eighty characters here now.",
                      "observation")
         result = prepare_wrap(store, crystal_store=crystal)

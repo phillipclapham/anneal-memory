@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from dataclasses import asdict, is_dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 
 from anneal_memory.store import (
     AnnealMemoryError,
@@ -1331,18 +1331,32 @@ class TestUpsertPatternHistorySeenAt:
         assert h["last_seen_at"] == "2026-06-04T00:00:00Z"
 
     def test_malformed_seen_at_degrades_to_wallclock(self, store):
+        # The wall-clock fallback stamps UTC (`_dt.now(_tz.utc)` in
+        # upsert_pattern_history), so assert the UTC date — NOT local
+        # date.today(), which diverges after ~8PM EDT once UTC has rolled to
+        # the next day (the local/UTC boundary bug this assertion used to hit).
+        # Capture the UTC date BOTH sides of the call and accept either, so a
+        # 00:00:00Z straddle (the exact time-boundary flake class this patch
+        # removes) can't reintroduce a different one.
+        before_utc = datetime.now(timezone.utc).date().isoformat()
         store.upsert_pattern_history("p_bad", 2, "expl", seen_at="not-a-date")
+        after_utc = datetime.now(timezone.utc).date().isoformat()
         h = store.get_pattern_history("p_bad")
-        # Wall-clock fallback: today's date, with a real (non-midnight-by-default)
-        # timestamp shape — never the invalid "not-a-dateT00:00:00Z".
-        assert h["last_seen_at"].startswith(date.today().isoformat())
+        # Contract: the fallback stamps the current UTC date plus a "Z" suffix —
+        # never the invalid "not-a-dateT00:00:00Z" from suffixing the bad input.
+        # (Midnight UTC is a legitimate fallback value; we do NOT assert non-midnight.)
+        assert h["last_seen_at"][:10] in {before_utc, after_utc}
         assert h["last_seen_at"].endswith("Z")
         assert "not-a-date" not in h["last_seen_at"]
 
     def test_omitted_seen_at_uses_wallclock(self, store):
+        # UTC, not local date.today() — see test_malformed_seen_at_degrades_to_wallclock
+        # (incl. the 00:00:00Z straddle guard).
+        before_utc = datetime.now(timezone.utc).date().isoformat()
         store.upsert_pattern_history("p_none", 2, "expl")
+        after_utc = datetime.now(timezone.utc).date().isoformat()
         h = store.get_pattern_history("p_none")
-        assert h["last_seen_at"].startswith(date.today().isoformat())
+        assert h["last_seen_at"][:10] in {before_utc, after_utc}
 
 
 class TestGetWrapHistory:

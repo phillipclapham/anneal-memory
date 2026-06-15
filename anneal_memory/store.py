@@ -567,8 +567,25 @@ def _fsync_dir(path: Path) -> None:
             pass
 
 
+class ContinuityLockUnavailable(AnnealMemoryError):
+    """Raised by :func:`continuity_lock` / :meth:`Store.continuity_lock` with
+    ``require=True`` when an exclusive cross-process lock cannot be acquired — a
+    non-POSIX platform (no ``fcntl``) or a lock-less POSIX filesystem (``flock``
+    raises ``ENOLCK`` / ``EOPNOTSUPP``, e.g. some NFS configs).
+
+    The default (``require=False``) degrades to a no-op on those platforms and the
+    context manager yields ``False`` (lock NOT held) — anneal's own consolidate
+    relies on this so a post-DB-commit acquire can't brick every wrap on such a
+    filesystem. A caller with no other serialization net — e.g. a governed
+    external editor doing read→modify→``os.replace`` with no 2PC / recovery oracle
+    of its own (Levain's Class-A State write) — passes ``require=True`` and FAILS
+    CLOSED on this rather than risk a silent lost update. [spore-091 #2]"""
+
+
 @contextmanager
-def continuity_lock(continuity_path: str | os.PathLike[str]) -> Iterator[None]:
+def continuity_lock(
+    continuity_path: str | os.PathLike[str], *, require: bool = False
+) -> Iterator[bool]:
     """Hold an exclusive cross-process advisory lock across a continuity-file
     read-modify-write. **THE cross-process coordination primitive (AM-CONTLOCK).**
 
@@ -621,34 +638,62 @@ def continuity_lock(continuity_path: str | os.PathLike[str]) -> Iterator[None]:
     recovery state on such a filesystem.) Any non-lock-unavailable ``OSError``
     from ``flock`` is a real fault and propagates unmasked.
 
-    Mutual exclusion keys on the lock file's INODE, not its path string — so two
-    cooperating processes that derive the path differently (one ``.resolve()``-d,
-    one not) still serialize as long as both land on the same file. Acquiring also
-    creates the lock file's parent directory if absent (a side effect of taking the
-    lock against a not-yet-existing tree).
+    Mutual exclusion keys on the lock file's INODE. The sidecar is derived from
+    the continuity path's **resolved** identity (``Path(...).resolve()``), not its
+    raw spelling — so two cooperating processes that pass the same file under
+    different spellings (one ``.resolve()``-d, one a raw ``store.continuity_path``,
+    or via a symlinked continuity directory) land on the SAME ``.lock`` inode and
+    genuinely serialize. The invariant lives in THIS primitive, not in caller
+    discipline (an earlier version derived the sidecar from the path string, so a
+    symlinked dir produced two ``.lock`` spellings → two inodes → silent
+    NON-serialization — the read→replace lost-update class). [spore-091 #1]
+    Acquiring also creates the lock file's parent directory if absent (a side
+    effect of taking the lock against a not-yet-existing tree).
+
+    **Return value / ``require``.** Yields ``True`` when the exclusive lock is
+    held, ``False`` when it degraded to a no-op (lock-less FS / non-POSIX) and
+    ``require`` was not set. With ``require=True`` a degradation raises
+    :class:`ContinuityLockUnavailable` instead of yielding ``False`` — for a
+    caller that must fail CLOSED rather than proceed unserialized. Existing
+    callers that ``with continuity_lock(path):`` (ignoring the value) are
+    unaffected; anneal's own ``validated_save_continuity`` deliberately keeps
+    ``require=False`` (best-effort, post-DB-commit).
     """
-    cp = Path(continuity_path)
+    # Canonicalize FIRST: resolve(strict=False) follows directory symlinks but
+    # keeps a not-yet-existing continuity leaf (first wrap), so the sidecar is the
+    # file's resolved identity + ".lock" regardless of how the caller spelled it.
+    cp = Path(continuity_path).resolve()
     lock_path = cp.with_name(cp.name + ".lock")
     # The lock fd goes INSIDE the try so a flock failure can't leak it: the
     # finally's None-guard covers "os.open failed (fd still None)" and any
     # re-raised "flock failed (fd open)".
     os.makedirs(lock_path.parent, exist_ok=True)
     lock_fd: int | None = None
+    acquired = False
     try:
         if fcntl is not None:
             lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                acquired = True
             except OSError as exc:
-                # Lock-less POSIX FS (ENOLCK/EOPNOTSUPP): degrade to a no-op —
-                # close the fd, proceed UNLOCKED, exactly as the no-op contract
-                # promises (and so a post-commit acquire can't brick every wrap).
-                # A non-lock-unavailable OSError (e.g. EBADF) is a real bug → re-raise.
+                # Lock-less POSIX FS (ENOLCK/EOPNOTSUPP): close the fd and (unless
+                # require) degrade to a no-op, proceeding UNLOCKED — exactly as the
+                # no-op contract promises (so a post-commit acquire can't brick
+                # every wrap). A non-lock-unavailable OSError (e.g. EBADF) is a
+                # real bug → re-raise.
                 if exc.errno not in _LOCK_UNAVAILABLE_ERRNOS:
                     raise
                 os.close(lock_fd)
                 lock_fd = None
-        yield
+        # fcntl is None (non-POSIX) leaves acquired False with no fd held.
+        if not acquired and require:
+            raise ContinuityLockUnavailable(
+                f"exclusive cross-process continuity lock unavailable for {cp} "
+                "(lock-less filesystem or non-POSIX platform) and require=True — "
+                "refusing to proceed without serialization"
+            )
+        yield acquired
     finally:
         if lock_fd is not None:
             os.close(lock_fd)
@@ -3082,17 +3127,20 @@ class Store:
         """
         return self._path.parent / f"{self._path.stem}.continuity.meta.json"
 
-    def continuity_lock(self) -> AbstractContextManager[None]:
+    def continuity_lock(self, *, require: bool = False) -> AbstractContextManager[bool]:
         """Convenience: :func:`continuity_lock` keyed on this store's
         :attr:`continuity_path`. Use inside any continuity read-modify-write that
-        could race a writer in another process. See the free function for the full
-        cross-process protocol and the POSIX-only / non-reentrant caveats.
+        could race a writer in another process. ``require=True`` fails closed
+        (raises :class:`ContinuityLockUnavailable`) when the lock can't be
+        acquired; the default degrades to a no-op and the manager yields ``False``.
+        See the free function for the full cross-process protocol, the resolved-path
+        invariant, and the POSIX-only / non-reentrant caveats.
 
         (Resolves the module-level :func:`continuity_lock` — NOT this method —
         since a bare name in a method body binds to the module global, not the
         class attribute; no self-recursion.)
         """
-        return continuity_lock(self.continuity_path)
+        return continuity_lock(self.continuity_path, require=require)
 
     def load_continuity(self) -> str | None:
         """Load the current continuity file.

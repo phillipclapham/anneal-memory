@@ -279,3 +279,79 @@ def test_lock_reraises_non_lock_unavailable_flock_error(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         with continuity_lock(tmp_path / "memory.continuity.md"):
             pass
+
+
+# --- spore-091 #1: the sidecar derives from the RESOLVED file identity ---------
+# (weekly-code-review codex catch 2026-06-15) Pre-fix `continuity_lock` derived the
+# `.lock` from the path STRING, so a symlinked continuity file → two `.lock`
+# spellings → two inodes → silent NON-serialization (the read→replace lost-update
+# class). The fix `.resolve()`s inside the primitive so every caller lands on one
+# lock inode regardless of spelling.
+
+def test_lock_resolves_symlinked_continuity_path_to_one_inode(tmp_path):
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    real = real_dir / "memory.continuity.md"
+    real.write_text("seed", encoding="utf-8")
+    link = tmp_path / "linked.continuity.md"
+    link.symlink_to(real)
+
+    resolved_lock = str(real) + ".lock"
+    with continuity_lock(link):  # the symlinked spelling
+        # the sidecar sits next to the RESOLVED target, never next to the symlink
+        assert os.path.exists(resolved_lock), "lock not created at the resolved path"
+        assert not os.path.exists(str(link) + ".lock"), "lock leaked to the symlink spelling"
+        # a second acquirer using the resolved spelling is EXCLUDED — same inode.
+        fd = os.open(resolved_lock, os.O_RDWR | os.O_CREAT)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+
+
+# --- spore-091 #2: require=True fails CLOSED; the manager yields acquired:bool ---
+# A governed external editor (Levain's State write) with no 2PC / recovery net of
+# its own must NOT proceed unserialized on a lock-less FS. require=True raises
+# instead of degrading; require=False keeps anneal's best-effort no-op (yields False).
+
+def test_lock_yields_true_when_held(tmp_path):
+    with continuity_lock(tmp_path / "memory.continuity.md") as held:
+        assert held is True
+
+
+def test_require_false_yields_false_on_degradation(tmp_path, monkeypatch):
+    monkeypatch.setattr(store_module, "fcntl", None)
+    with continuity_lock(tmp_path / "memory.continuity.md") as held:
+        assert held is False  # degraded — best-effort, not a raise
+
+
+def test_require_true_raises_when_fcntl_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(store_module, "fcntl", None)
+    with pytest.raises(store_module.ContinuityLockUnavailable):
+        with continuity_lock(tmp_path / "memory.continuity.md", require=True):
+            pass
+
+
+def test_require_true_raises_on_lockless_fs(tmp_path, monkeypatch):
+    import errno as _errno
+
+    class _NoLockFcntl:
+        LOCK_EX = fcntl.LOCK_EX
+
+        @staticmethod
+        def flock(fd, op):
+            raise OSError(_errno.ENOLCK, "no locks available")
+
+    monkeypatch.setattr(store_module, "fcntl", _NoLockFcntl)
+    with pytest.raises(store_module.ContinuityLockUnavailable):
+        with continuity_lock(tmp_path / "memory.continuity.md", require=True):
+            pass
+
+
+def test_store_method_require_true_raises_on_degradation(tmp_path, monkeypatch):
+    monkeypatch.setattr(store_module, "fcntl", None)
+    store = Store(str(tmp_path / "memory.db"))
+    with pytest.raises(store_module.ContinuityLockUnavailable):
+        with store.continuity_lock(require=True):
+            pass

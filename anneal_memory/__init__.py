@@ -4,6 +4,7 @@ __version__ = "0.9.0"
 
 from .store import (
     AnnealMemoryError,
+    ContinuityLockUnavailable,
     Store,
     StoreDatabaseError,
     StoreError,
@@ -108,6 +109,7 @@ from .server import Server
 
 __all__ = [
     "AnnealMemoryError",
+    "ContinuityLockUnavailable",
     "Store",
     "StoreDatabaseError",
     "StoreError",

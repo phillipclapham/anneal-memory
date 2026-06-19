@@ -564,3 +564,109 @@ class TestConcurrency:
             assert lock.read_text() == ""
         # The lock file is never confused for a spore document.
         assert len(store.list_open()) == 1
+
+
+# -- disposition (the opaque operator-I/O routing tag) --------------------------
+# anneal stores it verbatim and NEVER interprets it — the Tray taxonomy
+# (loop/seed/handoff/agenda) lives in the Levain/flow disposition-aware layer.
+
+
+class TestDisposition:
+    def test_add_omits_the_key_for_a_normal_loop(self, store):
+        """A plain loop stays key-free (store-minimal, backward-identical) — the
+        additive-no-schema-bump invariant."""
+        s = store.add(type="task", text="loop", today=T0)
+        assert "disposition" not in s
+        assert "disposition" not in SporeStore(store.path).get("spore-001")
+
+    def test_add_stores_a_truthy_disposition_verbatim(self, store):
+        s = store.add(type="thought", text="dumped", disposition="seed", today=T0)
+        assert s["disposition"] == "seed"
+        assert SporeStore(store.path).get("spore-001")["disposition"] == "seed"
+
+    def test_add_stores_an_arbitrary_value_uninterpreted(self, store):
+        """Anneal is blind to the taxonomy: a value it has never heard of is stored
+        exactly, not rejected — the disposition-aware layer owns validation."""
+        s = store.add(type="task", text="x", disposition="not-a-real-disposition", today=T0)
+        assert s["disposition"] == "not-a-real-disposition"
+
+    def test_add_empty_string_stays_key_free(self, store):
+        s = store.add(type="task", text="x", disposition="", today=T0)
+        assert "disposition" not in s
+
+    def test_add_rejects_a_non_string_disposition(self, store):
+        with pytest.raises(ValueError, match="disposition must be a string"):
+            store.add(type="task", text="x", disposition=3, today=T0)  # type: ignore[arg-type]
+
+    def test_update_sets_a_disposition(self, store):
+        store.add(type="thought", text="x", today=T0)
+        s = store.update("spore-001", disposition="handoff")
+        assert s["disposition"] == "handoff"
+        assert SporeStore(store.path).get("spore-001")["disposition"] == "handoff"
+
+    def test_update_clears_to_a_plain_loop(self, store):
+        """Metabolize: None/'' pops the key (back to a key-free loop), mirroring
+        how next/pointer/domain clear."""
+        store.add(type="thought", text="x", disposition="seed", today=T0)
+        s = store.update("spore-001", disposition=None)
+        assert "disposition" not in s
+        assert "disposition" not in SporeStore(store.path).get("spore-001")
+
+    def test_update_empty_string_also_clears(self, store):
+        store.add(type="thought", text="x", disposition="seed", today=T0)
+        s = store.update("spore-001", disposition="")
+        assert "disposition" not in s
+
+    def test_update_omitted_leaves_disposition_untouched(self, store):
+        """The _UNSET sentinel: not passing disposition must NOT clear an existing
+        one (the omit-vs-clear distinction)."""
+        store.add(type="thought", text="x", disposition="agenda", today=T0)
+        s = store.update("spore-001", tier="hot")
+        assert s["disposition"] == "agenda"
+
+    def test_update_rejects_a_non_string_disposition(self, store):
+        store.add(type="task", text="x", today=T0)
+        with pytest.raises(ValueError, match="disposition must be a string"):
+            store.update("spore-001", disposition=[])  # type: ignore[arg-type]
+
+    # -- expect_disposition: the optimistic compare-and-set (TOCTOU guard) --------
+    def test_update_expect_disposition_matches_applies(self, store):
+        store.add(type="thought", text="x", disposition="seed", today=T0)
+        s = store.update("spore-001", disposition="handoff", expect_disposition="seed")
+        assert s["disposition"] == "handoff"
+
+    def test_update_expect_disposition_none_matches_a_keyfree_loop(self, store):
+        # a plain loop's raw disposition is ABSENT → expect None must match it
+        store.add(type="thought", text="x", today=T0)
+        s = store.update("spore-001", disposition="seed", expect_disposition=None)
+        assert s["disposition"] == "seed"
+
+    def test_update_expect_disposition_mismatch_raises_and_writes_nothing(self, store):
+        store.add(type="thought", text="x", disposition="seed", today=T0)
+        # a concurrent writer would have changed it; we expected "agenda" but it's "seed"
+        with pytest.raises(SporeError, match="disposition changed since read"):
+            store.update("spore-001", disposition="loop-ish", expect_disposition="agenda")
+        # nothing written — the disposition is untouched
+        assert SporeStore(store.path).get("spore-001")["disposition"] == "seed"
+
+    def test_update_expect_disposition_none_mismatches_a_tagged_spore(self, store):
+        # caller expected a key-free loop but it's actually a seed → reject
+        store.add(type="thought", text="x", disposition="seed", today=T0)
+        with pytest.raises(SporeError, match="disposition changed since read"):
+            store.update("spore-001", disposition="agenda", expect_disposition=None)
+
+    def test_update_without_expect_disposition_skips_the_cas(self, store):
+        # omitted (the _UNSET default) → no CAS, unconditional set (back-compat)
+        store.add(type="thought", text="x", disposition="seed", today=T0)
+        s = store.update("spore-001", disposition="handoff")
+        assert s["disposition"] == "handoff"
+
+    def test_disposition_round_trips_through_the_lifecycle_verbs(self, store):
+        """The 3a de-risk, locked as a test: touch/descend leave an unknown
+        disposition untouched (anneal never strips a field it doesn't model)."""
+        store.add(type="task", text="x", disposition="seed", today=T0)
+        store.touch("spore-001", today=T0)
+        assert SporeStore(store.path).get("spore-001")["disposition"] == "seed"
+        store.descend("spore-001", kind="done")
+        # resolved rows keep the field too (the row moves whole into `resolved`)
+        assert SporeStore(store.path).get("spore-001")["disposition"] == "seed"

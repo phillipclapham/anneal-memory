@@ -670,3 +670,33 @@ class TestDisposition:
         store.descend("spore-001", kind="done")
         # resolved rows keep the field too (the row moves whole into `resolved`)
         assert SporeStore(store.path).get("spore-001")["disposition"] == "seed"
+
+
+# -- update(type=): the retype primitive (the "forming-vs-committed" lock is the
+# caller's policy, NOT anneal's — anneal mechanically allows it). -----------------
+
+
+class TestRetype:
+    def test_update_retypes_a_spore(self, store):
+        store.add(type="thought", text="x", today=T0)
+        s = store.update("spore-001", type="task")
+        assert s["type"] == "task"
+        assert SporeStore(store.path).get("spore-001")["type"] == "task"
+
+    def test_update_rejects_a_bad_type(self, store):
+        store.add(type="thought", text="x", today=T0)
+        with pytest.raises(ValueError, match="type must be one of"):
+            store.update("spore-001", type="bogus")  # type: ignore[arg-type]
+
+    def test_retype_changes_the_valid_terminal_kinds(self, store):
+        # the point of retype: a thought retyped to a task can now descend 'done'
+        # (which a thought cannot) — the forming->ready path.
+        store.add(type="thought", text="x", today=T0)
+        store.update("spore-001", type="task")
+        store.descend("spore-001", kind="done")  # task-only kind; would raise on a thought
+        assert SporeStore(store.path).get("spore-001")["status"] == "resolved"
+
+    def test_update_omitting_type_leaves_it_unchanged(self, store):
+        store.add(type="question", text="x", today=T0)
+        store.update("spore-001", tier="hot")
+        assert SporeStore(store.path).get("spore-001")["type"] == "question"

@@ -172,6 +172,13 @@ class SporeDict(TypedDict):
     resolution: ResolutionDict | None
     pointer: str | None
     notes: list[str]
+    # NOTE — ``disposition`` is DELIBERATELY NOT a field here. It is an opaque
+    # operator-I/O routing tag (the Levain/flow Tray layer's ``seed``/``handoff``/
+    # ``agenda`` vs the default ``loop``) that anneal carries verbatim but never
+    # interprets — so it stays OUTSIDE the modeled schema (a plain loop is key-free;
+    # additive, no schema bump). ``add``/``update`` set/clear it via a loosely-typed
+    # dict view, keeping anneal blind to the taxonomy. (Also: ``NotRequired`` is
+    # 3.11+, and this library targets 3.10 zero-dep — another reason it isn't a key.)
 
 
 # ---------------------------------------------------------------------------
@@ -469,12 +476,20 @@ class SporeStore:
         salience: int = 0,
         next: str | None = None,
         pointer: str | None = None,
+        disposition: str | None = None,
         today: date | None = None,
     ) -> SporeDict:
         """Plant a new spore. ``pointer`` is an optional link to fuller context for
         the open loop *as it stands* (a project path, a file, a doc) — distinct from
         ``ascend``'s ``ref``, which records what the spore *became* at resolution.
-        Returns the created record."""
+        Returns the created record.
+
+        ``disposition`` is an OPAQUE operator-I/O routing tag (the Levain/flow Tray
+        layer's ``seed``/``handoff``/``agenda`` vs the default ``loop``) — anneal
+        stores a truthy value verbatim and NEVER interprets it (the disposition-aware
+        layer owns the taxonomy + value-validation, mirroring how germination is
+        computed outside the store). Pass ``None`` for a normal loop, which stays
+        key-free (store-minimal, backward-identical)."""
         if type not in VALID_TYPES:
             raise ValueError(f"type must be one of {VALID_TYPES} (got {type!r}).")
         if tier not in VALID_TIERS:
@@ -489,6 +504,10 @@ class SporeStore:
             raise ValueError(f"domain must be a string (got {domain!r}).")
         if pointer is not None and not isinstance(pointer, str):
             raise ValueError(f"pointer must be a string or None (got {pointer!r}).")
+        # Type-check only — anneal never validates the disposition *value* (it stays
+        # blind to the Tray taxonomy); the disposition-aware layer gates the vocabulary.
+        if disposition is not None and not isinstance(disposition, str):
+            raise ValueError(f"disposition must be a string or None (got {disposition!r}).")
         next_validated = _validate_date(next, "next")
         now = (today or date.today()).isoformat()
         with self._transaction() as data:
@@ -507,6 +526,11 @@ class SporeStore:
                 "pointer": pointer or None,
                 "notes": [],
             }
+            # A truthy disposition is stored verbatim; a normal loop stays key-free.
+            # Set via a loosely-typed view: disposition is an opaque extra key, not a
+            # modeled SporeDict field (see the SporeDict note).
+            if disposition:
+                cast("dict[str, object]", item)["disposition"] = disposition
             data["spores"].append(item)
             return item
 
@@ -609,16 +633,47 @@ class SporeStore:
         salience: int | _Unset = _UNSET,
         domain: str | _Unset = _UNSET,
         pointer: str | None | _Unset = _UNSET,
+        disposition: str | None | _Unset = _UNSET,
+        expect_disposition: str | None | _Unset = _UNSET,
         add_note: str | None = None,
         today: date | None = None,
     ) -> SporeDict:
         """Metadata surgery on an open spore. Omitted arguments are left
-        unchanged; passing ``None``/``''`` to ``next``/``pointer``/``domain``
-        clears them. Deliberately does NOT bump ``seen`` — engagement is signalled
-        explicitly via :meth:`touch`, which keeps germination honest.
+        unchanged; passing ``None``/``''`` to ``next``/``pointer``/``domain``/
+        ``disposition`` clears them. Deliberately does NOT bump ``seen`` —
+        engagement is signalled explicitly via :meth:`touch`, which keeps
+        germination honest.
+
+        ``disposition`` is the opaque operator-I/O routing tag (see :meth:`add`):
+        a truthy value re-routes the spore (e.g. the Tray layer's ``seed`` →
+        ``handoff``), and ``None``/``''`` clears the key (metabolize back to a
+        plain key-free loop). anneal stores/clears it without interpreting the
+        value — the disposition-aware layer owns the taxonomy.
+
+        ``expect_disposition`` is an OPTIMISTIC compare-and-set on the disposition
+        field, checked INSIDE this transaction's lock so a caller that read the
+        disposition in a separate (lock-free) step can guard against a concurrent
+        change between its read and this write (the cross-process TOCTOU a
+        read-then-write guard otherwise has). When provided, the spore's CURRENT
+        raw disposition must equal it (``None`` = expect key-absent / a plain loop;
+        a string = expect that exact value) or :class:`SporeError` is raised and
+        nothing is written. Blind like everything else here — a raw value compare,
+        never an interpretation of the tag. (Mirrors the continuity write's
+        ``expected``-body stale-check.)
         """
         with self._transaction() as data:
             item = self._require_open(data, spore_id)
+
+            if not isinstance(expect_disposition, _Unset):
+                # Atomic optimistic-lock: the disposition the caller saw must still be
+                # current (raw value compare — None ≡ key-absent). Guards the caller's
+                # read-then-write window against a concurrent (cross-process) writer.
+                found = item.get("disposition")
+                if found != expect_disposition:
+                    raise SporeError(
+                        f"disposition changed since read (expected {expect_disposition!r}, "
+                        f"found {found!r}); re-read the spore and retry."
+                    )
 
             if not isinstance(tier, _Unset):
                 if tier not in VALID_TIERS:
@@ -642,6 +697,16 @@ class SporeStore:
                 if pointer is not None and not isinstance(pointer, str):
                     raise ValueError(f"pointer must be a string or None (got {pointer!r}).")
                 item["pointer"] = pointer or None
+            if not isinstance(disposition, _Unset):
+                # Type-check only — the value stays uninterpreted by anneal. Set/clear
+                # via a loosely-typed view (an opaque extra key, not a SporeDict field).
+                if disposition is not None and not isinstance(disposition, str):
+                    raise ValueError(f"disposition must be a string or None (got {disposition!r}).")
+                _view = cast("dict[str, object]", item)
+                if disposition:
+                    _view["disposition"] = disposition
+                else:  # None / "" → metabolize back to a plain (key-free) loop
+                    _view.pop("disposition", None)
             if add_note:
                 stamp = (today or date.today()).isoformat()
                 if not isinstance(item.get("notes"), list):

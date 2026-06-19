@@ -627,6 +627,7 @@ class SporeStore:
         self,
         spore_id: str,
         *,
+        type: SporeType | _Unset = _UNSET,
         tier: Tier | _Unset = _UNSET,
         next: str | None | _Unset = _UNSET,
         text: str | _Unset = _UNSET,
@@ -649,6 +650,12 @@ class SporeStore:
         ``handoff``), and ``None``/``''`` clears the key (metabolize back to a
         plain key-free loop). anneal stores/clears it without interpreting the
         value — the disposition-aware layer owns the taxonomy.
+
+        ``type`` retypes the spore (validated against ``VALID_TYPES``). anneal allows
+        it mechanically — types ARE anneal's taxonomy — but does NOT enforce the
+        "only while forming" policy (a forming Tray item is plastic; a committed loop
+        locks its type): that boundary is disposition-aware, so it lives in the
+        disposition-aware caller (the Levain/flow write seam gates it), not here.
 
         ``expect_disposition`` is an OPTIMISTIC compare-and-set on the disposition
         field, checked INSIDE this transaction's lock so a caller that read the
@@ -675,6 +682,10 @@ class SporeStore:
                         f"found {found!r}); re-read the spore and retry."
                     )
 
+            if not isinstance(type, _Unset):
+                if type not in VALID_TYPES:
+                    raise ValueError(f"type must be one of {VALID_TYPES} (got {type!r}).")
+                item["type"] = type
             if not isinstance(tier, _Unset):
                 if tier not in VALID_TIERS:
                     raise ValueError(f"tier must be one of {VALID_TIERS} (got {tier!r}).")

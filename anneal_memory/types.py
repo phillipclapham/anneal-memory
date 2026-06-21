@@ -207,6 +207,30 @@ class PatternAssociationStats:
     strongest_pairs: list[PatternAssociationPair] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class PatternGraphProjectionMeta:
+    """Projection checkpoint for the pattern-association read-model (CQRS — spore-104
+    dep-1). ``(projection_version, high_water_mark)`` uniquely pins the graph STATE
+    a Slice-C retrieval receipt was produced against, so the offline A/B replay
+    harness can bucket receipts by graph generation (and detect a receipt logged
+    against a different snapshot than the one being replayed).
+
+    ``high_water_mark`` is a monotonic revision counter bumped on every committed
+    graph-edge mutation (recall is read-only, so it never advances it). It pins
+    state WITHIN A SINGLE STORE LINEAGE — it is a per-DB counter, not a content
+    hash, so it will not detect a divergent-history collision (two rebuilt/restored
+    lineages landing on the same integer). Acceptable for the single-writer
+    sovereign store. ``projection_version`` marks the projection GENERATION — bumped
+    only by a future blue/green rebuild (deferred); stamped now (constant 1) so the
+    receipt corpus is forward-distinguishable once a rebuild starts bumping it.
+    ``updated_at`` is the logical date of the last bump (``None`` if the graph has
+    never mutated)."""
+
+    projection_version: int
+    high_water_mark: int
+    updated_at: str | None
+
+
 @dataclass
 class RecallResult:
     """Result of a recall query."""

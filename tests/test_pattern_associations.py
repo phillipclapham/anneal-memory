@@ -14,6 +14,7 @@ reads/telemetry, the Store wrappers, and the end-to-end wrap-pipeline seeding.
 """
 
 import math
+import sqlite3
 
 import pytest
 
@@ -22,10 +23,13 @@ from anneal_memory.pattern_associations import (
     DECAY_PER_DAY,
     GC_THRESHOLD,
     NODE_OUTGOING_BUDGET,
+    PATTERN_ASSOCIATIONS_SCHEMA,
     RETRIEVAL_THRESHOLD,
     SEED_STRENGTH,
+    bump_projection_high_water_mark,
     canonical_pair,
     effective_strength,
+    get_projection_meta,
     _current_generation,
 )
 from anneal_memory.store import Store
@@ -444,3 +448,174 @@ class TestWrapPipelineSeeding:
         # the episode Hebbian DML survived (was NOT rolled back by the fault)
         assert s.association_stats().total_links > 0
         s.close()
+
+
+class TestProjectionMeta:
+    """The CQRS projection checkpoint (spore-104 dep-1): a monotonic high-water mark
+    that pins which graph STATE a Slice-C retrieval receipt was logged against. The
+    contract: hwm advances on EVERY committed graph-EDGE mutation, NEVER on a no-op,
+    projection_version stays 1 (blue/green rebuild deferred), and a not-yet-upgraded
+    DB (read_only skips _init_schema → no table) degrades to the defaults."""
+
+    def test_fresh_graph_returns_defaults(self, tmp_path):
+        s = _store(tmp_path)
+        m = s.pattern_graph_projection_meta()
+        assert (m.projection_version, m.high_water_mark, m.updated_at) == (1, 0, None)
+        s.close()
+
+    def test_projection_version_is_constant_one(self, tmp_path):
+        s = _store(tmp_path)
+        s.seed_pattern_co_graduation(["alpha", "beta"], today="2026-06-12")
+        s.drain_co_surface_events(
+            _events(("e1", "s1", ["alpha", "beta"])), today="2026-06-12"
+        )
+        # No mutation path bumps the GENERATION — that is the deferred blue/green rebuild.
+        assert s.pattern_graph_projection_meta().projection_version == 1
+        s.close()
+
+    def test_seed_bumps_high_water_mark(self, tmp_path):
+        s = _store(tmp_path)
+        s.seed_pattern_co_graduation(["alpha", "beta"], today="2026-06-12")
+        m = s.pattern_graph_projection_meta()
+        assert m.high_water_mark == 1 and m.updated_at == "2026-06-12"
+        s.close()
+
+    def test_seed_singleton_does_not_bump(self, tmp_path):
+        s = _store(tmp_path)
+        # one name → no pair forms → no edge mutation → no bump
+        assert s.seed_pattern_co_graduation(["alpha"], today="2026-06-12") == 0
+        assert s.pattern_graph_projection_meta().high_water_mark == 0
+        s.close()
+
+    def test_seed_existing_pair_does_not_rebump(self, tmp_path):
+        s = _store(tmp_path)
+        s.seed_pattern_co_graduation(["alpha", "beta"], today="2026-06-12")
+        assert s.pattern_graph_projection_meta().high_water_mark == 1
+        # re-seeding the SAME pair forms nothing (existing edges untouched) → no bump
+        assert s.seed_pattern_co_graduation(["alpha", "beta"], today="2026-06-13") == 0
+        assert s.pattern_graph_projection_meta().high_water_mark == 1
+        s.close()
+
+    def test_drain_bumps_on_edge_change(self, tmp_path):
+        s = _store(tmp_path)
+        s.drain_co_surface_events(
+            _events(("e1", "s1", ["alpha", "beta"])), today="2026-06-12"
+        )
+        assert s.pattern_graph_projection_meta().high_water_mark == 1
+        s.close()
+
+    def test_drain_refeed_does_not_bump(self, tmp_path):
+        s = _store(tmp_path)
+        ev = _events(("e1", "s1", ["alpha", "beta"]))
+        s.drain_co_surface_events(ev, today="2026-06-12")
+        assert s.pattern_graph_projection_meta().high_water_mark == 1
+        # idempotent re-feed: events_applied=0, no edge change → hwm holds
+        r = s.drain_co_surface_events(ev, today="2026-06-12")
+        assert r["events_applied"] == 0
+        assert s.pattern_graph_projection_meta().high_water_mark == 1
+        s.close()
+
+    def test_drain_that_strengthens_existing_pair_bumps(self, tmp_path):
+        """Locks the structural guarantee (L2): a drain that STRENGTHENS an existing
+        edge (not just forms one) bumps too. This pins the normalize-dominated-by-bump
+        invariant — the homeostatic rescale that can ride such a drain only runs over
+        touched_nodes ⊆ delta_by_pair, so it can never mutate strength without
+        formed/strengthened ≥ 1 (and thus a bump) already firing."""
+        s = _store(tmp_path)
+        s.drain_co_surface_events(_events(("e1", "s1", ["alpha", "beta"])), today="2026-06-12")
+        assert s.pattern_graph_projection_meta().high_water_mark == 1  # formed
+        # distinct session + event_id, SAME pair → strengthens (not forms)
+        r = s.drain_co_surface_events(_events(("e2", "s2", ["alpha", "beta"])), today="2026-06-13")
+        assert r["pairs_strengthened"] == 1 and r["pairs_formed"] == 0
+        assert s.pattern_graph_projection_meta().high_water_mark == 2
+        s.close()
+
+    def test_drain_singleton_event_does_not_bump(self, tmp_path):
+        s = _store(tmp_path)
+        # a 1-name recall opportunity is logged but forms no pair → no edge → no bump
+        s.drain_co_surface_events(_events(("e1", "s1", ["alpha"])), today="2026-06-12")
+        assert s.pattern_graph_projection_meta().high_water_mark == 0
+        s.close()
+
+    def test_rename_with_edges_bumps(self, tmp_path):
+        s = _store(tmp_path)
+        s.seed_pattern_co_graduation(["alpha", "beta"], today="2026-06-12")  # hwm 1
+        s.rename_pattern_association("alpha", "gamma", today="2026-06-13")
+        assert s.pattern_graph_projection_meta().high_water_mark == 2
+        s.close()
+
+    def test_rename_no_edges_does_not_bump(self, tmp_path):
+        s = _store(tmp_path)
+        # renaming a name with no incident edges touches nothing
+        assert s.rename_pattern_association("ghost", "specter", today="2026-06-12") == 0
+        assert s.pattern_graph_projection_meta().high_water_mark == 0
+        s.close()
+
+    def test_sever_with_edges_bumps(self, tmp_path):
+        s = _store(tmp_path)
+        s.seed_pattern_co_graduation(["alpha", "beta"], today="2026-06-12")  # hwm 1
+        assert s.sever_pattern_concept("alpha", today="2026-06-13") == 1
+        assert s.pattern_graph_projection_meta().high_water_mark == 2
+        s.close()
+
+    def test_sever_no_edges_does_not_bump(self, tmp_path):
+        s = _store(tmp_path)
+        # a pure generation tombstone (no incident edges) changes only future homonym
+        # resolution, not the edges recall reads → hwm must not move
+        assert s.sever_pattern_concept("ghost", today="2026-06-12") == 0
+        assert s.pattern_graph_projection_meta().high_water_mark == 0
+        s.close()
+
+    def test_full_gc_bumps_on_reclaim_only(self, tmp_path):
+        s = _store(tmp_path)
+        s.seed_pattern_co_graduation(["alpha", "beta"], today="2026-06-12")  # hwm 1, str 0.3
+        # gc while the edge is still strong reclaims nothing → no bump
+        assert s.gc_pattern_associations(today="2026-06-12") == 0
+        assert s.pattern_graph_projection_meta().high_water_mark == 1
+        # gc far in the future: 0.3 * 0.96**~90d << GC_THRESHOLD → reclaimed → bump
+        assert s.gc_pattern_associations(today="2026-09-12") == 1
+        assert s.pattern_graph_projection_meta().high_water_mark == 2
+        s.close()
+
+    def test_high_water_mark_is_monotonic_across_mixed_ops(self, tmp_path):
+        s = _store(tmp_path)
+        s.seed_pattern_co_graduation(["alpha", "beta"], today="2026-06-12")          # +1 = 1
+        s.drain_co_surface_events(                                                    # +1 = 2
+            _events(("e1", "s1", ["gamma", "delta"])), today="2026-06-12"
+        )
+        s.drain_co_surface_events(                                                    # no-op (refeed)
+            _events(("e1", "s1", ["gamma", "delta"])), today="2026-06-12"
+        )
+        s.rename_pattern_association("alpha", "omega", today="2026-06-13")            # +1 = 3
+        assert s.pattern_graph_projection_meta().high_water_mark == 3
+        s.close()
+
+    def test_read_only_store_reads_through_without_writing(self, tmp_path):
+        path = str(tmp_path / "m.db")
+        with Store(path, project_name="test") as w:
+            w.seed_pattern_co_graduation(["alpha", "beta"], today="2026-06-12")
+        with Store(path, read_only=True) as r:
+            m = r.pattern_graph_projection_meta()
+        assert (m.projection_version, m.high_water_mark) == (1, 1)
+
+    def test_missing_table_returns_defaults(self):
+        # a not-yet-upgraded DB (no projection-meta table) must degrade, not fault —
+        # the read_only recall path opens such a DB and skips _init_schema
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE episodes (id TEXT)")
+        m = get_projection_meta(conn)
+        assert (m.projection_version, m.high_water_mark, m.updated_at) == (1, 0, None)
+        conn.close()
+
+    def test_bump_helper_lazy_inits_and_is_atomic_with_rollback(self):
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(PATTERN_ASSOCIATIONS_SCHEMA)
+        bump_projection_high_water_mark(conn, "2026-06-12")
+        bump_projection_high_water_mark(conn, "2026-06-12")
+        conn.commit()
+        assert get_projection_meta(conn).high_water_mark == 2
+        # the bump is plain SQL on the connection → it rolls back with its transaction
+        bump_projection_high_water_mark(conn, "2026-06-13")
+        conn.rollback()
+        assert get_projection_meta(conn).high_water_mark == 2
+        conn.close()

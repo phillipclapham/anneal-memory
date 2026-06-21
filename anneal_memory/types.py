@@ -236,7 +236,23 @@ class RelevantPattern:
     hyphenated / long terms weigh more). ``activation`` is the read-time tier
     (``hot``/``warm``/``cold``/``dormant``) computed at retrieval time. The
     snake_case ``name`` is itself high-signal — a query word matches it as a
-    substring (``structural`` ⊂ ``structural_invariants_beat_discipline``)."""
+    substring (``structural`` ⊂ ``structural_invariants_beat_discipline``).
+
+    ``source`` names WHICH retrieval path surfaced the pattern — the per-pattern
+    provenance a receipt/baseline-isolation consumer needs (the Slice-C gain
+    instrument separates baseline (c) direct-evidence from the graph hop by it):
+
+    * ``"keyword"`` — the pattern's OWN text (name/explanation/tags) matched the
+      query keywords (:func:`retrieval._score_patterns`). The high-confidence path.
+    * ``"evidence_edge"`` — keyword-orthogonal: surfaced via the associative
+      backend because the pattern's ``evidence`` cites an episode the query
+      *directly* keyword-matched (no graph hop).
+    * ``"graph_hop"`` — surfaced via the associative backend through one
+      episode-Hebbian hop (the pattern cites an episode co-cited with a
+      query-matched seed). Near-dead on sparse/decayed graphs.
+
+    Defaults to ``"keyword"`` so the field is additive (older constructors and
+    adopter mocks stay valid; only the associative path sets the other values)."""
 
     name: str
     level: int
@@ -244,6 +260,7 @@ class RelevantPattern:
     tags: list[str]
     activation: str
     score: float
+    source: str = "keyword"
 
 
 @dataclass(frozen=True)

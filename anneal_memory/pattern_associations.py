@@ -52,7 +52,11 @@ import sqlite3
 from itertools import combinations
 from typing import Any
 
-from .types import PatternAssociationPair, PatternAssociationStats
+from .types import (
+    PatternAssociationPair,
+    PatternAssociationStats,
+    PatternGraphProjectionMeta,
+)
 
 # -- Tunable constants (oracle-tuned in the shadow phase; sane starting values) --
 
@@ -173,6 +177,30 @@ CREATE TABLE IF NOT EXISTS processed_co_surface_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_processed_cosurface_drained ON processed_co_surface_events(drained_at);
+
+-- Projection checkpoint for the pattern graph as a CQRS read-model (spore-104
+-- dep-1). A retrieval receipt stamps (projection_version, high_water_mark) at
+-- recall time so the Slice-C offline A/B replay harness can PIN which graph
+-- state produced it (bucket receipts by graph generation; detect/exclude
+-- receipts logged against a different snapshot than the one the harness replays
+-- against). Single row (id = 1, CHECK-guarded), lazily inserted on the first
+-- mutation/read — keeping a logical date out of this static schema string.
+--   * high_water_mark — a monotonic REVISION counter, +1 inside the SAME
+--     transaction as any committed graph-EDGE mutation (drain / seed / rename /
+--     sever / gc). Two receipts share an hwm iff they saw the same stored graph;
+--     recall is read-only so it never advances it. (Effective strengths still
+--     vary with the query date via lazy decay — a pure function of stored state
+--     × today — so (version, hwm, today) fully determines the effective graph.)
+--   * projection_version — the projection GENERATION, bumped only by a future
+--     blue/green REBUILD (the CQRS "remainder"; deliberately DEFERRED — see the
+--     module docstring). It is stamped now (constant 1) so the receipt corpus is
+--     forward-distinguishable once a rebuild starts bumping it.
+CREATE TABLE IF NOT EXISTS pattern_graph_projection_meta (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    projection_version INTEGER NOT NULL DEFAULT 1,
+    high_water_mark INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -233,6 +261,113 @@ def canonical_pair(name_a: str, name_b: str) -> tuple[str, str] | None:
     return (name_a, name_b) if name_a < name_b else (name_b, name_a)
 
 
+# -- Projection checkpoint (CQRS read-model versioning — spore-104 dep-1) --
+#
+# The pattern graph is a read-model (projection) over the canonical episode /
+# graduation streams. A Slice-C retrieval receipt stamps the projection's
+# (projection_version, high_water_mark) at recall time so the offline A/B replay
+# harness can PIN which graph state produced the receipt. THIN by design: this
+# STAMPS state (lets a receipt and a replay snapshot be identified + ordered); it
+# does NOT rebuild a projection. The blue/green rebuild + raw-event retention that
+# a true as-of reconstruction needs is the deferred CQRS "remainder" (the graph
+# is not rebuildable-from-log today: raw co-surface events are truncated after
+# drain, decay is wall-calendar, GC deletes rows). The replay harness does not
+# need reconstruction — it pins ONE snapshot, replays the receipt queries against
+# it, and records that snapshot's checkpoint; the stamp is what makes that pin
+# identifiable. See slice_c_gain_instrument.md §4/§9.2.
+#
+# CONSUMER CONTRACT (load-bearing — L2): the harness MUST bucket receipts on
+# (high_water_mark, query_date), NOT hwm alone. hwm pins the STORED graph; lazy
+# calendar decay makes EFFECTIVE strength a pure function of (stored, today), so
+# two same-hwm receipts taken on different days saw DIFFERENT effective graphs.
+# Bucketing on hwm only silently mis-measures.
+#
+# DEFERRAL SUCCESS-CONDITION (measure before trusting thin): pin-not-rebuild
+# unblocks the harness ONLY IF enough receipts share an hwm bucket for A/B power.
+# hwm bumps on ~every wrap-time mutation (≈ every wrap), so the usable
+# single-snapshot sample may be only the receipts between two consecutive
+# mutations (potentially one day). Count receipts-per-hwm before relying on it; if
+# the bucket is too small, as-of rebuild (replay each receipt against the graph IT
+# saw) becomes necessary — that is when the deferred CQRS remainder gets built.
+# Two further axes are deliberately NOT stamped: a divergent store LINEAGE (hwm is
+# a per-DB counter, not a content hash — it cannot detect two histories colliding
+# on the same integer) and concept GENERATION boundaries (a homonym sever changes
+# FUTURE graph evolution, invisible to the edge-state the receipt pins). Both are
+# out of scope for the single-writer sovereign store + the current edge-state harness.
+
+
+def _ensure_projection_meta_row(conn: sqlite3.Connection, today: str) -> None:
+    """Lazily create the singleton projection-meta row (id = 1); no-op if present.
+    Keeps a logical date out of the static schema string — the row is born on the
+    first mutation/read with the caller's logical ``today`` (logical-clock
+    discipline, spore-081)."""
+    conn.execute(
+        "INSERT OR IGNORE INTO pattern_graph_projection_meta "
+        "(id, projection_version, high_water_mark, updated_at) VALUES (1, 1, 0, ?)",
+        (today,),
+    )
+
+
+def bump_projection_high_water_mark(conn: sqlite3.Connection, today: str) -> None:
+    """Advance the high-water mark by ONE revision — call inside the SAME
+    transaction as a committed graph-EDGE mutation, BEFORE the caller's commit.
+
+    The mutating functions (seed / drain / rename / sever / gc) thread their own
+    ``commit`` flag; this only writes the UPDATE, never commits, so the bump is
+    atomic with the edge change (a rollback reverts both). Callers GATE the call
+    on an actual edge change, so a no-op (e.g. an all-already-processed drain)
+    does not inflate the counter. Monotonic — never decreases."""
+    _ensure_projection_meta_row(conn, today)
+    conn.execute(
+        "UPDATE pattern_graph_projection_meta "
+        "SET high_water_mark = high_water_mark + 1, updated_at = ? WHERE id = 1",
+        (today,),
+    )
+
+
+def get_projection_meta(conn: sqlite3.Connection) -> PatternGraphProjectionMeta:
+    """The current (projection_version, high_water_mark) checkpoint — the receipt
+    stamp + replay bucket key. Defaults (version 1, hwm 0) when the graph has
+    never mutated (no row yet).
+
+    Read-only safe: pure SELECT, never inserts, so a read_only Store can call it
+    on the per-prompt recall path. Survives a not-yet-upgraded DB: a read_only
+    open SKIPS ``_init_schema`` (a reader cannot migrate), so the table may be
+    ABSENT — that one specific ``no such table`` case maps to the defaults rather
+    than faulting a recall; any OTHER OperationalError re-raises to the Store's
+    error boundary (don't mask a real fault).
+
+    READ-PATH INVARIANT (L3 codex — do not regress): keep this a PURE SELECT. The
+    read_only open inherits Python sqlite3's DEFAULT 5s busy_timeout (verified:
+    ``PRAGMA busy_timeout=5000``); under WAL a pure-SELECT reader doesn't contend
+    with the single writer, so it effectively never trips. But lazily inserting the
+    singleton row from HERE would take a write lock and, under a concurrent wrap,
+    STALL up to that 5s before failing — a worse hit on the per-prompt hook than a
+    fast fail. The lazy insert lives ONLY in the bump / ``_ensure`` (writer) path
+    for exactly this reason. (A fail-fast ``busy_timeout=0`` on the read_only open
+    is a real but SEPARATE anneal hardening, not this primitive's scope — spore.)"""
+    try:
+        row = conn.execute(
+            "SELECT projection_version, high_water_mark, updated_at "
+            "FROM pattern_graph_projection_meta WHERE id = 1"
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return PatternGraphProjectionMeta(
+                projection_version=1, high_water_mark=0, updated_at=None
+            )
+        raise
+    if row is None:
+        return PatternGraphProjectionMeta(
+            projection_version=1, high_water_mark=0, updated_at=None
+        )
+    return PatternGraphProjectionMeta(
+        projection_version=int(row[0]),
+        high_water_mark=int(row[1]),
+        updated_at=(row[2] or None),
+    )
+
+
 # -- Formation: co-graduation seeding (recall-independent exploration channel) --
 
 
@@ -276,6 +411,10 @@ def seed_co_graduation(
             (ca, cb, min(seed_strength, MAX_STRENGTH), today, today, today, today),
         )
         formed += 1
+    # Advance the projection checkpoint iff an edge was actually seeded (a wrap
+    # that seeds nothing leaves the graph — and the hwm — unchanged).
+    if formed:
+        bump_projection_high_water_mark(conn, today)
     if commit:
         conn.commit()
     return formed
@@ -474,6 +613,14 @@ def drain_co_surface_events(
     # 7. Prune the idempotency table beyond the retention horizon.
     _prune_processed_events(conn, today)
 
+    # Advance the projection checkpoint iff the graph EDGES changed. A drain that
+    # only filtered already-processed events (or saw no pairs) mutates no edge —
+    # the recall surface is unchanged — so the hwm must not move (gating it keeps
+    # "same hwm ⇒ same graph the receipt saw" honest). Same transaction as the
+    # strengthening above, so the bump rolls back with it on any fault.
+    if formed or strengthened or gced:
+        bump_projection_high_water_mark(conn, today)
+
     if commit:
         conn.commit()
 
@@ -594,6 +741,9 @@ def gc_pattern_associations(
                 (name_a, name_b),
             )
             gced += 1
+    # Advance the checkpoint iff the sweep reclaimed any edge.
+    if gced:
+        bump_projection_high_water_mark(conn, today)
     if commit:
         conn.commit()
     return gced
@@ -695,6 +845,10 @@ def rename_pattern(
             "VALUES (?, ?, ?, 'rename', ?)",
             (old_name, new_name, _current_generation(conn, old_name), today),
         )
+        # ``rows`` non-empty ⇒ edges were deleted/re-keyed/merged — the graph
+        # mutated even if a self-pair drop left ``rekeyed`` at 0. Advance the
+        # checkpoint in-transaction.
+        bump_projection_high_water_mark(conn, today)
     if commit:
         conn.commit()
     return rekeyed
@@ -726,6 +880,14 @@ def sever_pattern_concept(
         "VALUES (?, NULL, ?, 'generation', ?)",
         (name, next_gen, today),
     )
+    # Advance the checkpoint iff edges were severed (the recall surface shrank).
+    # A pure generation tombstone with 0 incident edges changes only future
+    # homonym resolution, not the edges recall reads — so it does not move the hwm.
+    # (The generation boundary is itself a separate, deliberately UN-stamped
+    # versioning axis — the receipt pins edge-state, not concept lineage; see the
+    # projection-checkpoint note above.)
+    if severed:
+        bump_projection_high_water_mark(conn, today)
     if commit:
         conn.commit()
     return severed

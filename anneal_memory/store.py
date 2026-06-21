@@ -69,6 +69,7 @@ from .pattern_associations import (
     drain_co_surface_events as _drain_co_surface_events,
     gc_pattern_associations as _gc_pattern_associations,
     get_pattern_associations as _get_pattern_associations,
+    get_projection_meta as _get_projection_meta,
     pattern_association_stats as _pattern_association_stats,
     rename_pattern as _rename_pattern,
     seed_co_graduation as _seed_co_graduation,
@@ -83,6 +84,7 @@ from .types import (
     EpisodeType,
     PatternAssociationPair,
     PatternAssociationStats,
+    PatternGraphProjectionMeta,
     RecallResult,
     StoreStatus,
     Tombstone,
@@ -202,6 +204,7 @@ StoreOperation = Literal[
     "gc_pattern_associations",
     "rename_pattern_association",
     "sever_pattern_concept",
+    "pattern_graph_projection_meta",
     # Pluggable section schema (v0.3.4)
     "section_schema",
     "set_section_schema",
@@ -3050,6 +3053,19 @@ class Store:
         if severed:
             self._audit_log("pattern_concept_severed", {"name": name, "severed": severed})
         return severed
+
+    def pattern_graph_projection_meta(self) -> PatternGraphProjectionMeta:
+        """The pattern-graph projection checkpoint — ``(projection_version,
+        high_water_mark)`` (spore-104 dep-1).
+
+        The Slice-C retrieval-receipt stamp + A/B replay bucket key: a receipt
+        records this at recall time so the offline replay harness can pin which
+        graph state produced it. Read-only (never mutates the graph), so it is
+        safe on a read_only Store on the per-prompt recall path; the underlying
+        read maps a missing table (a not-yet-upgraded DB opened read_only skips
+        _init_schema) to the defaults (version 1, hwm 0) rather than faulting."""
+        with self._db_boundary("pattern_graph_projection_meta"):
+            return _get_projection_meta(self._conn)
 
     # -- Pruning --
 

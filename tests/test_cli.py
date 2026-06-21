@@ -2959,7 +2959,9 @@ class TestCrystalIndexAndRecallCLI:
         cmd_crystal_recall(args)
         out = _json.loads(capsys.readouterr().out)
         assert len(out) == 1 and out[0]["name"] == "structural_invariants_beat_discipline"
-        assert set(out[0].keys()) == {"name", "level", "explanation", "tags", "activation", "score"}
+        assert set(out[0].keys()) == {"name", "level", "explanation", "tags", "activation", "score", "source"}
+        # keyword-matched on the pattern's own text → the high-confidence source tag.
+        assert out[0]["source"] == "keyword"
 
     def test_recall_thin_query_returns_empty(self, tmp_path, capsys):
         import json as _json

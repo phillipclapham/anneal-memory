@@ -2322,9 +2322,10 @@ def cmd_crystal_recall(args: argparse.Namespace) -> None:
     Precision-biased: a thin query (< 2 distinctive keywords) or nothing clearing
     the threshold returns empty, by design — surface nothing rather than noise.
     ``--json`` → the scored ``[{name, level, explanation, tags, activation,
-    score}]`` list — the field shape is identical on both backends (``score`` is
-    keyword-overlap on the keyword path and evidence-reach on the associative path:
-    same scale + threshold, different basis). ORDERING on the associative path is
+    score, source}]`` list — the field shape is identical on both backends (``score``
+    is keyword-overlap on the keyword path and evidence-reach on the associative path:
+    same scale + threshold, different basis; ``source`` is the per-pattern provenance
+    ``keyword`` | ``evidence_edge`` | ``graph_hop``). ORDERING on the associative path is
     keyword-matches first, then associative reaches — NOT strictly global-score-
     descending: a keyword hit (overlap on the pattern's own text) is higher-confidence
     than evidence-mediated reach and is never displaced by a numerically larger

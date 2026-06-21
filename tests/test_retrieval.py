@@ -287,9 +287,10 @@ class TestRetrievePatterns:
 
         # Total field tuple — a forever-public parity guarantee must cover EVERY
         # RelevantPattern field, incl. explanation + tags (a future _score_patterns
-        # refactor could otherwise silently diverge on a content field).
+        # refactor could otherwise silently diverge on a content field) AND source (both
+        # paths are keyword-only here → both must tag "keyword").
         def _tot(p):
-            return (p.name, p.level, p.score, p.activation, p.explanation, tuple(p.tags))
+            return (p.name, p.level, p.score, p.activation, p.explanation, tuple(p.tags), p.source)
         assert [_tot(p) for p in only] == [_tot(p) for p in full]
         assert only  # non-empty — the query genuinely matches seeded patterns
 
@@ -390,7 +391,11 @@ class TestAssociativeRetrieval:
         assert "invisible_infrastructure_failure" not in {p.name for p in kw.patterns}
         # associative: surfaces via the evidence edge to the matched episode.
         a = retrieve_relevant(store, crystal, self._QUERY, now=NOW, today=T0, associative=True)
-        assert "invisible_infrastructure_failure" in {p.name for p in a.patterns}
+        by_name = {p.name: p for p in a.patterns}
+        assert "invisible_infrastructure_failure" in by_name
+        # ... and its provenance is the DIRECT evidence edge (the pattern cites the
+        # episode the query keyword-matched), not a graph hop.
+        assert by_name["invisible_infrastructure_failure"].source == "evidence_edge"
 
     def test_associative_is_on_by_default(self, stores):
         store, crystal = stores
@@ -445,7 +450,11 @@ class TestAssociativeRetrieval:
         )
         r = retrieve_relevant(store, crystal, self._QUERY, now=NOW, today=T0)
         # e_other is reached via the strong Hebbian hop from the matched seed e_match.
-        assert "memory_is_governance" in {p.name for p in r.patterns}
+        by_name = {p.name: p for p in r.patterns}
+        assert "memory_is_governance" in by_name
+        # ... and its provenance is the graph hop (the pattern's evidence episode was
+        # reached only THROUGH the Hebbian link, not by a direct keyword match).
+        assert by_name["memory_is_governance"].source == "graph_hop"
 
     def test_weak_hop_alone_does_not_clear_gate(self, stores):
         store, crystal = stores
@@ -607,3 +616,138 @@ class TestAssociativeRetrieval:
         p = next(pp for pp in out.patterns if pp.name == "multi_cite")
         # Strongest single reach (~2.5) + a small multi-hit bonus — NOT the sum (~5.0).
         assert p.score < 4.0
+
+
+# -- corpus-IDF keyword weighting (the precision fix, spore-141/spore-104 dep-2) ----
+
+
+class TestCorpusIDF:
+    """The precision fix: on a real-sized corpus, a high-document-frequency PROCESS word
+    is deflated by corpus-IDF so it can't float a pattern grounded in an episode it
+    merely brushed; below ``IDF_MIN_CORPUS`` the length-proxy is used (so small fixtures
+    and the Store-free :func:`retrieve_patterns` path stay byte-unchanged)."""
+
+    # Two ubiquitous words present in EVERY seeded episode → DF == corpus size → the most
+    # common possible terms. A per-episode distinctive token keeps each independently
+    # recallable. The grounding episode is a DECISION so the +0.5 type boost is in play.
+    _COMMON = "session convo"
+
+    def _seed_big_corpus(self, store, n=60):
+        # Two unique per-episode tokens (`qa{i}z`/`qb{i}z`) — the trailing `z` makes them
+        # collision-free under substring match (`qa3z` is NOT inside `qa30z`), so their
+        # DF is exactly 1, unlike a bare `widget_3` which substrings `widget_30..39`.
+        ids = []
+        for i in range(n):
+            e = store.record(
+                f"A session convo note number {i} about qa{i}z and qb{i}z in the ongoing "
+                f"build, recorded with enough body to clear the episode length floor.",
+                EpisodeType.DECISION, source="flow",
+                timestamp=f"2026-06-05T{i // 60:02d}:{i % 60:02d}:00Z",
+            )
+            ids.append(e.id)
+        return ids
+
+    def test_idf_weight_floors_ubiquitous_lifts_rare(self):
+        # A term in (nearly) every episode floors; a unique term tops out near 1.0.
+        assert _retrieval._idf_weight(1000, 1000) == _retrieval.IDF_FLOOR  # in ALL → floor
+        assert _retrieval._idf_weight(1, 1000) > 0.8                       # unique → high
+        assert _retrieval._idf_weight(500, 1000) < _retrieval._idf_weight(5, 1000)
+
+    def test_query_weights_uses_idf_above_min_corpus(self, stores):
+        store, _ = stores
+        self._seed_big_corpus(store, n=60)
+        assert store.recall(limit=0).total_matching >= _retrieval.IDF_MIN_CORPUS
+        weights, used_idf = _retrieval._query_weights(
+            store, ["session", "qa3z"], {"session": 60, "qa3z": 1}
+        )
+        assert used_idf is True
+        # the ubiquitous word is floored; the rare one outweighs it decisively.
+        assert weights["session"] == pytest.approx(_retrieval.IDF_FLOOR, abs=0.01)
+        assert weights["qa3z"] > weights["session"]
+
+    def test_query_weights_falls_back_below_min_corpus(self, stores):
+        store, _ = stores
+        store.record(
+            "One apparatus-and-verification episode, comfortably past the length floor "
+            "so it is a valid candidate but the corpus stays tiny.",
+            EpisodeType.OBSERVATION, source="flow", timestamp="2026-06-05T09:00:00Z",
+        )
+        weights, used_idf = _retrieval._query_weights(
+            store, ["apparatus", "verification"], {"apparatus": 1, "verification": 1}
+        )
+        assert used_idf is False  # below IDF_MIN_CORPUS → length-proxy
+        assert weights["apparatus"] == _retrieval._keyword_weight("apparatus")
+
+    def test_common_word_no_longer_floods_pattern(self, stores, monkeypatch):
+        store, crystal = stores
+        ids = self._seed_big_corpus(store, n=60)
+        # A pattern grounded in ONE seeded episode, whose own text shares NO query word —
+        # so only the evidence edge from that episode can surface it.
+        crystal.crystallize(
+            name="some_unrelated_principle", level=3,
+            explanation="a distilled lesson with no lexical overlap with the query terms",
+            evidence=[ids[0]], today=T0,
+        )
+        q = "session convo"  # ONLY the two ubiquitous words
+        # Length-proxy regime (forced by lifting the corpus floor): 1.0+1.0 + 0.5 boost
+        # = 2.5 ⇒ the episode clears the bar, seeds, and FLOODS the pattern.
+        monkeypatch.setattr(_retrieval, "IDF_MIN_CORPUS", 10**9)
+        proxy = retrieve_relevant(store, crystal, q, now=NOW, today=T0)
+        assert "some_unrelated_principle" in {p.name for p in proxy.patterns}
+        # Corpus-IDF regime (default): both words floor (0.3+0.3 + 0.5 = 1.1 < 1.6) ⇒ the
+        # episode never seeds ⇒ the pattern is correctly NOT surfaced. The fix.
+        monkeypatch.undo()
+        idf = retrieve_relevant(store, crystal, q, now=NOW, today=T0)
+        assert "some_unrelated_principle" not in {p.name for p in idf.patterns}
+
+    def test_distinctive_query_still_reaches_on_big_corpus(self, stores):
+        store, crystal = stores
+        ids = self._seed_big_corpus(store, n=60)
+        crystal.crystallize(
+            name="some_unrelated_principle", level=3,
+            explanation="a distilled lesson with no lexical overlap with the query terms",
+            evidence=[ids[3]], today=T0,
+        )
+        # qa3z + qb3z are unique (df=1) → high IDF; two such hits clear the bar and reach
+        # the pattern grounded in ids[3] (one distinctive hit + boost would not — that is
+        # the MIN_HITS=2 precision floor, intact under IDF).
+        r = retrieve_relevant(store, crystal, "qa3z qb3z", now=NOW, today=T0)
+        assert "some_unrelated_principle" in {p.name for p in r.patterns}
+
+    def test_keyword_source_tag(self, stores):
+        store, crystal = stores
+        _seed_crystal(crystal)
+        r = retrieve_relevant(store, crystal, "structural invariants discipline", now=NOW, today=T0)
+        p = next(p for p in r.patterns if p.name == "structural_invariants_beat_discipline")
+        assert p.source == "keyword"  # matched the pattern's OWN text
+
+    def test_anchor_gate_kills_fat_common_word_query_above_min_corpus(self, stores):
+        store, crystal = stores
+        ids = self._seed_big_corpus(store, n=60)  # all carry "session"/"convo"/"build"
+        crystal.crystallize(
+            name="some_unrelated_principle", level=3,
+            explanation="a distilled lesson with no lexical overlap with the query terms",
+            evidence=[ids[0]], today=T0,
+        )
+        # A FAT query of MANY ubiquitous words (the L2-flagged accumulation case): under a
+        # floor-only fix 6 floored words (6×0.30=1.8) would clear the 1.6 bar and re-leak.
+        # The √N distinctiveness anchor kills it structurally — no term is distinctive, so
+        # no episode seeds, regardless of how many common words pile up.
+        q = "session convo build session convo build session convo"
+        r = retrieve_relevant(store, crystal, q, now=NOW, today=T0)
+        assert r.patterns == []
+
+    def test_distinctive_name_surfaces_as_keyword_source_under_idf(self, stores):
+        store, crystal = stores
+        self._seed_big_corpus(store, n=60)  # corpus ≥ IDF_MIN_CORPUS → IDF regime active
+        # A pattern whose NAME carries two distinctive (corpus-absent) tokens; a query of
+        # those tokens clears the √N anchor AND matches the pattern's own text → the
+        # keyword tier fires under IDF and the source tag is "keyword" (not evidence_edge).
+        crystal.crystallize(
+            name="zylophonic_qismetric_invariant", level=3,
+            explanation="a principle whose distilled text shares the query's rare tokens",
+            tags=[], today=T0,
+        )
+        r = retrieve_relevant(store, crystal, "zylophonic qismetric invariant", now=NOW, today=T0)
+        p = next(p for p in r.patterns if p.name == "zylophonic_qismetric_invariant")
+        assert p.source == "keyword"

@@ -89,7 +89,11 @@ ASSOC_FETCH_LIMIT = 200        # cap on associations fetched for the one Hebbian
 ASSOC_MIN_STRENGTH = 0.5       # ignore decayed/noise-level links (mirrors wrap-context default)
 ASSOC_HOP_FACTOR = 0.6         # discount one Hebbian hop vs a direct seed citation
 ASSOC_STRENGTH_NORM = 2.0      # link strength at/above this passes full hop weight
-ASSOC_SCORE_THRESHOLD = SCORE_THRESHOLD  # summed-reach floor to surface (same precision bar)
+ASSOC_SCORE_THRESHOLD = SCORE_THRESHOLD  # reach floor — the DEFAULT only. retrieve_relevant
+# passes the regime-matched bar (IDF_SCORE_THRESHOLD under corpus-IDF), so in production the
+# effective associative gate tracks the episode/pattern bar, not this proxy-band constant.
+# Under IDF the reach band is compressed, so the (already near-dead) graph-hop reaches rarely
+# clear it — the live associative path is the direct evidence-edge; the hop is decorative here.
 
 # Episode types that carry higher-signal prior thinking than the rest — the anneal
 # analog of the prototype hook's "findings/decisions weigh more": a committed
@@ -136,7 +140,13 @@ def extract_keywords(query: str) -> list[str]:
 
 def _keyword_weight(kw: str) -> float:
     """Distinctive terms weigh more. Generic 4-7 char words = 1.0; long words and
-    snake_case/hyphenated domain terms weigh up — a cheap IDF proxy, no corpus query."""
+    snake_case/hyphenated domain terms weigh up — a cheap IDF PROXY, no corpus query.
+
+    Used on the Store-FREE path (:func:`retrieve_patterns`) and as the small-corpus
+    fallback. The proxy is corpus-BLIND: it can't tell that ``work`` (in ~30% of a
+    real corpus) is a domain stopword while ``poker`` (~2%) is distinctive — both
+    read as 1.0. :func:`_idf_weight` is the corpus-aware replacement on the
+    Store-aware path, where the real document frequencies are available."""
     w = 1.0
     if len(kw) >= 8:
         w += 0.5
@@ -145,18 +155,142 @@ def _keyword_weight(kw: str) -> float:
     return w
 
 
-def _score_text(text: str, keywords: list[str], weights: dict[str, float]) -> tuple[float, int]:
+# --- Corpus-IDF keyword weighting (the precision fix for the promiscuous flow-meta
+# recall — spore-141 / spore-104 dep-2, 2026-06-21). The length-proxy above is blind
+# to corpus frequency, so high-document-frequency PROCESS words (work/commit/project/
+# load — the connective tissue of a work corpus) score like distinctive terms and
+# float whatever flow-meta episode they brush onto ~every prompt. A real inverse-
+# document-frequency weight, measured from the episode corpus, deflates those
+# corpus-learned stopwords while preserving genuinely rare terms. ---
+IDF_MIN_CORPUS = 50  # below this many episodes, document frequencies are too noisy to
+# beat the length-proxy heuristic → fall back to it (and a fresh adopter's tiny corpus,
+# or any test fixture, keeps the pre-IDF behavior until the corpus matures).
+IDF_FLOOR = 0.30     # numerical-safety floor for a near-ubiquitous term's weight (and a
+# small support contribution to an already-anchored item's score). It does NOT prevent
+# common-word noise on its own — the DISTINCTIVE ANCHOR below does that structurally; the
+# floor only bounds how much a floored term adds to the sum of an item that ALREADY has a
+# real distinctive match. Below the floor → clamped here.
+# The IDF regime's precision bar, calibrated on flow's REAL receipt corpus (the threshold
+# sweep, 2026-06-21). It is LOWER than SCORE_THRESHOLD (2.5) because the IDF weight band is
+# lower than the length-proxy band — a SEPARATE constant (not a rescale of the weight) so
+# the additive _TYPE_BOOST / multiplicity bonus keep their calibrated proportion. The
+# length-proxy / small-corpus / Store-free paths keep SCORE_THRESHOLD untouched, so the
+# test suite and pre-IDF behavior are byte-unchanged.
+# ⚠ FLOW-CALIBRATED DEFAULTS. IDF_SCORE_THRESHOLD and IDF_MIN_CORPUS are tuned to flow's
+# conceptual/partnership corpus regime (much repeated abstract vocabulary). An adopter on
+# a different regime (entity-dense: code identifiers, proper nouns → most terms naturally
+# rare) should RE-SWEEP both against their own receipt corpus — `1.6` will under-tighten
+# there. The DISTINCTIVE ANCHOR below is corpus-size-RELATIVE (√N) and needs no re-sweep.
+# (Per-call override / a distribution-relative bar is the deferred enhancement — spore.)
+IDF_SCORE_THRESHOLD = 1.6
+# The distinctiveness anchor — the STRUCTURAL guard against common-word accumulation
+# (structural_invariants_beat_discipline). An item surfaces in the IDF regime only if it
+# matched at least one keyword AT OR ABOVE this weight — i.e. one genuinely distinctive
+# term, not merely a pile of mid/low-frequency process words. 0.5 on the normalized IDF
+# scale ⟺ df ≤ √N (the geometric-mean document frequency): "rarer than the geometric mean
+# of the corpus." Corpus-size-RELATIVE by construction, so it does NOT need per-regime
+# re-calibration the way the absolute bar does. Without it, a long process-word-only prompt
+# (6 floored words = 1.8 > 1.6) reintroduces the promiscuous leak in a softened costume
+# (measured 2026-06-21); with it, no-distinctive-term prompts surface nothing, structurally.
+IDF_ANCHOR_WEIGHT = 0.5
+
+
+def _idf_weight(df: int, corpus_n: int) -> float:
+    """Inverse-document-frequency keyword weight from the episode corpus — the precision
+    fix's lever.
+
+    ``df`` = how many of the ``corpus_n`` episodes contain the keyword (the exact,
+    uncapped ``RecallResult.total_matching``). A term in MOST episodes (a corpus-learned
+    stopword — flow's ``work``/``commit``/``project``) gets a low weight; a rare
+    distinctive term a high one. Smoothed (``+1``) so a ``df`` of 0 can't divide by zero,
+    normalized by ``log(n+1)`` into ``[0, 1]`` then floored at :data:`IDF_FLOOR`. Only the
+    endpoints are corpus-size-stable (unique → ~1.0; ubiquitous → ~0); a fixed-FRACTION
+    term drifts down as the corpus grows, so :data:`IDF_SCORE_THRESHOLD` is a flow-N
+    calibration (the :data:`IDF_ANCHOR_WEIGHT` guard, being a √N point, does not drift).
+    A term at/above :data:`IDF_ANCHOR_WEIGHT` is the distinctive anchor an item needs to
+    surface; common words accumulate toward :data:`IDF_SCORE_THRESHOLD` only as support."""
+    if corpus_n <= 1:  # totality guard (unreachable via _query_weights' IDF_MIN_CORPUS
+        return IDF_FLOOR  # gate, but keeps the function safe for a direct caller — log(≤2))
+    # df and corpus_n come from separate Store.recall() calls (the candidate fetch vs the
+    # corpus count), so they are NOT one SQLite snapshot — a concurrent writer between them
+    # can make df > corpus_n (a prune race) → a negative log. Clamp the invariant df ≤ n at
+    # the source: the prune race floors the term (correct — "in ≥ all episodes" = ubiquitous)
+    # instead of going semantically wrong. The opposite race (writer ADDS between the calls)
+    # leaves df slightly under-counted vs n → marginally higher weight → direction-SAFE
+    # (toward recall, away from the over-pruning the precision fix guards). A single-snapshot
+    # stats read would erase even that residual; benign here, deferred (spore-141 follow-up).
+    df = min(df, corpus_n)
+    raw = log((corpus_n + 1) / (df + 1)) / log(corpus_n + 1)
+    return max(IDF_FLOOR, raw)
+
+
+def _query_weights(
+    store: Store,
+    keywords: list[str],
+    doc_freq: dict[str, int] | None,
+    *,
+    until: str | None = None,
+) -> tuple[dict[str, float], bool]:
+    """The per-keyword weights for scoring, and whether corpus-IDF was applied (so the
+    caller picks the matching precision bar — :data:`IDF_SCORE_THRESHOLD` vs
+    :data:`SCORE_THRESHOLD`). Corpus-IDF when an episode corpus large enough to estimate
+    document frequencies is present (``doc_freq`` captured from the candidate fetch,
+    ``corpus_n`` >= :data:`IDF_MIN_CORPUS`); the length-proxy otherwise — the Store-free
+    path (``doc_freq is None``), a sub-threshold corpus, and every small test fixture.
+    This is what makes :func:`retrieve_relevant` strictly more precise than the
+    keyword-only :func:`retrieve_patterns` when a real corpus exists, while staying
+    byte-identical to it on the tiny/empty corpora those tests use.
+
+    ``until`` MUST match the cutoff the candidate fetch used: ``doc_freq`` is counted
+    as-of that cutoff, so ``corpus_n`` is too — DF and N share one population, a valid
+    frequency ratio (otherwise an ``exclude_recent_minutes`` caller would under-count DF
+    against a whole-corpus N and read terms as more distinctive than they are)."""
+    if doc_freq is None:
+        return {kw: _keyword_weight(kw) for kw in keywords}, False
+    corpus_n = store.recall(until=until, limit=0).total_matching
+    if corpus_n < IDF_MIN_CORPUS:
+        return {kw: _keyword_weight(kw) for kw in keywords}, False
+    return {kw: _idf_weight(doc_freq.get(kw, 0), corpus_n) for kw in keywords}, True
+
+
+def _precision_bar(used_idf: bool) -> float:
+    """The regime-matched precision threshold: the (lower) IDF bar when the weights are
+    corpus-IDF, the length-proxy bar otherwise. One bar for every tier a single
+    :func:`retrieve_relevant` call scores, so episodes/patterns/associative-reach are
+    gated on the same scale their weights live on."""
+    return IDF_SCORE_THRESHOLD if used_idf else SCORE_THRESHOLD
+
+
+def _anchor_floor(used_idf: bool) -> float:
+    """The distinctiveness-anchor requirement for the regime: the √N
+    :data:`IDF_ANCHOR_WEIGHT` under corpus-IDF (an item must match one genuinely rare
+    term to surface), ``0.0`` under the length-proxy (no anchor gate — the proxy band has
+    no meaningful frequency signal, and this keeps the Store-free / small-corpus / test
+    paths byte-unchanged). The associative tier inherits it structurally: its seeds are
+    the anchor-gated episodes, so a no-anchor query yields no seeds and no reach."""
+    return IDF_ANCHOR_WEIGHT if used_idf else 0.0
+
+
+def _score_text(
+    text: str, keywords: list[str], weights: dict[str, float]
+) -> tuple[float, int, float]:
     """Weighted keyword-overlap score for one item's searchable text. Returns
-    (score, distinct_hit_count). Substring match (``kw in text``) so a query word
-    matches inside a snake_case name/term."""
+    (score, distinct_hit_count, top_hit_weight). Substring match (``kw in text``) so a
+    query word matches inside a snake_case name/term. ``top_hit_weight`` is the largest
+    weight among the MATCHED keywords (0.0 if none) — the distinctiveness-anchor signal:
+    in the IDF regime an item must clear :data:`IDF_ANCHOR_WEIGHT` on it to surface."""
     lc = text.lower()
     score = 0.0
     hits = 0
+    top = 0.0
     for kw in keywords:
         if kw in lc:
-            score += weights[kw]
+            w = weights[kw]
+            score += w
             hits += 1
-    return score, hits
+            if w > top:
+                top = w
+    return score, hits, top
 
 
 def _pattern_tags(crystal: CrystalDict) -> list[str]:
@@ -190,14 +324,19 @@ def _score_patterns(
     *,
     max_patterns: int,
     today: date,
+    score_threshold: float = SCORE_THRESHOLD,
+    require_anchor: float = 0.0,
 ) -> list[RelevantPattern]:
     """Score the live crystallized corpus against the query. Same precision bias as
-    episodes (≥MIN_HITS distinct keyword hits + SCORE_THRESHOLD), but NO length floor
-    — a pattern's name alone can be a strong, short signal."""
+    episodes (≥MIN_HITS distinct keyword hits + the bar), but NO length floor — a
+    pattern's name alone can be a strong, short signal. ``score_threshold`` is the
+    regime-matched bar (:data:`SCORE_THRESHOLD` proxy / :data:`IDF_SCORE_THRESHOLD` IDF);
+    ``require_anchor`` (>0 only in the IDF regime) is the distinctiveness anchor — a
+    pattern surfaces only if a MATCHED keyword clears it (a pile of common words can't)."""
     scored: list[RelevantPattern] = []
     for c in crystal_store.active():
-        score, hits = _score_text(_pattern_text(c), keywords, weights)
-        if hits < MIN_HITS or score < SCORE_THRESHOLD:
+        score, hits, top = _score_text(_pattern_text(c), keywords, weights)
+        if hits < MIN_HITS or score < score_threshold or top < require_anchor:
             continue
         _lvl = c.get("level")
         scored.append(
@@ -210,6 +349,7 @@ def _score_patterns(
                 tags=_pattern_tags(c),
                 activation=activation_tier(c, today),
                 score=round(score, 2),
+                source="keyword",  # matched the pattern's OWN text (high-confidence)
             )
         )
     # Best score first; higher level then name break ties (a total order →
@@ -218,38 +358,52 @@ def _score_patterns(
     return scored[:max_patterns]
 
 
-def _scored_episode_candidates(
-    store: Store,
+def _fetch_episode_candidates(
+    store: Store, keywords: list[str], *, until: str | None
+) -> tuple[dict[str, Episode], dict[str, int]]:
+    """Per-keyword episode recall → (unioned candidate episodes, per-keyword document
+    frequency). Fetch via the public ``Store.recall`` (one bounded LIKE query per
+    keyword, unioned by id). ``doc_freq[kw]`` is ``RecallResult.total_matching`` — the
+    EXACT, uncapped match count — captured from the SAME calls, so corpus-IDF weighting
+    (:func:`_query_weights`) costs no extra query. Reuses the public API; no new SQL."""
+    candidates: dict[str, Episode] = {}
+    doc_freq: dict[str, int] = {}
+    for kw in keywords:
+        result = store.recall(keyword=kw, until=until, limit=CANDIDATE_LIMIT_PER_KEYWORD)
+        doc_freq[kw] = result.total_matching
+        for ep in result.episodes:
+            candidates.setdefault(ep.id, ep)
+    return candidates, doc_freq
+
+
+def _score_candidate_episodes(
+    candidates: dict[str, Episode],
     keywords: list[str],
     weights: dict[str, float],
     *,
-    until: str | None,
+    score_threshold: float = SCORE_THRESHOLD,
+    require_anchor: float = 0.0,
 ) -> list[ScoredEpisode]:
-    """The FULL ranked set of episodes clearing the precision bar (NOT capped). Fetch
-    candidates via the public ``Store.recall`` (one bounded LIKE query per keyword,
-    unioned by id), then score by full weighted overlap. Reuses the public API — no
-    new SQL, no Store internals.
-
-    Returned uncapped because it serves two consumers: the displayed episode tier
-    (sliced to ``max_episodes`` by :func:`_score_episodes`) AND the SEED set for
-    associative pattern reach (which wants the wider relevant set, not just the top 3)."""
-    candidates: dict[str, Episode] = {}
-    for kw in keywords:
-        result = store.recall(keyword=kw, until=until, limit=CANDIDATE_LIMIT_PER_KEYWORD)
-        for ep in result.episodes:
-            candidates.setdefault(ep.id, ep)
-
+    """Score pre-fetched candidate episodes by weighted overlap — the FULL ranked set
+    clearing the precision bar (NOT capped). Serves two consumers: the displayed
+    episode tier (sliced to ``max_episodes``) AND the SEED set for associative pattern
+    reach (which wants the wider relevant set, not just the top 3). ``score_threshold``
+    is the regime-matched bar — :data:`SCORE_THRESHOLD` for length-proxy weights,
+    :data:`IDF_SCORE_THRESHOLD` for the lower-band corpus-IDF weights. ``require_anchor``
+    (>0 only in the IDF regime) is the distinctiveness anchor: an episode must have
+    MATCHED a keyword at/above it to seed — so a process-word-only query produces no
+    seeds, and the associative pass it feeds inherits that structurally."""
     scored: list[ScoredEpisode] = []
     for ep in candidates.values():
         content = ep.content or ""
         if len(content) < MIN_EPISODE_LEN:
             continue
-        score, hits = _score_text(content, keywords, weights)
-        if hits < MIN_HITS:
+        score, hits, top = _score_text(content, keywords, weights)
+        if hits < MIN_HITS or top < require_anchor:
             continue
         if ep.type in _HIGH_SIGNAL_TYPES:
             score += _TYPE_BOOST
-        if score < SCORE_THRESHOLD:
+        if score < score_threshold:
             continue
         scored.append(
             ScoredEpisode(
@@ -267,19 +421,6 @@ def _scored_episode_candidates(
     return scored
 
 
-def _score_episodes(
-    store: Store,
-    keywords: list[str],
-    weights: dict[str, float],
-    *,
-    max_episodes: int,
-    until: str | None,
-) -> list[ScoredEpisode]:
-    """The displayed episode tier: :func:`_scored_episode_candidates` capped at
-    ``max_episodes``. Kept as the stable named entry for the episode-only path."""
-    return _scored_episode_candidates(store, keywords, weights, until=until)[:max_episodes]
-
-
 def _associative_patterns(
     store: Store,
     crystal_store: CrystalStore,
@@ -288,6 +429,7 @@ def _associative_patterns(
     max_patterns: int,
     today: date,
     exclude_names: set[str],
+    score_threshold: float = ASSOC_SCORE_THRESHOLD,
 ) -> list[RelevantPattern]:
     """Surface crystallized patterns the keyword pass MISSED, by reach through the
     Hebbian substrate: query → keyword-matched episodes (the seeds) → their co-cited
@@ -372,8 +514,11 @@ def _associative_patterns(
         evidence = c.get("evidence")
         if not isinstance(evidence, list):  # defensive: a hand-corrupted row
             continue
+        # (weight, episode_id) so the WINNING reach's episode is recoverable for the
+        # source tag — a direct keyword-matched seed (its id in all_seed_set) is an
+        # evidence-edge; a hop destination is a graph-hop.
         weighted = [
-            reach[e] / (1.0 + log(citing[e]))
+            (reach[e] / (1.0 + log(citing[e])), e)
             for e in evidence
             if isinstance(e, str) and e in reach
         ]
@@ -382,11 +527,20 @@ def _associative_patterns(
         # max-aggregation: surfacing is decided by the SINGLE strongest distinctive
         # reach (NOT the sum — summing rewards citation breadth over relevance and lets
         # several weak reaches accumulate past the gate). Multiplicity is only a small
-        # bounded rank bonus, never enough to clear the gate on its own.
-        strongest = max(weighted)
-        if strongest < ASSOC_SCORE_THRESHOLD:
+        # bounded rank bonus, never enough to clear the gate on its own. Tie-break is
+        # confidence-biased: on equal weight, prefer a DIRECT seed (evidence_edge) over a
+        # hop (graph_hop) so an equally-strong direct edge is never mislabeled as a hop;
+        # then by id for determinism.
+        strongest, strongest_ep = max(
+            weighted, key=lambda t: (t[0], t[1] in all_seed_set, t[1])
+        )
+        if strongest < score_threshold:
             continue
         score = strongest + min(len(weighted) - 1, 3) * 0.1
+        # The winning reach's provenance: a directly keyword-matched seed (its score was
+        # the episode's own, authoritative reach) is the direct-evidence path; anything
+        # else reached `dst` only through the one Hebbian hop above.
+        source = "evidence_edge" if strongest_ep in all_seed_set else "graph_hop"
         _lvl = c.get("level")
         scored.append(
             RelevantPattern(
@@ -396,6 +550,7 @@ def _associative_patterns(
                 tags=_pattern_tags(c),
                 activation=activation_tier(c, today),
                 score=round(score, 2),
+                source=source,
             )
         )
     scored.sort(key=lambda p: (-p.score, -p.level, p.name))
@@ -450,23 +605,40 @@ def retrieve_relevant(
     if len(keywords) < MIN_KEYWORDS:
         return RelevantResult(patterns=[], episodes=[], query_keywords=keywords)
 
-    weights = {kw: _keyword_weight(kw) for kw in keywords}
-
     # The keyword-matched episode candidates are computed ONCE and serve two roles:
     # the displayed episode tier (capped) AND the SEED set for associative pattern
     # reach. The associative path needs them even when episodes aren't displayed
-    # (max_episodes=0), so compute whenever EITHER consumer wants them.
+    # (max_episodes=0), so compute whenever EITHER consumer wants them. The same fetch
+    # captures the per-keyword document frequencies that weight the whole query by
+    # corpus-IDF (the precision fix) — so the weighting is corpus-aware exactly when a
+    # corpus is being scanned, and the length-proxy otherwise (the keyword-only path).
     want_assoc = associative and crystal_store is not None and max_patterns > 0
     seed_episodes: list[ScoredEpisode] = []
     if max_episodes > 0 or want_assoc:
         until = _recent_cutoff(exclude_recent_minutes, now)
-        seed_episodes = _scored_episode_candidates(store, keywords, weights, until=until)
+        candidates, doc_freq = _fetch_episode_candidates(store, keywords, until=until)
+        weights, used_idf = _query_weights(store, keywords, doc_freq, until=until)
+        seed_episodes = _score_candidate_episodes(
+            candidates, keywords, weights,
+            score_threshold=_precision_bar(used_idf),
+            require_anchor=_anchor_floor(used_idf),
+        )
+    else:
+        # Keyword-only pattern path (no episode fetch): the length-proxy, byte-identical
+        # to retrieve_patterns (the parity contract holds on this branch by construction).
+        weights, used_idf = _query_weights(store, keywords, None)
     episodes = seed_episodes[:max_episodes] if max_episodes > 0 else []
+    # One regime-matched precision bar + anchor for every tier this call scores: the
+    # lower IDF bar + the √N distinctiveness anchor when the weights are corpus-IDF, the
+    # length-proxy bar + no anchor (0.0) otherwise.
+    thr = _precision_bar(used_idf)
+    anchor = _anchor_floor(used_idf)
 
     patterns: list[RelevantPattern] = []
     if crystal_store is not None and max_patterns > 0:
         patterns = _score_patterns(
-            crystal_store, keywords, weights, max_patterns=max_patterns, today=today
+            crystal_store, keywords, weights, max_patterns=max_patterns, today=today,
+            score_threshold=thr, require_anchor=anchor,
         )
         # Keyword-first: the associative pass fills only the slots the keyword pass left
         # UNUSED. A keyword hit (overlap on the pattern's OWN text) is strictly
@@ -483,6 +655,7 @@ def retrieve_relevant(
                 max_patterns=remaining,
                 today=today,
                 exclude_names={p.name for p in patterns},
+                score_threshold=thr,
             )
 
     return RelevantResult(patterns=patterns, episodes=episodes, query_keywords=keywords)

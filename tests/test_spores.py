@@ -691,6 +691,50 @@ class TestDisposition:
         s = store.ascend("spore-001", kind="pattern", ref="r", today=T0)
         assert s["status"] == "resolved"
 
+    # -- descend expect_disposition CAS: the snapshot-then-resolve TOCTOU guard (codex L3 HIGH --
+    # -- on spore-170, spore-173). A control surface picks the resolve KIND ("remove" for a Keep --
+    # -- note / "compost" for a loop) off a RENDERED snapshot; the CAS makes a concurrent re-route -
+    # -- between that snapshot and this resolve fail closed (parity with ascend's CAS).
+    def test_descend_expect_disposition_matches_resolves(self, store):
+        store.add(type="thought", text="x", today=T0)  # a key-free loop → expect None
+        s = store.descend("spore-001", kind="composted", expect_disposition=None, today=T0)
+        assert s["status"] == "resolved" and s["resolution"]["direction"] == "descend"
+
+    def test_descend_expect_disposition_tag_matches_resolves(self, store):
+        store.add(type="thought", text="x", disposition="note", today=T0)  # a Keep note → "remove"
+        s = store.descend("spore-001", kind="composted", expect_disposition="note", today=T0)
+        assert s["status"] == "resolved"
+
+    def test_descend_expect_disposition_mismatch_raises_and_resolves_nothing(self, store):
+        # THE TOCTOU: a surface rendered this as a Keep note and chose "remove" (expect "note"),
+        # but a concurrent writer promoted it to a live loop. The CAS must refuse — nothing
+        # composted, the (now-live) loop stays open. Without it, a live loop is silently composted.
+        store.add(type="thought", text="x", today=T0)  # actually a key-free loop now
+        with pytest.raises(SporeError, match="disposition changed since read"):
+            store.descend("spore-001", kind="composted", expect_disposition="note", today=T0)
+        fresh = SporeStore(store.path)
+        assert "spore-001" in [s["id"] for s in fresh.list_open()]  # NOT resolved
+        assert fresh.get("spore-001").get("disposition") is None      # still a key-free loop
+
+    def test_descend_expect_disposition_none_mismatches_a_tagged_spore(self, store):
+        # caller expected a key-free loop but it's a note → reject (symmetry with ascend's CAS)
+        store.add(type="thought", text="x", disposition="note", today=T0)
+        with pytest.raises(SporeError, match="disposition changed since read"):
+            store.descend("spore-001", kind="composted", expect_disposition=None, today=T0)
+
+    def test_descend_cas_runs_before_kind_validation(self, store):
+        # a stale snapshot must fail on the CAS (re-read the spore) before a kind error — the
+        # operator's fix is "re-read", not "your kind is wrong for a type you no longer see".
+        store.add(type="thought", text="x", disposition="seed", today=T0)
+        with pytest.raises(SporeError, match="disposition changed since read"):
+            store.descend("spore-001", kind="not-a-real-kind", expect_disposition=None, today=T0)
+
+    def test_descend_without_expect_disposition_skips_the_cas(self, store):
+        # omitted (the _UNSET default) → no CAS, resolves unconditionally (back-compat)
+        store.add(type="thought", text="x", disposition="seed", today=T0)
+        s = store.descend("spore-001", kind="composted", today=T0)
+        assert s["status"] == "resolved"
+
     def test_disposition_round_trips_through_the_lifecycle_verbs(self, store):
         """The 3a de-risk, locked as a test: touch/descend leave an unknown
         disposition untouched (anneal never strips a field it doesn't model)."""

@@ -756,6 +756,7 @@ class SporeStore:
         *,
         kind: str,
         ref: str,
+        expect_disposition: str | None | _Unset = _UNSET,
         today: date | None = None,
         now: datetime | None = None,
     ) -> SporeDict:
@@ -764,11 +765,28 @@ class SporeStore:
         (a project path / episode id / pattern name) — distinct from the spore's own
         ``pointer`` (context for the open loop). v1 records the ref; the actual
         episode write stays the host's act. For fully deterministic tests, pass both
-        ``today`` (the logical date) and ``now`` (the UTC instant on ``resolution.at``)."""
+        ``today`` (the logical date) and ``now`` (the UTC instant on ``resolution.at``).
+
+        ``expect_disposition`` is an OPTIMISTIC compare-and-set on the disposition,
+        checked INSIDE this transaction's lock (same primitive as :meth:`update`). A
+        caller that read the disposition in a SEPARATE, lock-free step (e.g. a host
+        enforcing a disposition-aware policy like "a Keep note can't ascend") passes the
+        raw value it saw; if a concurrent writer changed it between that read and this
+        resolve, :class:`SporeError` is raised and nothing is resolved — closing the
+        read-then-resolve TOCTOU a separate-transaction guard otherwise has (``None`` =
+        expect key-absent / a plain loop; a string = expect that exact value). Blind: a
+        raw value compare, never an interpretation of the tag."""
         if not ref or not ref.strip():
             raise ValueError("ascend requires a ref (what the spore became).")
         with self._transaction() as data:
             item = self._require_open(data, spore_id)
+            if not isinstance(expect_disposition, _Unset):
+                found = item.get("disposition")
+                if found != expect_disposition:
+                    raise SporeError(
+                        f"disposition changed since read (expected {expect_disposition!r}, "
+                        f"found {found!r}); re-read the spore and retry."
+                    )
             valid = ASCEND_BY_TYPE.get(item["type"], frozenset())
             if kind not in valid:
                 raise ValueError(

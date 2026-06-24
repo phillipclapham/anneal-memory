@@ -661,6 +661,36 @@ class TestDisposition:
         s = store.update("spore-001", disposition="handoff")
         assert s["disposition"] == "handoff"
 
+    # -- ascend expect_disposition CAS: the read-then-resolve TOCTOU guard (codex L3 HIGH, --
+    # -- 2026-06-23). A host enforcing "a Keep note can't ascend" reads the disposition in a -
+    # -- separate step; the CAS makes a concurrent flip between that read and the resolve fail.
+    def test_ascend_expect_disposition_matches_resolves(self, store):
+        store.add(type="thought", text="x", today=T0)  # a key-free loop → expect None
+        s = store.ascend("spore-001", kind="pattern", ref="r", expect_disposition=None, today=T0)
+        assert s["status"] == "resolved" and s["resolution"]["direction"] == "ascend"
+
+    def test_ascend_expect_disposition_mismatch_raises_and_resolves_nothing(self, store):
+        # THE TOCTOU: a host read the spore as a loop (None) and guard-passed, but a concurrent
+        # writer flipped it to a note. The CAS must refuse — nothing resolved, the note stays open.
+        store.add(type="thought", text="x", disposition="note", today=T0)
+        with pytest.raises(SporeError, match="disposition changed since read"):
+            store.ascend("spore-001", kind="pattern", ref="r", expect_disposition=None, today=T0)
+        fresh = SporeStore(store.path)
+        assert "spore-001" in [s["id"] for s in fresh.list_open()]  # NOT resolved
+        assert fresh.get("spore-001")["disposition"] == "note"      # untouched
+
+    def test_ascend_expect_disposition_none_mismatches_a_tagged_spore(self, store):
+        # caller expected a key-free loop but it's a seed → reject (symmetry with update's CAS)
+        store.add(type="thought", text="x", disposition="seed", today=T0)
+        with pytest.raises(SporeError, match="disposition changed since read"):
+            store.ascend("spore-001", kind="pattern", ref="r", expect_disposition=None, today=T0)
+
+    def test_ascend_without_expect_disposition_skips_the_cas(self, store):
+        # omitted (the _UNSET default) → no CAS, resolves unconditionally (back-compat)
+        store.add(type="thought", text="x", disposition="seed", today=T0)
+        s = store.ascend("spore-001", kind="pattern", ref="r", today=T0)
+        assert s["status"] == "resolved"
+
     def test_disposition_round_trips_through_the_lifecycle_verbs(self, store):
         """The 3a de-risk, locked as a test: touch/descend leave an unknown
         disposition untouched (anneal never strips a field it doesn't model)."""

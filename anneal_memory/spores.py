@@ -733,14 +733,33 @@ class SporeStore:
         spore_id: str,
         *,
         kind: str,
+        expect_disposition: str | None | _Unset = _UNSET,
         today: date | None = None,
         now: datetime | None = None,
     ) -> SporeDict:
         """Resolve a spore downward (compost / self-clean). ``kind`` must fit the
         spore's type (e.g. a ``task`` descends done/dropped/composted, never
-        ``answered``)."""
+        ``answered``).
+
+        ``expect_disposition`` is an OPTIMISTIC compare-and-set on the disposition,
+        checked INSIDE this transaction's lock (the SAME primitive as :meth:`ascend`
+        and :meth:`update`). A caller whose RESOLVE KIND was chosen against a disposition
+        read in a SEPARATE, lock-free step (e.g. a control surface picking "remove" for a
+        Keep note vs "compost" for a loop off a rendered SNAPSHOT) passes the raw value it
+        saw; if a concurrent writer re-routed the spore between that snapshot and this
+        resolve, :class:`SporeError` is raised and nothing is resolved — closing the
+        snapshot-then-resolve TOCTOU a separate-transaction guard otherwise has (``None`` =
+        expect key-absent / a plain loop; a string = expect that exact value). Blind: a raw
+        value compare, never an interpretation of the tag."""
         with self._transaction() as data:
             item = self._require_open(data, spore_id)
+            if not isinstance(expect_disposition, _Unset):
+                found = item.get("disposition")
+                if found != expect_disposition:
+                    raise SporeError(
+                        f"disposition changed since read (expected {expect_disposition!r}, "
+                        f"found {found!r}); re-read the spore and retry."
+                    )
             valid = DESCEND_BY_TYPE.get(item["type"], frozenset())
             if kind not in valid:
                 raise ValueError(

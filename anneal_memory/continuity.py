@@ -41,6 +41,7 @@ from .graduation import (
     _NAMED_PATTERN_WITH_EVIDENCE_RE,
     _is_graduating_heading,
 )
+from . import sessions
 from .schema import (
     DEFAULT_SCHEMA,
     SectionSpec,
@@ -54,6 +55,7 @@ from .store import StoreError, WrapInProgressError, _fsync_dir, _safe_unlink
 from .types import (
     AffectiveState,
     Episode,
+    FeltCurrency,
     PrepareWrapResult,
     SaveContinuityResult,
     StalePatternDict,
@@ -1225,6 +1227,7 @@ def prepare_wrap(
     max_chars: int | None = None,
     staleness_days: int = 7,
     crystal_store: CrystalStore | None = None,
+    session_id: str | None = None,
 ) -> PrepareWrapResult:
     """Run the full store-aware prepare_wrap pipeline.
 
@@ -1285,12 +1288,30 @@ def prepare_wrap(
             (e.g. FLOW_SCHEMA's felt/structural sections). An explicit int
             always overrides.
         staleness_days: Days before flagging stale patterns.
+        session_id: Opt-in to the consolidate-efferent gate
+            (AM-CONSOLIDATE-EFFERENT, spore-194). When passed, the
+            consolidate proceeds only if this is the sole live registered
+            session OR this session holds the consolidate baton; otherwise
+            it returns ``status == "downgraded"`` (capture-only) instead of
+            building a package or marking a wrap in progress. ``None``
+            (default) disables the gate entirely — every existing caller and
+            single-session adopter is unaffected. Liveness + the baton live
+            in sidecar files next to the continuity file; the caller
+            registers/heartbeats via :mod:`anneal_memory.sessions`. A
+            consolidate-efferent caller MUST also round-trip the returned
+            ``wrap_token`` to :func:`validated_save_continuity` — the gate
+            throttles WHO starts a consolidate; the token CAS is what makes
+            the SAVE safe under a mid-flight baton reclaim (a tokenless save
+            CASes against the current snapshot, not the prepare token).
 
     Returns:
         :class:`PrepareWrapResult` — a :class:`TypedDict` with keys:
-          - ``status`` (``Literal["empty", "ready"]``): ``"empty"``
-            means no episodes to wrap; ``"ready"`` means package
-            built and wrap marked in progress on the store
+          - ``status`` (``Literal["empty", "ready", "downgraded"]``):
+            ``"empty"`` = no episodes to wrap; ``"ready"`` = package
+            built and wrap marked in progress on the store;
+            ``"downgraded"`` = the consolidate-efferent gate (spore-194)
+            declined this session (not sole, not baton-holder) — see
+            ``message``; the store is left untouched
           - ``message`` (str): short human-readable status summary
           - ``episode_count`` (int): number of episodes in the wrap window
           - ``package`` (:class:`WrapPackageDict` | None): the
@@ -1356,6 +1377,47 @@ def prepare_wrap(
             crystallization_candidates=[],
             rewarm_candidates=[],
         )
+
+    # AM-CONSOLIDATE-EFFERENT (spore-194): the efferent gate. Capture is afferent
+    # (ungated, append-only, parallel-safe); CONSOLIDATE mutates the shared felt/identity
+    # layer, so it is gated by human authority — proceed iff this is the sole live session
+    # OR this session holds the consolidate baton, else AUTO-DOWNGRADE to capture-only
+    # (drift becomes safe, not a failure). OPT-IN: engaged only when the caller passes
+    # session_id; every existing caller + every single-session adopter is untouched
+    # (registry never consulted, gate inert). Placed BEFORE AM-PREPARE-GUARD so a
+    # downgraded session returns cleanly without raising (it is not clobbering an in-flight
+    # wrap, it is declining to start one) and BEFORE wrap_started so nothing is stranded;
+    # the store is left UNTOUCHED on a downgrade (we must not clear another live session's
+    # in-progress wrap — no wrap_cancelled here, unlike the empty path). The empty path above
+    # cannot be weaponized to clear another session's wrap either: a real in-flight wrap is set
+    # only on the non-empty path, and episodes_since_wrap is global (keyed off the last
+    # COMPLETED wrap), so while any wrap is in flight every parallel session sees the SAME
+    # non-empty window and never reaches the empty path's wrap_cancelled().
+    if session_id is not None:
+        if not session_id:
+            raise ValueError(
+                "prepare_wrap: session_id must be non-empty when provided "
+                "(pass session_id=None to disable the consolidate-efferent gate)."
+            )
+        auth = sessions.consolidate_authorized(store.continuity_path, session_id)
+        if not auth["authorized"]:
+            return PrepareWrapResult(
+                status="downgraded",
+                message=(
+                    f"Consolidate downgraded to capture-only ({auth['reason']}): "
+                    f"{len(auth['live_session_ids'])} live session(s), baton holder = "
+                    f"{auth['baton_holder'] or 'none'}. Capture (afferent) is unaffected; "
+                    f"claim the consolidate baton to recompose the felt layer."
+                ),
+                episode_count=len(episodes),
+                package=None,
+                assoc_context=None,
+                wrap_token=None,
+                uncovered_proven_to_check=[],
+                schema_warning=None,
+                crystallization_candidates=[],
+                rewarm_candidates=[],
+            )
 
     # AM-PREPARE-GUARD (0.4.2): real episodes to compress AND a wrap
     # already in progress = a clobber. The consolidate is single-writer
@@ -1449,6 +1511,28 @@ def prepare_wrap(
         schema_warning=schema_warning,
         crystallization_candidates=package["crystallization_candidates"],
         rewarm_candidates=package["rewarm_candidates"],
+    )
+
+
+def felt_currency(store: Store) -> FeltCurrency:
+    """Report whether the felt/identity continuity layer is current with the captured episodes
+    (AM-CONSOLIDATE-EFFERENT, spore-194 — the seal-watermark read).
+
+    The wrap lifecycle already seals each consolidate: the completed-wrap boundary stamps which
+    episodes it incorporated, and ``status().last_wrap_at`` records when. This surfaces that
+    seal as a currency check — how many episodes have been captured SINCE the last consolidate,
+    and therefore whether the felt layer reflects everything captured. ``episodes_since_seal >
+    0`` means the felt layer is stale relative to the episodic record (e.g. work captured after
+    the day's consolidate — the Slice-B-after-EOD case) without diffing anything by hand. Pure
+    read; mutates nothing.
+    """
+    st = store.status()
+    since = st.episodes_since_wrap
+    return FeltCurrency(
+        sealed_at=st.last_wrap_at,
+        episodes_since_seal=since,
+        is_current=(since == 0),
+        wrap_in_progress=st.wrap_in_progress,
     )
 
 

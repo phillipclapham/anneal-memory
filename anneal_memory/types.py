@@ -452,12 +452,35 @@ class WrapSnapshot(TypedDict):
     episode_ids: list[str]  # 8-char episode IDs frozen at prepare time
 
 
+class FeltCurrency(TypedDict):
+    """Whether the felt/identity continuity layer is current with the captured episodes
+    (AM-CONSOLIDATE-EFFERENT, spore-194 — the seal-watermark read). ``sealed_at`` is when the
+    felt layer was last recomposed (the last completed consolidate; ``None`` if never).
+    ``episodes_since_seal`` is the count of episodes captured since — the post-consolidate
+    drift. ``is_current`` is ``episodes_since_seal == 0``. ``wrap_in_progress`` distinguishes
+    "stale and nothing is happening" from "stale because a consolidate is actively underway" (a
+    ``prepare_wrap`` is open but ``validated_save_continuity`` has not yet committed). Surfaces
+    the per-consolidate seal the wrap lifecycle already records (the completed-wrap boundary +
+    ``last_wrap_at``), so a stale felt layer (e.g. work captured AFTER the day's consolidate) is
+    verifiable, not invisible."""
+
+    sealed_at: str | None
+    episodes_since_seal: int
+    is_current: bool
+    wrap_in_progress: bool
+
+
 class PrepareWrapResult(TypedDict):
     """Return shape of ``prepare_wrap``.
 
-    ``status`` is either ``"empty"`` (no episodes to wrap; ``package``
-    and ``assoc_context`` are ``None``) or ``"ready"`` (package built,
-    wrap marked in progress on the store). The ``Literal`` discriminant
+    ``status`` is ``"empty"`` (no episodes to wrap; ``package`` and
+    ``assoc_context`` are ``None``), ``"ready"`` (package built, wrap
+    marked in progress on the store), or ``"downgraded"`` (the
+    consolidate-efferent gate auto-downgraded this session to
+    capture-only — a parallel session that is neither the sole live
+    session nor the baton-holder; ``package``/``wrap_token`` ``None``,
+    the human-readable reason is in ``message``, the store left
+    untouched). The ``Literal`` discriminant
     gives type checkers a switchable tag and lets IDE autocomplete
     offer the two valid status values; callers typoing
     ``result["statuz"]`` or ``result["status"] == "reday"`` get a
@@ -472,7 +495,7 @@ class PrepareWrapResult(TypedDict):
     empty path (no wrap to commit).
     """
 
-    status: Literal["empty", "ready"]
+    status: Literal["empty", "ready", "downgraded"]
     message: str  # Short human-readable status summary
     episode_count: int
     package: WrapPackageDict | None  # None when status == "empty"

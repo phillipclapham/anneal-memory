@@ -18,6 +18,7 @@ from .types import (
     AssociationStats,
     Episode,
     EpisodeType,
+    FeltCurrency,
     PrepareWrapResult,
     RecallResult,
     RelevantPattern,
@@ -49,11 +50,13 @@ from .schema import (
     validate_schema,
 )
 from .continuity import (
+    felt_currency,
     format_wrap_package_text,
     prepare_wrap,
     validate_structure,
     validated_save_continuity,
 )
+from . import sessions
 from .graduation import (
     CrossSessionCollision,
     OmittedPattern,
@@ -124,6 +127,7 @@ __all__ = [
     "AssociationStats",
     "Episode",
     "EpisodeType",
+    "FeltCurrency",
     "PrepareWrapResult",
     "RecallResult",
     "SaveContinuityResult",
@@ -151,8 +155,10 @@ __all__ = [
     "heading_marker",
     "validate_structure",
     "prepare_wrap",
+    "felt_currency",
     "format_wrap_package_text",
     "validated_save_continuity",
+    "sessions",
     "validate_graduations",
     "check_explanation_overlap",
     "detect_stale_patterns",

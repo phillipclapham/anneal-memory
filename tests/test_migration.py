@@ -138,10 +138,14 @@ class TestWrapGeneratedEntry:
         return matches[0]
 
     def test_present_and_versioned(self) -> None:
-        # Keyed at exactly the current line so it is visible (not withheld as
-        # "not yet installed") yet not retroactively keyed under a shipped
-        # release an adopter may already have acknowledged.
-        assert self._entry()["version"] == "0.9.5"
+        # Keyed at the first PUBLIC release version (0.9.6) so it is visible
+        # (not withheld as "not yet installed") yet not retroactively keyed
+        # under a shipped release an adopter may already have acknowledged.
+        # The feature landed in code at the never-published label 0.9.5; it
+        # first ships publicly in 0.9.6, so 0.9.6 is the honest key — and it
+        # also surfaces for a local 0.9.5-acked operator upgrading to 0.9.6
+        # (a 0.9.5 ack marker does not record which 0.9.5 build it saw).
+        assert self._entry()["version"] == "0.9.6"
 
     def test_live_memory_guard_leads(self) -> None:
         # complement L3: the hard boundary must LEAD — an AI executing
@@ -190,7 +194,7 @@ class TestWrapGeneratedEntry:
         # The Tony scenario: an adopter acknowledged at the prior PyPI release
         # (0.8.5), upgrading to the current line, sees the new retirement entry,
         # and every surfaced entry is genuinely newer than what they acked.
-        out = pending_migrations("0.8.5", current_version="0.9.5")
+        out = pending_migrations("0.8.5", current_version="0.9.6")
         assert "AM-WRAP-GENERATED" in [e["feature"] for e in out]
         assert all(_version_tuple(e["version"]) > _version_tuple("0.8.5") for e in out)
 
@@ -198,7 +202,7 @@ class TestWrapGeneratedEntry:
         # spore-216 compose (negative case): a fresh install whose init auto-acked
         # the current version never had the file, so the entry is correctly
         # invisible to it — it surfaces only on a genuine migration from below.
-        out = pending_migrations("0.9.5", current_version="0.9.5")
+        out = pending_migrations("0.9.6", current_version="0.9.6")
         assert "AM-WRAP-GENERATED" not in [e["feature"] for e in out]
 
 

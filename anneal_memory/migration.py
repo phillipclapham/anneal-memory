@@ -271,7 +271,7 @@ MIGRATION_MANIFEST: list[MigrationEntry] = [
         "files": list(CORE_FILES),
     },
     {
-        "version": "0.9.5",
+        "version": "0.9.6",
         "feature": "AM-WRAP-GENERATED",
         "summary": (
             "anneal-memory's `prepare_wrap` GENERATES the wrap mechanics from "

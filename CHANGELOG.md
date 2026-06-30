@@ -4,6 +4,12 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.9.6] — 2026-06-30
+
+**The first public PyPI release of the 0.9.x line.** Releases `0.9.0`–`0.9.5` lived on `main` only — `0.9.0` (Slice B) shipped in SHADOW MODE and the rest rode the editable install; none were ever tagged or uploaded to PyPI (latest published was `0.8.5`). They collapse into this release. The version was bumped from the `main` label `0.9.5` to `0.9.6` because new public surface area (the `anneal_memory.sessions` module + API, AM-CONSOLIDATE-EFFERENT and AM-WRAP-GENERATED) landed after the `0.9.5` label was set, so the released artifact gets its own unambiguous number.
+
+This release is intentionally **decoupled from Slice C** (graph-consuming recall, gated on the §9.2 replay-harness oracle): Slice B's pattern-association graph (`pattern_associations.py`) ships in SHADOW MODE — additive `CREATE IF NOT EXISTS` tables, zero existing-DB impact, and **nothing reads the graph for recall**, so it is inert until Slice C wires a graph-consuming channel in a later release. Adopters on `0.8.5` upgrading to `0.9.6` are surfaced the AM-WRAP-GENERATED migration entry. It is keyed at `0.9.6` — the first public version it ships in — rather than its `0.9.5` code-landing label (which was never published), so it also reaches a local `0.9.5`-acked operator upgrading to `0.9.6` (a `0.9.5` ack marker does not record which `0.9.5` build it saw).
+
 ### Added — AM-CONSOLIDATE-EFFERENT (spore-194): a structural single-consolidator invariant for parallel sessions
 
 When N agent sessions run in parallel over one store, anneal already prevents two consolidates from both COMMITTING (the save-side `wrap_token` CAS under `continuity_lock`), but does not prevent N *sequential* consolidates from independently recomposing the shared felt/identity continuity layer from N narrow contexts — the "recency trap" (no corruption, but identity memory thrashes). This adds the authorization layer above corruption-prevention: capture (episodic append) is AFFERENT (ungated, parallel-safe); CONSOLIDATE is EFFERENT (mutates shared identity state) → gated by human authority, structurally, default-absent.

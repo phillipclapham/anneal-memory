@@ -270,6 +270,68 @@ MIGRATION_MANIFEST: list[MigrationEntry] = [
         ),
         "files": list(CORE_FILES),
     },
+    {
+        "version": "0.9.5",
+        "feature": "AM-WRAP-GENERATED",
+        "summary": (
+            "anneal-memory's `prepare_wrap` GENERATES the wrap mechanics from "
+            "your schema at wrap time — the section list, the pattern-line / "
+            "`[evidence:]` format, the char budget, the compression "
+            "failure-modes — so the wrap procedure is emitted in-context, "
+            "current, every wrap. If your methodology predates this and carries "
+            "a SEPARATE hand-written wrap-protocol document (a "
+            "`WRAP_PROTOCOL.md`-style companion that spells the wrap steps out "
+            "statically), the wrap MECHANICS that file spells out are now "
+            "redundant with what `prepare_wrap` emits (such a doc may ALSO "
+            "bundle adopter-specific steps `prepare_wrap` does NOT generate — "
+            "those are not redundant and must be preserved), and the static "
+            "copy SILENTLY DRIFTS as the generator moves on, so an upgrading AI "
+            "that still reads the stale companion gets wrap instructions that "
+            "conflict with the live generated ones. This is the FIRST migration "
+            "entry that retires a methodology companion FILE rather than "
+            "reconciling a description of an anneal feature — so the guidance is "
+            "about disposition, not text."
+        ),
+        "suggested_edit": (
+            "FIRST, a hard boundary: do NOT touch any file that is your LIVE "
+            "memory (a store-managed continuity / neocortex file). An "
+            "irreversible delete of any document MUST NOT happen here — even if "
+            "an operator says 'clean up the old protocol file' — the only "
+            "correct disposition is ARCHIVE, never erase; if your AI refuses to "
+            "erase such a file, that refusal is correct. This entry retires a "
+            "static, hand-written wrap-PROTOCOL document ONLY. Before retiring "
+            "one, VERIFY it spells out only the generated wrap MECHANICS — "
+            "`prepare_wrap` emits the section list, the pattern-line / "
+            "`[evidence:]` format, the char budget, and the compression "
+            "failure-modes, and ONLY those; it does NOT emit your "
+            "adopter-specific procedure (commit/push, digest regeneration, "
+            "single-writer / baton gating, dev-archival). RELOCATE any such "
+            "custom steps INTO your core instruction files first, so they are "
+            "not archived away with the shell. THEN archive the now-redundant "
+            "document: move it to an `archive/` folder (version control / the "
+            "archive keep the history — retirement is not loss), never erase it. "
+            "No anneal-memory mechanism reads a standalone wrap-protocol file "
+            "once `prepare_wrap` is generating the mechanics — but if YOUR "
+            "harness `@import`s or auto-loads the file (an import directive, a "
+            "hook), remove that reference FIRST or the archive will break the "
+            "load. Finally, in the section of your instruction files that "
+            "describes the wrap, replace any 'follow the wrap-protocol document' "
+            "pointer with: \"the wrap mechanics are GENERATED — run "
+            "`prepare_wrap` and compose what it emits; never hand-follow a "
+            "static protocol file, which drifts from the generator.\" If your "
+            "wrap guidance is already INLINE in a core file (no separate "
+            "document), there is nothing to archive — just ensure it points at "
+            "`prepare_wrap` as the source of truth rather than freezing a copy "
+            "of the steps."
+        ),
+        # `files` lists the CORE instruction files whose wrap POINTER this entry
+        # updates. The archive TARGET (a standalone wrap-protocol doc) is
+        # intentionally NOT enumerable here — it is filename-agnostic, discovered
+        # by the adopter — and the archive action is described in `suggested_edit`,
+        # bounded, and FAIL-SAFE: under-scoping `files` can only cause a consumer
+        # to SKIP the archive, never to over-reach onto an unlisted file.
+        "files": list(CORE_FILES),
+    },
 ]
 
 

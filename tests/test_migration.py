@@ -119,6 +119,89 @@ class TestPendingMigrations:
             assert entry["files"] and all(isinstance(f, str) for f in entry["files"])
 
 
+# -- AM-WRAP-GENERATED: the first file-RETIREMENT entry (spore-217) --
+
+class TestWrapGeneratedEntry:
+    """Locks AM-WRAP-GENERATED — the first manifest entry whose guidance RETIRES
+    a methodology companion file rather than reconciling a description of an
+    anneal feature. The content invariant is load-bearing: an AI ACTS on this
+    against a real operator's files, so it must lead with the live-memory
+    boundary, guide ARCHIVE via an IMPERATIVE prohibition (never an erase),
+    preserve adopter-specific custom steps, and stay filename-agnostic. The
+    asserts pin the safety-critical phrases AND forbid additive destructive
+    imperatives — L3 (codex + L1 converged): the regression guard must catch
+    ADDITION, not just replacement."""
+
+    def _entry(self) -> MigrationEntry:
+        matches = [e for e in MIGRATION_MANIFEST if e["feature"] == "AM-WRAP-GENERATED"]
+        assert len(matches) == 1, "exactly one AM-WRAP-GENERATED entry expected"
+        return matches[0]
+
+    def test_present_and_versioned(self) -> None:
+        # Keyed at exactly the current line so it is visible (not withheld as
+        # "not yet installed") yet not retroactively keyed under a shipped
+        # release an adopter may already have acknowledged.
+        assert self._entry()["version"] == "0.9.5"
+
+    def test_live_memory_guard_leads(self) -> None:
+        # complement L3: the hard boundary must LEAD — an AI executing
+        # incrementally could begin acting before reading a guard left at the end.
+        edit = self._entry()["suggested_edit"].lower()
+        assert "do not touch any file that is your live memory" in edit
+        assert "live memory" in edit[:160], "the live-memory guard must lead, not trail"
+
+    def test_archive_not_erase_is_an_imperative_prohibition(self) -> None:
+        # The safety invariant: an IMPERATIVE prohibition (not a two-branch
+        # "refusal is correct" validation), AND no additive destructive imperative
+        # can slip in. The bad-phrase list is verified absent today, so it catches
+        # a future REGRESSION (codex LOW + L1 MED converged), not a false positive.
+        edit = self._entry()["suggested_edit"].lower()
+        assert "must not happen" in edit
+        assert "archive, never erase" in edit
+        for bad in ("delete the file", "delete it", "delete the original",
+                    "safe to delete", "you can delete", "you may delete", "rm -"):
+            assert bad not in edit, f"destructive phrasing leaked in: {bad!r}"
+
+    def test_preserves_custom_steps_before_archiving(self) -> None:
+        # L1 L3: prepare_wrap generates ONLY the mechanics; a mixed doc's
+        # adopter-specific steps (commit/digest/baton/dev-archival) must be
+        # RELOCATED, not archived away with the shell.
+        edit = self._entry()["suggested_edit"].lower()
+        assert "relocate" in edit
+        assert "dev-archival" in edit
+
+    def test_reads_claim_scoped_to_anneal_and_warns_on_imports(self) -> None:
+        # complement L3: "nothing reads it" overclaims — an adopter whose harness
+        # @imports / auto-loads the file still reads it. Scope to anneal + warn.
+        edit = self._entry()["suggested_edit"].lower()
+        assert "no anneal-memory mechanism reads" in edit
+        assert "@import" in edit
+
+    def test_filename_agnostic_anchored_on_prepare_wrap(self) -> None:
+        # Anchored on the anneal capability (prepare_wrap); WRAP_PROTOCOL.md
+        # appears ONLY in the summary as a recognition example — the actionable
+        # edit stays agnostic so the guidance reaches every harness, not just flow.
+        entry = self._entry()
+        assert "prepare_wrap" in entry["summary"]
+        assert "prepare_wrap" in entry["suggested_edit"]
+        assert "wrap_protocol.md" not in entry["suggested_edit"].lower()
+
+    def test_surfaces_for_migrating_adopter_at_prior_release(self) -> None:
+        # The Tony scenario: an adopter acknowledged at the prior PyPI release
+        # (0.8.5), upgrading to the current line, sees the new retirement entry,
+        # and every surfaced entry is genuinely newer than what they acked.
+        out = pending_migrations("0.8.5", current_version="0.9.5")
+        assert "AM-WRAP-GENERATED" in [e["feature"] for e in out]
+        assert all(_version_tuple(e["version"]) > _version_tuple("0.8.5") for e in out)
+
+    def test_not_surfaced_for_fresh_install_acked_at_current(self) -> None:
+        # spore-216 compose (negative case): a fresh install whose init auto-acked
+        # the current version never had the file, so the entry is correctly
+        # invisible to it — it surfaces only on a genuine migration from below.
+        out = pending_migrations("0.9.5", current_version="0.9.5")
+        assert "AM-WRAP-GENERATED" not in [e["feature"] for e in out]
+
+
 # -- marker read / write --
 
 class TestMarker:

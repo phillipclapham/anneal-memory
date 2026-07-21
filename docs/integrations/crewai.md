@@ -193,6 +193,6 @@ class MyCrew:
 ## Key Considerations
 
 - **Event bus vs callbacks:** The event bus (`BaseEventListener`) is richer — it captures tool usage, agent execution, and LLM calls in addition to task events. Use it for full integration. Callbacks are simpler for task-level-only recording.
-- **CrewAI's built-in Memory:** CrewAI has its own `Memory` class with LLM-based extraction and consolidation. It does deduplication, not graduation. It has no immune system, citation decay, or anti-inbreeding defense. anneal-memory can run alongside it or replace it.
+- **CrewAI's built-in Memory:** CrewAI has its own `Memory` class with LLM-based extraction and consolidation. It does deduplication, not graduation. It has no immune system, no citation-validated graduation, and no explanation-grounding check. anneal-memory can run alongside it or replace it.
 - **Multi-agent recording:** Use the `source` parameter on `store.record()` to attribute episodes to specific agents — this matters for per-agent identity tracking.
 - **The cognitive loop:** The event listener captures episodes automatically, but compression should still involve an LLM — the agent's judgment during compression is where identity forms.

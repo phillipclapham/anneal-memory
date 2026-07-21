@@ -1,6 +1,6 @@
 ---
 name: anneal-memory
-description: Persistent four-layer agent memory (episodic + continuity + Hebbian + limbic) plus a prospective spore layer and an on-demand crystallized-pattern tier, via anneal-memory. Use in any project wired for anneal-memory — an `ANNEAL_MEMORY_DB` env var, an `anneal://continuity` MCP resource, or memory instructions referencing `recall`/`prepare_wrap`/`save_continuity`. Use it before any architectural decision or rule change (recall prior patterns first), while recording decisions/observations/tensions/outcomes during work, and when the user signals the session is ending ("wrap up", "save memory", "we're done") to run the prepare_wrap → compress → save_continuity wrap sequence. It also carries the start-of-session continuity load.
+description: Persistent four-layer agent memory (episodic + continuity + Hebbian + affective) plus a prospective spore layer and an on-demand crystallized-pattern tier, via anneal-memory. Use in any project wired for anneal-memory — an `ANNEAL_MEMORY_DB` env var, an `anneal://continuity` MCP resource, or memory instructions referencing `recall`/`prepare_wrap`/`save_continuity`. Use it before any architectural decision or rule change (recall prior patterns first), while recording decisions/observations/tensions/outcomes during work, and when the user signals the session is ending ("wrap up", "save memory", "we're done") to run the prepare_wrap → compress → save_continuity wrap sequence. It also carries the start-of-session continuity load.
 license: MIT
 ---
 
@@ -15,9 +15,9 @@ This project uses **anneal-memory** for persistent memory across sessions. Work 
 - **Episodic** — raw observations you record during work. Cheap, plentiful.
 - **Continuity** — the compressed working memory episodes graduate into at wrap time. This is where identity lives.
 - **Hebbian associations** — links that form automatically between episodes you cite together in your patterns; they strengthen with repetition and decay with disuse.
-- **Limbic** — an optional affective tag on a wrap that modulates how strongly its associations form.
+- **Affective** (the *limbic* layer in the CLS lineage this borrows from) — an optional affective tag on a wrap that modulates how strongly its associations form.
 
-You touch episodic (record) and continuity (wrap) directly. Hebbian and limbic are byproducts of citing honestly and reflecting on your state — no extra bookkeeping.
+You touch episodic (record) and continuity (wrap) directly. Hebbian and affective are byproducts of citing honestly and reflecting on your state — no extra bookkeeping.
 
 ## Spores — your prospective layer (a parallel store, not a fifth memory layer)
 
@@ -94,7 +94,7 @@ Report findings naturally — "from prior sessions there was a tension between X
 
 Only one process should operate against a given store at a time. The library is **not** thread-safe, task-safe, or reentrant. Multi-tenant deployments sharing a store break the hash-chained audit trail by construction. If you need multiple agents, give each its own store path.
 
-## Limbic layer (optional)
+## Affective layer (optional)
 
 When you save, you can include an affective state — a free-text functional tag (`engaged`, `curious`, `uncertain`, `focused`, `concerned`…) and an intensity (0.0–1.0). High intensity (>0.5) amplifies the associations formed in that wrap. Be honest: uniform "engaged 0.8" on every wrap is confabulation, not signal — the value is in genuine variation.
 

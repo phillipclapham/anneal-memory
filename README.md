@@ -221,6 +221,14 @@ The library implements a set of structural defenses around how patterns earn gra
 
 **Single-consolidator gate (structural; opt-in).** Recording episodes is afferent — append-only, parallel-safe, every session does it. Consolidating — recomposing the compressed identity layer — is efferent: it rewrites shared state, so it's gated to human authority. When several sessions run in parallel over one store (the real operating mode of a multi-conversation operator), each could independently recompose the felt/identity layer from its own narrow slice of context, and the identity memory thrashes. The gate makes the discipline structural: a consolidation proceeds only if this is the sole live session *or* this session holds the consolidate baton — otherwise it auto-downgrades to capture-only and surfaces a flag. A single-session operator (the common case) is auto-authorized and never sees the gate; parallel operators designate one session as the consolidate seat. The whole layer is opt-in (it engages only when a caller passes a `session_id`) and lives in coordination sidecars next to the store, never in the store's single-writer DB. Drift becomes a safe downgrade, not a silent identity-thrash.
 
+### Wrap-package integrity — two checks that guard what the agent is asked to do
+
+The primitives above defend the citation layer. Two more defend the *compression package itself* — the instructions `prepare_wrap` hands the agent. Both follow the same rule as the contradiction scan: the library is zero-dependency with no LLM and no embeddings, so it **surfaces the corpus and the agent judges**.
+
+**Pattern dedup scan (AM-SEMDUP).** The immune system catches a pattern re-cited with overlapping vocabulary, and a pattern that contradicts an existing one. It does not catch the same *principle* re-graduated under fresh words and a new name — a silent duplicate that forks the pattern graph, so two names for one principle each accrue half the evidence. Fresh vocabulary is by definition *low* lexical overlap, so a lexical or embedding detector is structurally blind to exactly this case. Instead, `prepare_wrap` renders a **Pattern Dedup Scan** block listing existing graduated patterns across all named levels as `name (Nx): one-line meaning`, with a merge-don't-fork instruction — the meaning line is what lets the agent judge semantic rather than merely nominal overlap. Capped at 50 with an announced overflow; never silently truncated. Public helpers: `extract_pattern_summaries(text, ...) -> list[PatternSummary]` and the `PatternSummary` NamedTuple (`name`, `level`, `summary`).
+
+**Schema role check (AM-ROLECHECK).** The wrap package is assembled conditionally on section *roles*: the pattern-line format and contradiction scan emit only for a `graduating` role, and the felt proportion-check only for `narrative-timeless`. `validate_schema` already refuses a schema with no graduating section or duplicate headings, and the shrink gate refuses catastrophic felt collapse at save — but a schema that validates, keeps a graduating section, and is mis-roled *elsewhere* slips between them. The load-bearing case is `narrative-timeless` → `narrative`, which silently drops both the felt proportion-check and the shrink gate's felt protection, so the package quietly comes back thinner and nothing says so. `schema_role_warning(schema) -> str | None` warns on role drift off a named schema (naming the section, expected vs actual role, and the fix) and enforces a no-graduating floor for a raw schema. `prepare_wrap` surfaces it both as a `UserWarning` and as the `schema_warning` key on `PrepareWrapResult`. Known limitation: a fully custom novel-heading schema with a felt mis-role is not caught, because there is no named reference to drift from.
+
 ### Honest scope — what these primitives do NOT catch
 
 The defenses above are **structural at the citation layer**. They catch fabricated citation evidence (fake IDs, missing IDs, wholesale-invented explanations), naive replay (re-citing prior-session episodes), per-ID citation gaming (single episode pumped across patterns), and post-hoc audit tampering. They do not catch:
@@ -491,7 +499,23 @@ A ><[axis] B                    tension on an axis
 
 | 1x (2026-04-01)              first observation
 | 2x (2026-04-01) [evidence: abc123 "explanation"]   validated pattern
+
+[contradicts: name]             this pattern conflicts with the named Proven
+[no-contradicts]                contradiction scan run, nothing conflicts
+[provenance: id1, id2]          founding episode ids for a mature top-tier
+                                pattern with no fresh evidence this wrap
 ```
+
+The last three are parsed by the immune system, not just prose.
+`[contradicts:]` / `[no-contradicts]` record whether the contradiction
+scan `prepare_wrap` renders into the compression package was actually
+run — a new Proven landing with no stance is written to the audit log.
+`[provenance:]` names the episodes that founded a mature 3x pattern
+whose evidence has gone low-variance; it suppresses the "graduate OUT to
+partnership.md or retire" warning for a line that is genuinely grounded
+but quiet. It is not immortality — a provenance pattern that goes cold
+still ages out through the ordinary warmth gate. Prefer fresh evidence
+whenever it exists; provenance is only for when it does not.
 
 ## Security
 

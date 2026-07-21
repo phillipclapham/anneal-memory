@@ -108,8 +108,23 @@ class AuditTrail:
         """Append a hash-chained entry to the audit trail.
 
         Args:
-            event: Event type (record, delete, prune, wrap_started,
-                   wrap_completed, wrap_cancelled, continuity_saved).
+            event: Event type. Not enforced (``event`` is a bare ``str``),
+                   but the emitted vocabulary is closed. Keep this list in
+                   sync when adding a raise site — it is the only inventory
+                   of event types that exists.
+
+                   Episode/store lifecycle:
+                     record, delete, prune
+                   Wrap lifecycle:
+                     wrap_started, wrap_cancelled, wrap_completed
+                   Continuity:
+                     continuity_saved, section_schema_set
+                   Hebbian (episode-level) associations:
+                     associations_updated, associations_decayed
+                   Cortical (pattern-level) association graph:
+                     pattern_associations_seeded, pattern_co_surface_drained,
+                     pattern_associations_gc, pattern_association_renamed,
+                     pattern_concept_severed
             data: Event-specific payload.
             actor: Identity of the actor triggering this event.
                    EU AI Act Article 12(2) requires actor identity on

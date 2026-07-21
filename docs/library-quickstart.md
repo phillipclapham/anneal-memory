@@ -97,7 +97,7 @@ if wrap["status"] == "ready":
 # validated_save_continuity runs the complete immune system:
 #   - Validates 4-section structure (State, Patterns, Decisions, Context)
 #   - Checks citation evidence on graduations (2x, 3x patterns)
-#   - Demotes ungrounded patterns (anti-inbreeding)
+#   - Demotes ungrounded patterns (the explanation-grounding check)
 #   - Records Hebbian associations between co-cited episodes
 #   - Applies decay (0.9x) to unreinforced associations
 #   - Updates metadata and records wrap completion

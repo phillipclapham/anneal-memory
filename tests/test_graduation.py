@@ -1978,12 +1978,17 @@ class TestV033HotfixRegressionGuards:
         assert [p.name for p in result] == ["new_today"]
 
     def test_low5_named_pattern_re_rejects_invalid_marker_combinations(self):
-        """LOW #5: v0.3.2's `[!?✓*]+` matched `!!!`, `!*?`, `??`, etc.
-        v0.3.3 tightens to explicit alternation. Confirm invalid
-        combinations no longer match."""
+        """LOW #5: v0.3.2's `[!?✓*]+` matched `!*?`, `??`, etc. v0.3.3
+        tightens to explicit alternation. Confirm invalid marker
+        combinations no longer match.
+
+        NOTE: a run of one-or-more `!` is a VALID FlowScript salience
+        prefix (spore-447 — `!!!` and longer ranks must parse). That tier
+        was wrongly bundled with genuinely-invalid combos here before the
+        fix; it is now asserted in test_low5_named_pattern_re_still_accepts_valid_markers.
+        This guard keeps the part that was always load-bearing: mixed
+        non-`!` marker garbage (`!*?`, `??`) must still be rejected."""
         from anneal_memory.graduation import _NAMED_PATTERN_RE
-        # Invalid: three bangs
-        assert _NAMED_PATTERN_RE.match("- !!! pattern_name | 2x") is None
         # Invalid: mixed-marker combo
         assert _NAMED_PATTERN_RE.match("- !*? pattern_name | 2x") is None
         # Invalid: double-question
@@ -1995,6 +2000,7 @@ class TestV033HotfixRegressionGuards:
         from anneal_memory.graduation import _NAMED_PATTERN_RE
         assert _NAMED_PATTERN_RE.match("- pattern_name | 2x") is not None
         assert _NAMED_PATTERN_RE.match("- !! pattern_name | 2x") is not None
+        assert _NAMED_PATTERN_RE.match("- !!! pattern_name | 3x") is not None
         assert _NAMED_PATTERN_RE.match("- ! pattern_name | 1x") is not None
         assert _NAMED_PATTERN_RE.match("- ? pattern_name | 1x") is not None
         assert _NAMED_PATTERN_RE.match("- ✓ pattern_name | 3x") is not None

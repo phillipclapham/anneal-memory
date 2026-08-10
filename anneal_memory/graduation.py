@@ -128,9 +128,9 @@ _NAMED_PATTERN_RE = re.compile(
     r"^(?:"
     r"[ \t]*-[ \t]+"                            # (a) "- " dash bullet (canonical), any indent
     r"|[ \t]+"                                  # (b) leading indentation (grouped member)
-    r"|(?=(?:!!|!|\?|✓|\*)[ \t])"               # (c) FlowScript marker at column 0 (zero-width)
+    r"|(?=(?:!+|\?|✓|\*)[ \t])"               # (c) FlowScript marker at column 0 (zero-width)
     r")"
-    r"(?:(?:!!|!|\?|✓|\*)[ \t]+)?"              # optional FlowScript marker prefix
+    r"(?:(?:!+|\?|✓|\*)[ \t]+)?"              # optional FlowScript marker prefix
     r"([A-Za-z][A-Za-z0-9_.\-]*)"               # operator-style identifier (ASCII)
     r"[ \t]*\|[ \t]*(\d+)x"                     # graduation marker
 )
@@ -157,9 +157,9 @@ _NAMED_PATTERN_WITH_EVIDENCE_RE = re.compile(
     r"^(?:"
     r"[ \t]*-[ \t]+"
     r"|[ \t]+"
-    r"|(?=(?:!!|!|\?|✓|\*)[ \t])"
+    r"|(?=(?:!+|\?|✓|\*)[ \t])"
     r")"
-    r"(?:(?:!!|!|\?|✓|\*)[ \t]+)?"
+    r"(?:(?:!+|\?|✓|\*)[ \t]+)?"
     r"([A-Za-z][A-Za-z0-9_.\-]*)"               # (1) operator-style identifier
     r"[ \t]*\|[ \t]*(\d+)x"                     # (2) level
     r"[ \t]*\((\d{4}-\d{2}-\d{2})\)"            # (3) date

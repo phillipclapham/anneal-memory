@@ -135,7 +135,8 @@ class TestCrystallize:
         {"name": "", "level": 3, "explanation": "x"},
         {"name": "  ", "level": 3, "explanation": "x"},
         {"name": "p", "level": 1, "explanation": "x"},   # 1x not Proven-tier
-        {"name": "p", "level": 4, "explanation": "x"},
+        {"name": "p", "level": 0, "explanation": "x"},   # below the floor
+        {"name": "p", "level": -3, "explanation": "x"},  # negative
         {"name": "p", "level": True, "explanation": "x"},  # bool rejected
         {"name": "p", "level": 3, "explanation": ""},
         {"name": "p", "level": 3, "explanation": "x", "evidence": "not-a-list"},
@@ -146,6 +147,42 @@ class TestCrystallize:
     def test_validation_raises_valueerror(self, store, bad):
         with pytest.raises(ValueError):
             store.crystallize(today=T0, **bad)
+
+    @pytest.mark.parametrize("level", [2, 3, 4, 5, 10, 27])
+    def test_there_is_NO_UPPER_BOUND_on_level(self, store, level):
+        """AM-LEVELCAP (2026-08-14). ``{"level": 4}`` used to sit in the bad-args list
+        above, asserting a ceiling that made a well-earned pattern IMPOSSIBLE TO
+        CRYSTALLIZE OUT — while graduation.py's own ``([23])x`` cap simultaneously made
+        it invisible to validation. A pattern above 3x was trapped in the working set
+        with no exit, which is the precise failure the module docstring says this store
+        exists to prevent ("the section had no OUT path — a one-way ratchet, so the
+        working set monotonically bloats").
+
+        The ceiling also contradicted this store's own contract: ``crystallize`` raises
+        level "monotonically (never lowers it — a pattern's earned high-water mark
+        holds)", and a high-water mark that saturates at 3 is not a high-water mark.
+
+        Level is the STRENGTH axis (times lived experience re-earned it);
+        ``last_activated_on`` is the RECENCY axis. Both are real and they are not
+        interchangeable, so strength must be free to climb.
+        """
+        rec = store.crystallize(name=f"deep{level}", level=level,
+                                explanation="x", evidence=["aabbccdd"], today=T0)
+        assert rec["level"] == level
+
+    def test_the_floor_is_still_enforced_at_2(self, store):
+        """The half of the old scoping that was CORRECT and must survive: 1x is a
+        developing pattern and belongs in the working set, not the deep store. Lifting
+        the ceiling must not lower the floor."""
+        with pytest.raises(ValueError, match="Proven-tier"):
+            store.crystallize(name="dev", level=1, explanation="x", today=T0)
+
+    def test_monotonic_raise_holds_above_3(self, store):
+        """The high-water mark now actually works past the old ceiling: re-crystallizing
+        raises the level and NEVER lowers it, at any magnitude."""
+        store.crystallize(name="climber", level=3, explanation="x", today=T0)
+        assert store.crystallize(name="climber", level=9, explanation="x", today=T0)["level"] == 9
+        assert store.crystallize(name="climber", level=4, explanation="x", today=T0)["level"] == 9
 
     def test_bare_string_evidence_rejected_not_charsplit(self, store):
         # A bare string would otherwise store each character — reject it.

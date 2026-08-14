@@ -87,6 +87,7 @@ from .crystal import (
     RETIRE_KINDS,
     VALID_ACTIVATION_MODES,
     VALID_ACTIVATIONS,
+    MIN_PROVEN_LEVEL,
     VALID_LEVELS,
     VALID_PERMANENCE,
     CrystalDict,
@@ -110,6 +111,30 @@ _TIME_UNITS = {
     "d": "days",
     "w": "weeks",
 }
+
+
+def _proven_level(value: str) -> int:
+    """argparse type for a Proven-tier graduation level: an int >= MIN_PROVEN_LEVEL.
+
+    ⛔ REPLACES ``choices=VALID_LEVELS`` (AM-LEVELCAP, 2026-08-14). ``choices=(2, 3)``
+    made ``crystal crystallize --level 4`` an argparse error — the CLI face of the same
+    ceiling that made a 4x pattern invisible to graduation validation AND impossible to
+    crystallize OUT. There is no upper bound: level is the STRENGTH axis and a pattern
+    re-earned many times keeps climbing, while ``last_activated_on`` carries recency.
+
+    A custom type rather than a widened ``choices`` tuple, because the valid set is now
+    open-ended — enumerating it would either lie or require a ceiling picked from nothing.
+    """
+    try:
+        level = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"level must be an integer (got {value!r})")
+    if level < MIN_PROVEN_LEVEL:
+        raise argparse.ArgumentTypeError(
+            f"level must be >= {MIN_PROVEN_LEVEL} (Proven-tier); got {level}. "
+            "1x is developing and belongs in the working set, not the deep store."
+        )
+    return level
 
 
 def parse_duration(value: str) -> str:
@@ -3024,8 +3049,8 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[json_parent],
     )
     cp.add_argument("--name", required=True, help="The pattern slug (snake_case)")
-    cp.add_argument("--level", type=int, choices=VALID_LEVELS, required=True,
-                    help="Graduation level (2 or 3 — Proven-tier)")
+    cp.add_argument("--level", type=_proven_level, required=True,
+                    help="Graduation level (>= 2 — Proven-tier; no upper bound)")
     cp.add_argument("--explanation", required=True, help="The pattern's felt-prose / mechanism body")
     cp.add_argument("--evidence", nargs="*", help="Evidence episode ids (associative-retrieval substrate)")
     cp.add_argument("--permanence", choices=VALID_PERMANENCE, default="timeless")
@@ -3057,7 +3082,7 @@ def build_parser() -> argparse.ArgumentParser:
     cp = crystal_sub.add_parser("update", help="Metadata surgery on a live pattern", parents=[json_parent])
     cp.add_argument("name", help="Pattern slug")
     cp.add_argument("--explanation")
-    cp.add_argument("--level", type=int, choices=VALID_LEVELS)
+    cp.add_argument("--level", type=_proven_level)
     cp.add_argument("--evidence", nargs="*")
     cp.add_argument("--permanence", choices=VALID_PERMANENCE)
     cp.add_argument("--activation-mode", dest="activation_mode", choices=VALID_ACTIVATION_MODES)

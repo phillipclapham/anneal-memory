@@ -124,8 +124,33 @@ VALID_ACTIVATIONS: tuple[Activation, ...] = ("hot", "warm", "cold", "dormant")
 VALID_ROUTES: tuple[Route, ...] = ("constitution", "crystallize", "compost")
 
 # Only Proven-tier wisdom crystallizes — a pattern graduates IN to the working set
-# at 2x/3x; crystallization is the stage PAST 3x (or a stable 2x leaving the hot set).
+# at 2x; crystallization is the stage PAST that (or a stable 2x leaving the hot set).
 # A 1x developing pattern belongs in the working set, not the deep store.
+#
+# ⛔ PROVEN-TIER IS "2 AND UP", NOT "2 OR 3" (AM-LEVELCAP, 2026-08-14). This gate was
+# `level not in (2, 3)`, so `crystallize(level=4)` raised ValueError. Paired with the
+# identical cap in graduation.py's `_GRADUATION_RE`, a pattern above 3x sat in a trap
+# with no exit: too high for validation to see, and too high to crystallize OUT.
+#
+# ⚠ THE TWO HALVES MUST SHIP TOGETHER — fixing only one is WORSE than fixing neither.
+# The graduation half landed first (abf119f); alone it makes a 4x line legal in the
+# working set — validated, forming links — while leaving it NO out path. That turns a
+# silent-drop bug into an unbounded always-loaded working set, which is exactly what
+# the shipped methodology warns against: "not a one-way 3x ratchet — without an OUT
+# path it bloats until an always-loaded list stops working".
+#
+# WHY A CEILING WAS INCOHERENT HERE SPECIFICALLY: `crystallize()` documents itself as
+# raising level "monotonically (never lowers it — a pattern's earned high-water mark
+# holds)". A high-water mark that saturates at 3 is not a high-water mark. Level is the
+# STRENGTH axis (how many times lived experience re-earned it); `last_activated_on` is
+# the RECENCY axis. Capping strength collapses a two-axis model to one and discards the
+# half that separates a pattern earned ten times over months from one touched yesterday.
+MIN_PROVEN_LEVEL: int = 2
+
+# ⚠ RETAINED FOR BACKWARDS COMPATIBILITY AND NO LONGER THE GATE. Exported from
+# `__init__.py`, so removing it breaks importers; it still names the two levels at which
+# a pattern typically FIRST crystallizes. Validation now uses `MIN_PROVEN_LEVEL` — do
+# not reintroduce a membership test against this tuple.
 VALID_LEVELS: tuple[int, ...] = (2, 3)
 
 # How a crystallized pattern leaves the store. ``falsified`` = the contradiction
@@ -496,7 +521,9 @@ class CrystalStore:
         ``crystallized_on``. Re-crystallizing a RETIRED name un-retires it (a
         falsified pattern re-proven) with a fresh ``crystallized_on`` and a note.
 
-        ``level`` must be 2 or 3 (only Proven-tier wisdom crystallizes). ``evidence``
+        ``level`` must be >= 2 (only Proven-tier wisdom crystallizes; 1x is developing
+        and belongs in the working set). There is NO UPPER BOUND — the level is the
+        strength axis and a pattern re-earned many times keeps climbing. ``evidence``
         is the list of episode ids that grounded the pattern — the substrate for
         associative retrieval (pattern → evidence-episode → Hebbian co-pattern).
         ``permanence`` × ``activation_mode`` is the 2-axis routing record; the store
@@ -805,8 +832,11 @@ class CrystalStore:
     @staticmethod
     def _validate_level(level: int) -> int:
         # bool is an int subclass — reject it so a stray True/False can't read as 1/0.
-        if not isinstance(level, int) or isinstance(level, bool) or level not in VALID_LEVELS:
-            raise ValueError(f"level must be one of {VALID_LEVELS} (Proven-tier) (got {level!r}).")
+        if not isinstance(level, int) or isinstance(level, bool) or level < MIN_PROVEN_LEVEL:
+            raise ValueError(
+                f"level must be an int >= {MIN_PROVEN_LEVEL} (Proven-tier) (got {level!r}). "
+                "1x is a developing pattern and belongs in the working set, not the deep store."
+            )
         return level
 
     @staticmethod

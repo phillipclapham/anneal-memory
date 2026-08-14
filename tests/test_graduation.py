@@ -3315,3 +3315,84 @@ class TestExtractPatternSummaries:
         assert (r.name, r.level, r.summary) == (r[0], r[1], r[2])
         name, level, summary = r
         assert name == r.name and level == r.level and summary == r.summary
+
+
+class TestLevelCapAM_LEVELCAP:
+    """A pattern at 4x or higher must be VISIBLE to graduation validation.
+
+    THE DEFECT (AM-LEVELCAP, found 2026-08-14 while diagnosing an AM-LINKGATE
+    warning): ``_GRADUATION_RE`` was scoped to ``([23])x``, so every pattern line at
+    4x or above matched no branch at all — not validated, not demoted, not skipped,
+    not counted. It formed no Hebbian co-citation either, because co-citation is
+    extracted inside the graduation path.
+
+    Measured on the live flow neocortex that morning: of 8 evidence-bearing pattern
+    lines, ONE was visible. Four of the invisible ones co-cited two real, resolvable,
+    same-wrap episode ids each and produced ZERO links. Fixing the cap took the same
+    text from validated=1 / co-citations=0 to validated=7 / co-citations=4 with 6
+    distinct session pairs.
+
+    ⚠ THE SUITE WAS 1654-GREEN BEFORE AND AFTER THE FIX. Nothing pinned this, which
+    is the same gap `spore-486` recorded against the salience-prefix fix. These tests
+    exist so reverting the regex to ``[23]`` goes RED.
+
+    ⛔ PIN THE PROPERTY, NOT ONE CASE — the lesson from the salience fix, whose
+    original bug was `!!` being bolted on beside `!` instead of "a run of `!`". The
+    property here is "2 and up", so 10x and 11x are tested alongside 4x; a fix that
+    only admitted 4-9 would leave the next decade to rediscover this.
+    """
+
+    IDS = ("0453fb22", "2481d68d")
+    EXPL = "guards mis-scoped rather than code misbehaving"
+
+    def _line(self, level):
+        return (
+            "## Patterns\n\n"
+            f"- !! probe_pattern | {level}x (2026-08-13) "
+            f'[evidence: {self.IDS[0]}, {self.IDS[1]} "{self.EXPL}"] — felt prose\n'
+        )
+
+    def _run(self, level):
+        ncm = {i: self.EXPL + " in the episode body" for i in self.IDS}
+        return validate_graduations(
+            self._line(level), set(self.IDS), "2026-08-13",
+            node_content_map=ncm, citations_seen=True,
+        )
+
+    @pytest.mark.parametrize("level", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 27])
+    def test_every_level_at_or_above_2_validates_and_co_cites(self, level):
+        """2 and up, INCLUDING two-digit levels — the regex must not stop at 9."""
+        res = self._run(level)
+        assert res.validated == 1, f"{level}x did not validate"
+        assert len(res.direct_co_citations) == 1, f"{level}x formed no Hebbian pair"
+        assert res.all_validated_ids == [set(self.IDS)]
+
+    def test_1x_is_still_NOT_a_graduation(self):
+        """The one part of the old scoping that was correct, and must survive.
+
+        A 1x line is a FIRST SIGHTING, not a graduation. Widening the level to a
+        plain ``\\d+`` would have swept it in; ``[2-9]|\\d{2,}`` deliberately does not.
+        """
+        res = self._run(1)
+        assert res.validated == 0
+        assert res.direct_co_citations == []
+
+    def test_a_high_level_line_is_not_silently_dropped(self):
+        """The SHAPE of the defect: it was invisible, not rejected.
+
+        Before the fix a 4x line incremented NO counter — validated, demoted,
+        skipped_non_today and carried_forward were all zero, so nothing in the
+        result could tell a caller the line had been seen and ignored. This asserts
+        the line now lands in exactly one bucket rather than none.
+        """
+        res = self._run(4)
+        accounted = (
+            res.validated + res.demoted + res.skipped_non_today
+            + len(res.carried_forward)
+        )
+        assert accounted == 1, (
+            "a 4x line must be accounted for by exactly one outcome; "
+            f"got validated={res.validated} demoted={res.demoted} "
+            f"skipped_non_today={res.skipped_non_today} "
+            f"carried={len(res.carried_forward)}"
+        )

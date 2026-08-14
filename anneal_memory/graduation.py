@@ -20,10 +20,48 @@ from typing import Any, Callable, NamedTuple
 from .schema import DEFAULT_GRADUATING
 
 
-# Matches graduated patterns (2x or 3x) WITH [evidence: <id> "explanation"] citations.
+# Matches graduated patterns (2x AND UP) WITH [evidence: <id> "explanation"] citations.
 # Captures: (1) level, (2) date, (3) cited IDs, (4) optional explanation in quotes.
+#
+# ⛔ LEVEL IS "2 AND UP", NOT "2 OR 3" (AM-LEVELCAP, fixed 2026-08-14).
+#
+# This read ``([23])x`` and therefore SILENTLY IGNORED every pattern line at 4x or
+# higher: no validation, no citation check, no demotion, no Hebbian co-citation —
+# the line matched no branch at all and nothing counted it. Measured on the live
+# flow neocortex the day it was found: of 8 evidence-bearing pattern lines, ONE was
+# visible to validation. The rest sat at 1x and 4x-10x. FOUR of them co-cited two
+# real, resolvable, same-wrap episode ids each and formed ZERO links — which is what
+# fired AM-LINKGATE ("no graduation offered a co-citation pair"), a warning accurate
+# about the symptom and structurally unable to name the cause.
+#
+# The consequence inverts the intent: the patterns a practice exercises MOST — the
+# ones that reach 6x, 9x, 10x — were exactly the ones excluded from the immune system
+# and the associative graph, so the graph could only decay.
+#
+# WHY THE CAP EXISTED, and why it is wrong HERE rather than wrong everywhere: the
+# methodology says patterns graduate 1x -> 2x -> 3x and then graduate OUT to a
+# destination file, so "above 3x" was read as "cannot occur". That is a claim about a
+# METHODOLOGY encoded in a LIBRARY regex, and consumers legitimately differ — flow's
+# neocortex keeps the count running as an evidence-strength signal and its working set
+# is full of 4x+ lines. A library may not silently drop input because it disagrees with
+# the caller's methodology. Note ``_NAMED_PATTERN_WITH_EVIDENCE_RE`` (pattern_history
+# anchoring, continuity.py:2176) was ALREADY any-level and says so in its own comment —
+# so history recorded 10x while validation could not see it, and the two halves of one
+# record disagreed with each other.
+#
+# ``([2-9]|\d{2,})`` is "2 and up": single digits 2-9, or any number of two or more
+# digits (10x, 11x, ...). It still excludes 1x deliberately — a 1x line is a FIRST
+# SIGHTING, not a graduation. That exclusion was always correct and is the only part
+# of the old scoping worth keeping; plain ``(\d+)`` would have swept 1x in.
+#
+# ⚠ KNOWN, DELIBERATE ASYMMETRY: ``_BARE_GRADUATION_RE`` below stays ``[23]``. Widening
+# it would make every today-dated 4x+ line WITHOUT evidence newly eligible for bare
+# demotion — a mass demotion of mature carried patterns the moment one is re-stamped,
+# a far larger blast radius than the defect being fixed. Carried lines are date-gated
+# out in the normal case, so the asymmetry is inert; it is recorded here rather than
+# left to be rediscovered.
 _GRADUATION_RE = re.compile(
-    r"\|\s*([23])x\s*\((\d{4}-\d{2}-\d{2})\)\s*\[evidence:\s*"
+    r"\|\s*([2-9]|\d{2,})x\s*\((\d{4}-\d{2}-\d{2})\)\s*\[evidence:\s*"
     r"([a-fA-F0-9][a-fA-F0-9, ]*)"  # one or more hex IDs
     r'(?:\s+"([^"]*)")?\s*\]'  # optional quoted explanation
 )

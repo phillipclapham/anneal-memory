@@ -4,6 +4,33 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.9.7] — 2026-08-14
+
+**A two-part correctness fix to the graduation ceiling, plus the previously-unreleased salience-prefix fix.** No API removals; one new export (`MIN_PROVEN_LEVEL`). Adopters at 2x/3x see NO behaviour change — every fix here widens what the library ACCEPTS.
+
+### Fixed — AM-LEVELCAP: a pattern at 4x or higher was silently invisible, and could not crystallize out
+
+`_GRADUATION_RE` was scoped to `([23])x` and `CrystalStore._validate_level` gated on `level in (2, 3)`. Together those two ceilings put a well-earned pattern in a trap with no exit: **too high for graduation validation to see, and too high to crystallize OUT.**
+
+- **The graduation half was SILENT, which is what made it dangerous.** A 4x+ line matched no branch at all — not validated, not demoted, not skipped, not counted. Nothing in `GraduationResult` could tell a caller the line had been seen and ignored. Because Hebbian co-citation is extracted *inside* the graduation path, those lines also formed **no associations**, so an affected store's association graph could only decay.
+- **Found via an AM-LINKGATE warning** (`"no graduation offered a co-citation pair, so 0 Hebbian links formed"`) on a real store whose four co-citing pattern lines all sat at 4x/6x/7x/10x. The warning was accurate about the symptom and structurally unable to name the cause.
+- **Measured on that store**, same text, same episodes, only the regex changed: `validated` 1 → 7, `direct_co_citations` 0 → 4, session pairs 0 → 6, and the real write path formed **6 associations where it had formed 0**.
+- **Both halves ship together, deliberately.** Lifting only the graduation cap makes a 4x line legal and linkable in the working set while still denying it an exit — converting a silent-drop bug into an unbounded always-loaded working set, the exact failure the crystal store exists to prevent.
+- **The floor is unchanged**: 1x is a developing pattern and belongs in the working set, not the deep store. `([2-9]|\d{2,})` and `MIN_PROVEN_LEVEL = 2` both still exclude it.
+- **Why a ceiling was wrong here at all:** `crystallize()` documents raising level *"monotonically (never lowers it — a pattern's earned high-water mark holds)"*, and a high-water mark that saturates at 3 is not a high-water mark. Level is the **strength** axis (how many times lived experience re-earned the pattern); `last_activated_on` is the **recency** axis. Capping strength collapses a two-axis model to one.
+- **Who this affected:** any consumer whose methodology counts past 3x. A consumer following the shipped 1x→2x→3x→crystallize lifecycle never produced an affected line, which is why this survived to 0.9.6 unnoticed.
+- `VALID_LEVELS` is **retained as a public compat export** and is no longer the gate; it now only names the two levels at which a pattern typically first crystallizes. The CLI's `choices=VALID_LEVELS` becomes a `_proven_level` argparse type, since the valid set is open-ended.
+
+### Fixed — the FlowScript salience prefix `!!!` made a pattern vanish (previously unreleased)
+
+Landed on `main` as `fef6af0` and never published. `_NAMED_PATTERN_RE` offered `!!|!|?|✓|*` with **no `!!!` branch**, so a `!!!`-prefixed line did not parse to a wrong name — it did not parse AT ALL, and the pattern was invisible to `extract_pattern_names` and every consumer of the `## Patterns` section. Now **any run of `!` is a salience prefix**, so `!!!!` works too.
+
+### Notes
+
+- `MIN_PROVEN_LEVEL` added to the public API.
+- Both fixes are pinned by mutation-verified tests. The suite was green **before and after** the level-cap fix (nothing pinned the ceiling), which is itself why the new tests assert the property — 2..27 including two-digit levels — rather than the one reported case.
+
+
 ## [0.9.6] — 2026-06-30
 
 **The first public PyPI release of the 0.9.x line.** Releases `0.9.0`–`0.9.5` lived on `main` only — `0.9.0` (Slice B) shipped in SHADOW MODE and the rest rode the editable install; none were ever tagged or uploaded to PyPI (latest published was `0.8.5`). They collapse into this release. The version was bumped from the `main` label `0.9.5` to `0.9.6` because new public surface area (the `anneal_memory.sessions` module + API, AM-CONSOLIDATE-EFFERENT and AM-WRAP-GENERATED) landed after the `0.9.5` label was set, so the released artifact gets its own unambiguous number.

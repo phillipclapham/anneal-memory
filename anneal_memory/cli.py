@@ -88,7 +88,6 @@ from .crystal import (
     VALID_ACTIVATION_MODES,
     VALID_ACTIVATIONS,
     MIN_PROVEN_LEVEL,
-    VALID_LEVELS,
     VALID_PERMANENCE,
     CrystalDict,
     CrystalError,

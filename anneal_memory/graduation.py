@@ -49,10 +49,18 @@ from .schema import DEFAULT_GRADUATING
 # so history recorded 10x while validation could not see it, and the two halves of one
 # record disagreed with each other.
 #
-# ``([2-9]|\d{2,})`` is "2 and up": single digits 2-9, or any number of two or more
-# digits (10x, 11x, ...). It still excludes 1x deliberately — a 1x line is a FIRST
-# SIGHTING, not a graduation. That exclusion was always correct and is the only part
-# of the old scoping worth keeping; plain ``(\d+)`` would have swept 1x in.
+# ``([2-9]|[1-9][0-9]+)`` is "2 and up": single digits 2-9, or any multi-digit number
+# with a NON-ZERO lead (10x, 11x, ...). It still excludes 1x deliberately — a 1x line
+# is a FIRST SIGHTING, not a graduation. That exclusion was always correct and is the
+# only part of the old scoping worth keeping; plain ``(\d+)`` would have swept 1x in.
+#
+# ⛔ THE NON-ZERO LEAD IS LOAD-BEARING, NOT COSMETIC (codex L3 HIGH, 2026-08-31). The
+# first AM-LEVELCAP form was ``\d{2,}``, which matches ZERO-PADDED values: ``| 01x``
+# parsed as a validated graduation at ``int("01") == 1`` and ``| 00x`` at level 0 —
+# so the deliberate 1x exclusion above was bypassed by a leading zero, and such a line
+# formed a Hebbian pair as if it were Proven. Worse on the way out: ``_demote_line``
+# rewrites by level, so it cannot rewrite ``| 01x`` and the counters could report a
+# demotion while the displayed level never moved. Verified on disk before the fix.
 #
 # ⚠ KNOWN, DELIBERATE ASYMMETRY: ``_BARE_GRADUATION_RE`` below stays ``[23]``. Widening
 # it would make every today-dated 4x+ line WITHOUT evidence newly eligible for bare
@@ -61,7 +69,7 @@ from .schema import DEFAULT_GRADUATING
 # out in the normal case, so the asymmetry is inert; it is recorded here rather than
 # left to be rediscovered.
 _GRADUATION_RE = re.compile(
-    r"\|\s*([2-9]|\d{2,})x\s*\((\d{4}-\d{2}-\d{2})\)\s*\[evidence:\s*"
+    r"\|\s*([2-9]|[1-9][0-9]+)x\s*\((\d{4}-\d{2}-\d{2})\)\s*\[evidence:\s*"
     r"([a-fA-F0-9][a-fA-F0-9, ]*)"  # one or more hex IDs
     r'(?:\s+"([^"]*)")?\s*\]'  # optional quoted explanation
 )
@@ -83,10 +91,11 @@ _PATTERN_RE = re.compile(
     r"\|\s*(\d+)x\s*\((\d{4}-\d{2}-\d{2})\)"
 )
 
-# Matches a pattern line at ANY level (1x/2x/3x) with an
+# Matches a pattern line at ANY level (1x and up) with an
 # ``[evidence: HEXID "explanation"]`` tag. Distinct from
-# ``_GRADUATION_RE`` (which is scoped to 2x/3x for validation
-# purposes) and from ``_PATTERN_RE`` (which ignores evidence).
+# ``_GRADUATION_RE`` (which excludes 1x for validation purposes —
+# it is 2-AND-UP WITH NO CEILING since AM-LEVELCAP, not "2x/3x")
+# and from ``_PATTERN_RE`` (which ignores evidence).
 # Used by the cross-session history-upsert path so that 1x mentions
 # with explanations also anchor the per-pattern history — without
 # this, the first graduation (1x → 2x) wouldn't see any prior
@@ -1413,8 +1422,9 @@ def extract_proven_patterns(
     front of them during compression.
 
     The default ``min_level=2`` means 1x ("Developing") patterns are
-    NOT returned — only Proven-tier (2x and 3x) patterns are
-    contradiction-scan targets. Adjust ``min_level`` if a stricter or
+    NOT returned — Proven-tier patterns (2x and ABOVE) are the
+    contradiction-scan targets. ``min_level`` is a FLOOR with no
+    ceiling (AM-LEVELCAP, 0.9.7): a 4x or 12x pattern is returned. Adjust ``min_level`` if a stricter or
     looser definition of "Proven" applies in a calling context.
 
     Args:

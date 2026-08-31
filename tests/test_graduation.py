@@ -1081,15 +1081,182 @@ class TestFlowScriptPrefixedPatterns:
         }
 
 
+class TestTeacherCoversReaderRange:
+    """AM-LEVELCAP follow-through (spore-535, 2026-08-31): the GENERATED wrap
+    instructions must not teach a narrower contract than the library accepts.
+
+    ⛔ WHY THE CLASS BELOW COULD NOT CATCH THIS — the reason this one exists
+    rather than another fixture. ``TestCanonicalTemplateFormatEndToEnd`` claimed
+    to pin "the format the template teaches against the regex the immune system
+    uses", but its fixture is a HAND-COPIED string, and ``_marker_reference``
+    appeared in this entire file only inside docstrings: never imported, never
+    called. A hand-written fixture cannot notice the generator moving, so it
+    stayed green through 0.9.7 while teacher and reader diverged.
+
+    ⚠ AND THE DRIFT RAN IN THE DIRECTION A ROUND-TRIP TEST STRUCTURALLY CANNOT
+    SEE. Every example the generator teaches IS readable — teacher ⊆ reader
+    holds and always did. The defect is the converse: the READER accepts
+    strictly more than the TEACHER teaches (``_GRADUATION_RE`` takes
+    ``([2-9]|\\d{2,})x``, 2-and-up with no ceiling, and the salience reader takes
+    any run of ``!``), so an agent obeying its own instructions silently
+    re-imposes a cap the library removed. **The generated prompt is what agents
+    actually obey; a library widening the prompt does not carry is a widening
+    that never reaches the behaviour.**
+
+    These assertions derive from the generator's OWN OUTPUT, so they cannot be
+    satisfied by editing a fixture."""
+
+    def test_teaching_covers_the_readers_level_range(self):
+        """The taught example set must show a level above the retired 3x cap."""
+        import re as _re
+
+        from anneal_memory.continuity import _marker_reference
+
+        ref = _marker_reference("2026-08-31")
+        levels = {int(m) for m in _re.findall(r"\|\s*(\d+)x", ref)}
+        assert levels, "generator emitted no level examples at all"
+        assert max(levels) > 3, (
+            "the generated instructions teach a closed level set whose maximum is "
+            f"{max(levels)}x, while _GRADUATION_RE accepts 2-and-up with NO ceiling "
+            "(AM-LEVELCAP, 0.9.7). An agent following its own instructions can never "
+            "write a 4x line, so the practice re-caps itself even though the code "
+            "does not."
+        )
+
+    def test_teaching_does_not_name_a_closed_level_enumeration(self):
+        """A closed enumeration is the specific shape that re-imposes the cap."""
+        from anneal_memory.continuity import _marker_reference
+
+        ref = _marker_reference("2026-08-31")
+        assert (
+            "1, 2, or 3" not in ref
+        ), "the retired closed level enumeration is back in the generated instructions"
+
+    def test_teaching_covers_the_readers_salience_range(self):
+        """The taught marker set must show a run of ``!`` longer than ``!!``."""
+        import re as _re
+
+        from anneal_memory.continuity import _marker_reference
+
+        ref = _marker_reference("2026-08-31")
+        runs = {len(m) for m in _re.findall(r"-\s+(!+)\s", ref)}
+        assert runs, "generator emitted no salience-prefix examples at all"
+        assert max(runs) > 2, (
+            f"the generated instructions teach at most {'!' * max(runs)} while the "
+            "reader takes ANY run of '!' (spore-447, 0.9.7) and flow's own neocortex "
+            "writes '!!!' today"
+        )
+
+    def test_a_level_above_the_retired_cap_round_trips(self):
+        """Behavioural floor under the three assertions above: the reader really
+        does accept what they require the teacher to teach."""
+        text = (
+            "## Patterns\n"
+            '- deep_pattern | 12x (2026-08-31) [evidence: abc12345 "both validate it"]\n'
+        )
+        assert extract_pattern_names(text) == {"deep_pattern": 12}
+
+    # ---- codex L3 MED, 2026-08-31: the four assertions above are POSITIVE-TOKEN
+    # ONLY, so a generator emitting "only 1x, 2x, 3x, or 12x" would satisfy every
+    # one of them, and they interrogate ``_marker_reference`` rather than the
+    # instructions actually DELIVERED. Both gaps are closed below.
+
+    @staticmethod
+    def _delivered(today: str = "2026-08-31") -> str:
+        """The instruction text an agent actually receives, not a component of it."""
+        from anneal_memory.continuity import _build_wrap_instructions
+
+        return _build_wrap_instructions("proj", None, today)
+
+    def test_delivered_instructions_carry_no_ceiling_language(self):
+        """NEGATIVE assertion — the shapes that re-impose a cap must be absent
+        from the DELIVERED text, not merely absent from one component."""
+        delivered = self._delivered()
+        for banned in (
+            "1, 2, or 3",
+            "graduations (2x and 3x)",
+            "to 2x or 3x",
+            "Patterns at 3x:",
+            "highest urgency",
+        ):
+            assert banned not in delivered, (
+                f"ceiling language {banned!r} is back in the delivered wrap "
+                "instructions — an agent obeying them re-caps a library that does not"
+            )
+
+    def test_delivered_instructions_show_a_level_above_the_cap(self):
+        import re as _re
+
+        levels = {int(m) for m in _re.findall(r"\|\s*(\d+)x", self._delivered())}
+        assert max(levels) > 3, f"delivered instructions top out at {max(levels)}x"
+
+    def test_marker_kinds_taught_are_exactly_the_kinds_the_reader_accepts(self):
+        """codex L3 MED: the KINDS are a closed set; only the ``!`` RUN is open.
+        Teaching 'not a closed set' invites a marker the reader silently drops."""
+        delivered = self._delivered()
+        for accepted in ("`?`", "`✓`", "`*`"):
+            assert accepted in delivered, f"reader accepts {accepted}, teaching omits it"
+        # and the reader really does drop an unlisted glyph
+        assert extract_pattern_names(
+            '## Patterns\n- ~ p | 2x (2026-08-31) [evidence: abc12345 "x"]\n'
+        ) == {}
+
+    def test_a_long_bang_run_is_read_at_a_high_level(self):
+        """Behaviour, not text: pins BOTH open axes at once, so the salience
+        assertion cannot pass while the reader is capped at three bangs."""
+        text = (
+            "## Patterns\n"
+            '- !!!!! mature | 12x (2026-08-31) [evidence: abc12345 "x"]\n'
+        )
+        assert extract_pattern_names(text) == {"mature": 12}
+
+
+class TestZeroPaddedLevelsAreNotGraduations:
+    """codex L3 HIGH, 2026-08-31 — verified on disk before fixing. AM-LEVELCAP's
+    first form was ``([2-9]|\\d{2,})``, which matches ZERO-PADDED values: ``| 01x``
+    parsed as a validated graduation at ``int("01") == 1`` and ``| 00x`` at level 0,
+    bypassing the deliberate 1x exclusion and forming a Hebbian pair as if Proven.
+    ``_demote_line`` rewrites by level and cannot rewrite ``| 01x``, so counters
+    could report a demotion the displayed line never took."""
+
+    @staticmethod
+    def _line(level: str) -> str:
+        return f'- p | {level}x (2026-08-31) [evidence: abc12345 "x"]'
+
+    @pytest.mark.parametrize("level", ["00", "01", "007"])
+    def test_zero_padded_is_not_a_graduation(self, level):
+        from anneal_memory.graduation import _GRADUATION_RE
+
+        assert _GRADUATION_RE.search(self._line(level)) is None
+
+    @pytest.mark.parametrize("level,expected", [("2", 2), ("12", 12), ("100", 100)])
+    def test_well_formed_levels_still_match(self, level, expected):
+        from anneal_memory.graduation import _GRADUATION_RE
+
+        m = _GRADUATION_RE.search(self._line(level))
+        assert m is not None and int(m.group(1)) == expected
+
+    def test_bare_1x_still_excluded(self):
+        from anneal_memory.graduation import _GRADUATION_RE
+
+        assert _GRADUATION_RE.search(self._line("1")) is None
+
+
 class TestCanonicalTemplateFormatEndToEnd:
     """Critical #1 lockdown (v0.3.2): a continuity in the EXACT format
     that ``_marker_reference()`` teaches agents to produce must fire
     Move #2 (omission audit) and Move #3 (cross-session check). Before
     v0.3.2 the template taught one format (``thought: prose | Nx``)
     and the immune system parsed a different format (``- name | Nx``),
-    so every defense silently no-op'd in production. This test fixture
-    pins the format the template now teaches against the regex the
-    immune system uses, preventing silent re-divergence."""
+    so every defense silently no-op'd in production.
+
+    ⚠ SCOPE CORRECTED 2026-08-31 (spore-535). This class used to claim it
+    "pins the format the template now teaches against the regex the immune
+    system uses, preventing silent re-divergence". **It does not, and cannot.**
+    Its fixture is a hand-copied string that never calls ``_marker_reference``,
+    so it pins a FORMAT SAMPLE against the regexes — valuable, and not the same
+    thing. Re-divergence is pinned by ``TestTeacherCoversReaderRange`` above,
+    which derives its assertions from the generator's own output."""
 
     def _canonical_continuity(self, today: str) -> str:
         """Continuity built to match the format ``_marker_reference()``

@@ -920,18 +920,33 @@ Required elements:
 - Operator-style `pattern_name` — starts with a letter, contains only letters,
   digits, underscores, dots, hyphens. Examples: `acid_compliance_over_speed`,
   `connection_pooling_is_bottleneck`, `partnership_challenge_at_X_boundary`.
-- Graduation marker `| Nx ({today})` where N is 1, 2, or 3
-- For 2x and 3x: an `[evidence: ... "explanation"]` tag is REQUIRED (the TAG is
+- Graduation marker `| Nx ({today})` where **N is 1 or greater and has NO UPPER
+  BOUND**. `1x` is a FIRST SIGHTING, not a graduation. `2x` and above are
+  Proven-tier and require the evidence tag below. A pattern that lived experience
+  re-earns many times keeps climbing: `| 12x ({today})` is a well-formed line, not
+  an error, and must not be flattened back to `3x`.
+  ⚠ **LEVEL and RECENCY are two INDEPENDENT axes.** The level is how many times the
+  pattern was re-earned; the date is when it last fired. A pattern earned ten times
+  over months and one touched yesterday are different facts, and a capped level
+  cannot express the first.
+  ⚠ The level you WRITE is not immutable: an ungrounded re-stamp can be demoted, so
+  the visible `Nx` is current standing, not a ratchet. The monotonic high-water mark
+  is kept by the library (`max_level_reached`), not by this line.
+- For 2x and above: an `[evidence: ... "explanation"]` tag is REQUIRED (the TAG is
   required, not a particular id count). Include 2+ episode ids when more than one
   genuinely supports the pattern — co-citation is what FORMS the Hebbian link (see
   "Wiring the associative graph" below). A single id is fine when only one episode
   truly applies; do not pad to reach two.
 
-Optional FlowScript marker prefix (supported by the immune system):
+Optional FlowScript prefix. **The marker KINDS are a closed set — `!` (any run), `?`,
+`✓`, `*` — and nothing else is recognised** (a `~` or any other glyph is silently
+ignored by the per-name defenses). What is open-ended is the RUN LENGTH of `!`:
 - `!` urgent / load-bearing → `- ! pattern_name | 1x ({today})`
-- `!!` highest urgency → `- !! pattern_name | 3x ({today}) [evidence: ...]`
+- `!!` higher → `- !! pattern_name | 3x ({today}) [evidence: ...]`
+- `!!!` higher still → `- !!! pattern_name | 12x ({today}) [evidence: ...]`
 - `?` open question → `- ? pattern_name | 1x ({today})`
 - `✓` completed/resolved → `- ✓ pattern_name | 2x ({today}) [evidence: ...]`
+- `*` also recognised → `- * pattern_name | 2x ({today}) [evidence: ...]`
 
 **Why operator-style names are load-bearing (v0.3.2):** the cross-session
 immune system tracks per-pattern history so it can detect sycophantic
@@ -953,8 +968,12 @@ names so the immune system can protect your patterns.
 ### Temporal Graduation (this is what makes the system learn)
 - New pattern from THIS session → `- pattern_name | 1x ({today})`
 - Validates existing 1x → `- pattern_name | 2x ({today}) [evidence: <id1>, <id2> "how both episodes validate"]`
-- Validates existing 2x → `- pattern_name | 3x ({today}) [evidence: <id1>, <id2> "how both episodes validate"]`
-- Evidence citations REQUIRED for graduations (2x and 3x). Cite 2+ episode 8-char
+- **Validates an existing Nx → `| (N+1)x`, AND THE LADDER DOES NOT STOP.** `2x`→`3x`,
+  `3x`→`4x`, `11x`→`12x`. There is no top rung: the level is a monotonic high-water
+  mark of how many times lived experience re-earned the pattern. **Never flatten a
+  mature pattern back to `3x`** — that discards the difference between a pattern
+  earned eleven times over months and one earned twice last week.
+- Evidence citations REQUIRED for graduations (2x and above). Cite 2+ episode 8-char
   IDs that co-support the pattern — co-citation forms the Hebbian link. A single id
   is acceptable ONLY when just one episode genuinely supports the pattern (do not
   pad with unrelated ids to hit two).
@@ -967,8 +986,8 @@ names so the immune system can protect your patterns.
   `({today})` ONLY when you genuinely re-exercised the pattern with NEW evidence this
   session; otherwise carry it forward verbatim with its prior date, and it ages out
   naturally at 7 days (below) if never re-grounded.
-- **Mature top-tier pattern, still ACTIVE but low-variance evidence → provenance.**
-  A 3x/2x Proven re-stamped to `({today})` because it IS still live, but whose fresh
+- **Mature Proven pattern (3x or above), still ACTIVE but low-variance evidence → provenance.**
+  A Proven pattern at 2x or above, re-stamped to `({today})` because it IS still live, but whose fresh
   evidence is too near-identical to cite without tripping the `(cross-session-overlap)`
   gate (the repetitive-domain / daily-telemetry case — e.g. a stable email-triage
   rule), carries `[provenance: <founding_id1>, <founding_id2>]`: the episode ids that
@@ -992,7 +1011,7 @@ names so the immune system can protect your patterns.
 - Patterns marked `(cross-session-overlap)` were demoted because today's explanation
   reused too much vocabulary from prior sessions; compose new evidence with
   genuinely distinct words to re-graduate.
-- Patterns at 3x: extract the PRINCIPLE, not the surface observations.
+- Patterns at 3x AND ABOVE: extract the PRINCIPLE, not the surface observations.
 - Patterns older than 7 days with no new validation → remove (stale).
 - Group related patterns visually with a header line above them if you like —
   grouping is fine and the `- ` bullet is OPTIONAL. Each pattern LINE needs an
@@ -1064,7 +1083,8 @@ def _contradiction_scan_block(uncovered_proven: list[str]) -> str:
     proven_list = "\n".join(f"- {name}" for name in uncovered_proven)
     return f"""### Contradiction Scan (REQUIRED before graduating any new Proven)
 
-Before you graduate a pattern to 2x or 3x (Proven tier) in this wrap, scan it
+Before you graduate a pattern to Proven tier (2x or ABOVE — there is no top level)
+in this wrap, scan it
 against your existing Proven patterns listed below. On the line of EACH pattern
 you newly graduate to Proven tier, declare a contradiction-stance:
 
@@ -1942,10 +1962,11 @@ def validated_save_continuity(
         carryforward_cold_days=carryforward_cold_days,
     )
 
-    # Detect Proven-tier (2x/3x) patterns silently dropped between the
+    # Detect Proven-tier (2x and ABOVE — `min_level` is a FLOOR, not a range, so a
+    # 4x+ pattern is covered) patterns silently dropped between the
     # prior wrap and this one. validate_graduations operates only on
     # patterns the agent wrote INTO the new continuity, so a pattern
-    # that was at 2x or 3x in the prior continuity and is absent from
+    # that was at 2x or higher in the prior continuity and is absent from
     # the new continuity leaves no trace at the graduation layer —
     # silently erased. Surfaced here as informational audit signal, not
     # a gate: the agent may have intentionally retired the pattern, or

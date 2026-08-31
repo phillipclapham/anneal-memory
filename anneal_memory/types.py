@@ -583,7 +583,7 @@ class SaveContinuityResult(TypedDict):
     # collision fired. Closes the slow-drift sycophantic-accumulation
     # gap surfaced by Bold Stand Phase 1b probe #1 (2026-05-21).
     cross_session_collisions: list[dict[str, Any]]
-    # Move #4 library layer (v0.3.2): new Proven graduations (2x or 3x
+    # Move #4 library layer (v0.3.2): new Proven graduations (2x or above,
     # with today's date) that landed in this wrap WITHOUT either a
     # ``[contradicts: ...]`` or ``[no-contradicts]`` annotation. Audit
     # signal, not a gate — the library does not refuse the save. The

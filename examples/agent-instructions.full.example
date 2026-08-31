@@ -201,7 +201,7 @@ don't lean on the backstop.)
   first wrap), single-ID citation pumping (≥3 reuses of one ID in one
   wrap → gaming flag), replay-attempts citing prior-session episode
   IDs that aren't in the current wrap window (demote), and **silent
-  pattern omission across sessions** — patterns that were at 2x or 3x
+  pattern omission across sessions** — patterns that were at 2x or above
   in the prior continuity but absent from the new continuity surface
   as `omitted_patterns: [{"name": ..., "prior_level": ...}]` on the
   save result and in the hash-chained audit log. Demotion (carrying a
@@ -324,7 +324,7 @@ report that. The value comes from genuine variation.
 - Report findings naturally: "From prior sessions, there was a tension
   between X and Y" — not "The recall tool returned..."
 - Don't narrate tool calls — just use them and share what's relevant
-- When your continuity mentions a pattern at 2x or 3x, trust it —
+- When your continuity mentions a pattern at 2x or above, trust it —
   it earned that level through validated evidence
 
 **When things go wrong:**
@@ -338,7 +338,7 @@ report that. The value comes from genuine variation.
   current session to re-graduate them, or remove them if no longer valid.
 - If your continuity contains `(needs-evidence)` markers, the system
   now requires citation for all graduations. Include `[evidence: <id>
-  "explanation"]` on all 2x and 3x patterns.
+  "explanation"]` on all patterns at 2x and above.
 
 **Compression quality (during wraps):**
 - Follow the compression instructions from `prepare_wrap` — they
@@ -346,7 +346,7 @@ report that. The value comes from genuine variation.
 - Principles over facts: "We keep hitting X because Y" > "X happened"
 - One insightful line > three vague ones
 - Temporal graduation: new patterns start at 1x, validated patterns
-  graduate to 2x and 3x with evidence citations referencing episode IDs
+  climb to 2x, 3x, 4x and onward — no ceiling — with evidence citations referencing episode IDs
 - If removing something wouldn't change your next decision, cut it
 
 **Staying current.** After you (or your operator) upgrade the

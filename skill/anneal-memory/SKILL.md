@@ -88,7 +88,7 @@ Patterns graduate 1x → 2x → 3x, and each graduation must **cite the episode 
 
 ## How to present memory
 
-Report findings naturally — "from prior sessions there was a tension between X and Y", not "the recall tool returned…". Don't narrate tool calls; just use them and share what's relevant. When continuity marks a pattern at 2x or 3x, trust it — it earned that level through validated evidence.
+Report findings naturally — "from prior sessions there was a tension between X and Y", not "the recall tool returned…". Don't narrate tool calls; just use them and share what's relevant. When continuity marks a pattern at 2x or above, trust it — it earned that level through validated evidence, and the level has no ceiling: a pattern re-earned many times keeps climbing.
 
 ## Single-process invariant (load-bearing)
 

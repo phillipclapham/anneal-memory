@@ -201,7 +201,7 @@ But consolidation alone doesn't solve the problem. A system that consolidates fa
 
 The library implements a set of structural defenses around how patterns earn graduation. They are narrow and specific — naming them honestly is part of the architecture.
 
-**Citation-validated graduation.** Patterns start at 1x. To graduate to 2x or 3x, they must cite specific episode IDs as evidence. The server verifies those IDs exist in the current wrap's frozen episode snapshot — the cross-session episode set is intentionally out of scope. No matching episode IDs, no promotion.
+**Citation-validated graduation.** Patterns start at 1x. To graduate to Proven tier — 2x and every level above it, with no ceiling — they must cite specific episode IDs as evidence. The server verifies those IDs exist in the current wrap's frozen episode snapshot — the cross-session episode set is intentionally out of scope. No matching episode IDs, no promotion.
 
 **Explanation-grounding check.** For each cited episode, the explanation in `[evidence: ID "explanation"]` must share ≥2 meaningful words (>2 chars, non-stopword) with the cited episode's content. This catches citations whose explanations are fabricated wholesale (no overlap → demote). It is lexical, not semantic — see *Honest scope* below.
 

@@ -240,7 +240,7 @@ Structural defenses at the citation layer (narrow but real):
 - **Staleness flagging:** Patterns whose dates fall behind the staleness
   threshold (default 7 days) appear in the next wrap's package as
   removal candidates. You decide.
-- **Pattern-omission audit:** Proven-tier patterns (2x or 3x) that were
+- **Pattern-omission audit:** Proven-tier patterns (2x or above) that were
   in the prior continuity and are absent from the new continuity
   surface as `omitted_patterns` on the save result and in the audit
   log. Intentional retirement is fine; the audit just records what
@@ -366,7 +366,7 @@ anneal-memory prune --older-than 90 --dry-run   # Preview what would be pruned
 - Report findings naturally: "From prior sessions, there was a tension
   between X and Y" — not "The search command returned..."
 - Don't narrate CLI calls — just use them and share what's relevant
-- When your continuity mentions a pattern at 2x or 3x, trust it —
+- When your continuity mentions a pattern at 2x or above, trust it —
   it earned that level through validated evidence
 
 **Environment variables:**

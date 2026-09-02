@@ -120,9 +120,11 @@ CLI and MCP forms of the same loop. Set `ANNEAL_MEMORY_DB` (or pass `--db`) for 
 | Crystallize a pattern out | `anneal-memory crystal crystallize …` | — (CLI / library) |
 | Store status / health | `anneal-memory status` | `status` |
 | Delete an episode | `anneal-memory delete <id> --force` | `delete_episode` |
-| Recover a stuck wrap | `anneal-memory wrap-status` · `wrap-cancel` | — (CLI only) |
+| Recover a stuck wrap | `anneal-memory wrap-status` · `wrap-cancel` | `wrap_cancel` (inspect via `status`; `wrap-status` is CLI-only) |
 
-If a wrap gets stuck — `prepare_wrap` ran but `save_continuity` never completed, so the store is locked `wrap_in_progress` — inspect with `anneal-memory wrap-status` and clear it with `anneal-memory wrap-cancel` (don't delete the store or force a duplicate wrap).
+If a wrap gets stuck — `prepare_wrap` ran but `save_continuity` never completed, so the store is locked `wrap_in_progress` — clear it with the `wrap_cancel` MCP tool or `anneal-memory wrap-cancel` (don't delete the store or force a duplicate wrap). **Over MCP, call `status` first:** it reports when the wrap started, and a wrap that began moments ago is probably a live peer session still compressing rather than a corpse — one server process runs per client session against a shared store, and cancelling throws away whatever that session has in flight. `anneal-memory wrap-status` shows the full snapshot but is CLI-only.
+
+*(Before 0.9.8 this row read "— (CLI only)" and it was true: `wrap_cancel` had no MCP surface, so an agent that hit `WrapInProgressError` mid-session had no in-band way out. That is the defect 0.9.8 fixed.)*
 
 **Operator-only** (CLI, things MCP can't do — inspection/debugging that needs filesystem or broad queries): `stats` · `graph --format dot` · `history` · `diff --wraps 5` · `audit --since 7d` · `verify` · `export` / `import` · `prune --older-than 90`. All support `--json`. (`status` is on *both* CLI and MCP — it's in the table above; only the rest are CLI-only.)
 

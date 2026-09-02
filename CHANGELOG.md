@@ -48,6 +48,15 @@ On the tool's **primary recovery case** — corrupt half-written wrap metadata �
 
 `wrap_cancel` still clears unconditionally: it cannot refuse because the wrap belongs to someone else, since it has no owner to compare against. The description warns, `status` now gives the start time to judge by, and the receipt reports truthfully — but prompt text is not a concurrency guard. The real fix is wrap-lock ownership (owner / PID / expiry), which was reported alongside these items and is deliberately **not** in this patch release: it interacts with the single-writer invariant the frozen token exists to protect, and deserves its own change rather than being bolted on beside four others.
 
+### Also in this release — the last two surfaces of AM-LEVELCAP
+
+⚠ **0.9.8 is not only the two items above.** Two commits sat on `main` after the `0.9.7` tag and ship here:
+
+- **The generated wrap instructions taught a cap the library had removed** — at the moment of use, which is the worst place for a stale instruction to live.
+- **The adopter-facing docs taught it too** — the last surface of that class.
+
+Both are the same shape as everything else in this release: a description that disagreed with correct code.
+
 ### Notes
 
 - Every fix here is mutation-verified (22 mutants, 22 killed). One of the new tests was itself defective and mutation caught it: `"wrap_cancel" in msg` passes on a message that names only `store.wrap_cancelled()`, so the assertion was a proxy that could not fail on the defect under repair.

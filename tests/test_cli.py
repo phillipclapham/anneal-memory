@@ -2648,6 +2648,88 @@ class TestCmdWrapCancel:
             assert store.load_wrap_snapshot() is None
             assert store.get_wrap_started_at() is None
 
+    def test_partial_state_is_not_reported_as_no_wrap(self, base_args_with_data, capsys):
+        """Parity with the MCP handler, flagged at review.
+
+        The CLI said "no wrap was in progress" after clearing a CORRUPT partial
+        wrap — false, and on the one recovery case this subcommand most exists
+        for. It also contradicts the error that sent the operator here. The MCP
+        tool was fixed; this is the same defect in the other transport.
+        """
+        base_args_with_data.max_chars = 20000
+        base_args_with_data.staleness_days = 7
+        cmd_prepare_wrap(base_args_with_data)
+        with Store(base_args_with_data.db, project_name="TestProject") as store:
+            store._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_token", ""),
+            )
+            store._conn.commit()
+        capsys.readouterr()
+
+        cmd_wrap_cancel(base_args_with_data)
+        out = capsys.readouterr().out
+        assert "no wrap was in progress" not in out
+        assert "corrupt/partial wrap state cleared" in out
+        with Store(base_args_with_data.db, project_name="TestProject") as store:
+            assert store.load_wrap_snapshot() is None
+
+    def test_reports_the_released_episode_count_and_start_time(self, base_args_with_data, capsys):
+        base_args_with_data.max_chars = 20000
+        base_args_with_data.staleness_days = 7
+        cmd_prepare_wrap(base_args_with_data)
+        with Store(base_args_with_data.db, project_name="TestProject") as store:
+            started = store.get_wrap_started_at()
+            n = len(store.load_wrap_snapshot()["episode_ids"])
+        capsys.readouterr()
+        cmd_wrap_cancel(base_args_with_data)
+        out = capsys.readouterr().out
+        assert started and started in out
+        assert f"{n} episode(s) released" in out
+        assert "not deleted" in out
+
+    def test_does_not_pre_read_the_snapshot(self, base_args_with_data, capsys, monkeypatch):
+        """Structural, matching the MCP handler's guard.
+
+        Reporting from a pre-read is the TOCTOU: between the read and the
+        unconditional clear a peer can finish the observed wrap and start
+        another, so the clear destroys the new one while the output names the
+        old token. Pin the ABSENCE of the second read rather than the wording
+        it produces — a mutant that merely adds a discarded read is harmless,
+        but one that REPORTS from it is the bug back.
+        """
+        base_args_with_data.max_chars = 20000
+        base_args_with_data.staleness_days = 7
+        cmd_prepare_wrap(base_args_with_data)
+        capsys.readouterr()
+
+        calls = []
+        real = Store.load_wrap_snapshot
+
+        def spy(self):
+            calls.append("load_wrap_snapshot")
+            return real(self)
+
+        monkeypatch.setattr(Store, "load_wrap_snapshot", spy)
+        cmd_wrap_cancel(base_args_with_data)
+        assert calls == [], (
+            "wrap-cancel read the snapshot before clearing — the read-then-clear "
+            "race the receipt exists to remove"
+        )
+
+    def test_json_carries_the_full_receipt(self, base_args_with_data, capsys):
+        base_args_with_data.max_chars = 20000
+        base_args_with_data.staleness_days = 7
+        cmd_prepare_wrap(base_args_with_data)
+        capsys.readouterr()
+        base_args_with_data.json = True
+        cmd_wrap_cancel(base_args_with_data)
+        data = json.loads(capsys.readouterr().out)
+        assert data["cancelled_token"]
+        assert data["cancelled_started_at"]
+        assert isinstance(data["cancelled_episode_ids"], list)
+        assert data["partial_state"] is False
+
     def test_cancel_json(self, base_args_with_data, capsys):
         base_args_with_data.max_chars = 20000
         base_args_with_data.staleness_days = 7

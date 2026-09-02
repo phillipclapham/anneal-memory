@@ -662,7 +662,7 @@ class TestToolWrapCancel:
             server._handle_tools_call({"name": "wrap_cancel", "arguments": {}})
         )
         assert token in text
-        assert "2 episode" in text
+        assert "2 episode(s) released" in text  # exact: "2 episode" also matches "12 episode(s)"
 
     def test_no_wrap_in_progress_is_not_an_error(self, server):
         """Idempotent by design: cancelling when idle clears state and
@@ -742,7 +742,7 @@ class TestWrapCancelReceiptIsRaceFree:
             server._handle_tools_call({"name": "wrap_cancel", "arguments": {}})
         )
         assert token in text
-        assert "2 episode" in text
+        assert "2 episode(s) released" in text  # exact: "2 episode" also matches "12 episode(s)"
 
     def test_report_cannot_name_a_wrap_it_did_not_clear(self, server, store):
         """The race made concrete. A peer replaces the wrap between the moment

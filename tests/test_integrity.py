@@ -423,6 +423,43 @@ class TestDocumentedToolCount:
                 continue  # documented collectively as `spore_*`
             assert f"`{name}`" in readme, f"MCP tool {name!r} is not documented in README.md"
 
+    def test_skill_does_not_claim_an_mcp_tool_is_CLI_ONLY(self):
+        """SKILL.md is the depth doc an AGENT loads, and it claimed the
+        stuck-wrap row had no MCP surface — which 0.9.8 made false, in the one
+        file most likely to be read by the reader the fix was written for.
+
+        The README assertions above did not cover it, so the release's own
+        defect class survived in a shipping artifact (the skill is in the
+        sdist). Scanning every tool name against every "CLI only" marker is
+        what generalises past the one row that happened to be noticed.
+        """
+        skill = self._root() / "skill" / "anneal-memory" / "SKILL.md"
+        if not skill.is_file():
+            pytest.skip("skill/ not present in this checkout")
+        text = skill.read_text(encoding="utf-8")
+        tool_names = {t["name"] for t in TOOLS}
+        for line in text.splitlines():
+            if not line.startswith("|") or "CLI only" not in line:
+                continue
+            for name in tool_names:
+                assert f"`{name}`" not in line, (
+                    f"SKILL.md marks a row 'CLI only' while naming the MCP tool "
+                    f"{name!r} in it: {line.strip()}"
+                )
+
+    def test_skill_documents_the_wrap_recovery_mcp_tool(self):
+        """The positive half — the row must actually name the tool. A row that
+        merely stopped saying 'CLI only' would still leave the agent unaware
+        the tool exists, which is the condition Alex De Groodt was in."""
+        skill = self._root() / "skill" / "anneal-memory" / "SKILL.md"
+        if not skill.is_file():
+            pytest.skip("skill/ not present in this checkout")
+        text = skill.read_text(encoding="utf-8")
+        assert "`wrap_cancel`" in text, (
+            "SKILL.md never names the wrap_cancel MCP tool — an agent reading it "
+            "still has no in-band way out of a stuck wrap"
+        )
+
     def test_server_docstring_states_the_real_count(self):
         import re
         from anneal_memory import server

@@ -1366,7 +1366,8 @@ def prepare_wrap(
             compress. The single-writer guard (AM-PREPARE-GUARD, 0.4.2)
             refuses to clobber the in-flight wrap's token + snapshot.
             Finish the open wrap with :func:`validated_save_continuity`
-            or abandon it with :meth:`Store.wrap_cancelled`, then call
+            or abandon it with :meth:`Store.wrap_cancelled` (over MCP:
+            the ``save_continuity`` / ``wrap_cancel`` tools), then call
             ``prepare_wrap`` again. The empty path (no episodes) does NOT
             raise — it clears a stale/degenerate flag and returns
             ``status == "empty"``, preserving stuck-wrap auto-recovery.

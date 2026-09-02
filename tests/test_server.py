@@ -78,7 +78,7 @@ class TestPing:
 class TestToolsList:
     def test_returns_all_tools(self, server):
         result = server._handle_tools_list({})
-        assert len(result["tools"]) == 16  # 6 core + 2 crystal + 8 spore tools
+        assert len(result["tools"]) == 17  # 7 core + 2 crystal + 8 spore tools
 
     def test_crystal_tools_registered(self, server):
         names = {t["name"] for t in server._handle_tools_list({})["tools"]}
@@ -124,7 +124,7 @@ class TestResourcesRead:
         assert "spore_add" in manifest["tools"]
         assert "crystal_recall" in manifest["tools"]
         assert "crystal_index" in manifest["tools"]
-        assert len(manifest["tools"]) == 16  # 6 core + 2 crystal + 8 spore tools
+        assert len(manifest["tools"]) == 17  # 7 core + 2 crystal + 8 spore tools
 
     def test_unknown_uri_returns_empty(self, server):
         result = server._handle_resources_read({"uri": "anneal://unknown"})
@@ -580,6 +580,275 @@ class TestToolSaveContinuity:
         assert _is_error(result)
         assert "No wrap in progress" in _text_from_result(result)
         assert store.status().total_wraps == 0
+
+
+# -- 0.9.8: MCP wrap_cancel (AM-MCP-WRAPCANCEL) --
+
+
+class TestToolWrapCancel:
+    """The MCP escape hatch for a stuck wrap.
+
+    Reported by Alex De Groodt 2026-08-04: an agent that hit
+    WrapInProgressError over MCP had no in-band way out — wrap_cancel
+    existed only as a CLI subcommand and a Python method — so his wrap
+    stayed stuck for three days with 31 episodes stranded while the
+    hook kept advising him to run prepare_wrap.
+
+    Every test here routes through ``_handle_tools_call``, not the
+    private handler. Reaching the private method proves nothing about
+    the finding: the defect was that the tool was not DISPATCHABLE.
+    """
+
+    def test_tool_is_dispatchable_by_name(self, server):
+        """The regression proper: 'wrap_cancel' resolves to a handler.
+
+        Before 0.9.8 this returned the 'Unknown tool' error result.
+        """
+        result = server._handle_tools_call({"name": "wrap_cancel", "arguments": {}})
+        assert not _is_error(result)
+        assert "Unknown tool" not in _text_from_result(result)
+
+    def test_advertised_in_tools_list(self, server):
+        names = {t["name"] for t in server._handle_tools_list({})["tools"]}
+        assert "wrap_cancel" in names
+
+    def test_description_warns_about_a_LIVE_peer_session(self, server):
+        """L3 (codex) caught this: anneal runs one server process per client
+        session against a shared store, so the wrap this tool clears may belong
+        to a sibling that is still compressing. The description is the ONLY
+        thing the model reads before calling, so the hazard has to live there —
+        a tool that presents a destructive act on another session's state as
+        free will be called freely."""
+        desc = next(t for t in TOOLS if t["name"] == "wrap_cancel")["description"]
+        assert "STILL RUNNING" in desc
+        assert "Call `status` first" in desc
+        assert "throws that work away" in desc
+
+    def test_unblocks_a_stuck_wrap_end_to_end(self, server, store):
+        """Alex's exact scenario, start to finish.
+
+        prepare_wrap -> (session dies) -> prepare_wrap refuses forever
+        -> wrap_cancel -> prepare_wrap works again, and NOTHING from
+        the abandoned window was lost.
+        """
+        server._tool_record({"content": "Episode one", "episode_type": "observation"})
+        server._tool_prepare_wrap({})  # marks the wrap in progress
+        server._tool_record({"content": "Episode two", "episode_type": "observation"})
+
+        blocked = server._handle_tools_call({"name": "prepare_wrap", "arguments": {}})
+        assert _is_error(blocked)
+        assert "a wrap is already in progress" in _text_from_result(blocked)
+
+        cancelled = server._handle_tools_call({"name": "wrap_cancel", "arguments": {}})
+        assert not _is_error(cancelled)
+        assert store.load_wrap_snapshot() is None
+
+        unblocked = server._handle_tools_call({"name": "prepare_wrap", "arguments": {}})
+        assert not _is_error(unblocked)
+        text = _text_from_result(unblocked)
+        # Both episodes survive the cancel — the abandoned window is
+        # released back, not deleted. This is the claim the tool
+        # description makes to the agent, so it is the claim under test.
+        assert "Episode one" in text
+        assert "Episode two" in text
+
+    def test_reports_the_cancelled_token_and_episode_count(self, server, store):
+        server._tool_record({"content": "One", "episode_type": "observation"})
+        server._tool_record({"content": "Two", "episode_type": "observation"})
+        server._tool_prepare_wrap({})
+        token = store.load_wrap_snapshot()["token"]
+
+        text = _text_from_result(
+            server._handle_tools_call({"name": "wrap_cancel", "arguments": {}})
+        )
+        assert token in text
+        assert "2 episode" in text
+
+    def test_no_wrap_in_progress_is_not_an_error(self, server):
+        """Idempotent by design: cancelling when idle clears state and
+        says so, rather than refusing. An agent recovering from an
+        unknown state must be able to call this blind."""
+        result = server._handle_tools_call({"name": "wrap_cancel", "arguments": {}})
+        assert not _is_error(result)
+        assert "No wrap was in progress" in _text_from_result(result)
+
+    def test_partial_state_is_still_cancellable(self, server, store):
+        """The recovery scenario the tool most exists for.
+
+        A partial wrap state (started_at set, token missing) makes
+        load_wrap_snapshot raise StoreError. cli.cmd_wrap_cancel falls
+        back rather than propagating, and the MCP handler must match —
+        otherwise the one state you cannot recover from is the one that
+        needs recovering.
+        """
+        server._tool_record({"content": "One", "episode_type": "observation"})
+        server._tool_prepare_wrap({})
+        # Corrupt into a partial state: started_at kept, token cleared.
+        store._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("wrap_token", ""),
+        )
+        store._conn.commit()
+        with pytest.raises(StoreError):
+            store.load_wrap_snapshot()
+
+        result = server._handle_tools_call({"name": "wrap_cancel", "arguments": {}})
+        assert not _is_error(result)
+        # State is genuinely clear afterwards, not merely reported clear.
+        assert store.load_wrap_snapshot() is None
+        assert not _is_error(
+            server._handle_tools_call({"name": "prepare_wrap", "arguments": {}})
+        )
+
+
+class TestWrapCancelReceiptIsRaceFree:
+    """L3 CONSENSUS (codex HIGH + glm MED), found after the tool shipped in
+    this same release.
+
+    The handler used to `load_wrap_snapshot()` first so it had something to
+    report, then call `wrap_cancelled()`. That is a TOCTOU: `wrap_cancelled()`
+    clears whatever is CURRENT, so between the read and the clear a peer can
+    finish the observed wrap and start a new one — and the call then destroys
+    the NEW wrap while reporting the OLD token. The operator is told they
+    cleaned up a corpse when they killed a live peer.
+    """
+
+    def test_handler_does_not_pre_read_the_snapshot(self, server, store):
+        """The structural assertion. A handler that reads before clearing has
+        the window no matter how the report is phrased, so pin the ABSENCE of
+        the second read rather than the wording it produced."""
+        calls = []
+        real = store.load_wrap_snapshot
+        def spy():
+            calls.append("load_wrap_snapshot")
+            return real()
+        store.load_wrap_snapshot = spy  # type: ignore[method-assign]
+
+        server._tool_record({"content": "One", "episode_type": "observation"})
+        server._tool_prepare_wrap({})
+        server._handle_tools_call({"name": "wrap_cancel", "arguments": {}})
+        assert calls == [], (
+            "wrap_cancel read the snapshot before clearing — that is the "
+            "read-then-clear race the receipt exists to remove"
+        )
+
+    def test_receipt_describes_what_was_actually_cleared(self, server, store):
+        server._tool_record({"content": "One", "episode_type": "observation"})
+        server._tool_record({"content": "Two", "episode_type": "observation"})
+        server._tool_prepare_wrap({})
+        token = store.load_wrap_snapshot()["token"]
+
+        text = _text_from_result(
+            server._handle_tools_call({"name": "wrap_cancel", "arguments": {}})
+        )
+        assert token in text
+        assert "2 episode" in text
+
+    def test_report_cannot_name_a_wrap_it_did_not_clear(self, server, store):
+        """The race made concrete. A peer replaces the wrap between the moment
+        the caller decided to cancel and the clear itself; whatever the handler
+        reports must be the wrap the CLEAR saw, never an earlier one."""
+        server._tool_record({"content": "One", "episode_type": "observation"})
+        server._tool_prepare_wrap({})
+        stale_token = store.load_wrap_snapshot()["token"]
+
+        # The peer finishes that wrap and immediately starts another.
+        store.wrap_cancelled()
+        store.wrap_started(token="b" * 32, episode_ids=["cafebabe"])
+
+        text = _text_from_result(
+            server._handle_tools_call({"name": "wrap_cancel", "arguments": {}})
+        )
+        assert "b" * 32 in text, "did not report the wrap it actually cleared"
+        assert stale_token not in text, (
+            "reported a token from a wrap that had already completed — the "
+            "operator would believe a corpse was cleared"
+        )
+
+    def test_reports_start_time_so_a_peer_kill_is_visible(self, server, store):
+        server._tool_record({"content": "One", "episode_type": "observation"})
+        server._tool_prepare_wrap({})
+        started = store.get_wrap_started_at()
+        text = _text_from_result(
+            server._handle_tools_call({"name": "wrap_cancel", "arguments": {}})
+        )
+        assert started and started in text
+
+
+class TestWrapCancelPartialStateMessage:
+    """L3 codex#4 / glm LOW. On the tool's PRIMARY recovery path — a corrupt
+    partial wrap state — the response said "No wrap was in progress", which is
+    false and contradicts the WrapInProgressError that sent the operator here.
+    Right outcome, wrong story, on the one case the tool most exists for."""
+
+    def _corrupt(self, server, store):
+        server._tool_record({"content": "One", "episode_type": "observation"})
+        server._tool_prepare_wrap({})
+        store._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("wrap_token", ""),
+        )
+        store._conn.commit()
+
+    def test_says_the_state_was_corrupt_not_absent(self, server, store):
+        self._corrupt(server, store)
+        text = _text_from_result(
+            server._handle_tools_call({"name": "wrap_cancel", "arguments": {}})
+        )
+        assert "CORRUPT" in text
+        assert "No wrap was in progress" not in text
+
+    def test_still_actually_clears_it(self, server, store):
+        self._corrupt(server, store)
+        server._handle_tools_call({"name": "wrap_cancel", "arguments": {}})
+        assert store.load_wrap_snapshot() is None
+        assert not _is_error(
+            server._handle_tools_call({"name": "prepare_wrap", "arguments": {}})
+        )
+
+    def test_unparseable_episode_ids_also_read_as_partial(self, server, store):
+        server._tool_record({"content": "One", "episode_type": "observation"})
+        server._tool_prepare_wrap({})
+        store._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("wrap_episode_ids", "{not json"),
+        )
+        store._conn.commit()
+        text = _text_from_result(
+            server._handle_tools_call({"name": "wrap_cancel", "arguments": {}})
+        )
+        assert "CORRUPT" in text
+
+    def test_idle_store_is_NOT_reported_as_corrupt(self, server):
+        """An idle store is idle, not damaged — the partial-state message must
+        not fire on a blind recovery call against a clean store."""
+        text = _text_from_result(
+            server._handle_tools_call({"name": "wrap_cancel", "arguments": {}})
+        )
+        assert "No wrap was in progress" in text
+        assert "CORRUPT" not in text
+
+
+class TestStatusExposesWrapStartTime:
+    """L3 codex#2: `wrap_cancel`'s description tells the agent to call `status`
+    and not to cancel a wrap that started moments ago — while status reported
+    only a boolean, so the check it named could not be performed. Advice
+    pointing at a surface that cannot answer it is this release's own defect."""
+
+    def test_status_names_when_the_wrap_started(self, server, store):
+        server._tool_record({"content": "One", "episode_type": "observation"})
+        server._tool_prepare_wrap({})
+        started = store.get_wrap_started_at()
+        text = _text_from_result(server._handle_tools_call(
+            {"name": "status", "arguments": {}}))
+        assert "Wrap in progress" in text
+        assert started and started in text
+
+    def test_no_wrap_line_when_idle(self, server):
+        server._tool_record({"content": "One", "episode_type": "observation"})
+        text = _text_from_result(server._handle_tools_call(
+            {"name": "status", "arguments": {}}))
+        assert "Wrap in progress" not in text
 
 
 # -- 10.5c.4: MCP token round-trip --

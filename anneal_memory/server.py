@@ -1,7 +1,7 @@
 """MCP server for anneal-memory.
 
 Implements the Model Context Protocol over stdio transport (JSON-RPC 2.0,
-newline-delimited). 16 tools + 2 resources. Zero dependencies beyond Python
+newline-delimited). 17 tools + 2 resources. Zero dependencies beyond Python
 stdlib.
 
 Usage:
@@ -171,6 +171,7 @@ class Server:
             "recall": self._tool_recall,
             "prepare_wrap": self._tool_prepare_wrap,
             "save_continuity": self._tool_save_continuity,
+            "wrap_cancel": self._tool_wrap_cancel,
             "delete_episode": self._tool_delete_episode,
             "status": self._tool_status,
             "crystal_recall": self._tool_crystal_recall,
@@ -570,6 +571,64 @@ class Server:
 
         return _tool_result("\n".join(lines))
 
+    def _tool_wrap_cancel(self, args: dict[str, Any]) -> dict[str, Any]:
+        """MCP transport adapter for Store.wrap_cancelled().
+
+        The operator escape hatch for a stuck wrap, which until 0.9.8
+        existed only as the ``wrap-cancel`` CLI subcommand and the
+        ``Store.wrap_cancelled()`` Python method — neither reachable by
+        an MCP client, so an agent that hit ``WrapInProgressError`` had
+        no in-band way out and the wrap stayed stuck until a human
+        opened a terminal. Reported from the field by Alex De Groodt,
+        who sat locked for three days with 31 episodes stranded.
+
+        Reports from the RECEIPT ``wrap_cancelled()`` returns, which is read
+        inside the same transaction as the clear.
+
+        ⚠ IT DELIBERATELY DOES NOT ``load_wrap_snapshot()`` FIRST, AND THAT IS
+        THE WHOLE POINT. The first version did, to have something to report.
+        That is a TOCTOU: between the read and the clear, a peer session can
+        finish the wrap this call saw and start a NEW one — and the clear is
+        unconditional, so it destroys the new wrap while the response names the
+        old token and count. The operator is told they cleaned up a corpse when
+        they killed a live peer. Found by codex and glm independently at L3.
+        Reading inside the transaction removes the window rather than narrowing
+        it, and the receipt cannot disagree with what was cleared.
+
+        The partial-state path (``StoreError`` territory for
+        ``load_wrap_snapshot``) needs no special handling here any more:
+        ``wrap_cancelled()`` clears raw metadata and never parses it, so it
+        works on exactly the corrupt states that method refuses — and the
+        receipt says ``partial_state`` so the response can tell the operator
+        what really happened instead of "no wrap was in progress", which was
+        false precisely on the recovery path this tool most exists to serve.
+        """
+        receipt = self._store.wrap_cancelled()
+
+        if receipt.partial_state:
+            token = f" (token: {receipt.token})" if receipt.token else ""
+            return _tool_result(
+                f"Wrap state was CORRUPT (partial wrap-in-progress metadata) "
+                f"and has been cleared{token}. This is the recovery case: the "
+                f"store was left half-way through a wrap. Your episodes are "
+                f"intact — prepare_wrap will now start a fresh wrap and pick "
+                f"them all up."
+            )
+
+        if receipt.token is None:
+            return _tool_result(
+                "No wrap was in progress (wrap state cleared anyway). "
+                "prepare_wrap will now start a fresh wrap."
+            )
+
+        count = len(receipt.episode_ids) if receipt.episode_ids is not None else 0
+        started = f", started {receipt.started_at}" if receipt.started_at else ""
+        return _tool_result(
+            f"Wrap cancelled (token: {receipt.token}{started}). "
+            f"{count} episode(s) released from the frozen snapshot "
+            f"— they are NOT deleted and the next prepare_wrap picks them up."
+        )
+
     def _tool_status(self, args: dict[str, Any]) -> dict[str, Any]:
         status = self._store.status()
 
@@ -585,8 +644,17 @@ class Server:
             lines.append("Last wrap: never")
 
         if status.wrap_in_progress:
+            # The START TIME is what makes the wrap_cancel guidance actionable.
+            # That tool's description tells the agent to check status first and
+            # not to cancel a wrap that began moments ago (it is probably a live
+            # peer mid-compression, not a corpse) — and until 0.9.8 status
+            # reported only a boolean, so the check it named could not be
+            # performed. Advice pointing at a surface that cannot answer it is
+            # the same defect this release exists to close (codex L3).
+            started_at = self._store.get_wrap_started_at()
             lines.append(
                 "Wrap in progress (prepare_wrap called, save_continuity pending)"
+                + (f" — started {started_at}" if started_at else "")
             )
 
         if status.continuity_chars is not None:

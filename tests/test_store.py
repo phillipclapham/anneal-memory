@@ -504,6 +504,123 @@ class TestWrapInProgressError:
         assert restored.started_at == err.started_at
         assert str(restored) == str(err)
 
+    # -- 0.9.8: the message must name a path the CALLER can reach --
+
+    def test_message_names_every_transport_for_both_recovery_paths(self):
+        """Reported by Alex De Groodt 2026-08-04.
+
+        The message used to read "Finish it with validated_save_continuity,
+        or abandon it with store.wrap_cancelled()" — two Python APIs, and
+        an MCP client can reach neither. An agent that hits this error is
+        the caller LEAST able to act on a Python-only instruction, so the
+        message is the contract under test here, not decoration.
+        """
+        msg = str(WrapInProgressError(started_at="2026-08-04T10:00:00Z"))
+        # Cancel path, all three transports.
+        assert "MCP: the `wrap_cancel` tool" in msg    # MCP tool
+        assert "anneal-memory wrap-cancel" in msg      # CLI
+        assert "store.wrap_cancelled()" in msg         # Python
+        # Finish path had the identical defect and is fixed with it.
+        assert "MCP: the `save_continuity` tool" in msg  # MCP tool
+        assert "anneal-memory save-continuity" in msg    # CLI
+        assert "validated_save_continuity()" in msg      # Python
+
+    def test_named_mcp_tools_actually_exist(self):
+        """Guards the failure mode this fix could itself create: a
+        message naming an MCP tool that was renamed or never shipped is
+        no better than one naming an unreachable method. Ties the
+        operator-facing string to the real tool table."""
+        from anneal_memory.integrity import TOOLS
+        msg = str(WrapInProgressError())
+        names = {t["name"] for t in TOOLS}
+        for tool in ("wrap_cancel", "save_continuity"):
+            # Match the MCP phrasing, not a bare substring: "wrap_cancel"
+            # occurs inside "store.wrap_cancelled()", so a containment
+            # check on the bare name passes on a Python-only message.
+            assert f"MCP: the `{tool}` tool" in msg
+            assert tool in names, f"message names MCP tool {tool!r} that TOOLS does not expose"
+
+    def test_partial_state_errors_also_name_a_reachable_path(self, tmp_path):
+        """The three sibling StoreError recovery hints in
+        load_wrap_snapshot carried the same defect and were fixed with
+        it — a symptom-scoped fix would have left them wrong."""
+        db = tmp_path / "partial.db"
+        s = Store(path=db, project_name="P")
+        try:
+            s.record("One", EpisodeType.OBSERVATION)
+            s.wrap_started(token="a" * 32, episode_ids=["deadbeef"])
+            s._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_token", ""),
+            )
+            s._conn.commit()
+            with pytest.raises(StoreError) as excinfo:
+                s.load_wrap_snapshot()
+            msg = str(excinfo.value)
+            assert "MCP: the `wrap_cancel` tool" in msg
+            assert "anneal-memory wrap-cancel" in msg
+        finally:
+            s.close()
+
+    def test_EVERY_snapshot_integrity_error_names_the_recovery_path(self, tmp_path):
+        """The class, not the cases. Four StoreErrors in load_wrap_snapshot tell
+        an operator their wrap state is broken; every one of them has to say how
+        to clear it, or the operator is stuck holding a diagnosis.
+
+        The 'unexpected shape' branch was missed on the first pass and survived
+        mutation — it is reached by valid JSON of the wrong type, e.g. `{}`.
+        Asserting over all of them is what stops a fifth branch shipping mute.
+        """
+        cases = {
+            "token-empty": ("wrap_token", ""),
+            "ids-empty": ("wrap_episode_ids", ""),
+            "ids-not-json": ("wrap_episode_ids", "{not json"),
+            "ids-wrong-shape": ("wrap_episode_ids", "{}"),
+            "ids-not-strings": ("wrap_episode_ids", "[1, 2, 3]"),
+        }
+        for label, (key, value) in cases.items():
+            db = tmp_path / f"{label}.db"
+            s = Store(path=db, project_name="P")
+            try:
+                s.record("One", EpisodeType.OBSERVATION)
+                s.wrap_started(token="a" * 32, episode_ids=["deadbeef"])
+                s._conn.execute(
+                    "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                    (key, value),
+                )
+                s._conn.commit()
+                with pytest.raises(StoreError) as excinfo:
+                    s.load_wrap_snapshot()
+                msg = str(excinfo.value)
+                assert "MCP: the `wrap_cancel` tool" in msg, (
+                    f"{label}: integrity error names no MCP-reachable recovery path"
+                )
+                assert "anneal-memory wrap-cancel" in msg, f"{label}: no CLI path"
+            finally:
+                s.close()
+
+    def test_wrap_cancelled_returns_a_receipt_not_None(self, tmp_path):
+        """The receipt is the TOCTOU fix, so its EXISTENCE is the contract —
+        a caller that has to re-read to learn what it cleared is back in the
+        race, whatever the handler does with the value."""
+        from anneal_memory.store import WrapCancelReceipt
+        db = tmp_path / "receipt.db"
+        s = Store(path=db, project_name="P")
+        try:
+            s.record("One", EpisodeType.OBSERVATION)
+            s.wrap_started(token="c" * 32, episode_ids=["feedface"])
+            r = s.wrap_cancelled()
+            assert isinstance(r, WrapCancelReceipt)
+            assert r.token == "c" * 32
+            assert r.episode_ids == ["feedface"]
+            assert r.started_at
+            assert r.partial_state is False
+            idle = s.wrap_cancelled()
+            assert isinstance(idle, WrapCancelReceipt)
+            assert idle.token is None and idle.partial_state is False
+        finally:
+            s.close()
+
 
 # -- Pruning --
 

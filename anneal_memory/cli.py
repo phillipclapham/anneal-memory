@@ -1182,29 +1182,34 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
     record of what was cleared.
     """
     with _open_store(args) as store:
-        # Capture the token BEFORE cancellation so we can report what
-        # was cleared. wrap_cancelled() itself clears the state in a
-        # single transaction; reading after would return None.
-        try:
-            snapshot = store.load_wrap_snapshot()
-            cancelled_token = snapshot["token"] if snapshot else None
-        except StoreError:
-            # Partial-state integrity failure still needs to be
-            # cancellable — that's the whole point of this subcommand.
-            # Fall back to reading the raw token via the accessor.
-            cancelled_token = None
-
-        store.wrap_cancelled()
+        # Report from the RECEIPT, read inside the clearing transaction (0.9.8).
+        # This used to load_wrap_snapshot() first and then clear — two reads with
+        # a gap, in which a peer can finish the observed wrap and start another,
+        # so the clear destroys the new one while the output names the old token.
+        # It also meant a partial-state cancel printed "no wrap was in progress",
+        # which is false on the one recovery case this subcommand most exists
+        # for, and contradicts the error that sent the operator here.
+        receipt = store.wrap_cancelled()
 
         if args.json:
             _print_json({
                 "status": "cancelled",
-                "cancelled_token": cancelled_token,
+                "cancelled_token": receipt.token,
+                "cancelled_started_at": receipt.started_at,
+                "cancelled_episode_ids": receipt.episode_ids,
+                "partial_state": receipt.partial_state,
             })
             return
 
-        if cancelled_token:
-            print(f"wrap cancelled (token: {cancelled_token})")
+        if receipt.partial_state:
+            token = f" (token: {receipt.token})" if receipt.token else ""
+            print(f"corrupt/partial wrap state cleared{token}")
+            print("  the store was left part-way through a wrap; episodes are intact")
+        elif receipt.token:
+            started = f", started {receipt.started_at}" if receipt.started_at else ""
+            count = len(receipt.episode_ids) if receipt.episode_ids is not None else 0
+            print(f"wrap cancelled (token: {receipt.token}{started})")
+            print(f"  {count} episode(s) released — not deleted; the next prepare-wrap picks them up")
         else:
             print("no wrap was in progress (state cleared anyway)")
 

@@ -620,9 +620,14 @@ class TestToolWrapCancel:
         a tool that presents a destructive act on another session's state as
         free will be called freely."""
         desc = next(t for t in TOOLS if t["name"] == "wrap_cancel")["description"]
-        assert "STILL RUNNING" in desc
-        assert "Call `status` first" in desc
-        assert "throws that work away" in desc
+        # Assert the SEMANTICS, not the register. The first version of this
+        # pinned the literal string "STILL RUNNING" and broke when the caps were
+        # folded into plain prose — a test that fails on a rewording which
+        # preserves every fact is pinning the wrong thing.
+        assert "another session that is still running" in desc.lower()
+        assert "status" in desc                       # the surface to check
+        assert "throws its work away" in desc         # the consequence, named
+        assert "started" in desc                      # the discriminator (age)
 
     def test_unblocks_a_stuck_wrap_end_to_end(self, server, store):
         """Alex's exact scenario, start to finish.

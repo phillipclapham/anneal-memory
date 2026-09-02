@@ -17,12 +17,13 @@ class TestToolDefinitions:
     """Verify canonical tool definitions are well-formed."""
 
     def test_tool_count(self):
-        assert len(TOOLS) == 16  # 6 core + 2 crystal + 8 spore (prospective layer)
+        assert len(TOOLS) == 17  # 7 core + 2 crystal + 8 spore (prospective layer)
 
     def test_tool_names(self):
         names = {t["name"] for t in TOOLS}
         assert names == {
-            "record", "recall", "prepare_wrap", "save_continuity", "delete_episode", "status",
+            "record", "recall", "prepare_wrap", "save_continuity", "wrap_cancel",
+            "delete_episode", "status",
             "crystal_recall", "crystal_index",
             "spore_add", "spore_get", "spore_list", "spore_touch",
             "spore_update", "spore_descend", "spore_ascend", "spore_surface",
@@ -202,7 +203,7 @@ class TestVerifyIntegrity:
         path.write_text(json.dumps({"version": 1, "tools": {}}))
         valid, issues = verify_integrity(path)
         assert valid is False
-        assert len(issues) == 16  # All 16 tools missing
+        assert len(issues) == 17  # All 17 tools missing
 
 
 class TestShippedManifest:
@@ -393,3 +394,38 @@ class TestSkillManifest:
             assert "SKILL" in p.read_text(), (
                 f"{name} should point adopters to the SKILL for depth"
             )
+
+
+class TestDocumentedToolCount:
+    """The README and server.py both state the tool count in prose. Nothing
+    checked either, and both were stale the moment a tool was added — the same
+    class as the finding this release fixes (a description that disagrees with
+    correct code), so the fix is an assertion rather than a corrected number."""
+
+    def _root(self):
+        import anneal_memory
+        return Path(anneal_memory.__file__).resolve().parent.parent
+
+    def test_readme_states_the_real_count(self):
+        import re
+        readme = (self._root() / "README.md").read_text(encoding="utf-8")
+        m = re.search(r"\*\*(\d+) tools total\*\*", readme)
+        assert m, "README no longer states a tool total — update this test if deliberate"
+        assert int(m.group(1)) == len(TOOLS)
+
+    def test_readme_documents_every_tool(self):
+        """A tool absent from the table is a tool an adopter never learns exists —
+        which is exactly how `wrap_cancel` stayed invisible."""
+        readme = (self._root() / "README.md").read_text(encoding="utf-8")
+        for tool in TOOLS:
+            name = tool["name"]
+            if name.startswith("spore_"):
+                continue  # documented collectively as `spore_*`
+            assert f"`{name}`" in readme, f"MCP tool {name!r} is not documented in README.md"
+
+    def test_server_docstring_states_the_real_count(self):
+        import re
+        from anneal_memory import server
+        m = re.search(r"(\d+) tools \+ \d+ resources", server.__doc__ or "")
+        assert m, "server module docstring no longer states a tool count"
+        assert int(m.group(1)) == len(TOOLS)

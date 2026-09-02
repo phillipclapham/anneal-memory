@@ -4,6 +4,56 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.9.8] — 2026-09-02
+
+**The stuck wrap now has a way out from inside an MCP session.** Both items reported by [Alex De Groodt](https://github.com/Hurleveur) on 2026-08-04 against 0.9.6 and confirmed still open at 0.9.7. Additive: one new tool, one message rewrite. No API removals, no behaviour change to any existing call.
+
+### Added — AM-MCP-WRAPCANCEL: `wrap_cancel` as an MCP tool
+
+`wrap_cancel` existed as the `anneal-memory wrap-cancel` CLI subcommand and as `Store.wrap_cancelled()`, and as **neither** over MCP. So an agent that hit `WrapInProgressError` mid-session had no in-band way to resolve it: the wrap stayed open until a human opened a terminal. The reporter sat locked for three days with 31 episodes stranded behind it, while his harness advised him every prompt to run the one call that could only raise.
+
+- Mirrors `cli.cmd_wrap_cancel`, including its fallback: a partial-state integrity failure (`StoreError` from `load_wrap_snapshot`) is **still cancellable**, because recovering from exactly that state is what the tool is for.
+- Reports the cancelled token and how many episodes were released. Episodes are **not** deleted — cancelling discards only the frozen snapshot and its handshake token, and the next `prepare_wrap` picks the whole window up.
+- Cancelling with no wrap open is not an error: an agent recovering from an unknown state must be able to call it blind.
+- `tools/list` now advertises **17** tools (was 16); both the shipped and repo-root `tool-integrity.json` manifests are regenerated.
+
+### Fixed — `WrapInProgressError` named a recovery path its most likely caller could not reach
+
+The message read, verbatim, *"Finish it with validated_save_continuity, or abandon it with store.wrap_cancelled()"* — **two Python APIs**, offered to an MCP client that can call neither. The agent most likely to hit this error was the one least able to act on the instruction.
+
+- Both halves carried the defect, not only the reported one: `validated_save_continuity` is as unreachable from MCP as `store.wrap_cancelled()` is.
+- The message now names all three transports for both paths (MCP tool · CLI subcommand · Python API), from two module-level constants so a fourth site cannot drift.
+- The **three sibling recovery hints** in `Store.load_wrap_snapshot`'s partial-state `StoreError`s had the identical defect and are fixed with it — a symptom-scoped fix would have left the states you most need to recover from still pointing at an unreachable method.
+- A test pins the message against the real tool table, so a message naming an MCP tool that was renamed or never shipped fails the suite. Nothing pinned this string before.
+
+### Fixed — `wrap_cancel` could clear a wrap it did not observe (found at review, same release)
+
+The first cut of the handler read the snapshot to have something to report, then called `wrap_cancelled()` — which clears whatever is **current**. Between the two, a peer session can finish the observed wrap and start a new one, and the clear then destroys the NEW wrap while the response names the OLD token and count: the operator is told they cleaned up a corpse when they killed a live peer.
+
+`Store.wrap_cancelled()` now returns a **`WrapCancelReceipt`** (`token`, `started_at`, `episode_ids`, `partial_state`) read inside the same transaction as the clear, and the handler reports from that. The pre-read is gone, so the window is removed rather than narrowed and the receipt cannot disagree with what was cleared. The return value is additive — existing callers that ignore it are unaffected.
+
+### Fixed — the partial-state path said "No wrap was in progress"
+
+On the tool's **primary recovery case** — corrupt half-written wrap metadata — the response claimed no wrap existed, contradicting the very error that sent the operator there. It now reports that corrupt state was found and cleared. `wrap_cancelled()` works on exactly the states `load_wrap_snapshot` refuses, because it clears raw metadata and never parses it.
+
+### Fixed — `status` now reports when the wrap started
+
+`wrap_cancel`'s description tells the agent to check `status` first and not to cancel a wrap that began moments ago, since that is probably a live peer mid-compression rather than a corpse. `status` reported only a boolean, so the check it named could not be performed — advice pointing at a surface that cannot answer it, which is this release's own defect class.
+
+### Fixed — a fourth recovery hint that named no reachable path
+
+`load_wrap_snapshot`'s "decoded to an unexpected shape" branch (reached by valid JSON of the wrong type, e.g. `{}`) was the one integrity error still offering no way to clear the state. A test now asserts the property across **all** of them, rather than the cases that happened to be noticed.
+
+### Known limitation — cancellation is not yet CAS-guarded
+
+`wrap_cancel` still clears unconditionally: it cannot refuse because the wrap belongs to someone else, since it has no owner to compare against. The description warns, `status` now gives the start time to judge by, and the receipt reports truthfully — but prompt text is not a concurrency guard. The real fix is wrap-lock ownership (owner / PID / expiry), which was reported alongside these items and is deliberately **not** in this patch release: it interacts with the single-writer invariant the frozen token exists to protect, and deserves its own change rather than being bolted on beside four others.
+
+### Notes
+
+- Every fix here is mutation-verified (22 mutants, 22 killed). One of the new tests was itself defective and mutation caught it: `"wrap_cancel" in msg` passes on a message that names only `store.wrap_cancelled()`, so the assertion was a proxy that could not fail on the defect under repair.
+- Levain 0.4.2 requires this release: its `[wrap blocked]` hook advice names the `wrap_cancel` MCP tool.
+
+
 ## [0.9.7] — 2026-08-14
 
 **A two-part correctness fix to the graduation ceiling, plus the previously-unreleased salience-prefix fix.** No API removals; one new export (`MIN_PROVEN_LEVEL`). Adopters at 2x/3x see NO behaviour change — every fix here widens what the library ACCEPTS.

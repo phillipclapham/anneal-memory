@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, NamedTuple
 
 try:  # POSIX advisory locking; absent on Windows (see continuity_lock).
     import fcntl
@@ -450,6 +450,50 @@ class StoreDatabaseError(StoreError):
     # class name automatically.
 
 
+# -- Wrap-recovery hints (AM-MCP-WRAPCANCEL, 0.9.8) --
+#
+# Every recovery hint about the wrap lifecycle is spelled out HERE, once,
+# and names all three transports. It used to name the Python API alone
+# ("abandon it with store.wrap_cancelled()"), which is the only one of
+# the three an MCP client cannot reach — so the agent most likely to hit
+# WrapInProgressError was the one told to call a method it has no way of
+# calling. Alex De Groodt reported it from a stuck wrap that stayed stuck
+# for three days.
+#
+# Both halves had the defect, not just the one reported: validated_save_
+# continuity is as unreachable from MCP as store.wrap_cancelled() is.
+# A constant rather than four literals, so a fourth site cannot drift.
+_WRAP_FINISH_PATHS = (
+    "finish it (MCP: the `save_continuity` tool · CLI: "
+    "`anneal-memory save-continuity` · Python: `validated_save_continuity()`)"
+)
+_WRAP_CANCEL_PATHS = (
+    "cancel it (MCP: the `wrap_cancel` tool · CLI: "
+    "`anneal-memory wrap-cancel` · Python: `store.wrap_cancelled()`)"
+)
+
+
+class WrapCancelReceipt(NamedTuple):
+    """What a :meth:`Store.wrap_cancelled` call actually cleared.
+
+    Read inside the clearing transaction, so it cannot disagree with what was
+    cleared — which a separate ``load_wrap_snapshot()`` before the clear can
+    (see that method's note on the race it removes).
+
+    ``token`` / ``started_at`` are ``None`` on an idle store. ``episode_ids``
+    is ``None`` when there were none or the stored JSON was unreadable —
+    distinct from ``[]``, which means a wrap really did freeze an empty list.
+    ``partial_state`` is True when some lifecycle keys were present but the set
+    was incomplete or corrupt: the recovery case, worth saying out loud rather
+    than reporting as "no wrap was in progress".
+    """
+
+    token: str | None
+    started_at: str | None
+    episode_ids: list[str] | None
+    partial_state: bool
+
+
 class WrapInProgressError(AnnealMemoryError):
     """Raised when a new wrap is started while one is already in progress.
 
@@ -480,7 +524,12 @@ class WrapInProgressError(AnnealMemoryError):
 
     **Recovery:** finish the open wrap with
     :func:`~anneal_memory.validated_save_continuity`, or abandon it with
-    :meth:`Store.wrap_cancelled`, then start a new wrap. A deliberate
+    :meth:`Store.wrap_cancelled`, then start a new wrap. Both have
+    transport equivalents an out-of-process caller can reach — the
+    ``save_continuity`` / ``wrap_cancel`` MCP tools and the
+    ``save-continuity`` / ``wrap-cancel`` CLI subcommands — and the
+    message this class raises names all three (``_WRAP_FINISH_PATHS``,
+    ``_WRAP_CANCEL_PATHS`` above). A deliberate
     "discard the in-progress wrap and restart compression" flow passes
     ``allow_restart=True`` to :meth:`Store.wrap_started` — though
     :meth:`Store.wrap_cancelled` followed by a fresh ``prepare_wrap``
@@ -499,9 +548,9 @@ class WrapInProgressError(AnnealMemoryError):
     def _build_message(started_at: str | None) -> str:
         when = f" (started {started_at})" if started_at else ""
         return (
-            f"a wrap is already in progress{when}. Finish it with "
-            "validated_save_continuity, or abandon it with "
-            "store.wrap_cancelled(), before starting a new wrap."
+            f"a wrap is already in progress{when}. Either "
+            f"{_WRAP_FINISH_PATHS}, or {_WRAP_CANCEL_PATHS}, "
+            "before starting a new wrap."
         )
 
     def __reduce__(self) -> "tuple[type[WrapInProgressError], tuple[str | None]]":
@@ -1879,7 +1928,7 @@ class Store:
                 },
             )
 
-    def wrap_cancelled(self) -> None:
+    def wrap_cancelled(self) -> "WrapCancelReceipt":
         """Clear wrap-in-progress flag without recording a completed wrap.
 
         Use when a wrap is abandoned (no episodes, LLM failure, validation
@@ -1889,6 +1938,22 @@ class Store:
         ``wrap_token``, ``wrap_episode_ids``, and the frozen
         ``wrap_section_schema``) in a single SQL transaction, matching
         the batched-write invariant :meth:`wrap_started` establishes.
+
+        Returns a :class:`WrapCancelReceipt` describing **what this call
+        actually cleared**, read inside the same transaction as the clear.
+
+        ⚠ THE RETURN VALUE IS A CONCURRENCY FIX, NOT A CONVENIENCE (0.9.8).
+        It returned ``None``, so every caller wanting to report what it
+        cancelled had to ``load_wrap_snapshot()`` first and then clear — two
+        reads with a gap in between. In that gap a peer session can complete
+        the wrap the caller saw and start a NEW one, and the unconditional
+        clear below then destroys the new wrap while the caller reports the
+        old token. The operator is told they cleaned up a corpse when they
+        killed a live peer. Reading and clearing in one transaction removes
+        the window instead of narrowing it. Found by codex + glm at L3.
+
+        The receipt is additive: existing callers that ignore the return value
+        are unaffected.
         """
         # Capture all three wrap-lifecycle keys before we clear them,
         # so the audit entry records the full chain-of-custody
@@ -1972,6 +2037,32 @@ class Store:
                 if not healthy:
                     payload["partial_state"] = True
                 self._audit.log("wrap_cancelled", payload)
+
+        episode_ids: list[str] | None = None
+        if cancelled_ids_raw:
+            try:
+                decoded_ids = json.loads(cancelled_ids_raw)
+            except json.JSONDecodeError:
+                decoded_ids = None
+            if isinstance(decoded_ids, list) and all(
+                isinstance(x, str) for x in decoded_ids
+            ):
+                episode_ids = decoded_ids
+
+        # "Partial" means the store was NOT in a clean wrap-in-progress state:
+        # some lifecycle keys present, or episode IDs unreadable. An idle store
+        # (nothing set at all) is not partial — it is simply idle, which the
+        # ``token is None and started_at is None`` pair already says.
+        had_any = bool(cancelled_started_at or cancelled_token or cancelled_ids_raw)
+        complete = bool(
+            cancelled_started_at and cancelled_token and episode_ids is not None
+        )
+        return WrapCancelReceipt(
+            token=cancelled_token or None,
+            started_at=cancelled_started_at or None,
+            episode_ids=episode_ids,
+            partial_state=had_any and not complete,
+        )
 
     def get_wrap_started_at(self) -> str | None:
         """Return the wrap-in-progress timestamp, or None if no wrap is pending.
@@ -2073,7 +2164,7 @@ class Store:
                 "store metadata is in a partial wrap-in-progress state. "
                 "Possible causes: a v0.1.x database mid-upgrade with a "
                 "stale legacy flag, or a manual metadata edit. "
-                "Call store.wrap_cancelled() to clear the stale flag, "
+                f"To clear the stale flag, {_WRAP_CANCEL_PATHS}, "
                 "then re-run prepare_wrap for a clean snapshot.",
                 operation="load_wrap_snapshot",
                 path=str(self.path),
@@ -2088,8 +2179,8 @@ class Store:
                 "wrap_token is set but wrap_episode_ids is empty — "
                 "store metadata is inconsistent. This indicates a "
                 "wrap-lifecycle state machine bug or manual metadata "
-                "edit. Either clear wrap-in-progress state with "
-                "`wrap_cancelled()` or restore the episode ID list.",
+                f"edit. Either clear wrap-in-progress state — {_WRAP_CANCEL_PATHS} "
+                "— or restore the episode ID list.",
                 operation="load_wrap_snapshot",
                 path=str(self.path),
             )
@@ -2099,8 +2190,8 @@ class Store:
         except json.JSONDecodeError as exc:
             raise StoreError(
                 f"wrap_episode_ids metadata is not valid JSON: {exc}. "
-                "Either clear wrap-in-progress state with "
-                "`wrap_cancelled()` or restore the snapshot.",
+                f"Either clear wrap-in-progress state — {_WRAP_CANCEL_PATHS} "
+                "— or restore the snapshot.",
                 operation="load_wrap_snapshot",
                 path=str(self.path),
             ) from exc
@@ -2111,7 +2202,8 @@ class Store:
             raise StoreError(
                 "wrap_episode_ids metadata decoded to an unexpected "
                 f"shape ({type(episode_ids).__name__}); expected a "
-                "list of episode ID strings.",
+                f"list of episode ID strings. Either clear wrap-in-progress "
+                f"state — {_WRAP_CANCEL_PATHS} — or restore the snapshot.",
                 operation="load_wrap_snapshot",
                 path=str(self.path),
             )

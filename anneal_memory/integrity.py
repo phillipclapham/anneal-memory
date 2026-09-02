@@ -255,6 +255,36 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "wrap_cancel",
+        "description": (
+            "Abandon a wrap that is in progress, clearing the wrap-in-progress "
+            "state so a fresh prepare_wrap can run. Call this when prepare_wrap "
+            "refuses with 'a wrap is already in progress' and that wrap is NOT "
+            "going to be finished — typically one an earlier session opened and "
+            "then ended without saving, so nothing is left to compress it. "
+            "Episodes are NOT deleted: cancelling discards the frozen snapshot "
+            "and its handshake token, and every episode in the abandoned window "
+            "is still recorded and is picked up by the next prepare_wrap. The "
+            "cancellation is written to the audit trail with the abandoned "
+            "token and episode IDs. "
+            "WHAT THIS DESTROYS, AND WHY YOU SHOULD CHECK FIRST: the wrap may "
+            "belong to a DIFFERENT SESSION THAT IS STILL RUNNING — one server "
+            "process runs per client session against a shared store — and that "
+            "session may be part-way through composing its compression right "
+            "now. Cancelling makes its save fail and throws that work away. "
+            "Call `status` first: if the wrap started only moments ago it is "
+            "probably a live peer, not a corpse. Prefer finishing a wrap you "
+            "opened yourself over cancelling it. Do NOT call this to recover "
+            "from a save_continuity validation failure you can fix by editing "
+            "the text and saving again — that wrap is still live and cancelling "
+            "it throws away the snapshot you are working against."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
         "name": "delete_episode",
         "description": (
             "Delete a single episode by ID. Use this for content that should not "

@@ -66,8 +66,18 @@ from .schema import DEFAULT_GRADUATING
 # it would make every today-dated 4x+ line WITHOUT evidence newly eligible for bare
 # demotion — a mass demotion of mature carried patterns the moment one is re-stamped,
 # a far larger blast radius than the defect being fixed. Carried lines are date-gated
-# out in the normal case, so the asymmetry is inert; it is recorded here rather than
-# left to be rediscovered.
+# out in the normal case. ⛔ THAT LAST CLAUSE READ "so the asymmetry is inert" AND IT
+# WAS MEASURED FALSE ON 2026-08-31, against flow's live neocortex: of its pattern lines
+# only THREE carry an [evidence:] tag, FOURTEEN are bare at level >= 4, and TEN of those
+# were dated to the wrap then in progress — i.e. today-dated bare 4x+ lines are the
+# HABIT, not the exception the date-gate assumption relies on. Ten such lines matched
+# neither regex at the most recent consolidate and were silently skipped.
+# ⚠ THE DEFERRAL STILL STANDS AND IS NOT WEAKENED BY THIS: the reason to keep [23] is
+# the blast radius above (widening puts fourteen mature carried patterns onto the
+# bare-demotion path at the next re-stamp), not the frequency. Only the stated
+# JUSTIFICATION was wrong, and a deferral resting on a false premise is one somebody
+# re-opens for the wrong reason. spore-676 holds the decision; it is gated on spore-675
+# and is NOT to be widened casually. Recorded here rather than left to be rediscovered.
 _GRADUATION_RE = re.compile(
     r"\|\s*([2-9]|[1-9][0-9]+)x\s*\((\d{4}-\d{2}-\d{2})\)\s*\[evidence:\s*"
     r"([a-fA-F0-9][a-fA-F0-9, ]*)"  # one or more hex IDs
@@ -280,7 +290,7 @@ class ProvenWithoutDeclaration:
     """
 
     name: str  # Pattern identifier (operator-style name)
-    level: int  # Level at which the pattern graduated (2 or 3)
+    level: int  # Level at which the pattern graduated (>= MIN_PROVEN_LEVEL; no ceiling)
 
 
 def _is_graduating_heading(
@@ -427,7 +437,7 @@ class CrossSessionCollision:
     """
 
     name: str  # Pattern identifier
-    today_level: int  # Level the agent attempted to graduate to (2 or 3)
+    today_level: int  # Level the agent attempted to graduate to (>= 2; no ceiling)
     overlap_words: list[str]  # Meaningful words shared with prior explanation
     prior_explanation: str  # The prior session's explanation text
 
@@ -520,7 +530,7 @@ class OmittedPattern:
     """
 
     name: str  # Pattern identifier (operator-style name before the | marker)
-    prior_level: int  # Level at which it appeared in the previous wrap (2 or 3)
+    prior_level: int  # Level in the previous wrap (>= 2; no ceiling)
 
 
 def validate_graduations(
@@ -536,7 +546,10 @@ def validate_graduations(
 ) -> GraduationResult:
     """Validate evidence citations on graduated patterns.
 
-    Scans the ## Patterns section for 2x/3x lines with [evidence: <id> "explanation"].
+    Scans the ## Patterns section for Nx lines (N >= 2, NO ceiling — see
+    ``_GRADUATION_RE``) with [evidence: <id> "explanation"]. It said "2x/3x lines"
+    until 2026-09-04, which is the pre-0.9.7 contract and describes a cap this
+    regex has not had since AM-LEVELCAP.
     Only validates citations whose date matches today (newly graduated this session).
     Carried-forward patterns from previous sessions pass through unchanged.
 
@@ -1841,7 +1854,7 @@ def _demote_line(
         line: The full line being demoted.
         match: The ``_GRADUATION_RE`` match object that captured the
             graduation marker.
-        level: The current level (2 or 3) to demote from.
+        level: The current level (>= MIN_PROVEN_LEVEL, no ceiling) to demote from.
         marker: The text to replace the ``[evidence: ...]`` tag with.
             Default ``(ungrounded)`` (the citation-validation failure
             path); cross-session-overlap demotions pass

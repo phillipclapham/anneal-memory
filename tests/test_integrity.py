@@ -533,6 +533,57 @@ class TestDocumentedToolCount:
             "still has no in-band way out of a stuck wrap"
         )
 
+    def test_skill_does_not_teach_a_terminating_graduation_ladder(self):
+        """SKILL.md must not teach a ceiling the library removed in 0.9.7.
+
+        ⚠ THIS ROTTED FOR TWENTY DAYS AND NOTHING FIRED. AM-LEVELCAP (0.9.7,
+        2026-08-14) replaced the `level in (2, 3)` gate with `MIN_PROVEN_LEVEL`
+        and no ceiling, because a pattern earned 4+ times could neither validate
+        nor crystallize out. The generated wrap instructions were pinned to the
+        reader's range by ``TestTeacherCoversReaderRange``; **SKILL.md — the doc
+        an AGENT loads — was pinned by nothing**, and went on teaching
+        `1x → 2x → 3x` full stop until 2026-09-04.
+
+        ⛔ A WIDENING EMITS NO ERROR SIGNAL ANYWHERE DOWNSTREAM. Nothing breaks:
+        every consumer keeps working correctly against the narrower contract it
+        already knows, and the only symptom is absence — which is precisely why
+        this needs a test rather than review. Same shape as the `wrap_cancel`
+        row in this same file, and as `crystal.py`'s consumer contract, which
+        kept instructing readers to guard `level in (2, 3)` and so RE-CREATED
+        the cap in at least one consumer that trusted it.
+
+        Positive assertion on purpose: an absence-scan would trip on the
+        historical note that quotes the old ladder, and a negative guard that
+        matches nothing cannot be told from a broken one.
+
+        MUTATION-CHECKED: restore `1x → 2x → 3x` as the taught ladder and this
+        fails.
+        """
+        import re
+
+        skill = self._root() / "skill" / "anneal-memory" / "SKILL.md"
+        if not skill.is_file():
+            pytest.skip("skill/ not present in this checkout")
+
+        ladder_lines = [
+            line
+            for line in skill.read_text(encoding="utf-8").splitlines()
+            if "graduate" in line.lower() and re.search(r"\d+x", line)
+        ]
+        assert ladder_lines, "SKILL.md no longer teaches graduation at all"
+
+        levels = {
+            int(m)
+            for line in ladder_lines
+            for m in re.findall(r"(\d+)x", line)
+        }
+        assert max(levels) > 3, (
+            f"SKILL.md teaches a ladder topping out at {max(levels)}x. The "
+            f"library has had NO ceiling since 0.9.7 (MIN_PROVEN_LEVEL, no upper "
+            f"bound) — an agent following this doc flattens mature patterns back "
+            f"to 3x and loses the high-water mark."
+        )
+
     def test_skill_documents_every_tool(self):
         """The mirror of :meth:`test_readme_documents_every_tool`, over the doc
         that actually rotted.

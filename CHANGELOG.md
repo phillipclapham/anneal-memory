@@ -103,6 +103,58 @@ wrapper's formatted message, which embeds the store path — a database under a 
 `locked/` would fool a substring test. `cause_type_name` cannot do this job despite being advertised
 as the retry-dispatch key: `SQLITE_BUSY` and a malformed database image are both `OperationalError`.
 
+### Fixed — the AM-LEVELCAP carried tail: eleven surfaces still teaching a ceiling removed in 0.9.7
+
+0.9.7 lifted the `level in (2, 3)` cap because a pattern earned 4+ times could neither validate nor
+crystallize out. **Eleven surfaces went on describing the cap for three weeks** — because a widening
+emits no error signal anywhere downstream. Nothing breaks; every consumer keeps working correctly
+against the narrower contract it already knows, and the only symptom is absence.
+
+⛔ **One of them was CAUSATIVE, not cosmetic.** `crystal.py`'s consumer contract told readers that
+`crystallize` requires `level ∈ {2, 3}` and that a consumer "MUST guard `level in (2, 3)`" — and at
+least one consumer did exactly that, so the cap the release removed was **re-derived from the
+documentation** by every reader who trusted it. Corrected to `MIN_PROVEN_LEVEL`, with the causal
+chain recorded in place.
+
+Also corrected: `SKILL.md` taught `1x → 2x → 3x` full stop, in the doc an **agent** loads — now the
+open ladder with no top rung, and pinned by a new test, because the generated instructions had
+`TestTeacherCoversReaderRange` and SKILL.md had nothing; `crystal.py`'s module header said patterns
+graduate IN at 3x (it is `MIN_PROVEN_LEVEL`, 2); a `UserWarning` called an Nx pattern "top-tier
+(3x)"; four field comments read "(2 or 3)"; and the citation-validator docstring said it scans
+"2x/3x lines" when its regex has had no ceiling since 0.9.7.
+
+⚠ **`_BARE_GRADUATION_RE` deliberately stays `[23]`** — widening it puts fourteen mature carried
+patterns onto the bare-demotion path at the next re-stamp. But its justification said "the asymmetry
+is inert", which was **measured false**: of flow's live pattern lines only three carry an
+`[evidence:]` tag, fourteen are bare at level ≥ 4, and ten of those were dated to the wrap then in
+progress. Today-dated bare 4x+ lines are the habit, not the exception the date-gate assumption
+relied on. The deferral stands on blast radius; only its stated reason was wrong, **and a deferral
+resting on a false premise is one somebody re-opens for the wrong reason**.
+
+### Fixed — two assertions used for type narrowing did not survive `python -O`
+
+`assert package is not None` and `assert cont_tmp is not None` enforced pipeline invariants that
+vanish under `-O`, where the following line raised `TypeError`/`AttributeError` on None instead of a
+typed library error — at a point where the DB has already committed. ⭐ The identical correction was
+already made for `meta_tmp` and documented **twenty lines below `cont_tmp`**: it landed on one
+sibling and not its neighbour. Both are explicit raises now.
+
+### Fixed — an invented quotation, and a published claim that used the regex it was broken by
+
+A comment attributed *"not a one-way 3x ratchet…"* to "the shipped methodology" in quotation marks;
+the string appears nowhere but in that comment. Now cites the real site. And 0.9.7's release note
+asserted the 1x floor while quoting `([2-9]|\d{2,})` — the regex whose `\d{2,}` matched a
+zero-padded `01x` as level 1, i.e. the note asserts the property that bug broke. Corrected in place.
+
+### Fixed — an "EXACTLY" test that checked one direction, and the one it named
+
+`test_marker_kinds_taught_are_exactly_the_kinds_the_reader_accepts` proved only *accepted ⊆ taught*.
+Its own docstring names the risk as "teaching a marker the reader silently drops" — the **other**
+direction, and the unchecked one. The converse now round-trips every taught marker through the real
+reader. Scoped to the teaching shape rather than every backticked glyph, because a naive scan fails
+on correct text (the instructions also backtick the markdown bullet, the level separator, and `~` as
+an explicit non-marker) — the same over-matching trap as the SKILL.md "CLI only" guard.
+
 ### Added — AM-WRAPCANCEL-CAS: `wrap_cancel` can be asked to prove the wrap is yours
 
 Alex De Groodt's **A3**, reported 2026-08-04 and deliberately NOT shipped in 0.9.8, whose letter said
@@ -303,7 +355,8 @@ Both are the same shape as everything else in this release: a description that d
 - **Found via an AM-LINKGATE warning** (`"no graduation offered a co-citation pair, so 0 Hebbian links formed"`) on a real store whose four co-citing pattern lines all sat at 4x/6x/7x/10x. The warning was accurate about the symptom and structurally unable to name the cause.
 - **Measured on that store**, same text, same episodes, only the regex changed: `validated` 1 → 7, `direct_co_citations` 0 → 4, session pairs 0 → 6, and the real write path formed **6 associations where it had formed 0**.
 - **Both halves ship together, deliberately.** Lifting only the graduation cap makes a 4x line legal and linkable in the working set while still denying it an exit — converting a silent-drop bug into an unbounded always-loaded working set, the exact failure the crystal store exists to prevent.
-- **The floor is unchanged**: 1x is a developing pattern and belongs in the working set, not the deep store. `([2-9]|\d{2,})` and `MIN_PROVEN_LEVEL = 2` both still exclude it.
+- **The floor is unchanged**: 1x is a developing pattern and belongs in the working set, not the deep store. `([2-9]|[1-9][0-9]+)` and `MIN_PROVEN_LEVEL = 2` both still exclude it.
+  > ⚠ **CORRECTION, 2026-09-04 — this line shipped asserting the property it names, using the regex that BROKE it.** As published it read `([2-9]|\d{2,})`, and `\d{2,}` matches a zero-padded level: `| 01x` parsed as a validated graduation at `int("01") == 1`, so the deliberate 1x exclusion this sentence claims was bypassed by a leading zero. Fixed in 0.9.8 (`([2-9]|[1-9][0-9]+)`, parametrized regressions added); the text is corrected here rather than rewritten, because what shipped is what this section is for.
 - **Why a ceiling was wrong here at all:** `crystallize()` documents raising level *"monotonically (never lowers it — a pattern's earned high-water mark holds)"*, and a high-water mark that saturates at 3 is not a high-water mark. Level is the **strength** axis (how many times lived experience re-earned the pattern); `last_activated_on` is the **recency** axis. Capping strength collapses a two-axis model to one.
 - **Who this affected:** any consumer whose methodology counts past 3x. A consumer following the shipped 1x→2x→3x→crystallize lifecycle never produced an affected line, which is why this survived to 0.9.6 unnoticed.
 - `VALID_LEVELS` is **retained as a public compat export** and is no longer the gate; it now only names the two levels at which a pattern typically first crystallizes. The CLI's `choices=VALID_LEVELS` becomes a `_proven_level` argparse type, since the valid set is open-ended.
@@ -316,6 +369,7 @@ Landed on `main` as `fef6af0` and never published. `_NAMED_PATTERN_RE` offered `
 
 - `MIN_PROVEN_LEVEL` added to the public API.
 - Both fixes are pinned by mutation-verified tests. The suite was green **before and after** the level-cap fix (nothing pinned the ceiling), which is itself why the new tests assert the property — 2..27 including two-digit levels — rather than the one reported case.
+  > ⚠ **2026-09-04 — the mutation measurement behind this line was never re-run**, and Diogenes carried it twice on file-text-unchanged, which his own rule forbids a third time. The historical half (what the suite did on 2026-08-14) is not re-runnable. The half that matters IS checkable and is now named rather than asserted: the ceiling is pinned by `TestTeacherCoversReaderRange::test_delivered_instructions_show_a_level_above_the_cap` and, since 2026-09-04, by `test_skill_does_not_teach_a_terminating_graduation_ladder` for the agent-facing doc that was pinned by nothing. An unverifiable claim replaced by a named test a reader can run.
 
 
 ## [0.9.6] — 2026-06-30

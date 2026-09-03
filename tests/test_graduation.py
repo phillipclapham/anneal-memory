@@ -1193,6 +1193,8 @@ class TestTeacherCoversReaderRange:
     def test_marker_kinds_taught_are_exactly_the_kinds_the_reader_accepts(self):
         """codex L3 MED: the KINDS are a closed set; only the ``!`` RUN is open.
         Teaching 'not a closed set' invites a marker the reader silently drops."""
+        import re as _re
+
         delivered = self._delivered()
         for accepted in ("`?`", "`✓`", "`*`"):
             assert accepted in delivered, f"reader accepts {accepted}, teaching omits it"
@@ -1200,6 +1202,36 @@ class TestTeacherCoversReaderRange:
         assert extract_pattern_names(
             '## Patterns\n- ~ p | 2x (2026-08-31) [evidence: abc12345 "x"]\n'
         ) == {}
+
+        # ⭐ THE CONVERSE — the direction this test is NAMED for and did not check.
+        # "EXACTLY" is a two-way claim, but the body only proved accepted ⊆ taught.
+        # The docstring names the risk as "teaching a marker the reader silently
+        # drops", which is the OTHER direction: taught ⊆ accepted. That half was
+        # missing, so the test certified an equality while checking an inclusion.
+        # Diogenes carried it as "the EXACTLY test checking one direction".
+        # Behaviour, not text: every glyph the instructions teach must survive a
+        # real round-trip through the reader.
+        # ⚠ SCOPED TO THE TEACHING SHAPE, NOT EVERY BACKTICKED GLYPH. A naive
+        # scan over-matches and fails on correct text: the instructions also
+        # backtick the markdown bullet `-`, the level separator `|`, and `~` as
+        # an explicit NON-marker ("silently ignored"). Same over-matching trap
+        # as the SKILL.md "CLI only" guard. A marker is taught by a bullet that
+        # both names the glyph AND shows it in a pattern line, which is exactly
+        # the form an agent copies.
+        taught_markers = _re.findall(
+            r"^- `([^\w\s`])` [^\n]*→ `- \1 pattern_name", delivered, _re.M
+        )
+        assert taught_markers, "no marker teaching found — has the format changed?"
+        for taught in taught_markers:
+            line = (
+                "## Patterns\n"
+                f'- {taught} probe | 2x (2026-08-31) [evidence: abc12345 "x"]\n'
+            )
+            assert extract_pattern_names(line) == {"probe": 2}, (
+                f"the delivered instructions teach the marker {taught!r}, but the "
+                f"reader SILENTLY DROPS a pattern line carrying it — an agent "
+                f"obeying the teaching loses the pattern with no error"
+            )
 
     def test_a_long_bang_run_is_read_at_a_high_level(self):
         """Behaviour, not text: pins BOTH open axes at once, so the salience

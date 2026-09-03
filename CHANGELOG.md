@@ -4,6 +4,25 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added — a test that HEAD is not stamped at an already-released version
+
+spore-710's policy — *the commit after a release bumps to the next `.devN`, or the release commit is
+the last one on that number* — was written into this CHANGELOG on 2026-09-03, and **the very next
+commit after the `v0.9.9` tag landed still stamped `0.9.9`**. The action-boundary hook surfaced
+spore-710 before that push and the push happened anyway: the note was on screen, correct, and
+specific, and it did not change the behaviour.
+
+That is why this is now a test. Reading is not acting, and **structural invariants beat discipline** —
+the 0.9.9 cut had already shown the mechanical half works, since a consistency test is the only
+reason the *third* stamp site (`server.json`) was found at all.
+
+It reads **git tags, not PyPI**, deliberately: an unreachable network oracle degrades to a PASS,
+which is this defect's whole shape — an instrument reporting health because it could not look. Skips
+loudly outside a git checkout or with no tags. Mutation-checked by restoring the exact defect.
+
+⭐ Credit where it belongs: the levain seat built the equivalent guard the same morning, after the
+identical shared defect. anneal had the policy and no test; levain had neither and now has both.
+
 ### Fixed — the AM-LEVELCAP tail was larger than 0.9.9 reported, and a peer's Unicode-arrow tip found it
 
 0.9.9's notes said "eleven surfaces". That was an **undercount**, and the correction came from the

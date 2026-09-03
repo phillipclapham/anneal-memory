@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# anneal-memory pre-push gate.
+#
+# ⛔ WHY THIS EXISTS, and it is a specific failure rather than a precaution.
+# 2026-09-04: spore-710's policy ("the commit after a release bumps to the next
+# .devN") was written into this repo's own CHANGELOG in the morning, and the
+# very next commit after the v0.9.9 tag still stamped 0.9.9. The flow
+# action-boundary hook printed that note IN FULL immediately before the push.
+# On screen, correct, specific, about that exact command — and the push happened
+# anyway. Reading is not acting.
+#
+# The test that catches it already existed by then. What did not exist was
+# anything that RUNS it between "the stamp is wrong" and "it is public": CI
+# fires after the push, which is after the damage. This closes that window.
+#
+# Deliberately FAILS CLOSED. A guard that degrades to a pass when it cannot run
+# is the exact shape of the defect it guards against (an instrument reporting
+# health because it could not look). The escape is explicit and visible:
+#   git push --no-verify
+set -uo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+cd "$root" || exit 1
+
+for py in .venv/bin/python python3; do
+    command -v "$py" >/dev/null 2>&1 && { PY="$py"; break; }
+    [ -x "$py" ] && { PY="$py"; break; }
+done
+
+if [ -z "${PY:-}" ]; then
+    echo "pre-push: no python found to run the release-stamp gate." >&2
+    echo "          Fix the environment, or push deliberately with --no-verify." >&2
+    exit 1
+fi
+
+if ! "$PY" -m pytest tests/test_integrity.py -q \
+        -k "ReleaseStampIsNotAPublishedVersion" >/tmp/anneal_prepush.$$ 2>&1; then
+    echo >&2
+    echo "⛔ pre-push BLOCKED — the release-stamp gate failed:" >&2
+    echo >&2
+    sed -n '/FAILED\|AssertionError\|Error/p' /tmp/anneal_prepush.$$ | head -8 >&2
+    echo >&2
+    echo "   HEAD is stamped at an already-released version. Bump to the next" >&2
+    echo "   .devN (pyproject.toml, anneal_memory/__init__.py, server.json x2)" >&2
+    echo "   and regenerate both tool-integrity.json manifests. See spore-710." >&2
+    echo >&2
+    echo "   To push anyway: git push --no-verify" >&2
+    rm -f /tmp/anneal_prepush.$$
+    exit 1
+fi
+rm -f /tmp/anneal_prepush.$$
+exit 0

@@ -4,6 +4,24 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added — a pre-push hook, because the test alone still left the window open
+
+The levain seat's read of the incident, and it is the sharper one: **the guard catches it at COMMIT
+time, and nothing fires between "the stamp is wrong" and "it is public."** CI runs *after* the push,
+which is after the damage. The flow action-boundary hook was the only thing in that window, and it
+had just failed its one job.
+
+`scripts/hooks/pre-push` runs the release-stamp gate and refuses the push. Install once per clone
+with `bash scripts/install_hooks.sh` (it sets `core.hooksPath`, so a hook dropped in `.git/hooks/`
+is ignored — the hooks that fire are the versioned, reviewable ones).
+
+⛔ **It fails CLOSED.** A guard that degrades to a pass when it cannot run is the exact shape of the
+defect it guards against — an instrument reporting health because it could not look. The escape is
+explicit and visible rather than silent: `git push --no-verify`.
+
+**Verified on the real path, not simulated**: reproduced the 0.9.9-on-a-post-tag-HEAD defect on a
+scratch branch and `git push` was refused with the bump instructions.
+
 ### Added — a test that HEAD is not stamped at an already-released version
 
 spore-710's policy — *the commit after a release bumps to the next `.devN`, or the release commit is

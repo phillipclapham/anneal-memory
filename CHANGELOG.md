@@ -103,6 +103,31 @@ wrapper's formatted message, which embeds the store path — a database under a 
 `locked/` would fool a substring test. `cause_type_name` cannot do this job despite being advertised
 as the retry-dispatch key: `SQLITE_BUSY` and a malformed database image are both `OperationalError`.
 
+### Fixed — an in-progress wrap was refused only after waiting out the write lock
+
+`BEGIN IMMEDIATE` made `wrap_started`'s single-writer guard cross-connection atomic and, as first
+written, also put the write lock in front of a question it is not needed for. **"Is a wrap already
+in progress" is a READ, and WAL readers never block** — but a caller whose correct answer was
+`WrapInProgressError` instead waited out `busy_timeout` (5s by default) behind an unrelated writer
+and got `StoreDatabaseError`: told the database was broken when the true answer was available
+instantly. Measured at 0.85s and the wrong class against an 800ms timeout. Under several parallel
+sessions this converts real refusals into stalls.
+
+A refusal-only pre-check now runs before the lock is taken: **0.85s → 0.000s**, correct class, and
+the clobber guard is unchanged because the authoritative check stays inside the transaction.
+
+⛔ **The soundness turns entirely on the direction the fast path can err.** It can only REFUSE,
+never grant. A stale "no wrap in progress" falls through to the real check inside the lock, so no
+clobber is possible; a stale "wrap in progress" is a spurious refusal, which is safe and is exactly
+what this method did before the lock existed. A double-check is sound only when the fast path errs
+toward the safe answer — here that is *refuse*.
+
+⚠ The first cut placed the pre-check ABOVE `_db_boundary` and the suite caught it at once: a SQLite
+failure on that read escaped as a raw `sqlite3.OperationalError`, breaking the caller-consistency
+primitive ("every store failure surfaces through `StoreError`") that boundary exists for. It sits
+inside the boundary and before the transaction — the only placement that gets both. **An
+optimisation outside the error boundary is a hole in the error boundary.**
+
 ### Fixed — the AM-LEVELCAP carried tail: eleven surfaces still teaching a ceiling removed in 0.9.7
 
 0.9.7 lifted the `level in (2, 3)` cap because a pattern earned 4+ times could neither validate nor

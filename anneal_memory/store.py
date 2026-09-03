@@ -1983,7 +1983,42 @@ class Store:
         # ``load_wrap_snapshot`` still treats as an integrity failure
         # as belt-and-suspenders defense even though the v0.3.0
         # signature tightening removed the API path that produced it).
+        # ⚡ FAST REFUSAL BEFORE THE LOCK — refusal-only, never permission.
+        # ⚠ It sits INSIDE ``_db_boundary`` and BEFORE ``BEGIN IMMEDIATE``, which
+        # is the only placement that works: the boundary opens no transaction, so
+        # the refusal still costs no lock, while a SQLite failure on this read
+        # still surfaces as StoreDatabaseError. The first cut put it above the
+        # boundary and ``test_wrap_started_wraps_sqlite_error`` caught it —
+        # a raw sqlite3.OperationalError escaped, breaking the caller-consistency
+        # primitive ("EVERY store failure surfaces through StoreError") that
+        # boundary exists for. An optimisation outside the error boundary is a
+        # hole in the boundary.
+        # Taking BEGIN IMMEDIATE below made the guard cross-connection atomic,
+        # but it also put the WRITE lock in front of a question that needs no
+        # lock to answer: "is a wrap already in progress" is a READ, and WAL
+        # readers never block. Without this, a caller whose correct answer is
+        # WrapInProgressError instead waited out busy_timeout (5s by default)
+        # behind an unrelated writer and got StoreDatabaseError — told the
+        # DATABASE was broken when the true answer was available instantly.
+        # Measured 2026-09-04: 0.85s at busy_timeout=800ms, wrong error class.
+        # Flagged by the L1 seat as the one behavioural edge of the lock change.
+        #
+        # ⛔ WHY THIS IS SAFE, AND IT TURNS ENTIRELY ON THE DIRECTION IT CAN ERR.
+        # This check can ONLY refuse; it never grants permission to write. The
+        # authoritative check is still the one inside the transaction below.
+        #   · stale "no wrap in progress" -> falls through, takes the lock, and
+        #     the real check refuses. No clobber.
+        #   · stale "wrap in progress" (it completed microseconds ago) -> a
+        #     spurious refusal, which is safe and is exactly what this method
+        #     did before the lock existed. The caller retries.
+        # A double-check is only sound when the fast path errs toward the safe
+        # answer, and here the safe answer is REFUSE.
         with self._db_boundary("wrap_started"):
+            if not allow_restart:
+                existing_started = self._get_metadata("wrap_started_at")
+                if existing_started:
+                    raise WrapInProgressError(started_at=existing_started)
+
             # AM-PREPARE-GUARD (0.4.2): single-writer refusal at the true
             # write-point. BEGIN IMMEDIATE takes the write lock BEFORE the
             # guard read, so the check (read wrap_started_at) and the set

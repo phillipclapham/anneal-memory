@@ -266,6 +266,90 @@ class TestShippedManifest:
         )
 
 
+class TestReleaseStampIsNotAPublishedVersion:
+    """HEAD must not be stamped at a version that is already released.
+
+    ⛔ THE POLICY (spore-710, 2026-09-03): the commit after a release bumps to
+    the next ``.devN``, or the release commit is the last one on that number.
+    Otherwise the version names TWO trees and what a developer clones is not
+    what an adopter installs — including a `tool-integrity.json` that no longer
+    matches the published one.
+
+    ⚠ WHY THIS IS A TEST AND NOT A RULE. It was already a written policy, in
+    this repo's own CHANGELOG, when the very next commit after the v0.9.9 tag
+    landed still stamped 0.9.9. The action-boundary hook surfaced spore-710
+    before that push and the push happened anyway: the note was on screen,
+    correct and specific, and it did not change the behaviour. Reading is not
+    acting, and structural invariants beat discipline.
+
+    Reads GIT TAGS, not PyPI, deliberately: an unreachable network oracle
+    degrades to a PASS, which is this defect's whole shape — an instrument that
+    reports health because it could not look.
+    """
+
+    def _run(self, *args):
+        import subprocess
+        root = self._root()
+        try:
+            r = subprocess.run(
+                ["git", *args], cwd=root, capture_output=True, text=True, timeout=10
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return r.stdout.strip() if r.returncode == 0 else None
+
+    def _root(self):
+        import anneal_memory
+        return Path(anneal_memory.__file__).resolve().parent.parent
+
+    def test_head_stamp_is_not_an_already_released_version(self):
+        import re
+        from anneal_memory import __version__
+
+        if self._run("rev-parse", "--git-dir") is None:
+            pytest.skip("not a git checkout")
+        tags = self._run("tag", "--list", "v*")
+        if not tags:
+            pytest.skip("no release tags to compare against")
+
+        released = {t.lstrip("v") for t in tags.splitlines() if t.strip()}
+        if __version__ not in released:
+            return  # a .devN or an unreleased number — correct by construction
+
+        # The stamp equals a released version. That is legal ONLY if HEAD is
+        # that exact release commit.
+        at_head = (self._run("tag", "--points-at", "HEAD") or "").splitlines()
+        assert f"v{__version__}" in at_head, (
+            f"HEAD is stamped {__version__!r}, which is already released, but "
+            f"HEAD is not the v{__version__} commit. Bump to the next .devN — "
+            f"a published number on a moving main makes the version name two "
+            f"trees (spore-710)."
+        )
+
+    def test_every_stamp_site_agrees(self):
+        """The 0.9.9 cut found a THIRD stamp site (server.json) only because a
+        consistency test failed. Pin all of them together."""
+        import json
+        import re
+        from anneal_memory import __version__
+
+        root = self._root()
+        pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+        m = re.search(r'^version = "([^"]+)"', pyproject, re.M)
+        assert m, "pyproject.toml no longer declares a version"
+        assert m.group(1) == __version__, (
+            f"pyproject {m.group(1)!r} != __version__ {__version__!r}"
+        )
+
+        sj = json.loads((root / "server.json").read_text(encoding="utf-8"))
+        assert sj["version"] == __version__, "server.json top-level version drifted"
+        for pkg in sj.get("packages", []):
+            assert pkg["version"] == __version__, (
+                "server.json packages[].version drifted — and this one names the "
+                "PyPI version, so at publish it must name a release that exists"
+            )
+
+
 class TestVersionConsistency:
     """Every shipped version string must agree with ``__version__``.
 

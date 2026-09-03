@@ -266,6 +266,54 @@ class TestShippedManifest:
         )
 
 
+class TestSourceCompilesCleanlyOnEveryTargetPython:
+    """No module may contain an invalid escape sequence.
+
+    ⛔ THIS BROKE CI ON 2026-09-04 AND COULD NOT BREAK LOCALLY. A docstring
+    written with ``\\`` escapes is a *SyntaxWarning* on Python 3.12+ and a hard
+    *SyntaxError* under pytest's assertion rewriter on 3.10/3.11. The dev
+    machine runs 3.13; CI runs 3.10-3.13. The full suite passed locally, twice,
+    against a file that could not even be COLLECTED on half the support matrix.
+
+    ⚖ THE GENERAL POINT, which is why this test exists rather than a note:
+    "tests pass locally" is a claim about ONE interpreter. With a four-version
+    matrix it is evidence about a quarter of it, and the missing three quarters
+    are invisible rather than red. Same shape as every other defect this suite
+    has grown a guard for — an instrument reporting health on an axis it does
+    not measure.
+
+    ⚡ It is catchable locally: the warning EXISTS on 3.13, it simply is not
+    fatal there. Promoting it to an error reproduces the 3.10 failure on any
+    interpreter, so this closes the version gap for this class without needing
+    the other interpreters installed.
+    """
+
+    def test_no_module_has_an_invalid_escape_sequence(self):
+        import warnings
+
+        root = Path(__file__).resolve().parent.parent
+        offenders = []
+        for path in sorted(
+            list((root / "anneal_memory").rglob("*.py"))
+            + list((root / "tests").rglob("*.py"))
+        ):
+            src = path.read_text(encoding="utf-8")
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", SyntaxWarning)
+                try:
+                    compile(src, str(path), "exec")
+                except SyntaxWarning as exc:
+                    offenders.append(f"{path.relative_to(root)}: {exc}")
+                except SyntaxError as exc:
+                    offenders.append(f"{path.relative_to(root)}: SyntaxError: {exc}")
+        assert not offenders, (
+            "invalid escape sequence(s) — a SyntaxWarning here is a hard "
+            "SyntaxError on Python 3.10/3.11 under pytest's assertion "
+            "rewriter, so the file cannot even be COLLECTED there:\n  "
+            + "\n  ".join(offenders)
+        )
+
+
 class TestReleaseStampIsNotAPublishedVersion:
     """HEAD must not be stamped at a version that is already released.
 
@@ -691,7 +739,7 @@ class TestDocumentedToolCount:
         and this test fails. And checked against the DEFECT ITSELF rather than
         a mutant: the published 0.9.8 sdist was downloaded from PyPI on
         2026-09-03 and its SKILL.md does not contain the string
-        ``\`wrap_cancel\``` anywhere, so this loop would have failed on the
+        the backticked tool name anywhere, so this loop would have failed on
         artifact that shipped. The guard that was there did not.
         """
         skill = self._root() / "skill" / "anneal-memory" / "SKILL.md"

@@ -478,11 +478,23 @@ class WrapCancelReceipt(NamedTuple):
 
     Read inside the clearing transaction, so it cannot disagree with what was
     cleared — which a separate ``load_wrap_snapshot()`` before the clear can
-    (see that method's note on the race it removes).
+    (see that method's note on the race it removes). That atomicity comes from
+    the ``BEGIN IMMEDIATE`` in :meth:`Store.wrap_cancelled` and from nothing
+    else; 0.9.8 made this claim without it and it was false.
 
     ``token`` / ``started_at`` are ``None`` on an idle store. ``episode_ids``
-    is ``None`` when there were none or the stored JSON was unreadable —
-    distinct from ``[]``, which means a wrap really did freeze an empty list.
+    is ``None`` whenever a list of strings could not be recovered: no
+    ``wrap_episode_ids`` metadata was set at all, the stored JSON was
+    unreadable, OR it parsed to something that is not a list of strings
+    (``[1, 2]``, ``{"a": 1}``, ``"hello"``, ``null`` — all readable JSON, all
+    ``None`` here, all ``partial_state``). ⚠ This sentence said "in exactly two
+    cases" until 2026-09-03; the third was missing even though the code's own
+    comment in :meth:`wrap_cancelled` names wrong-shape JSON as a deliberate
+    category. It is NOT ``None`` for a wrap that simply had no episodes — that freezes the string ``"[]"`` and reads
+    back as ``[]``. ⚠ Do not branch ``if episode_ids is None`` and call it
+    "no episodes": that treats the CORRUPT case as the benign one, which is
+    the confusion ``partial_state`` exists to make loud. Branch on
+    ``partial_state``, and use ``episode_ids`` only for the list itself.
     ``partial_state`` is True when some lifecycle keys were present but the set
     was incomplete or corrupt: the recovery case, worth saying out loud rather
     than reporting as "no wrap was in progress".
@@ -1725,10 +1737,23 @@ class Store:
         set this raises :class:`WrapInProgressError` rather than
         clobbering the existing token + episode snapshot (which would
         strand the open wrap's compression — only the save-side CAS
-        caught it before). The check reads ``wrap_started_at`` inside
-        the SAME transaction as the writes, so the check-and-set is
-        atomic on this connection: a second ``wrap_started`` cannot slip
-        between the check and the INSERTs. :func:`prepare_wrap` guards
+        caught it before). The block opens with ``BEGIN IMMEDIATE``, so
+        the guard read takes the write lock and the check-and-set is
+        atomic ACROSS CONNECTIONS: a second ``wrap_started`` cannot slip
+        between the check and the INSERTs.
+
+        ⚠ THIS DOCSTRING WAS FALSE BEFORE THE ``BEGIN IMMEDIATE``, and the
+        way it was false is worth keeping. It said the check read
+        ``wrap_started_at`` *"inside the SAME transaction as the writes"*.
+        It did not: a bare SELECT opens no transaction under
+        ``isolation_level=""``, which the inline comment at the guard
+        stated correctly while this paragraph — the one a caller actually
+        reads — asserted the opposite. Measured 2026-09-03,
+        ``in_transaction`` was ``False`` at the guard read. The fallback
+        the comment offered does not cover this path either:
+        ``continuity_lock`` is taken inside
+        :func:`validated_save_continuity` only, never in
+        :func:`prepare_wrap`, which is what calls this method. :func:`prepare_wrap` guards
         earlier and so reaches this method with an empty flag; this is
         the structural backstop that protects every other direct caller
         and closes ``prepare_wrap``'s own check→write window. Pass
@@ -1853,16 +1878,21 @@ class Store:
         # signature tightening removed the API path that produced it).
         with self._db_boundary("wrap_started"):
             # AM-PREPARE-GUARD (0.4.2): single-writer refusal at the true
-            # write-point. The check (read wrap_started_at) and the set
-            # (the INSERTs below) run in the SAME transaction on this one
-            # connection. Under the store's documented single-process /
-            # caller-flock-serialized model that makes the read→decide→write
-            # atomic for the writer holding the lock. It is NOT a
-            # cross-connection guarantee on its own: there is no
-            # BEGIN IMMEDIATE and the SELECT takes no write lock, so a
-            # hypothetical competing connection WITHOUT the external flock
-            # could still race the check. That writer is excluded by the
-            # flock by design — closing it here would need BEGIN IMMEDIATE.
+            # write-point. BEGIN IMMEDIATE takes the write lock BEFORE the
+            # guard read, so the check (read wrap_started_at) and the set
+            # (the INSERTs below) really are one transaction and the
+            # read→decide→write is atomic ACROSS connections.
+            #
+            # ⚠ Until 2026-09-03 this comment ended "closing it here would
+            # need BEGIN IMMEDIATE" and correctly said the SELECT took no
+            # write lock — while the DOCSTRING above claimed the check and
+            # the writes already shared a transaction. Both described the
+            # same code; only one was true. The deferral rested on the
+            # competing writer being "excluded by the flock by design", and
+            # that is not so for this path: continuity_lock is taken in
+            # validated_save_continuity only, never in prepare_wrap, which
+            # is this method's caller. So the lock is taken here instead.
+            self._conn.execute("BEGIN IMMEDIATE")
             # (This is a transactional read-then-write, NOT the
             # single-statement compare-and-swap UPDATE wrap_completed uses.)
             # ``_get_metadata`` is a bare SELECT on self._conn — calling
@@ -1940,7 +1970,9 @@ class Store:
         the batched-write invariant :meth:`wrap_started` establishes.
 
         Returns a :class:`WrapCancelReceipt` describing **what this call
-        actually cleared**, read inside the same transaction as the clear.
+        actually cleared**, read inside the same transaction as the clear —
+        see the ``BEGIN IMMEDIATE`` paragraph below, which is what makes that
+        true rather than aspirational.
 
         ⚠ THE RETURN VALUE IS A CONCURRENCY FIX, NOT A CONVENIENCE (0.9.8).
         It returned ``None``, so every caller wanting to report what it
@@ -1949,8 +1981,41 @@ class Store:
         the wrap the caller saw and start a NEW one, and the unconditional
         clear below then destroys the new wrap while the caller reports the
         old token. The operator is told they cleaned up a corpse when they
-        killed a live peer. Reading and clearing in one transaction removes
-        the window instead of narrowing it. Found by codex + glm at L3.
+        killed a live peer. The block opens with ``BEGIN IMMEDIATE`` so the
+        reads take the write lock; read-and-clear is therefore atomic ACROSS
+        CONNECTIONS and the window is removed rather than narrowed. Found by
+        codex + glm at L3.
+
+        ⛔ SCOPE, SO NOBODY COMPRESSES THIS INTO SOMETHING FALSE: the fix makes
+        the TELLING honest, not the KILLING safe. The clear is still
+        UNCONDITIONAL — a peer wrap installed before this call takes the lock is
+        still destroyed; what changed is that the receipt now names the wrap
+        that was actually cleared instead of an earlier one. Checking ``status``
+        first (which is why the tool description says to) remains the only
+        mitigation for cancelling a live peer. ``wrap_cancel`` is NOT "safe
+        against live peers" and this paragraph does not say it is.
+
+        ⚠ ``BEGIN IMMEDIATE`` IS LOAD-BEARING, NOT DECORATION.
+        0.9.8 shipped the sentence above while the statement was absent, and
+        the claim was false from the moment it shipped. Under the store's default
+        ``isolation_level=""`` the implicit ``BEGIN`` fires before DML only,
+        never before a SELECT (:meth:`_batch` documents this), so without the
+        statement the three metadata reads below run in autocommit and a peer
+        can replace the wrap between the last read and the first INSERT.
+        Measured 2026-09-03 and driven to completion: the caller returned the
+        OLD token with ``partial_state=False`` while the peer's live wrap was
+        destroyed — verbatim the outcome this paragraph calls impossible.
+        The flock does NOT cover this path: ``continuity_lock`` guards the
+        continuity FILE, its own docstring says it does not span the wrap
+        lifecycle, and none of the three ``wrap_cancelled()`` call sites takes
+        it. :meth:`wrap_started` reached the same conclusion for the same
+        reason and takes the lock too, so neither method rests on that
+        exclusion any more. ⚠ This sentence read "so unlike
+        :meth:`wrap_started`, this method cannot rest on that exclusion" until
+        the sibling was fixed 2026-09-03, at which point it silently became a
+        false claim ABOUT ANOTHER METHOD — the land-somewhere-not-everywhere
+        shape, committed inside the change set written to close it (L1 seat). Removing the statement makes
+        ``test_a_peer_installed_between_read_and_clear_is_not_destroyed`` fail.
 
         The receipt is additive: existing callers that ignore the return value
         are unaffected.
@@ -1970,9 +2035,16 @@ class Store:
         # silent_error_swallowing inside the very tool that exists
         # to recover from silent error states. 10.5c.5 L1 MEDIUM.
         with self._db_boundary("wrap_cancelled"):
+            # Take the write lock BEFORE the reads so no peer connection can
+            # replace the wrap between what we report and what we clear. See
+            # the docstring's BEGIN IMMEDIATE paragraph — the bare SELECTs
+            # below do NOT open a transaction on their own. _db_boundary rolls
+            # back on any exception, so the lock is released on failure.
+            self._conn.execute("BEGIN IMMEDIATE")
             cancelled_started_at = self._get_metadata("wrap_started_at")
             cancelled_token = self._get_metadata("wrap_token")
             cancelled_ids_raw = self._get_metadata("wrap_episode_ids")
+            cancelled_schema_raw = self._get_metadata("wrap_section_schema")
 
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
@@ -1995,6 +2067,55 @@ class Store:
             )
             self._conn.commit()
 
+        # ONE parse, ONE predicate, feeding BOTH the audit payload and the
+        # receipt. 0.9.8 computed "is this partial state" twice, eleven lines
+        # apart — the audit half from the RAW metadata string, the receipt half
+        # from the PARSED value — so they agreed everywhere EXCEPT the
+        # unreadable-JSON case, which is precisely the recovery case the audit
+        # marker exists to flag. The receipt said partial_state=True while the
+        # tamper-evident record called the same event a routine abandonment.
+        # Diogenes 2026-09-03 MEDIUM. Hoisted above the audit block so there is
+        # only one definition to keep honest.
+        decoded_ids: Any = None
+        if cancelled_ids_raw:
+            try:
+                decoded_ids = json.loads(cancelled_ids_raw)
+            except json.JSONDecodeError:
+                decoded_ids = None
+
+        episode_ids: list[str] | None = None
+        if isinstance(decoded_ids, list) and all(
+            isinstance(x, str) for x in decoded_ids
+        ):
+            episode_ids = decoded_ids
+
+        # "Partial" means the store was NOT in a clean wrap-in-progress state:
+        # some lifecycle keys present, or episode IDs unreadable. An idle store
+        # (nothing set at all) is not partial — it is simply idle, which the
+        # ``token is None and started_at is None`` pair already says.
+        # ⚠ DELIBERATE WIDENING vs 0.9.8's audit half: valid JSON of the wrong
+        # SHAPE (e.g. ``[1, 2]``) is now partial too. It was "healthy" to the
+        # old raw-string test purely because the string was non-empty, and a
+        # list the receipt refuses to hand back is not a readable episode list.
+        # ⚠ FOUR lifecycle keys are cleared by this method, so all four count as
+        # "there was state here". ``wrap_section_schema`` was omitted, so a store
+        # holding ONLY a stray frozen schema reported "no wrap was in progress"
+        # and emitted NO audit event at all — state silently discarded with no
+        # record. It is deliberately NOT part of ``complete``: wraps written
+        # before AM-SCHEMASNAPSHOT have no frozen schema and are otherwise
+        # healthy, so requiring one would mark ordinary cancels partial.
+        # codex L3.
+        had_any = bool(
+            cancelled_started_at
+            or cancelled_token
+            or cancelled_ids_raw
+            or cancelled_schema_raw
+        )
+        complete = bool(
+            cancelled_started_at and cancelled_token and episode_ids is not None
+        )
+        partial_state = had_any and not complete
+
         if self._audit is not None:
             # Three cases:
             # 1. Healthy cancel — all three keys were set. Log full
@@ -2006,62 +2127,58 @@ class Store:
             #    from "operator abandoned a healthy wrap."
             # 3. Clean store — none of the three keys was set. No
             #    audit event (there was nothing to cancel).
-            any_state = bool(
-                cancelled_started_at or cancelled_token or cancelled_ids_raw
-            )
-            if any_state:
+            if had_any:
                 payload: dict[str, Any] = {}
                 if cancelled_token:
                     payload["wrap_token"] = cancelled_token
                 if cancelled_started_at:
                     payload["wrap_started_at"] = cancelled_started_at
-                if cancelled_ids_raw:
-                    # Audit is best-effort: a corrupt JSON here should
-                    # not prevent the cancellation from being recorded.
-                    try:
-                        decoded = json.loads(cancelled_ids_raw)
-                        if isinstance(decoded, list):
-                            payload["wrap_episode_ids"] = decoded
-                            payload["wrap_episode_count"] = len(decoded)
-                    except json.JSONDecodeError:
-                        pass
-                # Healthy cancels have all three keys set. Anything
-                # else is partial state — tag it so operators
-                # reviewing the audit trail know this was recovery,
-                # not routine abandonment.
-                healthy = bool(
-                    cancelled_started_at
-                    and cancelled_token
-                    and cancelled_ids_raw
-                )
-                if not healthy:
+                # Audit is best-effort: corrupt JSON must not prevent the
+                # cancellation being recorded, so log whatever list parsed.
+                if isinstance(decoded_ids, list):
+                    payload["wrap_episode_ids"] = decoded_ids
+                    payload["wrap_episode_count"] = len(decoded_ids)
+                # Tag partial state so operators reviewing the audit trail
+                # know this was recovery, not routine abandonment — from the
+                # SAME predicate the receipt reports, never a second one.
+                if partial_state:
                     payload["partial_state"] = True
-                self._audit.log("wrap_cancelled", payload)
+                try:
+                    self._audit.log("wrap_cancelled", payload)
+                except Exception as exc:
+                    # ⛔ THE CANCELLATION IS ALREADY COMMITTED ABOVE. Letting an
+                    # audit I/O failure (disk full, permissions, a failed
+                    # rotation) propagate would raise out of this method with the
+                    # metadata ALREADY cleared and no receipt returned — MCP
+                    # reports isError, the CLI shows a traceback, and the
+                    # operator is told the cancel failed when it succeeded.
+                    # A peer then finds its token gone with no audit explaining
+                    # why. codex L3 HIGH.
+                    #
+                    # ⭐ THE POLICY ALREADY EXISTS IN THIS FILE and this method
+                    # was violating it: :meth:`_batch` documents that audit-flush
+                    # exceptions are swallowed after a successful commit,
+                    # because propagating one "would trick the caller's outer
+                    # except clause into cleaning up tmp files that represent
+                    # committed state — a data-loss path." Same reasoning, same
+                    # answer. The failure is surfaced as a warning rather than
+                    # silently dropped, because a missing audit event is a real
+                    # gap in a tamper-evident record.
+                    warnings.warn(
+                        "wrap_cancelled: the cancellation COMMITTED but its "
+                        f"audit event could not be written ({exc!r}). The store "
+                        "state is correct; the audit trail is missing this "
+                        "event. Investigate the audit sink before relying on "
+                        "the trail for this window.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
 
-        episode_ids: list[str] | None = None
-        if cancelled_ids_raw:
-            try:
-                decoded_ids = json.loads(cancelled_ids_raw)
-            except json.JSONDecodeError:
-                decoded_ids = None
-            if isinstance(decoded_ids, list) and all(
-                isinstance(x, str) for x in decoded_ids
-            ):
-                episode_ids = decoded_ids
-
-        # "Partial" means the store was NOT in a clean wrap-in-progress state:
-        # some lifecycle keys present, or episode IDs unreadable. An idle store
-        # (nothing set at all) is not partial — it is simply idle, which the
-        # ``token is None and started_at is None`` pair already says.
-        had_any = bool(cancelled_started_at or cancelled_token or cancelled_ids_raw)
-        complete = bool(
-            cancelled_started_at and cancelled_token and episode_ids is not None
-        )
         return WrapCancelReceipt(
             token=cancelled_token or None,
             started_at=cancelled_started_at or None,
             episode_ids=episode_ids,
-            partial_state=had_any and not complete,
+            partial_state=partial_state,
         )
 
     def get_wrap_started_at(self) -> str | None:
@@ -3894,7 +4011,11 @@ class Store:
             # then propagate unchanged (we do NOT wrap non-DB errors). A
             # refusal raised BEFORE any DML (WrapInProgressError, the
             # input-validation ValueError/TypeError guards) or a failed
-            # read finds no open transaction, so this is a no-op for them.
+            # read USED to find no open transaction, making this a no-op for
+            # them. That is no longer true where the block opens with
+            # BEGIN IMMEDIATE (wrap_started, wrap_cancelled): those refusals
+            # DO hold the write lock, and this rollback is what releases it.
+            # Do not "optimize" it away on the old reasoning.
             # On SUCCESS this clause never runs, so a deferred-commit
             # _batch() method (which intentionally leaves its DML open for
             # the outer commit) is unaffected.
@@ -3910,8 +4031,17 @@ class Store:
         flush). Rollback failures are swallowed so the PRIMARY exception
         that triggered the rollback is what the caller sees — the store is
         in an unknown state either way and the caller must reconstruct it.
-        A no-op when no transaction is open (a failed read, or a refusal
-        raised before any DML), so it is safe on every error path.
+        ⚠ NO LONGER A NO-OP ON EVERY PATH, AND THIS DOCSTRING SAID IT WAS.
+        It used to read "a no-op when no transaction is open (a failed read, or
+        a refusal raised before any DML), so it is safe on every error path."
+        Since :meth:`wrap_started` and :meth:`wrap_cancelled` open their blocks
+        with ``BEGIN IMMEDIATE``, a refusal raised before any DML — a
+        :class:`WrapInProgressError`, say — DOES hold the write lock, and this
+        call is what releases it. Load-bearing there, not defensive.
+        ⭐ Caught by the L2 seat 2026-09-03: the fix landed on the CALLER's
+        comment in ``_db_boundary`` and not on this, the callee's own docstring
+        — the same land-somewhere-not-everywhere shape the rest of this change
+        set exists to close. It is still a genuine no-op where nothing is open.
         """
         if self._conn is not None and self._conn.in_transaction:
             try:
@@ -3984,6 +4114,14 @@ class Store:
         ``wrap_cancelled``, ``save_continuity``, ``save_meta``)
         commit immediately and are NOT safe to call inside a batch —
         doing so would break the single-transaction invariant.
+        ⚠ ``wrap_started`` and ``wrap_cancelled`` now FAIL LOUD there rather
+        than corrupting quietly: they open with ``BEGIN IMMEDIATE``, so inside
+        a batch that has already issued DML they raise
+        :class:`StoreDatabaseError` (``cannot start a transaction within a
+        transaction``) and the batch rolls back. Previously they silently
+        committed the outer batch mid-flight. Sub-case, unreachable today:
+        inside a batch with NO prior DML, ``wrap_cancelled()`` still succeeds
+        and commits, ending the batch's transaction before it opened.
         Extend this list by adding the batch-aware guard to any new
         write method that becomes part of a batched pipeline. L3
         contrarian F1 flagged this as a forward-looking hazard;

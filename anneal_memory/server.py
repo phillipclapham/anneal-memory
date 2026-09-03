@@ -15,6 +15,7 @@ import argparse
 import json
 import logging
 import os
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -46,7 +47,7 @@ from .retrieval import (
     retrieve_patterns,
     retrieve_relevant,
 )
-from .store import Store, StoreError, _WRAP_TOKEN_RE
+from .store import Store, StoreDatabaseError, StoreError, _WRAP_TOKEN_RE
 from .types import AffectiveState, RelevantPattern
 
 logger = logging.getLogger("anneal-memory")
@@ -56,6 +57,36 @@ _PROTOCOL_VERSION = "2024-11-05"
 
 # Maximum message size (10MB) — prevents memory exhaustion from oversized lines
 _MAX_MESSAGE_SIZE = 10 * 1024 * 1024
+
+
+
+def _is_write_lock_contention(exc: StoreDatabaseError) -> bool:
+    """True when a StoreDatabaseError was caused by SQLite write-lock contention.
+
+    Matched on the underlying ``sqlite3`` error preserved as ``__cause__`` (the
+    store's ``_db_boundary`` always chains it), never on the wrapper's own
+    formatted text — that text embeds the store PATH, so a database living under
+    a directory called e.g. ``locked/`` would match a naive substring test on
+    the message and report contention that never happened.
+    """
+    cause = exc.__cause__
+    if not isinstance(cause, sqlite3.OperationalError):
+        return False
+    # ``cause_type_name`` CANNOT do this job, though the class docs advertise it
+    # as the retry-dispatch key: SQLITE_BUSY and a malformed database image are
+    # BOTH OperationalError. The real discriminator is the SQLite result-code
+    # name, exposed from Python 3.11 — and ``requires-python`` is >=3.10, so the
+    # attribute is guarded and the message text is the 3.10 fallback. (L2 seat,
+    # 2026-09-03.)
+    errorname = getattr(cause, "sqlite_errorname", None)
+    if errorname is not None:
+        return errorname in (
+            "SQLITE_BUSY",
+            "SQLITE_BUSY_SNAPSHOT",
+            "SQLITE_BUSY_TIMEOUT",
+        )
+    text = str(cause).lower()
+    return "database is locked" in text or "database is busy" in text
 
 
 # -- Stdio Transport (newline-delimited JSON per MCP 2024-11-05 spec) --
@@ -583,7 +614,9 @@ class Server:
         who sat locked for three days with 31 episodes stranded.
 
         Reports from the RECEIPT ``wrap_cancelled()`` returns, which is read
-        inside the same transaction as the clear.
+        inside the same transaction as the clear — true only because that
+        method opens with ``BEGIN IMMEDIATE`` (added after 0.9.8). Remove it and
+        this sentence goes back to being false.
 
         ⚠ IT DELIBERATELY DOES NOT ``load_wrap_snapshot()`` FIRST, AND THAT IS
         THE WHOLE POINT. The first version did, to have something to report.
@@ -593,7 +626,11 @@ class Server:
         old token and count. The operator is told they cleaned up a corpse when
         they killed a live peer. Found by codex and glm independently at L3.
         Reading inside the transaction removes the window rather than narrowing
-        it, and the receipt cannot disagree with what was cleared.
+        it, and the receipt cannot disagree with what was cleared. ⚠ 0.9.8
+        shipped that sentence WITHOUT the ``BEGIN IMMEDIATE`` that makes it
+        true: bare SELECTs open no transaction under ``isolation_level=""``, so
+        the window was narrowed, not removed, and the race was reproduced on
+        2026-09-03. The guarantee lives in ``Store.wrap_cancelled``, not here.
 
         The partial-state path (``StoreError`` territory for
         ``load_wrap_snapshot``) needs no special handling here any more:
@@ -603,7 +640,51 @@ class Server:
         what really happened instead of "no wrap was in progress", which was
         false precisely on the recovery path this tool most exists to serve.
         """
-        receipt = self._store.wrap_cancelled()
+        try:
+            receipt = self._store.wrap_cancelled()
+        except StoreDatabaseError as exc:
+            # ⚠ NOT A NEW FAILURE MODE — I ASSERTED THAT AND IT WAS FALSE.
+            # The L2 seat MEASURED the pre-BEGIN-IMMEDIATE shape under the same
+            # contention: the bare SELECTs succeed instantly (WAL readers are
+            # never blocked), then the FIRST INSERT blocks and raises the
+            # identical "database is locked" at 5.19s, versus 5.20s now. Same
+            # error, same class, same latency — the lock statement only moved it
+            # ahead of the reads. So there is no loudness-for-safety trade here;
+            # the loud failure already existed and the silent corruption is gone.
+            # What was always missing is a REACHABLE NEXT ACTION on the one tool
+            # an agent calls when it is already stuck — 0.9.8's own defect class
+            # (a recovery message naming a path its caller cannot take).
+            #
+            # ⛔ AND THE FIRST DRAFT OF THIS MESSAGE OVERCLAIMED — codex, L3.
+            # It said the lock was "evidence the wrap is LIVE, not stranded".
+            # It is not. A write lock proves only that SOMEONE is writing: an
+            # unrelated `record`, a prune, a schema init on a fresh open, or an
+            # abandoned transaction holds it identically while an old wrap stays
+            # stranded. Ownership is exactly what SQLite locks do not carry.
+            # ⚡ The test made the point by accident — it holds a RAW
+            # BEGIN IMMEDIATE on an unrelated connection, i.e. the counterexample
+            # to the claim it was asserting. Establishing liveness needs
+            # persisted owner/lease data, which is spore-699, not a lock.
+            # So the message reports what is actually known and lets `status`
+            # settle ownership.
+            if _is_write_lock_contention(exc):
+                return _tool_result(
+                    "Could not cancel: another process holds this store's "
+                    "write lock, so something else is writing RIGHT NOW. "
+                    "Nothing was changed and the store is not corrupt. ⚠ This "
+                    "does NOT tell you whether the pending wrap belongs to that "
+                    "writer — a lock carries no ownership, and an unrelated "
+                    "write holds it the same way a live peer's wrap does. Do "
+                    "NOT retry blindly: a wrap that IS live is destroyed by "
+                    "cancelling it. Wait a few seconds, then call `status`. If "
+                    "`wrap_in_progress` is gone, the writer finished and there "
+                    "is nothing to cancel. If a wrap is still open, compare its "
+                    "start time: unchanged across several checks means it is "
+                    "probably stranded and safe to cancel; moving means a peer "
+                    "is actively working and you should leave it alone.",
+                    is_error=True,
+                )
+            raise
 
         if receipt.partial_state:
             token = f" (token: {receipt.token})" if receipt.token else ""

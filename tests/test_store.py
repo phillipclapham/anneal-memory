@@ -622,6 +622,276 @@ class TestWrapInProgressError:
             s.close()
 
 
+    def test_a_peer_cannot_slip_a_wrap_between_the_guard_read_and_the_writes(
+        self, tmp_path
+    ):
+        """AM-PREPARE-GUARD across CONNECTIONS, not just within one.
+
+        The guard reads ``wrap_started_at`` and then writes. Until 2026-09-03
+        that read was a bare SELECT, which opens no transaction under
+        ``isolation_level=""`` — so the docstring's claim that check and set
+        "run in the SAME transaction" was false, and a second connection could
+        install its own wrap in the gap and have it silently clobbered. The
+        inline comment deferred the close to an external flock, but
+        ``continuity_lock`` is taken in ``validated_save_continuity`` only,
+        never in ``prepare_wrap``, which is this method's caller — so nothing
+        excluded the competing writer. Found while fixing the same defect in
+        ``wrap_cancelled``; the honest comment and the false docstring
+        described the same code, 120 lines apart.
+
+        MUTATION-CHECKED: remove ``BEGIN IMMEDIATE`` from ``wrap_started`` and
+        this fails — the peer's wrap is accepted and then clobbered instead of
+        being refused.
+        """
+        import threading
+
+        db = tmp_path / "guard.db"
+        caller = Store(path=db, project_name="P")
+        try:
+            caller.record("One", EpisodeType.OBSERVATION)
+
+            peer_ready = threading.Event()
+            release_peer = threading.Event()
+            peer_done = threading.Event()
+            peer_outcome: list[object] = []
+
+            def peer_starts_its_own_wrap():
+                try:
+                    peer = Store(path=db, project_name="P")
+                    try:
+                        peer_ready.set()  # open and scheduled, before any lock
+                        release_peer.wait(timeout=10.0)
+                        peer.wrap_started(token="b" * 32, episode_ids=["cafebabe"])
+                        peer_outcome.append("accepted")
+                    finally:
+                        peer.close()
+                except WrapInProgressError:
+                    peer_outcome.append("refused")
+                except BaseException as exc:  # pragma: no cover - diagnostic
+                    peer_outcome.append(exc)
+                finally:
+                    peer_done.set()
+
+            worker = threading.Thread(target=peer_starts_its_own_wrap, daemon=True)
+            real_get = caller._get_metadata
+            # Capture the mechanism so it can be asserted — a surviving-outcome
+            # assertion alone would also pass if something unrelated serialized
+            # the two writers. L1 seat.
+            peer_finished_during_lock: list[bool] = []
+
+            def inject_after_guard_read(key: str):
+                value = real_get(key)
+                if key == "wrap_started_at" and not release_peer.is_set():
+                    # The gap: the guard has read, nothing is written yet.
+                    release_peer.set()
+                    peer_finished_during_lock.append(peer_done.wait(timeout=1.0))
+                return value
+
+            # ⭐ THE BARRIER (codex L3). Asserting only "the peer did not finish
+            # inside the window" cannot tell BLOCKED-ON-THE-LOCK from
+            # NEVER-SCHEDULED — under the mutant a thread starved for one second
+            # produces the same observation and the test passes on the live
+            # defect. So the peer opens its store and signals READY *before* the
+            # caller takes the lock (a Store() open would itself block on the
+            # lock, so the barrier cannot sit after construction), the caller
+            # proves it reached that point, and only then releases it into the
+            # gap. Now "did not finish" means one thing.
+            worker.start()
+            assert peer_ready.wait(timeout=10.0), (
+                "peer thread never opened its store — the window was never armed"
+            )
+
+            caller._get_metadata = inject_after_guard_read  # type: ignore[method-assign]
+            caller.wrap_started(token="a" * 32, episode_ids=["feedface"])
+            caller._get_metadata = real_get  # type: ignore[method-assign]
+
+            worker.join(timeout=10.0)
+            assert not worker.is_alive(), "peer thread never completed"
+
+            # ⭐ The lock is the assertion, not a lucky outcome.
+            assert peer_finished_during_lock == [False], (
+                "the peer completed while the caller held the write lock — "
+                "nothing serialized them, so the guard under test was never "
+                "exercised"
+            )
+
+            # ⭐ The peer must be REFUSED, not accepted-then-clobbered. An
+            # "accepted" outcome means two writers both believed they owned
+            # the wrap and one snapshot was silently destroyed.
+            assert peer_outcome == ["refused"], (
+                "a peer installed a wrap between the guard read and the "
+                f"writes and was not refused: {peer_outcome!r}"
+            )
+            snap = caller.load_wrap_snapshot()
+            assert snap is not None and snap["token"] == "a" * 32
+        finally:
+            caller.close()
+
+class TestWrapCancelReceiptSemantics:
+    """What `WrapCancelReceipt` MEANS — the partial-state predicate and the
+    None-vs-empty-list distinction. Split out of `TestWrapInProgressError`
+    2026-09-04: these are about the receipt, not about that exception, and a
+    test's home is one of the two things a future reader consults to decide
+    whether a class is covered (L1 seat NOTE-5)."""
+
+    def test_audit_and_receipt_agree_that_corrupt_state_is_partial(self, tmp_path):
+        """ONE predicate, not two. 0.9.8 computed "is this partial state" from
+        the RAW metadata string for the audit trail and from the PARSED value
+        for the receipt, eleven lines apart in one method. They agreed
+        everywhere except on unreadable JSON — which is exactly the recovery
+        case the audit marker exists to flag, so on the one event that IS
+        recovery the marker was absent while the receipt said partial_state.
+        Diogenes 2026-09-03 MEDIUM.
+
+        MUTATION-CHECKED: revert the audit branch to test ``cancelled_ids_raw``
+        and this fails — the payload loses its ``partial_state`` key.
+        """
+        import json as _json
+        db = tmp_path / "divergence.db"
+        s = Store(path=db, project_name="P")
+        try:
+            s.record("One", EpisodeType.OBSERVATION)
+            s.wrap_started(token="d" * 32, episode_ids=["feedface"])
+            # Corrupt the frozen list the way a half-written wrap does.
+            s._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_episode_ids", "{not json"),
+            )
+            s._conn.commit()
+
+            receipt = s.wrap_cancelled()
+            assert receipt.partial_state is True
+            assert receipt.episode_ids is None
+        finally:
+            s.close()
+
+        events = []
+        for path in tmp_path.rglob("*"):
+            if path.is_file() and path.suffix == ".jsonl":
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    try:
+                        events.append(_json.loads(line))
+                    except ValueError:
+                        pass
+        cancels = [e for e in events if e.get("event") == "wrap_cancelled"]
+        assert cancels, "no wrap_cancelled audit event was written"
+        payload = cancels[-1].get("data", {})
+        assert payload.get("partial_state") is True, (
+            "the audit trail recorded a corrupt-state cancel as a routine "
+            "abandonment while the receipt called it partial — the two halves "
+            "must compute the predicate once: " + repr(payload)
+        )
+
+    def test_a_failed_audit_write_does_not_lose_a_committed_cancellation(
+        self, tmp_path
+    ):
+        """The cancellation COMMITS before the audit event is written.
+
+        If the audit append fails — disk full, permissions, a failed rotation —
+        letting it propagate raises out of `wrap_cancelled()` with the metadata
+        ALREADY cleared and no receipt returned: MCP reports isError, the CLI
+        shows a traceback, and the operator is told the cancel failed when it
+        succeeded. A peer then finds its token gone with no audit explaining
+        why. codex L3 HIGH.
+
+        ⭐ The policy already existed in this file — `_batch` documents that
+        audit-flush exceptions are swallowed after a successful commit because
+        propagating one "would trick the caller's outer except clause into
+        cleaning up tmp files that represent committed state — a data-loss
+        path." This method was violating the rule its own sibling states.
+        """
+        db = tmp_path / "auditfail.db"
+        s = Store(path=db, project_name="P")
+        try:
+            s.record("One", EpisodeType.OBSERVATION)
+            s.wrap_started(token="f" * 32, episode_ids=["feedface"])
+
+            def explode(event, payload, **kwargs):
+                raise OSError("No space left on device")
+
+            assert s._audit is not None
+            s._audit.log = explode  # type: ignore[method-assign]
+
+            with pytest.warns(UserWarning, match="audit event could not be written"):
+                receipt = s.wrap_cancelled()
+
+            # The receipt describes real, committed work — it must survive.
+            assert receipt.token == "f" * 32
+            assert receipt.episode_ids == ["feedface"]
+            # And the cancellation really did commit.
+            assert s.load_wrap_snapshot() is None
+        finally:
+            s.close()
+
+    def test_a_stray_frozen_schema_is_state_not_silence(self, tmp_path):
+        """`wrap_cancelled` clears FOUR wrap-lifecycle keys but classified on
+        three. A store holding only a stray `wrap_section_schema` therefore
+        reported "no wrap was in progress" and emitted NO audit event at all —
+        state cleared with no record that anything had been there. codex L3.
+
+        Deliberately NOT part of `complete`: wraps written before
+        AM-SCHEMASNAPSHOT have no frozen schema and are otherwise healthy, so
+        requiring one would mark ordinary cancels partial.
+        """
+        import json as _json
+
+        db = tmp_path / "strayschema.db"
+        s = Store(path=db, project_name="P")
+        try:
+            s._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_section_schema", '["State", "Patterns"]'),
+            )
+            s._conn.commit()
+            receipt = s.wrap_cancelled()
+            assert receipt.partial_state is True, (
+                "a stray frozen schema is leftover wrap state, not an idle store"
+            )
+        finally:
+            s.close()
+
+        events = []
+        for path in tmp_path.rglob("*.jsonl"):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    events.append(_json.loads(line))
+                except ValueError:
+                    pass
+        assert [e for e in events if e.get("event") == "wrap_cancelled"], (
+            "cleared leftover wrap state and wrote no audit event for it"
+        )
+
+    def test_empty_wrap_reads_back_as_empty_list_never_None(self, tmp_path):
+        """Pins the rule the receipt docstring gets to state.
+
+        0.9.8's docstring said ``episode_ids`` is None "when there were none or
+        the stored JSON was unreadable", then that ``[]`` means "a wrap really
+        did freeze an empty list" — the two clauses cannot both hold. Measured:
+        a wrap with no episodes stores ``"[]"`` and reads back as ``[]``. None
+        means NO metadata at all, or unreadable JSON. A caller trusting the
+        first clause would branch ``if episode_ids is None`` as "no episodes"
+        and silently treat the CORRUPT case as the benign one — the confusion
+        ``partial_state`` exists to make loud. Diogenes 2026-09-03 LOW.
+        """
+        db = tmp_path / "empty.db"
+        s = Store(path=db, project_name="P")
+        try:
+            s.wrap_started(token="e" * 32, episode_ids=[])
+            frozen = s.wrap_cancelled()
+            assert frozen.episode_ids == [], (
+                "an empty wrap must read back as [] — None is reserved for "
+                "absent-or-unreadable, which is a different fact"
+            )
+            assert frozen.episode_ids is not None
+            assert frozen.partial_state is False
+
+            # And the other side of the distinction: an idle store.
+            idle = s.wrap_cancelled()
+            assert idle.episode_ids is None
+        finally:
+            s.close()
+
+
 # -- Pruning --
 
 

@@ -623,6 +623,58 @@ class TestWrapInProgressError:
             s.close()
 
 
+    def test_an_in_progress_wrap_is_refused_without_waiting_on_the_write_lock(
+        self, tmp_path
+    ):
+        """"A wrap is already in progress" needs NO lock to know — it is a read,
+        and WAL readers never block.
+
+        Taking `BEGIN IMMEDIATE` made the guard cross-connection atomic and, as
+        first written, also put the write lock in front of that question: a
+        caller whose correct answer was `WrapInProgressError` instead waited out
+        `busy_timeout` (5s by default) behind an unrelated writer and got
+        `StoreDatabaseError` — told the DATABASE was broken when the true answer
+        was available instantly. Measured 0.85s and the wrong class at an
+        800ms timeout. Flagged by the L1 seat as the one behavioural edge of the
+        lock change; under 4-6 parallel sessions it converts real refusals into
+        stalls.
+
+        The pre-check that fixes it can only REFUSE, never grant: the
+        authoritative check stays inside the transaction, so a stale "no wrap"
+        falls through to it and no clobber is possible.
+
+        MUTATION-CHECKED: delete the pre-check and this fails with
+        `StoreDatabaseError` after the full timeout.
+        """
+        import sqlite3
+        import time
+
+        db = tmp_path / "fastrefuse.db"
+        s = Store(path=db, project_name="P")
+        peer = sqlite3.connect(str(db))
+        try:
+            s.record("One", EpisodeType.OBSERVATION)
+            s.wrap_started(token="a" * 32, episode_ids=["feedface"])
+
+            peer.execute("BEGIN IMMEDIATE")  # an unrelated writer holds the lock
+            s._conn.execute("PRAGMA busy_timeout=800")
+
+            started = time.monotonic()
+            with pytest.raises(WrapInProgressError) as exc_info:
+                s.wrap_started(token="b" * 32, episode_ids=["cafebabe"])
+            elapsed = time.monotonic() - started
+
+            assert exc_info.value.started_at
+            # The refusal must not have queued behind the lock at all.
+            assert elapsed < 0.4, (
+                f"refusal took {elapsed:.2f}s — it waited on the write lock to "
+                f"answer a question that needs only a read"
+            )
+        finally:
+            peer.rollback()
+            peer.close()
+            s.close()
+
     def test_a_peer_cannot_slip_a_wrap_between_the_guard_read_and_the_writes(
         self, tmp_path
     ):
@@ -681,9 +733,19 @@ class TestWrapInProgressError:
             peer_finished_during_lock: list[bool] = []
             held_the_lock: list[bool] = []
 
+            # ⚠ `wrap_started_at` is read TWICE now: once by the refusal-only
+            # pre-check (deliberately OUTSIDE the transaction, so a refusal costs
+            # no lock) and once by the authoritative guard INSIDE it. The window
+            # under test is the second one — injecting on the first exercises no
+            # window at all, and this test failed loudly when the pre-check
+            # landed, which is the guard doing its job.
+            guard_reads = {"n": 0}
+
             def inject_after_guard_read(key: str):
                 value = real_get(key)
-                if key == "wrap_started_at" and not release_peer.is_set():
+                if key == "wrap_started_at":
+                    guard_reads["n"] += 1
+                if key == "wrap_started_at" and guard_reads["n"] == 2:
                     # The gap: the guard has read, nothing is written yet.
                     # ⭐ DETERMINISTIC PROOF OF THE MECHANISM, not a timeout.
                     # peer-noncompletion-within-1s is evidence, not proof: a

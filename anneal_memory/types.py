@@ -390,7 +390,7 @@ class WrapPackageDict(TypedDict):
     episode_count: int
     continuity: str | None  # Current continuity text, or None for first wrap
     stale_patterns: list[StalePatternDict]
-    # AM-CONTRASCAN-EMIT (v0.4.3): existing Proven (2x/3x) pattern names the
+    # AM-CONTRASCAN-EMIT (v0.4.3): existing Proven (2x+) pattern names the
     # agent must run the contradiction-scan discipline against before any new
     # Proven graduation this wrap. Computed once here (from the existing
     # continuity) so the scan INSTRUCTION embedded in ``instructions`` and the
@@ -401,7 +401,7 @@ class WrapPackageDict(TypedDict):
     # pre-existing ``PrepareWrapResult.uncovered_proven_to_check``); the
     # agent-facing instruction renders it as "Existing Proven to scan against".
     uncovered_proven: list[str]
-    # AM-CRYSTAL-MIGRATE (v0.6): cold-Proven (2x/3x + stale) patterns in the
+    # AM-CRYSTAL-MIGRATE (v0.6): cold-Proven (2x+ and stale) patterns in the
     # graduating section ready to route OUT — the composer judges each (→ always-on
     # constitution / → crystallized store / → compost). Subset of stale_patterns;
     # ``[]`` when no crystal store is passed or none qualify. Propose-not-auto.
@@ -501,7 +501,7 @@ class PrepareWrapResult(TypedDict):
     package: WrapPackageDict | None  # None when status == "empty"
     assoc_context: str | None  # Hebbian association context, or None
     wrap_token: str | None  # Session-handshake token, None when status == "empty"
-    # Move #4 library layer (v0.3.2): list of existing Proven (2x/3x)
+    # Move #4 library layer (v0.3.2): list of existing Proven (2x+)
     # pattern names already in the continuity. Methodology-layer
     # discipline (e.g., Levain WRAP_PROTOCOL.md) uses this to drive a
     # mandatory contradiction-scan at graduation: before any new
@@ -552,7 +552,7 @@ class SaveContinuityResult(TypedDict):
     graduations_validated: int
     graduations_demoted: int  # Total: demoted + bare_demoted
     demoted: int  # Citations demoted due to bad evidence only
-    bare_demoted: int  # Bare (evidence-free) 2x/3x graduations demoted
+    bare_demoted: int  # Bare (evidence-free) Proven-tier graduations demoted
     citation_reuse_max: int  # Max times any single episode was cited
     # Graduation-format lines whose date != today (carried-forward
     # from prior sessions, OR a test-authoring bug where a hardcoded
@@ -562,13 +562,13 @@ class SaveContinuityResult(TypedDict):
     # Finding #3 class permanently.
     skipped_non_today: int
     gaming_suspects: list[str]  # Episode IDs flagged for suspicious reuse
-    # Patterns at 2x/3x in the prior continuity that are absent at any
+    # Patterns at Proven-tier (2x+) in the prior continuity, absent at any
     # level in the new continuity. Surfaced as informational audit
     # signal — see graduation.detect_pattern_omissions() and
     # graduation.OmittedPattern. Each entry is a dict
     # ``{"name": str, "prior_level": int}``. Empty list on first wrap
     # (no prior continuity to compare against) and when the agent
-    # carried all prior 2x/3x patterns forward at any level. Closes
+    # carried all prior Proven-tier patterns forward at any level. Closes
     # the silent-omission gap surfaced by Bold Stand Phase 1b probe #1
     # (2026-05-21).
     omitted_patterns: list[dict[str, Any]]

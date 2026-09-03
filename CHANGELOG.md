@@ -4,6 +4,29 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — the AM-LEVELCAP tail was larger than 0.9.9 reported, and a peer's Unicode-arrow tip found it
+
+0.9.9's notes said "eleven surfaces". That was an **undercount**, and the correction came from the
+levain seat: their own capped-ladder sweep had missed a site because the grep was ASCII-only and the
+text used `→`. Re-swept anneal across both arrow spellings plus the `2x/3x` and `(2 or 3)` phrasings
+and found **twenty-two more**, in `graduation.py`, `continuity.py`, `types.py` and `store.py`.
+
+Three were **false about current behaviour**, not merely stale: comments asserting `_GRADUATION_RE`
+is `2x/3x-only`. It excludes 1x but has had **no ceiling** since AM-LEVELCAP — which the file already
+said correctly at another site, warning in as many words *"it is 2-AND-UP WITH NO CEILING since
+AM-LEVELCAP, not '2x/3x'"*. The rest were `(2x/3x)` used as a gloss for **Proven-tier**, which is
+2-and-up, so the gloss silently re-taught the removed cap.
+
+⚠ **Deliberately left alone**, because they are accurate: comments explaining *why the cap existed*
+(that is the rationale for removing it), anything scoped `pre-0.4.6` or "BEFORE that", and
+`_BARE_GRADUATION_RE`'s "bare 2x/3x graduation" — that regex genuinely **is** still `[23]` under
+`spore-676`, so naming its range is correct rather than stale.
+
+⚖ **The transferable half is the grep, not the fix.** A ceiling can be taught in ASCII (`->`) or
+Unicode (`→`) arrows, as a range (`2x/3x`), as a set (`{2, 3}`, `(2 or 3)`), or as a parenthetical
+gloss on a word that means something wider. A sweep for one spelling reports clean while the others
+sit untouched — and two repos hit that same failure on the same day, independently.
+
 ## [0.9.9] — 2026-09-04
 
 ⚠ **VERSION STAMP POLICY, adopted 2026-09-03.** The commit after a release bumps to the next

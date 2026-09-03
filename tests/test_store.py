@@ -17,6 +17,7 @@ from anneal_memory.store import (
     StoreDatabaseError,
     StoreError,
     WrapInProgressError,
+    WrapOwnershipError,
 )
 from anneal_memory.types import EpisodeType, StoreStatus, WrapRecord, WrapResult
 from anneal_memory import prepare_wrap
@@ -678,11 +679,19 @@ class TestWrapInProgressError:
             # assertion alone would also pass if something unrelated serialized
             # the two writers. L1 seat.
             peer_finished_during_lock: list[bool] = []
+            held_the_lock: list[bool] = []
 
             def inject_after_guard_read(key: str):
                 value = real_get(key)
                 if key == "wrap_started_at" and not release_peer.is_set():
                     # The gap: the guard has read, nothing is written yet.
+                    # ⭐ DETERMINISTIC PROOF OF THE MECHANISM, not a timeout.
+                    # peer-noncompletion-within-1s is evidence, not proof: a
+                    # mutant that simply fails to schedule the peer produces the
+                    # identical observation and every later assertion passes.
+                    # in_transaction is True here IFF BEGIN IMMEDIATE ran, so it
+                    # kills the mutant with no timing dependence at all. codex L3.
+                    held_the_lock.append(caller._conn.in_transaction)
                     release_peer.set()
                     peer_finished_during_lock.append(peer_done.wait(timeout=1.0))
                 return value
@@ -709,6 +718,10 @@ class TestWrapInProgressError:
             assert not worker.is_alive(), "peer thread never completed"
 
             # ⭐ The lock is the assertion, not a lucky outcome.
+            assert held_the_lock == [True], (
+                "the caller was NOT inside a transaction at the guard read — "
+                "BEGIN IMMEDIATE did not run and the check-and-set is not atomic"
+            )
             assert peer_finished_during_lock == [False], (
                 "the peer completed while the caller held the write lock — "
                 "nothing serialized them, so the guard under test was never "
@@ -726,6 +739,380 @@ class TestWrapInProgressError:
             assert snap is not None and snap["token"] == "a" * 32
         finally:
             caller.close()
+
+class TestWrapCancelOwnershipCAS:
+    """AM-WRAPCANCEL-CAS — `wrap_cancelled(expect_token=...)`.
+
+    Alex De Groodt's A3 (2026-08-04), deliberately not shipped in 0.9.8 because
+    the lock recorded only `started_at` — no owner, no PID, no expiry — so
+    `wrap_cancel` could not refuse on the grounds that the wrap belonged to
+    somebody else. `WrapInProgressError` stops a second wrap CLOBBERING the
+    first; this stops a second session CANCELLING it. spore-699.
+    """
+
+    def test_a_mismatched_token_refuses_and_changes_nothing(self, tmp_path):
+        db = tmp_path / "cas.db"
+        s = Store(path=db, project_name="P")
+        try:
+            s.record("One", EpisodeType.OBSERVATION)
+            s.wrap_started(token="a" * 32, episode_ids=["feedface"])
+
+            with pytest.raises(WrapOwnershipError) as exc_info:
+                s.wrap_cancelled(expect_token="b" * 32)
+            assert exc_info.value.expected == "b" * 32
+            assert exc_info.value.actual == "a" * 32
+            assert "DIFFERENT session" in str(exc_info.value)
+
+            # ⭐ Refusal must be TOTAL — a partial clear would be worse than no
+            # guard, since the owner's wrap would be damaged by the check.
+            snap = s.load_wrap_snapshot()
+            assert snap is not None and snap["token"] == "a" * 32
+            assert snap["episode_ids"] == ["feedface"]
+        finally:
+            s.close()
+
+    def test_the_matching_token_clears_normally(self, tmp_path):
+        db = tmp_path / "cas_ok.db"
+        s = Store(path=db, project_name="P")
+        try:
+            s.record("One", EpisodeType.OBSERVATION)
+            s.wrap_started(token="c" * 32, episode_ids=["feedface"])
+            receipt = s.wrap_cancelled(expect_token="c" * 32)
+            assert receipt.token == "c" * 32
+            assert s.load_wrap_snapshot() is None
+        finally:
+            s.close()
+
+    def test_an_idle_store_reports_already_gone_not_wrong_owner(self, tmp_path):
+        """`actual is None` is a DIFFERENT fact from "someone else owns it", and
+        a caller retrying a cancel needs to tell them apart."""
+        db = tmp_path / "cas_idle.db"
+        s = Store(path=db, project_name="P")
+        try:
+            with pytest.raises(WrapOwnershipError) as exc_info:
+                s.wrap_cancelled(expect_token="d" * 32)
+            assert exc_info.value.actual is None
+            assert "NO wrap is in progress" in str(exc_info.value)
+        finally:
+            s.close()
+
+    def test_omitting_the_token_is_the_override(self, tmp_path):
+        """There is no separate `force` flag on purpose: an unproven cancel IS a
+        cancel with no claim, which is what every pre-existing caller does."""
+        db = tmp_path / "cas_force.db"
+        s = Store(path=db, project_name="P")
+        try:
+            s.record("One", EpisodeType.OBSERVATION)
+            s.wrap_started(token="e" * 32, episode_ids=["feedface"])
+            receipt = s.wrap_cancelled()  # no claim -> clears whatever is current
+            assert receipt.token == "e" * 32
+            assert s.load_wrap_snapshot() is None
+        finally:
+            s.close()
+
+    def test_partial_state_is_a_THIRD_answer_not_an_idle_store(self, tmp_path):
+        """⛔ THE LOCKOUT THE FIRST CUT REINTRODUCED. L3 consensus (glm HIGH,
+        codex MED).
+
+        A partial store — `wrap_started_at` set, `wrap_token` empty, from a
+        crash or a hand edit — can match NO token, so no proven cancel can ever
+        succeed. The first cut computed `actual=cancelled_token or None`, which
+        collapsed this into the IDLE case: the caller was told NO WRAP IS IN
+        PROGRESS while `wrap_started_at` survived the rollback, so the next
+        `prepare_wrap` failed with `WrapInProgressError` and the store looked
+        permanently stuck. That is Alex De Groodt's original three-day lockout,
+        reachable through the guard written to prevent it.
+
+        MUTATION-CHECKED: restore `actual=cancelled_token or None` with no
+        partial_state and this fails.
+        """
+        db = tmp_path / "cas_partial.db"
+        s = Store(path=db, project_name="P")
+        try:
+            s.record("One", EpisodeType.OBSERVATION)
+            s.wrap_started(token="a" * 32, episode_ids=["feedface"])
+            s._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_token", ""),
+            )
+            s._conn.commit()
+
+            with pytest.raises(WrapOwnershipError) as exc_info:
+                s.wrap_cancelled(expect_token="a" * 32)
+            exc = exc_info.value
+            assert exc.partial_state is True, (
+                "partial state reported as an idle store — the operator is told "
+                "there is nothing to clear while wrap_started_at still stands"
+            )
+            assert "PARTIAL" in str(exc)
+            assert "without expect_token" in str(exc), (
+                "no recovery path offered for a state no token can ever match"
+            )
+            # The refusal must not have cleared anything...
+            assert s._get_metadata("wrap_started_at")
+            # ...and the override must actually work, or this is still a lockout.
+            receipt = s.wrap_cancelled()
+            assert receipt.partial_state is True
+            assert not s._get_metadata("wrap_started_at")
+        finally:
+            s.close()
+
+    def test_unreadable_metadata_cannot_raise_after_the_commit(self, tmp_path):
+        """No receipt-building step after a destructive commit may be able to fail.
+
+        The parse ran AFTER the clear at first, catching only `JSONDecodeError`.
+        codex reproduced the consequence: `wrap_episode_ids` holding an
+        invalid-UTF-8 BLOB raises `UnicodeDecodeError`, so the wrap was already
+        cleared and the caller got an exception with no receipt and no audit
+        event — a destructive success reported as a failure. A 5,000-digit JSON
+        integer raises `ValueError` the same way. The parse now happens inside
+        the transaction, so any failure rolls back instead.
+        """
+        import json as _json
+
+        # ⚠ THE FIRST VERSION OF THIS TEST DID NOT EXERCISE ITS OWN PROPERTY,
+        # and only the mutation run caught it: it stored b"\xff\xfe not utf-8",
+        # whose length happens to decode cleanly as utf-16 and then fail as a
+        # JSONDecodeError — the case the NARROW catch already handled. So it
+        # passed against the mutant while its name and docstring certified the
+        # stronger claim. One character decided it (`utf-8` vs `utf8`). Each
+        # payload below is asserted to raise the exception class it is here for,
+        # so the test cannot silently drift back to the easy case.
+        payloads = {
+            # invalid utf-16 after the BOM -> UnicodeDecodeError, NOT a subclass
+            # of JSONDecodeError
+            "undecodable-bytes": (b"\xff\xfe not utf8", UnicodeDecodeError),
+            # past CPython's 4300-digit int limit -> plain ValueError
+            "huge-integer": (b"1" * 5000, ValueError),
+        }
+        for label, (payload, expected_exc) in payloads.items():
+            with pytest.raises(expected_exc):
+                _json.loads(payload)
+            if expected_exc is ValueError:
+                assert not isinstance(
+                    _json.JSONDecodeError("x", "y", 0), type(None)
+                )
+
+            db = tmp_path / f"cas_{label}.db"
+            s = Store(path=db, project_name="P")
+            try:
+                s.record("One", EpisodeType.OBSERVATION)
+                s.wrap_started(token="a" * 32, episode_ids=["feedface"])
+                s._conn.execute(
+                    "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                    ("wrap_episode_ids", payload),
+                )
+                s._conn.commit()
+
+                receipt = s.wrap_cancelled()  # must NOT raise
+                assert receipt.partial_state is True, label
+                assert receipt.episode_ids is None, label
+                assert s.load_wrap_snapshot() is None, label
+            finally:
+                s.close()
+
+    def test_a_warning_filter_set_to_error_cannot_undo_a_committed_cancel(
+        self, tmp_path
+    ):
+        """⚠ THE GUARD'S OWN TEST WAS MASKING THIS. codex, L3.
+
+        `test_a_failed_audit_write_does_not_lose_a_committed_cancellation` uses
+        `pytest.warns`, which installs a CAPTURING filter — so it proves the
+        warning is emitted but says nothing about what happens when a filter
+        turns warnings into errors. Under `python -W error`,
+        `PYTHONWARNINGS=error`, or an embedding application's filter,
+        `warnings.warn` RAISES, recreating verbatim the "committed then reported
+        as failed" path the catch exists to eliminate.
+
+        No capturing filter here, deliberately.
+        """
+        import warnings
+
+        db = tmp_path / "cas_warnerr.db"
+        s = Store(path=db, project_name="P")
+        try:
+            s.record("One", EpisodeType.OBSERVATION)
+            s.wrap_started(token="a" * 32, episode_ids=["feedface"])
+
+            def explode(event, payload, **kwargs):
+                raise OSError("No space left on device")
+
+            assert s._audit is not None
+            s._audit.log = explode  # type: ignore[method-assign]
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                receipt = s.wrap_cancelled()  # must NOT raise
+
+            assert receipt.token == "a" * 32
+            assert s.load_wrap_snapshot() is None
+        finally:
+            s.close()
+
+    def test_the_error_survives_a_pickle_round_trip(self, tmp_path):
+        """A public exception that cannot cross a process boundary breaks
+        multiprocessing, RPC and any logging layer that serializes it — and it
+        fails while HANDLING a refusal, the worst moment for it. The keyword-only
+        constructor makes the default `Exception.__reduce__` crash with
+        `TypeError: takes 1 positional argument but 2 were given`. codex, L3;
+        `WrapInProgressError` already carried its own `__reduce__`.
+        """
+        import copy
+        import pickle
+
+        for exc in (
+            WrapOwnershipError(expected="a" * 32, actual="b" * 32),
+            WrapOwnershipError(expected="a" * 32, actual=None),
+            WrapOwnershipError(expected="a" * 32, actual=None, partial_state=True),
+        ):
+            for restored in (pickle.loads(pickle.dumps(exc)), copy.deepcopy(exc)):
+                assert type(restored) is WrapOwnershipError
+                assert restored.expected == exc.expected
+                assert restored.actual == exc.actual
+                assert restored.partial_state == exc.partial_state
+                assert str(restored) == str(exc)
+
+    def test_a_refusal_does_not_leak_the_write_lock(self, tmp_path):
+        """The refusal is raised INSIDE `BEGIN IMMEDIATE`, so the rollback in
+        `_db_boundary` is what releases the write lock — it is load-bearing on
+        this path, not defensive.
+
+        ⛔ Why this is worth its own test rather than trusting the boundary: the
+        MCP server holds ONE `Store` for the life of the process, so a lock
+        leaked by a refusal would not be transient — it would be a permanent,
+        store-wide lock taken by a guard whose entire purpose is to change
+        nothing. The most benign-looking path with the worst failure mode.
+        """
+        db = tmp_path / "cas_leak.db"
+        caller = Store(path=db, project_name="P")
+        try:
+            caller.record("One", EpisodeType.OBSERVATION)
+            caller.wrap_started(token="a" * 32, episode_ids=["feedface"])
+
+            with pytest.raises(WrapOwnershipError):
+                caller.wrap_cancelled(expect_token="b" * 32)
+
+            assert caller._conn.in_transaction is False
+
+            # A peer must be able to take the write lock immediately.
+            peer = Store(path=db, project_name="P")
+            try:
+                peer._conn.execute("PRAGMA busy_timeout=200")
+                peer._conn.execute("BEGIN IMMEDIATE")
+                peer._conn.rollback()
+            finally:
+                peer.close()
+
+            # And the refusing caller is still usable, with its wrap intact.
+            snap = caller.load_wrap_snapshot()
+            assert snap is not None and snap["token"] == "a" * 32
+        finally:
+            caller.close()
+
+    def test_the_ownership_check_is_atomic_across_connections(self, tmp_path):
+        """⭐ THE POINT OF THE WHOLE THING — the compare and the clear must be
+        one atomic step.
+
+        A guard that reads the token, compares, and THEN clears has a window: a
+        peer can complete that wrap and start a new one in between, and the
+        caller — having validated the OLD token — clears the NEW one. It would
+        be a guard carrying the exact defect it was written to close, and it is
+        what this check WOULD have been before `BEGIN IMMEDIATE` landed
+        (2026-09-03), when the metadata reads ran in autocommit.
+
+        The peer is injected AFTER the compare and BEFORE the clear, on its own
+        connection, with a barrier proving it arrived (so "did not finish"
+        cannot mean "was never scheduled").
+
+        MUTATION-CHECKED: remove `BEGIN IMMEDIATE` from `wrap_cancelled` and
+        this fails — the peer's wrap is destroyed by a call that validated a
+        token the store no longer held.
+        """
+        import threading
+
+        db = tmp_path / "cas_race.db"
+        caller = Store(path=db, project_name="P")
+        try:
+            caller.record("One", EpisodeType.OBSERVATION)
+            owned = "a" * 32
+            caller.wrap_started(token=owned, episode_ids=["feedface"])
+
+            peer_token = "b" * 32
+            peer_ready = threading.Event()
+            release_peer = threading.Event()
+            peer_done = threading.Event()
+            peer_error: list[BaseException] = []
+
+            def peer_takes_over():
+                try:
+                    peer = Store(path=db, project_name="P")
+                    try:
+                        peer_ready.set()
+                        release_peer.wait(timeout=10.0)
+                        peer.wrap_cancelled()
+                        peer.wrap_started(
+                            token=peer_token, episode_ids=["cafebabe"]
+                        )
+                    finally:
+                        peer.close()
+                except BaseException as exc:  # pragma: no cover - diagnostic
+                    peer_error.append(exc)
+                finally:
+                    peer_done.set()
+
+            worker = threading.Thread(target=peer_takes_over, daemon=True)
+            worker.start()
+            assert peer_ready.wait(timeout=10.0), "peer never opened its store"
+
+            real_get = caller._get_metadata
+            peer_finished_during_lock: list[bool] = []
+            held_the_lock: list[bool] = []
+
+            def inject_after_the_compare(key: str):
+                value = real_get(key)
+                # wrap_section_schema is read AFTER wrap_token, so the compare
+                # has already happened and nothing has been cleared yet.
+                if key == "wrap_section_schema":
+                    # ⭐ DETERMINISTIC PROOF OF THE MECHANISM, not a timeout.
+                    # peer-noncompletion-within-1s is evidence, not proof: a
+                    # mutant that simply fails to schedule the peer produces the
+                    # identical observation and every later assertion passes.
+                    # in_transaction is True here IFF BEGIN IMMEDIATE ran, so it
+                    # kills the mutant with no timing dependence at all. codex L3.
+                    held_the_lock.append(caller._conn.in_transaction)
+                    release_peer.set()
+                    peer_finished_during_lock.append(peer_done.wait(timeout=1.0))
+                return value
+
+            caller._get_metadata = inject_after_the_compare  # type: ignore[method-assign]
+            receipt = caller.wrap_cancelled(expect_token=owned)
+            caller._get_metadata = real_get  # type: ignore[method-assign]
+
+            worker.join(timeout=10.0)
+            assert not worker.is_alive()
+            assert not peer_error, f"peer raised: {peer_error!r}"
+            assert held_the_lock == [True], (
+                "the caller was NOT inside a transaction when the compare ran — "
+                "the compare and the clear are not one atomic step"
+            )
+            assert peer_finished_during_lock == [False], (
+                "the peer wrote while the caller held the write lock — the "
+                "compare and the clear were not one atomic step"
+            )
+            assert receipt.token == owned
+
+            verifier = Store(path=db, project_name="P")
+            try:
+                surviving = verifier.load_wrap_snapshot()
+            finally:
+                verifier.close()
+            assert surviving is not None and surviving["token"] == peer_token, (
+                "the peer's wrap was destroyed by a cancel that had validated a "
+                "token the store no longer held"
+            )
+        finally:
+            caller.close()
+
 
 class TestWrapCancelReceiptSemantics:
     """What `WrapCancelReceipt` MEANS — the partial-state predicate and the

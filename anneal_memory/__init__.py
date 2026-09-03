@@ -10,6 +10,7 @@ from .store import (
     StoreError,
     StoreOperation,
     WrapInProgressError,
+    WrapOwnershipError,
     continuity_lock,
 )
 from .types import (
@@ -119,6 +120,7 @@ __all__ = [
     "StoreError",
     "StoreOperation",
     "WrapInProgressError",
+    "WrapOwnershipError",
     "continuity_lock",
     "Server",
     "AuditTrail",

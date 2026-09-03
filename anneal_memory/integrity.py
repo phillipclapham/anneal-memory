@@ -223,6 +223,8 @@ TOOLS: list[dict[str, Any]] = [
                 "wrap_token": {
                     "type": "string",
                     "pattern": "^[0-9a-f]{32}$",
+                    "minLength": 32,
+                    "maxLength": 32,
                     "description": (
                         "Optional: the 32-char hex session-handshake token "
                         "from the prepare_wrap response (the 'Wrap token: "
@@ -277,11 +279,30 @@ TOOLS: list[dict[str, Any]] = [
             "you opened yourself. Do not call this to recover "
             "from a save_continuity validation failure you can fix by editing "
             "the text and saving again — that wrap is still live and cancelling "
-            "it throws away the snapshot you are working against."
+            "it throws away the snapshot you are working against. "
+            "If you opened the wrap yourself, pass the wrap_token prepare_wrap "
+            "gave you: the cancel then succeeds only if that wrap is still the "
+            "one in progress, and is refused without changing anything if a "
+            "peer replaced it. Omit wrap_token to cancel whatever is current, "
+            "which is what you want when recovering a wrap you did not open."
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "wrap_token": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{32}$",
+                    "description": (
+                        "Optional proof that the wrap being cancelled is yours "
+                        "— the token prepare_wrap returned. The store compares "
+                        "it inside the same transaction that clears, so a peer "
+                        "cannot swap the wrap in between. Refused with no "
+                        "change if it does not match, including when the wrap "
+                        "has already completed. Omit it to cancel whatever is "
+                        "in progress."
+                    ),
+                },
+            },
         },
     },
     {

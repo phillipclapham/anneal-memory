@@ -3379,3 +3379,135 @@ class TestWriteLockContentionIsNotReportedAsCorruption:
         finally:
             peer.rollback()
             peer.close()
+
+
+class TestWrapCancelOwnershipParityOnTheCLI:
+    """`--wrap-token` on `anneal-memory wrap-cancel` — the CLI half of
+    AM-WRAPCANCEL-CAS.
+
+    ⚠ Parity is the point, not a courtesy: 0.9.8 shipped the partial-state
+    message on the MCP side and had to fix the CLI "a round later", which is the
+    same lands-somewhere-not-everywhere shape this release exists to close. Both
+    surfaces must answer the same two facts the same way.
+    """
+
+    def _store_with_wrap(self, tmp_path, token):
+        db = tmp_path / "cliown.db"
+        s = Store(path=db, project_name="P")
+        s.record("One", "observation")
+        s.wrap_started(token=token, episode_ids=["feedface"])
+        s.close()
+        return db
+
+    def test_a_peers_wrap_is_refused_and_left_intact(self, tmp_path, capsys):
+        db = self._store_with_wrap(tmp_path, "a" * 32)
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_wrap_cancel(
+                Namespace(db=str(db), project_name="P", json=False,
+                          wrap_token="b" * 32)
+            )
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "different session" in err, err
+        assert "Nothing was changed" in err, err
+        assert "without --wrap-token" in err, "no override path offered: " + err
+
+        s = Store(path=db, project_name="P")
+        try:
+            assert s.load_wrap_snapshot() is not None
+        finally:
+            s.close()
+
+    def test_an_already_finished_wrap_does_not_blame_a_peer(self, tmp_path, capsys):
+        db = tmp_path / "cliidle.db"
+        Store(path=db, project_name="P").close()
+        with pytest.raises(SystemExit):
+            cmd_wrap_cancel(
+                Namespace(db=str(db), project_name="P", json=False,
+                          wrap_token="c" * 32)
+            )
+        err = capsys.readouterr().err
+        assert "already" in err, err
+        assert "different session" not in err, err
+
+    def test_the_owner_token_cancels(self, tmp_path, capsys):
+        db = self._store_with_wrap(tmp_path, "d" * 32)
+        cmd_wrap_cancel(
+            Namespace(db=str(db), project_name="P", json=False, wrap_token="d" * 32)
+        )
+        s = Store(path=db, project_name="P")
+        try:
+            assert s.load_wrap_snapshot() is None
+        finally:
+            s.close()
+
+    def test_a_malformed_token_is_rejected_before_anything_is_cleared(
+        self, tmp_path, capsys
+    ):
+        db = self._store_with_wrap(tmp_path, "e" * 32)
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_wrap_cancel(
+                Namespace(db=str(db), project_name="P", json=False,
+                          wrap_token="nope")
+            )
+        assert exc_info.value.code == 1
+        assert "32-character hex" in capsys.readouterr().err
+        s = Store(path=db, project_name="P")
+        try:
+            assert s.load_wrap_snapshot() is not None, (
+                "a bad argument must not be a destructive no-op"
+            )
+        finally:
+            s.close()
+
+    def test_a_trailing_newline_token_is_rejected_not_treated_as_a_mismatch(
+        self, tmp_path, capsys
+    ):
+        """`$` matches before a final newline, so `re.match` accepts a
+        33-character token — easy to produce from a shell command substitution.
+        The store then reported a misleading ownership MISMATCH ("that wrap
+        belongs to another session") for what is simply a malformed argument.
+        `save-continuity`'s validator already used `fullmatch`; this one did not.
+        codex + glm, L3.
+        """
+        db = self._store_with_wrap(tmp_path, "a" * 32)
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_wrap_cancel(
+                Namespace(db=str(db), project_name="P", json=False,
+                          wrap_token="a" * 32 + "\n")
+            )
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "32-character hex" in err, err
+        assert "different session" not in err, (
+            "a malformed token was reported as an ownership mismatch: " + err
+        )
+
+    def test_partial_state_offers_the_override_instead_of_claiming_nothing_is_wrong(
+        self, tmp_path, capsys
+    ):
+        """CLI parity for the L3 consensus finding — partial state must not be
+        reported as an idle store, or the operator is told there is nothing to
+        clear while `wrap_started_at` still blocks the next prepare-wrap."""
+        db = self._store_with_wrap(tmp_path, "a" * 32)
+        s = Store(path=db, project_name="P")
+        s._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("wrap_token", ""),
+        )
+        s._conn.commit()
+        s.close()
+
+        with pytest.raises(SystemExit):
+            cmd_wrap_cancel(
+                Namespace(db=str(db), project_name="P", json=False,
+                          wrap_token="a" * 32)
+            )
+        err = capsys.readouterr().err
+        assert "PARTIAL" in err, err
+        assert "WITHOUT --wrap-token" in err, (
+            "no recovery path offered for a state no token can ever match: " + err
+        )
+        assert "already" not in err.lower(), (
+            "reported a half-written store as an already-finished wrap: " + err
+        )

@@ -850,6 +850,7 @@ class TestWrapCancelReceiptIsRaceFree:
             # did the work; asserting only the surviving wrap would also pass if
             # something unrelated happened to serialize the two. L1 seat.
             peer_finished_during_lock: list[bool] = []
+            held_the_lock: list[bool] = []
 
             def inject_after_last_read(key: str):
                 value = real_get(key)
@@ -860,6 +861,13 @@ class TestWrapCancelReceiptIsRaceFree:
                 # test still passed. L1 seat NOTE-2.
                 if key == "wrap_episode_ids":
                     # The gap: caller has read everything, has cleared nothing.
+                    # ⭐ DETERMINISTIC PROOF OF THE MECHANISM, not a timeout.
+                    # peer-noncompletion-within-1s is evidence, not proof: a
+                    # mutant that simply fails to schedule the peer produces the
+                    # identical observation and every later assertion passes.
+                    # in_transaction is True here IFF BEGIN IMMEDIATE ran, so it
+                    # kills the mutant with no timing dependence at all. codex L3.
+                    held_the_lock.append(caller._conn.in_transaction)
                     release_peer.set()
                     peer_finished_during_lock.append(peer_done.wait(timeout=1.0))
                 return value
@@ -887,6 +895,11 @@ class TestWrapCancelReceiptIsRaceFree:
             assert not peer_error, f"peer thread raised: {peer_error!r}"
 
             # ⭐ The lock is the assertion, not a lucky outcome.
+            assert held_the_lock == [True], (
+                "the caller was NOT inside a transaction at the injection "
+                "point — BEGIN IMMEDIATE did not run, so nothing was holding "
+                "the write lock and the window is open"
+            )
             assert peer_finished_during_lock == [False], (
                 "the peer completed its write while the caller held the write "
                 "lock — nothing serialized them, so the guarantee under test "
@@ -983,7 +996,7 @@ class TestWrapCancelReceiptIsRaceFree:
 
         import sqlite3
 
-        def boom():
+        def boom(*, expect_token=None):
             # ⚠ The cause must be a REAL, NON-BUSY OperationalError. Raising
             # with no __cause__ at all made this vacuous: the predicate exits at
             # its first isinstance check, so a regression classifying EVERY
@@ -1870,3 +1883,127 @@ class TestToolCrystalIndex:
         r = _call(server, "crystal_index", {})
         assert _is_error(r)
         assert "crystal store corrupt" in _text_from_result(r)
+
+
+class TestWrapCancelOwnershipOverMCP:
+    """AM-WRAPCANCEL-CAS at the transport. Alex De Groodt's A3 (spore-699).
+
+    The store-side compare-and-swap is useless to the caller it was written for
+    unless the agent holding the token can reach it — and the agent IS the
+    person Alex was. Shipping the guard library-only would be the same
+    lands-somewhere-not-everywhere shape this release exists to close.
+    """
+
+    def _open_wrap(self, server, store):
+        server._tool_record({"content": "One", "episode_type": "observation"})
+        server._tool_prepare_wrap({})
+        return store.load_wrap_snapshot()["token"]
+
+    def test_the_owner_token_cancels(self, server, store):
+        token = self._open_wrap(server, store)
+        result = server._handle_tools_call(
+            {"name": "wrap_cancel", "arguments": {"wrap_token": token}}
+        )
+        assert not _is_error(result)
+        assert token in _text_from_result(result)
+        assert store.load_wrap_snapshot() is None
+
+    def test_a_peers_wrap_is_refused_and_left_intact(self, server, store):
+        self._open_wrap(server, store)
+        result = server._handle_tools_call(
+            {"name": "wrap_cancel", "arguments": {"wrap_token": "b" * 32}}
+        )
+        text = _text_from_result(result)
+        assert _is_error(result)
+        assert "different session" in text.lower(), text
+        assert "Nothing was changed" in text, text
+        assert "WITHOUT wrap_token" in text, "no override path offered: " + text
+        # ⭐ The refusal must leave the owner's wrap completely intact.
+        assert store.load_wrap_snapshot() is not None
+
+    def test_an_already_finished_wrap_says_so_rather_than_blaming_a_peer(
+        self, server, store
+    ):
+        """"Already gone" and "someone else owns it" are different facts and the
+        caller acts differently on each — the first is retry-safe, the second
+        means backing off."""
+        result = server._handle_tools_call(
+            {"name": "wrap_cancel", "arguments": {"wrap_token": "c" * 32}}
+        )
+        text = _text_from_result(result)
+        assert _is_error(result)
+        assert "already completed" in text, text
+        assert "different session" not in text.lower(), (
+            "blamed a peer for a wrap that simply finished: " + text
+        )
+
+    def test_a_malformed_token_is_rejected_before_anything_is_cleared(
+        self, server, store
+    ):
+        self._open_wrap(server, store)
+        result = server._handle_tools_call(
+            {"name": "wrap_cancel", "arguments": {"wrap_token": "not-a-token"}}
+        )
+        assert _is_error(result)
+        assert "32-character hex" in _text_from_result(result)
+        # A bad argument must not be a destructive no-op.
+        assert store.load_wrap_snapshot() is not None
+
+    def test_omitting_the_token_still_cancels_whatever_is_current(
+        self, server, store
+    ):
+        """The recovery path Alex needed: cancelling a wrap you did NOT open,
+        where you have no token to prove anything with."""
+        self._open_wrap(server, store)
+        result = server._handle_tools_call(
+            {"name": "wrap_cancel", "arguments": {}}
+        )
+        assert not _is_error(result)
+        assert store.load_wrap_snapshot() is None
+
+    def test_a_trailing_newline_token_is_rejected_not_treated_as_a_mismatch(
+        self, server, store
+    ):
+        """`re.match` accepts a 33-char token ending in a newline because `$`
+        matches before a final one. The agent then got a misleading ownership
+        mismatch for a malformed argument. codex + glm, L3."""
+        self._open_wrap(server, store)
+        result = server._handle_tools_call(
+            {"name": "wrap_cancel", "arguments": {"wrap_token": "a" * 32 + "\n"}}
+        )
+        text = _text_from_result(result)
+        assert _is_error(result)
+        assert "32-character hex" in text, text
+        assert "different session" not in text.lower(), text
+        assert store.load_wrap_snapshot() is not None
+
+    def test_partial_state_offers_the_override_not_a_false_all_clear(
+        self, server, store
+    ):
+        """⛔ THE L3 CONSENSUS FINDING AT THE TRANSPORT. Partial metadata can
+        match no token, so reporting it as "nothing in progress" leaves
+        `wrap_started_at` standing and the next prepare_wrap fails — Alex's
+        original three-day lockout, through the guard written to prevent it."""
+        self._open_wrap(server, store)
+        store._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("wrap_token", ""),
+        )
+        store._conn.commit()
+
+        result = server._handle_tools_call(
+            {"name": "wrap_cancel", "arguments": {"wrap_token": "a" * 32}}
+        )
+        text = _text_from_result(result)
+        assert _is_error(result)
+        assert "PARTIAL" in text, text
+        assert "WITHOUT wrap_token" in text, (
+            "no recovery path offered for a state no token can match: " + text
+        )
+        assert "already completed" not in text, (
+            "reported a half-written store as an already-finished wrap: " + text
+        )
+        # And the override must genuinely clear it, or it is still a lockout.
+        result = server._handle_tools_call({"name": "wrap_cancel", "arguments": {}})
+        assert not _is_error(result)
+        assert store._get_metadata("wrap_started_at") == ""

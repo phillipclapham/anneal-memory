@@ -631,6 +631,113 @@ def _fsync_dir(path: Path) -> None:
             pass
 
 
+def _reconstruct_wrap_ownership_error(
+    expected: str, actual: str | None, partial_state: bool
+) -> "WrapOwnershipError":
+    """Module-level reconstructor for pickling :class:`WrapOwnershipError`.
+
+    Needed because the constructor is keyword-only: the default
+    ``Exception.__reduce__`` rebuilds via ``type(self)(*self.args)`` and dies
+    with ``TypeError: takes 1 positional argument but 2 were given``. Found by
+    codex at L3 — a public exception that cannot cross a process boundary
+    breaks multiprocessing, RPC and any logging layer that serializes it, and
+    it fails while HANDLING a refusal, which is the worst moment for it.
+    """
+    return WrapOwnershipError(
+        expected=expected, actual=actual, partial_state=partial_state
+    )
+
+
+class WrapOwnershipError(AnnealMemoryError):
+    """Raised when ``wrap_cancelled(expect_token=...)`` is called and the store's
+    current wrap token is not the one the caller claims to own.
+
+    **The ownership half of the single-writer invariant.**
+    :class:`WrapInProgressError` stops a second wrap CLOBBERING the first;
+    this stops a second session CANCELLING it. Reported by Alex De Groodt
+    2026-08-04 (A3) and deliberately not shipped in 0.9.8, whose letter said
+    so rather than letting him assume it had landed: the lock recorded only
+    ``started_at`` — no owner, no PID, no expiry — so ``wrap_cancel`` could not
+    refuse on the grounds that the wrap belonged to somebody else.
+
+    ⚡ **It is a REAL compare-and-swap, and it could not have been before
+    2026-09-03.** The compare and the clear run inside
+    :meth:`Store.wrap_cancelled`'s ``BEGIN IMMEDIATE``, so no peer connection
+    can replace the token between them. Until that statement landed, the
+    metadata reads ran in autocommit and a check-then-clear here would have
+    been a read-compare-write with a live window — i.e. a guard carrying the
+    exact defect it was written to close.
+
+    ⛔ **A LOCK CANNOT ESTABLISH OWNERSHIP, WHICH IS WHY THIS EXISTS.** Write-lock
+    contention proves only that SOMETHING is writing — an unrelated ``record``,
+    a prune, a schema init on a fresh open, or an abandoned transaction holds it
+    identically while an old wrap stays stranded (codex, L3, 2026-09-03). Only
+    persisted per-wrap identity can answer "is this mine", and the token minted
+    by :func:`~anneal_memory.prepare_wrap` is that identity.
+
+    **Omitting ``expect_token`` is the override.** There is no separate ``force``
+    flag at this layer — an unproven cancel is exactly a cancel with no claim,
+    which is what every pre-existing caller already does.
+
+    ⛔ **THE STATE IS THREE-WAY AND THE THIRD ONE IS LOAD-BEARING:**
+
+    * ``actual`` is a token — a healthy wrap belonging to a DIFFERENT session.
+      Cancelling it destroys that session's compression. Back off.
+    * ``actual is None`` and ``partial_state`` False — the store is IDLE. The
+      caller's own wrap already completed or was cancelled. Retry-safe; there
+      is nothing to do.
+    * ``partial_state`` True — CORRUPT/PARTIAL state: lifecycle keys are set but
+      not coherently (``wrap_started_at`` present with an empty ``wrap_token``,
+      say, after a crash or a hand edit). No token can match, so no claim can
+      ever succeed; the only way out is to cancel WITHOUT ``expect_token``.
+
+    ⚠ The first cut collapsed the last two into ``actual is None`` and told the
+    operator NO WRAP IS IN PROGRESS while ``wrap_started_at`` survived the
+    rollback — so the next ``prepare_wrap`` failed with
+    :class:`WrapInProgressError` and the store looked permanently stuck. That is
+    Alex's original three-day lockout, reachable through the guard written to
+    prevent it. Both L3 seats caught it (glm HIGH, codex MED).
+    """
+
+    def __init__(
+        self, *, expected: str, actual: str | None, partial_state: bool = False
+    ) -> None:
+        self.expected = expected
+        self.actual = actual
+        self.partial_state = partial_state
+        if partial_state and actual is None:
+            super().__init__(
+                f"wrap_cancelled: caller claims wrap {expected!r}, but the store "
+                f"holds PARTIAL wrap state with no usable token (a crash or a "
+                f"manual edit). No token can match it, so no proven cancel can "
+                f"ever succeed. Nothing was changed — call without expect_token "
+                f"to clear the broken state."
+            )
+        elif actual is None:
+            super().__init__(
+                f"wrap_cancelled: caller claims wrap {expected!r} but NO wrap is "
+                f"in progress — it already completed or was cancelled. Nothing "
+                f"was changed. Call without expect_token to clear whatever is "
+                f"current, or treat this as already-done."
+            )
+        else:
+            super().__init__(
+                f"wrap_cancelled: caller claims wrap {expected!r} but the store "
+                f"holds {actual!r} — this wrap belongs to a DIFFERENT session and "
+                f"cancelling it would destroy its compression. Nothing was "
+                f"changed. Check `status` for its start time; call without "
+                f"expect_token only if you mean to override that."
+            )
+
+    def __reduce__(self) -> tuple:
+        # Keyword-only __init__, so route through the module-level
+        # reconstructor rather than the default type(self)(*self.args).
+        return (
+            _reconstruct_wrap_ownership_error,
+            (self.expected, self.actual, self.partial_state),
+        )
+
+
 class ContinuityLockUnavailable(AnnealMemoryError):
     """Raised by :func:`continuity_lock` / :meth:`Store.continuity_lock` with
     ``require=True`` when an exclusive cross-process lock cannot be acquired — a
@@ -1958,7 +2065,9 @@ class Store:
                 },
             )
 
-    def wrap_cancelled(self) -> "WrapCancelReceipt":
+    def wrap_cancelled(
+        self, *, expect_token: str | None = None
+    ) -> "WrapCancelReceipt":
         """Clear wrap-in-progress flag without recording a completed wrap.
 
         Use when a wrap is abandoned (no episodes, LLM failure, validation
@@ -1968,6 +2077,15 @@ class Store:
         ``wrap_token``, ``wrap_episode_ids``, and the frozen
         ``wrap_section_schema``) in a single SQL transaction, matching
         the batched-write invariant :meth:`wrap_started` establishes.
+
+        Args:
+            expect_token: If given, clear the wrap ONLY IF the store's current
+                ``wrap_token`` is exactly this — otherwise raise
+                :class:`WrapOwnershipError` and change nothing. The comparison
+                happens inside this method's ``BEGIN IMMEDIATE``, so it is a
+                true compare-and-swap across connections. Omitting it keeps the
+                pre-0.9.9 behaviour (clear whatever is current), which is what
+                an override means at this layer — there is no separate ``force``.
 
         Returns a :class:`WrapCancelReceipt` describing **what this call
         actually cleared**, read inside the same transaction as the clear —
@@ -2046,6 +2164,68 @@ class Store:
             cancelled_ids_raw = self._get_metadata("wrap_episode_ids")
             cancelled_schema_raw = self._get_metadata("wrap_section_schema")
 
+            # ⚠ PARSE AND CLASSIFY BEFORE THE COMMIT, NOT AFTER. This ran
+            # after the clear at first, and codex reproduced the consequence:
+            # `wrap_episode_ids` holding an invalid-UTF-8 BLOB raises
+            # UnicodeDecodeError — not JSONDecodeError — while building the
+            # receipt, so the wrap was ALREADY CLEARED and the caller got an
+            # exception with no receipt and no audit event. A 5,000-digit JSON
+            # integer raises ValueError the same way. ⛔ THE RULE THIS ENCODES:
+            # no receipt-building step after a destructive commit may be able to
+            # fail. Everything that can raise now happens while the transaction
+            # is still open, so a failure rolls back and clears nothing.
+            decoded_ids: Any = None
+            if cancelled_ids_raw:
+                try:
+                    decoded_ids = json.loads(cancelled_ids_raw)
+                except (ValueError, TypeError, UnicodeDecodeError, RecursionError):
+                    # Every parse failure is the SAME fact — the frozen list is
+                    # unreadable — so it classifies as partial state rather than
+                    # propagating. JSONDecodeError subclasses ValueError.
+                    decoded_ids = None
+
+            episode_ids: list[str] | None = None
+            if isinstance(decoded_ids, list) and all(
+                isinstance(x, str) for x in decoded_ids
+            ):
+                episode_ids = decoded_ids
+
+            had_any = bool(
+                cancelled_started_at
+                or cancelled_token
+                or cancelled_ids_raw
+                or cancelled_schema_raw
+            )
+            complete = bool(
+                cancelled_started_at and cancelled_token and episode_ids is not None
+            )
+            partial_state = had_any and not complete
+
+            # AM-WRAPCANCEL-CAS: compare INSIDE the write lock, so no peer can
+            # replace the token between this check and the clear below. That is
+            # what makes it a compare-and-swap rather than a read-compare-write
+            # with a window — and it is only true because of the BEGIN IMMEDIATE
+            # above. Raising here rolls back via _db_boundary, releasing the lock
+            # with NOTHING cleared. Alex De Groodt's A3; spore-699.
+            #
+            # ⛔ THE STATE IS THREE-WAY, NOT TWO. The first cut collapsed
+            # "nothing here" and "something here but no token" into
+            # ``actual=None`` via ``cancelled_token or None``, so a partial store
+            # (``wrap_started_at`` set, ``wrap_token`` empty — a crash or a hand
+            # edit) told the operator NO WRAP IS IN PROGRESS while
+            # ``wrap_started_at`` survived the rollback. The next prepare_wrap
+            # then failed with WrapInProgressError and the store looked
+            # permanently stuck: Alex's original three-day lockout, reachable
+            # through the guard written to prevent it. Both L3 seats caught it
+            # (glm HIGH, codex MED). ``actual is None`` now means IDLE and
+            # nothing else.
+            if expect_token is not None and cancelled_token != expect_token:
+                raise WrapOwnershipError(
+                    expected=expect_token,
+                    actual=cancelled_token or None,
+                    partial_state=partial_state if had_any else False,
+                )
+
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_started_at", ""),
@@ -2067,55 +2247,25 @@ class Store:
             )
             self._conn.commit()
 
-        # ONE parse, ONE predicate, feeding BOTH the audit payload and the
-        # receipt. 0.9.8 computed "is this partial state" twice, eleven lines
-        # apart — the audit half from the RAW metadata string, the receipt half
-        # from the PARSED value — so they agreed everywhere EXCEPT the
-        # unreadable-JSON case, which is precisely the recovery case the audit
-        # marker exists to flag. The receipt said partial_state=True while the
-        # tamper-evident record called the same event a routine abandonment.
-        # Diogenes 2026-09-03 MEDIUM. Hoisted above the audit block so there is
-        # only one definition to keep honest.
-        decoded_ids: Any = None
-        if cancelled_ids_raw:
-            try:
-                decoded_ids = json.loads(cancelled_ids_raw)
-            except json.JSONDecodeError:
-                decoded_ids = None
-
-        episode_ids: list[str] | None = None
-        if isinstance(decoded_ids, list) and all(
-            isinstance(x, str) for x in decoded_ids
-        ):
-            episode_ids = decoded_ids
-
-        # "Partial" means the store was NOT in a clean wrap-in-progress state:
-        # some lifecycle keys present, or episode IDs unreadable. An idle store
-        # (nothing set at all) is not partial — it is simply idle, which the
-        # ``token is None and started_at is None`` pair already says.
+        # ⚠ ONE parse, ONE predicate, feeding BOTH the audit payload and the
+        # receipt — computed above, INSIDE the transaction. 0.9.8 computed "is
+        # this partial state" twice, eleven lines apart: the audit half from the
+        # RAW metadata string, the receipt half from the PARSED value. They
+        # agreed everywhere EXCEPT unreadable JSON, which is precisely the
+        # recovery case the audit marker exists to flag, so the receipt said
+        # partial_state while the tamper-evident record logged a routine
+        # abandonment. Diogenes 2026-09-03 MEDIUM.
+        #
         # ⚠ DELIBERATE WIDENING vs 0.9.8's audit half: valid JSON of the wrong
-        # SHAPE (e.g. ``[1, 2]``) is now partial too. It was "healthy" to the
-        # old raw-string test purely because the string was non-empty, and a
-        # list the receipt refuses to hand back is not a readable episode list.
-        # ⚠ FOUR lifecycle keys are cleared by this method, so all four count as
-        # "there was state here". ``wrap_section_schema`` was omitted, so a store
-        # holding ONLY a stray frozen schema reported "no wrap was in progress"
-        # and emitted NO audit event at all — state silently discarded with no
-        # record. It is deliberately NOT part of ``complete``: wraps written
-        # before AM-SCHEMASNAPSHOT have no frozen schema and are otherwise
-        # healthy, so requiring one would mark ordinary cancels partial.
-        # codex L3.
-        had_any = bool(
-            cancelled_started_at
-            or cancelled_token
-            or cancelled_ids_raw
-            or cancelled_schema_raw
-        )
-        complete = bool(
-            cancelled_started_at and cancelled_token and episode_ids is not None
-        )
-        partial_state = had_any and not complete
-
+        # SHAPE (e.g. ``[1, 2]``) is partial too. It was "healthy" to the old
+        # raw-string test purely because the string was non-empty, and a list
+        # the receipt refuses to hand back is not a readable episode list.
+        # ⚠ FOUR lifecycle keys are cleared here, so all four count as "there was
+        # state". ``wrap_section_schema`` was omitted, so a store holding only a
+        # stray frozen schema reported "no wrap was in progress" and emitted NO
+        # audit event — state discarded with no record. It is deliberately NOT
+        # part of ``complete``: pre-AM-SCHEMASNAPSHOT wraps have no frozen schema
+        # and are otherwise healthy. codex L3.
         if self._audit is not None:
             # Three cases:
             # 1. Healthy cancel — all three keys were set. Log full
@@ -2164,15 +2314,34 @@ class Store:
                     # answer. The failure is surfaced as a warning rather than
                     # silently dropped, because a missing audit event is a real
                     # gap in a tamper-evident record.
-                    warnings.warn(
-                        "wrap_cancelled: the cancellation COMMITTED but its "
-                        f"audit event could not be written ({exc!r}). The store "
-                        "state is correct; the audit trail is missing this "
-                        "event. Investigate the audit sink before relying on "
-                        "the trail for this window.",
-                        UserWarning,
-                        stacklevel=2,
-                    )
+                    try:
+                        warnings.warn(
+                            "wrap_cancelled: the cancellation COMMITTED but its "
+                            f"audit event could not be written ({exc!r}). The "
+                            "store state is correct; the audit trail is missing "
+                            "this event. Investigate the audit sink before "
+                            "relying on the trail for this window.",
+                            UserWarning,
+                            stacklevel=2,
+                        )
+                    except Exception:
+                        # ⛔ THE NOTIFICATION ITSELF CAN RAISE, AND THAT WOULD
+                        # UNDO THE WHOLE POINT. Under `python -W error`,
+                        # PYTHONWARNINGS=error, or an embedding application's
+                        # filter, warnings.warn RAISES — recreating verbatim the
+                        # "destructive mutation committed, then reported as a
+                        # failure" path this catch exists to eliminate. codex
+                        # reproduced it at L3, and the regression test MASKED it
+                        # because pytest.warns installs a capturing filter, so
+                        # the guard's own test made the guard look sound.
+                        #
+                        # Once the commit has returned there is exactly one
+                        # correct outcome — return the receipt — so nothing
+                        # after it may propagate. The audit gap is real and
+                        # unreportable in that configuration; reporting it by
+                        # raising would tell the operator the cancel FAILED when
+                        # it succeeded, which is strictly worse.
+                        pass
 
         return WrapCancelReceipt(
             token=cancelled_token or None,

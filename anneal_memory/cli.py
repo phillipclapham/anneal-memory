@@ -100,6 +100,7 @@ from .store import (
     StoreDatabaseError,
     StoreError,
     WrapInProgressError,
+    WrapOwnershipError,
     _WRAP_TOKEN_RE,
 )
 from .types import AffectiveState, AssociationStats, EpisodeType, RelevantPattern
@@ -1232,6 +1233,19 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
     Prints the cancelled token (if any) to stdout so operators have a
     record of what was cleared.
     """
+    expect_token = getattr(args, "wrap_token", None)
+    # fullmatch, not match — `$` matches before a trailing newline, so `match`
+    # accepts a 33-character token ending in one (easy from a shell command
+    # substitution) and the store then reports a misleading ownership mismatch.
+    # save-continuity's validator already used fullmatch. codex + glm, L3.
+    if expect_token is not None and not _WRAP_TOKEN_RE.fullmatch(expect_token):
+        print(
+            "Error: --wrap-token must be the 32-character hex token from "
+            "prepare-wrap. Omit it to cancel whatever wrap is in progress.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     with _open_store(args) as store:
         # Report from the RECEIPT, read inside the clearing transaction — which
         # holds because Store.wrap_cancelled opens with BEGIN IMMEDIATE (added
@@ -1242,7 +1256,41 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
         # It also meant a partial-state cancel printed "no wrap was in progress",
         # which is false on the one recovery case this subcommand most exists
         # for, and contradicts the error that sent the operator here.
-        receipt = store.wrap_cancelled()
+        try:
+            receipt = store.wrap_cancelled(expect_token=expect_token)
+        except WrapOwnershipError as exc:
+            # ⚠ PARITY WITH THE MCP HANDLER IS THE POINT, NOT A COURTESY. 0.9.8
+            # shipped the partial-state message on the MCP side and had to fix
+            # the CLI "a round later" — the same lands-somewhere-not-everywhere
+            # shape. Both surfaces answer the same two facts the same way.
+            if exc.partial_state:
+                print(
+                    "The store holds PARTIAL wrap state with no usable token — "
+                    "a crash or a hand edit left it half-written. Your token "
+                    "cannot match it, so no proven cancel will ever succeed, "
+                    "and prepare-wrap will keep refusing until it is cleared. "
+                    "Nothing was changed. Re-run WITHOUT --wrap-token to clear "
+                    "the broken state — that is the recovery this command "
+                    "exists for.",
+                    file=sys.stderr,
+                )
+            elif exc.actual is None:
+                print(
+                    "Nothing to cancel: the wrap you named has already "
+                    "completed or been cancelled, and no wrap is in progress "
+                    "now. Nothing was changed.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "Refused: the wrap in progress is NOT the one you named, "
+                    "so it belongs to a different session and cancelling it "
+                    "would destroy its compression. Nothing was changed. Run "
+                    "`anneal-memory wrap-status` to see when it started; if it "
+                    "really is abandoned, re-run without --wrap-token.",
+                    file=sys.stderr,
+                )
+            sys.exit(1)
 
         if args.json:
             _print_json({
@@ -2952,6 +3000,17 @@ def build_parser() -> argparse.ArgumentParser:
         "wrap-cancel",
         help="Clear wrap-in-progress state without recording a completed wrap",
         parents=[json_parent],
+    )
+    sub.add_argument(
+        "--wrap-token",
+        help=(
+            "Proof that the wrap being cancelled is yours — the token from "
+            "the prior prepare-wrap ('Wrap token: <hex>'). The cancel then "
+            "succeeds only if that wrap is still the one in progress, and is "
+            "refused WITHOUT changing anything if a peer replaced it or it "
+            "already completed. Omit to cancel whatever is current, which is "
+            "what you want when clearing a wrap you did not open."
+        ),
     )
     sub.set_defaults(func=cmd_wrap_cancel)
 

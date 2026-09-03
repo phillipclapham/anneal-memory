@@ -95,7 +95,13 @@ from .crystal import (
     activation_tier,
 )
 from .retrieval import retrieve_patterns, retrieve_relevant, MAX_PATTERNS
-from .store import Store, StoreError, WrapInProgressError, _WRAP_TOKEN_RE
+from .store import (
+    Store,
+    StoreDatabaseError,
+    StoreError,
+    WrapInProgressError,
+    _WRAP_TOKEN_RE,
+)
 from .types import AffectiveState, AssociationStats, EpisodeType, RelevantPattern
 
 
@@ -237,11 +243,56 @@ def _open_store(args: argparse.Namespace) -> Store:
             file=sys.stderr,
         )
         sys.exit(1)
-    return Store(
-        path=db_path,
-        project_name=getattr(args, "project_name", "Agent"),
-        audit=True,
-    )
+    try:
+        return Store(
+            path=db_path,
+            project_name=getattr(args, "project_name", "Agent"),
+            audit=True,
+        )
+    except StoreDatabaseError as exc:
+        # ⚠ THE OPERATOR'S FIRST MESSAGE, AND IT USED TO READ LIKE CORRUPTION.
+        # Store.__init__ runs INSERT OR IGNORE on every write-capable open, and
+        # that takes the WRITE LOCK even when the row already exists — so a new
+        # process opening a store while any peer is mid-write waits out
+        # busy_timeout and dies with "SQLite schema_init failed on <path>:
+        # database is locked". That is the `anneal-memory wrap-cancel` path:
+        # the recovery command an operator reaches for when a session is stuck,
+        # answering with what sounds like a corrupt database.
+        #
+        # Pre-existing (found by the L2 seat 2026-09-03, not introduced by the
+        # BEGIN IMMEDIATE work — that added ~0.11 ms to the lock hold). It is
+        # translated HERE rather than left alone because the MCP surface now
+        # gives `wrap_cancel` an actionable contention message, and fixing the
+        # agent's path while leaving the human's is the land-somewhere-not-
+        # everywhere shape this whole change set exists to close.
+        if _is_write_lock_contention(exc):
+            _print_contention(db_path)
+            sys.exit(1)
+        raise
+
+
+def _is_write_lock_contention(exc: StoreDatabaseError) -> bool:
+    """True when a StoreDatabaseError came from SQLite write-lock contention.
+
+    Matches on the ``sqlite3`` error preserved as ``__cause__`` — never on the
+    wrapper's formatted message, which embeds the store PATH (a database under
+    a directory named ``locked/`` would fool a substring test). ``cause_type_name``
+    cannot do this job either: SQLITE_BUSY and a malformed database image are
+    both ``OperationalError``. The result-code name is the real discriminator
+    and arrived in Python 3.11, so it is guarded — ``requires-python`` is >=3.10.
+    """
+    cause = exc.__cause__
+    if not isinstance(cause, sqlite3.OperationalError):
+        return False
+    errorname = getattr(cause, "sqlite_errorname", None)
+    if errorname is not None:
+        return errorname in (
+            "SQLITE_BUSY",
+            "SQLITE_BUSY_SNAPSHOT",
+            "SQLITE_BUSY_TIMEOUT",
+        )
+    text = str(cause).lower()
+    return "database is locked" in text or "database is busy" in text
 
 
 # -- Episode dict helper --
@@ -1182,7 +1233,9 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
     record of what was cleared.
     """
     with _open_store(args) as store:
-        # Report from the RECEIPT, read inside the clearing transaction (0.9.8).
+        # Report from the RECEIPT, read inside the clearing transaction — which
+        # holds because Store.wrap_cancelled opens with BEGIN IMMEDIATE (added
+        # after 0.9.8, which claimed this without it and so claimed it falsely).
         # This used to load_wrap_snapshot() first and then clear — two reads with
         # a gap, in which a peer can finish the observed wrap and start another,
         # so the clear destroys the new one while the output names the old token.
@@ -3195,8 +3248,47 @@ def main() -> None:
     if remaining:
         parser.error(f"unrecognized arguments: {' '.join(remaining)}")
 
-    # Dispatch to subcommand handler
-    args.func(args)
+    # Dispatch to subcommand handler, behind the ONE contention boundary.
+    #
+    # ⚠ SCOPED WRONG AT FIRST — the translation lived only around `Store(...)`
+    # in `_open_store`, so it covered a peer holding the lock at OPEN time and
+    # nothing after. A peer that takes the lock between a successful open and
+    # the command's own write (`wrap-cancel`'s BEGIN IMMEDIATE, for one) still
+    # escaped as a raw `StoreDatabaseError` traceback — the exact low-level
+    # failure the new messaging claims to eliminate, from the same command.
+    # And the first test could not see it: it held the lock BEFORE opening, so
+    # the post-open race was never exercised. codex L3.
+    #
+    # ⭐ It sits HERE, not at the `wrap_cancelled()` call site, because the
+    # window is not specific to that command — every subcommand that writes has
+    # it. Fixing the one site that was noticed is how the previous scoping got
+    # written. One boundary, all subcommands.
+    try:
+        args.func(args)
+    except StoreDatabaseError as exc:
+        if not _is_write_lock_contention(exc):
+            raise
+        _print_contention(getattr(args, "db", "the store"))
+        sys.exit(1)
+
+
+def _print_contention(db: object) -> None:
+    """The operator-facing message for SQLite write-lock contention.
+
+    One function so the open-time path and the command-time path cannot drift
+    into saying different things about the same condition.
+    """
+    print(f"Error: another process is writing to this store right now ({db}).",
+          file=sys.stderr)
+    print(
+        "The database is NOT corrupt and nothing has been changed. "
+        "Something else holds the write lock — a wrap being saved, or any "
+        "other write. ⚠ A lock carries no ownership, so this does not tell "
+        "you WHICH session is working or whether a pending wrap belongs to "
+        "it. Wait a few seconds and run the command again. If it never "
+        "clears, check for a stuck process holding the store open.",
+        file=sys.stderr,
+    )
 
 
 if __name__ == "__main__":

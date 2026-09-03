@@ -396,6 +396,28 @@ class TestSkillManifest:
             )
 
 
+
+def _mcp_cell_marks_unavailable(row: str, tool_names: set[str]) -> bool:
+    """True when a SKILL.md table row's MCP cell declares the tool unavailable
+    over MCP — i.e. it says CLI-only (either spelling) and names no shipped MCP
+    tool in that same cell.
+
+    Cell-scoped on purpose: a row may legitimately say a CLI *subcommand* is
+    CLI-only while correctly naming the MCP tool alongside it, and a row-scoped
+    test cannot tell that apart from the defect.
+    """
+    if not row.startswith("|"):
+        return False
+    cells = [c.strip() for c in row.strip().strip("|").split("|")]
+    if len(cells) < 2:
+        return False
+    mcp_cell = cells[-1]
+    lowered = mcp_cell.lower()
+    if "cli only" not in lowered and "cli-only" not in lowered:
+        return False
+    return not any(f"`{name}`" in mcp_cell for name in tool_names)
+
+
 class TestDocumentedToolCount:
     """The README and server.py both state the tool count in prose. Nothing
     checked either, and both were stale the moment a tool was added — the same
@@ -423,29 +445,80 @@ class TestDocumentedToolCount:
                 continue  # documented collectively as `spore_*`
             assert f"`{name}`" in readme, f"MCP tool {name!r} is not documented in README.md"
 
-    def test_skill_does_not_claim_an_mcp_tool_is_CLI_ONLY(self):
-        """SKILL.md is the depth doc an AGENT loads, and it claimed the
-        stuck-wrap row had no MCP surface — which 0.9.8 made false, in the one
-        file most likely to be read by the reader the fix was written for.
+    def test_no_skill_row_marks_an_mcp_tool_as_having_no_mcp_surface(self):
+        """SKILL.md must never present a shipped MCP tool as unavailable to MCP.
 
-        The README assertions above did not cover it, so the release's own
-        defect class survived in a shipping artifact (the skill is in the
-        sdist). Scanning every tool name against every "CLI only" marker is
-        what generalises past the one row that happened to be noticed.
+        ⚠ REWRITTEN 2026-09-03 — the previous guard,
+        ``test_skill_does_not_claim_an_mcp_tool_is_CLI_ONLY``, SCANNED ZERO
+        LINES and had therefore never executed its assertion once. Its filter
+        required a row to start with ``|`` AND contain the exact string
+        ``"CLI only"``; the same commit that added the guard rewrote the only
+        qualifying row to say ``CLI-only`` (hyphen), so the loop body never
+        ran. Not weaker coverage — NO coverage. Found by the L1 seat, which
+        sharpened Diogenes' reading (he had it as "passes on the defect it was
+        written for"; it cannot fail at all).
+
+        ⛔ AND THE OLD PREDICATE WAS UNSALVAGEABLE, not merely mis-spelled.
+        "row says CLI-only AND names a tool" false-positives on the CURRENT,
+        CORRECT row, which reads ``| Recover a stuck wrap | ... | `wrap_cancel`
+        (inspect via `status`; `wrap-status` is CLI-only) |`` — the CLI-only
+        applies to the CLI subcommand ``wrap-status``, while the row correctly
+        names the MCP tool. Widening the spelling would have made a good row
+        fail.
+
+        The real defect shape was the MCP CELL marking unavailability while
+        naming no tool (``— (CLI only)``), so the predicate is cell-scoped.
+        Its discrimination is proved on synthetic input by
+        :meth:`test_the_unavailable_marker_predicate_actually_discriminates`,
+        so this assertion cannot go quietly vacuous again.
         """
         skill = self._root() / "skill" / "anneal-memory" / "SKILL.md"
         if not skill.is_file():
             pytest.skip("skill/ not present in this checkout")
-        text = skill.read_text(encoding="utf-8")
         tool_names = {t["name"] for t in TOOLS}
-        for line in text.splitlines():
-            if not line.startswith("|") or "CLI only" not in line:
-                continue
-            for name in tool_names:
-                assert f"`{name}`" not in line, (
-                    f"SKILL.md marks a row 'CLI only' while naming the MCP tool "
-                    f"{name!r} in it: {line.strip()}"
-                )
+        offenders = [
+            line
+            for line in skill.read_text(encoding="utf-8").splitlines()
+            if _mcp_cell_marks_unavailable(line, tool_names)
+        ]
+        assert not offenders, (
+            "SKILL.md row(s) mark the MCP surface unavailable without naming "
+            f"any shipped MCP tool in that cell: {offenders}"
+        )
+
+    def test_the_unavailable_marker_predicate_actually_discriminates(self):
+        """The non-vacuity proof for the guard above.
+
+        A NEGATIVE guard is healthy when it matches nothing, which makes
+        "matches nothing because the file is clean" indistinguishable from
+        "matches nothing because the filter is broken" — exactly how its
+        predecessor sat dead in the suite. So the predicate is exercised here
+        on inputs of BOTH classes, independent of what SKILL.md happens to say.
+        """
+        tool_names = {t["name"] for t in TOOLS}
+
+        # The real defect, verbatim from the published 0.9.8 sdist.
+        bad = (
+            "| Recover a stuck wrap | `anneal-memory wrap-status` · "
+            "`wrap-cancel` | — (CLI only) |"
+        )
+        assert _mcp_cell_marks_unavailable(bad, tool_names)
+        # Hyphenated spelling — the one that killed the old filter.
+        assert _mcp_cell_marks_unavailable(
+            "| Recover a stuck wrap | `wrap-cancel` | — (CLI-only) |", tool_names
+        )
+        # The CURRENT, CORRECT row: says CLI-only about a CLI subcommand while
+        # naming the MCP tool. Must NOT fire.
+        good = (
+            "| Recover a stuck wrap | `anneal-memory wrap-status` · "
+            "`wrap-cancel` | `wrap_cancel` (inspect via `status`; "
+            "`wrap-status` is CLI-only) |"
+        )
+        assert not _mcp_cell_marks_unavailable(good, tool_names)
+        # Prose is not a table row.
+        assert not _mcp_cell_marks_unavailable(
+            '*(Before 0.9.8 this row read "— (CLI only)".)*', tool_names
+        )
 
     def test_skill_documents_the_wrap_recovery_mcp_tool(self):
         """The positive half — the row must actually name the tool. A row that
@@ -459,6 +532,45 @@ class TestDocumentedToolCount:
             "SKILL.md never names the wrap_cancel MCP tool — an agent reading it "
             "still has no in-band way out of a stuck wrap"
         )
+
+    def test_skill_documents_every_tool(self):
+        """The mirror of :meth:`test_readme_documents_every_tool`, over the doc
+        that actually rotted.
+
+        ⚠ ADDED 2026-09-03. The asymmetry was the defect: README.md, which did
+        NOT rot, carried an every-tool loop, while SKILL.md — the depth doc an
+        AGENT loads, and the file that DID rot — was guarded by a single
+        hardcoded ``wrap_cancel`` string literal. Measured before writing this:
+        erasing ``delete_episode`` from SKILL.md left the FULL suite green, so
+        a tool could vanish from the agent-facing doc and nothing fired. That
+        reproduces Alex De Groodt's condition — a tool the reader never learns
+        exists — with no red test anywhere.
+
+        The sibling negative guard (``..._is_CLI_ONLY``) cannot cover this: in
+        SKILL.md the MCP column is where the backticked tool names live, so a
+        row whose MCP cell reads "CLI only" does not name the tool BY
+        CONSTRUCTION and the scan has nothing to match. It passes on the exact
+        defect it was written for; this loop is what generalises.
+
+        MUTATION-CHECKED: remove any non-``spore_*`` tool name from SKILL.md
+        and this test fails. And checked against the DEFECT ITSELF rather than
+        a mutant: the published 0.9.8 sdist was downloaded from PyPI on
+        2026-09-03 and its SKILL.md does not contain the string
+        ``\`wrap_cancel\``` anywhere, so this loop would have failed on the
+        artifact that shipped. The guard that was there did not.
+        """
+        skill = self._root() / "skill" / "anneal-memory" / "SKILL.md"
+        if not skill.is_file():
+            pytest.skip("skill/ not present in this checkout")
+        text = skill.read_text(encoding="utf-8")
+        for tool in TOOLS:
+            name = tool["name"]
+            if name.startswith("spore_"):
+                continue  # documented collectively as `spore_*`
+            assert f"`{name}`" in text, (
+                f"MCP tool {name!r} is not documented in SKILL.md — the depth "
+                f"doc an agent loads. It cannot use a tool it never learns of."
+            )
 
     def test_server_docstring_states_the_real_count(self):
         import re

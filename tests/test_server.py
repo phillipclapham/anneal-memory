@@ -749,10 +749,22 @@ class TestWrapCancelReceiptIsRaceFree:
         assert token in text
         assert "2 episode(s) released" in text  # exact: "2 episode" also matches "12 episode(s)"
 
-    def test_report_cannot_name_a_wrap_it_did_not_clear(self, server, store):
-        """The race made concrete. A peer replaces the wrap between the moment
-        the caller decided to cancel and the clear itself; whatever the handler
-        reports must be the wrap the CLEAR saw, never an earlier one."""
+    def test_report_names_the_current_wrap_not_an_earlier_one(self, server, store):
+        """SEQUENTIAL replacement — no concurrency here, deliberately.
+
+        ⚠ RENAMED 2026-09-03. This was called
+        ``test_report_cannot_name_a_wrap_it_did_not_clear`` and its docstring
+        opened "The race made concrete", but the peer replacement below happens
+        BEFORE ``_handle_tools_call`` is ever entered: nothing interleaves, so
+        no window is exercised. The name and docstring are what a future reader
+        consults to decide whether the race class is covered, and both
+        certified a property this body cannot see. Diogenes 2026-09-03 MEDIUM.
+
+        What it DOES prove is real and worth keeping: the handler reports
+        CURRENT state rather than a value read earlier, which kills the
+        pre-read mutant. The interleaved case is
+        :meth:`test_a_peer_installed_between_read_and_clear_is_not_destroyed`.
+        """
         server._tool_record({"content": "One", "episode_type": "observation"})
         server._tool_prepare_wrap({})
         stale_token = store.load_wrap_snapshot()["token"]
@@ -769,6 +781,233 @@ class TestWrapCancelReceiptIsRaceFree:
             "reported a token from a wrap that had already completed — the "
             "operator would believe a corpse was cleared"
         )
+
+    def test_a_peer_installed_between_read_and_clear_is_not_destroyed(
+        self, tmp_path
+    ):
+        """THE ACTUAL RACE — a peer write injected BETWEEN the caller's reads
+        and the caller's clear, on a SECOND CONNECTION, driven to completion.
+
+        This is the test the class name always claimed to have. Without
+        ``BEGIN IMMEDIATE`` in ``Store.wrap_cancelled`` the three metadata
+        SELECTs run in autocommit (``isolation_level=""`` fires BEGIN before
+        DML only), the peer's new wrap lands in the gap, and the caller's
+        unconditional clear destroys it while reporting the OLD token — the
+        operator is told a corpse was cleared. Measured 2026-09-03.
+
+        MUTATION-CHECKED: delete the ``BEGIN IMMEDIATE`` statement FROM
+        ``wrap_cancelled`` and this test fails; the rest of the suite stays
+        green. ⚠ Scope the mutation to that one site — there are now two
+        (``wrap_started`` has one as well), and stripping both fails two tests.
+
+        ⏱ The healthy path burns the full 1.0s wait BY DESIGN: the peer is
+        blocked on the write lock and must not finish. Timing margins measured
+        by the L1 seat — under the mutant the peer completes in ~60 ms against
+        a 1.0s window (~16x), and the block is bounded by sqlite3's 5.0s busy
+        timeout against that same 1.0s (~5x). Neither is tight.
+        """
+        import threading
+
+        db = tmp_path / "race.db"
+        caller = Store(path=db, project_name="TestProject")
+        try:
+            ep = caller.record("one", "observation")
+            old_token = "a" * 32
+            caller.wrap_started(token=old_token, episode_ids=[ep.id])
+
+            new_token = "b" * 32
+            peer_ready = threading.Event()
+            release_peer = threading.Event()
+            peer_done = threading.Event()
+            peer_error: list[BaseException] = []
+
+            def peer_replaces_the_wrap():
+                # The peer Store is built INSIDE the thread: sqlite3 objects
+                # may only be used on the thread that created them.
+                try:
+                    peer = Store(path=db, project_name="TestProject")
+                    try:
+                        peer_ready.set()  # open and scheduled, before any lock
+                        release_peer.wait(timeout=10.0)
+                        # Finish the observed wrap and immediately start a new
+                        # one. Under BEGIN IMMEDIATE this blocks on the write
+                        # lock until the caller commits — which is the point.
+                        peer.wrap_cancelled()
+                        peer.wrap_started(
+                            token=new_token, episode_ids=["cafebabe"]
+                        )
+                    finally:
+                        peer.close()
+                except BaseException as exc:  # pragma: no cover - diagnostic
+                    peer_error.append(exc)
+                finally:
+                    peer_done.set()
+
+            worker = threading.Thread(target=peer_replaces_the_wrap, daemon=True)
+            real_get = caller._get_metadata
+            # ⭐ THE MECHANISM, CAPTURED SO IT CAN BE ASSERTED. Recording whether
+            # the peer finished DURING the caller's lock is what proves the lock
+            # did the work; asserting only the surviving wrap would also pass if
+            # something unrelated happened to serialize the two. L1 seat.
+            peer_finished_during_lock: list[bool] = []
+
+            def inject_after_last_read(key: str):
+                value = real_get(key)
+                # Keyed on the LAST key wrap_cancelled reads, not on a count.
+                # `len(reads) == 3` hardcoded the number of _get_metadata calls,
+                # so adding a fourth read would slide the injection into the
+                # MIDDLE of the read set and quietly weaken the window while the
+                # test still passed. L1 seat NOTE-2.
+                if key == "wrap_episode_ids":
+                    # The gap: caller has read everything, has cleared nothing.
+                    release_peer.set()
+                    peer_finished_during_lock.append(peer_done.wait(timeout=1.0))
+                return value
+
+            # ⭐ THE BARRIER (codex L3). Asserting only "the peer did not finish
+            # inside the window" cannot tell BLOCKED-ON-THE-LOCK from
+            # NEVER-SCHEDULED — under the mutant a thread starved for one second
+            # produces the same observation and the test passes on the live
+            # defect. So the peer opens its store and signals READY *before* the
+            # caller takes the lock (a Store() open would itself block on the
+            # lock, so the barrier cannot sit after construction), the caller
+            # proves it reached that point, and only then releases it into the
+            # gap. Now "did not finish" means one thing.
+            worker.start()
+            assert peer_ready.wait(timeout=10.0), (
+                "peer thread never opened its store — the window was never armed"
+            )
+
+            caller._get_metadata = inject_after_last_read  # type: ignore[method-assign]
+            receipt = caller.wrap_cancelled()
+            caller._get_metadata = real_get  # type: ignore[method-assign]
+
+            worker.join(timeout=10.0)
+            assert not worker.is_alive(), "peer thread never completed"
+            assert not peer_error, f"peer thread raised: {peer_error!r}"
+
+            # ⭐ The lock is the assertion, not a lucky outcome.
+            assert peer_finished_during_lock == [False], (
+                "the peer completed its write while the caller held the write "
+                "lock — nothing serialized them, so the guarantee under test "
+                "was never exercised"
+            )
+
+            # The receipt must describe the wrap the CLEAR saw.
+            assert receipt.token == old_token
+
+            # ⭐ THE ASSERTION THE OLD TEST COULD NOT MAKE: the peer's wrap
+            # must still be there. If the clear ran while the peer's write was
+            # already committed, this is None and a live wrap was destroyed.
+            verifier = Store(path=db, project_name="TestProject")
+            try:
+                surviving = verifier.load_wrap_snapshot()
+            finally:
+                verifier.close()
+            assert surviving is not None, (
+                "the peer's live wrap was destroyed by a cancel that reported "
+                "an older token — the read/clear window is open"
+            )
+            assert surviving["token"] == new_token
+        finally:
+            caller.close()
+
+    def test_write_lock_contention_tells_the_agent_not_to_retry(self, tmp_path):
+        """The failure mode BEGIN IMMEDIATE introduced, given a reachable action.
+
+        Closing the read/clear race means a peer holding the write lock now
+        blocks this call and then surfaces "database is locked". Shipping that
+        bare would repeat 0.9.8's own defect — a recovery message naming no
+        path its caller can take — on the tool an agent calls when it is
+        already stuck. And the lock is SIGNAL: it proves a peer is writing, so
+        the wrap is live and must NOT be cancelled.
+
+        Real contention, not a mock: a second connection holds an actual
+        BEGIN IMMEDIATE. busy_timeout is shortened so the test does not pay
+        sqlite3's 5s default.
+        """
+        import sqlite3
+
+        db = tmp_path / "contended.db"
+        s = Store(path=db, project_name="TestProject")
+        try:
+            srv = Server(s)
+            srv._tool_record({"content": "One", "episode_type": "observation"})
+            srv._tool_prepare_wrap({})
+
+            peer = sqlite3.connect(str(db))
+            try:
+                peer.execute("BEGIN IMMEDIATE")  # hold the write lock
+                s._conn.execute("PRAGMA busy_timeout=100")
+
+                result = srv._handle_tools_call(
+                    {"name": "wrap_cancel", "arguments": {}}
+                )
+                text = _text_from_result(result)
+                assert _is_error(result)
+                assert "Do NOT retry" in text, text
+                assert "database is locked" not in text.lower(), (
+                    "leaked the raw SQLite string instead of a next action"
+                )
+                # ⭐ THE MESSAGE MUST NOT CLAIM THE WRAP IS LIVE, AND THIS TEST
+                # IS THE COUNTEREXAMPLE. The lock above is held by a RAW
+                # BEGIN IMMEDIATE on an unrelated connection — no wrap, no peer
+                # session. An earlier draft asserted "live" here, i.e. this body
+                # demonstrated the refutation while certifying the claim.
+                # codex L3.
+                assert "no ownership" in text.lower() or "does NOT tell you" in text, (
+                    "message must say a lock carries no ownership: " + text
+                )
+                assert "is LIVE, not stranded" not in text, (
+                    "claims the pending wrap is live; a write lock proves only "
+                    "that SOMETHING is writing — an unrelated record, prune or "
+                    "abandoned transaction holds it identically: " + text
+                )
+            finally:
+                peer.rollback()
+                peer.close()
+
+            # And the wrap is still intact — nothing was destroyed.
+            assert s.load_wrap_snapshot() is not None
+        finally:
+            s.close()
+
+    def test_an_unrelated_database_error_is_not_swallowed_as_contention(
+        self, server, store, monkeypatch
+    ):
+        """The catch must be NARROW. A guard that treats every StoreDatabaseError
+        as lock contention would hide real corruption behind a soothing
+        'a peer is writing' message — the same shape as reporting a corpse
+        cleared. Pin that only genuine contention takes that branch."""
+        from anneal_memory.store import StoreDatabaseError
+
+        import sqlite3
+
+        def boom():
+            # ⚠ The cause must be a REAL, NON-BUSY OperationalError. Raising
+            # with no __cause__ at all made this vacuous: the predicate exits at
+            # its first isinstance check, so a regression classifying EVERY
+            # OperationalError as contention would still have passed here.
+            # codex L3.
+            cause = sqlite3.OperationalError("disk I/O error")
+            try:
+                raise cause
+            except sqlite3.OperationalError as exc:
+                raise StoreDatabaseError(
+                    "SQLite wrap_cancelled failed on /tmp/x: disk I/O error",
+                    operation="wrap_cancelled",
+                    path="/tmp/x",
+                    cause_type_name="OperationalError",
+                ) from exc
+
+        monkeypatch.setattr(store, "wrap_cancelled", boom)
+        result = server._handle_tools_call({"name": "wrap_cancel", "arguments": {}})
+        text = _text_from_result(result)
+        assert _is_error(result)
+        assert "Do NOT retry" not in text, (
+            "an unrelated database error was reported as write-lock contention"
+        )
+        assert "disk I/O error" in text
 
     def test_reports_start_time_so_a_peer_kill_is_visible(self, server, store):
         server._tool_record({"content": "One", "episode_type": "observation"})

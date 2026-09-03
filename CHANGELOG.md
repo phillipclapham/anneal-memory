@@ -4,6 +4,153 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+⚠ **VERSION STAMP POLICY, adopted 2026-09-03.** The commit after a release bumps to the next
+`.devN`, or the release commit is the last one on that number. Both are acceptable; a published
+number left standing on a moving `main` is not. **0.9.8 broke this**: PyPI's upload landed
+2026-09-02 13:28 EDT from `a067a7d` (which the `v0.9.8` tag correctly points at), and three more
+commits landed at 13:33, 13:41 and 14:09 while `pyproject.toml` still read `0.9.8`. So "0.9.8"
+named two different trees and what a developer cloned was not what an adopter installed —
+including a `tool-integrity.json` mismatch that makes anneal's own `verify_integrity` report
+`possible tampering` on a clean install. Nothing below shipped in the published 0.9.8.
+
+### Fixed — `wrap_cancel`'s read/clear window is now actually closed, not just described as closed
+
+0.9.8 shipped the sentence *"the window is removed rather than narrowed"* without the statement
+that makes it true. Under the store's default `isolation_level=""` the implicit `BEGIN` fires
+before DML only, never before a `SELECT`, so `wrap_cancelled()`'s three metadata reads ran in
+autocommit and a peer on another connection could replace the wrap between the last read and the
+first write. Measured 2026-09-03 and driven to completion: the caller returned the OLD token with
+`partial_state=False` while the peer's live wrap was destroyed — verbatim the outcome the release
+note called impossible. `Store.wrap_cancelled()` now opens with `BEGIN IMMEDIATE`, so the reads
+take the write lock and read-and-clear is atomic across connections.
+
+The flock does not cover this path: `continuity_lock` guards the continuity *file*, its own
+docstring says it does not span the wrap lifecycle, and none of the three `wrap_cancelled()` call
+sites takes it. (`wrap_started` turned out to have the same defect and the same non-coverage —
+see the next section — so both methods now take the lock; neither rests on that exclusion.)
+
+### Fixed — `wrap_started`'s single-writer guard had the SAME false-atomicity claim, found by generalising
+
+Not filed by the reviewer — found by asking whether the `wrap_cancelled` defect had siblings, which it
+did, in the one method held up as documenting its own limit honestly. `wrap_started`'s **docstring**
+said the guard reads `wrap_started_at` *"inside the SAME transaction as the writes, so the check-and-set
+is atomic on this connection"*. Measured: `in_transaction` was `False` at the guard read. The inline
+comment 120 lines below stated the limit **correctly** (*"there is no BEGIN IMMEDIATE and the SELECT
+takes no write lock"*) and deferred the close to an external flock — but `continuity_lock` is taken
+inside `validated_save_continuity` only, **never in `prepare_wrap`**, which is what calls `wrap_started`.
+So nothing excluded the competing writer, and two connections could each pass the guard and one wrap
+snapshot be silently clobbered. `BEGIN IMMEDIATE` now takes the write lock before the guard read.
+
+⚠ Both descriptions were of the same code and only one was true. A reader who consulted the docstring
+was told the window was closed; a reader who consulted the comment was told it was open and covered by
+a lock that path never takes.
+
+### Fixed — the audit trail and the receipt computed "is this partial state" two different ways
+
+Eleven lines apart in one method: the audit half tested the **raw** metadata string, the receipt
+half the **parsed** value. They agreed everywhere except on unreadable JSON — which is precisely
+the recovery case the `partial_state` audit marker exists to flag. The receipt reported
+`partial_state: true` while the tamper-evident record logged the same event as a routine
+abandonment. One parse and one predicate now feed both. Valid JSON of the wrong *shape* (e.g.
+`[1, 2]`) is now partial too, which the raw-string test had called healthy. ⚠ Precisely: only the
+AUDIT half widened — the receipt already treated wrong-shape JSON as partial, because it always
+filtered on `all(isinstance(x, str))`. The two halves now agree; the receipt's behaviour is
+unchanged.
+
+### Fixed — `WrapCancelReceipt.episode_ids` docstring contradicted itself in one sentence
+
+It said `None` meant *"there were none or the stored JSON was unreadable"*, then that `[]` meant
+*"a wrap really did freeze an empty list"* — the two cannot both hold. Measured: a wrap with no
+episodes stores `"[]"` and reads back as `[]`, never `None`. A caller following the first clause
+would branch `if episode_ids is None` and treat the **corrupt** case as the benign one, which is
+the confusion `partial_state` was added to make loud.
+
+### Fixed — two guards that passed without exercising what they were named for
+
+- `test_report_cannot_name_a_wrap_it_did_not_clear` was documented as *"the race made concrete"*
+  and contained **no concurrency**: the peer replacement ran sequentially, before the handler was
+  entered. Renamed to `test_report_names_the_current_wrap_not_an_earlier_one` (it does prove the
+  handler reports current state, which kills the pre-read mutant), and a genuinely interleaved
+  test now injects a peer write on a second connection between the caller's reads and the
+  caller's clear. Mutation-checked: removing `BEGIN IMMEDIATE` fails the new test **and nothing
+  else** — all four pre-existing tests, including the one named for the race, stay green on the
+  live defect. (Scoped: removing the `BEGIN IMMEDIATE` in `wrap_cancelled` SPECIFICALLY. There are
+  now two such statements, and stripping both fails two tests.)
+- SKILL.md — the depth doc an **agent** loads, and the file that actually rotted — was guarded by
+  a single hardcoded `wrap_cancel` string literal, while README.md, which did not rot, carried an
+  every-tool loop. Measured: erasing `delete_episode` from SKILL.md left the full suite green.
+  `test_skill_documents_every_tool` now mirrors the README loop with the same `spore_*` exemption.
+
+### Fixed — write-lock contention no longer reads as a broken database, on either surface
+
+Both `wrap_cancel` transports now translate SQLite write-lock contention into a next action instead
+of surfacing a raw `database is locked`. On the MCP side the lock is *signal*, not merely an error:
+it proves a peer is writing right now, which is evidence the wrap is LIVE rather than stranded — the
+one case the tool's own description says not to cancel — so the message says do NOT retry blindly.
+On the CLI side, `Store.__init__` runs `INSERT OR IGNORE` on every write-capable open and that takes
+the write lock even when the row exists, so a second process died at construction with
+`SQLite schema_init failed on <path>: database is locked`. That is `anneal-memory wrap-cancel` — the
+command an operator reaches for when a session is stuck — answering with what reads as corruption.
+
+⚠ **Neither is a new failure mode**, and the first draft of this entry wrongly said so. Measured: the
+pre-`BEGIN IMMEDIATE` code failed under the same contention at the first INSERT with the identical
+error at 5.19s, versus 5.20s now. The lock statement only moved the failure ahead of the reads. What
+was always missing was a reachable next action — 0.9.8's own defect class.
+
+Contention is detected from the `sqlite3` error preserved as `__cause__`, keyed on
+`sqlite_errorname` (guarded: `requires-python` is >=3.10 and the attribute is 3.11+). Never from the
+wrapper's formatted message, which embeds the store path — a database under a directory named
+`locked/` would fool a substring test. `cause_type_name` cannot do this job despite being advertised
+as the retry-dispatch key: `SQLITE_BUSY` and a malformed database image are both `OperationalError`.
+
+### Fixed — five defects the L3 mesh found in this change set's own fixes
+
+The frontier seat (codex) reviewed the fixes above and found the same class inside them.
+
+- **A committed cancellation could be reported as a failure.** `wrap_cancelled()` commits, then
+  writes its audit event. An audit I/O failure — disk full, permissions, a failed rotation —
+  propagated out with the metadata already cleared and no receipt returned: the operator is told the
+  cancel failed when it succeeded, a peer finds its token gone, and no audit records why. The policy
+  already existed in this file: `_batch` documents that audit-flush exceptions are swallowed after a
+  successful commit because propagating one "would trick the caller's outer except clause into
+  cleaning up tmp files that represent committed state — a data-loss path." Now warned, not raised.
+- **The contention message claimed the pending wrap was live.** A write lock proves only that
+  *something* is writing — an unrelated `record`, a prune, a schema init on a fresh open, or an
+  abandoned transaction holds it identically while an old wrap stays stranded. Locks carry no
+  ownership. ⚡ The test made the point by accident: it holds a raw `BEGIN IMMEDIATE` on an unrelated
+  connection — the counterexample — while asserting the "live" conclusion. Both message and test now
+  say what is actually known and defer ownership to `status`. (Real liveness needs persisted
+  owner/lease data — that is the next round, not something a lock can supply.)
+- **`wrap_cancelled` clears four lifecycle keys and classified on three.** A store holding only a
+  stray `wrap_section_schema` reported "no wrap was in progress" and emitted no audit event at all —
+  leftover state cleared with no record. It is counted as state now, deliberately not as
+  *completeness*: pre-AM-SCHEMASNAPSHOT wraps have no frozen schema and are otherwise healthy.
+- **The CLI contention translation was scoped to the store OPEN only**, so a peer taking the lock
+  between a successful open and the command's own write still escaped as a raw traceback — from the
+  command whose messaging claims to prevent exactly that. It now sits in one shared boundary in
+  `main()`, covering every subcommand rather than the one that was noticed.
+- **Two negative tests could not fail.** Both built a `StoreDatabaseError` with no underlying
+  `sqlite3` cause, so the contention predicate exited at its first type check and a regression
+  classifying *every* `OperationalError` as contention would have passed. They chain a real non-busy
+  `OperationalError` now, and both kill that mutant.
+
+⚠ **And the concurrency guards themselves could pass while starved.** Asserting only "the peer did
+not finish inside the window" cannot distinguish *blocked on the lock* from *never scheduled* — a
+thread starved for one second reproduces the healthy observation on the live defect. Both threaded
+tests now open the peer's store and signal READY before the caller takes the lock (a `Store()` open
+would itself block, so the barrier cannot sit after construction), assert that point was reached,
+and only then release into the gap.
+
+### Changed — from the three commits that landed after the 0.9.8 upload (never published)
+
+- `cli.cmd_wrap_cancel` reports from the receipt, giving the CLI TOCTOU and partial-state parity
+  with the MCP handler; `--json` carries the full receipt.
+- The `wrap_cancel` tool description was de-shouted — it was the longest in the table and the only
+  one in caps, while `delete_episode` carries a harsher consequence in flat prose.
+- `docs/library-quickstart.md` points at the transports alongside the Python API.
+- SKILL.md's stuck-wrap row no longer says `— (CLI only)`, which 0.9.8 made false the moment it
+  shipped. ⚠ The published 0.9.8 sdist still carries the false row; only this tree is corrected.
+
 ## [0.9.8] — 2026-09-02
 
 **The stuck wrap now has a way out from inside an MCP session.** Both items reported by [Alex De Groodt](https://github.com/Hurleveur) on 2026-08-04 against 0.9.6 and confirmed still open at 0.9.7. Additive: one new tool, one message rewrite. No API removals, no behaviour change to any existing call.
@@ -31,6 +178,12 @@ The message read, verbatim, *"Finish it with validated_save_continuity, or aband
 The first cut of the handler read the snapshot to have something to report, then called `wrap_cancelled()` — which clears whatever is **current**. Between the two, a peer session can finish the observed wrap and start a new one, and the clear then destroys the NEW wrap while the response names the OLD token and count: the operator is told they cleaned up a corpse when they killed a live peer.
 
 `Store.wrap_cancelled()` now returns a **`WrapCancelReceipt`** (`token`, `started_at`, `episode_ids`, `partial_state`) read inside the same transaction as the clear, and the handler reports from that. The pre-read is gone, so the window is removed rather than narrowed and the receipt cannot disagree with what was cleared. The return value is additive — existing callers that ignore it are unaffected.
+
+> ⚠ **CORRECTION, 2026-09-03 — this paragraph was false as published.** The receipt was NOT read
+> inside the clearing transaction: with `isolation_level=""` the implicit `BEGIN` precedes DML
+> only, so the reads ran in autocommit and the window was **narrowed, not removed**. Verified by
+> driving the race to completion. Fixed under [Unreleased] with `BEGIN IMMEDIATE`. Left in place
+> rather than rewritten, because what shipped is what this section is for.
 
 ### Fixed — the partial-state path said "No wrap was in progress"
 

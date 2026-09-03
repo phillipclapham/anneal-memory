@@ -21,6 +21,7 @@ import pytest
 
 from anneal_memory import Store, __version__
 from anneal_memory.cli import (
+    _open_store,
     build_parser,
     cmd_associations,
     cmd_audit,
@@ -3238,3 +3239,143 @@ class TestCrystalIndexAndRecallCLI:
         assert ns.no_associative is True
         ns2 = parser.parse_args(["--db", db, "crystal", "recall", "q"])
         assert ns2.no_associative is False
+
+
+class TestWriteLockContentionIsNotReportedAsCorruption:
+    """`Store.__init__` runs INSERT OR IGNORE on every write-capable open, and
+    that takes the WRITE LOCK even when the row already exists. So a new process
+    opening the store while a peer is mid-write waits out busy_timeout and dies
+    with "SQLite schema_init failed on <path>: database is locked".
+
+    That is the `anneal-memory wrap-cancel` path — the recovery command an
+    operator reaches for when a session is stuck — answering with what reads as
+    a corrupt database. Pre-existing; found by the L2 seat 2026-09-03 while
+    reviewing the BEGIN IMMEDIATE work, which did not cause it (that added
+    ~0.11 ms to the lock hold). Translated because the MCP surface now gives
+    `wrap_cancel` an actionable contention message, and fixing the agent's path
+    while leaving the human's is the land-somewhere-not-everywhere shape.
+    """
+
+    def test_real_contention_reports_a_peer_not_a_broken_database(
+        self, tmp_path, capsys
+    ):
+        """REAL contention — a second connection holds an actual BEGIN IMMEDIATE.
+
+        ⏱ This test costs ~5s: it must wait out sqlite3's default busy_timeout,
+        which is the only way to reach the failure at all (`Store` exposes no
+        timeout parameter). A mock of the exception would verify the TRANSLATION
+        while ASSUMING the shape that produces it — the proxy this whole change
+        set exists to stop. The shape is what rots, so the shape is what is
+        pinned here.
+
+        Would the defect make this pass? No: without the translation the
+        operator sees "schema_init failed", which the assertions reject.
+        """
+        import sqlite3
+        import time
+
+        db = tmp_path / "contended.db"
+        Store(path=db, project_name="P").close()
+
+        peer = sqlite3.connect(str(db))
+        try:
+            peer.execute("BEGIN IMMEDIATE")  # hold the write lock for real
+
+            started = time.monotonic()
+            with pytest.raises(SystemExit) as exc_info:
+                _open_store(Namespace(db=str(db), project_name="P"))
+            elapsed = time.monotonic() - started
+
+            assert exc_info.value.code == 1
+            err = capsys.readouterr().err
+            assert "another process is writing to this store" in err, err
+            assert "NOT corrupt" in err, err
+            assert "schema_init" not in err, (
+                "leaked the internal operation name — reads as corruption to "
+                f"an operator: {err}"
+            )
+            # Sanity: it really did wait on the lock rather than fail instantly
+            # for some unrelated reason.
+            assert elapsed > 1.0, f"did not actually block on the lock ({elapsed:.2f}s)"
+        finally:
+            peer.rollback()
+            peer.close()
+
+    def test_an_unrelated_database_error_still_propagates(self, tmp_path):
+        """The catch must be NARROW. Translating every StoreDatabaseError into
+        'a peer is writing' would bury real corruption under a soothing message
+        — the same shape as telling an operator a corpse was cleared."""
+        from anneal_memory.store import StoreDatabaseError
+
+        db = tmp_path / "broken.db"
+        Store(path=db, project_name="P").close()
+
+        import sqlite3
+
+        # ⚠ A REAL, NON-BUSY OperationalError as the cause. Without one the
+        # predicate exits at its first isinstance check and this test cannot
+        # distinguish a correct narrow guard from one that treats every
+        # OperationalError as contention. codex L3.
+        try:
+            raise sqlite3.OperationalError("database disk image is malformed")
+        except sqlite3.OperationalError as exc:
+            boom = StoreDatabaseError(
+                "SQLite schema_init failed on x: database disk image is malformed",
+                operation="schema_init",
+                path=str(db),
+                cause_type_name="OperationalError",
+            )
+            boom.__cause__ = exc
+        with mock.patch("anneal_memory.cli.Store", side_effect=boom):
+            with pytest.raises(StoreDatabaseError):
+                _open_store(Namespace(db=str(db), project_name="P"))
+
+    def test_contention_acquired_AFTER_the_store_opens_is_still_translated(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """The window the first test could not see.
+
+        The translation originally lived only around `Store(...)` in
+        `_open_store`, so it covered a peer holding the lock at OPEN time and
+        nothing after. A peer taking the lock between a successful open and the
+        command's own write escaped as a raw traceback — from the very command
+        whose messaging claims to prevent that. And the sibling test above
+        holds the lock BEFORE opening, so it exercises only the open-time half
+        and would pass with the post-open window wide open. codex L3.
+
+        Here the lock is taken AFTER `_open_store` returns, which is the real
+        interleaving, and the assertion is on the operator-facing output.
+        """
+        import sqlite3
+        import anneal_memory.cli as cli_mod
+
+        db = tmp_path / "postopen.db"
+        s = Store(path=db, project_name="P")
+        s.record("One", "observation")
+        s.wrap_started(token="a" * 32, episode_ids=["feedface"])
+        s.close()
+
+        peer = sqlite3.connect(str(db))
+        real_open = cli_mod._open_store
+
+        def open_then_let_a_peer_take_the_lock(args):
+            store = real_open(args)
+            peer.execute("BEGIN IMMEDIATE")  # after the open, before the write
+            store._conn.execute("PRAGMA busy_timeout=100")
+            return store
+
+        monkeypatch.setattr(cli_mod, "_open_store", open_then_let_a_peer_take_the_lock)
+        monkeypatch.setattr(
+            sys, "argv", ["anneal-memory", "--db", str(db), "wrap-cancel"]
+        )
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                cli_mod.main()
+            assert exc_info.value.code == 1
+            err = capsys.readouterr().err
+            assert "another process is writing to this store" in err, err
+            assert "no ownership" in err, err
+            assert "Traceback" not in err
+        finally:
+            peer.rollback()
+            peer.close()

@@ -751,6 +751,34 @@ class TestFormatWrapPackageText:
         text = format_wrap_package_text(result)
         assert text == "No episodes since last wrap. Nothing to compress."
 
+    def test_a_broken_invariant_raises_a_library_error_not_an_assertion(self):
+        """The invariant guard must survive ``python -O``, which STRIPS asserts.
+
+        This was `assert package is not None`. Under `-O` it vanished and the
+        next line subscripted None, raising `TypeError` — the wrong exception
+        type for a transport layer that catches `AnnealMemoryError` at its
+        boundary. ⚠ The identical correction was already made for `meta_tmp` in
+        `validated_save_continuity` and documented there ("Explicit None check
+        instead of ``assert`` so the guard survives ``python -O``"); it landed
+        on that site and not on this one or on `cont_tmp` twenty lines away.
+        Diogenes carried it as assert-for-narrowing.
+
+        MUTATION-CHECKED WITHOUT NEEDING ``-O``: an `assert` raises
+        `AssertionError`, which is not an `AnnealMemoryError`, so restoring it
+        fails this test under a normal run.
+        """
+        from anneal_memory.store import AnnealMemoryError
+
+        broken = {
+            "status": "ready",
+            "message": "",
+            "episode_count": 1,
+            "package": None,  # violates status=="ready" ⇒ package is not None
+            "assoc_context": None,
+        }
+        with pytest.raises(AnnealMemoryError):
+            format_wrap_package_text(broken)
+
     def test_ready_first_session_includes_first_wrap_notice(self, tmp_path):
         """Ready path with no existing continuity should note 'first wrap'."""
         store = Store(str(tmp_path / "fmt_test.db"), project_name="Test")

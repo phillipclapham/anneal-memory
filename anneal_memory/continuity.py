@@ -51,7 +51,13 @@ from .schema import (
     schema_role_warning,
 )
 from .crystal import CrystalError, CrystalStore
-from .store import StoreError, WrapInProgressError, _fsync_dir, _safe_unlink
+from .store import (
+    AnnealMemoryError,
+    StoreError,
+    WrapInProgressError,
+    _fsync_dir,
+    _safe_unlink,
+)
 from .types import (
     AffectiveState,
     Episode,
@@ -1587,10 +1593,20 @@ def format_wrap_package_text(result: PrepareWrapResult) -> str:
 
     package = result["package"]
     # PrepareWrapResult invariant: status == "ready" ⇒ package is not None.
-    # mypy cannot narrow the package Optional through a sibling-key
-    # check on a TypedDict, so the assertion documents + enforces the
-    # invariant at the narrowing boundary.
-    assert package is not None, "PrepareWrapResult invariant violated: status=ready but package is None"
+    # mypy cannot narrow the package Optional through a sibling-key check on a
+    # TypedDict, so this documents + enforces the invariant at the narrowing
+    # boundary. Explicit raise, not ``assert``: assertions are stripped by
+    # ``python -O``, and under ``-O`` the next line would raise ``TypeError``
+    # on a None subscript instead of a typed library error. Same convention as
+    # the ``meta_tmp`` / ``cont_tmp`` guards in validated_save_continuity.
+    if package is None:
+        # AnnealMemoryError, not StoreError: this is a pure formatter with no
+        # store and no I/O, so there is no operation or path to attribute — and
+        # ``StoreOperation`` enumerates Store METHODS, which prepare_wrap is not.
+        raise AnnealMemoryError(
+            "PrepareWrapResult invariant violated: status='ready' but package "
+            "is None — this indicates a bug in prepare_wrap's control flow."
+        )
     parts: list[str] = [package["instructions"], "\n---\n"]
     parts.append(f"## Episodes This Session ({package['episode_count']})")
     parts.append(package["episodes"])
@@ -2286,7 +2302,24 @@ def validated_save_continuity(
         # Acquiring the flock earlier (around the batch) would nest them and create
         # one; keep it scoped to the renames.
         with store.continuity_lock():
-            assert cont_tmp is not None
+            # Explicit None check instead of ``assert`` so the guard survives
+            # ``python -O``, which strips assertions — the SAME correction made
+            # for ``meta_tmp`` twenty lines below (L3 complement F3 +
+            # contrarian F6). That fix landed on the sibling and not here, so
+            # under ``-O`` this assert vanished and ``cont_tmp.replace(...)``
+            # raised ``AttributeError`` on None: the wrong exception type for
+            # the transport layer, at the moment the DB has already committed.
+            if cont_tmp is None:
+                raise StoreError(
+                    "internal pipeline invariant violated: cont_tmp is None "
+                    "after the batch committed — this indicates a bug in "
+                    "validated_save_continuity's control flow. The DB has "
+                    "committed but the continuity sidecar was never staged; "
+                    "the store is in a partial-commit state. Manual recovery "
+                    "required.",
+                    operation="save_continuity",
+                    path=str(store.continuity_path),
+                )
             try:
                 cont_tmp.replace(store.continuity_path)
             except OSError as exc:
@@ -2656,7 +2689,7 @@ def validated_save_continuity(
     )
     if graduate_out:
         warnings.warn(
-            f"{len(graduate_out)} top-tier (3x) pattern(s) were carried forward "
+            f"{len(graduate_out)} Proven-tier pattern(s) were carried forward "
             f"this wrap with no resolving citation and no provenance: "
             f"{', '.join(graduate_out)}. A permanent truth held without grounding "
             f"is a candidate to (a) record its founding episode ids as "

@@ -2,7 +2,8 @@
 
 anneal's continuity ``## Patterns`` section is a WORKING SET: developing (1x/2x)
 plus recently-leaned-on patterns, always loaded, bounded by nature. But a pattern
-graduates IN at 3x and the section had no OUT path — a one-way ratchet, so the
+graduates IN at ``MIN_PROVEN_LEVEL`` (2x) and the section had no OUT path — a
+one-way ratchet, so the
 working set monotonically bloats and, past a point, an always-loaded list stops
 *working* (attention doesn't scale — 50 always-on patterns drown each other out).
 
@@ -135,9 +136,13 @@ VALID_ROUTES: tuple[Route, ...] = ("constitution", "crystallize", "compost")
 # ⚠ THE TWO HALVES MUST SHIP TOGETHER — fixing only one is WORSE than fixing neither.
 # The graduation half landed first (abf119f); alone it makes a 4x line legal in the
 # working set — validated, forming links — while leaving it NO out path. That turns a
-# silent-drop bug into an unbounded always-loaded working set, which is exactly what
-# the shipped methodology warns against: "not a one-way 3x ratchet — without an OUT
-# path it bloats until an always-loaded list stops working".
+# silent-drop bug into an unbounded always-loaded working set — the condition
+# ``_crystallization_block`` in continuity.py describes as "a one-way 3x ratchet that
+# monotonically bloats until an always-loaded list stops working". ⚠ That sentence was
+# quoted here as coming from "the shipped methodology" with the quotation marks around
+# a string that appears NOWHERE except this comment — an invented quotation attributed
+# to an unnamed source, which a reader cannot check and a maintainer cannot update when
+# the real text changes. Cite the site, not a paraphrase in quotes.
 #
 # WHY A CEILING WAS INCOHERENT HERE SPECIFICALLY: `crystallize()` documents itself as
 # raising level "monotonically (never lowers it — a pattern's earned high-water mark
@@ -734,7 +739,7 @@ class CrystalStore:
         the explanation) without re-crystallizing. Omitted arguments are left
         unchanged; passing ``None``/``''`` to ``source`` clears it. ``level`` here is
         set as given (the explicit-correction path — unlike :meth:`crystallize`'s
-        monotonic upsert), but still must be 2 or 3. Deliberately does NOT bump
+        monotonic upsert), but still must be >= ``MIN_PROVEN_LEVEL``. Deliberately does NOT bump
         ``last_activated_on`` — activation is signalled explicitly via :meth:`touch`,
         which keeps the tier honest."""
         with self._transaction() as data:
@@ -935,10 +940,22 @@ class CrystalDecision(NamedTuple):
     Contract for a ``crystallize`` consumer (the parser is a PURE parser — it does NOT
     enforce route×level coherence, by design): ``level`` is whatever ``Nx`` was written
     on the line (any integer, or ``None`` if grounding failed). :meth:`CrystalStore.
-    crystallize` requires ``level`` ∈ {2, 3} and a non-empty ``explanation`` and will
-    raise ``ValueError`` otherwise. So a consumer routing ``crystallize`` MUST guard
-    ``level in (2, 3)`` (and ``level is None`` ⇒ grounding failed ⇒ surface back to the
-    composer, do not crystallize) rather than passing every row blindly to the store."""
+    crystallize` requires ``level >= MIN_PROVEN_LEVEL`` and a non-empty ``explanation``
+    and will raise ``ValueError`` otherwise. So a consumer routing ``crystallize`` MUST
+    guard ``level is not None and level >= MIN_PROVEN_LEVEL`` (``level is None`` ⇒
+    grounding failed ⇒ surface back to the composer, do not crystallize) rather than
+    passing every row blindly to the store.
+
+    ⛔ **THIS PARAGRAPH SAID ``level`` ∈ {2, 3} UNTIL 2026-09-04, AND IT WAS NOT MERELY
+    STALE — IT WAS CAUSATIVE.** 0.9.7 (AM-LEVELCAP) replaced the ``(2, 3)`` gate with
+    ``MIN_PROVEN_LEVEL`` and no ceiling, precisely because a pattern earned 4+ times
+    could neither validate nor crystallize out — a trap with no exit at either end. This
+    contract kept telling consumers to guard ``level in (2, 3)``, and at least one did
+    exactly that (flow's ``scripts/crystal_decision_apply.py``), so the cap the release
+    removed was **re-derived from the documentation** by every reader who trusted it.
+    A widening emits no error signal anywhere downstream — nothing breaks, every
+    consumer keeps working correctly against the narrower contract it already knew, and
+    the only symptom is absence. Fix the record or the bug comes back."""
 
     name: str
     route: Route

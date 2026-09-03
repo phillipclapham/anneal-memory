@@ -103,6 +103,81 @@ wrapper's formatted message, which embeds the store path — a database under a 
 `locked/` would fool a substring test. `cause_type_name` cannot do this job despite being advertised
 as the retry-dispatch key: `SQLITE_BUSY` and a malformed database image are both `OperationalError`.
 
+### Added — AM-WRAPCANCEL-CAS: `wrap_cancel` can be asked to prove the wrap is yours
+
+Alex De Groodt's **A3**, reported 2026-08-04 and deliberately NOT shipped in 0.9.8, whose letter said
+so rather than letting him assume it had landed: the lock recorded only `started_at` — no owner, no
+PID, no expiry — so `wrap_cancel` could not refuse on the grounds that the wrap belonged to somebody
+else. `WrapInProgressError` stops a second wrap *clobbering* the first; there was nothing stopping a
+second session *cancelling* it.
+
+`Store.wrap_cancelled(expect_token=...)` now clears the wrap only if the store's current token is
+exactly that one, raising the new `WrapOwnershipError` and changing **nothing** otherwise. Reachable
+from both transports — `wrap_cancel`'s optional `wrap_token` argument over MCP, `--wrap-token` on
+`anneal-memory wrap-cancel` — because a guard the caller cannot reach is no guard, and the caller
+here is precisely the agent Alex was.
+
+⚡ **It is a real compare-and-swap, and it could not have been written before today.** The compare
+and the clear run inside the `BEGIN IMMEDIATE` added above, so no peer can replace the token between
+them. Written a day earlier it would have been a read-compare-write with a live window — a guard
+carrying the exact defect it was written to close. Mutation-checked in both directions: removing
+`BEGIN IMMEDIATE` fails the cross-connection atomicity test while the other four pass; removing the
+comparison fails the refusal tests.
+
+⛔ **What this does NOT do, stated because a lock invites the opposite conclusion:** it does not
+establish liveness. Write-lock contention proves only that *something* is writing. Ownership is
+answered by the persisted token or not at all — which is why the token, not the lock, is the guard.
+
+`actual is None` is deliberately distinguishable from a mismatched token: the first means the
+caller's own wrap already finished (retry-safe, nothing to do), the second means cancelling would
+destroy another session's compression. Both transports report them differently. Omitting the token
+keeps the historical behaviour and is the override — there is no separate `force`, because an
+unproven cancel *is* a cancel with no claim, which is what every existing caller already does and
+what the original stuck-wrap recovery needs.
+
+⚠ **Still open, and still Alex's and Phill's call** (`spore-699`): the transport-layer *age refusal*
+versus Alex's competing idempotent-`prepare_wrap` proposal. This change forecloses neither — both
+need exactly this compare-and-swap underneath, and both must preserve the frozen-token contract.
+
+### Fixed — six more the L3 mesh found in the CAS itself, one of them a lockout
+
+The frontier seats reviewed the compare-and-swap above. **Both flagged the same defect** (glm HIGH,
+codex MED), which is the strongest signal the mesh produces, and codex reproduced two others by
+execution.
+
+- ⛔ **A PARTIAL STORE WAS REPORTED AS AN IDLE ONE — Alex's original lockout, through the guard
+  written to prevent it.** `actual = cancelled_token or None` collapsed "nothing here" and
+  "something here but no usable token" into one answer. A store with `wrap_started_at` set and
+  `wrap_token` empty (a crash, a hand edit) told the operator NO WRAP IS IN PROGRESS while
+  `wrap_started_at` survived the rollback — so the next `prepare_wrap` failed with
+  `WrapInProgressError` and the store looked permanently stuck, with the message insisting nothing
+  was wrong. `WrapOwnershipError` now carries a three-way state and `actual is None` means IDLE and
+  nothing else; the partial case names the one recovery that works (cancel *without* the token).
+- **A receipt-building step after the destructive commit could fail.** The parse ran after the clear
+  and caught only `JSONDecodeError`; an invalid-UTF-8 BLOB raises `UnicodeDecodeError` and a
+  5,000-digit integer raises `ValueError`. The wrap was cleared, the caller got an exception, and no
+  receipt or audit event existed. Parsing and classification now happen inside the transaction, so a
+  failure rolls back instead. **The rule: nothing after a destructive commit may be able to raise.**
+- **A warning filter set to error undid the audit guard.** Under `-W error` or `PYTHONWARNINGS=error`
+  the `warnings.warn` added above *raises*, recreating exactly the committed-then-reported-as-failed
+  path it was written to remove. ⚠ Its regression test masked this, because `pytest.warns` installs
+  a capturing filter — the guard's own test made the guard look sound.
+- **`WrapOwnershipError` could not be pickled** (keyword-only constructor, no `__reduce__`), so it
+  crashed multiprocessing, RPC and serializing log handlers *while handling a refusal*.
+- **Both token validators used `re.match`**, and `$` matches before a trailing newline, so a
+  33-character token was accepted and then reported as an ownership mismatch rather than a malformed
+  argument. Now `fullmatch`, matching `save_continuity`, with the JSON schema bounded to 32.
+- **The concurrency tests proved the lock by timeout.** Peer-noncompletion within a window is
+  evidence, not proof: a mutant that fails to schedule the peer produces the identical observation.
+  All three now assert `in_transaction` at the injection point, which is true iff `BEGIN IMMEDIATE`
+  ran and kills the mutant with no timing dependence.
+
+⚠ **And the mutation run caught one more that review did not.** The regression test for
+*non-`JSONDecodeError`* parse failures stored bytes whose length happens to decode cleanly as UTF-16
+and then fail as a `JSONDecodeError` — the case the narrow catch already handled. It passed against
+the mutant while its name certified the stronger claim; one character decided it (`utf-8` vs
+`utf8`). Each payload is now asserted to raise the class it exists for, so it cannot drift back.
+
 ### Fixed — five defects the L3 mesh found in this change set's own fixes
 
 The frontier seat (codex) reviewed the fixes above and found the same class inside them.

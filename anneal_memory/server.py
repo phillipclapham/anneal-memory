@@ -47,7 +47,13 @@ from .retrieval import (
     retrieve_patterns,
     retrieve_relevant,
 )
-from .store import Store, StoreDatabaseError, StoreError, _WRAP_TOKEN_RE
+from .store import (
+    Store,
+    StoreDatabaseError,
+    StoreError,
+    WrapOwnershipError,
+    _WRAP_TOKEN_RE,
+)
 from .types import AffectiveState, RelevantPattern
 
 logger = logging.getLogger("anneal-memory")
@@ -640,8 +646,63 @@ class Server:
         what really happened instead of "no wrap was in progress", which was
         false precisely on the recovery path this tool most exists to serve.
         """
+        expect_token = args.get("wrap_token")
+        if expect_token is not None:
+            # fullmatch, not match: `$` matches before a trailing newline, so
+            # `match` accepts "a"*32 + "\n" — 33 characters — and the store then
+            # reports a misleading ownership MISMATCH instead of an invalid
+            # token. save_continuity's validator already used fullmatch; this
+            # one silently did not. codex + glm, L3.
+            if not isinstance(expect_token, str) or not _WRAP_TOKEN_RE.fullmatch(
+                expect_token
+            ):
+                return _tool_result(
+                    "wrap_token must be the 32-character hex token prepare_wrap "
+                    "returned. Omit it entirely to cancel whatever wrap is "
+                    "currently in progress.",
+                    is_error=True,
+                )
+
         try:
-            receipt = self._store.wrap_cancelled()
+            receipt = self._store.wrap_cancelled(expect_token=expect_token)
+        except WrapOwnershipError as exc:
+            # ⭐ THE REFUSAL IS THE FEATURE, so it reports what is true and what
+            # to do — not a bare mismatch. `actual is None` is a DIFFERENT fact
+            # from "a peer owns it": the first means the caller's own wrap has
+            # already finished (retry-safe, nothing to do), the second means
+            # cancelling would destroy someone else's compression.
+            if exc.partial_state:
+                # ⛔ THE THIRD STATE, AND OMITTING IT WAS A REAL LOCKOUT. Partial
+                # metadata (wrap_started_at set, wrap_token empty) can match NO
+                # token, so no proven cancel can ever succeed. Reporting it as
+                # "nothing in progress" left wrap_started_at standing and the
+                # next prepare_wrap failed — Alex's original three-day lockout,
+                # through the guard written to prevent it. L3 consensus.
+                return _tool_result(
+                    "The store holds PARTIAL wrap state with no usable token — "
+                    "a crash or a hand edit left it half-written. Your token "
+                    "cannot match it, so no proven cancel will ever succeed, and "
+                    "prepare_wrap will keep refusing until it is cleared. "
+                    "Nothing was changed. Call wrap_cancel again WITHOUT "
+                    "wrap_token to clear the broken state — that is the recovery "
+                    "this tool exists for.",
+                    is_error=True,
+                )
+            if exc.actual is None:
+                return _tool_result(
+                    "Nothing to cancel: the wrap you named has already completed "
+                    "or been cancelled, and no wrap is in progress now. Nothing "
+                    "was changed — prepare_wrap will start a fresh one.",
+                    is_error=True,
+                )
+            return _tool_result(
+                "Refused: the wrap in progress is NOT the one you named, so it "
+                "belongs to a different session and cancelling it would destroy "
+                "its compression. Nothing was changed. Call `status` to see when "
+                "that wrap started; if it really is abandoned, call wrap_cancel "
+                "again WITHOUT wrap_token to override.",
+                is_error=True,
+            )
         except StoreDatabaseError as exc:
             # ⚠ NOT A NEW FAILURE MODE — I ASSERTED THAT AND IT WAS FALSE.
             # The L2 seat MEASURED the pre-BEGIN-IMMEDIATE shape under the same

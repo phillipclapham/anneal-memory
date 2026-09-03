@@ -4,6 +4,23 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — a docstring that could not be COLLECTED on half the support matrix
+
+CI went red on 2026-09-04: `SyntaxError: invalid escape sequence '\\`'` in `tests/test_integrity.py`,
+on Python **3.10 and 3.11**, in a docstring added the same day. It is a *SyntaxWarning* on 3.12+ and
+a hard *SyntaxError* under pytest's assertion rewriter on 3.10/3.11 — so the file could not even be
+collected there.
+
+⛔ **The full suite had passed locally, twice, on that file.** The dev machine runs 3.13; CI runs
+3.10–3.13. **"Tests pass locally" was a claim about one interpreter out of four**, and the missing
+three quarters were invisible rather than red — an instrument reporting health on an axis it does
+not measure, which is this release's recurring shape.
+
+`TestSourceCompilesCleanlyOnEveryTargetPython` now compiles every module with `SyntaxWarning`
+promoted to an error, which **reproduces the 3.10 failure on any interpreter** and closes the version
+gap for this class without needing the other versions installed. The pre-push hook runs it too, so
+it is caught before the push rather than after. Mutation-checked by reintroducing the exact escape.
+
 ### Added — a pre-push hook, because the test alone still left the window open
 
 The levain seat's read of the incident, and it is the sharper one: **the guard catches it at COMMIT

@@ -17,6 +17,11 @@
 # is the exact shape of the defect it guards against (an instrument reporting
 # health because it could not look). The escape is explicit and visible:
 #   git push --no-verify
+#
+# Also gates cross-version syntax: an invalid escape sequence is a WARNING on
+# 3.13 (this dev machine) and a hard SyntaxError on 3.10/3.11 under pytest's
+# rewriter, so a file that passes the full local suite can fail to COLLECT on
+# half the CI matrix. That is exactly what happened on 2026-09-04.
 set -uo pipefail
 
 root="$(git rev-parse --show-toplevel)"
@@ -34,7 +39,8 @@ if [ -z "${PY:-}" ]; then
 fi
 
 if ! "$PY" -m pytest tests/test_integrity.py -q \
-        -k "ReleaseStampIsNotAPublishedVersion" >/tmp/anneal_prepush.$$ 2>&1; then
+        -k "ReleaseStampIsNotAPublishedVersion or SourceCompilesCleanlyOnEveryTargetPython" \
+        >/tmp/anneal_prepush.$$ 2>&1; then
     echo >&2
     echo "⛔ pre-push BLOCKED — the release-stamp gate failed:" >&2
     echo >&2

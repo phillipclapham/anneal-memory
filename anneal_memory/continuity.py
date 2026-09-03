@@ -717,7 +717,7 @@ def _build_wrap_package(
 
     # Crystallization candidates: cold-Proven patterns in ## Patterns ready to route
     # OUT (constitution / crystallize / compost — composer-judged). The cold signal
-    # is the staleness flag; the Proven (2x/3x) filter is the high-water proxy. Only
+    # is the staleness flag; the Proven (2x+) filter is the high-water proxy. Only
     # surfaced when a crystal store is present (no store ⇒ no crystallization tier ⇒
     # byte-identical pre-AM-CRYSTAL package, consistent with the gate's None path).
     if crystal_store is not None:
@@ -1519,7 +1519,7 @@ def prepare_wrap(
     )
 
     # Move #4 library layer (v0.3.2): surface the list of existing
-    # Proven (2x/3x) pattern names so the methodology-layer
+    # Proven (2x+) pattern names so the methodology-layer
     # contradiction-scan discipline can require the agent to declare
     # contradiction-stance against each before any new Proven
     # graduation in this wrap. AM-CONTRASCAN-EMIT (v0.4.3): the list is
@@ -1769,7 +1769,7 @@ def validated_save_continuity(
           - ``graduations_demoted`` (int): citations demoted due to
             bad/missing evidence, *including* bare graduations
           - ``demoted`` (int): citations demoted due to bad evidence only
-          - ``bare_demoted`` (int): bare (evidence-free) 2x/3x
+          - ``bare_demoted`` (int): bare (evidence-free) Proven-tier
             graduations demoted for missing citations
           - ``citation_reuse_max`` (int): max times any single episode
             was cited in this wrap
@@ -2158,7 +2158,7 @@ def validated_save_continuity(
             # line with an [evidence: ...] explanation that was AUTHORED
             # TODAY. That includes today's 1x mentions (preserves their
             # explanation for the next session's cross-session check)
-            # and today's surviving 2x/3x graduations (the demoted
+            # and today's surviving Proven-tier graduations (the demoted
             # ones already lost their evidence tag via _demote_line so
             # they won't match here, which is correct).
             #
@@ -2211,7 +2211,8 @@ def validated_save_continuity(
                 # demoted (evidence tag stripped), the unanchored search bound
                 # the SECOND marker's evidence to the FIRST marker's name,
                 # polluting pattern_history. The combined regex matches the
-                # any-level evidence form (not the 2x/3x-only GRADUATION_RE) so
+                # any-level evidence form (GRADUATION_RE excludes 1x but has NO
+                # ceiling; this said "2x/3x-only" until 2026-09-04) so
                 # 1x mentions with explanations still anchor cross-session
                 # history (the 1x → 2x first-graduation step Phase 1b probe #1
                 # exploits). A line with no ``[evidence:]`` simply doesn't match
@@ -2420,7 +2421,7 @@ def validated_save_continuity(
             }
             # Capture Proven-tier pattern omissions in the audit chain.
             # detect_pattern_omissions returns an empty list for the
-            # common case (first wrap, or all prior 2x/3x patterns
+            # common case (first wrap, or all prior Proven-tier patterns
             # carried forward at some level), in which case we omit
             # the key entirely to keep the routine-case audit entry
             # lean. When omissions DID happen, the audit chain records

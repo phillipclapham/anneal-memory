@@ -369,7 +369,7 @@ class GraduationResult:
     # the explanation, not the ids), so reading all_validated_ids would
     # misdiagnose a healthy immune-gate demotion as a dead-namespace graph.
     any_citation_resolved: bool = False
-    # Patterns at 2x/3x in the prior continuity that are absent at any
+    # Patterns at Proven-tier (2x+) in the prior continuity, absent at any
     # level in the new continuity. Surfaced as audit signal — see
     # detect_pattern_omissions() and OmittedPattern docstring.
     omitted_patterns: list["OmittedPattern"] = field(default_factory=list)
@@ -388,7 +388,7 @@ class GraduationResult:
     # a CarriedForward. Empty when nothing was held (no history, cold, or never
     # earned the level). See CarriedForward for the full mechanism.
     carried_forward: list["CarriedForward"] = field(default_factory=list)
-    # AM-PROVENANCE (Slice A, codex L3 HIGH): names of today-dated 2x/3x lines that
+    # AM-PROVENANCE (Slice A, codex L3 HIGH): names of today-dated Proven-tier lines that
     # carry an [evidence:] tag non-adjacent to their marker (so it missed validation)
     # — the silent-evidence-drop class. Surfaced as a loud UserWarning at the save
     # layer; the lines themselves are left UNCHANGED (non-destructive).
@@ -501,7 +501,7 @@ class CarriedForward:
 
 @dataclass
 class OmittedPattern:
-    """A pattern that was at Proven-tier (2x/3x) in the prior continuity
+    """A pattern that was at Proven-tier (2x+, no ceiling) in the prior continuity
     but is absent at any level in the new continuity.
 
     Silent omission of a graduated pattern is a threat the rest of the
@@ -624,7 +624,7 @@ def validate_graduations(
     any_citation_resolved = False
     cross_session_collisions: list[CrossSessionCollision] = []
     carried_forward: list[CarriedForward] = []
-    # AM-PROVENANCE (Slice A, codex L3 HIGH): today-dated 2x/3x lines that carry an
+    # AM-PROVENANCE (Slice A, codex L3 HIGH): today-dated Proven-tier lines that carry an
     # [evidence:] tag NOT adjacent to their marker (so _GRADUATION_RE missed it) and
     # would otherwise be silently held as a bare carry, dropping the live evidence.
     malformed_evidence_carries: list[str] = []
@@ -751,8 +751,10 @@ def validate_graduations(
                 # The trailing level guard (``name_match.group(2) == str(level)``)
                 # is the same level-alignment fix as in _carryforward_decision:
                 # the combined regex is any-level + anchored while _GRADUATION_RE
-                # is 2x/3x-only, so on a malformed line with a leading
-                # ``1x [evidence:]`` and a later 2x/3x marker, the name must bind
+                # excludes 1x (2-AND-UP, NO CEILING since AM-LEVELCAP — this said
+                # "2x/3x-only" until 2026-09-04, the cap the release removed), so
+                # on a malformed line with a leading
+                # ``1x [evidence:]`` and a later Proven-tier marker, the name must bind
                 # to the marker validation actually matched (codex L3 re-verify).
                 name_match = _NAMED_PATTERN_WITH_EVIDENCE_RE.match(line)
                 if name_match is not None and name_match.group(2) == str(level):
@@ -1046,7 +1048,7 @@ def validate_graduations(
             skipped_non_today += 1
             continue
 
-        # AM-PROVENANCE (Slice A, codex L3 HIGH): a today-dated 2x/3x marker with an
+        # AM-PROVENANCE (Slice A, codex L3 HIGH): a today-dated Proven-tier marker with an
         # [evidence:] tag in ITS TAIL (after the marker) that did not match
         # _GRADUATION_RE means the evidence is NOT adjacent to the marker (e.g. a
         # [provenance:] tag sits between them: `name | 3x (date) [provenance: x]
@@ -1379,7 +1381,7 @@ def detect_pattern_omissions(
     the new continuity and surfaces any pattern at ``min_level`` or
     higher in the prior text that is absent at any level in the new
     text. Default ``min_level=2`` so 1x ("Developing") drops are NOT
-    surfaced — those are normal lifecycle; only 2x/3x ("Proven-tier")
+    surfaced — those are normal lifecycle; only Proven-tier (2x+)
     omissions are tracked.
 
     This is informational, not a gate. The library does not refuse the
@@ -2008,7 +2010,7 @@ def _carryforward_decision(
     carryforward_cold_days: int | None,
     cross_session_overlap_threshold: int = 3,
 ) -> CarriedForward | None:
-    """Decide whether an ungrounded 2x/3x line should be HELD instead of
+    """Decide whether an ungrounded Proven-tier line should be HELD instead of
     demoted (AM-CARRYFORWARD, v0.4.6). Returns a :class:`CarriedForward`
     to hold the line, or ``None`` to fall through to demotion.
 
@@ -2051,13 +2053,14 @@ def _carryforward_decision(
     if name_match is None:
         return None
     # Level-alignment guard (codex L3 re-verify, v0.4.6): the combined regex is
-    # ANY-level + anchored, but validation matched a 2x/3x marker
-    # (_GRADUATION_RE is 2x/3x-only + unanchored). On a malformed line whose
+    # ANY-level + anchored, but validation matched a Proven-tier marker
+    # (_GRADUATION_RE excludes 1x but has NO ceiling — this said "2x/3x-only"
+    # until 2026-09-04). On a malformed line whose
     # LEADING marker is e.g. ``1x [evidence:]`` and a LATER marker is the 3x
     # validation matched, the combined regex binds the leading 1x name while
     # `level` is the later marker's — a cross-bind. Requiring the bound marker's
     # level to equal the validation `level` closes this: when they match, the
-    # combined regex's (first, line-start) evidence marker IS a 2x/3x marker, so
+    # combined regex's (first, line-start) evidence marker IS a Proven-tier marker, so
     # nothing with evidence precedes it and it is necessarily the same marker
     # _GRADUATION_RE.search found. Mismatch → the line-start name does not own
     # the validated marker → decline.

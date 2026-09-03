@@ -4,6 +4,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.9.9] — 2026-09-04
+
 ⚠ **VERSION STAMP POLICY, adopted 2026-09-03.** The commit after a release bumps to the next
 `.devN`, or the release commit is the last one on that number. Both are acceptable; a published
 number left standing on a moving `main` is not. **0.9.8 broke this**: PyPI's upload landed

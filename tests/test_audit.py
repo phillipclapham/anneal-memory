@@ -1834,6 +1834,84 @@ class TestDegradedAuditHealthReachesEveryTransport:
         )
 
 
+class TestThePersistCommitDoesNotLeakOtherWork:
+    """The durable counter writes with a standalone ``commit()``. Prove it is safe.
+
+    ``_persist_audit_health`` runs inside the post-commit audit-failure handler
+    and issues its own ``INSERT OR REPLACE`` + ``commit()``. That is only
+    correct if there is genuinely no in-flight transaction at that point — and
+    "there isn't one" was an ARGUMENT in a docstring, which is the weakest kind
+    of claim in this repo. A stray commit here would publish another method's
+    uncommitted DML, and the wrap state machine's whole invariant is that its
+    metadata writes share ONE commit.
+
+    So: reproduce both hazards rather than reason about them.
+    """
+
+    def _boom(self, *args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    def test_a_failure_inside_a_rolled_back_batch_publishes_nothing(self, tmp_path):
+        from anneal_memory.store import Store
+
+        store = Store(tmp_path / "memory.db")
+        store._audit.log = self._boom
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with pytest.raises(RuntimeError):
+                    with store._batch():
+                        store.record("in a batch that fails", episode_type="observation")
+                        raise RuntimeError("force rollback")
+
+            assert store.status().total_episodes == 0, (
+                "the audit-health commit published DML from a batch that rolled "
+                "back — a standalone commit in the post-commit handler is not "
+                "safe after all"
+            )
+        finally:
+            store.close()
+
+        assert Store(tmp_path / "memory.db").status().total_episodes == 0
+
+    def test_a_failure_during_an_open_wrap_leaves_the_wrap_intact(self, tmp_path):
+        """The wrap state machine must not notice this write at all."""
+        import uuid
+
+        from anneal_memory.store import Store
+
+        db = tmp_path / "memory.db"
+        store = Store(db)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                seed = store.record("seed", episode_type="observation")
+                store.wrap_started(
+                    token=uuid.uuid4().hex,
+                    episode_ids=[seed["id"] if isinstance(seed, dict) else str(seed)],
+                )
+                # Break the sink only once the wrap is open.
+                store._audit.log = self._boom
+                store.record("during the wrap", episode_type="observation")
+                status = store.status()
+
+            assert status.wrap_in_progress is True
+            assert status.audit_write_failures == 1
+        finally:
+            store.close()
+
+        reopened = Store(db)
+        try:
+            after = reopened.status()
+            assert after.wrap_in_progress is True, (
+                "an audit-write failure during a wrap destroyed the in-progress "
+                "wrap state — this is Alex's lockout class from the other side"
+            )
+            assert after.audit_write_failures == 1
+        finally:
+            reopened.close()
+
+
 class TestL3ResidualsClosed:
     """Findings from the 2026-09-04 L3 mesh, each verified against disk first.
 

@@ -1834,6 +1834,88 @@ class TestDegradedAuditHealthReachesEveryTransport:
         )
 
 
+class TestAFailedRotationDoesNotLeaveAFalseTamperingVerdict:
+    """"Active file missing" is not proof the rotation succeeded (spore-746).
+
+    Rotation renames the active file FIRST, then gzips, then updates the
+    manifest. If a later step raises — disk full during the gzip is the
+    measured case — the sealed file exists, the manifest does not know about
+    it, and the active file is gone. The next call arrived at the
+    "active missing" branch and simply advanced ``_last_week``, recording a
+    rotation that never completed; the following append then started a fresh
+    file chaining to the orphan's hash.
+
+    ⛔ THE COST IS A FALSE TAMPERING VERDICT, NOT A LOST FILE. Measured
+    2026-09-04, same process, no crash: ``verify()`` returned
+    ``valid=False, "Hash mismatch at seq 3: expected sha256:GENESIS..."`` on a
+    store where nothing had been tampered with and no data was lost.
+
+    ⚠ AND THE RECOVERY COULD NOT BE REACHED BY THE COMMAND AN OPERATOR RUNS.
+    ``_adopt_orphaned_files`` already existed and is idempotent, but only ran
+    from ``_initialize``. ``AuditTrail.verify`` is a CLASSMETHOD and never
+    constructs a trail, so ``anneal-memory verify`` — precisely what someone
+    runs when they suspect tampering — could not trigger it. The store read as
+    tampered until some unrelated operation happened to open it.
+    """
+
+    def _trail_whose_rotation_failed(self, tmp_path):
+        import gzip as gzip_mod
+
+        import anneal_memory.audit as audit_mod
+        from anneal_memory.audit import AuditTrail
+
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("record", {"i": i})
+
+        # Make the next append cross a week boundary, then break the gzip so
+        # rotation dies AFTER the rename and BEFORE the manifest update.
+        trail._last_week = "2026-W01"
+        real_open = gzip_mod.open
+
+        def boom(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        audit_mod.gzip.open = boom
+        try:
+            with pytest.raises(OSError):
+                trail.log("record", {"i": "during the failed rotation"})
+        finally:
+            audit_mod.gzip.open = real_open
+        return db, trail
+
+    def test_the_orphan_is_adopted_by_the_process_that_created_it(self, tmp_path):
+        from anneal_memory.audit import AuditTrail
+
+        db, trail = self._trail_whose_rotation_failed(tmp_path)
+
+        # The sealed orphan exists and the manifest does not know it yet.
+        assert (tmp_path / "m.audit.2026-W01.jsonl").exists()
+        assert trail._load_manifest()["files"] == []
+
+        # The next append in the SAME process must repair rather than paper over.
+        trail.log("record", {"i": "after"})
+
+        assert [f["filename"] for f in trail._load_manifest()["files"]] == [
+            "m.audit.2026-W01.jsonl"
+        ], "the orphaned sealed file was never adopted; the manifest still omits it"
+
+        result = AuditTrail.verify(db)
+        assert result.valid is True, (
+            "verify reports a broken chain after a failed rotation that lost "
+            f"no data — a tampering-shaped verdict from a disk error. {result.error}"
+        )
+
+    def test_a_reopen_still_recovers_too(self, tmp_path):
+        """The pre-existing path must keep working — the fix adds, not replaces."""
+        from anneal_memory.audit import AuditTrail
+
+        db, _ = self._trail_whose_rotation_failed(tmp_path)
+        AuditTrail(db).log("record", {"i": "reopened"})
+        assert AuditTrail.verify(db).valid is True
+
+
 class TestAnInvalidTrailStillReportsWhatItCouldNotRead:
     """A tampering verdict must not also claim the file was fully readable.
 

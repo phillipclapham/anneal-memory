@@ -627,6 +627,38 @@ class AuditTrail:
 
         active = self._active_path
         if not active.exists() or active.stat().st_size == 0:
+            # ⛔ "ACTIVE MISSING" IS NOT PROOF THE ROTATION SUCCEEDED.
+            # Rotation renames the active file FIRST, then gzips, then updates
+            # the manifest. If either later step raises — disk full during the
+            # gzip is the measured case — the sealed file exists, the manifest
+            # does not know about it, and the active file is GONE. Arriving
+            # here and simply advancing ``_last_week`` records that rotation as
+            # done, and the next append starts a fresh active file chaining to
+            # the orphan's hash.
+            #
+            # MEASURED 2026-09-04, same process, no crash: the following
+            # ``verify()`` returned valid=False with "Hash mismatch at seq 3:
+            # expected sha256:GENESIS..." — a TAMPERING-SHAPED VERDICT caused
+            # by a failed disk write. ``verify`` is a classmethod and never
+            # constructs a trail, so ``anneal-memory verify`` cannot trigger
+            # the recovery that would fix it; the store reads as tampered
+            # until some other operation happens to open it.
+            #
+            # Adoption already exists and is idempotent — it just only ran at
+            # ``_initialize``. Run it here too, so the process that broke the
+            # rotation is the one that repairs it rather than leaving a false
+            # alarm for whoever looks next.
+            try:
+                self._adopt_orphaned_files()
+            except Exception:
+                # Adoption is best-effort recovery; failing it must not stop
+                # the caller. The orphan stays on disk and the next open
+                # retries, which is exactly the pre-existing behaviour.
+                logger.warning(
+                    "could not adopt orphaned sealed audit file(s) while "
+                    "rotating; the trail may verify as broken until the store "
+                    "is reopened", exc_info=True,
+                )
             self._last_week = current_week
             return
 

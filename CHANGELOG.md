@@ -4,6 +4,26 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — a failed rotation left a false tampering verdict the operator could not clear
+
+Rotation renames the active audit file FIRST, then gzips, then updates the manifest. If a later
+step raises — disk full during the gzip is the measured case — the sealed file exists, the
+manifest does not know about it, and the active file is gone. The next call reached the
+"active file missing" branch and simply advanced `_last_week`, recording a rotation that never
+completed; the following append then started a fresh file chaining to the orphan's hash.
+
+⛔ **The cost is a false tampering verdict, not a lost file.** Measured 2026-09-04, same process,
+no crash: `verify()` returned `valid=False, "Hash mismatch at seq 3: expected sha256:GENESIS..."`
+on a store where nothing had been tampered with and nothing was lost.
+
+⚠ **And the recovery could not be reached by the command an operator runs.**
+`_adopt_orphaned_files` already existed and is idempotent, but ran only from `_initialize`.
+`AuditTrail.verify` is a **classmethod** and never constructs a trail, so `anneal-memory verify` —
+exactly what someone runs when they suspect tampering — could not trigger it. The store read as
+tampered until an unrelated operation happened to open it. Rotation now runs the same adoption
+before advancing, so the process that broke the rotation is the one that repairs it. Reopen-based
+recovery is unchanged and still tested. (`spore-746`, codex L3.)
+
 ### Fixed — a tampering verdict claimed the file was fully readable
 
 `AuditTrail.verify` counts malformed lines it skips, and the success return has always carried

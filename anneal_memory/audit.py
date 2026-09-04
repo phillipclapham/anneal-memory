@@ -402,6 +402,18 @@ class AuditTrail:
                         valid=False,
                         total_entries=total_entries,
                         files_verified=files_verified,
+                        # ⛔ CARRY THE SKIPPED COUNT OUT. This return sits
+                        # INSIDE the counting loop and used to omit
+                        # ``skipped_lines``, so the dataclass default of 0
+                        # overwrote a count already incremented above — an
+                        # operator investigating a TAMPERING verdict was told
+                        # "0 malformed lines" while unreadable lines sat in the
+                        # file they were being asked to trust. The three other
+                        # early returns in this method legitimately omit it:
+                        # they run BEFORE ``skipped`` exists. This was the only
+                        # one that discarded a real number (measured
+                        # 2026-09-04 by walking every construction site).
+                        skipped_lines=skipped,
                         chain_break_at=entry.get("seq", total_entries),
                         chain_break_file=fpath.name,
                         error=f"Hash mismatch at seq {entry.get('seq')}: "

@@ -1834,6 +1834,92 @@ class TestDegradedAuditHealthReachesEveryTransport:
         )
 
 
+class TestAnInvalidTrailStillReportsWhatItCouldNotRead:
+    """A tampering verdict must not also claim the file was fully readable.
+
+    ``AuditTrail.verify`` counts malformed lines it skips, and the SUCCESS
+    return has always carried that count out. The chain-break return —
+    the one INSIDE the counting loop — omitted ``skipped_lines``, so the
+    dataclass default of 0 overwrote a number already incremented. An operator
+    investigating "possible tampering" was told zero lines were unreadable
+    while unreadable lines sat in the very file they were being asked to
+    distrust.
+
+    ⚠ Unreadable lines are a COMPETING EXPLANATION for a chain break, not a
+    footnote to it: a truncated write and a malicious edit both produce a
+    break, and the skipped count is part of telling them apart.
+
+    ⛔ Behavioural, not a scan over the return sites. Three of the four
+    early returns in ``verify`` legitimately omit the field — they run before
+    ``skipped`` exists — so a structural "every construction must pass it"
+    assertion would be WRONG, and a scan tuned to exempt them would encode
+    today's line numbers. Drive the real function instead.
+    """
+
+    def _trail_with(self, tmp_path, malformed: bool, break_chain: bool):
+        from anneal_memory.store import Store
+
+        db = tmp_path / "memory.db"
+        store = Store(db)
+        for i in range(3):
+            store.record(f"ep-{i}", episode_type="observation")
+        store.close()
+
+        audit = db.parent / f"{db.stem}.audit.jsonl"
+        lines = audit.read_text(encoding="utf-8").splitlines()
+        if malformed:
+            lines.insert(1, "{ this line is not json")
+        if break_chain:
+            last = json.loads(lines[-1])
+            last["prev_hash"] = "0" * 64
+            lines[-1] = json.dumps(last)
+        audit.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return db
+
+    def test_a_chain_break_carries_the_skipped_count_out(self, tmp_path):
+        from anneal_memory.audit import AuditTrail
+
+        db = self._trail_with(tmp_path, malformed=True, break_chain=True)
+        result = AuditTrail.verify(db)
+
+        assert result.valid is False
+        assert result.skipped_lines == 1, (
+            "verify reported a chain break and skipped_lines=0 while a "
+            "malformed line was present. The count is incremented and then "
+            "discarded by the invalid return, so an operator investigating a "
+            "tampering verdict is told the file was fully readable."
+        )
+
+    def test_the_valid_path_still_carries_it(self, tmp_path):
+        """The half that already worked — pinned so a fix cannot trade one for the other."""
+        from anneal_memory.audit import AuditTrail
+
+        db = self._trail_with(tmp_path, malformed=True, break_chain=False)
+        result = AuditTrail.verify(db)
+
+        assert result.valid is True
+        assert result.skipped_lines == 1
+
+    def test_the_cli_tells_the_operator_on_BOTH_paths(self, tmp_path, capsys):
+        """The dataclass is not the surface — this is the operator's actual view."""
+        from anneal_memory.cli import build_parser
+
+        broken = self._trail_with(tmp_path / "a", malformed=True, break_chain=True)
+        args = build_parser().parse_args(["--db", str(broken), "verify"])
+        with pytest.raises(SystemExit):
+            args.func(args)
+        err = capsys.readouterr().err
+        assert "malformed" in err, (
+            "the CLI's INVALID branch prints the chain break and says nothing "
+            f"about unreadable lines. got:\n{err}"
+        )
+
+        ok = self._trail_with(tmp_path / "b", malformed=True, break_chain=False)
+        args = build_parser().parse_args(["--db", str(ok), "verify"])
+        args.func(args)
+        assert "malformed" in capsys.readouterr().out
+
+
 class TestThePersistCommitDoesNotLeakOtherWork:
     """The durable counter writes with a standalone ``commit()``. Prove it is safe.
 

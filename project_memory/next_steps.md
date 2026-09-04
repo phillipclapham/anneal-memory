@@ -34,7 +34,7 @@ them can stay true on their own:
 ```
 push state   git ls-remote origin main   vs   git rev-parse HEAD     (equal at close)
 tree         git status --short                                      (empty at close)
-tests        .venv/bin/python -m pytest -q -p no:cacheprovider        (1833 at close, from 1822)
+tests        .venv/bin/python -m pytest -q -p no:cacheprovider        (1846 at close, from 1822)
 types        .venv/bin/python -m mypy anneal_memory                   (clean)
 lint         .venv/bin/python -m ruff check .                         (63, unchanged all session)
 findings     project_memory/diogenes_20260904.md — its OWN still-open slot, newest wins
@@ -205,12 +205,59 @@ where a lost increment is lost forever and a lost whole-value write is repaired 
 that rolls back publishes nothing) and cannot disturb an open wrap. Both reproduced, both pinned as
 tests, and the pin mutation-checked for vacuity.
 
+### ▶▶ SECOND BLOCK — THE NAMED QUEUE, WORKED AFTER THE PILE (Phill: *"if the anneal session has more stuff it can do ask it continue"*)
+Everything this session named as open at its first close is now done or ruled. **All four were the
+same shape and I did not expect that going in: `verify()` — the tamper-evidence surface — crying
+TAMPERING at ordinary disk errors.** A tamper detector that fires on ENOSPC teaches its operator
+to ignore it, which is the only way this feature actually fails.
+
+- **A failed rotation left a false tampering verdict nobody could clear (`spore-746`, codex L3).**
+  Rotation renames the active file FIRST, then gzips, then updates the manifest. Break the gzip and
+  the sealed file exists, the manifest does not know it, the active file is gone — and the next
+  call advanced `_last_week`, recording a rotation that never happened. Measured, same process, no
+  crash: `verify()` returned `valid=False, "Hash mismatch at seq 3: expected sha256:GENESIS..."` on
+  a store where nothing was tampered with and nothing was lost.
+  ⚡ **The recovery existed and could not be reached by the command an operator runs** —
+  `_adopt_orphaned_files` is idempotent and correct but ran only from `_initialize`, and
+  `AuditTrail.verify` is a CLASSMETHOD that never constructs a trail. Rotation now adopts first.
+- **A tampering verdict claimed the file was fully readable.** The chain-break return omitted
+  `skipped_lines`, so a count already incremented was overwritten by the default 0. ▶ The carried
+  finding blamed `cli.cmd_verify`; **misattributed** — the CLI was right on the valid path and the
+  LIBRARY was discarding it a layer below. Walking every construction site showed three of four
+  early returns omit it LEGITIMATELY (they run before `skipped` exists), so exactly one was wrong.
+- **`spore-745`: the outbox was NOT built, and that is the ruling.** The chained marker's unique
+  property is TAMPER-EVIDENCE; an outbox in SQLite metadata is not chained either, so it delivers
+  *durability of a location* — obtainable far more cheaply, because `note_write_failure` already
+  knew the seq and discarded it. `audit_last_failure` now carries `[dropped before audit seq N] at
+  <utc>`. ⚡ **And "advance `_seq` so verify sees a gap" was falsified before building:**
+  `_initialize` recovers `_seq` from the last entry ON DISK, so a reopen erases it — identical
+  durability to the marker it would replace. **The chained marker stays open and process-local.**
+- **`spore-747` anneal half: the SQLite store now fails CLOSED like the sidecars.** `crystal.py`
+  and `spores.py` refuse a newer `schema_version`; the store wrote `format_version` and never read
+  it back, so under skew the two halves failed in OPPOSITE directions. ⚠ The check runs BEFORE
+  `_init_schema` — migrating a store you are about to refuse is the one thing it must not do.
+  Narrower than the sidecars on purpose: unparseable or absent still opens, because a sidecar is a
+  cache and this is the user's memory. ▶ **The levain half is NOT anneal's** — `.mcp.json` wiring
+  and `doctor` reporting both resolutions. See `spore-751`.
+
+### ⚠ AND I WROTE A HOLLOW GUARD WHILE FIXING HOLLOW GUARDS — the one to carry
+The ordering test above (`must run before _init_schema`) first compared metadata rows before and
+after a refused open. **Mutation-proved hollow: moving the check AFTER `_init_schema` left it
+PASSING**, because `INSERT OR IGNORE` writes nothing to a store that already has its keys, so the
+after-state is invariant to the property the test was named for. It now spies on whether
+`_init_schema` is CALLED, with a control asserting it *does* run on an acceptable store.
+▶ **The rule that would have caught it at authoring time: when a test asserts an operation did NOT
+happen, ask what observable that operation would have changed — and if the honest answer is "on
+this input, nothing", the test cannot see its own subject.** An idempotent operation leaves no
+after-state, so ordering around it can only be tested by observing the call.
+
 ### ▶ STILL OPEN GOING INTO 09-05
-- `spore-745` — the `dropped_before` MARKER is still process-local (the count is not; see above).
-- `spore-746` — rotation-failure orphan, pre-existing MED.
-- `spore-747` — the levain two-anneal skew.
-- `cli.cmd_verify` still buries `skipped_lines`, so an operator running `verify` is not told lines
-  were skipped. Untouched, still worth doing.
+- `spore-745` — **only the chained `dropped_before` MARKER remains**, still process-local. The
+  count AND the location are both durable now. An outbox is its shape only if someone rules the
+  tamper-evidence of a gap worth coupling `AuditTrail` to the DB; nobody has, and it is not urgent.
+- `spore-747` — **the LEVAIN half only**: `.mcp.json` wiring one authoritative anneal, and `doctor`
+  reporting both resolutions by RUNNING the hook-side interpreter rather than inferring from
+  config. Routed to the fan-in, not reached across. `spore-746` is CLOSED.
 - The three live clocks below are untouched: `spore-721` (09-11), `spore-722` (09-10),
   `spore-675` step 4.
 

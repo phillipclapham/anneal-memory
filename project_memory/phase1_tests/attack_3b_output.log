@@ -1,0 +1,4 @@
+Single-writer clean chain valid: True, entries: 3
+After tampering (line 1 actor 'single'->'TAMPERED'): valid=False
+   detected at seq 2, error: Hash mismatch at seq 2: expected sha256:4e29621a82414..., got sha256:a808e00296a
+After restore: valid=True

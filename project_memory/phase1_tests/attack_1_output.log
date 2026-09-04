@@ -1,0 +1,60 @@
+======================================================================
+ATTACK 1 — Staleness attack / false-pattern injection
+======================================================================
+
+[setup] Recorded 5 legitimate episodes.
+        Episode IDs (8-char): ['bce1eb9b', '59a40490', '1d7574da', '4c966ce6', '2bfcdd16']
+[setup] Wrap prepared. Token: aca44eca…
+
+[attack] Submitting continuity with 4 graduation candidates:
+         A — honest (should validate)
+         B — word-overlap exploit (false claim, lexical overlap)
+         C — fake citation ID (should demote)
+         D — bare graduation, no evidence tag
+
+[result] validated_save_continuity returned:
+         validated:   2
+         demoted:     1
+         bare_demoted:0
+         total demoted: 1
+         gaming suspects: []
+
+[result] Persisted ## Patterns section:
+         ## Patterns
+         - structural_invariants_beat_discipline_based_verification | 2x (2026-05-21) [evidence: bce1eb9b, 4c966ce6 "race condition fix and atomicity decision both prove discipline rots and structure holds"] (A-honest)
+         - the_moon_is_made_of_cheese_at_low_temperatures | 2x (2026-05-21) [evidence: bce1eb9b "SQLite race condition proves moon cheese fact at temperatures"] (B-word-overlap-exploit)
+         - patterns_must_be_cited_with_real_episode_ids | 1x (2026-05-21) (ungrounded) (C-missing-citation)
+         - bare_graduation_attempt | 2x (2026-05-21) (D-bare-graduation)
+
+[probe] B (word-overlap exploit) survived as 2x: True
+        >> GAP: lexical-overlap check passed despite semantic absurdity.
+        >> The immune system has NO semantic coherence check.
+
+[probe] check_explanation_overlap(B-explanation, episode-1): True
+        >> Lexical-overlap returned True. Shared meaningful words:
+        >> ['condition', 'race', 'sqlite']
+
+======================================================================
+Session 2 — re-cite the same episodes to probe gaming detection
+======================================================================
+[session2] Wrap prepared. New episode IDs: ['5f67027c']
+[session2] valid_ids for graduation = ['5f67027c']
+[session2] => Citations to session-1 episodes will FAIL validation
+            because they are no longer in the current wrap window.
+
+[session2] validated: 0
+[session2] demoted:   2
+[session2] gaming suspects: []
+
+[session2] Persisted ## Patterns:
+           ## Patterns
+           - structural_invariants_beat_discipline_based_verification | 2x (2026-05-21) (ungrounded) (carried-pattern-re-graduation)
+           - replay_attack_on_old_episodes | 1x (2026-05-21) (ungrounded) (replay-attempt)
+
+======================================================================
+ATTACK 1 RESULTS SUMMARY
+======================================================================
+Defense held on C (fake citation ID):    demoted
+Defense held on D (bare graduation):     bare graduations only demoted after citations_seen=True (first wrap exemption)
+Defense status on B (word-overlap):      BREACHED
+Replay attack on prior-session episodes: structurally blocked by session_id scoping in validate_graduations

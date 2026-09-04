@@ -1,0 +1,73 @@
+======================================================================
+ATTACK 3 — Cross-context / fleet contamination
+======================================================================
+
+--- Scenario 1: different stores (production fleet shape) ---
+   agent_a recorded ep f1979f8f
+   agent_b recorded ep 8750552d
+   probe: agent_b episode visible to agent_a.recall(): False
+   probe: agent_a.episodes_since_wrap() count: 1
+   probe: agent_b.episodes_since_wrap() count: 1
+   probe: agent_a.prepare_wrap returned 1 ep(s)
+   >> Scenario 1 defense status: per-store isolation HELD structurally
+      (filesystem-path scoping is the boundary; no shared state)
+
+
+--- Scenario 2: SAME store, two agents writing ---
+   agent_a recorded ep 4a321d82 (source=agent_a)
+   agent_b recorded ep bd3bbe9d (source=agent_b)
+   agent_a.recall() saw 2 episodes:
+     - id=bd3bbe9d source=agent_b content='agent_b private observation about workflow rotatio'…
+     - id=4a321d82 source=agent_a content='agent_a private observation about discipline caden'…
+   agent_a.prepare_wrap returned 2 ep(s) — INCLUDES agent_b's
+   validated: 2, demoted: 0
+   probe: agent_a's pattern citing agent_b's episode survived as 2x: True
+      >> GAP: citation validation has NO actor scoping.
+      >> In shared-store deployment, agent A can graduate patterns
+      >> using agent B's episodes as evidence with no warning.
+
+   probe: agent_a forged episode with source='agent_b': id=1a1d855c
+   probe: forged.source='agent_b' — accepted without challenge
+
+   probe: audit log has 7 entries
+   record events (3 total):
+     - actor='agent_a' ep_id=None
+     - actor='agent_b' ep_id=None
+     - actor='agent_b' ep_id=None
+
+
+--- Scenario 3: audit chain integrity ---
+   probe: original audit chain has 7 lines
+   probe: clean chain verify() — valid=False
+          (error: Hash mismatch at seq 1: expected sha256:3bbcfc845d8e3..., got sha256:5ece2d1513127...)
+          (chain_break_at: 1)
+          (total_entries: 2)
+      >> SUBTLE FINDING: Two Store instances pointing at the same DB
+      >> each maintain INDEPENDENT in-memory audit state. When both
+      >> write to the same active .jsonl file, the prev_hash values
+      >> reference each instance's local chain — the merged file
+      >> has a broken hash chain by construction. Shared-store
+      >> deployment isn't just leaky on citations — it's leaky on
+      >> audit integrity itself. The single-process design
+      >> invariant (documented in store.py) is load-bearing.
+   probe: tampered line 1 (changed actor 'agent_b' -> 'tampered_actor')
+   probe: tampered chain verify() — valid=False
+      >> Tampering DETECTED. Hash chain catches post-hoc field modification.
+      >> But: the source field at WRITE time is unauthenticated.
+      >> Tamper-evidence != actor-authenticity.
+   probe: restored chain verify() — valid=False
+
+======================================================================
+ATTACK 3 RESULTS
+======================================================================
+Scenario 1 (different stores):    isolation HELD (filesystem-path scoping)
+Scenario 2 (shared store):        cross-actor citation NOT blocked
+                                  source-field spoofing NOT detected
+Scenario 3 (audit integrity):     hash chain present; verify-API
+                                  visibility limited (see probe above)
+
+Key finding: 'per-agent audit trails validated (separate chains, same
+system)' is true ONLY when each agent has its own store path. In a
+shared-store deployment, citation validation, episode recall, and
+audit attribution all degrade to a single trust domain — no
+agent-level boundary inside the store.

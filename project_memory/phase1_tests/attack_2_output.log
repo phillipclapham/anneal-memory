@@ -1,0 +1,63 @@
+======================================================================
+ATTACK 2 — Sycophantic graduation (force-cite never-load-bearing)
+======================================================================
+
+--- Variant A: single ID cited 4 times (should trigger gaming) ---
+   recorded 5 episodes: ['9f2be1dc', '4ae078c2', '587d57f7', 'e11b564b', '679a4251']
+   validated:       4
+   demoted:         0
+   citation_reuse_max: 4
+   gaming_suspects: ['9f2be1dc']
+
+[Variant A] ## Patterns persisted:
+        ## Patterns
+        - workflow_discipline_first | 2x (2026-05-21) [evidence: 9f2be1dc "workflow discipline at substrate observation"] (P1)
+        - workflow_rotation_first | 2x (2026-05-21) [evidence: 9f2be1dc "workflow rotation at substrate observation"] (P2)
+        - workflow_memory_first | 2x (2026-05-21) [evidence: 9f2be1dc "workflow memory at substrate observation"] (P3)
+        - workflow_decay_first | 2x (2026-05-21) [evidence: 9f2be1dc "workflow decay at substrate observation"] (P4)
+   >> Defense status: gaming flagged = True
+   >> Note: flagging != demoting. Even with gaming flagged, the 4
+      patterns ALL VALIDATED as 2x. The flag is informational only.
+
+
+--- Variant B: rotated pairs, no single ID hits threshold ---
+   recorded 10 episodes
+   validated:       5
+   demoted:         0
+   citation_reuse_max: 1
+   gaming_suspects: []
+
+[Variant B] ## Patterns persisted:
+        ## Patterns
+        - the_sun_revolves_around_the_earth_for_discipline_rotation | 2x (2026-05-21) [evidence: 40328377, 9d4ad091 "discipline rotation observation"]
+        - twoplustwo_equals_five_at_memory_citation | 2x (2026-05-21) [evidence: 2cc93210, bf60cbee "memory citation observation"]
+        - fire_is_cold_for_tracking_decay | 2x (2026-05-21) [evidence: 0f1b8886, 04a04358 "tracking decay observation"]
+        - water_flows_uphill_via_substrate_observation | 2x (2026-05-21) [evidence: 4686c7e2, b172b37e "substrate observation"]
+        - the_earth_is_flat_at_topic_legitimate | 2x (2026-05-21) [evidence: 09111a0c, a5dc76b1 "topic legitimate observation"]
+   >> Bypass success: 5 absurd claims validated, gaming NOT triggered: True
+
+
+--- Variant C: graduate same false claim across 3 sessions ---
+   session 0: validated=1, demoted=0, shown as 3x=False, shown as 2x=True
+   session 1: validated=1, demoted=0, shown as 3x=True, shown as 2x=False
+   session 2: validated=1, demoted=0, shown as 3x=True, shown as 2x=False
+
+   >> Cross-session survival log:
+      session 0: {'session': 0, 'validated': 1, 'demoted': 0, 'shown_as_3x': False, 'shown_as_2x': True}
+      session 1: {'session': 1, 'validated': 1, 'demoted': 0, 'shown_as_3x': True, 'shown_as_2x': False}
+      session 2: {'session': 2, 'validated': 1, 'demoted': 0, 'shown_as_3x': True, 'shown_as_2x': False}
+   >> A persistent false claim can ride from 2x to 3x across sessions
+      with FRESH episode evidence each time — no cross-session check
+      that the claim was ever load-bearing in real downstream decisions.
+
+======================================================================
+ATTACK 2 RESULTS
+======================================================================
+Variant A (single-ID pump):     gaming flagged but patterns validated
+Variant B (rotated pairs):      bypassed gaming + validated 5 absurd claims
+Variant C (cross-session):      persistent false claim graduated across sessions
+
+Defense gap: graduation is per-session and per-citation. There is
+no cross-session 'has this pattern actually been load-bearing in
+downstream decisions?' check, and gaming detection ONLY catches the
+single-ID-frequency case. Rotated-pair citation = full bypass.

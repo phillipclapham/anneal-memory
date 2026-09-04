@@ -1441,6 +1441,7 @@ class Store:
                     # exist + be schema-current — a reader cannot migrate; a stale-schema
                     # read surfaces as a normal query error to the caller's handling.
                     self._conn.execute("PRAGMA query_only=ON")
+                    self._refuse_a_newer_schema()
                     # A reader polls audit health too, and seeding is a bare
                     # SELECT — permitted under query_only. Without this, a
                     # read-only handle reports a permanently clean trail.
@@ -1462,6 +1463,9 @@ class Store:
                 # the continuity/meta tmp writes. L2 L3.
                 self._conn.execute("PRAGMA synchronous=FULL")
                 self._conn.execute("PRAGMA foreign_keys=ON")
+                # BEFORE _init_schema — see the docstring. Migrating a store
+                # we are about to refuse is the one thing this must not do.
+                self._refuse_a_newer_schema()
                 self._init_schema()
                 # 10.5c.5 L3 Fix #13: detect orphan tmp sidecars from a
                 # prior crashed pipeline before any new wrap runs. If a
@@ -4281,6 +4285,61 @@ class Store:
     # and forward-looking rule live in the Store class docstring
     # ("Wrap-lifecycle invariants"). Do not reintroduce a single-key
     # helper inside wrap_started/wrap_cancelled/wrap_completed.
+
+    def _refuse_a_newer_schema(self) -> None:
+        """Refuse a store written by a NEWER anneal, the way the sidecars do.
+
+        ⛔ THE ASYMMETRY THIS CLOSES (spore-747). ``crystal.py`` and
+        ``spores.py`` both hard-refuse a newer ``schema_version`` — verbatim,
+        *"refusing to read it so fields this version doesn't understand aren't
+        silently dropped"*. The SQLite store wrote ``format_version`` into
+        metadata and **never read it back**, so the two halves of one store
+        failed in OPPOSITE directions under version skew: the sidecars failed
+        CLOSED and loud, the SQLite half degraded SILENTLY. That asymmetry is
+        what made a levain two-anneal skew a correctness hazard rather than a
+        reporting gap.
+
+        ⚠ RUNS BEFORE ``_init_schema`` ON PURPOSE. Schema init applies
+        migrations and ``INSERT OR IGNORE``s defaults; doing that to a store
+        we are about to declare unreadable would mutate the very database
+        whose format we do not understand.
+
+        Deliberately narrow — it refuses ONLY on a value that parses as an
+        integer and is strictly greater:
+        · key ABSENT → a pre-versioning store, or a fresh database. Not an
+          error; ``_init_schema`` will stamp the current version.
+        · value UNPARSEABLE → left alone. The sidecars refuse here, but a
+          sidecar is a cache and this is the user's memory; locking someone
+          out of every episode they own over a garbled metadata string is a
+          worse outcome than proceeding, and the audit trail is a separate
+          integrity surface.
+        · value GREATER → refuse.
+        """
+        try:
+            row = self._conn.execute(
+                "SELECT value FROM metadata WHERE key = 'format_version'"
+            ).fetchone()
+        except sqlite3.Error:
+            return  # no metadata table yet — a brand-new database
+        if row is None:
+            return
+        try:
+            found = int(str(row["value"]).strip())
+        except (TypeError, ValueError):
+            return
+        if found > _SCHEMA_VERSION:
+            raise StoreError(
+                f"{self._path} was written by a newer anneal-memory schema "
+                f"(format_version {found} > {_SCHEMA_VERSION}); refusing to open "
+                f"it so fields this version does not understand aren't silently "
+                f"dropped on the next write. Upgrade anneal-memory, or point "
+                f"this process at a store written by a matching version. "
+                f"(If one install wires two different anneal versions at one "
+                f"store, that is the actual defect — check which interpreter "
+                f"each entry point resolves.)",
+                operation="schema_init",
+                path=str(self._path),
+            )
 
     def _seed_audit_health(self) -> None:
         """Load the durable degraded-audit counters from ``metadata``.

@@ -98,6 +98,7 @@ from .retrieval import retrieve_patterns, retrieve_relevant, MAX_PATTERNS
 from .store import (
     Store,
     StoreDatabaseError,
+    _is_write_lock_contention,
     StoreError,
     WrapInProgressError,
     WrapOwnershipError,
@@ -272,28 +273,6 @@ def _open_store(args: argparse.Namespace) -> Store:
         raise
 
 
-def _is_write_lock_contention(exc: StoreDatabaseError) -> bool:
-    """True when a StoreDatabaseError came from SQLite write-lock contention.
-
-    Matches on the ``sqlite3`` error preserved as ``__cause__`` — never on the
-    wrapper's formatted message, which embeds the store PATH (a database under
-    a directory named ``locked/`` would fool a substring test). ``cause_type_name``
-    cannot do this job either: SQLITE_BUSY and a malformed database image are
-    both ``OperationalError``. The result-code name is the real discriminator
-    and arrived in Python 3.11, so it is guarded — ``requires-python`` is >=3.10.
-    """
-    cause = exc.__cause__
-    if not isinstance(cause, sqlite3.OperationalError):
-        return False
-    errorname = getattr(cause, "sqlite_errorname", None)
-    if errorname is not None:
-        return errorname in (
-            "SQLITE_BUSY",
-            "SQLITE_BUSY_SNAPSHOT",
-            "SQLITE_BUSY_TIMEOUT",
-        )
-    text = str(cause).lower()
-    return "database is locked" in text or "database is busy" in text
 
 
 # -- Episode dict helper --

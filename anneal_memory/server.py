@@ -15,7 +15,6 @@ import argparse
 import json
 import logging
 import os
-import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -50,6 +49,7 @@ from .retrieval import (
 from .store import (
     Store,
     StoreDatabaseError,
+    _is_write_lock_contention,
     StoreError,
     WrapOwnershipError,
     _WRAP_TOKEN_RE,
@@ -66,33 +66,6 @@ _MAX_MESSAGE_SIZE = 10 * 1024 * 1024
 
 
 
-def _is_write_lock_contention(exc: StoreDatabaseError) -> bool:
-    """True when a StoreDatabaseError was caused by SQLite write-lock contention.
-
-    Matched on the underlying ``sqlite3`` error preserved as ``__cause__`` (the
-    store's ``_db_boundary`` always chains it), never on the wrapper's own
-    formatted text — that text embeds the store PATH, so a database living under
-    a directory called e.g. ``locked/`` would match a naive substring test on
-    the message and report contention that never happened.
-    """
-    cause = exc.__cause__
-    if not isinstance(cause, sqlite3.OperationalError):
-        return False
-    # ``cause_type_name`` CANNOT do this job, though the class docs advertise it
-    # as the retry-dispatch key: SQLITE_BUSY and a malformed database image are
-    # BOTH OperationalError. The real discriminator is the SQLite result-code
-    # name, exposed from Python 3.11 — and ``requires-python`` is >=3.10, so the
-    # attribute is guarded and the message text is the 3.10 fallback. (L2 seat,
-    # 2026-09-03.)
-    errorname = getattr(cause, "sqlite_errorname", None)
-    if errorname is not None:
-        return errorname in (
-            "SQLITE_BUSY",
-            "SQLITE_BUSY_SNAPSHOT",
-            "SQLITE_BUSY_TIMEOUT",
-        )
-    text = str(cause).lower()
-    return "database is locked" in text or "database is busy" in text
 
 
 # -- Stdio Transport (newline-delimited JSON per MCP 2024-11-05 spec) --
@@ -235,8 +208,16 @@ class Server:
                 continue
 
             # After the EOF + str guards, _read_message() guarantees a
-            # parsed JSON-RPC dict. Narrow for the type checker.
-            assert isinstance(msg, dict), "parsed message must be a dict"
+            # parsed JSON-RPC dict. Narrow for the type checker — with an
+            # explicit raise, not an ``assert``: asserts are stripped under
+            # ``python -O``, so the narrowing (and any protection it implies)
+            # silently disappears in exactly the deployment most likely to run
+            # optimised. The two siblings in continuity.py were converted for
+            # this reason; this was the third and last.
+            if not isinstance(msg, dict):
+                raise TypeError(
+                    f"parsed message must be a dict, got {type(msg).__name__}"
+                )
             method = msg.get("method", "")
             msg_id = msg.get("id")
 

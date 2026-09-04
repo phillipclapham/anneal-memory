@@ -39,7 +39,14 @@ types        .venv/bin/python -m mypy anneal_memory                   (clean)
 lint         .venv/bin/python -m ruff check .                         (63, unchanged all session)
 findings     project_memory/diogenes_20260904.md — its OWN still-open slot, newest wins
 ```
-⚠ The last line matters most: this file said "all six findings closed" on 09-04 and was falsified
+⛔ **AND RECONCILE THAT LAST ONE BEFORE YOU ACT ON IT.** The generated pointer block at the top of
+this file says **STILL OPEN: 12** and will keep saying 12 until Diogenes reviews this repo again —
+it is DIOGENES' COUNT AT 12:47 ON 09-04, taken BEFORE any of this session's work, not a live
+number. **Eleven of those twelve are closed** (see below); the twelfth is the deliberate deferral.
+The routed block cannot know that, because nothing in the triage path writes back into it. Do not
+open this file, read 12, and go hunting.
+
+⚠ And the reason the whole block above is commands rather than numbers: this file said "all six findings closed" on 09-04 and was falsified
 **by a second review landing**, not by the code changing. An answer can go stale without anything
 touching the repo (`spore-764`).
 

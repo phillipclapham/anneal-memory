@@ -1640,3 +1640,271 @@ class TestSwallowedWriteIsStillVisible:
             "the file was externalized but its audit event was queued behind a "
             f"batch that rolled back, and lost. events={events}"
         )
+
+
+class TestDegradedAuditHealthReachesEveryTransport:
+    """⛔ A FIELD ON A DATACLASS IS NOT A SURFACE.
+
+    ``audit_write_failures`` was added to ``StoreStatus``, documented in the
+    CHANGELOG and README as the channel to POLL, and reached NONE of the three
+    transports: the CLI's ``--json`` builds its own ``audit`` sub-object with
+    four hardcoded keys, the CLI's human output prints four, and the MCP
+    ``status`` handler composes its own line. Found by L4 on 2026-09-04 by
+    running the real CLI — not by any of the 1812 tests, all of which asked the
+    Python API.
+
+    That is the day's class one layer out: the assertion's subject was the
+    layer that MODELS the field; the claim's subject is the surface an operator
+    has to READ it from. The swallow is only acceptable because the loss is
+    visible somewhere an operator can look, so a channel that stops at the
+    dataclass makes the whole policy dishonest.
+    """
+
+    def _degraded(self, tmp_path):
+        from anneal_memory.store import Store
+
+        store = Store(tmp_path / "memory.db")
+
+        def boom(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        store._audit.log = boom
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            store.record("one", episode_type="observation")
+        return store
+
+    def test_cli_json_status_carries_the_write_failure_count(self, tmp_path):
+        store = self._degraded(tmp_path)
+        status = store.status()
+        assert status.audit_write_failures == 1
+
+        # The CLI's --json payload is assembled independently of StoreStatus,
+        # so assert against the assembling code, not the dataclass.
+        source = Path(__import__("anneal_memory.cli", fromlist=["x"]).__file__)
+        text = source.read_text(encoding="utf-8")
+        assert "status.audit_write_failures" in text, (
+            "cli.py never reads audit_write_failures — the --json status "
+            "payload hardcodes its audit keys, so the field exists on "
+            "StoreStatus and reaches no operator."
+        )
+        assert "status.audit_last_failure" in text
+
+    def test_mcp_status_carries_the_write_failure_count(self):
+        source = Path(__import__("anneal_memory.server", fromlist=["x"]).__file__)
+        text = source.read_text(encoding="utf-8")
+        assert "status.audit_write_failures" in text, (
+            "server.py's status handler composes its own audit line and never "
+            "reads audit_write_failures — an MCP agent cannot see that the "
+            "trail is incomplete."
+        )
+
+    def test_every_transport_that_reports_audit_health_reports_the_write_side(self):
+        """The property, stated once over all the surfaces that claim it.
+
+        Any module that reports ``audit_entry_count`` (what the trail HAS) must
+        also report ``audit_write_failures`` (what it LOST). Reporting only the
+        first is how a trail missing entries reads as healthy.
+        """
+        import anneal_memory
+
+        pkg = Path(anneal_memory.__file__).parent
+        offenders = []
+        for module in sorted(pkg.rglob("*.py")):
+            text = module.read_text(encoding="utf-8")
+            if "audit_entry_count" not in text:
+                continue
+            if module.name in {"types.py", "store.py"}:
+                continue  # the definition and the producer, not reporters
+            if "audit_write_failures" not in text:
+                offenders.append(module.name)
+        assert not offenders, (
+            "module(s) report what the audit trail HAS without reporting what "
+            "it LOST: " + ", ".join(offenders) + ". A swallowed write is "
+            "invisible to verify(); this is the only surface it is visible on."
+        )
+
+
+class TestL3ResidualsClosed:
+    """Findings from the 2026-09-04 L3 mesh, each verified against disk first.
+
+    ⚠ THE PASS ITSELF WAS NOT COVERAGE AND IS RECORDED AS SUCH: codex timed out
+    and produced nothing, and glm was cut off part-way through the target. What
+    is closed here is what two partial seats reached, not a clean bill.
+    """
+
+    def test_queued_audit_kwargs_may_not_shadow_the_flush_call_site(self, tmp_path):
+        """complement MED — a collision would raise from the post-commit path.
+
+        The ``_batch`` flush calls ``_audit_log_after_commit`` with
+        ``method=``/``committed=``/``stacklevel=``/``batch_aware=`` explicit and
+        then splats the QUEUED kwargs. A queued key with one of those names
+        makes Python raise ``TypeError: got multiple values`` **at the call
+        site, before the callee runs** — so it fires after ``commit_succeeded``
+        and propagates a raw TypeError out of a fully committed batch.
+
+        ⚠ THE FIRST FIX FOR THIS WAS UNREACHABLE, and the test is what proved
+        it. A guard placed INSIDE ``_audit_log_after_commit`` can never fire:
+        Python binds every one of those names to the PARAMETER, so they never
+        arrive in that method's ``**kwargs``. The assertion's subject was the
+        callee's kwargs; the claim's subject is the caller's splat. Hence a
+        free function checked at ENQUEUE, which is the only path that can carry
+        a bad key to the flush.
+        """
+        from anneal_memory.store import (
+            _RESERVED_AUDIT_KWARGS,
+            _reject_reserved_audit_kwargs,
+        )
+
+        assert _RESERVED_AUDIT_KWARGS == {
+            "method", "committed", "batch_aware", "stacklevel"
+        }
+        # The pass-through actually in use survives untouched.
+        assert _reject_reserved_audit_kwargs({"actor": "src"}) == {"actor": "src"}
+
+        for name in sorted(_RESERVED_AUDIT_KWARGS):
+            with pytest.raises(TypeError, match="may not use"):
+                _reject_reserved_audit_kwargs({name: "collision"})
+
+    def test_both_enqueue_paths_run_the_reserved_kwarg_check(self):
+        """The guard must sit on EVERY path that can feed the flush splat.
+
+        Two methods append to ``_deferred_audits``. A check on one of them is
+        the same one-of-N shape this whole change set is about.
+        """
+        import ast
+        from pathlib import Path
+
+        import anneal_memory.store as store_mod
+
+        tree = ast.parse(Path(store_mod.__file__).read_text(encoding="utf-8"))
+        unguarded = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            if not (isinstance(fn, ast.Attribute) and fn.attr == "append"):
+                continue
+            if not (
+                isinstance(fn.value, ast.Attribute)
+                and fn.value.attr == "_deferred_audits"
+            ):
+                continue
+            src = ast.unparse(node)
+            if "_reject_reserved_audit_kwargs" not in src:
+                unguarded.append(node.lineno)
+        assert not unguarded, (
+            "append(s) to _deferred_audits that do not sanitise their kwargs, "
+            f"at line(s) {unguarded}. Every enqueue path feeds the flush splat."
+        )
+
+    def test_a_stray_frozen_schema_is_named_in_the_cancel_audit(self, tmp_path):
+        """glm LOW — confirmed on disk before believing it.
+
+        ``had_any`` counts FOUR lifecycle keys; the audit payload named three.
+        A store carrying only a stray ``wrap_section_schema`` — a crash between
+        wrap_started's schema INSERT and its token INSERT — fired the event with
+        an EMPTY payload plus ``partial_state``: a forensic record saying
+        something was cleared without saying what, on the very recovery case the
+        marker exists to flag.
+        """
+        import json
+
+        from anneal_memory.store import Store
+
+        store = Store(tmp_path / "memory.db")
+        # Exactly the partial state: schema set, nothing else.
+        store._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("wrap_section_schema", json.dumps([{"heading": "State",
+                                                 "role": "live-state"}])),
+        )
+        store._conn.commit()
+
+        receipt = store.wrap_cancelled()
+        assert receipt.partial_state is True
+
+        events = [
+            json.loads(line)
+            for line in store._audit._active_path.read_text().splitlines()
+            if line.strip()
+        ]
+        cancelled = [e for e in events if e["event"] == "wrap_cancelled"]
+        assert cancelled, "no wrap_cancelled audit event was written at all"
+        data = cancelled[-1].get("data", {})
+        assert data.get("wrap_section_schema_cleared") is True, (
+            "the cancel audit event does not name the one key that was "
+            f"actually cleared. payload={data!r}"
+        )
+
+    def test_the_drop_count_survives_a_rotation_and_is_carried_once(self, tmp_path):
+        """Accounting across the two events that could corrupt it.
+
+        ``log()`` calls ``_rotate_if_needed()`` BEFORE building the entry, and
+        the chain is write-first, so a drop pending across a rotation boundary
+        could plausibly be lost with the old file or double-counted into both.
+        Measured 2026-09-04: it rides into the first entry of the NEW file,
+        exactly once, and the chain still verifies across both files.
+        """
+        import json
+
+        from anneal_memory.audit import AuditTrail
+        from anneal_memory.store import Store
+
+        store = Store(tmp_path / "memory.db")
+        store.record("first", episode_type="observation")
+        real = store._audit.log
+
+        def boom(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        store._audit.log = boom
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for i in range(3):
+                store.record(f"drop{i}", episode_type="observation")
+        store._audit.log = real
+        assert store._audit._dropped_since_last == 3
+
+        store._audit._last_week = "1970-W01"  # force the weekly rotation
+        store.record("after rotation", episode_type="observation")
+
+        assert store._audit._dropped_since_last == 0
+        last = json.loads(store._audit._active_path.read_text().splitlines()[-1])
+        assert last["dropped_before"] == 3
+        result = AuditTrail.verify(store._path)
+        assert result.valid and result.files_verified == 2, result
+
+    def test_repeated_failures_accumulate_and_are_not_reset_early(self, tmp_path):
+        """The count clears only after fsync, never on a failed attempt.
+
+        Clearing on the attempt would lose the very fact the mechanism exists
+        to preserve — the failure that carried it.
+        """
+        import json
+
+        from anneal_memory.store import Store
+
+        store = Store(tmp_path / "memory.db")
+        store.record("first", episode_type="observation")
+        real = store._audit.log
+
+        def boom(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        store._audit.log = boom
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for i in range(3):
+                store.record(f"d{i}", episode_type="observation")
+        assert store._audit._dropped_since_last == 3
+
+        store._audit.log = real
+        store.record("lands", episode_type="observation")
+        last = json.loads(store._audit._active_path.read_text().splitlines()[-1])
+        assert last["dropped_before"] == 3, "carried the wrong count"
+
+        # And exactly once: the entry after it must be clean.
+        store.record("next", episode_type="observation")
+        tail = json.loads(store._audit._active_path.read_text().splitlines()[-1])
+        assert "dropped_before" not in tail

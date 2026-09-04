@@ -841,6 +841,14 @@ class Server:
                 )
             else:
                 audit_line += ", retention unlimited"
+            if status.audit_write_failures:
+                audit_line += (
+                    f" — ⚠ {status.audit_write_failures} write(s) FAILED and "
+                    f"were dropped; the trail is INCOMPLETE for this process "
+                    f"(verify() cannot see a missing entry)"
+                )
+                if status.audit_last_failure:
+                    audit_line += f", last: {status.audit_last_failure}"
             lines.append(audit_line)
             if status.audit_log_path is not None:
                 lines.append(f"Audit log: {status.audit_log_path}")

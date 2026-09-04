@@ -81,7 +81,13 @@ itself raises, the nested guard swallows it, and the caller sees **zero signal o
 
 So a swallowed write now reports on **four channels, most-suppressible last**:
 1. **`dropped_before`** rides into the next entry that lands — the loss becomes a hash-chained,
-   tamper-evident FACT rather than an absence (`AuditTrail.note_write_failure`);
+   tamper-evident fact rather than an absence (`AuditTrail.note_write_failure`).
+   ⚠ **Conditional, and stated rather than implied:** the count is process-local, so it reaches the
+   chain only once a LATER write lands. A crash in between still loses it and `verify()` again
+   reports `valid=True` over the gap — this closes swallow-only, **not swallow-then-crash**. Both
+   L3 seats flagged it independently. Making it durable means persisting outside the sink that is
+   already failing; that is a design question about issuing a write from inside a post-commit
+   exception handler, not a patch, and it is deliberately left for the next anneal touch;
 2. **`Store.status().audit_write_failures` / `.audit_last_failure`** — pollable, which a warning is
    not: an agent that started later, or runs under `-W error`, can still ask;
 3. the **`anneal-memory` logger** with `exc_info`, matching how `audit.py` already reports the
@@ -124,6 +130,44 @@ attempt, and each one taught something the tests could not have told us:
 - truncating the *second* SKILL.md ladder survived the per-line form, because that line also mentions
   `12x`/`18x` in its demotion sentence — a per-line max is still a proxy. The gate now judges the
   ladder RUNS themselves (ascending, not a demotion pair, not a whole-span historical quote).
+
+### Fixed — L3 residuals, and one guard of mine that could never have fired
+
+⚠ **THE L3 PASS WAS NOT COVERAGE AND IS RECORDED AS A GAP, NOT A CLEAN BILL.** codex timed out and
+produced no review; glm was cut off part-way through the target. What follows is what two partial
+seats reached. This change set stays on the bugfind list.
+
+- **A queued audit kwarg could raise a `TypeError` out of a committed batch** (complement). The
+  `_batch` flush passes `method=`/`committed=`/`stacklevel=`/`batch_aware=` explicitly and then
+  splats the queued kwargs; a queued key with one of those names raises *at the call site*, after
+  `commit_succeeded` — the "operation succeeded, caller told it failed" path again. Unreachable
+  today (`actor=` is the only pass-through), refused structurally now.
+  ⛔ **My first fix for it was a guard inside `_audit_log_after_commit`, and the test proved it could
+  never fire** — Python binds every one of those names to the *parameter*, so they never reach that
+  method's `**kwargs`. The assertion's subject was the callee's kwargs; the claim's subject is the
+  caller's splat. **The day's class, one more time, inside the fix for a finding about it.** The
+  check is now a free function run at *enqueue*, on both paths that feed the flush, with a test
+  asserting both are covered.
+- **A stray frozen schema was cleared but not named in the cancel audit** (glm, confirmed on disk).
+  `had_any` counts four lifecycle keys; the payload named three. A store carrying only a stray
+  `wrap_section_schema` — a crash between `wrap_started`'s schema INSERT and its token INSERT — fired
+  the event with an EMPTY payload plus `partial_state`: a record saying *something* was cleared
+  without saying what, on the exact recovery case the marker exists to flag. Recorded by presence.
+  The comment above it said "none of the three keys" while the code checked four.
+- **The `dropped_before` guarantee is conditional, and now says so** (both seats, independently).
+  The pending count is process-local: a crash between the swallow and the next successful write loses
+  it, `__init__` resets to 0, and `verify()` again reports `valid=True` over the gap. This closes
+  swallow-only, **not swallow-then-crash**. The comment claiming a "chained FACT" was overclaiming
+  and is corrected rather than quietly kept. Persisting it means issuing a write from inside a
+  post-commit exception handler — a design question, not a patch — and is deliberately left.
+- Measured while checking codex's focus questions: the drop count **survives a weekly rotation**,
+  rides into the first entry of the new file exactly once, verifies across both files, and
+  **accumulates without early reset** across repeated failures. Both pinned.
+
+Also: `[tool.ruff] exclude = ["project_memory"]`. The project memory moved into this repo on
+2026-09-04, bringing the archived Phase-1 hostile-testing scripts with it; ruff linted them and added
+52 findings to a baseline that is otherwise a real signal. They are receipts of what was run then —
+"fixing" one would edit the evidence.
 
 ### Fixed — a docstring that could not be COLLECTED on half the support matrix
 

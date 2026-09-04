@@ -97,11 +97,25 @@ class AuditTrail:
         self._prev_hash: str = GENESIS_HASH
         self._last_week: str = ""
         # Writes a caller swallowed since the last entry that landed. Rides
-        # into the next successful entry as ``dropped_before`` so a gap is a
-        # chained FACT rather than an absence — see :meth:`note_write_failure`.
-        # Process-local by design: it survives no restart, which is exactly
-        # why the count is flushed into the durable chain at the first
-        # opportunity instead of being kept here.
+        # into the next successful entry as ``dropped_before`` so a gap becomes
+        # a chained fact rather than an absence — see :meth:`note_write_failure`.
+        # ⚠ PROCESS-LOCAL, AND THE GUARANTEE IS THEREFORE CONDITIONAL —
+        # stated because the first version of this comment overclaimed it.
+        # The count reaches the durable chain only when a LATER write lands.
+        # If the process dies first (OOM, kill -9, power loss, a deploy
+        # restart) the count is gone, ``__init__`` resets it to 0, and the
+        # trail on disk has a gap with no ``dropped_before`` marker —
+        # ``verify()`` then walks a clean chain over it and reports
+        # ``valid=True``, exactly as before this mechanism existed. So this
+        # closes the swallow-only case, NOT swallow-then-crash.
+        # Flagged independently by BOTH L3 seats, 2026-09-04. Making it
+        # durable means persisting outside the sink that is already failing
+        # (the SQLite metadata table is a different I/O path) — deliberately
+        # NOT done in this pass: it is a write issued from inside a
+        # post-commit exception handler and needs its own failure discipline,
+        # which is a design question, not a patch. Tracked for the next
+        # anneal touch; the honest thing meanwhile is that this comment says
+        # so rather than the docstring implying a guarantee it does not have.
         self._dropped_since_last: int = 0
 
     # -- Public API --
@@ -217,6 +231,10 @@ class AuditTrail:
         Deliberately cannot raise: it is called from inside an exception
         handler whose whole contract is that nothing after a commit
         propagates.
+
+        ⚠ The record is durable only once a later entry lands — see the
+        ``_dropped_since_last`` comment in ``__init__``. A crash before that
+        loses the count, and ``verify()`` reports ``valid=True`` over the gap.
         """
         try:
             self._dropped_since_last += 1

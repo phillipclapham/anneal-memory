@@ -66,6 +66,49 @@ from .associations import (
 )
 from .audit import AuditTrail
 
+#: Parameter names of :meth:`Store._audit_log_after_commit` that must never
+#: appear in the pass-through ``**kwargs`` queued for a deferred audit replay.
+_RESERVED_AUDIT_KWARGS = frozenset(
+    {"method", "committed", "batch_aware", "stacklevel"}
+)
+
+
+def _reject_reserved_audit_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Refuse audit pass-through kwargs that would collide at the flush splat.
+
+    ⛔ THE COLLISION RAISES AT THE CALL SITE, NOT INSIDE THE CALLEE — which is
+    why this is a free function checked at ENQUEUE and not a guard inside
+    ``_audit_log_after_commit``. The ``_batch`` flush calls that method with
+    ``method=``/``committed=``/``stacklevel=``/``batch_aware=`` explicit and
+    then splats the queued kwargs; a queued key with one of those names makes
+    Python raise ``TypeError: got multiple values for keyword argument``
+    BEFORE the callee runs, so the callee's own try/except cannot see it — and
+    it fires after ``commit_succeeded``, propagating a raw TypeError out of a
+    fully committed batch. That is verbatim the "operation succeeded, caller
+    told it failed" path this whole mechanism exists to close.
+
+    Raised by complement at L3 (2026-09-04). ⚠ The first fix for it was a
+    guard placed INSIDE the callee, which measurement showed can never fire:
+    Python binds every one of those names to the PARAMETER, so they never
+    reach ``**kwargs`` there. The assertion's subject was the callee's kwargs;
+    the claim's subject is the caller's splat — the day's class, one more time,
+    inside the fix for a finding about it.
+
+    Not reachable today (``actor=`` is the only pass-through in the codebase);
+    this refuses it structurally instead of relying on no future caller
+    choosing an overlapping name.
+    """
+    collisions = _RESERVED_AUDIT_KWARGS & set(kwargs)
+    if collisions:
+        raise TypeError(
+            f"audit pass-through kwargs may not use {sorted(collisions)}: "
+            "these are _audit_log_after_commit's own parameter names, and a "
+            "queued collision raises out of the post-commit flush path, after "
+            "the batch has committed."
+        )
+    return kwargs
+
+
 # Same logger the audit layer uses for the exactly analogous failure (a
 # secondary side-effect failing after a durable write — ``audit.py`` reports
 # an ``on_event`` callback failure this way). A post-commit audit failure is
@@ -2377,8 +2420,10 @@ class Store:
             #    ``partial_state: true`` marker so auditors can
             #    distinguish "operator cleaned up a broken store"
             #    from "operator abandoned a healthy wrap."
-            # 3. Clean store — none of the three keys was set. No
+            # 3. Clean store — none of the FOUR keys was set. No
             #    audit event (there was nothing to cancel).
+            #    ⚠ Said "three" until 2026-09-04 while ``had_any`` above
+            #    checked four: a comment disagreeing with correct code.
             if had_any:
                 payload: dict[str, Any] = {}
                 if cancelled_token:
@@ -2395,6 +2440,17 @@ class Store:
                 # SAME predicate the receipt reports, never a second one.
                 if partial_state:
                     payload["partial_state"] = True
+                # ⛔ THE FROZEN SCHEMA COUNTS TOWARD ``had_any`` AND WAS ABSENT
+                # HERE. A store carrying ONLY a stray ``wrap_section_schema``
+                # (a crash between wrap_started's schema INSERT and its token
+                # INSERT) fired this event with an EMPTY payload plus
+                # partial_state — a forensic record saying "something was
+                # cleared" without saying what, on the exact recovery case the
+                # marker exists to flag. Recorded by PRESENCE, not content: the
+                # raw value can be arbitrarily large and the audit payload is
+                # not the place for it. (glm L3, 2026-09-04, confirmed on disk.)
+                if cancelled_schema_raw:
+                    payload["wrap_section_schema_cleared"] = True
                 # ⛔ POST-COMMIT: the metadata clear above is COMMITTED, and the
                 # receipt below is the only correct outcome. The swallow + warn
                 # policy this site introduced on 2026-09-03 now lives in
@@ -4211,7 +4267,8 @@ class Store:
             # so a flush-time failure names the batch rather than a site whose
             # work landed.
             self._deferred_audits.append(
-                (event, payload, kwargs, "_batch", "the batched write")
+                (event, payload, _reject_reserved_audit_kwargs(kwargs),
+                 "_batch", "the batched write")
             )
         else:
             self._audit.log(event, payload, **kwargs)
@@ -4300,7 +4357,9 @@ class Store:
             # back through this method with ``_defer_commit`` already reset to
             # False, so the swallow policy still applies there and this branch
             # cannot re-queue forever.
-            self._deferred_audits.append((event, payload, kwargs, method, committed))
+            self._deferred_audits.append(
+                (event, payload, _reject_reserved_audit_kwargs(kwargs), method, committed)
+            )
             return
         try:
             self._audit.log(event, payload, **kwargs)
@@ -4309,10 +4368,15 @@ class Store:
             # cannot carry that load. FOUR channels, most-suppressible LAST,
             # so no filter configuration can blank all of them:
             #   1. the trail's own pending-drop count, riding into the next
-            #      entry that lands as ``dropped_before`` — durable and
-            #      hash-chained. Without it ``verify()`` walks a clean chain
-            #      over the hole and reports valid=True (measured 2026-09-04:
-            #      8 mutations, 7 drops, ONE entry, ``valid=True``);
+            #      entry that lands as ``dropped_before`` — hash-chained, and
+            #      the only channel that outlives the process. Without it
+            #      ``verify()`` walks a clean chain over the hole and reports
+            #      valid=True (measured 2026-09-04: 8 mutations, 7 drops, ONE
+            #      entry, ``valid=True``). ⚠ It becomes durable only once a
+            #      LATER write lands: a crash before that still loses the
+            #      count. Both L3 seats flagged it independently; see
+            #      ``AuditTrail.__init__``. Closes swallow-only, not
+            #      swallow-then-crash;
             #   2. a counter + last-failure string on this Store, surfaced by
             #      ``status()`` so a long-running agent can POLL for degraded
             #      audit health instead of having to have caught a warning;

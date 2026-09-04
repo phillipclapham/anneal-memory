@@ -44,6 +44,14 @@ anneal-memory = "anneal_memory.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["anneal_memory"]
 
+[tool.ruff]
+# ``project_memory/`` holds project-tracking documents and the ARCHIVED Phase-1
+# hostile-testing scripts, which moved into this repo on 2026-09-04 with the
+# project memory. They are receipts of what was run then, not package source —
+# linting them added 52 findings to a baseline that is otherwise a real signal,
+# and "fixing" a receipt would edit the evidence. Excluded, not silenced.
+exclude = ["project_memory"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

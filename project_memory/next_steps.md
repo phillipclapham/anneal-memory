@@ -25,10 +25,15 @@
 
 ## ▶▶ PICKUP 2026-09-05 — AM-AUDIT-AFTER-COMMIT LANDED. READ THE COUNT STORY BEFORE ANYTHING ELSE.
 
-**State at close of the 09-04 seat:** working tree has the AM-AUDIT-AFTER-COMMIT change (uncommitted
-at the time of writing; see the repo). **1811 tests** (from 1764) · mypy clean · **ruff 64** —
-⚠ note the baseline was **65 at HEAD, not the 64 this file claimed**; re-derived from disk, which is
-this file's own standing instruction.
+**State at close of the 09-04 seat:** AM-AUDIT-AFTER-COMMIT is COMMITTED — `d7b482e` (the policy)
+and `e8c04da` (the L3/L4 round). Working tree clean apart from this file.
+**1820 tests** (from 1764) · mypy clean · **ruff 64** · pre-push gate green on HEAD, stamp
+`0.9.10.dev0`, not a released number.
+⚠ The ruff baseline at HEAD was **65, not the 64 this file claimed** — re-derived from disk, which
+is this file's own standing instruction, and it was wrong about its own number. The count is 64 now
+because a previously-unused import became used, and because `project_memory/` is excluded from ruff:
+the archived Phase-1 scripts arrived with today's move and added 52 findings to an otherwise real
+signal.
 
 ### ⛔ THE FINDING WAS "A CORRECTION REACHED ONE OF FIVE SITES." THE REAL DENOMINATOR IS SIXTEEN.
 The 09-03 codex L3 HIGH established *an audit-sink failure must not propagate once the work is
@@ -64,12 +69,33 @@ warning**) and `-W error` produces **zero signal**. So four channels now, most-s
 (pollable), the `anneal-memory` logger, then the warning.
 
 ### ▶ OPEN / NEXT
-- **L3 (`complement,codex,glm`) was still running at close** — triage its output before the commit
-  is considered final. L1 + L2 are integrated.
+- ⚠ **L3 RAN AND IS NOT COVERAGE. codex TIMED OUT AND PRODUCED NOTHING; glm was CUT OFF part-way.**
+  The runner said so itself and kept this repo on the bugfind list. complement's three findings and
+  glm's two are triaged and closed (commit `e8c04da`) — **that is not a clean bill of health.**
+  ⚖ Per `spore-744` (Phill, today): *being stingy with codex is a defect, not thrift.* codex was
+  re-run on a tighter `--paths anneal_memory/audit.py` scope at `--timeout 900`; **if that retry also
+  came back empty, the frontier-lineage seat has still not read this change, and it reaches Alex's
+  lockout path — run it again before any release.**
+- **L4 caught the one no test could**, and it is the pattern to carry: `audit_write_failures` reached
+  `StoreStatus` and **none of the three transports**. The CLI `--json` builds its own `audit` object
+  with four hardcoded keys, the human output prints four, the MCP handler composes its own line. The
+  channel documented as "pollable" was not pollable on any surface an operator reads. **A field on a
+  dataclass is not a surface.** Fixed + pinned across every module that reports audit health.
 - **`gc_pattern_associations` and `drain_co_surface_events`** emit only on a non-zero count, so they
   are covered by the mechanical scan and NOT by the behavioural table. Stated in the test on purpose.
 - **A partial audit write (ENOSPC mid-line) is still reported as tampering by `verify()`** —
   pre-existing, named by L2, NOT fixed here. `cli.cmd_verify` buries `skipped_lines`.
+- ⛔ **`dropped_before` CLOSES SWALLOW-ONLY, NOT SWALLOW-THEN-CRASH.** Both L3 seats found this
+  independently. The pending count is process-local: a crash between the swallowed write and the
+  next successful one loses it, `__init__` resets to 0, and `verify()` reports `valid=True` over the
+  gap exactly as before the mechanism existed. Making it durable means persisting outside the sink
+  that is already failing (the SQLite metadata table is a different I/O path) — **a design question
+  about issuing a write from inside a post-commit exception handler, not a patch.** Deliberately
+  left; the comments say so rather than implying a guarantee the code does not have.
+- ▶ **`decision_influence_receipt_contract.md` travelled here with the move and is NOT anneal-local.**
+  `voltron/CLAUDE.md` names it an integrator-seat surface — the frozen cross-altitude schema binding
+  anneal, vagus, Bridge and FlowPoker, where a field change is a checkpoint and never unilateral.
+  The move removed the friction without removing the discipline. Do not treat it as this repo's.
 - The **three live clocks below are untouched**: `spore-721` (09-11), `spore-722` (09-10),
   `spore-675` step 4.
 

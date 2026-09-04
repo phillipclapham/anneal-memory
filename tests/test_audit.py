@@ -1872,7 +1872,11 @@ class TestThePersistCommitDoesNotLeakOtherWork:
         finally:
             store.close()
 
-        assert Store(tmp_path / "memory.db").status().total_episodes == 0
+        reopened = Store(tmp_path / "memory.db")
+        try:
+            assert reopened.status().total_episodes == 0
+        finally:
+            reopened.close()
 
     def test_a_failure_during_an_open_wrap_leaves_the_wrap_intact(self, tmp_path):
         """The wrap state machine must not notice this write at all."""

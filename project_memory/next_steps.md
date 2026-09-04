@@ -125,6 +125,29 @@ its 24 rows SUCCEEDED, and today it was 8 successes out of 9. What is real is a 
 failure rate (8/24) with an opaque signature — seven identical `Claude CLI exit code 1 (no
 stderr)` plus one timeout. **The denominator was in my own output — I printed "24 rows, 8 errored"
 and generalised from the numerator anyway.** An errored-row count is not a failure rate.
+▶ **RETRIED TWICE MORE, TIGHTER, AND IT STILL DID NOT COVER.** Scoped to
+`anneal_memory/store.py` alone (12,084 chars): glm-5.3 DID read this time — rounds=6,
+files_opened=1 — and hit its 550s timeout with nothing emitted; complement threw the identical
+`exit code 1: (no stderr)` twice more, three for three from this seat.
+⚡ **AND THE FAILURE IS NOT UNIFORMLY DISTRIBUTED, WHICH IS THE PART TO CARRY.** Measured over all
+26 complement rows in the store: **5 of the 8 lifetime errors are anneal-memory** (5 errors to 1
+success), while wisp is 3-for-3, blackjack 3-for-3, levain 2-for-2. Today specifically, all 8
+successes fall in a 56-minute morning window across seven other repos and all 3 failures are this
+repo in the afternoon. That does not cleanly separate a repo effect from a time effect — 09-03 has
+a later solitaire success AFTER an anneal-memory failure, which argues against pure time. Stated
+as two live candidates rather than a diagnosis.
+▶ **A gpt-oss pass DID land on the tight scope and was triaged against disk — 2 of 6 had
+substance and BOTH HIGHs were false.** "sqlite3 is never imported in store.py" (it is, line 19),
+"the package cannot import" (it imports and binds all six names), and "_seed_audit_health is
+called twice for writers" (instrumented: exactly one per open, both paths) — all three
+diff-scoping artifacts, the seat seeing a moved function and an annotation line without the file.
+⚠ **Both HIGHs were confidently wrong in 8.65 seconds. Do not weight this seat's severity.**
+What was real: a silently-swallowed persist failure (now logged at debug) and a read-modify-write
+that could lose an update between concurrent writers — DOCUMENTED, NOT CHANGED, because
+concurrent writers already break the hash chain by construction and the proposed atomic increment
+is worse for the scenario this counter records (a failing sink means repeated persist failures,
+where a lost increment is lost forever and a lost whole-value write is repaired by the next one).
+
 ▶ **So the riskiest part of this change set was verified by me directly instead:** the standalone
 `commit()` inside the post-commit handler cannot leak another method's uncommitted DML (a batch
 that rolls back publishes nothing) and cannot disturb an open wrap. Both reproduced, both pinned as

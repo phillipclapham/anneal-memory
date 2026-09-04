@@ -34,7 +34,7 @@ them can stay true on their own:
 ```
 push state   git ls-remote origin main   vs   git rev-parse HEAD     (equal at close)
 tree         git status --short                                      (empty at close)
-tests        .venv/bin/python -m pytest -q -p no:cacheprovider        (1846 at close, from 1822)
+tests        .venv/bin/python -m pytest -q -p no:cacheprovider        (1853 at close, from 1822)
 types        .venv/bin/python -m mypy anneal_memory                   (clean)
 lint         .venv/bin/python -m ruff check .                         (63, unchanged all session)
 findings     project_memory/diogenes_20260904.md — its OWN still-open slot, newest wins
@@ -244,6 +244,45 @@ to ignore it, which is the only way this feature actually fails.
   Narrower than the sidecars on purpose: unparseable or absent still opens, because a sidecar is a
   cache and this is the user's memory. ▶ **The levain half is NOT anneal's** — `.mcp.json` wiring
   and `doctor` reporting both resolutions. See `spore-751`.
+
+### ⛔⛔ THIRD BLOCK — CODEX FOUND SEVEN DEFECTS IN THE WORK ABOVE, AFTER I HAD MUTATION-TESTED IT
+The slot was granted late (`--seats codex --timeout 900 --paths anneal_memory/store.py`, 19,505
+chars, **576s**, 9 findings: 5 HIGH / 4 MED, coverage recorded). **Seven confirmed by execution and
+fixed; two filed as `spore-773` and `spore-774` rather than half-built.** This is the clearest
+evidence this repo has produced for why the frontier cross-lineage seat is non-replaceable.
+
+⛔ **EVERY ONE LIVED IN CODE I HAD ALREADY PINNED WITH MUTATION-CHECKED TESTS, AND THE MUTATIONS
+PASSED BECAUSE I MUTATED THE PATH I HAD IN MIND.**
+- I proved "the standalone commit cannot leak another method's DML" using a batch containing
+  `record()` — which **DEFERS** its audit write, so the failure handler never ran. `save_continuity`
+  is not batch-aware and logs immediately: **two episodes survived a batch that rolled back.**
+- I proved "the guard never mutates the store it refuses" by asserting `_init_schema` was never
+  CALLED. True, and insufficient — `PRAGMA journal_mode=WAL` runs before it and is PERSISTENT.
+  Measured going `delete` → `wal` on a refused store.
+
+⚖ **AND IT REFUTED THE RULING IN THE BLOCK ABOVE.** My "whole-value beats atomic" argument was
+wrong: a per-process **delta** added under `BEGIN IMMEDIATE` and cleared only after commit is
+atomic AND self-healing. Worse, what I shipped was measurably **not monotonic** despite that word
+being in `types.py`, `README` and `CHANGELOG` — two writers seeded from one base drove it
+**backwards 7 → 6**. The outbox refusal still stands on tamper-evidence grounds; only that
+argument fell.
+
+▶ **ALSO FIXED:** an unreadable `format_version` read as "brand-new database" and would have run
+this version's DDL against a newer layout · `status()` returned the constructor-seeded field, so a
+long-lived MCP server or reader was permanently stale · a failed health transaction stayed open,
+holding SQLite's writer lock against every other process until close · contention was classified
+against a three-name allowlist, so `SQLITE_BUSY_RECOVERY` and friends read as not-contention **and**
+skipped the text fallback.
+
+⚡ **THE SECOND-ORDER LESSON, WORTH MORE THAN ANY SINGLE FIX: MY FIRST REGRESSION TEST FOR THE
+COMMIT LEAK COULD NOT TELL THE FIX FROM THE BUG.** Reverting the guard makes `BEGIN IMMEDIATE` raise
+inside the caller's open transaction, and the handler's own rollback then destroys the caller's
+work — **identical observable** to correct behaviour in a batch that was rolling back anyway. The
+discriminating test had to drive a batch that **SUCCEEDS**. ▶ **A surviving mutation does not always
+mean a hollow assertion — sometimes the SCENARIO cannot separate the outcomes, and the fix is a
+different scenario, not a stronger assert.** ⚠ And two of my mutations were no-ops on first attempt
+(one inserted a dead variable instead of moving the call); a mutation that does not mutate reports
+PASS and looks like evidence. Verify the mutant actually changed behaviour.
 
 ### ⚠ AND I WROTE A HOLLOW GUARD WHILE FIXING HOLLOW GUARDS — the one to carry
 The ordering test above (`must run before _init_schema`) first compared metadata rows before and

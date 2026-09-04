@@ -4,6 +4,33 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Changed — a lost audit write now records WHERE, not only that it happened
+
+`Store.status().audit_last_failure` now carries the chain position and a UTC timestamp:
+`record: OSError(28, ...) [dropped before audit seq 2] at 2026-09-04T18:33:09Z`. It is persisted
+with the failure count, so the position outlives the process that saw it.
+
+⛔ **`spore-745` asked for a transactional outbox and one was NOT built — the reasoning is the
+substance.** What the hash-chained `dropped_before` marker uniquely provides is TAMPER-EVIDENCE,
+because it lives inside the chain. An outbox staged in the SQLite metadata table is not chained
+either, so it would not deliver that property during the window it exists; what it would actually
+deliver is *durability of a location*. That was obtainable far more cheaply, because
+`note_write_failure` already knew the seq and was discarding it.
+
+⚡ **A cheaper idea still was falsified before building:** "advance `_seq` on a dropped write so
+`verify` sees a numeric gap" buys nothing — `_initialize` recovers `_seq` from the last entry ON
+DISK (`last_entry["seq"] + 1`), so a reopen erases the gap. Identical durability to the marker it
+was meant to replace.
+
+⚠ **Wording matters here and was corrected during the work:** it reads *"dropped BEFORE seq N"*,
+never *"missing seq N"*. `_seq` advances only on a successful append, so the next entry that lands
+reuses the number the dropped one was assigned — "missing seq N" would point at an entry that
+exists, and contradict the chained marker sitting on that very entry. The two records now agree by
+construction, and a test asserts that agreement rather than the string.
+
+**The chained marker itself is unchanged and still process-local.** `spore-745` stays open for
+that half, which is the half that needs the tamper-evidence.
+
 ### Fixed — a failed rotation left a false tampering verdict the operator could not clear
 
 Rotation renames the active audit file FIRST, then gzips, then updates the manifest. If a later

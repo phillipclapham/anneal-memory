@@ -277,7 +277,7 @@ class AuditTrail:
 
         return entry
 
-    def note_write_failure(self) -> None:
+    def note_write_failure(self) -> int | None:
         """Record that a caller swallowed a failed audit write.
 
         The count rides into the next entry that lands, as
@@ -289,14 +289,33 @@ class AuditTrail:
         handler whose whole contract is that nothing after a commit
         propagates.
 
-        ⚠ The record is durable only once a later entry lands — see the
-        ``_dropped_since_last`` comment in ``__init__``. A crash before that
-        loses the count, and ``verify()`` reports ``valid=True`` over the gap.
+        ⚠ The CHAINED record is durable only once a later entry lands — see
+        the ``_dropped_since_last`` comment in ``__init__``. A close or crash
+        before that loses the marker, and ``verify()`` reports ``valid=True``
+        over the gap.
+
+        ▶ WHICH IS WHY THIS RETURNS THE LOCATION. The seq the missing entry
+        would have carried is known right here and is otherwise thrown away.
+        Handing it back lets ``Store`` fold it into the DURABLE
+        ``audit_last_failure`` record, so the *where* survives the process even
+        when the chained marker does not. That is not a substitute for the
+        marker — it is not hash-chained, so it proves nothing against an
+        attacker — but it is the difference between an operator knowing "this
+        store lost 2 writes" and knowing "the gaps are at seq 3 and seq 7".
+
+        Returns:
+            The seq the dropped entry would have had, or ``None`` if even that
+            could not be determined. Deliberately cannot raise.
         """
+        try:
+            missing_seq = self._seq
+        except Exception:  # pragma: no cover — defensive, see docstring
+            missing_seq = None
         try:
             self._dropped_since_last += 1
         except Exception:  # pragma: no cover — defensive, see docstring
             pass
+        return missing_seq
 
     def stats(self) -> dict[str, Any]:
         """Return a cheap health snapshot of the audit trail.

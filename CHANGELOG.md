@@ -4,6 +4,28 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — a tampering verdict claimed the file was fully readable
+
+`AuditTrail.verify` counts malformed lines it skips, and the success return has always carried
+that count out. The chain-break return — the one INSIDE the counting loop — omitted
+`skipped_lines`, so the dataclass default of `0` overwrote a number already incremented. An
+operator investigating *"possible tampering"* was told zero lines were unreadable while
+unreadable lines sat in the very file they were being asked to distrust. Measured: a trail with
+one malformed line and one broken chain reported `"skipped_lines": 0`; it now reports `1`.
+
+⚠ Unreadable lines are a **competing explanation** for a chain break, not a footnote to it — a
+truncated write and a malicious edit both produce a break, and the skipped count is part of
+telling them apart. The CLI's human `verify` output never mentioned skipped lines on the invalid
+path either, only on the valid one; it now reports on both.
+
+▶ The carried finding said *"`cli.cmd_verify` buries `skipped_lines`"*. **That was misattributed
+and is corrected here**: the CLI reported it correctly on the valid path all along, and the count
+was being discarded in the library one layer below, before the CLI could see it. Walking every
+`AuditVerifyResult` construction in `verify` also showed that **three of the four early returns
+omit the field legitimately** — they run before `skipped` exists — so only one site was ever
+wrong. Pinned behaviourally rather than by a scan over the return sites, because a structural
+"every construction must pass it" assertion would be false of three of them.
+
 ### Fixed — two guards that could not see their own subject
 
 - **The reserved-audit-kwarg set was hand-written and covered four of six collision-capable

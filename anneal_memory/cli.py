@@ -909,6 +909,16 @@ def cmd_verify(args: argparse.Namespace) -> None:
                 f"  Chain broke at seq {result.chain_break_at} in {result.chain_break_file}",
                 file=sys.stderr,
             )
+        # The valid path has reported skipped lines since it existed; this one
+        # never did. An operator staring at a tampering verdict is exactly who
+        # needs to know that some lines could not be read at all — unreadable
+        # lines are a competing explanation for the break, not a footnote to it.
+        if result.skipped_lines > 0:
+            print(
+                f"  ({result.skipped_lines} malformed line(s) skipped — these were "
+                f"unreadable, not verified)",
+                file=sys.stderr,
+            )
         sys.exit(1)
 
 

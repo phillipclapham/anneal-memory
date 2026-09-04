@@ -34,7 +34,7 @@ them can stay true on their own:
 ```
 push state   git ls-remote origin main   vs   git rev-parse HEAD     (equal at close)
 tree         git status --short                                      (empty at close)
-tests        .venv/bin/python -m pytest -q -p no:cacheprovider        (1832 at close, from 1822)
+tests        .venv/bin/python -m pytest -q -p no:cacheprovider        (1833 at close, from 1822)
 types        .venv/bin/python -m mypy anneal_memory                   (clean)
 lint         .venv/bin/python -m ruff check .                         (63, unchanged all session)
 findings     project_memory/diogenes_20260904.md — its OWN still-open slot, newest wins
@@ -125,6 +125,26 @@ degrades and asserts inside one process could not have seen this however much co
   lost its line number on purpose after being wrong twice, differently; and
   `_is_write_lock_contention` collapsed from two AST-identical copies into one, pinned by an
   IDENTITY assertion — a grep passes on two identical copies, which is the forbidden state.
+
+### ⭐ FOUND BY TWO LANES INDEPENDENTLY, AND NOT IN THE PILE AT ALL
+**`tool-integrity.json` exists twice — repo root and package — byte-identical, kept in sync by
+DISCIPLINE and nothing else.** Every regeneration path writes ONLY the package copy
+(`server.py` and `cli.py` both use `Path(__file__).parent`), and `test_shipped_manifest_verifies`
+guards ONLY the package copy. Their git histories are identical because a human has regenerated
+both every time, and the CHANGELOG says so on three separate releases.
+
+⚠ **The consequence is not a stale file, it is a FALSE ALARM IN THE TAMPER-EVIDENCE FEATURE** —
+already measured on this repo (09-03, published-vs-repo axis of the same class): divergent
+manifests made `verify_integrity` return `(False, ["Tool wrap_cancel description hash mismatch
+(possible tampering)"])` on a clean install. The root copy also **ships in the sdist**, so the
+person it bites is an adopter taking reference hashes from it.
+
+Closed with a byte-identity invariant (`TestTheTwoManifestsCannotDrift`), mutation-proven: one
+byte of drift turns it RED. `structural_invariants_beat_discipline`, applied to a convention this
+repo had documented three times instead of enforcing once.
+⚡ **Worth noting HOW it surfaced: two lanes on disjoint file spans flagged it independently,
+neither having been asked about it.** Convergence from separate spans is the strongest signal the
+lane shape produces, and it found something no finding in the pile named.
 
 ### ⛔ THE ONE DELIBERATELY NOT CLOSED — DO NOT "FIX" IT
 **`graduation.py:95`, `_BARE_GRADUATION_RE` still `([23])x`.** This is a RULED deferral held by

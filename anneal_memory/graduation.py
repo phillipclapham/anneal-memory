@@ -1849,7 +1849,14 @@ def _demote_line(
     level: int,
     marker: str = "(ungrounded)",
 ) -> str:
-    """Demote a graduated pattern line (3x->2x or 2x->1x) and mark it.
+    """Demote a graduated pattern line BY ONE LEVEL and mark it.
+
+    ⚠ NOT "3x->2x or 2x->1x" — that enumeration was written under the removed
+    AM-LEVELCAP ceiling and survived it here, in the function that performs the
+    demotion. The arithmetic is `level - 1` and has no upper bound. MEASURED
+    2026-09-04 through this function: 2x->1x, 3x->2x, 4x->3x, 12x->11x,
+    18x->17x, 25x->24x. The same stale enumeration was still standing in three
+    README sites on the same date; state the RULE, not a sample of it.
 
     Uses positional replacement via match span to avoid fragility
     from str.replace on LLM-generated text that might contain

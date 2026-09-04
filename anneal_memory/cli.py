@@ -474,6 +474,16 @@ def cmd_status(args: argparse.Namespace) -> None:
                     "log_path": status.audit_log_path,
                     "entry_count": status.audit_entry_count,
                     "retention_days": status.audit_retention_days,
+                    # ⛔ WRITE-SIDE HEALTH. entry_count says what the trail
+                    # HAS; these say what it LOST. A post-commit audit failure
+                    # is swallowed by design, so this is the only surface an
+                    # operator can POLL for it — a UserWarning had to be caught
+                    # when it fired. Added 2026-09-04 after L4 found the field
+                    # existed on StoreStatus and reached NO transport: the
+                    # channel documented as "pollable" was not, on the surface
+                    # anyone actually polls.
+                    "write_failures": status.audit_write_failures,
+                    "last_failure": status.audit_last_failure,
                 },
             })
             return
@@ -524,6 +534,15 @@ def cmd_status(args: argparse.Namespace) -> None:
             else:
                 retention_str = "retention unlimited"
             print(f"Audit:      enabled — {count_str}, {retention_str}")
+            if status.audit_write_failures:
+                print(
+                    f"  ⚠ {status.audit_write_failures} audit write(s) FAILED "
+                    f"and were dropped — the trail is INCOMPLETE for this "
+                    f"process. verify() cannot see a missing entry and will "
+                    f"still report valid."
+                )
+                if status.audit_last_failure:
+                    print(f"    last: {status.audit_last_failure}")
             if status.audit_log_path is not None:
                 print(f"  Log:      {status.audit_log_path}")
             print(f"  Verify:   `anneal-memory verify` validates hash chain")

@@ -1123,6 +1123,46 @@ class TestTeacherCoversReaderRange:
             "does not."
         )
 
+    def test_teaching_never_calls_the_VISIBLE_level_monotonic(self):
+        """⛔ A REFUTED CLAIM THAT THE GENERATOR ITSELF REFUTED 39 LINES LATER.
+
+        The generated instructions said, at the ladder section, *"the level is a
+        monotonic high-water mark"* — and, at the LEVEL/RECENCY note, the truth:
+        *"the level you WRITE is not immutable... the visible `Nx` is current
+        standing, not a ratchet. The monotonic high-water mark is kept by the
+        library (`max_level_reached`), not by this line."* **Both shipped in the
+        same package handed to the composing agent every wrap.**
+
+        MEASURED 2026-09-04 against ``validate_graduations``: an ungrounded
+        re-stamp DECREMENTS the visible level — ``4x``→``3x``, ``12x``→``11x``,
+        ``18x``→``17x``, tagged ``(ungrounded)``. So the ladder-section claim was
+        false, and the 2026-09-04 SKILL.md fix IMPORTED it from here — a
+        correction propagating a refutation because the source it copied from
+        contradicted itself.
+
+        This pins the property at the GENERATOR, which is the surface the agent
+        actually obeys. Its sibling in ``tests/test_integrity.py`` pins SKILL.md.
+        One claim, both of its sites — that is the whole lesson of the finding
+        that produced it.
+        """
+        import re as _re
+
+        from anneal_memory.continuity import _marker_reference
+
+        ref = _marker_reference("2026-09-04")
+        # "monotonic" is allowed ONLY in a sentence that also names the field
+        # that actually is monotonic. Anything else is the refuted claim.
+        for sentence in _re.split(r"(?<=[.!?])\s+", ref):
+            if "monotonic" not in sentence:
+                continue
+            assert "max_level_reached" in sentence, (
+                "the generated instructions call a level 'monotonic' without "
+                "naming max_level_reached as the field that is. The VISIBLE "
+                "level is decremented on an ungrounded re-stamp (measured: "
+                "4x->3x, 12x->11x, 18x->17x), so this teaches the composing "
+                f"agent a property the library refutes. Sentence: {sentence!r}"
+            )
+
     def test_teaching_does_not_name_a_closed_level_enumeration(self):
         """A closed enumeration is the specific shape that re-imposes the cap."""
         from anneal_memory.continuity import _marker_reference

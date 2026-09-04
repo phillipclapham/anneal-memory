@@ -96,6 +96,13 @@ class AuditTrail:
         self._seq: int = 0
         self._prev_hash: str = GENESIS_HASH
         self._last_week: str = ""
+        # Writes a caller swallowed since the last entry that landed. Rides
+        # into the next successful entry as ``dropped_before`` so a gap is a
+        # chained FACT rather than an absence — see :meth:`note_write_failure`.
+        # Process-local by design: it survives no restart, which is exactly
+        # why the count is flushed into the durable chain at the first
+        # opportunity instead of being kept here.
+        self._dropped_since_last: int = 0
 
     # -- Public API --
 
@@ -152,6 +159,24 @@ class AuditTrail:
         }
         if data is not None:
             entry["data"] = data
+        # ⛔ A DROPPED ENTRY MUST BE A FACT IN THE CHAIN, NOT AN ABSENCE.
+        # This class is write-first: chain state is updated only after fsync
+        # returns, so a failed write leaves ``_prev_hash``/``_seq`` untouched
+        # and the NEXT entry chains cleanly over the hole. MEASURED
+        # 2026-09-04: 8 store mutations with 7 sink failures produced ONE
+        # entry and ``verify()`` returned ``valid=True, chain_break_at=None``.
+        # The gap was not merely undetectable-as-tampering — it was
+        # indistinguishable from the mutations never happening, while the
+        # verifier reported a clean bill of health over it.
+        #
+        # Callers that swallow a write failure (see
+        # ``Store._audit_log_after_commit``, which must not fail an operation
+        # that already committed) record it via :meth:`note_write_failure`;
+        # the count then rides into the next entry that DOES land, so it is
+        # hash-chained and tamper-evident like everything else here. Emitted
+        # only when non-zero, so a healthy trail is byte-identical to before.
+        if self._dropped_since_last:
+            entry["dropped_before"] = self._dropped_since_last
 
         # Deterministic serialization — sorted keys, compact separators
         json_line = json.dumps(entry, sort_keys=True, separators=(",", ":"))
@@ -167,6 +192,10 @@ class AuditTrail:
         # Update chain state
         self._prev_hash = self._compute_hash(json_line)
         self._seq += 1
+        # Cleared only now — after fsync — so a failure while writing THIS
+        # entry keeps the pending count for the next attempt rather than
+        # losing the very fact it exists to preserve.
+        self._dropped_since_last = 0
 
         # Fire callback after successful write
         if self._on_event is not None:
@@ -176,6 +205,23 @@ class AuditTrail:
                 logger.warning("on_event callback failed for seq %d", entry["seq"], exc_info=True)
 
         return entry
+
+    def note_write_failure(self) -> None:
+        """Record that a caller swallowed a failed audit write.
+
+        The count rides into the next entry that lands, as
+        ``dropped_before``. See the comment in :meth:`log` — without this a
+        swallowed write is invisible to :meth:`verify`, which walks a
+        continuous chain over the hole and reports ``valid=True``.
+
+        Deliberately cannot raise: it is called from inside an exception
+        handler whose whole contract is that nothing after a commit
+        propagates.
+        """
+        try:
+            self._dropped_since_last += 1
+        except Exception:  # pragma: no cover — defensive, see docstring
+            pass
 
     def stats(self) -> dict[str, Any]:
         """Return a cheap health snapshot of the audit trail.

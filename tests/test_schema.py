@@ -111,7 +111,10 @@ class TestNamedSchemas:
             raise OSError("audit disk full")
 
         store._audit.log = boom  # type: ignore[union-attr]
-        with pytest.warns(UserWarning, match="audit log append failed"):
+        # Matches the uniform marker emitted by Store._audit_log_after_commit
+        # (the single home of the post-commit audit policy since 2026-09-04),
+        # not this site's former bespoke wording.
+        with pytest.warns(UserWarning, match="COMMITTED"):
             store.set_section_schema(FLOW_SCHEMA)
         # The schema is persisted despite the audit failure.
         assert [s["heading"] for s in store.section_schema] == \

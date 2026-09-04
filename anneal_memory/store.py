@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import logging
 import json
 import os
 import re
@@ -64,6 +65,16 @@ from .associations import (
     record_associations as _record_associations,
 )
 from .audit import AuditTrail
+
+# Same logger the audit layer uses for the exactly analogous failure (a
+# secondary side-effect failing after a durable write — ``audit.py`` reports
+# an ``on_event`` callback failure this way). A post-commit audit failure is
+# reported on BOTH channels on purpose: ``warnings`` is the caller-facing one
+# and is deduplicated per location by Python's default filter (measured
+# 2026-09-04: five consecutive failures produced ONE warning) and silenced
+# entirely under ``-W error`` (measured: zero signal of any kind), so it
+# cannot be the only one.
+_LOG = logging.getLogger("anneal-memory")
 from .pattern_associations import (
     PATTERN_ASSOCIATIONS_SCHEMA,
     drain_co_surface_events as _drain_co_surface_events,
@@ -1213,13 +1224,25 @@ class Store:
         # ``(event, payload, kwargs)`` — the kwargs slot carries
         # pass-through keyword arguments for ``AuditTrail.log``
         # (e.g. ``actor="source"`` for record events). 10.5c.5 L3
-        # Fix #17 widened the tuple from 2 to 3 elements.
+        # Fix #17 widened the tuple from 2 to 3 elements; 2026-09-04 widened
+        # it to 5 by appending ``(method, committed)`` — the ORIGIN of the
+        # queued event. Without it every flush-time warning read
+        # "_batch: the batched write COMMITTED", including for
+        # ``wrap_completed``, so the diagnostic this policy exists to produce
+        # was at its least specific exactly where a loss costs most.
         self._deferred_audits: list[
-            tuple[str, dict[str, Any] | None, dict[str, Any]]
+            tuple[str, dict[str, Any] | None, dict[str, Any], str, str]
         ] = []
 
         # Audit trail — hash-chained JSONL sidecar (writers only; a read-only handle
         # must not write an audit sidecar on every per-turn open).
+        # Degraded-audit-health counters. A post-commit audit write that was
+        # swallowed is invisible to every existing surface — ``status()``
+        # already reports ``audit_entry_count`` and would happily show a count
+        # that trails ``total_episodes`` with nothing computing the difference.
+        # Surfaced on StoreStatus so it is POLLABLE (a warning is not).
+        self._audit_write_failures: int = 0
+        self._audit_last_failure: str | None = None
         self._audit: AuditTrail | None = None
         if audit and not read_only:
             self._audit = AuditTrail(
@@ -1487,6 +1510,12 @@ class Store:
 
         Returns:
             The recorded Episode.
+
+        Warns:
+            UserWarning: if the audit event could not be written. The
+                operation still SUCCEEDED — the audit trail is missing
+                this event. Also counted on ``status().audit_write_failures``
+                and logged; see :meth:`_audit_log_after_commit`.
         """
         if not content or not content.strip():
             raise ValueError("Episode content cannot be empty")
@@ -1547,16 +1576,17 @@ class Store:
             metadata=metadata,
         )
 
-        # Audit goes through the batch-aware helper so the event is
-        # queued (not fired) inside a batch, and flushed only after
-        # the outer commit succeeds. Same ordering invariant as the
-        # existing batched write methods.
-        self._audit_log("record", {
+        # ⛔ POST-COMMIT (the INSERT committed above, or is owned by an outer
+        # batch — the helper is batch-aware and defers in that case). Measured
+        # 2026-09-04: a bare emit raised a raw OSError with the episode already
+        # persisted, so the caller was told record() failed and would write it
+        # again — a duplicate-episode path.
+        self._audit_log_after_commit("record", {
             "episode_id": ep_id,
             "type": episode_type.value,
             "content_hash": _content_hash(content),
             "source": source,
-        }, actor=source)
+        }, method="record", committed="the episode", actor=source)
 
         return episode
 
@@ -1592,6 +1622,12 @@ class Store:
 
         Returns:
             True if the episode was found and deleted, False if not found.
+
+        Warns:
+            UserWarning: if the audit event could not be written. The
+                operation still SUCCEEDED — the audit trail is missing
+                this event. Also counted on ``status().audit_write_failures``
+                and logged; see :meth:`_audit_log_after_commit`.
         """
         with self._db_boundary("delete"):
             row = self._conn.execute(
@@ -1617,11 +1653,14 @@ class Store:
             if not self._defer_commit:
                 self._conn.commit()
 
-        self._audit_log("delete", {
+        # ⛔ POST-COMMIT: the row is DELETED. A bare emit raised a raw OSError
+        # with the episode already gone (measured 2026-09-04) — the caller is
+        # told the delete failed while the content is unrecoverable.
+        self._audit_log_after_commit("delete", {
             "episode_id": row["id"],
             "type": row["type"],
             "content_hash": _content_hash(row["content"]),
-        })
+        }, method="delete", committed="the deletion")
 
         return True
 
@@ -1819,6 +1858,8 @@ class Store:
             audit_log_path=audit_log_path,
             audit_entry_count=audit_entry_count,
             audit_retention_days=audit_retention_days,
+            audit_write_failures=self._audit_write_failures,
+            audit_last_failure=self._audit_last_failure,
         )
 
     # -- Wrap lifecycle --
@@ -1912,6 +1953,12 @@ class Store:
                 ``False``. Raised inside the write transaction, before
                 any metadata is mutated, so a refused call leaves the
                 in-flight wrap's token and snapshot untouched.
+
+        Warns:
+            UserWarning: if the audit event could not be written. The
+                operation still SUCCEEDED — the audit trail is missing
+                this event. Also counted on ``status().audit_write_failures``
+                and logged; see :meth:`_audit_log_after_commit`.
         """
         if not token:
             raise ValueError(
@@ -2085,7 +2132,15 @@ class Store:
             # from "audit entry from a legacy version that didn't
             # log these fields." Always-on logging restores that
             # discrimination.
-            self._audit.log(
+            # ⛔ POST-COMMIT: the four metadata writes above are COMMITTED.
+            # Routed through the after-commit helper, which owns the swallow +
+            # warn policy. Before 2026-09-04 this was a bare ``self._audit.log``
+            # OUTSIDE ``_db_boundary``: a sink failure escaped as a raw OSError
+            # with wrap_started_at and wrap_token already committed, so the
+            # caller was told the wrap FAILED while the wrap was LIVE and it
+            # held no token to cancel with — the stuck-wrap lockout, reachable
+            # through the very release that closed it.
+            self._audit_log_after_commit(
                 "wrap_started",
                 {
                     "wrap_token": token,
@@ -2098,6 +2153,12 @@ class Store:
                     # L3 LOW-2.)
                     "wrap_section_schema": frozen_schema,
                 },
+                method="wrap_started",
+                committed="the wrap start",
+                # Commits unconditionally above (no _defer_commit guard), so
+                # its audit must not be queued behind a batch that may roll
+                # back — same reasoning as prune/save_continuity.
+                batch_aware=False,
             )
 
     def wrap_cancelled(
@@ -2172,6 +2233,12 @@ class Store:
 
         The receipt is additive: existing callers that ignore the return value
         are unaffected.
+
+        Warns:
+            UserWarning: if the audit event could not be written. The
+                operation still SUCCEEDED — the audit trail is missing
+                this event. Also counted on ``status().audit_write_failures``
+                and logged; see :meth:`_audit_log_after_commit`.
         """
         # Capture all three wrap-lifecycle keys before we clear them,
         # so the audit entry records the full chain-of-custody
@@ -2328,55 +2395,25 @@ class Store:
                 # SAME predicate the receipt reports, never a second one.
                 if partial_state:
                     payload["partial_state"] = True
-                try:
-                    self._audit.log("wrap_cancelled", payload)
-                except Exception as exc:
-                    # ⛔ THE CANCELLATION IS ALREADY COMMITTED ABOVE. Letting an
-                    # audit I/O failure (disk full, permissions, a failed
-                    # rotation) propagate would raise out of this method with the
-                    # metadata ALREADY cleared and no receipt returned — MCP
-                    # reports isError, the CLI shows a traceback, and the
-                    # operator is told the cancel failed when it succeeded.
-                    # A peer then finds its token gone with no audit explaining
-                    # why. codex L3 HIGH.
-                    #
-                    # ⭐ THE POLICY ALREADY EXISTS IN THIS FILE and this method
-                    # was violating it: :meth:`_batch` documents that audit-flush
-                    # exceptions are swallowed after a successful commit,
-                    # because propagating one "would trick the caller's outer
-                    # except clause into cleaning up tmp files that represent
-                    # committed state — a data-loss path." Same reasoning, same
-                    # answer. The failure is surfaced as a warning rather than
-                    # silently dropped, because a missing audit event is a real
-                    # gap in a tamper-evident record.
-                    try:
-                        warnings.warn(
-                            "wrap_cancelled: the cancellation COMMITTED but its "
-                            f"audit event could not be written ({exc!r}). The "
-                            "store state is correct; the audit trail is missing "
-                            "this event. Investigate the audit sink before "
-                            "relying on the trail for this window.",
-                            UserWarning,
-                            stacklevel=2,
-                        )
-                    except Exception:
-                        # ⛔ THE NOTIFICATION ITSELF CAN RAISE, AND THAT WOULD
-                        # UNDO THE WHOLE POINT. Under `python -W error`,
-                        # PYTHONWARNINGS=error, or an embedding application's
-                        # filter, warnings.warn RAISES — recreating verbatim the
-                        # "destructive mutation committed, then reported as a
-                        # failure" path this catch exists to eliminate. codex
-                        # reproduced it at L3, and the regression test MASKED it
-                        # because pytest.warns installs a capturing filter, so
-                        # the guard's own test made the guard look sound.
-                        #
-                        # Once the commit has returned there is exactly one
-                        # correct outcome — return the receipt — so nothing
-                        # after it may propagate. The audit gap is real and
-                        # unreportable in that configuration; reporting it by
-                        # raising would tell the operator the cancel FAILED when
-                        # it succeeded, which is strictly worse.
-                        pass
+                # ⛔ POST-COMMIT: the metadata clear above is COMMITTED, and the
+                # receipt below is the only correct outcome. The swallow + warn
+                # policy this site introduced on 2026-09-03 now lives in
+                # :meth:`_audit_log_after_commit` — it reached ONE of SIXTEEN
+                # post-commit emit sites while it lived here as a comment
+                # (15 in this file + validated_save_continuity; counted
+                # mechanically over the routed call sites, not by hand).
+                # (This comment said "five" until the L1 pass: the first census
+                # scoped by the SYMPTOM `self._audit.log` and so could not see
+                # the seven association sites that reach a commit through a
+                # helper's `commit=` argument. The count in a comment about a
+                # miscount was itself produced by the miscount.)
+                self._audit_log_after_commit(
+                    "wrap_cancelled",
+                    payload,
+                    method="wrap_cancelled",
+                    committed="the cancellation",
+                    batch_aware=False,
+                )
 
         return WrapCancelReceipt(
             token=cancelled_token or None,
@@ -2616,6 +2653,12 @@ class Store:
                 limit for an IN clause (998 by default). This is a
                 hard guard, not a silent truncation — chunking is
                 10.5c.5+ work.
+
+        Warns:
+            UserWarning: if the audit event could not be written. The
+                operation still SUCCEEDED — the audit trail is missing
+                this event. Also counted on ``status().audit_write_failures``
+                and logged; see :meth:`_audit_log_after_commit`.
         """
         if (
             episode_ids is not None
@@ -2841,7 +2884,17 @@ class Store:
         # queued (and flushed only after the outer commit succeeds)
         # when we're inside ``_batch()``, and fired immediately
         # otherwise.
-        self._audit_log("wrap_completed", audit_payload)
+        # ⛔ POST-COMMIT, AND THE HIGHEST-COST SITE OF THE SET. Measured
+        # 2026-09-04: a sink failure raised a raw OSError with the wraps row
+        # WRITTEN and wrap_started_at CLEARED — the wrap fully succeeded and the
+        # agent was told it failed. A caller that then retries the wrap, or
+        # cancels it, is acting on a store that already completed.
+        self._audit_log_after_commit(
+            "wrap_completed",
+            audit_payload,
+            method="wrap_completed",
+            committed="the wrap",
+        )
 
         # Auto-prune old episodes if retention_days is configured.
         # Skip inside a batch — auto-prune is a separate DML burst
@@ -3240,6 +3293,12 @@ class Store:
 
         Returns:
             Tuple of (links_formed, links_strengthened).
+
+        Warns:
+            UserWarning: if the audit event could not be written. The
+                operation still SUCCEEDED — the audit trail is missing
+                this event. Also counted on ``status().audit_write_failures``
+                and logged; see :meth:`_audit_log_after_commit`.
         """
         ts = _now_utc()
         # 10.5c.5: inside a ``_batch()`` the free-function helper must
@@ -3264,7 +3323,9 @@ class Store:
             if affective_state is not None:
                 audit_data["affective_tag"] = affective_state.tag
                 audit_data["affective_intensity"] = affective_state.intensity
-            self._audit_log("associations_updated", audit_data)
+            self._audit_log_after_commit(
+                "associations_updated", audit_data,
+                method="record_associations", committed="the association writes")
 
         return formed, strengthened
 
@@ -3283,6 +3344,12 @@ class Store:
 
         Returns:
             Number of associations decayed (including deleted).
+
+        Warns:
+            UserWarning: if the audit event could not be written. The
+                operation still SUCCEEDED — the audit trail is missing
+                this event. Also counted on ``status().audit_write_failures``
+                and logged; see :meth:`_audit_log_after_commit`.
         """
         # Canonicalize the pairs (filter out self-pairs)
         canonical = set()
@@ -3304,11 +3371,11 @@ class Store:
             )
 
         if decayed:
-            self._audit_log("associations_decayed", {
+            self._audit_log_after_commit("associations_decayed", {
                 "decayed": decayed,
                 "decay_factor": decay_factor,
                 "cleanup_threshold": cleanup_threshold,
-            })
+            }, method="decay_associations", committed="the decay")
 
         return decayed
 
@@ -3370,6 +3437,12 @@ class Store:
         The recall-INDEPENDENT exploration channel — fires inside the wrap
         pipeline whenever 2+ patterns graduate together, seeding the pairs the
         keyword recall hook is blind to. Returns links newly seeded.
+
+        Warns:
+            UserWarning: if the audit event could not be written. The
+                operation still SUCCEEDED — the audit trail is missing
+                this event. Also counted on ``status().audit_write_failures``
+                and logged; see :meth:`_audit_log_after_commit`.
         """
         day = today or _today_local()
         with self._db_boundary("seed_pattern_co_graduation"):
@@ -3377,7 +3450,9 @@ class Store:
                 self._conn, graduated_names, day, commit=not self._defer_commit
             )
         if formed:
-            self._audit_log("pattern_associations_seeded", {"formed": formed})
+            self._audit_log_after_commit(
+                "pattern_associations_seeded", {"formed": formed},
+                method="seed_pattern_co_graduation", committed="the seeded links")
         return formed
 
     def drain_co_surface_events(
@@ -3389,6 +3464,12 @@ class Store:
         wrap time. event_id dedup makes a re-fed spool safe; per-session
         burst-damp + provenance-gating + calendar lazy-decay + homeostatic
         normalization all run in one transaction. Returns a metrics dict.
+
+        Warns:
+            UserWarning: if the audit event could not be written. The
+                operation still SUCCEEDED — the audit trail is missing
+                this event. Also counted on ``status().audit_write_failures``
+                and logged; see :meth:`_audit_log_after_commit`.
         """
         day = today or _today_local()
         with self._db_boundary("drain_co_surface_events"):
@@ -3396,7 +3477,9 @@ class Store:
                 self._conn, events, day, commit=not self._defer_commit
             )
         if metrics.get("events_applied"):
-            self._audit_log("pattern_co_surface_drained", metrics)
+            self._audit_log_after_commit(
+                "pattern_co_surface_drained", metrics,
+                method="drain_co_surface_events", committed="the drain")
         return metrics
 
     def get_pattern_associations(
@@ -3426,6 +3509,12 @@ class Store:
     def gc_pattern_associations(self, today: str | None = None) -> int:
         """Periodic full-graph GC: delete edges decayed below the GC floor.
         NOT per-wrap (that re-introduces the regime-variant cost the calendar
+
+        Warns:
+            UserWarning: if the audit event could not be written. The
+                operation still SUCCEEDED — the audit trail is missing
+                this event. Also counted on ``status().audit_write_failures``
+                and logged; see :meth:`_audit_log_after_commit`.
         model avoids) — a harness calls it occasionally. Returns rows deleted."""
         day = today or _today_local()
         with self._db_boundary("gc_pattern_associations"):
@@ -3433,7 +3522,9 @@ class Store:
                 self._conn, day, commit=not self._defer_commit
             )
         if gced:
-            self._audit_log("pattern_associations_gc", {"deleted": gced})
+            self._audit_log_after_commit(
+                "pattern_associations_gc", {"deleted": gced},
+                method="gc_pattern_associations", committed="the edge deletion")
         return gced
 
     def rename_pattern_association(
@@ -3441,6 +3532,12 @@ class Store:
     ) -> int:
         """Rename a pattern, carrying its earned cortical edges to the new name
         (first-class alias — the SAME concept under a new name; edges merge if the
+
+        Warns:
+            UserWarning: if the audit event could not be written. The
+                operation still SUCCEEDED — the audit trail is missing
+                this event. Also counted on ``status().audit_write_failures``
+                and logged; see :meth:`_audit_log_after_commit`.
         target pair exists). Returns edges re-keyed."""
         day = today or _today_local()
         with self._db_boundary("rename_pattern_association"):
@@ -3448,15 +3545,23 @@ class Store:
                 self._conn, old_name, new_name, day, commit=not self._defer_commit
             )
         if rekeyed:
-            self._audit_log(
+            self._audit_log_after_commit(
                 "pattern_association_renamed",
                 {"old": old_name, "new": new_name, "rekeyed": rekeyed},
+                method="rename_pattern_association",
+                committed="the rename",
             )
         return rekeyed
 
     def sever_pattern_concept(self, name: str, today: str | None = None) -> int:
         """Homonym guard: a pattern's concept left (composted/retired) → delete
         its edges + bump its generation so a future homonym starts clean. Returns
+
+        Warns:
+            UserWarning: if the audit event could not be written. The
+                operation still SUCCEEDED — the audit trail is missing
+                this event. Also counted on ``status().audit_write_failures``
+                and logged; see :meth:`_audit_log_after_commit`.
         edges severed."""
         day = today or _today_local()
         with self._db_boundary("sever_pattern_concept"):
@@ -3464,7 +3569,9 @@ class Store:
                 self._conn, name, day, commit=not self._defer_commit
             )
         if severed:
-            self._audit_log("pattern_concept_severed", {"name": name, "severed": severed})
+            self._audit_log_after_commit(
+                "pattern_concept_severed", {"name": name, "severed": severed},
+                method="sever_pattern_concept", committed="the severance")
         return severed
 
     def pattern_graph_projection_meta(self) -> PatternGraphProjectionMeta:
@@ -3491,6 +3598,12 @@ class Store:
 
         Returns:
             Number of episodes pruned.
+
+        Warns:
+            UserWarning: if the audit event could not be written. The
+                operation still SUCCEEDED — the audit trail is missing
+                this event. Also counted on ``status().audit_write_failures``
+                and logged; see :meth:`_audit_log_after_commit`.
         """
         days = older_than_days if older_than_days is not None else self._retention_days
         if days is None:
@@ -3530,11 +3643,16 @@ class Store:
 
             self._conn.commit()
 
-        if self._audit is not None and pruned > 0:
-            self._audit.log("prune", {
+        if pruned > 0:
+            # ⛔ POST-COMMIT: the episodes are already DELETED. A bare emit here
+            # raised a raw OSError with the rows gone (measured 2026-09-04),
+            # telling the caller prune failed after it had destroyed data — and
+            # ``validated_save_continuity`` calls prune AFTER the wrap commit,
+            # so it reached the canonical pipeline.
+            self._audit_log_after_commit("prune", {
                 "count": pruned,
                 "older_than_days": days,
-            })
+            }, method="prune", committed="the prune", batch_aware=False)
 
         return pruned
 
@@ -3631,6 +3749,12 @@ class Store:
                 failures represent bugs or data-shape problems
                 rather than transport-level I/O errors and should
                 not be masked behind a ``StoreError`` wrapper.
+
+        Warns:
+            UserWarning: if the audit event could not be written. The
+                operation still SUCCEEDED — the audit trail is missing
+                this event. Also counted on ``status().audit_write_failures``
+                and logged; see :meth:`_audit_log_after_commit`.
         """
         path = self.continuity_path
         # 10.5c.5: delegate the tmp-write + fsync to the shared
@@ -3669,11 +3793,15 @@ class Store:
                 if not succeeded:
                     _safe_unlink(tmp_path)
 
-        if self._audit is not None:
-            self._audit.log("continuity_saved", {
-                "chars": len(text),
-                "content_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-            })
+        # ⛔ POST-COMMIT: the tmp->final rename above has ALREADY externalized
+        # the file. A bare emit raised a raw OSError with the continuity file on
+        # disk (measured 2026-09-04) — a caller whose error path retries or
+        # falls back then writes over correct state.
+        self._audit_log_after_commit("continuity_saved", {
+            "chars": len(text),
+            "content_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        }, method="save_continuity", committed="the continuity file",
+            batch_aware=False)
 
         return str(path)
 
@@ -3915,6 +4043,12 @@ class Store:
 
         Returns:
             The normalized schema that was persisted.
+
+        Warns:
+            UserWarning: if the audit event could not be written. The
+                operation still SUCCEEDED — the audit trail is missing
+                this event. Also counted on ``status().audit_write_failures``
+                and logged; see :meth:`_audit_log_after_commit`.
         """
         if self.get_wrap_started_at():
             raise ValueError(
@@ -3936,19 +4070,18 @@ class Store:
                 ("section_schema", json.dumps(normalized)),
             )
             self._conn.commit()
-        # Best-effort audit AFTER the durable write (mirrors _batch's post-commit
-        # policy): the schema is persisted, so an audit-append failure must not
-        # surface as a failed migration. Warn, don't raise.
-        try:
-            self._audit_log("section_schema_set", {
-                "from": old_headings,
-                "to": [s["heading"] for s in normalized],
-            })
-        except OSError as exc:
-            warnings.warn(
-                f"section_schema persisted but audit log append failed: {exc}",
-                stacklevel=2,
-            )
+        # ⛔ POST-COMMIT: the schema is persisted. This site had a bespoke guard
+        # that was narrower than the policy on BOTH axes — it caught only
+        # ``OSError`` (measured 2026-09-04: a RuntimeError from the sink
+        # propagated and failed a completed migration) and its ``warnings.warn``
+        # was not nested-guarded (under ``-W error`` the warning itself raised,
+        # recreating the very failure it existed to prevent). Routed through the
+        # shared helper so there is one policy, not a local approximation of it.
+        self._audit_log_after_commit("section_schema_set", {
+            "from": old_headings,
+            "to": [s["heading"] for s in normalized],
+        }, method="set_section_schema", committed="the schema migration",
+            batch_aware=False)
         return normalized
 
     # -- Internal helpers --
@@ -4074,9 +4207,166 @@ class Store:
         if self._audit is None:
             return
         if self._defer_commit:
-            self._deferred_audits.append((event, payload, kwargs))
+            # Origin slots: this helper's callers are pre-commit by contract,
+            # so a flush-time failure names the batch rather than a site whose
+            # work landed.
+            self._deferred_audits.append(
+                (event, payload, kwargs, "_batch", "the batched write")
+            )
         else:
             self._audit.log(event, payload, **kwargs)
+
+    def _audit_log_after_commit(
+        self,
+        event: str,
+        payload: dict[str, Any] | None,
+        *,
+        method: str,
+        committed: str,
+        batch_aware: bool = True,
+        stacklevel: int = 3,
+        **kwargs: Any,
+    ) -> None:
+        """Audit log for work that is ALREADY committed or externalized.
+
+        ⛔ THE ONE HOME FOR THE POST-COMMIT AUDIT POLICY. Use this — never
+        a bare ``self._audit.log(...)`` — at any emit site that runs AFTER
+        a ``commit()``, an ``os.replace()``, or a successful ``_batch``
+        exit. A test asserts mechanically that no such bare call survives
+        (``TestNoBareAuditEmitSites``; the behavioural twin is
+        ``TestAuditAfterCommitPolicy``), because the policy previously
+        lived as a comment at ONE call site and reached exactly that one.
+
+        Why the exception is swallowed. Once the mutation has landed there
+        is exactly one correct outcome for the caller — success — so
+        nothing after it may propagate. Letting an audit I/O failure (disk
+        full, permissions, a failed rotation) escape raises out of the
+        method with the work ALREADY done: MCP reports ``isError``, the CLI
+        shows a traceback, and the operator is told the operation failed
+        when it succeeded. Measured 2026-09-04 at three sites: an
+        ``OSError(ENOSPC)`` from the sink left ``wrap_started`` with a LIVE
+        committed wrap the caller held no token for (the next
+        ``prepare_wrap`` then raises :class:`WrapInProgressError` — the
+        stuck-wrap lockout 0.9.8/0.9.9 exist to end), left ``prune`` with
+        the episodes deleted, and left ``save_continuity`` with the file on
+        disk. Each also escaped as a bare ``OSError`` rather than a
+        :class:`StoreError`, breaching the caller-consistency primitive
+        :meth:`_db_boundary` exists for.
+
+        ⭐ THE POLICY WAS ALREADY IN THIS FILE: :meth:`_batch` swallows
+        audit-flush exceptions after a successful commit, because
+        propagating one "would trick the caller's outer except clause into
+        cleaning up tmp files that represent committed state — a data-loss
+        path." Same reasoning, same answer, now in one place.
+
+        The failure is surfaced as a ``UserWarning`` rather than dropped
+        silently: a missing entry is a real gap in a tamper-evident record.
+
+        Args:
+            event: Audit event name.
+            payload: Audit payload dict.
+            method: Method name, for the warning text. NOT named
+                ``operation``: ``test_store_operation_literal_has_no_drift``
+                greps this file for that keyword followed by a string and
+                requires every such value to be a :data:`StoreOperation`.
+                These are method names, not store operations, so they must
+                not enter that namespace. ⚠ That scan reads the raw source,
+                DOCSTRINGS INCLUDED — its assertion subject is every such
+                literal in the file, which is wider than its claim's subject
+                (``_db_boundary`` and ``StoreError`` raise sites). Naming
+                this parameter ``operation`` failed it, and so did merely
+                MENTIONING the pattern in this sentence. Left as prose on
+                purpose: the scan is a gauge that works, and a mis-scoped
+                guard gets fixed or tolerated, never given a neighbour.
+            committed: Noun phrase naming what already landed
+                (e.g. ``"the cancellation"``), for the warning text.
+            **kwargs: Passed through to :meth:`AuditTrail.log`.
+        """
+        if self._audit is None:
+            return
+        # ⚠ ``batch_aware=False`` for a site that commits or externalizes
+        # UNCONDITIONALLY (prune, save_continuity, set_section_schema — all
+        # documented as not batch-safe). Queueing their events inverts audit
+        # ordering against durability: MEASURED 2026-09-04, a save_continuity
+        # inside a batch whose body then raised externalized the file and lost
+        # its audit event with ZERO warnings, because the queue is discarded
+        # when the batch does not commit. The old bare emit wrote it. Audit
+        # ordering must match durability ordering SITE BY SITE, not by a
+        # blanket default.
+        if batch_aware and self._defer_commit:
+            # Inside a ``_batch`` the "commit" this site sits after has not
+            # happened yet — the outer pipeline owns it. Queue exactly as
+            # :meth:`_audit_log` does; the flush at the end of ``_batch`` comes
+            # back through this method with ``_defer_commit`` already reset to
+            # False, so the swallow policy still applies there and this branch
+            # cannot re-queue forever.
+            self._deferred_audits.append((event, payload, kwargs, method, committed))
+            return
+        try:
+            self._audit.log(event, payload, **kwargs)
+        except Exception as exc:
+            # ⛔ THE SWALLOW MUST NOT BECOME SILENCE, and the warning alone
+            # cannot carry that load. FOUR channels, most-suppressible LAST,
+            # so no filter configuration can blank all of them:
+            #   1. the trail's own pending-drop count, riding into the next
+            #      entry that lands as ``dropped_before`` — durable and
+            #      hash-chained. Without it ``verify()`` walks a clean chain
+            #      over the hole and reports valid=True (measured 2026-09-04:
+            #      8 mutations, 7 drops, ONE entry, ``valid=True``);
+            #   2. a counter + last-failure string on this Store, surfaced by
+            #      ``status()`` so a long-running agent can POLL for degraded
+            #      audit health instead of having to have caught a warning;
+            #   3. the module logger, matching how ``audit.py`` already
+            #      reports the analogous ``on_event`` failure;
+            #   4. the UserWarning — deduplicated per location by Python's
+            #      default filter (measured: five consecutive failures → ONE
+            #      warning) and silenced entirely under ``-W error``
+            #      (measured: zero signal), which is why it is not alone.
+            # Each step is itself wrapped: this runs inside a handler whose
+            # contract is that nothing after a commit propagates.
+            try:
+                self._audit.note_write_failure()
+            except Exception:
+                pass
+            try:
+                self._audit_write_failures += 1
+                self._audit_last_failure = f"{method}: {exc!r}"
+            except Exception:
+                pass
+            try:
+                _LOG.warning(
+                    "audit write failed after %s committed (%s) — the store "
+                    "state is correct, the audit trail is missing this event",
+                    committed,
+                    method,
+                    exc_info=True,
+                )
+            except Exception:
+                pass
+            try:
+                warnings.warn(
+                    f"{method}: {committed} COMMITTED, but its audit event "
+                    f"could not be written ({exc!r}). The store state is "
+                    "correct; the audit trail is missing this event. "
+                    "Investigate the audit sink before relying on the trail "
+                    "for this window.",
+                    UserWarning,
+                    stacklevel=stacklevel,
+                )
+            except Exception:
+                # ⛔ THE NOTIFICATION ITSELF CAN RAISE, AND THAT WOULD UNDO
+                # THE WHOLE POINT. Under ``python -W error``,
+                # PYTHONWARNINGS=error, or an embedding application's filter,
+                # warnings.warn RAISES — recreating verbatim the "mutation
+                # committed, then reported as a failure" path this catch
+                # exists to eliminate. codex reproduced it at L3 on 2026-09-03
+                # and the regression test MASKED it, because pytest.warns
+                # installs a capturing filter: the guard's own test made the
+                # guard look sound. The audit gap is real and unreportable in
+                # that configuration; reporting it by raising would tell the
+                # operator the operation FAILED when it succeeded, which is
+                # strictly worse.
+                pass
 
     @contextmanager
     def _db_boundary(self, operation: StoreOperation) -> Iterator[None]:
@@ -4448,15 +4738,31 @@ class Store:
         # best-effort at this point; we trade a missing audit event
         # for durability of the actual wrap data.
         if commit_succeeded and self._audit is not None:
-            for event, payload, kwargs in deferred:
-                try:
-                    self._audit.log(event, payload, **kwargs)
-                except Exception:
-                    # Best-effort. No logger wired at this layer;
-                    # silently drop the failing event and continue
-                    # flushing the rest. A future pass can route
-                    # this to a stderr warning or metric.
-                    pass
+            for event, payload, kwargs, origin_method, origin_committed in deferred:
+                # The "future pass" this loop's comment promised: routed
+                # through the shared after-commit helper, so a failed flush
+                # now warns instead of vanishing, and continues flushing the
+                # rest exactly as before.
+                self._audit_log_after_commit(
+                    event,
+                    payload,
+                    method=origin_method,
+                    committed=origin_committed,
+                    # ⚠ NOT the default 3. ``_batch`` is a @contextmanager, so
+                    # at flush time frame 3 is ``contextlib.__exit__`` — every
+                    # batch-flush warning was attributed to
+                    # ``contextlib.py:148`` (measured 2026-09-04), pointing the
+                    # operator at stdlib AND keying Python's per-location dedup
+                    # registry there, collapsing every such failure
+                    # process-wide into one warning at a bogus location. There
+                    # is no meaningful user frame for a deferred replay, so
+                    # attribute it here.
+                    stacklevel=1,
+                    # Already past the commit and past the _defer_commit reset;
+                    # re-queueing would be a loop.
+                    batch_aware=False,
+                    **kwargs,
+                )
 
     # -- 10.5c.5 L3 fix: unique tmp sidecar filename pattern.
     #

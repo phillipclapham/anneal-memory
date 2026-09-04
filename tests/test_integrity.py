@@ -374,6 +374,58 @@ class TestReleaseStampIsNotAPublishedVersion:
             f"trees (spore-710)."
         )
 
+    def test_committed_head_stamp_is_not_an_already_released_version(self):
+        """The twin above, with the subject a PUSH actually publishes.
+
+        ⛔ THE TEST ABOVE READS THE WORKING TREE AND A PUSH SHIPS COMMITS.
+        ``from anneal_memory import __version__`` imports from disk, while
+        ``git tag --points-at HEAD`` reads the commit graph — two subjects in
+        one assertion. REPRODUCED 2026-09-04 in a scratch clone: with HEAD
+        committed at ``0.9.9`` on a non-tag commit and an UNCOMMITTED bump to
+        ``0.9.10.dev0`` in the working tree, the gate went from red to GREEN
+        and the pre-push hook exited 0 — publishing the bad commit. The fix
+        that was supposed to prevent the defect made the guard report health.
+
+        Both subjects are legitimate: in CI the checkout IS the commit, so the
+        working-tree test is the right one there. They are two tests because
+        they are two claims, not because one is a better version of the other.
+
+        ⚠ SCOPE, stated rather than implied: this checks HEAD. A push of a
+        non-HEAD branch or an older range is not covered. HEAD is what the
+        pre-push hook's pytest run is scoped to anyway, and widening this to
+        walk the pushed range would make a GATE big — deliberately not done
+        (spore-551: the gate list is small and fixed).
+
+        MUTATION-CHECKED: reproduced red on the scratch clone above, green
+        after committing the bump.
+        """
+        import re
+
+        if self._run("rev-parse", "--git-dir") is None:
+            pytest.skip("not a git checkout")
+        tags = self._run("tag", "--list", "v*")
+        if not tags:
+            pytest.skip("no release tags to compare against")
+
+        blob = self._run("show", "HEAD:anneal_memory/__init__.py")
+        if blob is None:
+            pytest.skip("HEAD carries no anneal_memory/__init__.py")
+        m = re.search(r'__version__ = "([^"]+)"', blob)
+        assert m, "HEAD's __init__.py no longer declares __version__"
+        committed = m.group(1)
+
+        released = {t.lstrip("v") for t in tags.splitlines() if t.strip()}
+        if committed not in released:
+            return  # a .devN or an unreleased number — correct by construction
+
+        at_head = (self._run("tag", "--points-at", "HEAD") or "").splitlines()
+        assert f"v{committed}" in at_head, (
+            f"THE COMMIT AT HEAD is stamped {committed!r}, which is already "
+            f"released, but HEAD is not the v{committed} commit. A clean "
+            f"working tree is not the question — pushing publishes this "
+            f"commit. Bump to the next .devN and COMMIT it (spore-710)."
+        )
+
     def test_every_stamp_site_agrees(self):
         """The 0.9.9 cut found a THIRD stamp site (server.json) only because a
         consistency test failed. Pin all of them together."""
@@ -688,8 +740,17 @@ class TestDocumentedToolCount:
         historical note that quotes the old ladder, and a negative guard that
         matches nothing cannot be told from a broken one.
 
-        MUTATION-CHECKED: restore `1x → 2x → 3x` as the taught ladder and this
-        fails.
+        ⛔ THIS GATE ASSERTED PER-FILE UNTIL 2026-09-04 AND THAT MADE IT BLIND
+        TO ITS OWN SUBJECT. It took ``max()`` over the UNION of levels across
+        every ladder line, so ONE corrected line certified EVERY uncorrected
+        one. Measured at the time: line 85 contributed ``12x`` and passed the
+        file, while line 35 went on teaching ``1x→2x→3x`` — the exact ceiling
+        this test is named for, in the same document, unseen. The assertion's
+        subject was the union; the claim's subject is every ladder the file
+        teaches. An agent does not read the union, it reads a line and stops.
+
+        MUTATION-CHECKED: restore `1x → 2x → 3x` on EITHER ladder line and this
+        fails. (Under the old union form only the last one did.)
         """
         import re
 
@@ -698,22 +759,49 @@ class TestDocumentedToolCount:
             pytest.skip("skill/ not present in this checkout")
 
         ladder_lines = [
-            line
-            for line in skill.read_text(encoding="utf-8").splitlines()
+            (num, line)
+            for num, line in enumerate(
+                skill.read_text(encoding="utf-8").splitlines(), 1
+            )
             if "graduate" in line.lower() and re.search(r"\d+x", line)
         ]
         assert ladder_lines, "SKILL.md no longer teaches graduation at all"
 
-        levels = {
-            int(m)
-            for line in ladder_lines
-            for m in re.findall(r"(\d+)x", line)
-        }
-        assert max(levels) > 3, (
-            f"SKILL.md teaches a ladder topping out at {max(levels)}x. The "
-            f"library has had NO ceiling since 0.9.7 (MIN_PROVEN_LEVEL, no upper "
-            f"bound) — an agent following this doc flattens mature patterns back "
-            f"to 3x and loses the high-water mark."
+        # ⚠ THE SUBJECT IS THE LADDER, NOT THE LINE. A per-line max over every
+        # ``Nx`` on the line is still a proxy: line 85 also mentions 12x/18x in
+        # its DEMOTION sentence, so a truncated ladder on that line would pass
+        # on the strength of text that is not a ladder at all. Measured
+        # 2026-09-04 by mutation — the per-line form did not kill that mutant.
+        # So extract the ladder RUNS themselves and judge each one.
+        #
+        # A run is a taught ladder when it ASCENDS (``4x``→``3x`` is a demotion
+        # example, not a ladder) and is not a whole-span quote of a retired
+        # ladder. CONVENTION, enforced here: quote a retired ladder as ONE
+        # backticked span (`` `1x → 2x → 3x` ``); teach a live one unquoted or
+        # with per-token backticks. This fails in the SAFE direction — forget
+        # the backticks around a historical quote and the gate fires loudly;
+        # it cannot silently pass a real ceiling.
+        ladder_run = re.compile(r"(?:`?\d+x`?\s*(?:→|->)\s*)+(?:`?\d+x`?|…|\.\.\.)")
+        capped = []
+        for num, line in ladder_lines:
+            for match in ladder_run.finditer(line):
+                run = match.group(0)
+                levels = [int(x) for x in re.findall(r"(\d+)x", run)]
+                if not all(b > a for a, b in zip(levels, levels[1:])):
+                    continue  # descending: a demotion example, not a ladder
+                if run.startswith("`") and run.endswith("`") and "`" not in run[1:-1]:
+                    continue  # a whole-span quote of a retired ladder
+                if run.rstrip().endswith(("…", "...")) or max(levels) > 3:
+                    continue  # open-ended, or demonstrably past the old cap
+                capped.append((num, max(levels), run))
+        assert not capped, (
+            "SKILL.md line(s) teach a ladder topping out at 3x or below. The "
+            "library has had NO ceiling since 0.9.7 (MIN_PROVEN_LEVEL, no upper "
+            "bound) — an agent following such a line flattens mature patterns "
+            "back to 3x and loses the high-water mark. A sibling line elsewhere "
+            "in the file teaching the open ladder does NOT fix this: an agent "
+            "reads a line, not the union. Offending line(s): "
+            + "; ".join(f"L{n} (ladder tops out at {lv}x): {t[:90]}" for n, lv, t in capped)
         )
 
     def test_skill_documents_every_tool(self):

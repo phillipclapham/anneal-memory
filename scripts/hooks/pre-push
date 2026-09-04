@@ -38,21 +38,67 @@ if [ -z "${PY:-}" ]; then
     exit 1
 fi
 
+# ⛔ REPORTING IS PART OF THE GATE, and both halves of this block were broken
+# until 2026-09-04.
+#
+# (1) The diagnostic was `sed -n '/FAILED\|AssertionError\|Error/p'`. In a BSD
+#     BRE — macOS, this dev machine — `\|` is NOT alternation, so it matched
+#     NOTHING and the "here is why" block printed ZERO lines. MEASURED, not
+#     read. Use -E. And if the filter still matches nothing, fall back to the
+#     raw tail: an empty explanation is indistinguishable from a clean one,
+#     which is this repo's own recurring defect wearing a different hat.
+#
+# (2) The remediation named the release-stamp class UNCONDITIONALLY, so a
+#     cross-version SYNTAX failure was reported with four bump-the-version
+#     steps that do nothing about it. The gates are run separately now so the
+#     advice matches the class that actually failed.
+
+explain() {  # $1 = pytest output file
+    if sed -nE '/FAILED|AssertionError|Error/p' "$1" | head -8 | grep -q .; then
+        sed -nE '/FAILED|AssertionError|Error/p' "$1" | head -8 >&2
+    else
+        echo "   (no matching diagnostic line — raw tail follows)" >&2
+        tail -12 "$1" >&2
+    fi
+}
+
+out="$(mktemp -t anneal_prepush)"
+trap 'rm -f "$out"' EXIT
+
 if ! "$PY" -m pytest tests/test_integrity.py -q \
-        -k "ReleaseStampIsNotAPublishedVersion or SourceCompilesCleanlyOnEveryTargetPython" \
-        >/tmp/anneal_prepush.$$ 2>&1; then
+        -k "ReleaseStampIsNotAPublishedVersion" >"$out" 2>&1; then
     echo >&2
     echo "⛔ pre-push BLOCKED — the release-stamp gate failed:" >&2
     echo >&2
-    sed -n '/FAILED\|AssertionError\|Error/p' /tmp/anneal_prepush.$$ | head -8 >&2
+    explain "$out"
     echo >&2
-    echo "   HEAD is stamped at an already-released version. Bump to the next" >&2
-    echo "   .devN (pyproject.toml, anneal_memory/__init__.py, server.json x2)" >&2
-    echo "   and regenerate both tool-integrity.json manifests. See spore-710." >&2
+    echo "   The version stamp is a released number on a commit that is not" >&2
+    echo "   that release. Bump to the next .devN in ALL THREE sites" >&2
+    echo "   (pyproject.toml, anneal_memory/__init__.py, server.json x2)," >&2
+    echo "   regenerate both tool-integrity.json manifests, and COMMIT it —" >&2
+    echo "   a fix that is only in the working tree does not change what this" >&2
+    echo "   push publishes. See spore-710." >&2
     echo >&2
     echo "   To push anyway: git push --no-verify" >&2
-    rm -f /tmp/anneal_prepush.$$
     exit 1
 fi
-rm -f /tmp/anneal_prepush.$$
+
+if ! "$PY" -m pytest tests/test_integrity.py -q \
+        -k "SourceCompilesCleanlyOnEveryTargetPython" >"$out" 2>&1; then
+    echo >&2
+    echo "⛔ pre-push BLOCKED — the cross-version syntax gate failed:" >&2
+    echo >&2
+    explain "$out"
+    echo >&2
+    echo "   A module does not compile cleanly with SyntaxWarning promoted to" >&2
+    echo "   an error. This is a WARNING on 3.12+ and a hard SyntaxError on" >&2
+    echo "   3.10/3.11 under pytest's assertion rewriter, so the file will" >&2
+    echo "   fail to COLLECT on half the CI matrix while passing locally." >&2
+    echo "   Usual cause: an invalid escape sequence in a docstring — make it" >&2
+    echo "   a raw string, or escape the backslash." >&2
+    echo >&2
+    echo "   To push anyway: git push --no-verify" >&2
+    exit 1
+fi
+
 exit 0

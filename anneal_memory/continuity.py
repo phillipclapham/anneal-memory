@@ -975,10 +975,12 @@ names so the immune system can protect your patterns.
 - New pattern from THIS session → `- pattern_name | 1x ({today})`
 - Validates existing 1x → `- pattern_name | 2x ({today}) [evidence: <id1>, <id2> "how both episodes validate"]`
 - **Validates an existing Nx → `| (N+1)x`, AND THE LADDER DOES NOT STOP.** `2x`→`3x`,
-  `3x`→`4x`, `11x`→`12x`. There is no top rung: the level is a monotonic high-water
-  mark of how many times lived experience re-earned the pattern. **Never flatten a
-  mature pattern back to `3x`** — that discards the difference between a pattern
-  earned eleven times over months and one earned twice last week.
+  `3x`→`4x`, `11x`→`12x`. There is no top rung: the level counts how many times
+  lived experience re-earned the pattern. **Never flatten a mature pattern back to
+  `3x`** — that discards the difference between a pattern earned eleven times over
+  months and one earned twice last week. (The level you WRITE is current standing,
+  not a ratchet — an ungrounded re-stamp is demoted by one; see the LEVEL/RECENCY
+  note above. `max_level_reached` is the monotonic high-water mark, not this line.)
 - Evidence citations REQUIRED for graduations (2x and above). Cite 2+ episode 8-char
   IDs that co-support the pattern — co-citation forms the Hebbian link. A single id
   is acceptable ONLY when just one episode genuinely supports the pattern (do not
@@ -2462,11 +2464,22 @@ def validated_save_continuity(
                     {"name": p.name, "level": p.level}
                     for p in proven_without_declaration
                 ]
-            store._audit.log("continuity_saved", audit_payload)
+            # ⛔ POST-COMMIT, and routed through the store's shared
+            # after-commit helper so this site cannot drift from the other
+            # four. Behaviour change: a failed emit now WARNS instead of
+            # vanishing silently — a missing entry is a real gap in a
+            # tamper-evident record. It still cannot propagate: the wrap is
+            # fully committed and success is the only correct outcome.
+            store._audit_log_after_commit(
+                "continuity_saved",
+                audit_payload,
+                method="validated_save_continuity",
+                committed="the wrap",
+            )
         except Exception:
-            # Audit is best-effort. Silently drop a failing
-            # continuity_saved event rather than reporting a false
-            # failure after a fully committed wrap.
+            # Belt-and-suspenders: the helper swallows sink failures, but the
+            # payload ASSEMBLY above (grad_result access, hashing) is inside
+            # this try as well and must not fail a committed wrap either.
             pass
 
     # Phase 5: auto-prune if retention is configured. In the pre-10.5c.5

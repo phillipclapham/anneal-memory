@@ -27,7 +27,7 @@
 
 **Seat 0904+11, afternoon of 2026-09-04.** Opened specifically for the twelve findings Diogenes
 filed against this repo in its SECOND review of the day (12:31–12:49) — six new, six carried.
-Eleven closed, one deliberately not. **1830 tests** (from 1822) · mypy clean · **ruff 63**
+Eleven closed, one deliberately not. **1832 tests** (from 1822) · mypy clean · **ruff 63**
 (unchanged) · tree clean, nothing unpushed at close.
 
 ### ⛔ THE SHAPE, BECAUSE IT DECIDES HOW TO READ THE REST

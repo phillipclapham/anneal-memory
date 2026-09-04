@@ -28,12 +28,12 @@
 **State at close of the 09-04 seat:** AM-AUDIT-AFTER-COMMIT is COMMITTED — `d7b482e` (the policy),
 `e8c04da` (L3 complement/glm + L4) and `8a6cc21` (the codex retry). Working tree clean apart from this file.
 **1822 tests** (from 1764) · mypy clean · **ruff 63** · pre-push gate green on HEAD, stamp
-`0.9.10.dev0`, not a released number.
+`0.9.10.dev0`, not a released number. Working tree clean.
 ⚠ The ruff baseline at HEAD was **65, not the 64 this file claimed** — re-derived from disk, which
-is this file's own standing instruction, and it was wrong about its own number. The count is 64 now
-because a previously-unused import became used, and because `project_memory/` is excluded from ruff:
-the archived Phase-1 scripts arrived with today's move and added 52 findings to an otherwise real
-signal.
+is this file's own standing instruction, and it was wrong about its own number. It is **63** now:
+two previously-unused imports in `tests/test_audit.py` became used, and `project_memory/` is
+excluded from ruff because the archived Phase-1 scripts arrived with today's move and added 52
+findings to an otherwise real signal.
 
 ### ⛔ THE FINDING WAS "A CORRECTION REACHED ONE OF FIVE SITES." THE REAL DENOMINATOR IS SIXTEEN.
 The 09-03 codex L3 HIGH established *an audit-sink failure must not propagate once the work is
@@ -93,8 +93,13 @@ warning**) and `-W error` produces **zero signal**. So four channels now, most-s
   dataclass is not a surface.** Fixed + pinned across every module that reports audit health.
 - **`gc_pattern_associations` and `drain_co_surface_events`** emit only on a non-zero count, so they
   are covered by the mechanical scan and NOT by the behavioural table. Stated in the test on purpose.
-- **A partial audit write (ENOSPC mid-line) is still reported as tampering by `verify()`** —
-  pre-existing, named by L2, NOT fixed here. `cli.cmd_verify` buries `skipped_lines`.
+- ⚠ **CORRECTED AT CLOSE — the partial-write half of this IS fixed, do not go looking for it.**
+  L2 named "an ENOSPC mid-line leaves a truncated line that `verify()` later reports as tampering",
+  and this file said NOT FIXED. The codex round's all-or-nothing append **closes it**: the
+  pre-append size is restored, so a partial write never survives to concatenate with the retry
+  (`test_a_partial_write_is_rolled_back_not_left_to_concatenate`). **What remains is only the
+  reporting half:** `cli.cmd_verify` buries `skipped_lines`, so an operator running `verify` is not
+  told that lines were skipped. That one is untouched and still worth doing.
 - ⛔ **`spore-745` — `dropped_before` IS LOST BY ANY `close()`/REOPEN, NOT JUST A CRASH.** Measured:
   an ORDINARY close+reopen leaves 3 episodes against 2 entries, no marker, `valid=True`,
   `audit_write_failures` back to 0. **Every CLI invocation opens and closes a Store**, so across CLI
@@ -137,9 +142,20 @@ warning**) and `-W error` produces **zero signal**. So four channels now, most-s
 `4x`→`3x`, `12x`→`11x`, `18x`→`17x` on an ungrounded re-stamp (a DECREMENT, not a flatten to 3x —
 "never flatten back to `3x`" stands). `max_level_reached` is the monotonic one. ⛔ **`continuity.py`
 contains BOTH the true statement and the false one, 39 lines apart, in the same package handed to
-the composing agent every wrap** — the false one at the ladder section is NOT yet fixed. Do that.
+the composing agent every wrap**. ✅ **BOTH SITES FIXED at close** — `continuity.py`'s ladder
+section no longer calls the visible level monotonic, and a test at the GENERATOR
+(`test_teaching_never_calls_the_VISIBLE_level_monotonic`) refuses any sentence that says "monotonic"
+without naming `max_level_reached`, with its sibling in `test_integrity.py` pinning SKILL.md.
+Mutation-checked. *(This line said "NOT yet fixed. Do that." until the cold-read pass at close — a
+stale INSTRUCTION in the very file whose standing rule is to re-derive before acting. An out-of-date
+instruction is worse than an out-of-date fact, because the next session executes it.)*
 
-## ▶▶ PICKUP 2026-09-04 (evening) — READ THIS FIRST, AND MEASURE BEFORE YOU ACT ON ANYTHING BELOW
+## ⚠ (SUPERSEDED 2026-09-04 by the block at the top) PICKUP 2026-09-04 (evening) — kept for its reasoning, NOT as instructions
+
+⛔ **DO NOT ACT ON THE NUMBERS OR THE TASK LIST BELOW.** Its "1764 tests · ruff 64" was true that
+evening and both are wrong now (1822 / 63), and the ruff baseline it states was never right —
+it was 65 at HEAD. Marked at close because this block's OWN warning is that *a plan read in order
+hits the stale framing first and the correction never*, and it had become the stale framing.
 
 **anneal is at a clean stop.** 0.9.9 is live on PyPI + GitHub, `main` is `0.9.10.dev0`, CI green on 3.10/3.11/3.12/3.13, working tree clean, **1764 tests** · mypy clean · ruff 64 (unchanged baseline). Nothing is half-finished and nothing is blocked.
 

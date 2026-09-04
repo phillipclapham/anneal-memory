@@ -101,7 +101,9 @@ if wrap["status"] == "ready":
 #   - Records Hebbian associations between co-cited episodes
 #   - Applies decay (0.9x) to unreinforced associations
 #   - Updates metadata and records wrap completion
-#   - Logs everything in the audit trail
+#   - Logs everything in the audit trail (best-effort on the write side: an
+#     audit-sink failure never fails the operation that already committed —
+#     see Store.status().audit_write_failures)
 #
 # Returns: dict with episodes_compressed, graduations_validated,
 #          graduations_demoted, associations_formed, etc.

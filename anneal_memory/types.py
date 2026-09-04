@@ -115,6 +115,16 @@ class StoreStatus:
     audit_log_path: str | None = None
     audit_entry_count: int | None = None
     audit_retention_days: int | None = None
+    # Write-side health (2026-09-04). ``audit_entry_count`` reports what the
+    # trail HAS; these report what it LOST. A post-commit audit failure is
+    # swallowed by design — the mutation already landed, so failing the caller
+    # would report a completed operation as failed — but swallowed must not
+    # mean invisible. Non-zero ``audit_write_failures`` means the trail is
+    # incomplete for this process: entries are missing, and ``verify()`` will
+    # still return ``valid=True`` because it walks the entries that exist.
+    # Defaulted, so every existing constructor call keeps working.
+    audit_write_failures: int = 0
+    audit_last_failure: str | None = None
 
 
 @dataclass(frozen=True)

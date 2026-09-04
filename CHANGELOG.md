@@ -4,6 +4,127 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — an audit-sink failure could report a COMMITTED operation as failed (AM-AUDIT-AFTER-COMMIT)
+
+0.9.9 shipped a codex L3 HIGH fix establishing the policy *an audit-sink failure must not propagate
+once the work is committed*. It was implemented as an inline `try/except` at **one** call site
+(`wrap_cancelled`). Measured 2026-09-04: **eight** post-commit emit sites existed and the correction
+reached one of them. The class is the portfolio-wide one for 2026-09-04 — **a guard that cannot see
+its own subject**: the guard was real, correct, and scoped to the site that happened to be reported.
+
+⚠ **AND THE FIRST CENSUS OF THOSE SITES WAS ITSELF WRONG — EIGHT, NOT SIXTEEN — WHICH IS THE
+SAME DEFECT ONE TURN LATER.** It scoped by the SYMPTOM (the literal text `self._audit.log`) and so
+could not see seven association methods that reach their commit through a free-function helper's
+`commit=` argument and emit via `_audit_log`. Two of those seven — `gc_pattern_associations` and
+`sever_pattern_concept` — DELETE edges and then raised a raw `OSError`. Found by the L1 pass asking
+about POSITION rather than spelling. Worse, all three guards written that morning inherited the one
+scoping decision: the census, the AST scan (which matches the same shape) and the behavioural table
+(which enumerated the methods the census produced). **A third guard sharing a blind spot is not
+defence in depth.** Closed by asserting `_audit_log` has ZERO production callers, so a future
+pre-commit site must state its reason rather than inherit the helper's name.
+
+Reproduced by execution at every site (a sink raising `OSError(ENOSPC)`), not by reading:
+
+- **`wrap_started`** — the four metadata writes were COMMITTED and the raw `OSError` escaped, so the
+  caller was told the wrap failed while the wrap was **live**, and the next `prepare_wrap` raised
+  `WrapInProgressError`. That is the stuck-wrap lockout 0.9.8/0.9.9 exist to end, reachable through
+  the release that closed it.
+- **`wrap_completed`** — the highest-cost site, and it was not in the report: the wraps row was
+  WRITTEN and `wrap_started_at` CLEARED. The wrap fully succeeded and the agent was told it failed.
+- **`prune`** — episodes already deleted. Reached the canonical pipeline: `validated_save_continuity`
+  calls `prune()` after the wrap commit.
+- **`save_continuity`** — the tmp→final rename had already externalized the file.
+- **`record`** / **`delete`** — episode persisted / row gone.
+- **`set_section_schema`** — had a bespoke guard that was **narrower than the policy on both axes**:
+  it caught only `OSError` (a `RuntimeError` from the sink propagated and failed a completed
+  migration) and its `warnings.warn` was not nested-guarded, so under `-W error` the warning itself
+  raised — recreating the exact failure the guard existed to prevent.
+- **`wrap_cancelled`** and the `_batch` deferred flush were already correct; the flush dropped
+  failures silently, which is now a warning.
+
+Every one of these also escaped as a bare `OSError` rather than a `StoreError`, breaching the
+caller-consistency primitive `_db_boundary` exists for.
+
+**The fix is a single home, not eight guards**: `Store._audit_log_after_commit(...)` owns the
+swallow-and-warn policy (batch-aware, so a post-commit site inside a `_batch` still defers), and all
+eight sites route through it. This follows the same move 0.9.8 made for `_WRAP_FINISH_PATHS` /
+`_WRAP_CANCEL_PATHS` — a policy that lives as a comment at one call site reaches one call site.
+
+Two tests with two different subjects, deliberately not proxies for each other: a **behavioural** one
+driving all eight public methods with a failing sink (both `OSError` and non-`OSError`, and again with
+`-W error` so the capturing filter `pytest.warns` installs cannot mask the warning-raises path — the
+mask that made the 0.9.9 guard's own test look sound), and a **mechanical** AST scan asserting no
+`self._audit.log(...)` call exists outside the two policy helpers, with a non-vacuity probe proving the
+scan can actually see one. Mutation-checked: 5 mutants, 5 killed.
+
+⚠ **One collision worth knowing**: the helper's method-name parameter is `method=`, not `operation=`,
+because `test_store_operation_literal_has_no_drift` greps `store.py` for that other keyword and
+requires every value to be a `StoreOperation`. That scan reads raw source, **docstrings included** —
+naming the parameter `operation` failed it, and so did merely mentioning the pattern in a docstring.
+Its assertion subject is wider than its claim's subject. Left as-is: the scan works, and a mis-scoped
+guard gets fixed or tolerated, never given a neighbour.
+
+### Fixed — the swallow must not become silence (the cost of the fix above, paid)
+
+⛔ **A swallowed audit write was INVISIBLE, and `verify()` reported health over the hole.**
+`AuditTrail.log` is write-first — chain state advances only after `fsync` — so a failed write leaves
+`_prev_hash`/`_seq` untouched and the next entry chains cleanly across the gap. Measured: **8 store
+mutations with 7 dropped writes produced ONE entry and `AuditTrail.verify()` returned
+`valid=True, chain_break_at=None`.** The gap was not merely indistinguishable from tampering — it
+was indistinguishable from the mutations never happening, under a verifier giving a clean bill of
+health. For a library sold on tamper-evidence that is the cost the fix above would otherwise have
+charged silently, at fifteen more sites than before.
+
+The `UserWarning` alone could not carry it, also measured: Python's default filter dedups per
+location, so **five consecutive failures produced ONE warning**, and under `-W error` the warning
+itself raises, the nested guard swallows it, and the caller sees **zero signal of any kind**.
+
+So a swallowed write now reports on **four channels, most-suppressible last**:
+1. **`dropped_before`** rides into the next entry that lands — the loss becomes a hash-chained,
+   tamper-evident FACT rather than an absence (`AuditTrail.note_write_failure`);
+2. **`Store.status().audit_write_failures` / `.audit_last_failure`** — pollable, which a warning is
+   not: an agent that started later, or runs under `-W error`, can still ask;
+3. the **`anneal-memory` logger** with `exc_info`, matching how `audit.py` already reports the
+   analogous `on_event` failure;
+4. the **`UserWarning`**, unchanged.
+
+Also fixed, all found by review of the fix itself:
+- **Audit ordering must match durability ordering SITE BY SITE.** `prune` / `save_continuity` /
+  `set_section_schema` / `wrap_started` / `wrap_cancelled` commit or externalize *unconditionally*.
+  Routing them through a batch-aware helper queued their events while their work landed immediately,
+  so a batch that then rolled back discarded the record of a mutation that had already happened —
+  **with no warning, where the pre-change bare emit wrote it.** Now `batch_aware=False` at those five.
+- **`stacklevel` is a parameter.** At the `_batch` deferred flush the old fixed `3` pointed at
+  `contextlib.py:148` — stdlib, not the operator's code — and keyed Python's per-location dedup
+  registry there, collapsing every batch-flush failure process-wide into one warning at a bogus
+  location.
+- **The deferred queue carries its origin** `(method, committed)`. Every flush-time warning
+  previously read `"_batch: the batched write COMMITTED"`, including for `wrap_completed` — the
+  diagnostic was least specific exactly where a loss costs most.
+- `set_section_schema`'s bespoke guard is gone: it caught only `OSError` (a `RuntimeError` from the
+  sink failed a completed migration) and its `warn` was not nested-guarded.
+- README's load-bearing tamper-evidence sentence, `delete_episode`'s "Logged in audit trail",
+  the GDPR line, the quickstart, and a `Warns:` section on all **15** affected public methods — these
+  now emit a warning on a SUCCESS path and no docstring said so.
+
+**1812 tests (1764 → 1812, +48), mypy clean, ruff 64 — one BELOW the prior 65** (the module-level
+`Path` import in `tests/test_audit.py` is now used). Every number here re-derived from disk, because
+the project-memory file that recorded the ruff baseline said 64 and the baseline at HEAD was 65.
+
+**Mutation-checked throughout: 15 mutants across the audit policy, the SKILL.md ladder gate, the
+pre-push gate and the generated-instruction pin — all killed.** ⚠ Three did not die on the first
+attempt, and each one taught something the tests could not have told us:
+- reverting the batch-deferral branch survived the *filtered* run and was killed only by the full
+  suite — the `-k` selector, not the coverage, was too narrow;
+- deleting the `note_write_failure` call and re-enabling `batch_aware` on `save_continuity` both
+  survived a green 96-test suite, because **the behavioural table varied the sink outcome and the
+  method while holding CONSTANT the channel that reports it** — every assertion was `pytest.warns`.
+  The defect lived in the dimension the fixture held constant. `TestSwallowedWriteIsStillVisible`
+  exists to vary that dimension;
+- truncating the *second* SKILL.md ladder survived the per-line form, because that line also mentions
+  `12x`/`18x` in its demotion sentence — a per-line max is still a proxy. The gate now judges the
+  ladder RUNS themselves (ascending, not a demotion pair, not a whole-span historical quote).
+
 ### Fixed — a docstring that could not be COLLECTED on half the support matrix
 
 CI went red on 2026-09-04: `SyntaxError: invalid escape sequence '\\`'` in `tests/test_integrity.py`,

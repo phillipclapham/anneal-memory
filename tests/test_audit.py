@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import uuid
+import warnings
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -1137,3 +1138,505 @@ class TestStoreIntegration:
         audit_path = tmp_path / "test.audit.jsonl"
         assert not audit_path.exists()
         store.close()
+
+
+# ---------------------------------------------------------------------------
+# AM-AUDIT-AFTER-COMMIT (2026-09-04)
+#
+# ⛔ WHY THIS BLOCK EXISTS, AND IT IS THE POINT OF IT. On 2026-09-03 a codex L3
+# HIGH established the policy "an audit-sink failure must not propagate once the
+# work is committed" and it was implemented as an inline try/except at ONE call
+# site (``wrap_cancelled``). Measured 2026-09-04: SIXTEEN post-commit emit sites
+# existed and the correction reached one of them. The class is the day's
+# portfolio-wide one — a guard that cannot see its own subject: the guard was
+# real, correct, and scoped to the site that happened to be reported.
+#
+# ⚠ AND THE FIRST COUNT WAS ITSELF WRONG, WHICH IS THE POINT. The opening
+# census said EIGHT, because it scoped by the SYMPTOM — the literal text
+# ``self._audit.log`` — and so could not see the seven association methods
+# that reach their commit through a helper's ``commit=`` argument and emit via
+# ``_audit_log``. The L1 pass found them by asking about POSITION rather than
+# spelling. A census scoped by symptom missed the class, inside the census
+# taken to fix a guard scoped by symptom.
+#
+# So the policy now has one home (``Store._audit_log_after_commit``) and two
+# tests: a BEHAVIOURAL one that drives every affected public method with a
+# failing sink, and a MECHANICAL one that fails if a ninth site is ever written
+# bare. Neither is a proxy for the other — the behavioural test proves the
+# policy holds for the methods that exist, the mechanical one proves no new
+# method can quietly opt out.
+# ---------------------------------------------------------------------------
+
+SCHEMA_OK = [
+    {"heading": "State", "role": "live-state"},
+    {"heading": "Patterns", "role": "graduating"},
+]
+
+
+def _sink_that_fails(store, exc):
+    """Replace the store's audit sink with one that raises ``exc``."""
+    def boom(*args, **kwargs):
+        raise exc
+    store._audit.log = boom
+
+
+def _committed_op_cases(tmp_path_factory=None):
+    """(label, setup, act, assert_committed) for every post-commit emit site."""
+    from anneal_memory.store import Store
+
+    def mk(sub):
+        return Store(sub / "memory.db")
+
+    def c_record(sub):
+        s = mk(sub)
+        return s, lambda: s.record("hello", episode_type="observation"), \
+            lambda: len(s.recall(limit=99).episodes) == 1
+
+    def c_delete(sub):
+        s = mk(sub)
+        s.record("bye", episode_type="observation")
+        ep = s.recall(limit=1).episodes[0].id
+        return s, lambda: s.delete(ep), \
+            lambda: len(s.recall(limit=99).episodes) == 0
+
+    def c_wrap_started(sub):
+        s = mk(sub)
+        s.record("e", episode_type="observation")
+        ids = [e.id for e in s.recall(limit=9).episodes]
+        return s, lambda: s.wrap_started(episode_ids=ids, token="tok"), \
+            lambda: s._get_metadata("wrap_token") == "tok"
+
+    def c_wrap_completed(sub):
+        s = mk(sub)
+        s.record("e", episode_type="observation")
+        ids = [e.id for e in s.recall(limit=9).episodes]
+        s.wrap_started(episode_ids=ids, token="tok")
+        return s, lambda: s.wrap_completed(
+            episodes_compressed=1, continuity_chars=10, wrap_token="tok"
+        ), lambda: len(s.get_wrap_history()) == 1
+
+    def c_wrap_cancelled(sub):
+        s = mk(sub)
+        s.record("e", episode_type="observation")
+        ids = [e.id for e in s.recall(limit=9).episodes]
+        s.wrap_started(episode_ids=ids, token="tok")
+        return s, lambda: s.wrap_cancelled(), \
+            lambda: not s._get_metadata("wrap_started_at")
+
+    def c_prune(sub):
+        s = mk(sub)
+        s.record("old", episode_type="observation")
+        return s, lambda: s.prune(older_than_days=0), \
+            lambda: len(s.recall(limit=99).episodes) == 0
+
+    def c_save_continuity(sub):
+        s = mk(sub)
+        return s, lambda: s.save_continuity("# hi\n"), \
+            lambda: s.continuity_path.exists()
+
+    def c_set_section_schema(sub):
+        s = mk(sub)
+        return s, lambda: s.set_section_schema(SCHEMA_OK), \
+            lambda: [x["heading"] for x in s.section_schema] == ["State", "Patterns"]
+
+    def _assoc_seed(sub):
+        """A store with two episodes, one episode edge and one pattern edge."""
+        st = mk(sub)
+        a = st.record("alpha", episode_type="observation")
+        b = st.record("beta", episode_type="observation")
+        st.record_associations({(a.id, b.id)})
+        st.seed_pattern_co_graduation(["p_one", "p_two"])
+        return st, a, b
+
+    def c_record_associations(sub):
+        st, a, b = _assoc_seed(sub)
+        return st, lambda: st.record_associations({(b.id, a.id)}), \
+            lambda: st.association_stats().total_links > 0
+
+    def c_decay_associations(sub):
+        st, a, b = _assoc_seed(sub)
+        return st, lambda: st.decay_associations(), lambda: True
+
+    def c_seed_pattern_co_graduation(sub):
+        st, a, b = _assoc_seed(sub)
+        return st, lambda: st.seed_pattern_co_graduation(["p_three", "p_four"]), \
+            lambda: True
+
+    def c_rename_pattern_association(sub):
+        st, a, b = _assoc_seed(sub)
+        return st, lambda: st.rename_pattern_association("p_one", "p_new"), \
+            lambda: True
+
+    def c_sever_pattern_concept(sub):
+        st, a, b = _assoc_seed(sub)
+        return st, lambda: st.sever_pattern_concept("p_two"), lambda: True
+
+    return [
+        ("record", c_record),
+        ("delete", c_delete),
+        ("wrap_started", c_wrap_started),
+        ("wrap_completed", c_wrap_completed),
+        ("wrap_cancelled", c_wrap_cancelled),
+        ("prune", c_prune),
+        ("save_continuity", c_save_continuity),
+        ("set_section_schema", c_set_section_schema),
+        # ⛔ THE SEVEN THE FIRST CENSUS COULD NOT SEE. These reach their
+        # commit through a free-function helper's ``commit=`` argument rather
+        # than a literal ``commit()`` in the method body, and emitted via
+        # ``_audit_log`` — so a scan for the text ``self._audit.log`` missed
+        # every one. Measured 2026-09-04 (L1): ``gc_pattern_associations``
+        # and ``sever_pattern_concept`` DELETED edges and then raised a raw
+        # OSError. Five of the seven are here; ``gc_pattern_associations``
+        # and ``drain_co_surface_events`` emit only when their count is
+        # non-zero and are covered by the mechanical scan instead — stated
+        # rather than quietly omitted, because a case that cannot fire would
+        # make this table look wider than it is.
+        ("record_associations", c_record_associations),
+        ("decay_associations", c_decay_associations),
+        ("seed_pattern_co_graduation", c_seed_pattern_co_graduation),
+        ("rename_pattern_association", c_rename_pattern_association),
+        ("sever_pattern_concept", c_sever_pattern_concept),
+    ]
+
+
+CASES = _committed_op_cases()
+
+
+class TestAuditAfterCommitPolicy:
+    """A failing audit sink must never fail an operation that already landed."""
+
+    @pytest.mark.parametrize("label,builder", CASES, ids=[c[0] for c in CASES])
+    @pytest.mark.parametrize(
+        "exc",
+        [OSError(28, "No space left on device"), RuntimeError("rotation failed")],
+        ids=["oserror", "non-oserror"],
+    )
+    def test_sink_failure_does_not_fail_committed_work(
+        self, tmp_path, label, builder, exc
+    ):
+        # ⚠ The non-OSError case is not decoration: ``set_section_schema``
+        # caught only OSError and propagated a RuntimeError from the sink,
+        # failing a completed migration (measured 2026-09-04).
+        sub = tmp_path / f"{label}-{type(exc).__name__}"
+        sub.mkdir()
+        store, act, committed = builder(sub)
+        _sink_that_fails(store, exc)
+
+        with pytest.warns(UserWarning, match="COMMITTED"):
+            act()
+
+        assert committed(), f"{label}: the work did not land"
+
+    @pytest.mark.parametrize("label,builder", CASES, ids=[c[0] for c in CASES])
+    def test_sink_failure_survives_warnings_as_errors(self, tmp_path, label, builder):
+        # ⛔ THE CASE THE GUARD'S OWN TEST ONCE MASKED. ``pytest.warns`` installs
+        # a capturing filter, so a test written only in the form above cannot
+        # see that ``warnings.warn`` ITSELF raises under ``-W error`` /
+        # PYTHONWARNINGS=error — which recreates the exact "committed, then
+        # reported as failed" path the policy exists to eliminate. This test
+        # takes the filter away on purpose.
+        sub = tmp_path / f"{label}-werror"
+        sub.mkdir()
+        store, act, committed = builder(sub)
+        _sink_that_fails(store, OSError(28, "No space left on device"))
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            act()  # must not raise, not even the warning
+
+        assert committed(), f"{label}: the work did not land"
+
+
+class TestNoBareAuditEmitSites:
+    """Mechanically: every ``self._audit.log`` call lives inside a policy helper.
+
+    ⚠ WHAT THIS DOES AND DOES NOT PROVE. It proves no emit site bypasses the two
+    helpers, which is the drift this exists to stop. It does NOT prove a site
+    picked the RIGHT helper (``_audit_log`` is correct pre-commit, and
+    ``_audit_log_after_commit`` post-commit) — that judgment is what the
+    behavioural tests above cover for the methods that exist. Two tests, two
+    subjects, on purpose.
+    """
+
+    ALLOWED_ENCLOSING_DEFS = {"_audit_log", "_audit_log_after_commit"}
+    # ⚠ These names are matched UNQUALIFIED, across every module. A future
+    # class defining its own ``_audit_log``, or a nested closure with that
+    # name, would inherit the exemption. Named here rather than engineered
+    # around: qualifying it needs a class-path walk, and the next test in
+    # this class closes the reachable half of the gap by asserting the
+    # exempt helper has no production callers at all.
+
+    def _bare_sites(self, module_path):
+        import ast
+
+        source = module_path.read_text()
+        tree = ast.parse(source)
+        # Map every node to its enclosing function name.
+        enclosing: dict[int, str] = {}
+
+        class Walk(ast.NodeVisitor):
+            def __init__(self):
+                self.stack: list[str] = []
+
+            def visit_FunctionDef(self, node):
+                self.stack.append(node.name)
+                for child in ast.iter_child_nodes(node):
+                    self.visit(child)
+                self.stack.pop()
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def generic_visit(self, node):
+                if isinstance(node, ast.Call):
+                    enclosing[id(node)] = self.stack[-1] if self.stack else "<module>"
+                super().generic_visit(node)
+
+        walker = Walk()
+        walker.visit(tree)
+
+        found = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            # match `<anything>._audit.log(...)`
+            if (
+                isinstance(fn, ast.Attribute)
+                and fn.attr == "log"
+                and isinstance(fn.value, ast.Attribute)
+                and fn.value.attr == "_audit"
+            ):
+                where = enclosing.get(id(node), "<unknown>")
+                if where not in self.ALLOWED_ENCLOSING_DEFS:
+                    found.append((module_path.name, node.lineno, where))
+        return found
+
+    def test_no_audit_emit_outside_the_policy_helpers(self):
+        import anneal_memory
+
+        pkg = Path(anneal_memory.__file__).parent
+        offenders = []
+        # rglob, not glob: the package is flat today, so these are the same
+        # set — but this is a structural-invariant test, and a subpackage
+        # added later must not silently drop out of its scope.
+        for module in sorted(pkg.rglob("*.py")):
+            offenders.extend(self._bare_sites(module))
+
+        assert not offenders, (
+            "bare `._audit.log(...)` call site(s) outside the policy helpers — "
+            "use Store._audit_log (pre-commit) or Store._audit_log_after_commit "
+            "(post-commit): " + ", ".join(f"{m}:{ln} in {fn}" for m, ln, fn in offenders)
+        )
+
+    def test_the_pre_commit_helper_has_no_production_callers(self):
+        """⛔ THE GUARD THAT WOULD HAVE CAUGHT THE SEVEN.
+
+        ``_audit_log`` fires immediately outside a batch. That is correct for a
+        PRE-commit site (a raise aborts the operation, which is what the caller
+        should hear) and wrong for a post-commit one. Seven association methods
+        used it at a post-commit position — they reach their commit through a
+        free-function helper's ``commit=`` argument — and two of them DELETED
+        edges and then raised a raw OSError.
+
+        None of the three guards written that day could see them: the census
+        scoped by the text ``self._audit.log``, the mechanical scan matches
+        that same AST shape, and the behavioural table enumerated the methods
+        the census produced. Three guards, one inherited scoping decision. The
+        third guard in a row sharing a blind spot is not defence in depth.
+
+        So: ``_audit_log`` now has ZERO production call sites, and this asserts
+        it. A future site that genuinely needs pre-commit emission has to come
+        back here and say so — which is exactly the judgment that went
+        unstated last time. Cheaper and more exact than inferring each call's
+        position relative to its commit.
+        """
+        import ast
+        from pathlib import Path
+
+        import anneal_memory
+
+        pkg = Path(anneal_memory.__file__).parent
+        callers = []
+        for module in sorted(pkg.rglob("*.py")):
+            tree = ast.parse(module.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "_audit_log"
+                ):
+                    callers.append(f"{module.name}:{node.lineno}")
+
+        assert not callers, (
+            "`_audit_log` (the PRE-commit, batch-aware emit helper) has "
+            "production call site(s): " + ", ".join(callers) + ". If the "
+            "mutation is already committed or externalized at that point, use "
+            "`_audit_log_after_commit` — a raise there reports a completed "
+            "operation as failed. If the site is genuinely pre-commit, add it "
+            "to this test's expected set WITH the reason, so the choice is on "
+            "the record instead of inferred from the helper's name."
+        )
+
+    def test_the_scan_can_actually_see_a_bare_site(self, tmp_path):
+        # Non-vacuity: the scan must FAIL on a module that contains one.
+        probe = tmp_path / "probe.py"
+        probe.write_text(
+            "class X:\n"
+            "    def some_method(self):\n"
+            "        self._audit.log('evt', {})\n"
+        )
+        found = self._bare_sites(probe)
+        assert found == [("probe.py", 3, "some_method")], found
+
+
+class TestSwallowedWriteIsStillVisible:
+    """The four channels a swallowed post-commit write reports on.
+
+    ⚠ WHY THIS CLASS EXISTS SEPARATELY. ``TestAuditAfterCommitPolicy`` varies
+    the sink outcome and the method, and holds CONSTANT the thing that reports
+    it — every one of its assertions is ``pytest.warns``. So it cannot see a
+    regression in any channel except the warning, and mutation proved it:
+    deleting the ``note_write_failure`` call left all 96 tests green. The
+    defect lives in the dimension the fixture held constant.
+    """
+
+    def _failing(self, tmp_path, sub):
+        from anneal_memory.store import Store
+
+        d = tmp_path / sub
+        d.mkdir()
+        store = Store(d / "memory.db")
+
+        def boom(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        store._audit.log = boom
+        return store
+
+    def test_the_gap_rides_into_the_next_entry_that_lands(self, tmp_path):
+        """⛔ Channel 1 — the only DURABLE one, and the reason it is needed.
+
+        ``AuditTrail`` is write-first: chain state advances only after fsync,
+        so a failed write leaves ``_prev_hash``/``_seq`` untouched and the next
+        entry chains cleanly OVER the hole. Measured 2026-09-04: 8 mutations
+        with 7 dropped writes produced ONE entry and ``verify()`` returned
+        ``valid=True, chain_break_at=None`` — the gap was not merely
+        undetectable-as-tampering, it was indistinguishable from the mutations
+        never happening, under a verifier reporting a clean bill of health.
+        """
+        import json
+
+        from anneal_memory.audit import AuditTrail
+        from anneal_memory.store import Store
+
+        d = tmp_path / "chained"
+        d.mkdir()
+        store = Store(d / "memory.db")
+        real = store._audit.log
+
+        def boom(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        store._audit.log = boom
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for i in range(3):
+                store.record(f"dropped {i}", episode_type="observation")
+
+        store._audit.log = real
+        store.record("this one lands", episode_type="observation")
+
+        entries = [
+            json.loads(line)
+            for line in store._audit._active_path.read_text().splitlines()
+            if line.strip()
+        ]
+        landed = entries[-1]
+        assert landed["dropped_before"] == 3, (
+            "the three swallowed writes left no trace in the chain — "
+            f"entry was {landed!r}"
+        )
+        # And it is a CHAINED fact, not a side note: the trail still verifies,
+        # now while carrying the loss instead of hiding it.
+        assert AuditTrail.verify(store._path).valid
+
+        # The pending count resets, so the next entry does not double-report.
+        store.record("and this one", episode_type="observation")
+        tail = json.loads(store._audit._active_path.read_text().splitlines()[-1])
+        assert "dropped_before" not in tail
+
+    def test_status_reports_degraded_audit_health(self, tmp_path):
+        """Channel 2 — the POLLABLE one.
+
+        A warning must have been caught at the moment it fired; an agent that
+        started later, or ran under ``-W error``, has no way to ask. ``status()``
+        can be asked at any time.
+        """
+        store = self._failing(tmp_path, "status")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            store.record("one", episode_type="observation")
+            store.record("two", episode_type="observation")
+
+        status = store.status()
+        assert status.audit_write_failures == 2
+        assert status.audit_last_failure is not None
+        assert "record" in status.audit_last_failure
+        # The divergence that was previously computable-but-uncomputed.
+        assert status.total_episodes == 2
+        assert status.audit_entry_count == 0
+
+    def test_the_logger_still_fires_when_warnings_are_errors(self, tmp_path, caplog):
+        """Channel 3 — the one that survives ``-W error``.
+
+        Measured 2026-09-04: under ``simplefilter("error")`` the warning path
+        raises, the nested guard swallows it, and the caller sees ZERO signal.
+        The logger is what remains.
+        """
+        import logging
+
+        store = self._failing(tmp_path, "logged")
+        with caplog.at_level(logging.WARNING, logger="anneal-memory"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                store.record("x", episode_type="observation")
+
+        assert any(
+            "audit write failed" in r.getMessage() for r in caplog.records
+        ), f"no log record: {[r.getMessage() for r in caplog.records]}"
+
+    def test_an_unconditional_commit_does_not_defer_its_audit(self, tmp_path):
+        """⛔ AUDIT ORDERING MUST MATCH DURABILITY ORDERING, SITE BY SITE.
+
+        ``prune`` / ``save_continuity`` / ``set_section_schema`` /
+        ``wrap_started`` / ``wrap_cancelled`` commit or externalize
+        UNCONDITIONALLY — they carry no ``_defer_commit`` guard. Routing them
+        through a batch-AWARE helper queued their events while their work
+        landed immediately, so a batch that then rolled back discarded the
+        record of a mutation that had already happened, with no warning.
+        Measured 2026-09-04 (L2/L1 agreeing independently); the pre-change
+        bare emit wrote it. Hence ``batch_aware=False`` at those sites.
+        """
+        import json
+
+        from anneal_memory.store import Store
+
+        d = tmp_path / "inversion"
+        d.mkdir()
+        store = Store(d / "memory.db")
+
+        with pytest.raises(RuntimeError):
+            with store._batch():
+                store.save_continuity("# externalized\n")
+                raise RuntimeError("batch body fails AFTER the file landed")
+
+        assert store.continuity_path.exists(), "the file did not externalize"
+        events = [
+            json.loads(line)["event"]
+            for line in store._audit._active_path.read_text().splitlines()
+            if line.strip()
+        ]
+        assert "continuity_saved" in events, (
+            "the file was externalized but its audit event was queued behind a "
+            f"batch that rolled back, and lost. events={events}"
+        )

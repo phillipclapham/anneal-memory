@@ -23,7 +23,125 @@
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
 
-## ▶▶ PICKUP 2026-09-05 — AM-AUDIT-AFTER-COMMIT LANDED. READ THE COUNT STORY BEFORE ANYTHING ELSE.
+## ▶▶ PICKUP 2026-09-05 — THE 09-04 SECOND-REVIEW PILE IS CLEARED. ONE ITEM DELIBERATELY LEFT.
+
+**Seat 0904+11, afternoon of 2026-09-04.** Opened specifically for the twelve findings Diogenes
+filed against this repo in its SECOND review of the day (12:31–12:49) — six new, six carried.
+Eleven closed, one deliberately not. **1830 tests** (from 1822) · mypy clean · **ruff 63**
+(unchanged) · tree clean, nothing unpushed at close.
+
+### ⛔ THE SHAPE, BECAUSE IT DECIDES HOW TO READ THE REST
+Four of the six new findings were INSTRUMENTS THAT COULD NOT SEE THEIR OWN SUBJECT — a counter on
+the one transport where it is structurally always zero, a guard that greps source for a defect
+source cannot show, a safety claim one backtick from vacuous, and an orientation file whose every
+number was wrong. Not a coincidence: it is what is left after three nights of the prose tail
+cleared out.
+
+### ▶ THE HIGH: THE COUNTER REACHED EVERY TRANSPORT AND WAS STILL ZERO ON THE ONE THAT MATTERS
+`status().audit_write_failures` was added so a swallowed audit write would be POLLABLE, routed to
+all three transports the day before — and on the CLI it could never report anything but 0. It was
+a plain instance attribute; a CLI run is a one-shot process whose `status` mutates nothing, so the
+only process that could have counted a failure was already gone. **Reproduced before fixing:** two
+episodes committed with their audit writes refused, `status --json` printing `"entry_count": 0`
+beside `"write_failures": 0` two lines apart, on a store that had genuinely lost both.
+
+**The fix is durability, not a label.** The count lives in the SQLite `metadata` table — a
+different I/O path from the JSONL sink that is already failing — seeded from disk at open
+(read-only handles too). **LIFETIME-SCOPED AND MONOTONIC, and that is a deliberate semantic:** a
+trail that lost an entry is permanently incomplete and `verify()` returns `valid=True` over that
+hole forever, so a number that healed would be a lie. ⚡ It never shipped (absent from v0.9.9), so
+no released behaviour changed — that is why the semantics were free to define.
+
+⚠ **Do NOT import spore-745's "a resettable integer only MOVES the window" objection here.** That
+is about `AuditTrail._dropped_since_last`, the ride-along marker, which must chain into the NEXT
+entry and genuinely needs an outbox. **The marker is still process-local and still open.** The
+count has no window to move: it is written when the failure happens. `audit.py`'s comment now
+separates the two promises explicitly.
+
+### ⚡ AND THE REGRESSION TEST FOR THE ORIGINAL DEFECT WAS HOLLOW — THE HALF WORTH CARRYING
+It read `cli.py` off disk and asserted `"status.audit_write_failures" in text`. Mutation-proven:
+hardcoding `"write_failures": 0` with the token alive in a COMMENT, plus `if False:` on the human
+branch, left it passing and all 1822 tests green. **A substring assertion is satisfied by a
+comment, a docstring, or a dead branch.** Replaced with tests that lose a write in one `Store`,
+CLOSE it, and read it back from another — CLI `--json`, CLI human, MCP handler, a read-only
+handle, and accumulation across sessions. All three mutants now fail.
+▶ **The generalisable move: the test crosses the boundary the DEFECT crossed.** A test that
+degrades and asserts inside one process could not have seen this however much code it executed.
+
+### ▶ WHAT ELSE CLOSED (each re-derived at HEAD by running, not read off a table)
+- **sdist leaked 984 KB of internal project memory** — 39 files including six review reports
+  enumerating open defects by file and line, and three carrying the operator's absolute home path.
+  Fixed as an ALLOWLIST, not an exclusion of `project_memory`: a denylist only catches the name you
+  already found. **Independently re-derived after the lane reported it** — a fresh build is 967,624
+  bytes over 69 files, zero `project_memory` entries, no home path anywhere. The wheel was never
+  affected, which is why it survived nine releases: the clean artifact is the one people look at.
+- **The packaging gate skipped in CI**, because `hatchling` is a build dependency hidden by build
+  isolation. A guard present on the dev machine and absent where it is enforced. CI installs it now.
+  ⚠ A SKIP IS NOT A PASS — if it starts skipping again the gate is gone and nothing will say so.
+- **The reserved-audit-kwarg set was typed by hand** and covered four of six collision-capable
+  names; `event` and `payload` go positionally at the flush splat and collide identically. Now
+  DERIVED from the signature by parameter kind. The test derives it independently AND separately
+  proves each name really does collide, instead of looping over the set under test.
+- **The SKILL.md ladder gate** keyed its historical-quote exemption on FORMATTING. Now requires a
+  retrospective cue on the line, tight enough that an unrecognised cue makes the gate FIRE.
+- **`project_memory/CLAUDE.md`** — every checkable claim re-derived from live sources; counts
+  replaced by the commands that produce them. Found nine more wrong claims than the four reported.
+- **Carried:** the levelcap sweep finally reached README (demotion is by one from ANY level; the
+  1x→3x diagram and promotion line implied a removed ceiling); the carry-forward warning stopped
+  naming "Proven-tier", a category strictly wider than its own `>= 3` gate; `server.py`'s last
+  assert-for-narrowing became an explicit raise (-O strips asserts); `graduation.py`'s coordinate
+  lost its line number on purpose after being wrong twice, differently; and
+  `_is_write_lock_contention` collapsed from two AST-identical copies into one, pinned by an
+  IDENTITY assertion — a grep passes on two identical copies, which is the forbidden state.
+
+### ⛔ THE ONE DELIBERATELY NOT CLOSED — DO NOT "FIX" IT
+**`graduation.py:95`, `_BARE_GRADUATION_RE` still `([23])x`.** This is a RULED deferral held by
+`spore-676`, gated on `spore-675`, and the reasoning in the file is now correct where it used to be
+false. Widening it puts **fourteen mature carried patterns** onto the bare-demotion path at the
+next re-stamp — a far larger blast radius than the defect. It is carried by Diogenes as a HIGH and
+will keep being carried; that is the ruling working, not the ruling failing.
+▶ **The improvement that would NOT violate the ruling, if someone wants it:** make a bare 4x+ line
+VISIBLE (counted as skipped and surfaced) without making it demotable. Today it matches neither
+regex and is reported as nothing at all — `absence_of_signal_rendered_as_health`. That is a
+decision for whoever owns spore-675/676, not a casual widening.
+
+### ⚠ L3 COVERAGE WAS NOT ACHIEVED TODAY, AND THE EXIT CODE SAID OTHERWISE
+`deep_review.py --seats complement,glm-5.3,gpt-oss` exited **0** with **two of three seats
+producing nothing**: complement `[Claude CLI exit code 1: (no stderr)]`, glm-5.3 empty after 380.8s
+with `files_opened=0`. Only gpt-oss answered — 1,170 chars in 8.3s against a 96k diff, which reads
+as a rubber stamp. **Checked the store against stdout per the day's rule; they AGREE, so this is a
+real gap and not a hidden success.**
+
+⛔ **THE DEFECT WORTH CARRYING IS THE EXIT CODE, NOT THE SEAT.** `deep_review.py` exits 0 and
+prints the "PRODUCED NO REVIEW" warning inside the body, so a seat reading the exit code records a
+three-lineage mesh when a lineage silently dropped out. That is the "L3 failures exit 0" family
+aimed at the mesh's own composition. **Check any L3 claiming three lineages against
+`state/verdicts.jsonl` for whether all three actually returned.** Routed to the fan-in — flow's
+apparatus, not this repo's.
+
+⚠ **AND A CORRECTION I OWE, because I filed the strong version first.** I reported complement as
+"contributing nothing for at least three days". **FALSE, and the fan-in measured it back:** 16 of
+its 24 rows SUCCEEDED, and today it was 8 successes out of 9. What is real is a ~33% intermittent
+failure rate (8/24) with an opaque signature — seven identical `Claude CLI exit code 1 (no
+stderr)` plus one timeout. **The denominator was in my own output — I printed "24 rows, 8 errored"
+and generalised from the numerator anyway.** An errored-row count is not a failure rate.
+▶ **So the riskiest part of this change set was verified by me directly instead:** the standalone
+`commit()` inside the post-commit handler cannot leak another method's uncommitted DML (a batch
+that rolls back publishes nothing) and cannot disturb an open wrap. Both reproduced, both pinned as
+tests, and the pin mutation-checked for vacuity.
+
+### ▶ STILL OPEN GOING INTO 09-05
+- `spore-745` — the `dropped_before` MARKER is still process-local (the count is not; see above).
+- `spore-746` — rotation-failure orphan, pre-existing MED.
+- `spore-747` — the levain two-anneal skew.
+- `cli.cmd_verify` still buries `skipped_lines`, so an operator running `verify` is not told lines
+  were skipped. Untouched, still worth doing.
+- The three live clocks below are untouched: `spore-721` (09-11), `spore-722` (09-10),
+  `spore-675` step 4.
+
+---
+
+## ⚠ (SUPERSEDED 2026-09-05 by the block above) PICKUP — AM-AUDIT-AFTER-COMMIT LANDED. Kept for the count story, not as instructions.
 
 **State at close of the 09-04 seat:** AM-AUDIT-AFTER-COMMIT is COMMITTED — `d7b482e` (the policy),
 `e8c04da` (L3 complement/glm + L4) and `8a6cc21` (the codex retry). Working tree clean apart from this file.

@@ -456,7 +456,8 @@ def schema_role_warning(schema: list[SectionSpec]) -> str | None:
         return (
             "Section schema has no 'graduating' section — the immune system, the "
             "pattern-line format, and the contradiction scan will NOT be emitted "
-            "into the wrap package, and patterns cannot graduate (1x->2x->3x). If "
+            "into the wrap package, and patterns cannot graduate (1x->2x->3x->..., "
+            "no top rung). If "
             "this store is meant to develop graduated principles, mark a section "
             "with role 'graduating' (e.g. 'Patterns')."
         )

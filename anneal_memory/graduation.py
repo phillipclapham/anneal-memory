@@ -426,8 +426,8 @@ class CrossSessionCollision:
     the same claim and reuses trope vocabulary.
 
     Detected at validate_graduations time. The graduation gets demoted
-    same way an ungrounded citation does (3x→2x or 2x→1x, marked
-    ``(cross-session-overlap)``). Pattern-history row is NOT updated
+    same way an ungrounded citation does — BY ONE LEVEL from wherever it
+    stood, not only 3x→2x/2x→1x — marked ``(cross-session-overlap)``. Pattern-history row is NOT updated
     when this fires — the prior session's explanation remains
     authoritative until the agent composes a new explanation with
     actually-different vocabulary.

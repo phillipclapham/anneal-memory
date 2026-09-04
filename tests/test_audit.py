@@ -1834,6 +1834,210 @@ class TestDegradedAuditHealthReachesEveryTransport:
         )
 
 
+class TestCodexL3TwentySixOhNineOhFour:
+    """Seven defects codex found in code I had shipped AND mutation-tested.
+
+    ⛔ WHY THESE EXIST AS A BLOCK: every one of them lived in the audit-health
+    persistence or the schema guard I wrote on 2026-09-04, both of which I had
+    already pinned with mutation-checked tests. The mutations passed because I
+    mutated the path I HAD IN MIND. codex drove the paths I had not.
+    """
+
+    def _boom(self, *args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    # -- #1: the standalone commit must not publish a caller's transaction --
+
+    def test_a_health_write_never_commits_someone_elses_open_batch(self, tmp_path):
+        """``save_continuity`` is NOT batch-aware, and that is the whole bug.
+
+        My earlier test drove ``record()`` inside a batch — which DEFERS its
+        audit write, so the failure handler never ran and the commit never
+        happened. ``save_continuity`` logs immediately, so its audit failure
+        committed the batch's uncommitted DML. Measured: two episodes survived
+        a batch that rolled back.
+        """
+        from anneal_memory.store import Store
+
+        db = tmp_path / "memory.db"
+        store = Store(db)
+        store.record("seed", episode_type="observation")
+        store.close()
+
+        store = Store(db)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with pytest.raises(RuntimeError):
+                    with store._batch():
+                        store.record("inside the batch", episode_type="observation")
+                        store._audit.log = self._boom
+                        store.save_continuity("# not batch aware\n")
+                        raise RuntimeError("force rollback")
+        finally:
+            store.close()
+
+        reopened = Store(db)
+        try:
+            assert reopened.status().total_episodes == 1, (
+                "the audit-health commit published DML from a batch that then "
+                "rolled back"
+            )
+        finally:
+            reopened.close()
+
+    def test_a_health_write_never_destroys_a_batch_that_SUCCEEDS(self, tmp_path):
+        """The discriminator the rolled-back version could not provide.
+
+        ⚠ Mutation-driven. Reverting the ``in_transaction`` guard left the
+        rolled-back test PASSING, because the mutant's failure mode —
+        ``BEGIN IMMEDIATE`` raising inside an open transaction, then the
+        handler's own ``rollback()`` destroying the caller's work — produces
+        the SAME observable as a batch that was going to roll back anyway.
+        Both end with the DML gone.
+
+        So drive a batch that COMMITS. Correct code leaves the delta pending
+        and the batch intact; the mutant rolls the caller's transaction back
+        underneath it and the episode vanishes from a batch that reported
+        success. A test whose scenario cannot separate the two outcomes is not
+        a test of the guard.
+        """
+        from anneal_memory.store import Store
+
+        db = tmp_path / "memory.db"
+        store = Store(db)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with store._batch():
+                    store.record("must survive", episode_type="observation")
+                    store._audit.log = self._boom
+                    store.save_continuity("# not batch aware\n")
+                # batch exits normally — its DML must be committed
+            assert store.status().total_episodes == 1, (
+                "a batch that completed successfully lost its DML — the "
+                "audit-health write rolled back the caller's transaction"
+            )
+        finally:
+            store.close()
+
+        reopened = Store(db)
+        try:
+            assert reopened.status().total_episodes == 1
+        finally:
+            reopened.close()
+
+    # -- #5: the count must never go backwards between writers --
+
+    def test_two_writers_cannot_make_the_lifetime_count_decrease(self, tmp_path):
+        """codex's exact interleaving: both seed 5, one persists 6 then 7, the
+        other persists its stale 6. A whole-value write loses an update; an
+        UPSERT that adds a delta cannot."""
+        from anneal_memory.store import Store
+
+        db = tmp_path / "memory.db"
+        seed = Store(db)
+        seed.record("seed", episode_type="observation")
+        seed.close()
+
+        a, b = Store(db), Store(db)
+        a._audit.log = self._boom
+        b._audit.log = self._boom
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                a.record("a1", episode_type="observation")
+                a.record("a2", episode_type="observation")
+                b.record("b1", episode_type="observation")
+        finally:
+            a.close()
+            b.close()
+
+        reopened = Store(db)
+        try:
+            assert reopened.status().audit_write_failures == 3, (
+                "three writes were lost; a stale-seeded writer overwrote the "
+                "count instead of adding to it"
+            )
+        finally:
+            reopened.close()
+
+    # -- #6: a long-lived handle must not report a constructor-time cache --
+
+    def test_a_long_lived_reader_sees_a_loss_from_another_process(self, tmp_path):
+        from anneal_memory.store import Store
+
+        db = tmp_path / "memory.db"
+        seed = Store(db)
+        seed.record("seed", episode_type="observation")
+        seed.close()
+
+        reader = Store(db, read_only=True)
+        try:
+            assert reader.status().audit_write_failures == 0
+
+            writer = Store(db)
+            writer._audit.log = self._boom
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                writer.record("lost", episode_type="observation")
+            writer.close()
+
+            assert reader.status().audit_write_failures == 1, (
+                "a long-lived handle reports the count it cached at "
+                "construction, so an MCP server or reader is permanently stale"
+            )
+        finally:
+            reader.close()
+
+    # -- #8: a failed health transaction must not keep the writer lock --
+
+    def test_a_failed_health_write_rolls_back_and_keeps_the_delta(self, tmp_path):
+        import sqlite3
+
+        from anneal_memory.store import Store
+
+        db = tmp_path / "memory.db"
+        seed = Store(db)
+        seed.record("seed", episode_type="observation")
+        seed.close()
+
+        # Abort the SECOND statement, so the failure lands mid-transaction.
+        conn = sqlite3.connect(db)
+        conn.execute(
+            "CREATE TRIGGER boom_on_last_failure BEFORE INSERT ON metadata "
+            "WHEN NEW.key = 'audit_last_failure' "
+            "BEGIN SELECT RAISE(ABORT, 'simulated mid-transaction failure'); END;"
+        )
+        conn.commit()
+        conn.close()
+
+        store = Store(db)
+        store._audit.log = self._boom
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                store.record("triggers a failed health write", episode_type="observation")
+
+            assert store._conn.in_transaction is False, (
+                "a failed health transaction was left open, holding SQLite's "
+                "writer lock against every other process until close"
+            )
+            assert store._audit_failures_unpersisted == 1, (
+                "the delta was cleared despite the commit failing, so the "
+                "count cannot be recovered by a later flush"
+            )
+
+            other = sqlite3.connect(db, timeout=1.0)
+            try:
+                other.execute("BEGIN IMMEDIATE")
+                other.rollback()
+            finally:
+                other.close()
+        finally:
+            store.close()
+
+
 class TestTheGapLocationSurvivesTheProcess:
     """spore-745, the half that could be closed without an outbox.
 

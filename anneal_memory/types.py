@@ -131,7 +131,14 @@ class StoreStatus:
     # version was a plain instance attribute, which made every CLI ``status``
     # structurally zero on the one surface the README says to poll.
     # It is MONOTONIC and never resets: a trail that lost an entry is
-    # permanently incomplete, so a number that healed would be a lie.
+    # permanently incomplete, so a number that healed would be a lie. That is
+    # enforced by an UPSERT that ADDS a per-process delta — the first version
+    # wrote the whole in-memory total and two writers could drive it backwards
+    # (codex L3, 2026-09-04).
+    # ⚠ BOUNDED, NOT ABSOLUTE: the write is best-effort and issued after the
+    # mutation committed, so a full volume can fail it too and a process that
+    # exits before a later flush loses the count. The guarantee is that a loss
+    # RECORDED here survives the process — not that every loss is recorded.
     # Defaulted, so every existing constructor call keeps working.
     audit_write_failures: int = 0
     audit_last_failure: str | None = None

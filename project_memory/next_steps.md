@@ -197,8 +197,13 @@ diff-scoping artifacts, the seat seeing a moved function and an annotation line 
 What was real: a silently-swallowed persist failure (now logged at debug) and a read-modify-write
 that could lose an update between concurrent writers — DOCUMENTED, NOT CHANGED, because
 concurrent writers already break the hash chain by construction and the proposed atomic increment
-is worse for the scenario this counter records (a failing sink means repeated persist failures,
-where a lost increment is lost forever and a lost whole-value write is repaired by the next one).
+is worse for a failing sink).
+⛔ **AND THAT SECOND ARGUMENT WAS WRONG — REFUTED BY THE CODEX PASS AN HOUR LATER.** The shape that
+has BOTH properties is a per-process DELTA added under `BEGIN IMMEDIATE` and cleared only after
+commit: atomic, so no lost update, AND self-healing, because a failed commit keeps the delta. My
+"whole-value beats atomic here" reasoning treated the two as a trade-off when they are not. Fixed;
+the counter was also measurably NOT monotonic before — two writers seeded from the same base drove
+it backwards 7 → 6.
 
 ▶ **So the riskiest part of this change set was verified by me directly instead:** the standalone
 `commit()` inside the post-commit handler cannot leak another method's uncommitted DML (a batch

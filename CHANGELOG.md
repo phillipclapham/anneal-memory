@@ -14,9 +14,13 @@ SQLite half degraded SILENTLY. That asymmetry is what made it a correctness haza
 reporting gap (`spore-747`).
 
 `Store` now refuses to open a database whose `format_version` is greater than this build's, on
-both the writer and the read-only path. ⚠ **The check runs BEFORE `_init_schema`** — schema init
-applies migrations and stamps defaults, and doing that to a store we are about to declare
-unreadable would mutate the very database being protected.
+both the writer and the read-only path. ⚠ **The check runs immediately after `connect`, before ANY persistent write** — including the
+pragmas. It first sat just above `_init_schema`, on the reasoning that schema init is what mutates
+the database; measured false the same day by codex — `PRAGMA journal_mode=WAL` is a persistent
+database property, and a refused store had already been changed from `delete` to `wal`. The test
+asserting `_init_schema` was never CALLED was true and insufficient, because the pragma is not
+inside `_init_schema`. An unreadable version now also fails closed rather than being read as
+"brand-new database", which would have run this version's DDL against a newer layout.
 
 ⚠ **Deliberately narrower than the sidecars':** they also refuse an *unparseable* version; this
 does not, and an absent key is not an error either. A sidecar is a cache and this is the user's
@@ -130,6 +134,15 @@ sink that is already failing — and is seeded from disk at open. It is **lifeti
 monotonic**: a trail that lost an entry is permanently incomplete and `verify()` returns
 `valid=True` over that hole forever, so a number that healed would be a lie. Read-only handles read
 it too. The field never shipped, so no released behaviour changed.
+
+⚠ **AMENDED THE SAME DAY BY A CODEX L3 — the first implementation delivered neither word.** It
+wrote the whole in-memory total, so two writers seeded from the same base could overwrite each
+other and drive the "monotonic" counter BACKWARDS; and `status()` returned the constructor-seeded
+field, so a long-lived MCP server or reader stayed permanently at whatever it saw at open. Both
+fixed: the write is now an UPSERT that ADDS a per-process delta under `BEGIN IMMEDIATE`, cleared
+only after commit, and `status()` reads the row fresh and adds the unflushed delta. **And
+"durable" is bounded, not absolute** — a full volume fails the metadata write too, so what is
+guaranteed is that a loss *recorded* here survives the process, not that every loss is recorded.
 
 ⛔ **And the regression test written for the original defect could not see it either.** It read
 `cli.py` off disk and asserted `"status.audit_write_failures" in text`. Mutation-proven hollow:

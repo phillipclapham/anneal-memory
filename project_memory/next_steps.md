@@ -27,8 +27,21 @@
 
 **Seat 0904+11, afternoon of 2026-09-04.** Opened specifically for the twelve findings Diogenes
 filed against this repo in its SECOND review of the day (12:31–12:49) — six new, six carried.
-Eleven closed, one deliberately not. **1832 tests** (from 1822) · mypy clean · **ruff 63**
-(unchanged) · tree clean, nothing unpushed at close.
+Eleven closed, one deliberately not.
+
+▶ **RE-DERIVE STATE, DO NOT READ IT FROM HERE** — every number below was true at close and none of
+them can stay true on their own:
+```
+push state   git ls-remote origin main   vs   git rev-parse HEAD     (equal at close)
+tree         git status --short                                      (empty at close)
+tests        .venv/bin/python -m pytest -q -p no:cacheprovider        (1832 at close, from 1822)
+types        .venv/bin/python -m mypy anneal_memory                   (clean)
+lint         .venv/bin/python -m ruff check .                         (63, unchanged all session)
+findings     project_memory/diogenes_20260904.md — its OWN still-open slot, newest wins
+```
+⚠ The last line matters most: this file said "all six findings closed" on 09-04 and was falsified
+**by a second review landing**, not by the code changing. An answer can go stale without anything
+touching the repo (`spore-764`).
 
 ### ⛔ THE SHAPE, BECAUSE IT DECIDES HOW TO READ THE REST
 Four of the six new findings were INSTRUMENTS THAT COULD NOT SEE THEIR OWN SUBJECT — a counter on
@@ -86,6 +99,18 @@ degrades and asserts inside one process could not have seen this however much co
   retrospective cue on the line, tight enough that an unrecognised cue makes the gate FIRE.
 - **`project_memory/CLAUDE.md`** — every checkable claim re-derived from live sources; counts
   replaced by the commands that produce them. Found nine more wrong claims than the four reported.
+- ⚡ **THE LEVELCAP CENSUS WENT WELL PAST THE THREE README SITES DIOGENES NAMED — this is the
+  session's clearest instance of its own class.** Deriving the list from the PROPERTY (any text
+  stating a ladder or demotion range that implies a 3x top rung) instead of from the finding found
+  **five more live shipped surfaces**: `types.py:599`, `schema.py:459` (an OPERATOR-FACING warning
+  string), `graduation.py:429`, `docs/architecture.md:19` and `:36` (which ship in the sdist), plus
+  `_demote_line`'s own docstring — the function that PERFORMS the demotion still said
+  "(3x->2x or 2x->1x)". Found only because I ran the function to check a claim I had just written
+  into the public README. Measured through it: 2x->1x, 3x->2x, 4x->3x, 12x->11x, 18x->17x, 25x->24x.
+  ⛔ This is the FOURTH consecutive sweep of this class, and every previous one scoped itself to the
+  strings already known — the 09-01 review said so in as many words: *"the class was defined by the
+  strings already known, so the ladder spelling was never in the denominator."* Every site now
+  states the RULE rather than a sample of it, which is the only form that survives the next move.
 - **Carried:** the levelcap sweep finally reached README (demotion is by one from ANY level; the
   1x→3x diagram and promotion line implied a removed ceiling); the carry-forward warning stopped
   naming "Proven-tier", a category strictly wider than its own `>= 3` gate; `server.py`'s last

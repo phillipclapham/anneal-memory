@@ -2686,6 +2686,17 @@ def validated_save_continuity(
     # return field. Lower-tier carries (2x) are held silently — they are the
     # normal domain-blind-erosion-fix case, not a graduate-out decision.
     #
+    # ⚠ THE MESSAGE SAYS "3x OR HIGHER", NOT "Proven-tier", AND THAT IS
+    # DELIBERATE. In this library ``MIN_PROVEN_LEVEL`` is 2, so "Proven-tier"
+    # means 2x-and-up with no ceiling — a strictly WIDER set than this gate's
+    # ``>= 3``, and the comment above already says the 2x carries are held
+    # silently. Naming the tier made the sentence enumerate a category it does
+    # not deliver: a reader told to review "the Proven-tier carries" would be
+    # looking at a list that silently excludes part of that tier. The prior
+    # wording before that was "top-tier (3x)", which called a 12x pattern 3x on
+    # every wrap. Stating the PREDICATE avoids both, and cannot drift when a
+    # tier is renamed or MIN_PROVEN_LEVEL moves.
+    #
     # The prior text said "held at level despite an ungrounded CITATION" — wrong
     # for the v0.5.0 bare path (a bare carry never had a citation to be
     # ungrounded). Reworded to "no resolving citation and no provenance," which is
@@ -2703,7 +2714,7 @@ def validated_save_continuity(
     )
     if graduate_out:
         warnings.warn(
-            f"{len(graduate_out)} Proven-tier pattern(s) were carried forward "
+            f"{len(graduate_out)} pattern(s) at 3x or higher were carried forward "
             f"this wrap with no resolving citation and no provenance: "
             f"{', '.join(graduate_out)}. A permanent truth held without grounding "
             f"is a candidate to (a) record its founding episode ids as "

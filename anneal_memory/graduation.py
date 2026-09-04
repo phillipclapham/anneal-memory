@@ -45,7 +45,10 @@ from .schema import DEFAULT_GRADUATING
 # neocortex keeps the count running as an evidence-strength signal and its working set
 # is full of 4x+ lines. A library may not silently drop input because it disagrees with
 # the caller's methodology. Note ``_NAMED_PATTERN_WITH_EVIDENCE_RE`` (pattern_history
-# anchoring, continuity.py:2176) was ALREADY any-level and says so in its own comment —
+# anchoring in continuity.py — no line number ON PURPOSE: this reference has been
+# wrong twice, and by the second time it pointed at a DIFFERENT wrong line than when
+# it was filed, because the code around it moved and the number did not. Grep the
+# symbol) was ALREADY any-level and says so in its own comment —
 # so history recorded 10x while validation could not see it, and the two halves of one
 # record disagreed with each other.
 #

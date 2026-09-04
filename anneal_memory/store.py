@@ -67,6 +67,37 @@ from .associations import (
 )
 from .audit import AuditTrail
 
+def _is_write_lock_contention(exc: StoreDatabaseError) -> bool:
+    """True when a StoreDatabaseError came from SQLite write-lock contention.
+
+    ⛔ ONE DEFINITION, IMPORTED BY BOTH SURFACES. This lived as two byte-wise
+    separate copies in ``cli.py`` and ``server.py`` — AST-identical, so they
+    agreed only by luck, and a fix to either would have silently left the other
+    surface classifying contention differently. Two things that should be one
+    computed by two pieces of code.
+
+    Matches on the ``sqlite3`` error preserved as ``__cause__`` (the store's
+    ``_db_boundary`` always chains it) — never on the wrapper's formatted
+    message, which embeds the store PATH, so a database under a directory named
+    ``locked/`` would fool a substring test on the message. ``cause_type_name``
+    cannot do this job either: SQLITE_BUSY and a malformed database image are
+    both ``OperationalError``. The result-code name is the real discriminator
+    and arrived in Python 3.11, so it is guarded — ``requires-python`` is >=3.10.
+    """
+    cause = exc.__cause__
+    if not isinstance(cause, sqlite3.OperationalError):
+        return False
+    errorname = getattr(cause, "sqlite_errorname", None)
+    if errorname is not None:
+        return errorname in (
+            "SQLITE_BUSY",
+            "SQLITE_BUSY_SNAPSHOT",
+            "SQLITE_BUSY_TIMEOUT",
+        )
+    text = str(cause).lower()
+    return "database is locked" in text or "database is busy" in text
+
+
 #: Parameter names of :meth:`Store._audit_log_after_commit` that must never
 #: appear in the pass-through ``**kwargs`` queued for a deferred audit replay.
 #:

@@ -3241,6 +3241,35 @@ class TestCrystalIndexAndRecallCLI:
         assert ns2.no_associative is False
 
 
+class TestTheContentionPredicateHasExactlyOneDefinition:
+    """Two things that should be one, computed by two pieces of code.
+
+    ``_is_write_lock_contention`` existed as byte-wise separate copies in
+    ``cli.py`` and ``server.py``. They were AST-identical, so the two operator
+    surfaces agreed only by luck — and a fix to either would have left the
+    other classifying SQLite contention differently, which is precisely the
+    "peer is writing" vs "your database is corrupt" distinction the predicate
+    exists to make.
+
+    ⚠ ASSERTS OBJECT IDENTITY, NOT SOURCE TEXT. A grep for ``def
+    _is_write_lock_contention`` would pass on two identical copies, which is
+    the state this test exists to forbid; it would also fail on a legitimate
+    re-export. Identity answers the actual question — is there one predicate?
+    """
+
+    def test_every_surface_shares_one_predicate_object(self):
+        from anneal_memory import cli, server, store
+
+        assert (
+            cli._is_write_lock_contention
+            is server._is_write_lock_contention
+            is store._is_write_lock_contention
+        ), (
+            "the CLI and the MCP server are not using the same contention "
+            "predicate; one of them has grown its own copy again."
+        )
+
+
 class TestWriteLockContentionIsNotReportedAsCorruption:
     """`Store.__init__` runs INSERT OR IGNORE on every write-capable open, and
     that takes the WRITE LOCK even when the row already exists. So a new process

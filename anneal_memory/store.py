@@ -1035,6 +1035,14 @@ _ASSOCIATIONS_SCHEMA_SQL = ASSOCIATIONS_SCHEMA
 # same way so existing DBs upgrade additively via CREATE IF NOT EXISTS.
 _PATTERN_ASSOCIATIONS_SCHEMA_SQL = PATTERN_ASSOCIATIONS_SCHEMA
 
+# Durable degraded-audit-health keys in the ``metadata`` table. Deliberately
+# NOT in ``_DEFAULT_METADATA``: an absent row is a store that has never lost an
+# audit write, which ``_seed_audit_health`` already reads as zero, and seeding
+# a "0" into every database on earth to say "nothing has gone wrong yet" is
+# storage spent on the absence of news.
+_AUDIT_FAILURES_KEY = "audit_write_failures"
+_AUDIT_LAST_FAILURE_KEY = "audit_last_failure"
+
 _DEFAULT_METADATA = {
     "format_version": str(_SCHEMA_VERSION),
     "project_name": "Agent",
@@ -1283,7 +1291,34 @@ class Store:
         # swallowed is invisible to every existing surface — ``status()``
         # already reports ``audit_entry_count`` and would happily show a count
         # that trails ``total_episodes`` with nothing computing the difference.
-        # Surfaced on StoreStatus so it is POLLABLE (a warning is not).
+        #
+        # ⛔ THESE ARE DURABLE AND LIFETIME-SCOPED, AND BOTH WORDS ARE
+        # LOAD-BEARING. The first version of this field was process-local and
+        # said "POLLABLE" right here, which was FALSE on the one surface
+        # anyone actually polls: a CLI invocation is a one-shot process that
+        # opens a Store, runs one subcommand and exits, and ``status``
+        # mutates nothing — so no CLI ``status`` could EVER report non-zero.
+        # MEASURED 2026-09-04: two episodes committed with their audit writes
+        # dropped, and ``status --json`` printed ``"entry_count": 0`` and
+        # ``"write_failures": 0`` two lines apart, on a store that had
+        # genuinely lost both entries. The counter had been routed to the one
+        # transport where it is structurally always zero, and README:218 told
+        # operators to poll exactly that.
+        #
+        # So the count now lives in the SQLite ``metadata`` table — a
+        # DIFFERENT I/O PATH from the JSONL sink that is already failing —
+        # and is SEEDED FROM DISK at open, which is what makes the CLI
+        # transport real. It is MONOTONIC over the store's lifetime and never
+        # resets, because that is the honest number: a trail that lost an
+        # entry is permanently incomplete, and ``verify()`` walks a clean
+        # chain over that hole and returns ``valid=True`` forever.
+        #
+        # ⚠ Do not import the "a resettable integer only MOVES the window"
+        # objection here — it is about ``AuditTrail._dropped_since_last``,
+        # the ride-along marker, which must chain into the NEXT entry to
+        # become durable and so genuinely needs an outbox. That one is still
+        # process-local and ``AuditTrail.__init__`` says so. This counter has
+        # no window to move: it is written when the failure happens.
         self._audit_write_failures: int = 0
         self._audit_last_failure: str | None = None
         self._audit: AuditTrail | None = None
@@ -1360,6 +1395,10 @@ class Store:
                     # exist + be schema-current — a reader cannot migrate; a stale-schema
                     # read surfaces as a normal query error to the caller's handling.
                     self._conn.execute("PRAGMA query_only=ON")
+                    # A reader polls audit health too, and seeding is a bare
+                    # SELECT — permitted under query_only. Without this, a
+                    # read-only handle reports a permanently clean trail.
+                    self._seed_audit_health()
                     return
                 self._conn.execute("PRAGMA journal_mode=WAL")
                 # synchronous=FULL makes commit() fsync the WAL so a
@@ -1422,6 +1461,12 @@ class Store:
                 except sqlite3.Error:
                     pass
             raise
+
+        # Seed the durable degraded-audit counters from disk. AFTER the
+        # boundary, so a store whose health record is unreadable still
+        # constructs — and after ``_init_schema``, so the metadata table
+        # exists on a freshly created database.
+        self._seed_audit_health()
 
     def _init_schema(self) -> None:
         """Initialize database schema and default metadata."""
@@ -4191,6 +4236,62 @@ class Store:
     # ("Wrap-lifecycle invariants"). Do not reintroduce a single-key
     # helper inside wrap_started/wrap_cancelled/wrap_completed.
 
+    def _seed_audit_health(self) -> None:
+        """Load the durable degraded-audit counters from ``metadata``.
+
+        This is what makes ``status().audit_write_failures`` mean anything on
+        a one-shot process. Best-effort by construction: a store whose health
+        row is missing, unreadable or malformed reports zero rather than
+        failing to open — refusing to construct a Store because its HEALTH
+        record is unreadable would be the tail wagging the dog.
+        """
+        try:
+            raw = self._get_metadata(_AUDIT_FAILURES_KEY)
+            self._audit_write_failures = int(raw) if raw else 0
+        except Exception:
+            self._audit_write_failures = 0
+        try:
+            self._audit_last_failure = (
+                self._get_metadata(_AUDIT_LAST_FAILURE_KEY) or None
+            )
+        except Exception:
+            self._audit_last_failure = None
+
+    def _persist_audit_health(self) -> None:
+        """Write the degraded-audit counters through to ``metadata``.
+
+        ⛔ Called ONLY from the post-commit audit-failure handler, whose
+        contract is that nothing it does propagates to the caller: the
+        mutation has already landed, and failing the caller would report a
+        completed operation as failed. So this swallows its own failure, like
+        every other channel in that handler.
+
+        ⚠ THE STANDALONE ``commit()`` IS CORRECT HERE AND WOULD NOT BE INSIDE
+        THE WRAP METHODS. The class docstring forbids per-key metadata helpers
+        inside ``wrap_started``/``wrap_cancelled``/``wrap_completed`` because
+        those must share ONE commit or a crash mid-sequence leaves the wrap
+        state machine partial. This handler runs after the pipeline's own
+        commit — there is no in-flight transaction here to split.
+
+        The running total is computed IN MEMORY and written whole, never as an
+        SQL increment, so a failed persist loses only that one write-through:
+        the next failure that persists cleanly restores the correct total.
+        """
+        if self._read_only or self._closed or self._conn is None:
+            return
+        try:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                (_AUDIT_FAILURES_KEY, str(self._audit_write_failures)),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                (_AUDIT_LAST_FAILURE_KEY, self._audit_last_failure or ""),
+            )
+            self._conn.commit()
+        except Exception:
+            pass
+
 
     def _row_to_episode(self, row: sqlite3.Row) -> Episode:
         """Convert a database row to an Episode.
@@ -4395,6 +4496,11 @@ class Store:
             try:
                 self._audit_write_failures += 1
                 self._audit_last_failure = f"{method}: {exc!r}"
+                # Write through to the metadata table so the count OUTLIVES
+                # this process. Without this the channel is real only for a
+                # long-lived MCP server and structurally dead on the CLI,
+                # which is the surface the README points operators at.
+                self._persist_audit_health()
             except Exception:
                 pass
             try:

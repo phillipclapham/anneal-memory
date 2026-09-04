@@ -109,16 +109,27 @@ class AuditTrail:
         #
         # MEASURED 2026-09-04 (codex L3 HIGH): a committed mutation whose audit
         # write was dropped, followed by an ORDINARY ``close()`` + reopen — no
-        # crash — leaves 3 episodes against 2 audit entries, no marker,
-        # ``verify()`` returning ``valid=True`` and ``status()`` reporting
-        # ``audit_write_failures = 0``. **Every CLI invocation opens and closes
-        # a Store**, so across CLI commands this mechanism effectively never
-        # fires. It closes the swallow-then-keep-going case within one live
-        # process, and nothing wider.
-        # Flagged independently by BOTH L3 seats, 2026-09-04. Making it
-        # durable means persisting outside the sink that is already failing
-        # (the SQLite metadata table is a different I/O path) — deliberately
-        # NOT done in this pass: it is a write issued from inside a
+        # crash — leaves 3 episodes against 2 audit entries, no marker, and
+        # ``verify()`` returning ``valid=True``. **Every CLI invocation opens
+        # and closes a Store**, so across CLI commands this mechanism
+        # effectively never fires. It closes the swallow-then-keep-going case
+        # within one live process, and nothing wider.
+        #
+        # ⚠ CORRECTION, 2026-09-04 (same day, later): that measurement also
+        # said ``status()`` reported ``audit_write_failures = 0`` after the
+        # reopen. THAT HALF IS NO LONGER TRUE and the sentence above has been
+        # amended rather than left to rot — ``Store._audit_write_failures`` is
+        # now persisted in the SQLite metadata table and seeded at open, so a
+        # reopened store reports the lifetime count. Stated narrowly, because
+        # this comment has been wrong twice already in the overclaiming
+        # direction: what became durable is the COUNT. This attribute — the
+        # ride-along ``dropped_before`` MARKER — did NOT, and everything else
+        # above stands. The two are different promises: the count says "N
+        # writes were lost", the marker says "the gap is HERE in the chain",
+        # and only the second has to survive into a hash-chained entry.
+        #
+        # Flagged independently by BOTH L3 seats, 2026-09-04. Making THE
+        # MARKER durable is still open: it is a write issued from inside a
         # post-commit exception handler and needs its own failure discipline,
         # which is a design question, not a patch. Tracked for the next
         # anneal touch; the honest thing meanwhile is that this comment says

@@ -476,12 +476,21 @@ def cmd_status(args: argparse.Namespace) -> None:
                     "retention_days": status.audit_retention_days,
                     # ⛔ WRITE-SIDE HEALTH. entry_count says what the trail
                     # HAS; these say what it LOST. A post-commit audit failure
-                    # is swallowed by design, so this is the only surface an
-                    # operator can POLL for it — a UserWarning had to be caught
+                    # is swallowed by design, so this is the surface an
+                    # operator POLLS for it — a UserWarning had to be caught
                     # when it fired. Added 2026-09-04 after L4 found the field
-                    # existed on StoreStatus and reached NO transport: the
-                    # channel documented as "pollable" was not, on the surface
-                    # anyone actually polls.
+                    # existed on StoreStatus and reached NO transport.
+                    # ⚠ AND THEN IT REACHED THIS ONE AND WAS STILL ZERO. The
+                    # counter was process-local, and a CLI run is a one-shot
+                    # process in which `status` mutates nothing — so this line
+                    # was structurally incapable of printing non-zero, on the
+                    # one surface the README tells operators to poll. The
+                    # count is durable (Store metadata) as of 2026-09-04; if
+                    # it ever goes process-local again, this line silently
+                    # becomes a decoration. Pinned by
+                    # tests/test_audit.py::TestDegradedAuditHealthReachesEveryTransport,
+                    # which loses a write in one Store and reads it from
+                    # another.
                     "write_failures": status.audit_write_failures,
                     "last_failure": status.audit_last_failure,
                 },
@@ -537,9 +546,9 @@ def cmd_status(args: argparse.Namespace) -> None:
             if status.audit_write_failures:
                 print(
                     f"  ⚠ {status.audit_write_failures} audit write(s) FAILED "
-                    f"and were dropped — the trail is INCOMPLETE for this "
-                    f"process. verify() cannot see a missing entry and will "
-                    f"still report valid."
+                    f"and were dropped over this store's LIFETIME — the trail "
+                    f"is INCOMPLETE. verify() cannot see a missing entry and "
+                    f"will still report valid."
                 )
                 if status.audit_last_failure:
                     print(f"    last: {status.audit_last_failure}")

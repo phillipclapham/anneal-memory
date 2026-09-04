@@ -120,8 +120,18 @@ class StoreStatus:
     # swallowed by design — the mutation already landed, so failing the caller
     # would report a completed operation as failed — but swallowed must not
     # mean invisible. Non-zero ``audit_write_failures`` means the trail is
-    # incomplete for this process: entries are missing, and ``verify()`` will
-    # still return ``valid=True`` because it walks the entries that exist.
+    # incomplete: entries are missing, and ``verify()`` will still return
+    # ``valid=True`` because it walks the entries that exist.
+    #
+    # ⛔ LIFETIME-SCOPED AND DURABLE, not process-local — the distinction is
+    # the whole value of the field. It is persisted in the store's SQLite
+    # ``metadata`` table (a different I/O path from the JSONL sink that is
+    # already failing) and seeded from disk at open, so a one-shot CLI run
+    # reports losses caused by a process that has long exited. The first
+    # version was a plain instance attribute, which made every CLI ``status``
+    # structurally zero on the one surface the README says to poll.
+    # It is MONOTONIC and never resets: a trail that lost an entry is
+    # permanently incomplete, so a number that healed would be a lie.
     # Defaulted, so every existing constructor call keeps working.
     audit_write_failures: int = 0
     audit_last_failure: str | None = None

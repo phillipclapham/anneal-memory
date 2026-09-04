@@ -4,6 +4,33 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — the degraded-audit counter reached the CLI and was still structurally zero
+
+`status().audit_write_failures` was added so a swallowed audit write would be *pollable*, then
+routed to every transport — and on the one transport operators actually poll it could never report
+anything but **0**. It was a plain instance attribute, and a CLI invocation is a one-shot process
+that opens a `Store`, runs one subcommand and exits; `status` mutates nothing, so the only process
+that could have counted a failure was already gone. Measured 2026-09-04: two episodes committed
+with their audit writes refused, and `anneal-memory status --json` printed `"entry_count": 0` and
+`"write_failures": 0` **two lines apart**, on a store that had genuinely lost both entries — while
+README told operators to poll exactly that. (The MCP path was never affected: one long-lived
+`Store` for the process lifetime.)
+
+The count now lives in the store's SQLite `metadata` table — a different I/O path from the JSONL
+sink that is already failing — and is seeded from disk at open. It is **lifetime-scoped and
+monotonic**: a trail that lost an entry is permanently incomplete and `verify()` returns
+`valid=True` over that hole forever, so a number that healed would be a lie. Read-only handles read
+it too. The field never shipped, so no released behaviour changed.
+
+⛔ **And the regression test written for the original defect could not see it either.** It read
+`cli.py` off disk and asserted `"status.audit_write_failures" in text`. Mutation-proven hollow:
+hardcoding `"write_failures": 0` with the token left alive in a *comment*, plus `if False:` on the
+human branch, left it passing and the whole suite green — a substring assertion is satisfied by a
+comment, a docstring or a dead branch. Replaced by tests that lose a write in one `Store`, close
+it, and read it back from another: the CLI `--json` payload, the CLI human output, the MCP handler,
+a read-only handle, and accumulation across sessions. All three mutants (the original one, plus
+removing the persist and removing the seed) now fail.
+
 ### Fixed — an audit-sink failure could report a COMMITTED operation as failed (AM-AUDIT-AFTER-COMMIT)
 
 0.9.9 shipped a codex L3 HIGH fix establishing the policy *an audit-sink failure must not propagate
@@ -88,6 +115,11 @@ So a swallowed write now reports on **four channels, most-suppressible last**:
    L3 seats flagged it independently. Making it durable means persisting outside the sink that is
    already failing; that is a design question about issuing a write from inside a post-commit
    exception handler, not a patch, and it is deliberately left for the next anneal touch;
+   ⚠ **AMENDED LATER THE SAME DAY — HALF OF THIS LANDED.** The *count* is now durable (see
+   *the counter reached the CLI and was still structurally zero*, below); the ride-along
+   `dropped_before` *marker* described in this bullet is NOT, and everything above about it
+   stands. The two are different promises: the count says N writes were lost, the marker says
+   *where* the gap is in the chain, and only the second must survive into a chained entry;
 2. **`Store.status().audit_write_failures` / `.audit_last_failure`** — pollable, which a warning is
    not: an agent that started later, or runs under `-W error`, can still ask;
 3. the **`anneal-memory` logger** with `exc_info`, matching how `audit.py` already reports the
@@ -158,6 +190,12 @@ constant WHERE IN THE WRITE the failure lands, and that is the dimension both HI
   `status().audit_write_failures` back to **0**. Every CLI invocation opens and closes a Store, so
   across CLI commands the mechanism effectively never fires. Making it durable means a transactional
   outbox, not a resettable integer (which just moves the window); left named rather than half-built.
+  ⚠ **CORRECTED IN PLACE, same day:** the final clause of that measurement — `audit_write_failures`
+  back to **0** — no longer holds; the counter is now persisted and seeded at open, so a reopened
+  store reports **2**. The rest of the measurement is unchanged and still true, and the
+  "transactional outbox, not a resettable integer" judgement still governs **the marker**, which is
+  what it was about. It does not govern the count: a lifetime count has no window to move, because
+  it is written when the failure happens rather than riding the next entry.
 - **MED, pre-existing, filed:** an exception during rotation (after the rename, during gzip or the
   manifest write) leaves an orphan whose sealed file is not adopted, and `_rotate_if_needed` then
   reads "active missing" as a successful rotation. Not introduced here — this release only changes

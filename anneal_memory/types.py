@@ -596,7 +596,8 @@ class SaveContinuityResult(TypedDict):
     # meaningful words with the pattern's prior-session explanation —
     # sycophantic vocabulary reuse across sessions, not multi-faceted
     # evidence accumulation. The corresponding patterns in the saved
-    # continuity were demoted (3x→2x, 2x→1x) and marked
+    # continuity were demoted BY ONE LEVEL from wherever they stood — not
+    # only 3x→2x/2x→1x; there is no ceiling since 0.9.7 — and marked
     # ``(cross-session-overlap)``. Each entry is a dict
     # ``{"name": str, "today_level": int, "overlap_words": list[str],
     #  "prior_explanation": str}``. Empty list when no cross-session

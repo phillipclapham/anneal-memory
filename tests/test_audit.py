@@ -1834,6 +1834,111 @@ class TestDegradedAuditHealthReachesEveryTransport:
         )
 
 
+class TestTheGapLocationSurvivesTheProcess:
+    """spore-745, the half that could be closed without an outbox.
+
+    The hash-chained ``dropped_before`` marker pins WHERE a gap sits, and it
+    becomes durable only once a later write lands IN THE SAME PROCESS. A close
+    or crash before that loses it and ``verify()`` walks cleanly over the hole.
+    The spore asked for a transactional outbox.
+
+    ⛔ AN OUTBOX WAS NOT BUILT, AND THE REASONING IS THE POINT. What the
+    chained marker uniquely provides is TAMPER-EVIDENCE — it is inside the
+    hash chain. An outbox staged in the SQLite metadata table is not chained
+    either, so it does not deliver that property during the window it exists;
+    it delivers DURABILITY OF A LOCATION. That is obtainable far more cheaply,
+    because ``note_write_failure`` already knows the seq and was discarding it.
+
+    ⚡ ALSO FALSIFIED BEFORE BUILDING: "advance ``_seq`` on a dropped write so
+    verify sees a numeric gap" looks cheaper still and buys NOTHING —
+    ``_initialize`` recovers ``_seq`` from the last entry ON DISK
+    (``last_entry["seq"] + 1``), so a reopen erases the gap. Identical
+    durability to the marker it was meant to replace.
+
+    So the location now rides the durable ``audit_last_failure`` record, and
+    the chained marker keeps its own separate job. Both are reported; neither
+    pretends to be the other.
+    """
+
+    def test_the_location_outlives_the_process_that_saw_it(self, tmp_path):
+        from anneal_memory.store import Store
+
+        db = tmp_path / "memory.db"
+        store = Store(db)
+        store.record("landed-0", episode_type="observation")
+        store.record("landed-1", episode_type="observation")
+
+        real = store._audit.log
+
+        def boom(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        store._audit.log = boom
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            store.record("this one loses its audit write", episode_type="observation")
+        store._audit.log = real
+        store.close()
+
+        reopened = Store(db)
+        try:
+            last = reopened.status().audit_last_failure
+        finally:
+            reopened.close()
+
+        assert last is not None, "the failure record did not survive the process"
+        assert "dropped before audit seq 2" in last, (
+            "the durable record says a write was lost but not WHERE, so an "
+            f"operator cannot locate the gap in the chain. got: {last!r}"
+        )
+
+    def test_the_wording_matches_the_chained_marker_rather_than_contradicting_it(
+        self, tmp_path
+    ):
+        """"dropped before seq N", never "missing seq N".
+
+        ``_seq`` advances only on a SUCCESSFUL append, so the next entry that
+        lands REUSES the number the dropped one was assigned. Phrasing it as
+        "missing seq N" would point an operator at an entry that exists — and
+        would contradict the chained marker sitting on that very entry.
+        """
+        from anneal_memory.store import Store
+
+        db = tmp_path / "memory.db"
+        store = Store(db)
+        try:
+            store.record("landed-0", episode_type="observation")
+            store.record("landed-1", episode_type="observation")
+            real = store._audit.log
+
+            def boom(*args, **kwargs):
+                raise OSError(28, "No space left on device")
+
+            store._audit.log = boom
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                store.record("lost", episode_type="observation")
+            store._audit.log = real
+            store.record("landed-after", episode_type="observation")
+
+            last = store.status().audit_last_failure
+        finally:
+            store.close()
+
+        assert "missing audit seq" not in last
+
+        # The entry the chained marker rode in on must be the same seq the
+        # durable record names — the two records agree by construction.
+        entries = [
+            json.loads(line)
+            for line in (db.parent / f"{db.stem}.audit.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        carrier = [e for e in entries if e.get("dropped_before")]
+        assert carrier, "no chained marker was written at all"
+        assert f"dropped before audit seq {carrier[0]['seq']}" in last
+
+
 class TestAFailedRotationDoesNotLeaveAFalseTamperingVerdict:
     """"Active file missing" is not proof the rotation succeeded (spore-746).
 

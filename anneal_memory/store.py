@@ -4561,13 +4561,36 @@ class Store:
             #      (measured: zero signal), which is why it is not alone.
             # Each step is itself wrapped: this runs inside a handler whose
             # contract is that nothing after a commit propagates.
+            missing_seq: int | None = None
             try:
-                self._audit.note_write_failure()
+                missing_seq = self._audit.note_write_failure()
             except Exception:
                 pass
             try:
                 self._audit_write_failures += 1
-                self._audit_last_failure = f"{method}: {exc!r}"
+                # ⛔ RECORD WHERE, NOT JUST WHAT. The hash-chained
+                # ``dropped_before`` marker pins the gap's position in the
+                # chain, but it only becomes durable once a LATER write lands
+                # in this same process — a close or crash before that loses it
+                # and verify() walks cleanly over the hole. This string is
+                # persisted to the metadata table immediately, so the position
+                # survives even when the marker does not.
+                # ⚠ NOT A SUBSTITUTE FOR THE MARKER: this is not hash-chained
+                # and proves nothing against an attacker who can edit the
+                # store. It is the difference between an operator knowing
+                # "2 writes were lost" and "the gaps are at seq 3 and seq 7".
+                # ⚠ "dropped BEFORE seq N", not "missing seq N" — ``_seq``
+                # only advances on a SUCCESSFUL append, so the next entry that
+                # lands reuses the number the dropped one was assigned.
+                # "missing seq 2" would point at an entry that exists.
+                # This wording matches the chained ``dropped_before`` marker's
+                # own semantics exactly, and the two now agree by construction.
+                where = (
+                    f" [dropped before audit seq {missing_seq}]"
+                    if missing_seq is not None else ""
+                )
+                when = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                self._audit_last_failure = f"{method}: {exc!r}{where} at {when}"
                 # Write through to the metadata table so the count OUTLIVES
                 # this process. Without this the channel is real only for a
                 # long-lived MCP server and structurally dead on the CLI,

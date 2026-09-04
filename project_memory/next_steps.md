@@ -25,9 +25,9 @@
 
 ## ▶▶ PICKUP 2026-09-05 — AM-AUDIT-AFTER-COMMIT LANDED. READ THE COUNT STORY BEFORE ANYTHING ELSE.
 
-**State at close of the 09-04 seat:** AM-AUDIT-AFTER-COMMIT is COMMITTED — `d7b482e` (the policy)
-and `e8c04da` (the L3/L4 round). Working tree clean apart from this file.
-**1820 tests** (from 1764) · mypy clean · **ruff 64** · pre-push gate green on HEAD, stamp
+**State at close of the 09-04 seat:** AM-AUDIT-AFTER-COMMIT is COMMITTED — `d7b482e` (the policy),
+`e8c04da` (L3 complement/glm + L4) and `8a6cc21` (the codex retry). Working tree clean apart from this file.
+**1822 tests** (from 1764) · mypy clean · **ruff 63** · pre-push gate green on HEAD, stamp
 `0.9.10.dev0`, not a released number.
 ⚠ The ruff baseline at HEAD was **65, not the 64 this file claimed** — re-derived from disk, which
 is this file's own standing instruction, and it was wrong about its own number. The count is 64 now
@@ -69,13 +69,23 @@ warning**) and `-W error` produces **zero signal**. So four channels now, most-s
 (pollable), the `anneal-memory` logger, then the warning.
 
 ### ▶ OPEN / NEXT
-- ⚠ **L3 RAN AND IS NOT COVERAGE. codex TIMED OUT AND PRODUCED NOTHING; glm was CUT OFF part-way.**
-  The runner said so itself and kept this repo on the bugfind list. complement's three findings and
-  glm's two are triaged and closed (commit `e8c04da`) — **that is not a clean bill of health.**
-  ⚖ Per `spore-744` (Phill, today): *being stingy with codex is a defect, not thrift.* codex was
-  re-run on a tighter `--paths anneal_memory/audit.py` scope at `--timeout 900`; **if that retry also
-  came back empty, the frontier-lineage seat has still not read this change, and it reaches Alex's
-  lockout path — run it again before any release.**
+- ✅ **L3 COVERAGE IS RECORDED and this repo is OFF today's bugfind list.** The FIRST pass was not
+  coverage — codex timed out with no output, glm was cut off part-way — and per `spore-744` (*being
+  stingy with codex is a defect, not thrift*) it was **re-run on a tighter `--paths
+  anneal_memory/audit.py` scope**. It came back in 424s with **two HIGH and one MED**, i.e. the
+  retry was the whole value. complement + glm triaged in `e8c04da`; codex in `8a6cc21`.
+- ⛔ **THE CODEX HIGH IS THE ONE TO CARRY: A DURABILITY HICCUP WAS READING AS TAMPERING, AND MY OWN
+  MORNING FIX MADE IT POSSIBLE.** `write`+`flush` succeed, `fsync` raises EIO → the complete line is
+  already on disk while `_seq`/`_prev_hash`/the drop counter are unchanged, so the retry re-emits the
+  SAME seq. Reproduced: seqs `[0,1,1]`, `dropped_before` `[None,2,3]` (pending drops counted twice
+  AND the landed entry counted as dropped), `verify()` → **`valid=False`**. On the record whose whole
+  job is telling a hiccup from tampering. **FIXED**: all-or-nothing append, pre-append size restored.
+  Mutation-checked. Also covers the partial-write case that concatenates into unparseable JSON.
+- ⚡ **AND CODEX'S CLOSING LINE WAS ABOUT THE TESTS, NOT THE CODE — keep this discriminator.** *"The
+  regression tests replace `AuditTrail.log` wholesale with a function that raises before writing."*
+  Every fixture varied the sink outcome and the method while holding constant **WHERE IN THE WRITE**
+  the failure lands — the dimension both HIGHs live in. `TestFailureLandsAtDifferentPointsInTheWrite`
+  exists to vary it. **Ask what a fixture varies and whether the defect lives in what it holds fixed.**
 - **L4 caught the one no test could**, and it is the pattern to carry: `audit_write_failures` reached
   `StoreStatus` and **none of the three transports**. The CLI `--json` builds its own `audit` object
   with four hardcoded keys, the human output prints four, the MCP handler composes its own line. The
@@ -85,7 +95,16 @@ warning**) and `-W error` produces **zero signal**. So four channels now, most-s
   are covered by the mechanical scan and NOT by the behavioural table. Stated in the test on purpose.
 - **A partial audit write (ENOSPC mid-line) is still reported as tampering by `verify()`** —
   pre-existing, named by L2, NOT fixed here. `cli.cmd_verify` buries `skipped_lines`.
-- ⛔ **`dropped_before` CLOSES SWALLOW-ONLY, NOT SWALLOW-THEN-CRASH.** Both L3 seats found this
+- ⛔ **`spore-745` — `dropped_before` IS LOST BY ANY `close()`/REOPEN, NOT JUST A CRASH.** Measured:
+  an ORDINARY close+reopen leaves 3 episodes against 2 entries, no marker, `valid=True`,
+  `audit_write_failures` back to 0. **Every CLI invocation opens and closes a Store**, so across CLI
+  commands the mechanism effectively never fires. A durable fix wants a transactional outbox — a
+  resettable integer only MOVES the window. ⚠ This comment has been wrong TWICE in one day, both
+  times overclaiming; do not let a third version do it. · **`spore-746`** — rotation-failure orphan
+  (pre-existing MED). · **`spore-747`** — the levain two-anneal skew + my design read (anneal's
+  sidecars fail CLOSED on a newer schema while the SQLite store degrades SILENTLY; that asymmetry is
+  what makes it a correctness hazard, not a reporting gap).
+- (superseded framing kept for the trail) `dropped_before` closes swallow-only, not swallow-then-crash. Both L3 seats found this
   independently. The pending count is process-local: a crash between the swallowed write and the
   next successful one loses it, `__init__` resets to 0, and `verify()` reports `valid=True` over the
   gap exactly as before the mechanism existed. Making it durable means persisting outside the sink

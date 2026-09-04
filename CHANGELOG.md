@@ -4,6 +4,25 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — the two halves of one store failed in OPPOSITE directions under version skew
+
+`crystal.py` and `spores.py` both hard-refuse a newer `schema_version` — verbatim, *"refusing to
+read it so fields this version doesn't understand aren't silently dropped"*. The SQLite store
+wrote `format_version` into its metadata table and **never read it back**. So when one install
+wires two different anneal versions at one store, the sidecars failed CLOSED and loud while the
+SQLite half degraded SILENTLY. That asymmetry is what made it a correctness hazard rather than a
+reporting gap (`spore-747`).
+
+`Store` now refuses to open a database whose `format_version` is greater than this build's, on
+both the writer and the read-only path. ⚠ **The check runs BEFORE `_init_schema`** — schema init
+applies migrations and stamps defaults, and doing that to a store we are about to declare
+unreadable would mutate the very database being protected.
+
+⚠ **Deliberately narrower than the sidecars':** they also refuse an *unparseable* version; this
+does not, and an absent key is not an error either. A sidecar is a cache and this is the user's
+memory — locking someone out of every episode they own over a garbled metadata string is a worse
+outcome than proceeding. No existing store can trip this: `_SCHEMA_VERSION` has only ever been 1.
+
 ### Changed — a lost audit write now records WHERE, not only that it happened
 
 `Store.status().audit_last_failure` now carries the chain position and a UTC timestamp:

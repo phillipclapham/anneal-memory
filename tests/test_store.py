@@ -40,6 +40,135 @@ def store(tmp_db):
 # -- Initialization --
 
 
+class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
+    """spore-747: the two halves of one store failed in OPPOSITE directions.
+
+    ``crystal.py`` and ``spores.py`` both hard-refuse a newer
+    ``schema_version`` — verbatim, *"refusing to read it so fields this
+    version doesn't understand aren't silently dropped"*. The SQLite store
+    wrote ``format_version`` into its metadata table and **never read it
+    back**. Under a version skew — one levain install wiring two different
+    anneal versions at one store, which is the case that surfaced this — the
+    sidecars failed CLOSED and loud while the SQLite half degraded SILENTLY.
+    That asymmetry is what made it a correctness hazard rather than a
+    reporting gap.
+
+    ⚠ The guard is deliberately NARROWER than the sidecars'. They also refuse
+    an unparseable version; this does not. A sidecar is a cache and this is
+    the user's memory — locking someone out of every episode they own over a
+    garbled metadata string is a worse outcome than proceeding.
+    """
+
+    def _store_stamped(self, tmp_path, value):
+        import sqlite3
+
+        db = tmp_path / "m.db"
+        store = Store(db)
+        store.record("hello", episode_type="observation")
+        store.close()
+        conn = sqlite3.connect(db)
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('format_version', ?)",
+            (value,),
+        )
+        conn.commit()
+        conn.close()
+        return db
+
+    def test_a_newer_store_is_refused_on_both_open_paths(self, tmp_path):
+        db = self._store_stamped(tmp_path, "2")
+
+        with pytest.raises(StoreError, match="newer anneal-memory schema"):
+            Store(db)
+        with pytest.raises(StoreError, match="newer anneal-memory schema"):
+            Store(db, read_only=True)
+
+    def test_schema_init_NEVER_RUNS_on_a_store_that_is_refused(
+        self, tmp_path, monkeypatch
+    ):
+        """The one thing this must not do — see the guard's docstring.
+
+        Schema init applies migrations and INSERT OR IGNOREs defaults. Running
+        that against a database whose format we have just declared we do not
+        understand would mutate the very store we are protecting, so the check
+        runs BEFORE ``_init_schema``.
+
+        ⛔ ASSERTS THE CALL, NOT THE AFTER-STATE, AND THAT IS THE WHOLE POINT.
+        The first version of this test compared the metadata rows before and
+        after — and MUTATION-PROVED HOLLOW: moving the check to AFTER
+        ``_init_schema`` left it PASSING, because ``INSERT OR IGNORE`` writes
+        nothing to a store that already has every default key, so the
+        after-state is identical whether or not schema init ran. The observable
+        it graded was invariant to the thing it was named for. Spy on the call.
+        """
+        db = self._store_stamped(tmp_path, "2")
+
+        calls = []
+        original = Store._init_schema
+        monkeypatch.setattr(
+            Store, "_init_schema",
+            lambda self: (calls.append(1), original(self))[1],
+        )
+
+        with pytest.raises(StoreError, match="newer anneal-memory schema"):
+            Store(db)
+
+        assert calls == [], (
+            "_init_schema ran against a store whose format this version does "
+            "not understand. The version check must precede it — migrations "
+            "and default-stamping would mutate the very store being refused."
+        )
+
+    def test_schema_init_DOES_run_on_a_store_that_is_accepted(
+        self, tmp_path, monkeypatch
+    ):
+        """The control. Without it, a guard that never opens anything passes."""
+        db = self._store_stamped(tmp_path, "1")
+
+        calls = []
+        original = Store._init_schema
+        monkeypatch.setattr(
+            Store, "_init_schema",
+            lambda self: (calls.append(1), original(self))[1],
+        )
+
+        store = Store(db)
+        try:
+            assert calls == [1], "schema init did not run on a readable store"
+        finally:
+            store.close()
+
+    @pytest.mark.parametrize(
+        "value,why",
+        [
+            ("1", "the current version"),
+            ("garbled", "unparseable — deliberately tolerated, see the class docstring"),
+        ],
+    )
+    def test_these_still_open(self, tmp_path, value, why):
+        db = self._store_stamped(tmp_path, value)
+        store = Store(db)
+        try:
+            assert store.status().total_episodes == 1, why
+        finally:
+            store.close()
+
+    def test_a_pre_versioning_store_with_no_key_still_opens(self, tmp_path):
+        import sqlite3
+
+        db = self._store_stamped(tmp_path, "1")
+        conn = sqlite3.connect(db)
+        conn.execute("DELETE FROM metadata WHERE key = 'format_version'")
+        conn.commit()
+        conn.close()
+
+        store = Store(db)
+        try:
+            assert store.status().total_episodes == 1
+        finally:
+            store.close()
+
+
 class TestInit:
     def test_creates_database_file(self, tmp_db):
         s = Store(tmp_db)

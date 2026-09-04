@@ -19,11 +19,14 @@ excludes it by some other rule. The oracle was validated against the artifact
 rather than assumed: at 06e5858 the API reproduced the real tarball's file list
 exactly, 112 of 112.
 
-⚠ SCOPE, STATED PLAINLY: this gate is LOCAL-ONLY. CI installs the package with
-build isolation, so ``hatchling`` is not importable on the matrix and these
-tests skip there. That is not ideal, but it is not idle either — releases are
-cut on the dev machine, which is where this runs. Adding ``pip install
-hatchling`` to the CI workflow would make it fire on the matrix too.
+⚠ SCOPE. This gate WAS local-only: CI installs the package under build
+isolation, so ``hatchling`` was not importable on the matrix and every test
+here skipped there — a guard present everywhere except where it is enforced,
+protecting an artifact that cannot be unpublished. The CI workflow now
+installs ``hatchling`` alongside pytest, so it fires on the matrix too. The
+``importorskip`` below stays as the honest fallback for a checkout without it
+(and note that a SKIP is not a PASS: if this ever starts skipping in CI again,
+the gate is gone and nothing will say so).
 """
 
 from __future__ import annotations

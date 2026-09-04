@@ -48,7 +48,13 @@ jobs:
           pip install -e .
 
       - name: Install test dependencies
-        run: pip install pytest
+        # hatchling is a BUILD dependency and is normally invisible on the
+        # matrix because `pip install -e .` runs under build isolation. The
+        # packaging gate (tests/test_packaging.py) asks hatchling's real
+        # file-selection API what the sdist will contain, so without this it
+        # SKIPS in CI — a guard that exists everywhere except where it is
+        # enforced. The artifact it protects cannot be unpublished.
+        run: pip install pytest hatchling
 
       - name: Run pytest
         run: pytest -q

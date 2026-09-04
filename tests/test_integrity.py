@@ -775,12 +775,33 @@ class TestDocumentedToolCount:
         # So extract the ladder RUNS themselves and judge each one.
         #
         # A run is a taught ladder when it ASCENDS (``4x``→``3x`` is a demotion
-        # example, not a ladder) and is not a whole-span quote of a retired
-        # ladder. CONVENTION, enforced here: quote a retired ladder as ONE
-        # backticked span (`` `1x → 2x → 3x` ``); teach a live one unquoted or
-        # with per-token backticks. This fails in the SAFE direction — forget
-        # the backticks around a historical quote and the gate fires loudly;
-        # it cannot silently pass a real ceiling.
+        # example, not a ladder) and is not a quote of a retired ladder.
+        #
+        # ⛔ THE HISTORICAL EXEMPTION IS DECIDED BY INTENT, NOT BY FORMATTING,
+        # AND THIS IS THE SECOND CORRECTION TO IT. It used to exempt ANY
+        # whole-span-backticked ascending run, unconditionally — and the
+        # comment here claimed the gate "cannot silently pass a real ceiling".
+        # MEASURED FALSE 2026-09-04 by one backtick pair: the same sentence
+        # re-teaching the removed ceiling as live guidance passed when written
+        # `1x -> 2x -> 3x` and failed when written 1x -> 2x -> 3x. Same claim,
+        # same line, same file. Code-formatting a ladder is the natural
+        # markdown instinct — the fix landed that same morning reached for
+        # backticks on its first move — so the blind spot sat in the ONLY
+        # downstream detector this class has, for a class that rotted twenty
+        # days unnoticed.
+        #
+        # So a whole-span quote is exempt only when the LINE also carries a
+        # retrospective cue, which a writer has to mean. Deliberately tight:
+        # an unrecognised cue makes the gate FIRE, which is the direction the
+        # old comment claimed and did not have. Quote a retired ladder as one
+        # backticked span AND say it is retired ("until 0.9.7 the ladder was
+        # `1x → 2x → 3x`"); teach a live one unquoted or with per-token
+        # backticks.
+        retrospective_cue = re.compile(
+            r"\b(retired|superseded|deprecated|formerly|previously|historical|"
+            r"legacy|no longer|used to|until|before 0\.9\.7|pre-0\.9\.7)\b",
+            re.IGNORECASE,
+        )
         ladder_run = re.compile(r"(?:`?\d+x`?\s*(?:→|->)\s*)+(?:`?\d+x`?|…|\.\.\.)")
         capped = []
         for num, line in ladder_lines:
@@ -789,8 +810,13 @@ class TestDocumentedToolCount:
                 levels = [int(x) for x in re.findall(r"(\d+)x", run)]
                 if not all(b > a for a, b in zip(levels, levels[1:])):
                     continue  # descending: a demotion example, not a ladder
-                if run.startswith("`") and run.endswith("`") and "`" not in run[1:-1]:
-                    continue  # a whole-span quote of a retired ladder
+                if (
+                    run.startswith("`")
+                    and run.endswith("`")
+                    and "`" not in run[1:-1]
+                    and retrospective_cue.search(line)
+                ):
+                    continue  # a quote of a retired ladder, marked as one
                 if run.rstrip().endswith(("…", "...")) or max(levels) > 3:
                     continue  # open-ended, or demonstrably past the old cap
                 capped.append((num, max(levels), run))

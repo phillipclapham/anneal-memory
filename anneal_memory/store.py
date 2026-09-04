@@ -10,6 +10,7 @@ Zero dependencies beyond Python stdlib.
 from __future__ import annotations
 
 import errno
+import inspect
 import hashlib
 import logging
 import json
@@ -68,9 +69,23 @@ from .audit import AuditTrail
 
 #: Parameter names of :meth:`Store._audit_log_after_commit` that must never
 #: appear in the pass-through ``**kwargs`` queued for a deferred audit replay.
-_RESERVED_AUDIT_KWARGS = frozenset(
-    {"method", "committed", "batch_aware", "stacklevel"}
-)
+#:
+#: ⛔ DERIVED FROM THE SIGNATURE, NOT TYPED — assigned at the bottom of this
+#: module, once ``Store`` exists. The hand-written version listed FOUR names
+#: and the method has SIX collision-capable parameters: ``event`` and
+#: ``payload`` are passed POSITIONALLY at the flush splat, which produces the
+#: identical uncatchable ``TypeError`` at the identical call site as the four
+#: that were refused. Measured 2026-09-04 — ``{"event": "x"}`` passed the
+#: guard and then raised *got multiple values for argument 'event'* out of a
+#: fully committed batch.
+#:
+#: ⚡ Unreachability is not the discriminator, and that is the whole argument:
+#: the four names that WERE guarded are equally unreachable today. The guard's
+#: own docstring says it exists so a FUTURE caller cannot choose an
+#: overlapping name — and for two of the six it was still relying on exactly
+#: the thing it says it replaces. Deriving it means adding a parameter to that
+#: method cannot silently widen the hole again.
+_RESERVED_AUDIT_KWARGS: frozenset[str]
 
 
 def _reject_reserved_audit_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -5530,3 +5545,19 @@ class Store:
 
     def __exit__(self, *args: Any) -> None:
         self.close()
+
+
+# ⛔ ASSIGNED HERE, NOT AT THE TOP, BECAUSE IT READS ``Store``'s SIGNATURE.
+# Every parameter except ``self`` and the ``**kwargs`` catch-all is
+# collision-capable at the ``_batch`` flush splat: the positional ones
+# (``event``, ``payload``) because the splat supplies them positionally, the
+# keyword ones because the splat supplies them by name. Selected by KIND
+# rather than by a second hand-written name list, so renaming a parameter
+# cannot desynchronise the guard from the thing it guards.
+_RESERVED_AUDIT_KWARGS = frozenset(
+    name
+    for name, _param in inspect.signature(
+        Store._audit_log_after_commit
+    ).parameters.items()
+    if name != "self" and _param.kind is not inspect.Parameter.VAR_KEYWORD
+)

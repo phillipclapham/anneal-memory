@@ -131,6 +131,41 @@ attempt, and each one taught something the tests could not have told us:
   `12x`/`18x` in its demotion sentence — a per-line max is still a proxy. The gate now judges the
   ladder RUNS themselves (ascending, not a demotion pair, not a whole-span historical quote).
 
+### Fixed — codex retried and earned the seat: a durability hiccup was reading as TAMPERING
+
+The first L3 pass had codex time out and produce nothing. Per today's ruling that *being stingy with
+codex is a defect, not thrift*, it was re-run on a tighter scope. It returned two HIGHs and a MED,
+and closed with the line that matters most: **"the current regression tests replace `AuditTrail.log`
+wholesale with a function that raises before writing, so they cannot detect the post-write ambiguity."**
+Correct — every fixture in the new suite varied the sink outcome and the method while holding
+constant WHERE IN THE WRITE the failure lands, and that is the dimension both HIGHs live in.
+
+- **HIGH, FIXED — the append was not all-or-nothing.** `write` + `flush` succeed, `fsync` raises
+  EIO: the complete line is already on disk while `_seq`, `_prev_hash` and the drop counter are all
+  unchanged, so the caller's retry re-emits the SAME `seq` and `prev_hash`. **Reproduced:** seqs on
+  disk `[0, 1, 1]`, `dropped_before` `[None, 2, 3]` — the pending drops counted twice AND the entry
+  that actually landed counted as dropped — with `verify()` returning `valid=False` and a hash
+  mismatch. **A durability hiccup reported as tampering, by the record whose entire job is telling
+  those apart** — and the `dropped_before` mechanism added in this same release is what made the
+  double-count possible. Now the pre-append size is recorded and restored if the append does not
+  fully complete, so disk agrees with memory: nothing landed. Covers the partial-write (ENOSPC
+  mid-line) case too, which otherwise concatenates with the retry into unparseable JSON. After:
+  `[0, 1]`, `[None, 3]`, `valid=True`. Mutation-checked.
+- **HIGH, NOT FIXED — the window is `close()`/reopen, not "a crash", and the comment now says so.**
+  **This comment has been wrong twice in one day, each time overclaiming.** Measured: a committed
+  mutation whose audit write was dropped, then an ORDINARY store close and reopen — no crash —
+  leaves 3 episodes against 2 audit entries, no marker, `verify()` `valid=True`, and
+  `status().audit_write_failures` back to **0**. Every CLI invocation opens and closes a Store, so
+  across CLI commands the mechanism effectively never fires. Making it durable means a transactional
+  outbox, not a resettable integer (which just moves the window); left named rather than half-built.
+- **MED, pre-existing, filed:** an exception during rotation (after the rename, during gzip or the
+  manifest write) leaves an orphan whose sealed file is not adopted, and `_rotate_if_needed` then
+  reads "active missing" as a successful rotation. Not introduced here — this release only changes
+  whether the caller swallows that error.
+
+New `TestFailureLandsAtDifferentPointsInTheWrite` exists specifically to vary the dimension the rest
+of the suite holds constant. 1822 tests, mypy clean, ruff 63 (two below the 65 at HEAD).
+
 ### Fixed — L3 residuals, and one guard of mine that could never have fired
 
 ⚠ **THE L3 PASS WAS NOT COVERAGE AND IS RECORDED AS A GAP, NOT A CLEAN BILL.** codex timed out and

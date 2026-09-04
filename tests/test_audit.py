@@ -1908,3 +1908,152 @@ class TestL3ResidualsClosed:
         store.record("next", episode_type="observation")
         tail = json.loads(store._audit._active_path.read_text().splitlines()[-1])
         assert "dropped_before" not in tail
+
+
+class TestFailureLandsAtDifferentPointsInTheWrite:
+    """⛔ THE DIMENSION EVERY OTHER TEST IN THIS FILE HOLDS CONSTANT.
+
+    codex named it at L3 on 2026-09-04, and it was aimed at these tests:
+    *"The current regression tests replace ``AuditTrail.log`` wholesale with a
+    function that raises before writing, so they cannot detect the post-write
+    ambiguity or incomplete-rotation paths."* Correct. Every fixture above
+    swaps in a ``boom`` that raises BEFORE any bytes reach the file, so they
+    vary the sink outcome and the method while holding constant WHERE IN THE
+    WRITE the failure happens — and that is exactly where the defect lived.
+
+    Same discriminator that killed two mutants earlier in this file, one layer
+    deeper. Ask what the fixture varies, and whether the defect lives in the
+    dimension it holds fixed.
+    """
+
+    def _store_with_pending_drops(self, tmp_path, n=2):
+        from anneal_memory.store import Store
+
+        store = Store(tmp_path / "memory.db")
+        store.record("first", episode_type="observation")
+        real = store._audit.log
+
+        def boom(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        store._audit.log = boom
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for i in range(n):
+                store.record(f"dropped{i}", episode_type="observation")
+        store._audit.log = real
+        assert store._audit._dropped_since_last == n
+        return store
+
+    def test_a_post_write_fsync_failure_does_not_corrupt_the_chain(self, tmp_path):
+        """codex HIGH — reproduced before the fix, pinned after it.
+
+        write + flush succeed, fsync raises EIO. The complete line is already
+        on disk while ``_seq``/``_prev_hash``/the drop counter are unchanged, so
+        the retry re-emits the SAME seq and prev_hash.
+
+        MEASURED BEFORE THE FIX: seqs ``[0, 1, 1]``, dropped_before
+        ``[None, 2, 3]`` — the pending drops counted twice AND the entry that
+        actually landed counted as dropped — with ``verify()`` returning
+        ``valid=False``. A durability hiccup reported as TAMPERING, by the
+        record whose whole job is telling those apart.
+        """
+        import json
+
+        from anneal_memory.audit import AuditTrail
+
+        store = self._store_with_pending_drops(tmp_path, n=2)
+
+        real_fsync = os.fsync
+
+        def fsync_eio(fd):
+            raise OSError(5, "EIO")
+
+        os.fsync = fsync_eio
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                store.record("the ambiguous one", episode_type="observation")
+        finally:
+            os.fsync = real_fsync
+
+        store.record("the retry", episode_type="observation")
+
+        entries = [
+            json.loads(line)
+            for line in store._audit._active_path.read_text().splitlines()
+            if line.strip()
+        ]
+        seqs = [e["seq"] for e in entries]
+        assert len(seqs) == len(set(seqs)), f"duplicate seq on disk: {seqs}"
+        assert AuditTrail.verify(store._path).valid, (
+            "a post-write fsync failure broke the hash chain — a durability "
+            "problem is now indistinguishable from tampering"
+        )
+        # The rolled-back entry counts as dropped exactly once: 2 + itself.
+        assert entries[-1]["dropped_before"] == 3, entries[-1]
+
+    def test_a_partial_write_is_rolled_back_not_left_to_concatenate(self, tmp_path):
+        """The same seam, entered mid-line instead of at fsync.
+
+        An ENOSPC part-way through the line leaves a truncated fragment that
+        the next append concatenates with, producing one unparseable line and
+        a permanent chain break. The pre-append size is restored instead.
+        """
+        import json
+
+        from anneal_memory.audit import AuditTrail
+
+        store = self._store_with_pending_drops(tmp_path, n=1)
+        active = store._audit._active_path
+        size_before = active.stat().st_size
+
+        real_open = __builtins__["open"] if isinstance(__builtins__, dict) else open
+
+        class HalfWriter:
+            def __init__(self, fh):
+                self._fh = fh
+
+            def write(self, data):
+                self._fh.write(data[: max(1, len(data) // 2)])
+                raise OSError(28, "No space left on device")
+
+            def __getattr__(self, name):
+                return getattr(self._fh, name)
+
+        import anneal_memory.audit as audit_mod
+
+        def patched_open(path, mode="r", *args, **kwargs):
+            fh = real_open(path, mode, *args, **kwargs)
+            if "a" in mode and str(path) == str(active):
+                return _Ctx(HalfWriter(fh), fh)
+            return fh
+
+        class _Ctx:
+            def __init__(self, wrapper, fh):
+                self._w, self._fh = wrapper, fh
+
+            def __enter__(self):
+                return self._w
+
+            def __exit__(self, *exc):
+                self._fh.close()
+                return False
+
+        audit_mod.open = patched_open  # type: ignore[assignment]
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                store.record("the half-written one", episode_type="observation")
+        finally:
+            del audit_mod.open
+
+        assert active.stat().st_size == size_before, (
+            "a partial write was left on disk; the next append will "
+            "concatenate with it into unparseable JSON"
+        )
+        store.record("the next one", episode_type="observation")
+        for line in active.read_text().splitlines():
+            if line.strip():
+                json.loads(line)  # must all parse
+        assert AuditTrail.verify(store._path).valid

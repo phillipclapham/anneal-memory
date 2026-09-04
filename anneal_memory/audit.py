@@ -99,15 +99,22 @@ class AuditTrail:
         # Writes a caller swallowed since the last entry that landed. Rides
         # into the next successful entry as ``dropped_before`` so a gap becomes
         # a chained fact rather than an absence — see :meth:`note_write_failure`.
-        # ⚠ PROCESS-LOCAL, AND THE GUARANTEE IS THEREFORE CONDITIONAL —
-        # stated because the first version of this comment overclaimed it.
-        # The count reaches the durable chain only when a LATER write lands.
-        # If the process dies first (OOM, kill -9, power loss, a deploy
-        # restart) the count is gone, ``__init__`` resets it to 0, and the
-        # trail on disk has a gap with no ``dropped_before`` marker —
-        # ``verify()`` then walks a clean chain over it and reports
-        # ``valid=True``, exactly as before this mechanism existed. So this
-        # closes the swallow-only case, NOT swallow-then-crash.
+        # ⛔ PROCESS-LOCAL, AND THE WINDOW IS MUCH WIDER THAN "A CRASH" —
+        # this comment has now been wrong twice in one day, each time in the
+        # direction of overclaiming. The count reaches the durable chain only
+        # when a LATER write lands ON THIS INSTANCE. Any ``Store`` close and
+        # reopen resets it: ``__init__`` sets it to 0, ``_initialize()``
+        # recovers ``seq``/``prev_hash`` from disk, and the next event chains
+        # cleanly over the hole with no ``dropped_before`` marker.
+        #
+        # MEASURED 2026-09-04 (codex L3 HIGH): a committed mutation whose audit
+        # write was dropped, followed by an ORDINARY ``close()`` + reopen — no
+        # crash — leaves 3 episodes against 2 audit entries, no marker,
+        # ``verify()`` returning ``valid=True`` and ``status()`` reporting
+        # ``audit_write_failures = 0``. **Every CLI invocation opens and closes
+        # a Store**, so across CLI commands this mechanism effectively never
+        # fires. It closes the swallow-then-keep-going case within one live
+        # process, and nothing wider.
         # Flagged independently by BOTH L3 seats, 2026-09-04. Making it
         # durable means persisting outside the sink that is already failing
         # (the SQLite metadata table is a different I/O path) — deliberately
@@ -195,13 +202,52 @@ class AuditTrail:
         # Deterministic serialization — sorted keys, compact separators
         json_line = json.dumps(entry, sort_keys=True, separators=(",", ":"))
 
-        # Write-first: fsync BEFORE updating internal state
+        # Write-first: fsync BEFORE updating internal state.
+        #
+        # ⛔ AND THE APPEND MUST BE ALL-OR-NOTHING, because "write-first" alone
+        # leaves a THIRD state between written and not-written. If ``write``
+        # and ``flush`` succeed and ``fsync`` (or close) then raises EIO, the
+        # complete line is ALREADY VISIBLE on disk while ``_seq``,
+        # ``_prev_hash`` and ``_dropped_since_last`` are all unchanged. The
+        # caller — which by contract swallows and calls
+        # :meth:`note_write_failure` — then retries, and the retry emits the
+        # SAME ``seq`` and the SAME ``prev_hash``.
+        #
+        # MEASURED 2026-09-04 (codex L3 HIGH, reproduced by failing fsync after
+        # a successful write): seqs on disk ``[0, 1, 1]``, ``dropped_before``
+        # ``[None, 2, 3]`` — the two pending drops counted TWICE and the entry
+        # that actually landed counted as dropped — and ``verify()`` returning
+        # ``valid=False`` with a hash mismatch. **A durability hiccup read as
+        # tampering**, on the record whose entire value is telling those apart.
+        # A partial write (ENOSPC mid-line) concatenates with the retry into
+        # malformed JSON and breaks the chain the same way.
+        #
+        # So: remember the pre-append size and roll the file back to it if the
+        # append does not fully complete. Disk is then made to agree with the
+        # in-memory state — nothing landed — which is what makes the caller's
+        # retry sound. Safe because this class is single-writer by contract
+        # (see the module docstring); truncating a file a peer was appending to
+        # would not be.
         active = self._active_path
         active.parent.mkdir(parents=True, exist_ok=True)
-        with open(active, "a", encoding="utf-8") as f:
-            f.write(json_line + "\n")
-            f.flush()
-            os.fsync(f.fileno())
+        resume_at = active.stat().st_size if active.exists() else 0
+        try:
+            with open(active, "a", encoding="utf-8") as f:
+                f.write(json_line + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception:
+            # Best-effort rollback. If THIS fails too, the ambiguity stands and
+            # the exception below still surfaces it — we do not mask the
+            # original failure with a rollback failure.
+            try:
+                with open(active, "r+b") as f_trunc:
+                    f_trunc.truncate(resume_at)
+                    f_trunc.flush()
+                    os.fsync(f_trunc.fileno())
+            except Exception:
+                pass
+            raise
 
         # Update chain state
         self._prev_hash = self._compute_hash(json_line)

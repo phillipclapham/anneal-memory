@@ -844,8 +844,8 @@ class Server:
             if status.audit_write_failures:
                 audit_line += (
                     f" — ⚠ {status.audit_write_failures} write(s) FAILED and "
-                    f"were dropped; the trail is INCOMPLETE for this process "
-                    f"(verify() cannot see a missing entry)"
+                    f"were dropped over this store's LIFETIME; the trail is "
+                    f"INCOMPLETE (verify() cannot see a missing entry)"
                 )
                 if status.audit_last_failure:
                     audit_line += f", last: {status.audit_last_failure}"

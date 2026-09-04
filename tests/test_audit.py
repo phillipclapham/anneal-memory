@@ -1643,27 +1643,44 @@ class TestSwallowedWriteIsStillVisible:
 
 
 class TestDegradedAuditHealthReachesEveryTransport:
-    """⛔ A FIELD ON A DATACLASS IS NOT A SURFACE.
+    """⛔ A FIELD ON A DATACLASS IS NOT A SURFACE — AND A GREP FOR ITS NAME IS
+    NOT A TRANSPORT TEST.
 
-    ``audit_write_failures`` was added to ``StoreStatus``, documented in the
-    CHANGELOG and README as the channel to POLL, and reached NONE of the three
-    transports: the CLI's ``--json`` builds its own ``audit`` sub-object with
-    four hardcoded keys, the CLI's human output prints four, and the MCP
-    ``status`` handler composes its own line. Found by L4 on 2026-09-04 by
-    running the real CLI — not by any of the 1812 tests, all of which asked the
-    Python API.
+    Both halves of the history are the lesson.
 
-    That is the day's class one layer out: the assertion's subject was the
-    layer that MODELS the field; the claim's subject is the surface an operator
-    has to READ it from. The swallow is only acceptable because the loss is
-    visible somewhere an operator can look, so a channel that stops at the
-    dataclass makes the whole policy dishonest.
+    2026-09-04 L4 found ``audit_write_failures`` reaching NONE of the three
+    transports: the CLI ``--json`` payload builds its own ``audit`` sub-object,
+    the CLI human output prints its own keys, and the MCP ``status`` handler
+    composes its own line. Found by running the real CLI — not by any of the
+    1812 tests then passing, all of which asked the Python API.
+
+    ⛔ THE REGRESSION TEST WRITTEN FROM THAT LESSON DID NOT RUN THE CLI EITHER.
+    It read cli.py off disk and asserted ``"status.audit_write_failures" in
+    text``. MUTATION-PROVEN HOLLOW the same day: hardcoding
+    ``"write_failures": 0`` in the --json payload with the token left alive in
+    a COMMENT, plus ``if False:`` on the human branch, left all three tests
+    PASSING and the full 1822-test suite green. A substring assertion is
+    satisfied by a comment, a docstring, or a dead branch.
+
+    ⚡ AND THE DEEPER HALF, which is why every test here crosses a PROCESS
+    boundary instead of merely executing more code. The field was also
+    structurally always zero on the CLI: it was a plain instance attribute,
+    and a CLI invocation is a one-shot process that opens a Store, runs one
+    subcommand and exits — so the surface an operator polls could never report
+    non-zero however correctly cli.py read it. A test that degrades and
+    asserts inside ONE Store cannot see that. So each test below loses the
+    audit write in one Store, CLOSES it, and asks a different reader.
     """
 
-    def _degraded(self, tmp_path):
+    def _store_that_lost_audit_writes(self, db_path, count=2):
+        """Commit ``count`` episodes whose audit writes are refused, then close.
+
+        Returns with nothing live: the only record that anything was lost is
+        whatever survived to disk. That is the property under test.
+        """
         from anneal_memory.store import Store
 
-        store = Store(tmp_path / "memory.db")
+        store = Store(db_path)
 
         def boom(*args, **kwargs):
             raise OSError(28, "No space left on device")
@@ -1671,40 +1688,132 @@ class TestDegradedAuditHealthReachesEveryTransport:
         store._audit.log = boom
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            store.record("one", episode_type="observation")
-        return store
+            for i in range(count):
+                store.record(f"lost-{i}", episode_type="observation")
+        store.close()
+        return db_path
 
-    def test_cli_json_status_carries_the_write_failure_count(self, tmp_path):
-        store = self._degraded(tmp_path)
-        status = store.status()
-        assert status.audit_write_failures == 1
+    def _run_cli(self, argv):
+        """Dispatch through the REAL parser and the REAL command function.
 
-        # The CLI's --json payload is assembled independently of StoreStatus,
-        # so assert against the assembling code, not the dataclass.
-        source = Path(__import__("anneal_memory.cli", fromlist=["x"]).__file__)
-        text = source.read_text(encoding="utf-8")
-        assert "status.audit_write_failures" in text, (
-            "cli.py never reads audit_write_failures — the --json status "
-            "payload hardcodes its audit keys, so the field exists on "
-            "StoreStatus and reaches no operator."
+        In-process on purpose. The venv installs anneal_memory as a COPY in
+        site-packages rather than an editable link, so a naive
+        ``subprocess([sys.executable, "-m", "anneal_memory", ...])`` grades
+        whatever was last installed instead of the tree under test — which is
+        the very defect class this file exists to catch, one level out. Going
+        through ``build_parser()`` keeps the argv path real; importing the
+        module here keeps the SOURCE real.
+        """
+        from anneal_memory.cli import build_parser
+
+        args = build_parser().parse_args(argv)
+        args.func(args)
+
+    def test_cli_json_status_reports_a_write_lost_by_an_EARLIER_process(
+        self, tmp_path, capsys
+    ):
+        """The transport the README points operators at, across the boundary."""
+        db = self._store_that_lost_audit_writes(tmp_path / "memory.db")
+
+        self._run_cli(["--db", str(db), "status", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+
+        audit = payload["audit"]
+        assert audit["write_failures"] == 2, (
+            "the CLI --json status reports a clean audit trail for a store "
+            "that lost two audit writes. This is what an operator polls; "
+            f"got {audit!r}"
         )
-        assert "status.audit_last_failure" in text
+        assert audit["last_failure"] is not None
+        assert "record" in audit["last_failure"]
+        # The pair is the whole point: what the trail HAS beside what it LOST.
+        # Reporting entry_count alone is how a hole reads as health.
+        assert audit["entry_count"] == 0
 
-    def test_mcp_status_carries_the_write_failure_count(self):
-        source = Path(__import__("anneal_memory.server", fromlist=["x"]).__file__)
-        text = source.read_text(encoding="utf-8")
-        assert "status.audit_write_failures" in text, (
-            "server.py's status handler composes its own audit line and never "
-            "reads audit_write_failures — an MCP agent cannot see that the "
-            "trail is incomplete."
+    def test_cli_human_status_reports_a_write_lost_by_an_EARLIER_process(
+        self, tmp_path, capsys
+    ):
+        db = self._store_that_lost_audit_writes(tmp_path / "memory.db")
+
+        self._run_cli(["--db", str(db), "status"])
+        out = capsys.readouterr().out
+
+        assert "2 audit write(s) FAILED" in out, (
+            "the human `status` output — the other surface an operator "
+            f"actually reads — shows no degradation. got:\n{out}"
         )
+        assert "record" in out
+
+    def test_mcp_status_reports_a_write_lost_by_an_EARLIER_process(self, tmp_path):
+        from anneal_memory.server import Server
+        from anneal_memory.store import Store
+
+        db = self._store_that_lost_audit_writes(tmp_path / "memory.db")
+
+        reopened = Store(db)
+        try:
+            result = Server(reopened)._tool_status({})
+            text = result["content"][0]["text"]
+        finally:
+            reopened.close()
+
+        assert "2 write(s) FAILED" in text, (
+            "an MCP agent asking status cannot see that the trail is "
+            f"incomplete. got:\n{text}"
+        )
+
+    def test_the_count_is_monotonic_across_processes_and_never_resets(
+        self, tmp_path
+    ):
+        """A lost entry is lost forever, so the number must not heal.
+
+        ``verify()`` walks a clean chain over the hole and returns valid=True
+        indefinitely, which is exactly why this counter may not reset: it is
+        the only durable statement that the trail is incomplete.
+        """
+        from anneal_memory.store import Store
+
+        db = self._store_that_lost_audit_writes(tmp_path / "memory.db", count=2)
+
+        # A healthy session afterwards must not launder the earlier loss.
+        store = Store(db)
+        store.record("this one is fine", episode_type="observation")
+        assert store.status().audit_write_failures == 2
+        store.close()
+
+        # And a further loss accumulates rather than replacing.
+        self._store_that_lost_audit_writes(db, count=1)
+        store = Store(db)
+        try:
+            assert store.status().audit_write_failures == 3
+        finally:
+            store.close()
+
+    def test_a_read_only_handle_also_sees_the_loss(self, tmp_path):
+        """A reader that reports audit health must report the write side too."""
+        from anneal_memory.store import Store
+
+        db = self._store_that_lost_audit_writes(tmp_path / "memory.db")
+
+        reader = Store(db, read_only=True)
+        try:
+            assert reader.status().audit_write_failures == 2
+        finally:
+            reader.close()
 
     def test_every_transport_that_reports_audit_health_reports_the_write_side(self):
-        """The property, stated once over all the surfaces that claim it.
+        """A SECONDARY NET, AND LABELLED AS ONE — it is not the guard.
 
-        Any module that reports ``audit_entry_count`` (what the trail HAS) must
+        Any module reporting ``audit_entry_count`` (what the trail HAS) must
         also report ``audit_write_failures`` (what it LOST). Reporting only the
         first is how a trail missing entries reads as healthy.
+
+        ⚠ This is a source scan and therefore CANNOT see whether the reporting
+        works — that is measured by the four behavioural tests above, and the
+        2026-09-04 mutation showed a scan like this one passing over a
+        hardcoded zero. What it CAN do that they cannot is notice a NEW module
+        that starts reporting audit health and forgets the write side. Keep it
+        for that reach; never read a pass here as coverage.
         """
         import anneal_memory
 

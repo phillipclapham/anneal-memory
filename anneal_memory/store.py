@@ -87,13 +87,18 @@ def _is_write_lock_contention(exc: StoreDatabaseError) -> bool:
     cause = exc.__cause__
     if not isinstance(cause, sqlite3.OperationalError):
         return False
-    errorname = getattr(cause, "sqlite_errorname", None)
-    if errorname is not None:
-        return errorname in (
-            "SQLITE_BUSY",
-            "SQLITE_BUSY_SNAPSHOT",
-            "SQLITE_BUSY_TIMEOUT",
-        )
+    # ⛔ CLASSIFY BY PRIMARY RESULT CODE, NOT BY A NAME ALLOWLIST.
+    # This listed three extended names and returned False for every other
+    # one — so SQLITE_BUSY_RECOVERY, SQLITE_LOCKED_SHAREDCACHE and friends
+    # were reported as NOT contention, and because the name existed the text
+    # fallback below was skipped too (codex L3, 2026-09-04). A hand-kept list
+    # of extended codes is the same shape as a hand-kept list of anything
+    # else: it is correct only until SQLite adds one. The low byte of the
+    # extended code IS the primary code, which is the stable classification
+    # SQLite documents.
+    errorcode = getattr(cause, "sqlite_errorcode", None)
+    if isinstance(errorcode, int):
+        return (errorcode & 0xFF) in (_SQLITE_BUSY, _SQLITE_LOCKED)
     text = str(cause).lower()
     return "database is locked" in text or "database is busy" in text
 
@@ -1086,6 +1091,12 @@ _PATTERN_ASSOCIATIONS_SCHEMA_SQL = PATTERN_ASSOCIATIONS_SCHEMA
 # audit write, which ``_seed_audit_health`` already reads as zero, and seeding
 # a "0" into every database on earth to say "nothing has gone wrong yet" is
 # storage spent on the absence of news.
+# SQLite PRIMARY result codes for lock contention. The low byte of any
+# extended code is its primary code, so these two cover every SQLITE_BUSY_*
+# and SQLITE_LOCKED_* variant, including ones added after this was written.
+_SQLITE_BUSY = 5
+_SQLITE_LOCKED = 6
+
 _AUDIT_FAILURES_KEY = "audit_write_failures"
 _AUDIT_LAST_FAILURE_KEY = "audit_last_failure"
 
@@ -1363,10 +1374,31 @@ class Store:
         # objection here — it is about ``AuditTrail._dropped_since_last``,
         # the ride-along marker, which must chain into the NEXT entry to
         # become durable and so genuinely needs an outbox. That one is still
-        # process-local and ``AuditTrail.__init__`` says so. This counter has
-        # no window to move: it is written when the failure happens.
+        # process-local and ``AuditTrail.__init__`` says so.
+        #
+        # ⛔ AMENDED AFTER A CODEX L3 (2026-09-04, same day): the FIRST version
+        # of this persisted the whole in-memory total, and I argued in writing
+        # that whole-value beat an atomic increment because a lost increment
+        # is lost forever while a lost whole-value write is repaired by the
+        # next one. THAT ARGUMENT WAS WRONG, and the counter was not actually
+        # monotonic: two writers seeded from the same base could overwrite
+        # each other and drive it BACKWARDS. The shape that has both
+        # properties is a per-process DELTA added under ``BEGIN IMMEDIATE``
+        # and cleared only after commit — atomic AND self-healing. See
+        # ``_persist_audit_health``, which now carries the whole argument.
+        # ⚠ AND THE GUARANTEE IS BOUNDED, not absolute: this is a best-effort
+        # write issued after the mutation committed. If the volume is full,
+        # the metadata write fails too, and a process that exits before a
+        # later flush loses the count. What is guaranteed is that a loss
+        # RECORDED here survives the process, not that every loss is
+        # recorded — the honest distinction codex insisted on.
         self._audit_write_failures: int = 0
         self._audit_last_failure: str | None = None
+        # Failures counted in this process but not yet committed to metadata.
+        # Cleared only by a successful flush, so a refused or deferred write
+        # (a caller's open transaction, a full disk) keeps the count alive for
+        # the next attempt instead of losing it. See _persist_audit_health.
+        self._audit_failures_unpersisted: int = 0
         self._audit: AuditTrail | None = None
         if audit and not read_only:
             self._audit = AuditTrail(
@@ -1429,6 +1461,17 @@ class Store:
             with self._db_boundary("schema_init"):
                 self._conn = sqlite3.connect(str(self._path))
                 self._conn.row_factory = sqlite3.Row
+                # ⛔ FIRST, BEFORE EVERY PERSISTENT WRITE — INCLUDING THE
+                # PRAGMAS. This used to sit just above ``_init_schema``, on the
+                # reasoning that schema init is what mutates the database.
+                # MEASURED FALSE (codex L3, 2026-09-04): ``PRAGMA
+                # journal_mode=WAL`` is a PERSISTENT database property, so a
+                # store that was then REFUSED had already been changed from
+                # ``delete`` to ``wal`` — the guard mutating the very database
+                # it declines to understand. The old test asserted
+                # ``_init_schema`` was never CALLED, which was true and
+                # insufficient: the pragma is not inside ``_init_schema``.
+                self._refuse_a_newer_schema()
                 if self._read_only:
                     # Pure-reader open (per-turn recall): reject writes via query_only
                     # and SKIP every init write below (WAL/synchronous pragmas,
@@ -1441,7 +1484,6 @@ class Store:
                     # exist + be schema-current — a reader cannot migrate; a stale-schema
                     # read surfaces as a normal query error to the caller's handling.
                     self._conn.execute("PRAGMA query_only=ON")
-                    self._refuse_a_newer_schema()
                     # A reader polls audit health too, and seeding is a bare
                     # SELECT — permitted under query_only. Without this, a
                     # read-only handle reports a permanently clean trail.
@@ -1463,9 +1505,6 @@ class Store:
                 # the continuity/meta tmp writes. L2 L3.
                 self._conn.execute("PRAGMA synchronous=FULL")
                 self._conn.execute("PRAGMA foreign_keys=ON")
-                # BEFORE _init_schema — see the docstring. Migrating a store
-                # we are about to refuse is the one thing this must not do.
-                self._refuse_a_newer_schema()
                 self._init_schema()
                 # 10.5c.5 L3 Fix #13: detect orphan tmp sidecars from a
                 # prior crashed pipeline before any new wrap runs. If a
@@ -1996,8 +2035,8 @@ class Store:
             audit_log_path=audit_log_path,
             audit_entry_count=audit_entry_count,
             audit_retention_days=audit_retention_days,
-            audit_write_failures=self._audit_write_failures,
-            audit_last_failure=self._audit_last_failure,
+            audit_write_failures=self._current_audit_failures(),
+            audit_last_failure=self._current_audit_last_failure(),
         )
 
     # -- Wrap lifecycle --
@@ -4319,8 +4358,26 @@ class Store:
             row = self._conn.execute(
                 "SELECT value FROM metadata WHERE key = 'format_version'"
             ).fetchone()
-        except sqlite3.Error:
-            return  # no metadata table yet — a brand-new database
+        except sqlite3.Error as exc:
+            # ⛔ ONLY A GENUINELY ABSENT TABLE MEANS "BRAND-NEW DATABASE".
+            # This used to swallow every sqlite error as "no metadata table
+            # yet", which is the reassuring reading of an ambiguous signal: a
+            # NEWER schema that keeps ``metadata`` but renames its ``value``
+            # column raises here too, and we would then have run old DDL
+            # against it (codex L3, 2026-09-04). Anything other than a missing
+            # table fails CLOSED — the whole point of this guard is that we do
+            # not understand the database, and an unreadable version is a
+            # stronger reason to stop than a high one.
+            if "no such table" in str(exc).lower():
+                return
+            raise StoreError(
+                f"{self._path}: cannot read format_version to check schema "
+                f"compatibility ({exc!r}); refusing to open rather than run "
+                f"this version's migrations against a database whose layout "
+                f"is unknown.",
+                operation="schema_init",
+                path=str(self._path),
+            ) from exc
         if row is None:
             return
         try:
@@ -4362,67 +4419,113 @@ class Store:
         except Exception:
             self._audit_last_failure = None
 
+    def _current_audit_failures(self) -> int:
+        """The lifetime count as of NOW, not as of this Store's construction.
+
+        ⛔ ``status()`` used to return the constructor-seeded field, which made
+        a LONG-LIVED handle permanently stale: an MCP server or a read-only
+        reader opened while the count was zero kept reporting zero however many
+        writes another process lost afterwards (codex L3, 2026-09-04). The
+        durable value only helped one-shot processes, which is half the point.
+
+        Reads the metadata row fresh and adds this process's unflushed delta,
+        so the number is right whether the loss happened here or elsewhere and
+        whether or not it has been committed yet. Falls back to the in-memory
+        total if the read fails — a health report must not raise.
+        """
+        pending = self._audit_failures_unpersisted
+        try:
+            raw = self._get_metadata(_AUDIT_FAILURES_KEY)
+            return (int(raw) if raw else 0) + pending
+        except Exception:
+            return self._audit_write_failures
+
+    def _current_audit_last_failure(self) -> str | None:
+        """The last failure as of NOW — see :meth:`_current_audit_failures`.
+
+        This process's own unflushed failure wins when it has one, because it
+        is strictly newer than anything already committed.
+        """
+        if self._audit_failures_unpersisted and self._audit_last_failure:
+            return self._audit_last_failure
+        try:
+            return self._get_metadata(_AUDIT_LAST_FAILURE_KEY) or None
+        except Exception:
+            return self._audit_last_failure
+
     def _persist_audit_health(self) -> None:
-        """Write the degraded-audit counters through to ``metadata``.
+        """Flush the pending degraded-audit delta to ``metadata``, atomically.
 
-        ⛔ Called ONLY from the post-commit audit-failure handler, whose
-        contract is that nothing it does propagates to the caller: the
-        mutation has already landed, and failing the caller would report a
-        completed operation as failed. So this swallows its own failure, like
-        every other channel in that handler.
+        ⛔ Called from the post-commit audit-failure handler, whose contract is
+        that nothing it does propagates to the caller — so it swallows its own
+        failure, like every other channel there.
 
-        ⚠ THE STANDALONE ``commit()`` IS CORRECT HERE AND WOULD NOT BE INSIDE
-        THE WRAP METHODS. The class docstring forbids per-key metadata helpers
-        inside ``wrap_started``/``wrap_cancelled``/``wrap_completed`` because
-        those must share ONE commit or a crash mid-sequence leaves the wrap
-        state machine partial. This handler runs after the pipeline's own
-        commit — there is no in-flight transaction here to split.
+        ⛔⛔ THREE CODEX L3 HIGHs LIVE IN THIS METHOD'S HISTORY; READ BEFORE
+        SIMPLIFYING IT (2026-09-04).
 
-        The running total is computed IN MEMORY and written whole, never as an
-        SQL increment, so a failed persist loses only that one write-through:
-        the next failure that persists cleanly restores the correct total.
+        1. IT MUST NOT COMMIT INSIDE SOMEONE ELSE'S TRANSACTION. The first
+           version committed unconditionally, on the argument that this handler
+           only ever runs post-commit. FALSE: ``record()`` inside a ``_batch()``
+           DEFERS its audit write, but ``save_continuity()`` is not batch-aware
+           and logs immediately — so its audit failure committed the batch's
+           uncommitted DML. MEASURED: two episodes persisted through a batch
+           that then rolled back. Hence the ``in_transaction`` check; when a
+           caller owns the transaction the delta simply waits.
 
-        ⚖ AND THAT CHOICE IS DELIBERATE AGAINST THE OBVIOUS OBJECTION. A whole
-        value write is a read-modify-write, so two CONCURRENT writers could
-        lose an update where an atomic ``ON CONFLICT ... value + 1`` could not
-        (raised by gpt-oss L3, 2026-09-04). Rejected for two reasons, in order:
-        concurrent writers are already outside this class's documented
-        contract — ``Store`` is not thread-safe, not task-safe, not reentrant,
-        and a multi-writer deployment breaks the hash chain by construction, so
-        a miscounted failure is the least of what has gone wrong. And the
-        atomic form is WORSE for the failure this counter actually exists to
-        record: the triggering scenario is a failing sink (disk full,
-        permissions), where persists are likely to fail REPEATEDLY. A lost
-        increment is lost forever; a lost whole-value write is repaired by the
-        next one that lands. Self-healing beats atomic when the writes
-        themselves are what is unreliable.
+        2. IT MUST ADD, NOT OVERWRITE. The first version wrote the whole
+           in-memory total, seeded at open. Two writers both seeded at 5, one
+           persisted 6 then 7, the other persisted its stale 6 — a counter
+           documented as MONOTONIC going backwards. An UPSERT that adds the
+           delta cannot lose an update.
+
+        3. AND IT MUST ROLL BACK. A failure between the two statements left
+           ``in_transaction`` true, holding SQLite's writer lock against every
+           other process until close, at which point the "durable" count was
+           rolled back anyway.
+
+        ⚡ The delta is cleared ONLY after a successful commit, which is what
+        makes this self-healing as well as atomic — the property the earlier
+        whole-value write was chosen for. My argument that whole-value beat
+        atomic here was simply wrong: this shape has both.
         """
         if self._read_only or self._closed or self._conn is None:
             return
+        if not self._audit_failures_unpersisted:
+            return
+        if self._conn.in_transaction:
+            # A caller owns an open transaction — committing here would
+            # publish their uncommitted DML. Leave the delta pending; the next
+            # flush (another failure, batch exit, or close) writes it.
+            return
+        delta = self._audit_failures_unpersisted
         try:
+            self._conn.execute("BEGIN IMMEDIATE")
             self._conn.execute(
-                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-                (_AUDIT_FAILURES_KEY, str(self._audit_write_failures)),
+                "INSERT INTO metadata (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET "
+                "value = CAST(COALESCE(metadata.value, '0') AS INTEGER) + ?",
+                (_AUDIT_FAILURES_KEY, str(delta), delta),
             )
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 (_AUDIT_LAST_FAILURE_KEY, self._audit_last_failure or ""),
             )
             self._conn.commit()
+            self._audit_failures_unpersisted -= delta
         except Exception:
-            # ⚠ SWALLOWED, BUT NOT SILENT. This runs inside a handler whose
-            # contract is that nothing propagates, so it cannot raise — but a
-            # persist that quietly stops working would make the counter look
-            # healthy while no longer being durable, which is the exact defect
-            # this whole mechanism exists to close, one level down. Debug
-            # rather than warning: the caller has already been warned about
-            # the audit failure itself, and this is the follow-on detail.
+            # ⚠ ROLL BACK, THEN SWALLOW. Without the rollback a half-written
+            # health transaction keeps the writer lock and blocks every other
+            # process. The delta is deliberately NOT cleared, so the count
+            # survives to the next flush inside this process.
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
             _LOG.debug(
                 "could not persist degraded-audit counters to metadata; the "
                 "count is still correct for this process but will not survive "
-                "it", exc_info=True,
+                "it unless a later flush lands", exc_info=True,
             )
-
 
     def _row_to_episode(self, row: sqlite3.Row) -> Episode:
         """Convert a database row to an Episode.
@@ -4627,6 +4730,7 @@ class Store:
                 pass
             try:
                 self._audit_write_failures += 1
+                self._audit_failures_unpersisted += 1
                 # ⛔ RECORD WHERE, NOT JUST WHAT. The hash-chained
                 # ``dropped_before`` marker pins the gap's position in the
                 # chain, but it only becomes durable once a LATER write lands

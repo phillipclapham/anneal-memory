@@ -138,6 +138,59 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
         finally:
             store.close()
 
+    def test_the_guard_does_not_change_journal_mode_on_a_store_it_refuses(
+        self, tmp_path
+    ):
+        """⛔ ``_init_schema`` was never the only thing that mutates.
+
+        The check used to sit just above ``_init_schema``, and the test above
+        asserted schema init was never CALLED — true, and insufficient.
+        ``PRAGMA journal_mode=WAL`` runs before it and is a PERSISTENT database
+        property: measured, a refused store went from ``delete`` to ``wal``.
+        The guard now runs immediately after ``connect``, before any pragma.
+        """
+        import sqlite3
+
+        db = self._store_stamped(tmp_path, "2")
+        conn = sqlite3.connect(db)
+        conn.execute("PRAGMA journal_mode=DELETE")
+        conn.commit()
+        before = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        conn.close()
+
+        with pytest.raises(StoreError, match="newer anneal-memory schema"):
+            Store(db)
+
+        conn = sqlite3.connect(db)
+        after = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        conn.close()
+        assert before == after, (
+            f"the guard changed journal_mode from {before!r} to {after!r} on a "
+            "store it then refused — a persistent write to the database it "
+            "declines to understand"
+        )
+
+    def test_an_unreadable_version_fails_closed_rather_than_reading_as_new(
+        self, tmp_path
+    ):
+        """A newer schema may keep ``metadata`` and change its shape.
+
+        The first version swallowed every sqlite error as "no metadata table
+        yet — a brand-new database", which is the reassuring reading of an
+        ambiguous signal. A v2 store that renamed ``value`` raises here, and
+        we would have run this version's DDL against it.
+        """
+        import sqlite3
+
+        db = self._store_stamped(tmp_path, "2")
+        conn = sqlite3.connect(db)
+        conn.execute("ALTER TABLE metadata RENAME COLUMN value TO val")
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(StoreError, match="cannot read format_version"):
+            Store(db)
+
     @pytest.mark.parametrize(
         "value,why",
         [

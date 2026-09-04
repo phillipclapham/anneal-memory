@@ -4,6 +4,27 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — two guards that could not see their own subject
+
+- **The reserved-audit-kwarg set was hand-written and covered four of six collision-capable
+  names.** `_audit_log_after_commit`'s `event` and `payload` are supplied POSITIONALLY at the
+  `_batch` flush splat, so a queued key with either name raises the identical uncatchable
+  `TypeError` at the identical call site as the four that were refused — out of a fully committed
+  batch, which is the exact "operation succeeded, caller told it failed" path the mechanism exists
+  to close. Unreachability is not a defence: the four guarded names are equally unreachable today,
+  and the guard's stated purpose is future callers. The set is now DERIVED from the signature by
+  parameter kind, so adding a parameter cannot silently widen the hole; the test derives it
+  independently and separately proves each name really does collide at the splat, rather than
+  looping over the set under test as before.
+
+- **The SKILL.md ladder gate was one backtick pair from vacuous.** Its comment claimed it "cannot
+  silently pass a real ceiling"; measured false the same day — the same sentence re-teaching the
+  removed 3x ceiling as live guidance PASSED written `` `1x -> 2x -> 3x` `` and FAILED written
+  without backticks. The historical-quote exemption keyed on FORMATTING, and code-formatting a
+  ladder is the natural markdown instinct. It now requires the line to carry a retrospective cue
+  the writer has to mean, and is deliberately tight so an unrecognised cue makes the gate fire.
+  This is the only downstream detector for a class that rotted twenty days unnoticed.
+
 ### Fixed — the degraded-audit counter reached the CLI and was still structurally zero
 
 `status().audit_write_failures` was added so a swallowed audit write would be *pollable*, then

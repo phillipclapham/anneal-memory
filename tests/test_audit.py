@@ -1865,15 +1865,73 @@ class TestL3ResidualsClosed:
             _reject_reserved_audit_kwargs,
         )
 
-        assert _RESERVED_AUDIT_KWARGS == {
-            "method", "committed", "batch_aware", "stacklevel"
+        # ⛔ DERIVED, NOT TYPED — and the test derives it INDEPENDENTLY from
+        # the same ground truth. The hand-written version listed four names
+        # and the method has six collision-capable parameters: ``event`` and
+        # ``payload`` are supplied POSITIONALLY at the flush splat, which
+        # collides identically. Measured 2026-09-04: {"event": "x"} passed the
+        # guard and raised out of a fully committed batch. Asserting against
+        # a re-typed literal is what let that sit — the old test derived its
+        # cases FROM the set under test, so it could only ever confirm the
+        # names already there.
+        import inspect
+
+        from anneal_memory.store import Store
+
+        collision_capable = {
+            name
+            for name, param in inspect.signature(
+                Store._audit_log_after_commit
+            ).parameters.items()
+            if name != "self" and param.kind is not inspect.Parameter.VAR_KEYWORD
         }
+        assert _RESERVED_AUDIT_KWARGS == collision_capable, (
+            "the guarded set has drifted from the callee's signature: "
+            f"guarded={sorted(_RESERVED_AUDIT_KWARGS)} "
+            f"collision-capable={sorted(collision_capable)}. A parameter added "
+            "to _audit_log_after_commit widens the hole silently unless the "
+            "set is derived."
+        )
+        assert {"event", "payload"} <= _RESERVED_AUDIT_KWARGS
+
         # The pass-through actually in use survives untouched.
         assert _reject_reserved_audit_kwargs({"actor": "src"}) == {"actor": "src"}
 
-        for name in sorted(_RESERVED_AUDIT_KWARGS):
+        for name in sorted(collision_capable):
             with pytest.raises(TypeError, match="may not use"):
                 _reject_reserved_audit_kwargs({name: "collision"})
+
+    def test_every_reserved_name_really_does_collide_at_the_flush_splat(
+        self, tmp_path
+    ):
+        """The set must be justified by BEHAVIOUR, not by its own definition.
+
+        Deriving the guarded set from the signature keeps it in sync, but on
+        its own it is circular: it would happily guard a name that cannot
+        actually collide, and the argument for refusing these keys is that
+        Python raises at the call site before the callee's try/except can see
+        it. So reproduce the splat and watch it raise, once per name.
+
+        Nothing executes inside the method — argument binding fails first,
+        which is the entire point of the finding.
+        """
+        from anneal_memory.store import _RESERVED_AUDIT_KWARGS, Store
+
+        store = Store(tmp_path / "memory.db")
+        try:
+            # The flush passes event/payload positionally and the rest by
+            # keyword; mirror that shape, then splat one candidate over it.
+            by_keyword = {
+                name: None
+                for name in _RESERVED_AUDIT_KWARGS - {"event", "payload"}
+            }
+            for name in sorted(_RESERVED_AUDIT_KWARGS):
+                with pytest.raises(TypeError, match="multiple values"):
+                    store._audit_log_after_commit(
+                        "evt", None, **by_keyword, **{name: "collision"}
+                    )
+        finally:
+            store.close()
 
     def test_both_enqueue_paths_run_the_reserved_kwarg_check(self):
         """The guard must sit on EVERY path that can feed the flush splat.

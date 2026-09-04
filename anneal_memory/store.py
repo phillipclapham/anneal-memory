@@ -4322,6 +4322,21 @@ class Store:
         The running total is computed IN MEMORY and written whole, never as an
         SQL increment, so a failed persist loses only that one write-through:
         the next failure that persists cleanly restores the correct total.
+
+        ⚖ AND THAT CHOICE IS DELIBERATE AGAINST THE OBVIOUS OBJECTION. A whole
+        value write is a read-modify-write, so two CONCURRENT writers could
+        lose an update where an atomic ``ON CONFLICT ... value + 1`` could not
+        (raised by gpt-oss L3, 2026-09-04). Rejected for two reasons, in order:
+        concurrent writers are already outside this class's documented
+        contract — ``Store`` is not thread-safe, not task-safe, not reentrant,
+        and a multi-writer deployment breaks the hash chain by construction, so
+        a miscounted failure is the least of what has gone wrong. And the
+        atomic form is WORSE for the failure this counter actually exists to
+        record: the triggering scenario is a failing sink (disk full,
+        permissions), where persists are likely to fail REPEATEDLY. A lost
+        increment is lost forever; a lost whole-value write is repaired by the
+        next one that lands. Self-healing beats atomic when the writes
+        themselves are what is unreliable.
         """
         if self._read_only or self._closed or self._conn is None:
             return
@@ -4336,7 +4351,18 @@ class Store:
             )
             self._conn.commit()
         except Exception:
-            pass
+            # ⚠ SWALLOWED, BUT NOT SILENT. This runs inside a handler whose
+            # contract is that nothing propagates, so it cannot raise — but a
+            # persist that quietly stops working would make the counter look
+            # healthy while no longer being durable, which is the exact defect
+            # this whole mechanism exists to close, one level down. Debug
+            # rather than warning: the caller has already been warned about
+            # the audit failure itself, and this is the follow-on detail.
+            _LOG.debug(
+                "could not persist degraded-audit counters to metadata; the "
+                "count is still correct for this process but will not survive "
+                "it", exc_info=True,
+            )
 
 
     def _row_to_episode(self, row: sqlite3.Row) -> Episode:

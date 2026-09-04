@@ -44,6 +44,85 @@ anneal-memory = "anneal_memory.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["anneal_memory"]
 
+[tool.hatch.build.targets.sdist]
+# ⛔ DEFAULT-DENY, AND THE DEFAULT-DENY IS THE WHOLE POINT.
+#
+# Until 2026-09-04 there was no sdist target at all, so the sdist took
+# hatchling's default — THE ENTIRE VCS TREE. The wheel was never affected
+# (``packages`` above scopes it), which is why this survived nine releases:
+# the artifact almost everyone consumes was clean, and the one that was not
+# is the one nobody looks inside. Measured at 06e5858: 1,436,684 bytes
+# carrying 39 ``project_memory/`` files — six Diogenes review reports
+# enumerating OPEN, UNFIXED defects in the shipped product by file and line,
+# hostile-test receipts, and three files holding the operator's absolute home
+# path. A PyPI sdist cannot be reliably unpublished; HEAD is 0.9.10.dev0 and
+# nothing has shipped, so this was catchable exactly once.
+#
+# ⚠ IT IS AN ALLOWLIST, NOT ``exclude = ["project_memory"]``, AND THAT IS A
+# DELIBERATE CHOICE ABOUT THE NEXT ONE. A denylist only ever catches the name
+# you already know — it would have needed someone to predict ``project_memory``
+# before it existed, and it will need them to predict whatever internal-notes
+# directory lands next. Default-deny inverts the failure: a new top-level entry
+# is OUT until someone states why it should ship. The only line in this file
+# that had ever noticed ``project_memory/`` was special told RUFF, not the
+# BUILD — a rule aimed at one name, doing nothing for the class.
+#
+# The property each entry below was graded against: AN SDIST CARRIES WHAT A
+# CONSUMER NEEDS TO BUILD, INSTALL, TEST AND LEGALLY REDISTRIBUTE THIS PACKAGE
+# FROM SOURCE — plus whatever the shipped README's own relative links require,
+# since ``readme =`` makes README.md the package description and a dangling
+# link in it is a defect in the distribution. It does NOT carry the project's
+# internal development record: how work was tracked, what was reviewed, or what
+# is still broken.
+#
+# Kept, with the reason each is not optional:
+#   anneal_memory  the package source
+#   tests          "test from source"; several tests read repo-root files via
+#                  ``Path(anneal_memory.__file__).parent.parent``, so they only
+#                  pass from a source tree — this one — and not from site-packages
+#   docs           14 files; README's integration table links every one of them
+#   examples       README links them AND test_integrity.py hard-asserts they exist
+#   skill          README links it AND test_integrity.py:547 hard-asserts SKILL.md
+#   README.md      ``readme =`` target; PKG-INFO embeds it
+#   CHANGELOG.md   the release record, and test_integrity.py reads it
+#   LICENSE        legal redistribution
+#   server.json    MCP registry manifest; test_integrity.py asserts on its versions
+#   logo-400.png   README.md:4 embeds it by relative path
+#   tool-integrity.json  matches BOTH the package copy (verified at server
+#                  startup, asserted by the suite) and the byte-identical
+#                  repo-root copy. The root copy alone does not clear the
+#                  property — nothing reads it — but it is public already, costs
+#                  1.5 KB, and belongs to the integrity story rather than to this
+#                  disclosure fix, so it is kept deliberately rather than by
+#                  oversight. Two copies that nothing pins together can drift.
+#
+# Dropped: project_memory (the reported site), .github, .gitignore, Dockerfile,
+# scripts (contributor git hooks), glama.json (third-party directory metadata),
+# logo.png (144 KB, referenced by nothing in the repo — logo-400.png is the one
+# README uses).
+#
+# ⚠ EVERY PATTERN IS ANCHORED WITH A LEADING SLASH ON PURPOSE. These are
+# gitignore-style patterns: an unanchored ``README.md`` matches at ANY depth and
+# would have re-admitted ``project_memory/testbed/README.md`` — the fix quietly
+# reopening the hole it closed. Verified by building, not by reading.
+#
+# tests/test_packaging.py pins this against hatchling's real file-selection API
+# (confirmed to reproduce the tarball exactly, 112/112 files at 06e5858). If you
+# add a top-level entry, that test fails until you decide whether it ships.
+include = [
+    "/anneal_memory",
+    "/tests",
+    "/docs",
+    "/examples",
+    "/skill",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/server.json",
+    "/logo-400.png",
+    "tool-integrity.json",
+]
+
 [tool.ruff]
 # ``project_memory/`` holds project-tracking documents and the ARCHIVED Phase-1
 # hostile-testing scripts, which moved into this repo on 2026-09-04 with the

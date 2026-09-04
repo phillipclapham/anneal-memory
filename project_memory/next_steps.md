@@ -340,10 +340,18 @@ warning**) and `-W error` produces **zero signal**. So four channels now, most-s
   (`test_a_partial_write_is_rolled_back_not_left_to_concatenate`). **What remains is only the
   reporting half:** `cli.cmd_verify` buries `skipped_lines`, so an operator running `verify` is not
   told that lines were skipped. That one is untouched and still worth doing.
+  ⛔ **DONE 2026-09-04 (commit acac0f0) AND THE DIAGNOSIS ABOVE IS WRONG — do not act on it.** The
+  CLI reported skipped lines on the valid path all along; the count was being discarded in the
+  LIBRARY, by the chain-break return in `AuditTrail.verify`, before the CLI could see it. Both
+  halves fixed. See the 09-05 block at the top of this file.
 - ⛔ **`spore-745` — `dropped_before` IS LOST BY ANY `close()`/REOPEN, NOT JUST A CRASH.** Measured:
   an ORDINARY close+reopen leaves 3 episodes against 2 entries, no marker, `valid=True`,
   `audit_write_failures` back to 0. **Every CLI invocation opens and closes a Store**, so across CLI
-  commands the mechanism effectively never fires. A durable fix wants a transactional outbox — a
+  commands the mechanism effectively never fires.
+  ⛔ **THE `audit_write_failures` HALF OF THAT MEASUREMENT IS NO LONGER TRUE (2026-09-04):** the
+  count AND the failure location are both persisted and seeded at open, so a reopened store reports
+  them. What this bullet still describes correctly is the `dropped_before` MARKER, which remains
+  process-local. `spore-746` is CLOSED; `spore-747`'s anneal half is CLOSED. See the 09-05 block. A durable fix wants a transactional outbox — a
   resettable integer only MOVES the window. ⚠ This comment has been wrong TWICE in one day, both
   times overclaiming; do not let a third version do it. · **`spore-746`** — rotation-failure orphan
   (pre-existing MED). · **`spore-747`** — the levain two-anneal skew + my design read (anneal's

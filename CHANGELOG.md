@@ -4,6 +4,47 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — a post-commit interrupt could destroy a committed wrap's continuity file
+
+Found by codex at L3 on the SAME DAY's audit-counter fix, which is the point of running L3 after
+the fix rather than before it.
+
+`_audit_log_after_commit` swallows with `except Exception`. A `KeyboardInterrupt` or `SystemExit`
+raised while `_batch()` replays a deferred audit therefore escaped the `with` block **after** the
+outer commit had landed. `validated_save_continuity` sets `db_committed = True` only once that
+block returns, and its `except BaseException` then unlinks both staged sidecars — so the new
+continuity text is destroyed while the wrap row and the episodes' wrap assignments stay durable.
+The comment on that cleanup says removing them there "would destroy committed state permanently".
+It was written for `Exception`, and this walks around it. A Ctrl+C during a CLI wrap reaches the
+window.
+
+The whole post-commit region now sits under one `except BaseException` at a single call site
+(`_replay_deferred_audits`), rather than depending on every statement inside it being individually
+non-raising. `_persist_audit_health`'s rollback was widened the same way: an interrupt between its
+`BEGIN IMMEDIATE` and `commit()` previously left the transaction OPEN, holding SQLite's writer lock
+against every other process — the precise failure that rollback exists to prevent.
+
+⚠ **The cost, stated:** a Ctrl+C during the replay is not delivered. The region is a few audit
+appends wide, and the trade is a deferred interrupt against a permanently lost wrap.
+
+### Fixed — a stale pending failure could overwrite a newer one, and THIS MORNING'S FIX OPENED IT
+
+`audit_last_failure` was written with an unconditional `INSERT OR REPLACE`. Writer A defers a
+failure inside a transaction, writer B persists a newer one, A closes and overwrites B's record
+with its own older string. The count is unaffected — that is an additive UPSERT and cannot lose an
+update — but the forensic pointer named the wrong final loss.
+
+⚡ **The window did not exist before 2026-09-05.** Until the `_batch()`-exit and `close()` flush
+points were added that morning, the only flush ran inside the failure handler microseconds after
+the string was assigned, so a flush could never carry a stale value. A fix reintroducing a
+neighbour of the class it closed is exactly what the review layer after it is for.
+
+The write is now conditional on the stamp the same method embeds in the string, read inside the
+same `BEGIN IMMEDIATE` so the compare and the write are atomic against the other writer. ⚠ The
+stamp is second-resolution: two losses inside one second tie, and a tie replaces — no worse than
+the unconditional write. An unparseable or absent stored value also replaces, so a corrupt row
+cannot pin the field forever.
+
 ### Fixed — the durable audit-failure counter was NOT durable on the batched path
 
 `audit_write_failures` is documented in three shipped places as durable and lifetime-scoped

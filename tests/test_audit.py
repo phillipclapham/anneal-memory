@@ -2046,6 +2046,186 @@ class TestCodexL3TwentySixOhNineOhFour:
         finally:
             reopened.close()
 
+    # -- #4c: a post-commit BaseException must not reach the caller (09-05) --
+
+    def test_a_keyboardinterrupt_in_the_replay_cannot_look_like_a_failed_batch(
+        self, tmp_path
+    ):
+        """codex L3 HIGH, 2026-09-05 — the data-loss path the guard walked past.
+
+        ⛔ ``_audit_log_after_commit`` swallows with ``except Exception``. A
+        ``KeyboardInterrupt`` raised while replaying a deferred audit therefore
+        escaped ``_batch()`` AFTER its outer commit had already landed. The
+        caller cannot tell that from a batch that failed to commit — and
+        ``validated_save_continuity`` does not try: it sets ``db_committed =
+        True`` only after the ``with`` block returns, and its ``except
+        BaseException`` then unlinks BOTH staged sidecars. The comment on that
+        cleanup says removing them "would destroy committed state permanently".
+        It was written for ``Exception``.
+
+        A Ctrl+C during a CLI wrap reaches this window, and the loss is the
+        new continuity text while the wrap row and the episodes' wrap
+        assignments stay durable.
+
+        MUTATION-CHECKED, and the failure MODE is the point: narrowing the
+        post-commit ``except BaseException`` in ``_batch()`` back to ``except
+        Exception`` does not turn this test red — the interrupt escapes the
+        ``with`` block and ABORTS the pytest run at that line. A caller has no
+        more defence against it than the test runner does, which is the whole
+        argument for containing it at the source.
+        """
+        from anneal_memory.store import Store
+
+        db = tmp_path / "memory.db"
+        store = Store(db)
+
+        def interrupt(*a, **k):
+            raise KeyboardInterrupt("user hit Ctrl+C during the audit replay")
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with store._batch():
+                    store.record("committed work", episode_type="observation")
+                    store._audit.log = interrupt
+            # Reaching here at all is the property: the batch exited normally,
+            # so a caller's ``db_committed = True`` runs and its cleanup does
+            # not fire.
+            assert store.status().total_episodes == 1
+        finally:
+            store._audit.log = None
+            store.close()
+
+        reopened = Store(db)
+        try:
+            assert reopened.status().total_episodes == 1, (
+                "the committed episode did not survive — a post-commit "
+                "interrupt was allowed to look like a failed batch"
+            )
+        finally:
+            reopened.close()
+
+    def test_an_interrupt_mid_health_write_does_not_hold_the_writer_lock(
+        self, tmp_path
+    ):
+        """The second half of the same HIGH, in ``_persist_audit_health``.
+
+        Its rollback sat under ``except Exception``, so an interrupt landing
+        between ``BEGIN IMMEDIATE`` and ``commit()`` left the transaction OPEN
+        — holding SQLite's writer lock against every other process, which is
+        the exact failure that rollback exists to prevent.
+
+        MUTATION-CHECKED: narrowing that handler back to ``except Exception``
+        makes the interrupt escape ``_persist_audit_health()`` itself and abort
+        the run at that call — with the transaction still open behind it. The
+        sibling test above stays unaffected, so the two are pinned separately.
+        """
+        from anneal_memory.store import Store
+
+        db = tmp_path / "memory.db"
+        store = Store(db)
+        try:
+            store._audit_failures_unpersisted = 1
+            store._audit_last_failure = "synthetic"
+
+            real_conn = store._conn
+
+            class _InterruptOnCommit:
+                # sqlite3.Connection.commit is read-only, so proxy instead of
+                # patching. Everything else delegates to the real connection,
+                # including ``in_transaction`` — which is the thing under test.
+                def __init__(self, conn):
+                    self._conn = conn
+
+                def __getattr__(self, name):
+                    return getattr(self._conn, name)
+
+                def commit(self, *a, **k):
+                    raise KeyboardInterrupt("Ctrl+C between BEGIN and COMMIT")
+
+            store._conn = _InterruptOnCommit(real_conn)
+            store._persist_audit_health()  # must not raise
+            store._conn = real_conn
+
+            assert not real_conn.in_transaction, (
+                "an interrupt left the health transaction open — the writer "
+                "lock is held against every other process"
+            )
+            assert store._audit_failures_unpersisted == 1, (
+                "the delta was cleared despite the write never committing"
+            )
+        finally:
+            store.close()
+
+    # -- #4d: nor may the last-failure POINTER go backwards (codex, 09-05) --
+
+    def test_a_stale_pending_failure_cannot_overwrite_a_newer_persisted_one(
+        self, tmp_path
+    ):
+        """codex L3 MED, 2026-09-05 — opened by that morning's own HIGH fix.
+
+        Writer A defers a failure inside a transaction; writer B persists a
+        newer one; A then closes and its flush wrote A's OLDER string over B's
+        via ``INSERT OR REPLACE``. The count is additive and unaffected — this
+        is the forensic pointer naming the wrong final loss.
+
+        ⚡ The window is NEW as of 2026-09-05. Before the ``_batch()``-exit and
+        ``close()`` flush points were added that morning, the only flush ran
+        inside the failure handler microseconds after the string was assigned,
+        so a flush could never carry a stale value. A fix reintroducing a
+        neighbour of the class it closed is why L3 runs after the fix and not
+        before it.
+
+        MUTATION-CHECKED: restoring the unconditional ``INSERT OR REPLACE``
+        makes the final assertion fail with A's older record in the row.
+        """
+        from anneal_memory.store import Store
+
+        db = tmp_path / "memory.db"
+        seed = Store(db)
+        seed.record("seed", episode_type="observation")
+        seed.close()
+
+        a = Store(db)
+        try:
+            # A holds an OLD pending failure it could not commit (the
+            # in_transaction guard) — synthesised at a stamp that is
+            # unambiguously earlier than B's.
+            a._audit_failures_unpersisted = 1
+            a._audit_last_failure = (
+                "record: OSError(28, 'No space left on device') "
+                "[dropped before audit seq 1] at 2026-09-05T10:00:00Z"
+            )
+
+            b = Store(db)
+            try:
+                b._audit_failures_unpersisted = 1
+                b._audit_last_failure = (
+                    "save_continuity: OSError(28, 'No space left on device') "
+                    "[dropped before audit seq 4] at 2026-09-05T11:00:00Z"
+                )
+                b._persist_audit_health()
+            finally:
+                b.close()
+
+            a._persist_audit_health()  # A's close-time flush, with a stale value
+        finally:
+            a.close()
+
+        reopened = Store(db)
+        try:
+            status = reopened.status()
+            assert status.audit_write_failures == 2, (
+                "the additive count lost an update"
+            )
+            assert status.audit_last_failure is not None
+            assert "11:00:00Z" in status.audit_last_failure, (
+                "a stale pending failure overwrote a newer persisted one — "
+                f"the row reads {status.audit_last_failure!r}"
+            )
+        finally:
+            reopened.close()
+
     # -- #5: the count must never go backwards between writers --
 
     def test_two_writers_cannot_make_the_lifetime_count_decrease(self, tmp_path):

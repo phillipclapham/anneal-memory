@@ -3706,14 +3706,16 @@ class Store:
 
     def gc_pattern_associations(self, today: str | None = None) -> int:
         """Periodic full-graph GC: delete edges decayed below the GC floor.
+
         NOT per-wrap (that re-introduces the regime-variant cost the calendar
+        model avoids) — a harness calls it occasionally. Returns rows deleted.
 
         Warns:
             UserWarning: if the audit event could not be written. The
                 operation still SUCCEEDED — the audit trail is missing
                 this event. Also counted on ``status().audit_write_failures``
                 and logged; see :meth:`_audit_log_after_commit`.
-        model avoids) — a harness calls it occasionally. Returns rows deleted."""
+        """
         day = today or _today_local()
         with self._db_boundary("gc_pattern_associations"):
             gced = _gc_pattern_associations(
@@ -4461,6 +4463,49 @@ class Store:
         except Exception:
             return self._audit_last_failure
 
+    @staticmethod
+    def _failure_stamp(value: str | None) -> str | None:
+        """The trailing ``at <ISO-Z>`` stamp ``_audit_log_after_commit`` writes.
+
+        Returns ``None`` for anything that does not carry one, which every
+        caller reads as "not comparable" rather than as "older".
+        """
+        if not value:
+            return None
+        marker = " at "
+        idx = value.rfind(marker)
+        if idx == -1:
+            return None
+        stamp = value[idx + len(marker):].strip()
+        # Shape check only — this is an ordering key, not a parsed datetime,
+        # and the format is fixed by the one site that writes it.
+        if len(stamp) == 20 and stamp.endswith("Z") and stamp[4] == "-":
+            return stamp
+        return None
+
+    def _stored_failure_is_newer(self, candidate: str) -> bool:
+        """Whether the persisted ``audit_last_failure`` post-dates ``candidate``.
+
+        Read inside the caller's ``BEGIN IMMEDIATE`` so the compare and the
+        write are atomic against another writer. Fails toward REPLACING: an
+        absent, unstamped or unreadable stored value returns False.
+        """
+        mine = self._failure_stamp(candidate)
+        if mine is None:
+            return False
+        try:
+            row = self._conn.execute(
+                "SELECT value FROM metadata WHERE key = ?",
+                (_AUDIT_LAST_FAILURE_KEY,),
+            ).fetchone()
+        except Exception:
+            return False
+        theirs = self._failure_stamp(row[0] if row else None)
+        if theirs is None:
+            return False
+        # ISO-8601 UTC at fixed width sorts lexically as it sorts temporally.
+        return theirs > mine
+
     def _persist_audit_health(self) -> None:
         """Flush the pending degraded-audit delta to ``metadata``, atomically.
 
@@ -4526,13 +4571,48 @@ class Store:
                 "value = CAST(COALESCE(metadata.value, '0') AS INTEGER) + ?",
                 (_AUDIT_FAILURES_KEY, str(delta), delta),
             )
-            self._conn.execute(
-                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-                (_AUDIT_LAST_FAILURE_KEY, self._audit_last_failure or ""),
-            )
+            # ⛔ CONDITIONAL, NOT ``INSERT OR REPLACE`` (codex L3 MED,
+            # 2026-09-05) — AND THIS DEFECT WAS OPENED BY THE FIX SHIPPED
+            # EARLIER THE SAME DAY. Before the ``_batch()``-exit and ``close()``
+            # flush points existed, the only flush ran inside the failure
+            # handler, microseconds after ``_audit_last_failure`` was assigned,
+            # so the value written was always this process's newest. A
+            # ``close()`` flush can now write a delta that has been pending for
+            # the whole session: writer A defers at T1, writer B persists at T2,
+            # A closes at T5 and its unconditional REPLACE overwrites B's newer
+            # record with A's older one. The COUNT is unaffected — that is an
+            # additive UPSERT and cannot lose an update — but the forensic
+            # pointer would name the wrong final loss.
+            # The comparison uses the timestamp this method itself embeds in
+            # the string, read inside the same ``BEGIN IMMEDIATE``, so it is
+            # atomic against the other writer.
+            # ⚠ RESIDUE, STATED: the stamp is second-resolution, so two losses
+            # inside one second tie and the tie replaces — no worse than the
+            # unconditional write it replaces. An unparseable or absent stored
+            # value also replaces, which keeps a corrupt row from pinning the
+            # field forever.
+            if self._audit_last_failure and not self._stored_failure_is_newer(
+                self._audit_last_failure
+            ):
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                    (_AUDIT_LAST_FAILURE_KEY, self._audit_last_failure),
+                )
             self._conn.commit()
             self._audit_failures_unpersisted -= delta
-        except Exception:
+        except BaseException:
+            # ⛔ ``BaseException``, NOT ``Exception`` (codex L3 HIGH,
+            # 2026-09-05). A ``KeyboardInterrupt`` landing between
+            # ``BEGIN IMMEDIATE`` and ``commit()`` walked straight past an
+            # ``except Exception`` and left the transaction OPEN — holding
+            # SQLite's writer lock against every other process for the life of
+            # the handle, which is the precise failure the rollback below was
+            # written to prevent. A Ctrl+C during a CLI wrap reaches this
+            # window. Swallowing is this method's documented contract at all
+            # three of its call sites, and it is the safe direction here: the
+            # alternative is an interrupt escaping ``close()`` or a post-commit
+            # ``_batch()`` exit, where the caller reads any raise as "the
+            # commit failed" and deletes committed state.
             # ⚠ ROLL BACK, THEN SWALLOW. Without the rollback a half-written
             # health transaction keeps the writer lock and blocks every other
             # process. The delta is deliberately NOT cleared, so the count
@@ -5051,6 +5131,19 @@ class Store:
         - :meth:`delete` (episode deletions)
         - :meth:`record_associations` / :meth:`decay_associations`
         - :meth:`wrap_completed`
+        - :meth:`seed_pattern_co_graduation`
+        - :meth:`drain_co_surface_events`
+        - :meth:`gc_pattern_associations`
+        - :meth:`rename_pattern_association`
+        - :meth:`sever_pattern_concept`
+
+        ⚠ The last five were MISSING from this list until 2026-09-05 (L3
+        complement) while being batch-aware in fact — each passes
+        ``commit=not self._defer_commit`` and emits through
+        ``_audit_log_after_commit`` with the default ``batch_aware=True``. The
+        list is read as a safety contract, so an omission here reads as "not
+        safe inside a batch" for a method that is, which is the more dangerous
+        direction for a list like this to be wrong in.
 
         All other write methods (``prune``, ``wrap_started``,
         ``wrap_cancelled``, ``save_continuity``, ``save_meta``)
@@ -5185,6 +5278,43 @@ class Store:
         # / L1 audit-flush-destroys-committed-state path). Audit is
         # best-effort at this point; we trade a missing audit event
         # for durability of the actual wrap data.
+        # ⛔ NOTHING BELOW THIS LINE MAY PROPAGATE (codex L3 HIGH, 2026-09-05).
+        # The load-bearing invariant is "a successful ``_batch()`` exit means
+        # the DB is committed and the caller may externalize files". The
+        # per-event swallow inside ``_audit_log_after_commit`` is ``except
+        # Exception``, so a ``KeyboardInterrupt`` or ``SystemExit`` raised
+        # while replaying a deferred audit escaped the ``with`` block AFTER the
+        # commit had landed. In ``validated_save_continuity`` that means
+        # ``db_committed = True`` is never reached, and its ``except
+        # BaseException`` then unlinks BOTH staged sidecars — destroying the
+        # new continuity text while the wrap row and the episodes' wrap
+        # assignments are durable. That handler's own comment says cleaning up
+        # there "would destroy committed state permanently"; it was built for
+        # ``Exception`` and this walks around it.
+        # ⚠ THE COST, STATED: a Ctrl+C during this replay is not delivered.
+        # The region is a few audit appends wide, and the trade is a deferred
+        # interrupt against a permanently lost wrap. Deliberate.
+        try:
+            self._replay_deferred_audits(deferred, commit_succeeded)
+        except BaseException:
+            try:
+                _LOG.warning(
+                    "post-commit audit work failed after a successful batch "
+                    "commit; the DB is committed and the caller may proceed",
+                    exc_info=True,
+                )
+            except Exception:
+                pass
+
+    def _replay_deferred_audits(
+        self, deferred: list[Any], commit_succeeded: bool
+    ) -> None:
+        """Post-commit audit replay + the health flush. See ``_batch()``.
+
+        Split out so the whole post-commit region sits under ONE
+        ``except BaseException`` at its single call site, rather than relying
+        on every statement inside it to be individually non-raising.
+        """
         if commit_succeeded and self._audit is not None:
             for event, payload, kwargs, origin_method, origin_committed in deferred:
                 # The "future pass" this loop's comment promised: routed
@@ -5222,9 +5352,12 @@ class Store:
         # heals before the batch exits produces neither, and the count dies
         # with the process while README/types.py/CHANGELOG all promise it is
         # durable. MEASURED 2026-09-05: after-reopen 0 without this line, 1
-        # with it. The batch's transaction is closed by here — the commit ran
-        # above and ``_defer_commit`` was reset in the ``finally`` — so this
-        # is a legal place to own one.
+        # with it. The batch's transaction is closed by the time this runs —
+        # ``_batch()`` does its outer commit and resets ``_defer_commit`` in a
+        # ``finally`` BEFORE calling this method — so this is a legal place to
+        # own one. (Said of ``_batch()``, not of the lines above: this moved
+        # out of ``_batch()`` on 2026-09-05 when the whole post-commit region
+        # was put under one ``except BaseException`` there.)
         self._persist_audit_health()
 
     # -- 10.5c.5 L3 fix: unique tmp sidecar filename pattern.

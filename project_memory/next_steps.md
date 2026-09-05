@@ -107,6 +107,14 @@ MEASURED: `SQLITE_LOCKED_SHAREDCACHE` reports `'database table is locked: sqlite
 matched NEITHER clause of the old predicate. **A named-and-unclosed coverage gap is a defect with a
 countdown on it.**
 ⚠ **glm was CUT OFF part-way through and opened one file. This was NOT a clean three-seat pass.**
+⛔ **AND THE CAUSE IS NOT WHAT I FIRST WROTE — CORRECTED BY `0905+1 fanin` AT CLOSE.** I attributed
+it to my own over-wide scope (70k-char diff). **It is a BUDGET defect: `deep_review.py --timeout`
+defaults to 600s and glm-5.3 needs more.** `agents.json`'s 300 was NOT the cause — every evidence
+row is `source: bugfind` from `deep_review.py`. The flow seat shipped a per-seat FLOOR (glm-5.3 →
+1800). **So glm-5.3 is UNDERFUNDED, not broken, and it failed BOTH of today's rounds for that
+reason — including the second, which I had scoped down to 18k chars specifically to fix a cause that
+was never the cause.** Narrowing scope did not help because scope was not the problem. If a seat
+here produces nothing, check its wall budget before you re-scope the diff.
 The region it never reached is unreviewed, and a later reader should not count this as coverage.
 
 ### ⚖ THE VERSION-GUARD RULING — SHIPPED NARROWER THAN IT WAS WORDED, AND READ THE GAP CLAUSE
@@ -132,8 +140,39 @@ answer spore-747. **NOT BUILT, NOT RULED.**
 the writing version", which is two fields in one question. The fan-in caught it downstream. If you
 hand a version question up, say WHICH version.
 
+### ⛔ THREE FINDINGS THAT ARE APPARATUS, NOT anneal — they outlive this repo
+1. **A seat that flags a deliberate tradeoff without engaging its reason will prescribe the
+   REVERSAL, and the reversal is the original bug.** gpt-oss filed both `except BaseException` sites
+   HIGH and prescribed re-raising everything — which IS the data-loss defect those handlers close.
+   ▶ **The remedy is cheap and is the point: MUTATION-TEST THE SEAT'S OWN PROPOSED FIX before
+   accepting it. One run.** Applying gpt-oss's made the wrap-protection test abort, exactly as the
+   original defect did.
+2. **CONSENSUS ON A LOCATION IS NOT CONSENSUS ON A DIAGNOSIS.** Both seats hit the same lines; only
+   complement had the distinction that mattered. A triage counting "2 of 2 flagged this" ships the
+   reversal. *(Shipped into `global/skills/bugfind/SKILL.md` by the head, whose read was sharper
+   than mine: the doctrine already said "resolve against disk, never by vote" three lines down, and
+   the bucketing routed past it.)*
+3. **Check the rows you ADDED against a file's convention, not the file as a whole — the whole will
+   look compliant.** This file's re-derivation block already used the procedure form; I preserved it
+   faithfully and authored my new rows as answers.
+
 ### ⛔ OPEN, AND DELIBERATELY NOT DECIDED HERE
-· **`last_writer_version` (spore-747's actual answer) — NOT BUILT, held pending a ruling.**
+· ⚖ **`last_writer_version` (spore-747's actual answer) — RULED HELD by `0905+1 fanin` 2026-09-05.
+  NOT "not got to yet".** Two reasons, and the second is the one that will otherwise be re-derived
+  wrongly:
+  **(a)** It is a NEW FIELD, therefore new machinery under one-in-one-out, which is in force while
+  `spore-741`'s subtraction review is unpaid. *Changing WHEN AN EXISTING FIELD IS WRITTEN — the
+  `format_version` stamp — is a FIX. Adding a field that does not exist is an ADDITION, and
+  additions owe the exchange.*
+  **(b)** ⛔ **The "cheap now, expensive later" argument that correctly justified the schema stamp
+  DOES NOT TRANSFER.** It works for `format_version` because that field **already exists and is
+  already read by a live guard**, so changing its write moment later means changing it under live
+  data with a guard depending on it. **`last_writer_version` has no data and no reader — adding it
+  in October costs exactly what adding it today costs.** Reusing the argument here would be a
+  rationale travelling past its scope condition, which is easiest to do right after the rationale
+  has just been validated.
+  ▶ Nothing degrades while it waits: spore-747 is filed-and-not-started with a next date, and the
+  skew is not live on this machine (levain is not on PATH here, verified 09-04).
 · ⛔⛔ **`spore-773` HAS RISEN — ITS TRIGGER IS MET.** The condition was *"if the levain fix does
   NOT land, this rises"*, and the levain-side fix (`spore-751`'s ruling half — `levain init` wiring
   `.mcp.json` to levain's OWN interpreter) was **not among the five findings levain closed on

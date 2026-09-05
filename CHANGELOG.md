@@ -137,7 +137,11 @@ regression tests now assert it, each mutation-checked against its own flush poin
 
 ⚠ **Honest scope, stated rather than implied:** durability requires reaching a flush point. A
 process killed mid-batch, before either the batch exit or `close()`, still loses that last delta.
-The counter is durable across a normal exit, not across a `SIGKILL`. Found by Diogenes 2026-09-05.
+The counter survives a normal exit, not a `SIGKILL`. ⛔ And that is the NARROWER half of the bound
+(`spore-774`, which rules that this field is never to be called "durable" unqualified): the metadata
+write is itself best-effort and issued after the mutation committed, so a full volume can fail it
+too. **The guarantee is that a loss RECORDED here survives the process — not that every loss is
+recorded.** Found by Diogenes 2026-09-05.
 
 ### Fixed — the two halves of one store failed in OPPOSITE directions under version skew
 

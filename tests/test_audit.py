@@ -2289,6 +2289,86 @@ class TestCodexL3TwentySixOhNineOhFour:
                 f"non-contention classified as contention: {msg!r}"
             )
 
+    # -- #4f: DIRECTION, not just frequency, for every conditional write --
+
+    @pytest.mark.parametrize(
+        "stored,expect_kept",
+        [
+            ("record: X [dropped before audit seq 1] at 2099-01-01T00:00:00Z", True),
+            ("record: X [dropped before audit seq 1] at 2020-01-01T00:00:00Z", False),
+            ("record: OSError(28) written before the stamp format existed", False),
+            (None, False),
+        ],
+        ids=["stored-newer", "stored-older", "stored-legacy-unstamped", "stored-absent"],
+    )
+    def test_the_last_failure_write_fires_in_the_right_DIRECTION(
+        self, tmp_path, stored, expect_kept
+    ):
+        """⚖ The lens this test exists for, named by ``0905+1 fanin`` 2026-09-05:
+
+        **A conditional write has TWO questions — how often it fires, and WHICH
+        WAY it fires — and reviewing only the first is the checkable-proxy
+        class.** That is not hypothetical here. The `format_version` stamp
+        shipped the same day with the predicate ``metadata.value IS NOT
+        excluded.value``, which reads as "only when it changed" and actually
+        says "whenever they differ, in EITHER direction". It was reviewed for
+        frequency, ratified, and wrote a version marker BACKWARDS.
+
+        So this pins the OTHER conditional write introduced that day — the
+        ``audit_last_failure`` guard — as an explicit direction matrix rather
+        than a "does it skip the redundant write" assertion. Every row was
+        MEASURED before being written down.
+
+        The one fail-open branch (a candidate with no parseable stamp
+        overwrites a stamped stored value) is structurally unreachable: a write
+        requires a pending delta, a delta requires a failure, and every failure
+        restamps ``_audit_last_failure`` with a fresh ``at <ISO-Z>``. Recorded
+        rather than guarded, because unreachability is not a property to lean
+        on silently — see ``_RESERVED_AUDIT_KWARGS``, which makes the same
+        argument in the other direction.
+        """
+        import sqlite3
+
+        from anneal_memory.store import Store
+
+        db = tmp_path / "m.db"
+        seed = Store(db)
+        seed.record("seed", episode_type="observation")
+        seed.close()
+
+        if stored is not None:
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) "
+                "VALUES ('audit_last_failure', ?)",
+                (stored,),
+            )
+            conn.commit()
+            conn.close()
+
+        writer = Store(db)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            writer._audit.log = self._boom
+            writer.record("provokes a real, freshly stamped failure",
+                          episode_type="observation")
+        writer.close()
+
+        reopened = Store(db)
+        try:
+            final = reopened.status().audit_last_failure
+        finally:
+            reopened.close()
+
+        if expect_kept:
+            assert final == stored, (
+                "a stale pending failure overwrote a NEWER persisted one"
+            )
+        else:
+            assert final != stored and "No space left on device" in (final or ""), (
+                "the newer failure did not replace an older/unorderable record"
+            )
+
     # -- #5: the count must never go backwards between writers --
 
     def test_two_writers_cannot_make_the_lifetime_count_decrease(self, tmp_path):

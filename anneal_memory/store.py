@@ -1636,10 +1636,25 @@ class Store:
         # ⚠ The read that GUARDS this ran before any persistent write, at
         # ``_refuse_a_newer_schema``; by here a greater version has already
         # been refused, so this can only ever hold or raise the marker.
-        # ⚠ NO-OP WHEN THE MARKER IS ALREADY RIGHT — the ``WHERE`` makes this
-        # write nothing in the overwhelmingly common case (opening a store this
-        # generation already wrote). MEASURED, because the objection was a cost
-        # one: ``_init_schema`` already runs its DDL and the ``INSERT OR
+        # ⛔ MONOTONIC — IT MAY RAISE THE MARKER, NEVER LOWER IT, AND THE FIRST
+        # VERSION OF THIS STAMP COULD LOWER IT. The predicate was
+        # ``metadata.value IS NOT excluded.value``, which writes whenever the
+        # values DIFFER — in either direction. MEASURED 2026-09-05 against the
+        # ``spore-773`` window (the version check and the migrations are not one
+        # atomic step): process A at this version passes ``_refuse_a_newer_
+        # schema`` while the marker still reads 1; process B at the next version
+        # migrates and stamps 2; A then reaches this line and wrote the marker
+        # BACK DOWN to 1. Every later open at the older version was then let
+        # through — so the stamp did not merely fail to refuse, it DESTROYED THE
+        # EVIDENCE that a newer binary had been here, turning a one-shot race
+        # into a permanent defeat of the guard. ``INSERT OR IGNORE``, which this
+        # replaced, would have left the 2 standing.
+        # A schema generation only ever advances, so a strictly-less-than
+        # predicate is the honest one and the no-lower property is structural
+        # rather than a rule someone has to remember.
+        # ⚠ It still no-ops when the marker is already right (``1 < 1`` is
+        # false), which was the point of the original predicate. MEASURED,
+        # because the objection to writing per-open was a cost one: ``_init_schema`` already runs its DDL and the ``INSERT OR
         # IGNORE`` defaults loop above and commits ONCE at the end of this
         # method, unconditionally, on every write-capable open. So this adds a
         # statement to an existing transaction, not a transaction or a commit —
@@ -1648,7 +1663,8 @@ class Store:
         self._conn.execute(
             "INSERT INTO metadata (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value "
-            "WHERE metadata.value IS NOT excluded.value",
+            "WHERE CAST(metadata.value AS INTEGER) "
+            "    < CAST(excluded.value AS INTEGER)",
             ("format_version", str(_SCHEMA_VERSION)),
         )
         # ⛔ WHAT THIS DOES **NOT** CLOSE, and the distinction is the whole

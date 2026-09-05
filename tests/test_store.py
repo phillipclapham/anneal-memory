@@ -121,6 +121,76 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
         with pytest.raises(StoreError, match="refusing to open"):
             Store(db)
 
+    def test_the_stamp_may_raise_the_marker_but_never_lower_it(
+        self, tmp_path, monkeypatch
+    ):
+        """The stamp must not destroy the evidence the guard depends on.
+
+        ⛔ THE DEFECT THIS PINS WAS INTRODUCED BY THE STAMP ITSELF, two hours
+        after it shipped. The first predicate was ``metadata.value IS NOT
+        excluded.value``, which writes whenever the values DIFFER — in either
+        direction.
+
+        ``spore-773`` records that the version check and the migrations are not
+        one atomic step: process A passes ``_refuse_a_newer_schema`` while the
+        marker still reads 1, process B migrates and stamps 2, and A only then
+        reaches ``_init_schema``. Under the first predicate A wrote the marker
+        BACK DOWN to 1, so every later open at the older version was let
+        through. The stamp did not merely fail to refuse — it erased the record
+        that a newer binary had been here, converting a one-shot race into a
+        PERMANENT defeat of the guard. ``INSERT OR IGNORE``, which the stamp
+        replaced, would have left the 2 standing: the fix was strictly worse
+        than the defect in this window.
+
+        A schema generation only advances, so strictly-less-than is the honest
+        predicate and the no-lower property is structural.
+
+        MUTATION-CHECKED: restoring ``IS NOT`` leaves the marker at 1 here and
+        the final open succeeds.
+        """
+        import sqlite3
+
+        import anneal_memory.store as store_mod
+
+        db = tmp_path / "m.db"
+        v1 = Store(db)
+        v1.record("v1 wrote this", episode_type="observation")
+        v1.close()
+
+        real_guard = Store._refuse_a_newer_schema
+
+        def guard_then_the_newer_binary_lands(self):
+            # A's own check runs for real and passes (the marker reads 1)...
+            real_guard(self)
+            # ...and B migrates and stamps 2 before A reaches _init_schema.
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "UPDATE metadata SET value = '2' WHERE key = 'format_version'"
+            )
+            conn.commit()
+            conn.close()
+
+        monkeypatch.setattr(store_mod, "_SCHEMA_VERSION", 1)
+        monkeypatch.setattr(
+            Store, "_refuse_a_newer_schema", guard_then_the_newer_binary_lands
+        )
+        raced = Store(db)
+        raced.close()
+        monkeypatch.setattr(Store, "_refuse_a_newer_schema", real_guard)
+
+        conn = sqlite3.connect(db)
+        marker = conn.execute(
+            "SELECT value FROM metadata WHERE key = 'format_version'"
+        ).fetchone()[0]
+        conn.close()
+        assert marker == "2", (
+            "the older binary wrote the marker back down and erased the "
+            f"evidence that a newer one had migrated this store (got {marker!r})"
+        )
+
+        with pytest.raises(StoreError, match="refusing to open"):
+            Store(db)
+
     def test_a_read_only_open_does_not_restamp_the_version(
         self, tmp_path, monkeypatch
     ):

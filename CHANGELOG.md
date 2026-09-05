@@ -13,8 +13,22 @@ the older one; the older binary then passed the guard and wrote to a migrated da
 only ever protected stores the newer binary had *created* — which is not the case that produces
 skew. Found by codex at L3.
 
-It is now stamped after the migration sequence, on write-capable opens, as a conditional upsert
-that writes nothing when the marker is already current. A `read_only` open cannot stamp: it returns
+It is now stamped after the migration sequence, on write-capable opens, as a MONOTONIC conditional
+upsert — it may raise the marker, never lower it, and writes nothing when the marker is already
+current.
+
+⛔ **The monotonic half was a second fix to the first one, two hours later, and it matters more than
+the stamp.** The first predicate was `metadata.value IS NOT excluded.value`, which writes whenever
+the values *differ* — in either direction. Against the `spore-773` window (the version check and the
+migrations are not one atomic step) that is actively harmful: process A passes
+`_refuse_a_newer_schema` while the marker reads 1, process B migrates and stamps 2, and A then wrote
+the marker **back down to 1** — so every later open at the older version was let through. The stamp
+did not merely fail to refuse; it **erased the evidence that a newer binary had been here**, turning
+a one-shot race into a permanent defeat of the guard. `INSERT OR IGNORE`, which the stamp replaced,
+would have left the 2 standing — *the fix was strictly worse than the defect in that window.*
+Measured in both directions and pinned by a test. A schema generation only advances, so
+strictly-less-than is the honest predicate and the no-lower property is structural rather than a
+rule to remember. A `read_only` open cannot stamp: it returns
 from `__init__` before `_init_schema` runs at all, and a test pins that ordering, because the
 write-capable-only property rests entirely on it — a reader that stamps is a reader that locks the
 writing binary out of the user's own memory.

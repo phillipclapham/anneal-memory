@@ -81,8 +81,16 @@ def _is_write_lock_contention(exc: StoreDatabaseError) -> bool:
     message, which embeds the store PATH, so a database under a directory named
     ``locked/`` would fool a substring test on the message. ``cause_type_name``
     cannot do this job either: SQLITE_BUSY and a malformed database image are
-    both ``OperationalError``. The result-code name is the real discriminator
+    both ``OperationalError``. The primary result CODE is the real discriminator
     and arrived in Python 3.11, so it is guarded — ``requires-python`` is >=3.10.
+    ⚠ CODE, not NAME. This sentence said "name" until 2026-09-05, inherited
+    verbatim from the two pre-window copies in cli.py and server.py that matched
+    ``sqlite_errorname`` against a three-name tuple. A name allowlist is the
+    exact defect codex filed against this function on 2026-09-04 and the whole
+    reason it was rewritten — see the ⛔ below. ``sqlite_errorcode`` arrived in
+    3.11 alongside ``sqlite_errorname``, so the guarding rationale and the
+    >=3.10 fallback are correct as written; only the word was wrong, and it was
+    wrong in the direction that argued for the abandoned approach.
     """
     cause = exc.__cause__
     if not isinstance(cause, sqlite3.OperationalError):
@@ -1086,17 +1094,17 @@ _ASSOCIATIONS_SCHEMA_SQL = ASSOCIATIONS_SCHEMA
 # same way so existing DBs upgrade additively via CREATE IF NOT EXISTS.
 _PATTERN_ASSOCIATIONS_SCHEMA_SQL = PATTERN_ASSOCIATIONS_SCHEMA
 
-# Durable degraded-audit-health keys in the ``metadata`` table. Deliberately
-# NOT in ``_DEFAULT_METADATA``: an absent row is a store that has never lost an
-# audit write, which ``_seed_audit_health`` already reads as zero, and seeding
-# a "0" into every database on earth to say "nothing has gone wrong yet" is
-# storage spent on the absence of news.
 # SQLite PRIMARY result codes for lock contention. The low byte of any
 # extended code is its primary code, so these two cover every SQLITE_BUSY_*
 # and SQLITE_LOCKED_* variant, including ones added after this was written.
 _SQLITE_BUSY = 5
 _SQLITE_LOCKED = 6
 
+# Durable degraded-audit-health keys in the ``metadata`` table. Deliberately
+# NOT in ``_DEFAULT_METADATA``: an absent row is a store that has never lost an
+# audit write, which ``_seed_audit_health`` already reads as zero, and seeding
+# a "0" into every database on earth to say "nothing has gone wrong yet" is
+# storage spent on the absence of news.
 _AUDIT_FAILURES_KEY = "audit_write_failures"
 _AUDIT_LAST_FAILURE_KEY = "audit_last_failure"
 

@@ -23,7 +23,113 @@
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
 
-## ▶▶ PICKUP 2026-09-05 — THE 09-04 SECOND-REVIEW PILE IS CLEARED. ONE ITEM DELIBERATELY LEFT.
+## ▶▶ PICKUP 2026-09-05 (SEAT 0905+5, MORNING) — ALL SIX FILED FINDINGS CLOSED, AND L3 THEN FOUND THREE MORE INSIDE THE FIX.
+
+**Seat 0905+5, Saturday morning.** Opened for the seven Diogenes filed against this repo overnight
+(1 HIGH / 2 MED / 3 LOW + 1 carried). Six closed. The seventh is the standing deliberate deferral.
+**Then L3 ran on the fix and filed seven more, three of which were consequences of THIS SESSION'S
+OWN COMMITS.** That is the shape of the day: read the L3 section before the Diogenes one.
+
+▶ **RE-DERIVE STATE, DO NOT READ IT FROM HERE** — every number below was true at close and none can
+stay true on its own:
+```
+push state   git ls-remote origin main   vs   git rev-parse HEAD
+tree         git status --short                                    (clean at close)
+tests        .venv/bin/python -m pytest -q                          (1856 at close, from 1852)
+types        .venv/bin/python -m mypy anneal_memory                 (clean)
+lint         .venv/bin/python -m ruff check .                       (63, unchanged all session)
+packaging    ⛔ NEEDS hatchling INSTALLED OR IT SKIPS AND LOOKS GREEN — see below
+findings     project_memory/diogenes_20260905.md — its OWN still-open slot, newest wins
+```
+⛔ **THE GENERATED BLOCK AT THE TOP OF THIS FILE SAYS `STILL OPEN: 7` AND WILL KEEP SAYING 7** until
+Diogenes reviews this repo again. That is his count at 04:57 today, taken BEFORE any of this work.
+Six are closed below; the seventh is the deferral. Nothing in the triage path writes back into that
+block. Do not open this file, read 7, and go hunting. *(Same trap as yesterday's 12. It has now
+mis-set the pickup two mornings running — if it does it a third time, that is a routing defect to
+fix, not a note to re-write.)*
+
+### ⛔ THE ONE THING TO CARRY FORWARD ABOVE ALL: THE FIX OPENED A NEIGHBOUR OF THE CLASS IT CLOSED
+The morning fix added two `_persist_audit_health()` flush points. Both were correct. Both were also
+**new fallible statements on a post-commit path**, and codex found two defects that did not exist
+before that commit:
+· a `KeyboardInterrupt` in the post-commit region escapes `_batch()` after the commit landed, and
+  `validated_save_continuity` reads any raise there as "the commit failed" and **unlinks the staged
+  continuity file** — destroying a committed wrap. Verified on disk: `continuity.py:2255` sets
+  `db_committed` after the `with` block, `:2396` does the unlink.
+· `close()`-time flushing let a session-old `audit_last_failure` overwrite a newer writer's.
+**Neither was reachable at 09:00. Both were reachable at 10:00 because of the fix.** L3 after the
+fix is what caught it; L3 before the fix could not have.
+
+### ▶ THE SIX CLOSED (Diogenes 2026-09-05)
+1. **HIGH `store.py` — the durable audit counter was not durable on the batched path.**
+   `_persist_audit_health` refuses to commit inside a caller's transaction and leaves the delta
+   pending; its comment promised three flush points and `grep` returned ONE. Reproduced before
+   fixing (after-reopen 0), inverted after (1). Flushes added at `_batch()` exit and in `close()`.
+   ⚠ **Why 1848 tests missed it, and this is the reusable part:** the guard class for this field
+   loses its writes through UNBATCHED `record()`; its batched sibling asserts only
+   `total_episodes == 1`. The batch case was exercised and the batch case's own property was not.
+2. **MED `pyproject.toml`** — "EVERY PATTERN IS ANCHORED" was false of the list beneath it.
+   `tool-integrity.json` was unanchored and admitted `project_memory/testbed/tool-integrity.json`
+   into the sdist; measured through hatchling's own API with the file planted. The comment's stated
+   REASON was also wrong — `/anneal_memory` already carries the package copy.
+3. **MED `README.md:210`** — "top-tier (3x) carry" against a gate of `max_level_reached >= 3`.
+   This is the PyPI package description.
+4. **LOW `pyproject.toml`** — the "Dropped" list named `.gitignore`, which ships. Built an sdist:
+   `.gitignore` AND `pyproject.toml` are hatchling force-includes. `test_packaging.py` already knew.
+5. **LOW `store.py:84`** — docstring named the discriminator the body forbids ("name", not "code").
+6. **LOW `store.py:1089`** — a comment block landed above the wrong definitions.
+   *(Also fixed two sites the report did not name: `tests/test_continuity.py` still called 3x
+   "top-tier", and `gc_pattern_associations`'s docstring had a `Warns:` block spliced into the
+   middle of a sentence — the same splice class as #6.)*
+
+### ▶ THE L3 ROUND (codex + complement, run AFTER the fix — 7 + 1 findings)
+**Fixed:** the post-commit `BaseException` HIGH · the stale-pointer MED · the Python 3.10
+lock-contention fallback MED · complement's LOW (the `_batch()` batch-aware list omitted five
+methods that ARE batch-aware).
+⛔ **The 3.10 fallback is worth its own line.** It is the branch Diogenes named as unexercised on
+THREE CONSECUTIVE NIGHTS ("Python 3.13 ONLY"), and codex found a real defect in it independently.
+MEASURED: `SQLITE_LOCKED_SHAREDCACHE` reports `'database table is locked: sqlite_master'`, which
+matched NEITHER clause of the old predicate. **A named-and-unclosed coverage gap is a defect with a
+countdown on it.**
+⚠ **glm was CUT OFF part-way through and opened one file. This was NOT a clean three-seat pass.**
+The region it never reached is unreviewed, and a later reader should not count this as coverage.
+
+### ⛔ OPEN, AND DELIBERATELY NOT DECIDED HERE
+· **spore-747 / the version-guard cluster — ESCALATED TO PHILL via `0905+1 fanin`, awaiting a
+  ruling. Do not decide it from this seat.** codex filed FOUR findings on `_refuse_a_newer_schema`.
+  I verified two: the guard **only protects databases the newer binary CREATED** (`format_version`
+  is seeded via `INSERT OR IGNORE`, so a v2 binary migrating a v1 database never re-stamps it), and
+  the unparseable-version branch codex flagged is a **DOCUMENTED DELIBERATE RULING** (CHANGELOG:
+  *"locking someone out of every episode they own over a garbled metadata string is a worse
+  outcome"*) — **re-litigated and refused; do not re-open it a third time.** The other two
+  (construction-time-only checking; `"no such table"` substring matching) are codex's reasoning and
+  I did NOT re-derive them. ⚠ All of it is FORWARD-compat: `_SCHEMA_VERSION` has only ever been 1.
+  The question for Phill: does the store stamp the writing version on every write-capable open, or
+  stay create-time-only and document the hazard?
+· **`graduation.py:98` `_BARE_GRADUATION_RE` stays `[23]`** — the carried finding, unchanged and
+  correct. Documented at `graduation.py:68`, gated on spore-675, held by spore-676. Widening it puts
+  fourteen mature carried patterns onto the bare-demotion path at the next re-stamp. **NOT to be
+  widened casually**; it is in the count because the count is open defects, not un-triaged ones.
+
+### ⚠ TWO TRAPS THIS SESSION HIT — BOTH COST A WRONG ANSWER BEFORE BEING CAUGHT
+1. **`tests/test_packaging.py` SKIPS SILENTLY WITHOUT hatchling**, which is not a package dependency.
+   A bare `pytest -q` reports 3 skipped and looks green while the packaging gate has not run at all.
+   Build a venv with hatchling before touching `pyproject.toml`:
+   `python3 -m venv v && ./v/bin/pip install hatchling pytest && ./v/bin/python -m pytest tests/test_packaging.py`
+2. **A mutation check run as a chain of `cp restore && mutate && pytest` in ONE shell command gave a
+   FALSE result** — the restore did not take, so "mutant B" ran with BOTH mutations applied and the
+   verdict contradicted itself. Re-running each cell as its own command gave the true answer. **Run
+   mutation cells one per command, and if two cells disagree, suspect the harness before the code.**
+
+### ⚠ AND A CLAIM SHAPE TO COPY: a KeyboardInterrupt test does NOT go red
+Both interrupt tests here ABORT the pytest run under mutation rather than reporting a failure —
+that is what an escaping `BaseException` does to a test runner. The first draft of their docstrings
+said "makes this test red", which was wrong and would have taught the next reader a false
+expectation. **The abort IS the demonstration**: a caller has no more defence than pytest does.
+
+---
+
+## ▶▶ PICKUP 2026-09-05 (EARLIER) — THE 09-04 SECOND-REVIEW PILE IS CLEARED. ONE ITEM DELIBERATELY LEFT.
 
 **Seat 0904+11, afternoon of 2026-09-04.** Opened specifically for the twelve findings Diogenes
 filed against this repo in its SECOND review of the day (12:31–12:49) — six new, six carried.

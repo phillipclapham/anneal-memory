@@ -94,7 +94,32 @@ fix is what caught it; L3 before the fix could not have.
    "top-tier", and `gc_pattern_associations`'s docstring had a `Warns:` block spliced into the
    middle of a sentence — the same splice class as #6.)*
 
-### ▶ THE L3 ROUND (codex + complement, run AFTER the fix — 7 + 1 findings)
+### ▶ L3 ROUND 2 (complement + gpt-oss; codex quota-exhausted portfolio-wide until Sep 7 11:27)
+Run over the TEN commits that landed after round 1 — a window that had had no mesh pass at all.
+
+⛔ **THE CODE SEMANTIC A STRANGER MUST NOT "SIMPLIFY": `SystemExit` IS RE-RAISED,
+`KeyboardInterrupt` IS NOT.** In `_persist_audit_health`'s `except BaseException`. Swallowing Ctrl-C
+for a few statements protects a committed wrap whose staged sidecars would otherwise be unlinked;
+swallowing an EXPLICIT termination request is a different fail-open with no equivalent justification
+— a long-lived MCP server whose SIGTERM handler calls `sys.exit(0)` would run on past the point
+something told it to stop.
+⚠ **THE PLACEMENT IS THE DESIGN, not an accident of where it was easy:** the re-raise is in
+`_persist_audit_health` and **NOT** in `_batch()`. On the batched path it is caught by `_batch()`'s
+own post-commit `except BaseException`, so a committed wrap is never harmed; only `close()` changes,
+where nothing is staged and the caller genuinely is exiting. **Moving it up into `_batch()` would
+re-open the data-loss HIGH.** Pinned by a test asserting both directions AND no open transaction in
+either.
+
+⛔ **AND A REVIEWER'S PRESCRIPTION WAS REFUSED — mutation-tested, not argued.** gpt-oss filed both
+`except BaseException` sites as HIGH and prescribed re-raising EVERYTHING. **That reintroduces the
+data-loss defect the handlers exist to close**; applying its fix makes the wrap-protection test abort
+the run, exactly as the original defect did. It also filed the lock-contention heuristic as risking
+an "infinite retry loop" — **there is no retry loop** (verified on disk: `cli.py:270` prints and
+`sys.exit(1)`; `server.py:712` returns a tool result), and its proposed `"schema" not in text`
+exclusion would have BROKEN the fix, since `database schema is locked` is a real `SQLITE_LOCKED`
+phrasing. **Recorded so it does not return a third time.**
+
+### ▶ L3 ROUND 1 (codex + complement, run AFTER the morning fix — 7 + 1 findings)
 **Fixed:** the post-commit `BaseException` HIGH · the stale-pointer MED · the Python 3.10
 lock-contention fallback MED · the `format_version` HIGH (see the ruling section below) ·
 complement's LOW (the `_batch()` batch-aware list omitted five methods that ARE batch-aware).

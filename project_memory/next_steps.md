@@ -8,13 +8,13 @@
 > Git history was NOT carried across the repo boundary (a cross-repo move cannot); flow's history
 > retains it up to this commit.
 
-> ### 🔬 DIOGENES — NEWEST: `diogenes_20260904.md` · **STILL OPEN: 12**
-> 21 episode(s) — HIGH 2 · LOW 3 · MEDIUM 9 — 14 of 21 episode(s) carry a severity; the other 7 are COVERAGE 2 · COVERAGE-OPEN 2 · SELF 1 · STILL OPEN 2. Routed UNTRIAGED by `route_diogenes.py`; the count above is Diogenes' own slot, not the ritual's. ▶ 8 FILED TONIGHT (measured at HEAD this window) · 4 CARRIED. A carried item was NOT necessarily re-checked this window — only the report's own still-open slot says which ones were. Do not read the total as a verified defect count.
-> ▶ 21 human commit(s) in the last 24h — the count could move in either direction this window.
-> ⚡ **1 finding(s) carry `[prescription: run]`** — candidates for `seat_run.py`, but only with an executable acceptance test.
+> ### 🔬 DIOGENES — NEWEST: `diogenes_20260905.md` · **STILL OPEN: 7** @ `5b79172`
+> 9 episode(s) — HIGH 1 · LOW 3 · MEDIUM 2 — 6 of 9 episode(s) carry a severity; the other 3 are COVERAGE 1 · COVERAGE-OPEN 1 · STILL OPEN 1. Routed UNTRIAGED by `route_diogenes.py`; the count above is Diogenes' own slot, not the ritual's.
+> ▶ 32 human commit(s) in the last 24h — the count could move in either direction this window.
+> ⚡ **2 finding(s) carry `[prescription: run]`** — candidates for `seat_run.py`, but only with an executable acceptance test.
 > *(Counted by each finding's OWN trailing tag — a quoted tag is not a verdict — and a tag withdrawn by a later SELF-CORRECTION does not count at all. If this number moved while the report did not, that rule changed: see flow `scripts/prescription.py`.)*
-> ⚙ COORDINATES: 4/11 confirmed at HEAD 34728ac (1 carried no quote, unchecked). ⚠ 7 could NOT be confirmed — look, do not assume the reviewer was wrong (a remediated finding reads the same as a bad coordinate): anneal_memory/cli.py:275 -> quoted text is at :291 · pyproject.toml:53 (1 of 5 fragments matched) · tests/test_integrity.py:783 (2 of 9 fragments matched) · anneal_memory/cli.py:485 (none of 9 quoted fragment(s) found) · tests/test_audit.py:1686 (none of 6 quoted fragment(s) found) · anneal_memory/store.py:71 (none of 10 quoted fragment(s) found)
-> *(Pointer written 2026-09-04 by route_diogenes.py. `spore-473`: a routed report with no reader is a disposal chute.)*
+> ⚙ COORDINATES: 0 of 6 finding(s) carried quoted text, so NONE could be checked. This is not a clean result.
+> *(Pointer written 2026-09-05 by route_diogenes.py. `spore-473`: a routed report with no reader is a disposal chute.)*
 
 > ⬇ **TRIAGE BELOW THIS LINE — the block above is a DISPOSABLE SPAN.** `route_diogenes.py`
 > regenerates that block every night, so anything written inside it is deleted by the next

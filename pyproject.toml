@@ -88,18 +88,42 @@ packages = ["anneal_memory"]
 #   LICENSE        legal redistribution
 #   server.json    MCP registry manifest; test_integrity.py asserts on its versions
 #   logo-400.png   README.md:4 embeds it by relative path
-#   tool-integrity.json  matches BOTH the package copy (verified at server
-#                  startup, asserted by the suite) and the byte-identical
-#                  repo-root copy. The root copy alone does not clear the
-#                  property — nothing reads it — but it is public already, costs
-#                  1.5 KB, and belongs to the integrity story rather than to this
-#                  disclosure fix, so it is kept deliberately rather than by
-#                  oversight. Two copies that nothing pins together can drift.
+#   /tool-integrity.json  the repo-root copy. Nothing reads it — the package
+#                  copy (verified at server startup, asserted by the suite) ships
+#                  under ``/anneal_memory`` and needs no entry of its own. The
+#                  root copy is public already, costs 1.5 KB, and belongs to the
+#                  integrity story rather than to this disclosure fix, so it is
+#                  kept deliberately rather than by oversight. Two copies that
+#                  nothing pins together can drift.
+#                  ⛔ ANCHORED SINCE 2026-09-05, and the note that used to sit
+#                  here was the reason it was not: it claimed one unanchored
+#                  pattern was needed to match BOTH copies. FALSE, and measured
+#                  — under ``/tool-integrity.json`` hatchling's own
+#                  ``recurse_included_files`` still ships both, because
+#                  ``/anneal_memory`` already carries the package one. The
+#                  unanchored form bought nothing and cost the anchoring
+#                  invariant three lines below: with
+#                  ``project_memory/testbed/tool-integrity.json`` planted in a
+#                  clone, the sdist admitted it. Anchored: ``[]``.
 #
-# Dropped: project_memory (the reported site), .github, .gitignore, Dockerfile,
-# scripts (contributor git hooks), glama.json (third-party directory metadata),
+# Dropped: project_memory (the reported site), .github, Dockerfile, scripts
+# (contributor git hooks), glama.json (third-party directory metadata),
 # logo.png (144 KB, referenced by nothing in the repo — logo-400.png is the one
 # README uses).
+#
+# ⛔ NOT DROPPABLE, and ``.gitignore`` sat in the list above until 2026-09-05
+# claiming otherwise: ``.gitignore`` and ``pyproject.toml`` SHIP regardless of
+# this list. hatchling adds ``get_default_build_data()['force_include']``
+# unconditionally at build time and it bypasses ``include`` entirely —
+# pyproject.toml, the ``readme =`` target, the license, and every VCS ignore
+# file. ``tests/test_packaging.py``'s ``EXPECTED_SDIST_TOP_LEVEL`` already
+# carried ``.gitignore`` with that exact reason attached, so the two records of
+# one decision disagreed and the test was the right one. MEASURED by building:
+# ``tar tzf`` on a real sdist lists ``.gitignore`` and ``pyproject.toml``.
+# Nothing hazardous ships — but this block is the repo's written record of what
+# a public, effectively unretractable artifact contains, and one line of it had
+# not been derived. Its closing sentence is "Verified by building, not by
+# reading."
 #
 # ⚠ EVERY PATTERN IS ANCHORED WITH A LEADING SLASH ON PURPOSE. These are
 # gitignore-style patterns: an unanchored ``README.md`` matches at ANY depth and
@@ -120,7 +144,7 @@ include = [
     "/LICENSE",
     "/server.json",
     "/logo-400.png",
-    "tool-integrity.json",
+    "/tool-integrity.json",
 ]
 
 [tool.ruff]

@@ -5336,7 +5336,7 @@ class TestBarePreserveEndToEnd:
                 "  verify | 3x (2026-06-05) — carried forward, not re-grounded this wrap"
             )
             prepare_wrap(store)
-            # A top-tier (3x) carry also emits the graduate-OUT notice, same as
+            # A 3x carry also emits the graduate-OUT notice, same as
             # the cited path — the warning logic reads carried_forward, which is
             # now fed by the bare path too.
             with pytest.warns(UserWarning, match="graduate OUT"):

@@ -122,8 +122,20 @@ hand a version question up, say WHICH version.
 
 ### ⛔ OPEN, AND DELIBERATELY NOT DECIDED HERE
 · **`last_writer_version` (spore-747's actual answer) — NOT BUILT, held pending a ruling.**
-· ⚠ **`spore-773` ALREADY HOLDS codex's check-then-act finding, with a deliberate NOT-BUILT
-  ruling and a RISING TRIGGER — read it before re-filing anything in this area.** It records that
+· ⛔⛔ **`spore-773` HAS RISEN — ITS TRIGGER IS MET.** The condition was *"if the levain fix does
+  NOT land, this rises"*, and the levain-side fix (`spore-751`'s ruling half — `levain init` wiring
+  `.mcp.json` to levain's OWN interpreter) was **not among the five findings levain closed on
+  2026-09-05** [measured by `0905+1 fanin`, relayed, not re-derived by me]. The braces did not ship;
+  the belt is still deferred. **Treat it as a live HIGH, not a deferral, until someone re-rules it.**
+  ⚡ **AND ITS WINDOW NOW HAS TEETH IT DID NOT HAVE THIS MORNING.** My `format_version` stamp landed
+  inside `_init_schema`, which is the far side of exactly the check-then-act gap spore-773 names. The
+  first predicate (`IS NOT`) wrote the marker BACK DOWN in that race, so a later older-version open
+  was let through and **the evidence a newer binary had been here was erased** — worse than the
+  `INSERT OR IGNORE` it replaced. Fixed by making the stamp MONOTONIC (`CAST(...) <  CAST(...)`),
+  measured both directions, pinned by a test. **Any future write to `format_version` must preserve
+  no-lower**, and anyone restructuring `_init_schema` for spore-773 proper should re-check that
+  property first.
+· ⚠ **Read spore-773 before re-filing anything in this area** — a deliberate NOT-BUILT ruling. It records that
   the version check and the migrations are not one atomic step (process A passes the guard, B
   upgrades, A runs this version's DDL against a v2 database), that the fix needs a real restructure
   of `_init_schema` because `executescript()` can implicitly COMMIT, and that it was deliberately

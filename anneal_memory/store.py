@@ -4456,9 +4456,16 @@ class Store:
     def _persist_audit_health(self) -> None:
         """Flush the pending degraded-audit delta to ``metadata``, atomically.
 
-        ⛔ Called from the post-commit audit-failure handler, whose contract is
-        that nothing it does propagates to the caller — so it swallows its own
-        failure, like every other channel there.
+        ⛔ THREE CALL SITES, AND THE COUNT IS LOAD-BEARING — the pending-delta
+        branch below promises exactly these and had only the first until
+        2026-09-05, which silently un-durabled the batched path:
+        1. the post-commit audit-failure handler (another failure);
+        2. ``_batch()`` exit, after the deferred-audit replay;
+        3. ``close()``, immediately before the connection goes away.
+        Every one of them is a place where no caller owns a transaction. It
+        swallows its own failure at all three — the handler's contract is that
+        nothing it does propagates to the caller, and a flush must never turn
+        a clean batch exit or close into a raising one.
 
         ⛔⛔ THREE CODEX L3 HIGHs LIVE IN THIS METHOD'S HISTORY; READ BEFORE
         SIMPLIFYING IT (2026-09-04).
@@ -4496,6 +4503,11 @@ class Store:
             # A caller owns an open transaction — committing here would
             # publish their uncommitted DML. Leave the delta pending; the next
             # flush (another failure, batch exit, or close) writes it.
+            # ⚠ ALL THREE OF THOSE EXIST — see this method's docstring for the
+            # sites. Until 2026-09-05 only the first did, so a delta deferred
+            # inside a batch whose sink then healed was never written and the
+            # lifetime count silently reset to 0 on reopen. If you remove one,
+            # this sentence becomes a lie and the field stops being durable.
             return
         delta = self._audit_failures_unpersisted
         try:
@@ -5192,6 +5204,21 @@ class Store:
                     **kwargs,
                 )
 
+        # ⛔ FLUSH POINT 2 OF 3. Nothing above this line is guaranteed to
+        # persist a degraded-audit delta that was deferred INSIDE the batch.
+        # ``_persist_audit_health`` refuses to commit while a caller owns the
+        # transaction, so an audit failure on a non-batch-aware path (
+        # ``save_continuity`` is the live one) leaves its delta pending; the
+        # only other flush is the failure handler itself, which needs a LATER
+        # failure that happens to land outside a transaction. A sink that
+        # heals before the batch exits produces neither, and the count dies
+        # with the process while README/types.py/CHANGELOG all promise it is
+        # durable. MEASURED 2026-09-05: after-reopen 0 without this line, 1
+        # with it. The batch's transaction is closed by here — the commit ran
+        # above and ``_defer_commit`` was reset in the ``finally`` — so this
+        # is a legal place to own one.
+        self._persist_audit_health()
+
     # -- 10.5c.5 L3 fix: unique tmp sidecar filename pattern.
     #
     # Two concurrent ``validated_save_continuity`` calls would race on
@@ -5779,6 +5806,13 @@ class Store:
             # Construction failed before connect ever ran.
             self._closed = True
             return
+        # ⛔ FLUSH POINT 3 OF 3 — THE LAST ONE THIS PROCESS WILL EVER GET.
+        # A delta still pending here is one no failure handler and no batch
+        # exit reached, and the connection is about to go away. Swallows its
+        # own errors (see the method), so it cannot turn a clean close into a
+        # raising one. Deliberately BEFORE the boundary block: a flush after
+        # ``self._conn.close()`` would have no connection to write through.
+        self._persist_audit_health()
         with self._db_boundary("close"):
             self._conn.close()
         self._closed = True

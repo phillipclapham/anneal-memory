@@ -4,6 +4,38 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — the durable audit-failure counter was NOT durable on the batched path
+
+`audit_write_failures` is documented in three shipped places as durable and lifetime-scoped
+(README, `types.py`, and this file's own entry below). It was, on the unbatched path. On the
+batched one — which is the path `validated_save_continuity`, the canonical wrap pipeline, actually
+takes — a lost audit write could die with the process and report **zero** after reopen.
+
+The mechanism is a correct guard with a missing counterpart. `_persist_audit_health` refuses to
+commit inside a caller's open transaction, because committing there would publish their
+uncommitted DML (a real defect, fixed 2026-09-04). It therefore leaves the delta pending and its
+own comment promised *"the next flush (another failure, batch exit, or close) writes it."* **Only
+the first of those three existed.** `grep` returned exactly one call site; there was no flush at
+`_batch()` exit and none in `close()`. So the loss needed only the last audit failure of a process
+to be one the guard had deferred — a transient sink that healed before the batch exited produces
+exactly that.
+
+MEASURED in both directions before and after: the repo's own batched scenario plus a healing sink
+gives after-reopen `write_failures = 0` with the metadata row absent; with the two added flush
+points it gives `1` with the full `[dropped before audit seq 0] at …` string.
+
+⚠ **Why 1848 tests did not see it, and it is the more useful half of this entry.** The guard class
+written for this exact field lost its writes through a helper that calls plain *unbatched*
+`record()` — the one path where the flush always succeeds. Its sibling `test_a_health_write_never_
+destroys_a_batch_that_SUCCEEDS` **does** drive the batched path, and asserts only
+`total_episodes == 1`: it grades whether the caller's DML survived and never asks whether the
+count landed. The batch case was exercised and the batch case's own property was not. Two
+regression tests now assert it, each mutation-checked against its own flush point.
+
+⚠ **Honest scope, stated rather than implied:** durability requires reaching a flush point. A
+process killed mid-batch, before either the batch exit or `close()`, still loses that last delta.
+The counter is durable across a normal exit, not across a `SIGKILL`. Found by Diogenes 2026-09-05.
+
 ### Fixed — the two halves of one store failed in OPPOSITE directions under version skew
 
 `crystal.py` and `spores.py` both hard-refuse a newer `schema_version` — verbatim, *"refusing to

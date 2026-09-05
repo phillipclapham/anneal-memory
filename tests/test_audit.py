@@ -1927,6 +1927,125 @@ class TestCodexL3TwentySixOhNineOhFour:
         finally:
             reopened.close()
 
+    # -- #4b: the deferred delta must actually reach disk (2026-09-05) --
+
+    def test_a_delta_deferred_inside_a_batch_survives_the_process(self, tmp_path):
+        """The property the test above drives the path of and never asserts.
+
+        ⛔ THE DEFECT THIS PINS, found by Diogenes 2026-09-05 and reproduced
+        before the fix: ``_persist_audit_health`` correctly refuses to commit
+        inside a caller's transaction and leaves the delta pending — and until
+        2026-09-05 the ONLY thing that ever flushed it was a LATER audit
+        failure landing outside a transaction. Its own comment named three
+        flush points; ``grep`` returned one. So a store really lost an audit
+        write, reported it correctly in-process, and reported ZERO after
+        reopen — while README.md, types.py and CHANGELOG.md all state the
+        field is durable and lifetime-scoped, on the batched path
+        ``validated_save_continuity`` actually uses.
+
+        ⚡ WHY THE SIBLING ABOVE CANNOT CATCH IT: it drives this exact batched
+        scenario and then asserts ``total_episodes == 1``. It grades whether
+        the CALLER'S DML survived — the guard's other half — and never asks
+        whether the count landed. The batch case was exercised and the batch
+        case's own property was not.
+
+        THE ONE EXTRA BEAT that separates this from the sibling: the sink
+        HEALS before the batch exits (a transient ENOSPC; the disk is freed).
+        Without it the deferred ``record()`` audit replays, fails again
+        OUTSIDE the transaction, and THAT handler flushes both deltas — the
+        loss needs the last audit failure of the process to be one the guard
+        deferred.
+
+        MUTATION-CHECKED: removing the ``_persist_audit_health()`` at
+        ``_batch()`` exit returns after-reopen to 0 and this test to red.
+        """
+        from anneal_memory.store import Store
+
+        db = tmp_path / "memory.db"
+        store = Store(db)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with store._batch():
+                    store.record("must survive", episode_type="observation")
+                    healthy = store._audit.log
+                    store._audit.log = self._boom
+                    store.save_continuity("# not batch aware\n")
+                    store._audit.log = healthy  # the sink heals mid-batch
+            assert store._audit_failures_unpersisted == 0, (
+                "the batch exited with a degraded-audit delta still pending — "
+                "nothing after this point is guaranteed to run"
+            )
+        finally:
+            store.close()
+
+        reopened = Store(db)
+        try:
+            status = reopened.status()
+            assert status.audit_write_failures == 1, (
+                "a lost audit write did not survive the process that saw it. "
+                "audit_write_failures is documented as durable and "
+                "lifetime-scoped (README.md, types.py, CHANGELOG.md) and the "
+                "canonical wrap pipeline is batched"
+            )
+            assert status.audit_last_failure is not None
+            assert "save_continuity" in status.audit_last_failure
+            assert status.total_episodes == 1, (
+                "the flush published or destroyed the batch's own DML"
+            )
+        finally:
+            reopened.close()
+
+    def test_close_is_the_last_flush_point_when_the_batch_never_reaches_its(
+        self, tmp_path
+    ):
+        """A batch that RAISES skips its own flush; ``close()`` is all that is left.
+
+        The flush at ``_batch()`` exit sits after the deferred-audit replay,
+        which a propagating exception never reaches. That is correct — the
+        rollback path must not linger — but it means the batch-exit flush is
+        not a total guarantee, and the delta is real either way: an audit
+        write was attempted and lost, whether or not the caller's DML
+        survived. ``close()`` is the process's last chance to write it down.
+
+        MUTATION-CHECKED: removing the ``_persist_audit_health()`` in
+        ``close()`` returns after-reopen to 0 and this test to red, while the
+        test above stays green — the two flush points are pinned separately.
+        """
+        from anneal_memory.store import Store
+
+        db = tmp_path / "memory.db"
+        store = Store(db)
+        store.record("seed", episode_type="observation")
+        store.close()
+
+        store = Store(db)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with pytest.raises(RuntimeError):
+                    with store._batch():
+                        store.record("inside", episode_type="observation")
+                        healthy = store._audit.log
+                        store._audit.log = self._boom
+                        store.save_continuity("# not batch aware\n")
+                        store._audit.log = healthy
+                        raise RuntimeError("force rollback")
+                assert store._audit_failures_unpersisted == 1, (
+                    "scenario no longer reaches close() with a pending delta "
+                    "— it is not testing the close() flush point any more"
+                )
+        finally:
+            store.close()
+
+        reopened = Store(db)
+        try:
+            assert reopened.status().audit_write_failures == 1, (
+                "the delta died with the process — close() did not flush"
+            )
+        finally:
+            reopened.close()
+
     # -- #5: the count must never go backwards between writers --
 
     def test_two_writers_cannot_make_the_lifetime_count_decrease(self, tmp_path):

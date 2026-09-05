@@ -124,7 +124,17 @@ class StoreStatus:
     # ``valid=True`` because it walks the entries that exist.
     #
     # ⛔ LIFETIME-SCOPED AND DURABLE, not process-local — the distinction is
-    # the whole value of the field. It is persisted in the store's SQLite
+    # the whole value of the field.
+    # ⚠ DURABLE REQUIRES A FLUSH POINT, and for six days it had only one.
+    # ``_persist_audit_health`` must not commit inside a caller's open
+    # transaction (it would publish their uncommitted DML), so a failure that
+    # lands inside a batch leaves its delta PENDING. Until 2026-09-05 the only
+    # thing that ever wrote a pending delta was a LATER failure landing outside
+    # a transaction — so a batched wrap whose sink then healed reported the
+    # loss correctly in-process and ZERO after reopen, on exactly the path
+    # ``validated_save_continuity`` uses. There are now three flush points
+    # (that handler, ``_batch()`` exit, ``close()``); the honest residue is a
+    # process killed mid-batch, which loses that last delta. It is persisted in the store's SQLite
     # ``metadata`` table (a different I/O path from the JSONL sink that is
     # already failing) and seeded from disk at open, so a one-shot CLI run
     # reports losses caused by a process that has long exited. The first

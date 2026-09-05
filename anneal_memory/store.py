@@ -4688,7 +4688,7 @@ class Store:
                 )
             self._conn.commit()
             self._audit_failures_unpersisted -= delta
-        except BaseException:
+        except BaseException as exc:
             # ⛔ ``BaseException``, NOT ``Exception`` (codex L3 HIGH,
             # 2026-09-05). A ``KeyboardInterrupt`` landing between
             # ``BEGIN IMMEDIATE`` and ``commit()`` walked straight past an
@@ -4714,6 +4714,26 @@ class Store:
                 "count is still correct for this process but will not survive "
                 "it unless a later flush lands", exc_info=True,
             )
+            # ⛔ SystemExit IS RE-RAISED; KeyboardInterrupt IS NOT (complement
+            # L3 MED, 2026-09-05). Conflating the two was the actual mistake in
+            # the morning's widening. Swallowing Ctrl-C for a few statements to
+            # protect a committed wrap is defensible; swallowing an EXPLICIT
+            # process-termination request is a different fail-open with no
+            # equivalent justification — a long-lived MCP server whose SIGTERM
+            # handler calls ``sys.exit(0)`` would run on past the point
+            # something told it to stop, and an orchestrator waiting out a
+            # grace period would SIGKILL it instead.
+            # ⚠ THE WRAP IS STILL PROTECTED, and that is why this is safe HERE
+            # and not in ``_batch()``: on the batched path this re-raise is
+            # caught by ``_batch()``'s own post-commit ``except BaseException``,
+            # so a committed wrap's staged sidecars are never unlinked. What
+            # changes is the ``close()`` path, where nothing is staged and the
+            # caller genuinely is trying to exit.
+            # ⛔ Do NOT "simplify" this to re-raise every BaseException — that
+            # is gpt-oss's suggested fix and it REINTRODUCES the data-loss HIGH
+            # this handler exists to close.
+            if isinstance(exc, SystemExit):
+                raise
 
     def _row_to_episode(self, row: sqlite3.Row) -> Episode:
         """Convert a database row to an Episode.

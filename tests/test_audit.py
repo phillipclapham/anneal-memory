@@ -2369,6 +2369,78 @@ class TestCodexL3TwentySixOhNineOhFour:
                 "the newer failure did not replace an older/unorderable record"
             )
 
+    # -- #4g: SystemExit is not KeyboardInterrupt (complement L3, 09-05) --
+
+    def test_systemexit_propagates_but_ctrl_c_is_still_swallowed(self, tmp_path):
+        """⚖ complement L3 MED — conflating the two was the morning's mistake.
+
+        Widening ``_persist_audit_health``'s handler to ``BaseException`` was
+        correct for ``KeyboardInterrupt``: swallowing Ctrl-C for a few
+        statements protects a committed wrap whose staged sidecars would
+        otherwise be unlinked. **``SystemExit`` is a different fail-open with
+        no equivalent justification.** A long-lived MCP server whose SIGTERM
+        handler calls ``sys.exit(0)`` would run on past the point something
+        explicitly told it to stop, and an orchestrator waiting out a grace
+        period would SIGKILL it instead.
+
+        ⚠ THE WRAP STAYS PROTECTED, which is why the re-raise lives here and
+        NOT in ``_batch()``: on the batched path it is caught by ``_batch()``'s
+        own post-commit ``except BaseException``. What changes is ``close()``,
+        where nothing is staged and the caller genuinely is exiting.
+
+        ⛔ Both cases must also leave NO OPEN TRANSACTION — the rollback is the
+        reason the handler was widened in the first place, and an early
+        ``raise`` that skipped it would hold SQLite's writer lock against every
+        other process.
+        """
+        from anneal_memory.store import Store
+
+        def _store_with_a_pending_delta(db):
+            store = Store(db)
+            store.record("seed", episode_type="observation")
+            store._audit_failures_unpersisted = 1
+            store._audit_last_failure = "synthetic at 2026-09-05T10:00:00Z"
+            return store
+
+        class _Raises:
+            """Proxy: sqlite3.Connection.commit is read-only, so wrap it."""
+
+            def __init__(self, conn, exc):
+                self._conn = conn
+                self._exc = exc
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def commit(self, *a, **k):
+                raise self._exc
+
+        # (1) KeyboardInterrupt — swallowed, as the wrap-protection argument requires.
+        store = _store_with_a_pending_delta(tmp_path / "a.db")
+        try:
+            real = store._conn
+            store._conn = _Raises(real, KeyboardInterrupt("ctrl-c"))
+            store._persist_audit_health()  # must NOT raise
+            store._conn = real
+            assert not real.in_transaction, "Ctrl-C left the writer lock held"
+        finally:
+            store.close()
+
+        # (2) SystemExit — propagates, and still rolls back first.
+        store = _store_with_a_pending_delta(tmp_path / "b.db")
+        try:
+            real = store._conn
+            store._conn = _Raises(real, SystemExit(0))
+            with pytest.raises(SystemExit):
+                store._persist_audit_health()
+            store._conn = real
+            assert not real.in_transaction, (
+                "the SystemExit re-raise skipped the rollback and left the "
+                "writer lock held against every other process"
+            )
+        finally:
+            store.close()
+
     # -- #5: the count must never go backwards between writers --
 
     def test_two_writers_cannot_make_the_lifetime_count_decrease(self, tmp_path):

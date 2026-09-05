@@ -4,6 +4,31 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — the Python 3.10 lock-contention fallback missed real contention
+
+`_is_write_lock_contention` classifies by primary result code where
+`sqlite3.OperationalError.sqlite_errorcode` exists — Python 3.11+. `requires-python` is `>=3.10`,
+and on 3.10 the TEXT fallback is the entire classifier. It matched only `"database is locked"` or
+`"database is busy"`.
+
+MEASURED on live connections with the codes captured alongside, not reasoned from the docs:
+
+    SQLITE_BUSY (5)                 -> 'database is locked'
+    SQLITE_LOCKED_SHAREDCACHE (262) -> 'database table is locked: sqlite_master'
+
+The second matches neither clause. So on a supported interpreter, genuine shared-cache contention
+was classified as not-contention: the CLI rethrew a low-level `StoreDatabaseError` and the MCP
+surface missed its contention response. Now `("locked" or "busy") and "database"`.
+
+⚠ The `"database"` conjunct is deliberate — the measured message carries an object name
+(`: sqlite_master`), so a bare `"locked"` test would also fire on an unrelated error naming a table
+such as `locked_items`. The test pins four positive and four negative strings.
+
+⚡ Worth recording for the review apparatus rather than the changelog: this branch is the one
+Diogenes named as unexercised on three consecutive nights ("Python 3.13 ONLY"), and codex found the
+defect in it independently. A coverage gap that gets named and not closed is a defect with a
+countdown on it.
+
 ### Fixed — a post-commit interrupt could destroy a committed wrap's continuity file
 
 Found by codex at L3 on the SAME DAY's audit-counter fix, which is the point of running L3 after

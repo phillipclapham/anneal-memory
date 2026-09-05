@@ -23,24 +23,36 @@
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
 
-## ▶▶ PICKUP 2026-09-05 (SEAT 0905+5, MORNING) — ALL SIX FILED FINDINGS CLOSED, AND L3 THEN FOUND THREE MORE INSIDE THE FIX.
+## ▶▶ PICKUP 2026-09-05 (SEAT 0905+5) — EVERY FILED FINDING CLOSED; TWO L3 ROUNDS EACH FOUND DEFECTS INSIDE THE PREVIOUS FIX.
 
-**Seat 0905+5, Saturday morning.** Opened for the seven Diogenes filed against this repo overnight
-(1 HIGH / 2 MED / 3 LOW + 1 carried). Six closed. The seventh is the standing deliberate deferral.
-**Then L3 ran on the fix and filed seven more, three of which were consequences of THIS SESSION'S
-OWN COMMITS.** That is the shape of the day: read the L3 section before the Diogenes one.
+**Seat 0905+5, Saturday.** Opened for the seven Diogenes filed overnight (1 HIGH / 2 MED / 3 LOW +
+1 carried). **Then L3 ran twice, and BOTH rounds found defects that this session's own fixes had
+created.** That is the shape of the day: read the "fix opened a neighbour" section before the
+Diogenes one.
+
+⚠ **NO COUNT APPEARS IN THIS HEADING ON PURPOSE.** An earlier version of it read "ALL SIX FILED
+FINDINGS CLOSED, AND L3 THEN FOUND THREE MORE" and was falsified within the same session by a
+second L3 round — not by the repo changing, by more review landing. `spore-764`: a status line that
+records an ANSWER goes stale the moment the world moves; one that records HOW TO RE-DERIVE IT
+cannot. **The count lives in the Diogenes slot and in `git log`, which are re-derivable. It does not
+live in a heading.**
 
 ▶ **RE-DERIVE STATE, DO NOT READ IT FROM HERE** — every number below was true at close and none can
 stay true on its own:
 ```
 push state   git ls-remote origin main   vs   git rev-parse HEAD
 tree         git status --short                                    (clean at close)
-tests        .venv/bin/python -m pytest -q                          (1856 at close, from 1852)
-types        .venv/bin/python -m mypy anneal_memory                 (clean)
+tests        .venv/bin/python -m pytest -q                          (rising all session; never fell)
+types        .venv/bin/python -m mypy anneal_memory                 (clean at every commit)
 lint         .venv/bin/python -m ruff check .                       (63, unchanged all session)
 packaging    ⛔ NEEDS hatchling INSTALLED OR IT SKIPS AND LOOKS GREEN — see below
 findings     project_memory/diogenes_20260905.md — its OWN still-open slot, newest wins
+what landed  git log --oneline <the 09-05 range> -- .              (the session's own record)
 ```
+⚠ **The test number is deliberately NOT written here.** It moved five times in one session and every
+written form of it was stale within the hour. What is durable is the DIRECTION — it only ever rose,
+and lint never moved — so a run that shows fewer tests or more than 63 lint errors is a regression
+to investigate, which is the only thing a cold session actually needs from this row.
 ⛔ **THE GENERATED BLOCK AT THE TOP OF THIS FILE SAYS `STILL OPEN: 7` AND WILL KEEP SAYING 7** until
 Diogenes reviews this repo again. That is his count at 04:57 today, taken BEFORE any of this work.
 Six are closed below; the seventh is the deferral. Nothing in the triage path writes back into that

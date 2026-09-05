@@ -4,6 +4,31 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — `SystemExit` is not `KeyboardInterrupt`, and conflating them was a second fail-open
+
+Widening `_persist_audit_health`'s handler to `BaseException` earlier the same day was correct for
+`KeyboardInterrupt`: swallowing Ctrl-C for a few statements protects a committed wrap whose staged
+sidecars would otherwise be unlinked. **`SystemExit` is a different fail-open with no equivalent
+justification.** A long-lived MCP server whose SIGTERM handler calls `sys.exit(0)` would run on past
+the point something explicitly told it to stop, and an orchestrator waiting out a grace period would
+SIGKILL it instead. Found by complement at L3.
+
+`SystemExit` is now re-raised *after* the rollback; `KeyboardInterrupt` is still swallowed.
+
+⚠ **The wrap stays protected, which is why the re-raise lives here and not in `_batch()`:** on the
+batched path it is caught by `_batch()`'s own post-commit `except BaseException`, so a committed
+wrap's sidecars are never unlinked. What changes is the `close()` path, where nothing is staged and
+the caller genuinely is exiting.
+
+⛔ **Two same-round suggestions were REFUSED, with reasons, so they do not return.** A breadth seat
+filed both `except BaseException` sites as HIGH and prescribed re-raising *everything* — that
+prescription **reintroduces the data-loss defect the handler exists to close**, demonstrated by
+mutation: applying it makes the wrap-protection test abort the run. The same seat filed the widened
+lock-contention heuristic as risking an "infinite retry loop"; **there is no retry loop** — both
+callers (`cli.py:270`, `server.py:712`) use the predicate to produce a better error message and then
+stop, one with `sys.exit(1)`. Its proposed `"schema" not in text` exclusion would also break the
+fix, because `database schema is locked` is a real `SQLITE_LOCKED` phrasing.
+
 ### Fixed — `format_version` was a true statement about the wrong moment
 
 `format_version` was seeded through `INSERT OR IGNORE` at creation and never written again, so it

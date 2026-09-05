@@ -107,8 +107,27 @@ def _is_write_lock_contention(exc: StoreDatabaseError) -> bool:
     errorcode = getattr(cause, "sqlite_errorcode", None)
     if isinstance(errorcode, int):
         return (errorcode & 0xFF) in (_SQLITE_BUSY, _SQLITE_LOCKED)
+    # ⛔ THE FALLBACK IS THE 3.10 PATH AND IT MISSED REAL CONTENTION (codex L3
+    # MED, 2026-09-05). It read ``"database is locked" or "database is busy"``,
+    # and SQLite does not phrase every lock that way. MEASURED, not reasoned —
+    # two live connections, the errors captured with their codes:
+    #   SQLITE_BUSY (5)                 -> 'database is locked'
+    #   SQLITE_LOCKED_SHAREDCACHE (262) -> 'database table is locked: sqlite_master'
+    # The second matches NEITHER clause, so on an interpreter without
+    # ``sqlite_errorcode`` genuine contention was classified as not-contention
+    # and the CLI rethrew a low-level StoreDatabaseError while MCP missed its
+    # contention response. ``requires-python`` is >=3.10, so that interpreter
+    # is supported. SQLITE_LOCKED also phrases as 'database schema is locked'.
+    # ⚠ ``"database"`` IS REQUIRED AS WELL, deliberately. The measured message
+    # carries an OBJECT NAME (``: sqlite_master``), so a bare ``"locked" in
+    # text`` would also match an unrelated error naming a table like
+    # ``locked_items``. Every real SQLite lock message contains "database";
+    # that conjunct is what keeps this a heuristic about locks rather than
+    # about the word.
+    # ⚠ AND IT IS A HEURISTIC, which the code-based branch above is not. It
+    # runs only where the stable classification is unavailable.
     text = str(cause).lower()
-    return "database is locked" in text or "database is busy" in text
+    return ("locked" in text or "busy" in text) and "database" in text
 
 
 #: Parameter names of :meth:`Store._audit_log_after_commit` that must never

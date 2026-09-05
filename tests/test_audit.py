@@ -2226,6 +2226,69 @@ class TestCodexL3TwentySixOhNineOhFour:
         finally:
             reopened.close()
 
+    # -- #4e: the 3.10 fallback must recognise SQLITE_LOCKED (codex, 09-05) --
+
+    def test_the_textual_fallback_recognises_every_measured_lock_message(self):
+        """The branch three Diogenes nights named as never exercised here.
+
+        ``_is_write_lock_contention`` classifies by primary result code when
+        ``sqlite_errorcode`` exists — Python 3.11+. ``requires-python`` is
+        >=3.10, and on 3.10 the TEXT fallback is the whole classifier. It read
+        ``"database is locked" or "database is busy"``.
+
+        ⛔ MEASURED on live connections, with the codes captured alongside, not
+        reasoned from the docs:
+          SQLITE_BUSY (5)                 -> 'database is locked'
+          SQLITE_LOCKED_SHAREDCACHE (262) -> 'database table is locked: sqlite_master'
+        The second matched NEITHER clause, so real contention was classified as
+        not-contention: the CLI rethrew a low-level ``StoreDatabaseError`` and
+        MCP missed its contention response.
+
+        ⚠ The negative cases are the point of the ``"database"`` conjunct. The
+        measured message carries an OBJECT NAME, so a bare ``"locked" in text``
+        would also fire on an unrelated error that happens to name a table
+        called ``locked_items``.
+        """
+        import sqlite3
+        from anneal_memory.store import StoreDatabaseError, _is_write_lock_contention
+
+        def _NoCode(msg):
+            # The function reads ``exc.__cause__``, never the wrapper's own
+            # message (which embeds the store PATH). A hand-built
+            # OperationalError carries no ``sqlite_errorcode`` — the C layer
+            # sets it — so this exercises the TEXT branch on any interpreter,
+            # which is the 3.10 path the repo supports and never runs here.
+            cause = sqlite3.OperationalError(msg)
+            err = StoreDatabaseError("wrapped", operation="record")
+            err.__cause__ = cause
+            return err
+
+        contention = [
+            "database is locked",                          # SQLITE_BUSY, measured
+            "database table is locked: sqlite_master",      # SQLITE_LOCKED_SHAREDCACHE, measured
+            "database schema is locked",                    # SQLITE_LOCKED, documented
+            "database is busy",
+        ]
+        for msg in contention:
+            exc = _NoCode(msg)
+            assert not isinstance(
+                getattr(exc.__cause__, "sqlite_errorcode", None), int
+            ), "this test must exercise the TEXT branch, not the code branch"
+            assert _is_write_lock_contention(exc), (
+                f"real lock contention classified as not-contention: {msg!r}"
+            )
+
+        not_contention = [
+            "no such table: locked_items",   # names a table, is not a lock
+            "attempt to write a readonly database",
+            "unable to open database file",
+            "cannot start a transaction within a transaction",
+        ]
+        for msg in not_contention:
+            assert not _is_write_lock_contention(_NoCode(msg)), (
+                f"non-contention classified as contention: {msg!r}"
+            )
+
     # -- #5: the count must never go backwards between writers --
 
     def test_two_writers_cannot_make_the_lifetime_count_decrease(self, tmp_path):

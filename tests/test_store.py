@@ -75,6 +75,85 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
         conn.close()
         return db
 
+    def test_a_write_capable_open_stamps_the_version_it_leaves_behind(
+        self, tmp_path, monkeypatch
+    ):
+        """⚖ RULED 2026-09-05 — the guard must protect MIGRATED stores too.
+
+        ⛔ THE DEFECT (codex L3 HIGH): ``format_version`` was seeded through
+        ``INSERT OR IGNORE`` at creation and never written again. So it
+        recorded WHO CREATED THIS DATABASE while ``_refuse_a_newer_schema``
+        read it as WHAT SCHEMA THIS DATA IS IN — a true statement standing in
+        for a different question. A newer binary opening an older store ran
+        its migrations and left the marker at the OLD number, and the old
+        binary then sailed through the guard into a migrated database. The
+        guard only ever covered stores the newer binary had CREATED, which is
+        not the case that produces skew.
+
+        This drives the real sequence: v1 creates, "v2" opens it write-capable
+        (simulated by raising the module's ``_SCHEMA_VERSION``), then v1 tries
+        again and must be REFUSED.
+
+        MUTATION-CHECKED: restoring the stamp to ``INSERT OR IGNORE`` leaves
+        the marker at "1" and the final open succeeds — the pre-fix behaviour.
+        """
+        import anneal_memory.store as store_mod
+
+        db = tmp_path / "m.db"
+        v1 = Store(db)
+        v1.record("written by v1", episode_type="observation")
+        v1.close()
+
+        monkeypatch.setattr(store_mod, "_SCHEMA_VERSION", 2)
+        v2 = Store(db)  # a newer binary opening an older store, write-capable
+        try:
+            row = v2._conn.execute(
+                "SELECT value FROM metadata WHERE key = 'format_version'"
+            ).fetchone()
+            assert row["value"] == "2", (
+                "the newer binary migrated this store and left the marker "
+                "naming the older one"
+            )
+        finally:
+            v2.close()
+
+        monkeypatch.setattr(store_mod, "_SCHEMA_VERSION", 1)
+        with pytest.raises(StoreError, match="refusing to open"):
+            Store(db)
+
+    def test_a_read_only_open_does_not_restamp_the_version(
+        self, tmp_path, monkeypatch
+    ):
+        """A reader cannot migrate, so it must not claim it did.
+
+        Structural rather than checked: a ``read_only`` open returns from
+        ``__init__`` before ``_init_schema`` runs at all. Pinned because the
+        stamp's write-capable-only property rests entirely on that ordering,
+        and a future refactor that moves the early return would silently let a
+        reader stamp a store it never touched — locking the writing binary out
+        of the user's own memory.
+        """
+        import anneal_memory.store as store_mod
+
+        db = tmp_path / "m.db"
+        v1 = Store(db)
+        v1.record("written by v1", episode_type="observation")
+        v1.close()
+
+        monkeypatch.setattr(store_mod, "_SCHEMA_VERSION", 2)
+        reader = Store(db, read_only=True)
+        try:
+            assert reader.status().total_episodes == 1
+        finally:
+            reader.close()
+
+        monkeypatch.setattr(store_mod, "_SCHEMA_VERSION", 1)
+        again = Store(db)  # must NOT have been locked out by the reader
+        try:
+            assert again.status().total_episodes == 1
+        finally:
+            again.close()
+
     def test_a_newer_store_is_refused_on_both_open_paths(self, tmp_path):
         db = self._store_stamped(tmp_path, "2")
 

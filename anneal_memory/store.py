@@ -1607,6 +1607,59 @@ class Store:
                 "INSERT OR IGNORE INTO metadata (key, value) VALUES (?, ?)",
                 (key, value),
             )
+
+        # ⚖⚖ STAMP THE WRITING VERSION ON EVERY WRITE-CAPABLE OPEN (ruled
+        # 2026-09-05; codex L3 HIGH, spore-747).
+        #
+        # ⛔ ``INSERT OR IGNORE`` ABOVE MAKES ``format_version`` A TRUE
+        # STATEMENT ABOUT THE WRONG MOMENT. Seeded once at creation and never
+        # touched again, the field records WHO CREATED THIS DATABASE — while
+        # ``_refuse_a_newer_schema`` reads it as WHAT SCHEMA THIS DATA IS IN.
+        # Two different questions, one field answering both. A v2 binary
+        # opening a v1 store ran its migrations and left the marker at "1", so
+        # a v1 binary then passed the guard and wrote to a migrated v2
+        # database: the guard only ever protected databases the NEWER binary
+        # had CREATED, which is not the case that produces skew.
+        #
+        # Stamping on write makes the field answer the question it is actually
+        # asked, and matches what ``crystal.py`` / ``spores.py`` already do —
+        # leaving SQLite create-time-only kept one contract with two mechanisms
+        # giving two answers, which is the same asymmetry the guard shipped on
+        # 2026-09-04 to fix, one layer down.
+        #
+        # ⚠ WRITE-CAPABLE ONLY, and that is structural rather than checked
+        # here: a ``read_only`` open returns from ``__init__`` before
+        # ``_init_schema`` is ever called. A reader must not restamp a store it
+        # cannot migrate.
+        # ⚠ AFTER the migrations above, not before — the stamp asserts the
+        # layout this process has actually finished establishing.
+        # ⚠ The read that GUARDS this ran before any persistent write, at
+        # ``_refuse_a_newer_schema``; by here a greater version has already
+        # been refused, so this can only ever hold or raise the marker.
+        # ⚠ NO-OP WHEN THE MARKER IS ALREADY RIGHT — the ``WHERE`` makes this
+        # write nothing in the overwhelmingly common case (opening a store this
+        # generation already wrote). MEASURED, because the objection was a cost
+        # one: ``_init_schema`` already runs its DDL and the ``INSERT OR
+        # IGNORE`` defaults loop above and commits ONCE at the end of this
+        # method, unconditionally, on every write-capable open. So this adds a
+        # statement to an existing transaction, not a transaction or a commit —
+        # and with the guard below it adds a row version only when the
+        # generation actually moved, which is a migration.
+        self._conn.execute(
+            "INSERT INTO metadata (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value "
+            "WHERE metadata.value IS NOT excluded.value",
+            ("format_version", str(_SCHEMA_VERSION)),
+        )
+        # ⛔ WHAT THIS DOES **NOT** CLOSE, and the distinction is the whole
+        # point: this stamps the SCHEMA generation, not the PACKAGE version.
+        # ``spore-747`` / ``spore-751`` are about two anneal RELEASES wiring one
+        # store — measured 0.9.9 against 0.9.10.dev0 — and BOTH of those are at
+        # ``_SCHEMA_VERSION == 1``. A schema stamp cannot see that skew, so
+        # anyone reading this as "the downgrade hazard is handled" is reading a
+        # true statement about a different question — the same error this stamp
+        # exists to fix, one level up. Detecting a package downgrade needs its
+        # own field (``last_writer_version``); it is NOT built.
         # v0.3.4: if the caller passed an explicit section_schema, persist it
         # with INSERT OR REPLACE so it wins over the INSERT-OR-IGNORE default
         # above (and over any previously-persisted schema) — the explicit

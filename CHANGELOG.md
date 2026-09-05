@@ -4,6 +4,29 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — `format_version` was a true statement about the wrong moment
+
+`format_version` was seeded through `INSERT OR IGNORE` at creation and never written again, so it
+recorded **who created this database** while `_refuse_a_newer_schema` read it as **what schema this
+data is in**. A newer binary opening an older store ran its migrations and left the marker naming
+the older one; the older binary then passed the guard and wrote to a migrated database. The guard
+only ever protected stores the newer binary had *created* — which is not the case that produces
+skew. Found by codex at L3.
+
+It is now stamped after the migration sequence, on write-capable opens, as a conditional upsert
+that writes nothing when the marker is already current. A `read_only` open cannot stamp: it returns
+from `__init__` before `_init_schema` runs at all, and a test pins that ordering, because the
+write-capable-only property rests entirely on it — a reader that stamps is a reader that locks the
+writing binary out of the user's own memory.
+
+⛔ **What this does NOT close, stated because the gap is the interesting part.** This stamps the
+SCHEMA generation, not the PACKAGE version. `spore-747` / `spore-751` are about two anneal
+*releases* wiring one store — measured, 0.9.9 against 0.9.10.dev0 — and **both are at
+`_SCHEMA_VERSION == 1`**. A schema stamp structurally cannot see that skew. Reading this fix as
+"the downgrade hazard is handled" would be a true statement standing in for a different question,
+which is precisely the defect being fixed, one level up. Detecting a package downgrade needs its
+own field and is not built.
+
 ### Fixed — the Python 3.10 lock-contention fallback missed real contention
 
 `_is_write_lock_contention` classifies by primary result code where

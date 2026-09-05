@@ -84,8 +84,11 @@ fix is what caught it; L3 before the fix could not have.
 
 ### ▶ THE L3 ROUND (codex + complement, run AFTER the fix — 7 + 1 findings)
 **Fixed:** the post-commit `BaseException` HIGH · the stale-pointer MED · the Python 3.10
-lock-contention fallback MED · complement's LOW (the `_batch()` batch-aware list omitted five
-methods that ARE batch-aware).
+lock-contention fallback MED · the `format_version` HIGH (see the ruling section below) ·
+complement's LOW (the `_batch()` batch-aware list omitted five methods that ARE batch-aware).
+**Refused with the reason recorded:** the unparseable-version MED, a documented deliberate ruling.
+⚖ Ratified by the head: *"A reviewer re-raising a settled ruling is not a finding, and writing down
+that it was refused AND WHY is the only thing that stops the third round."*
 ⛔ **The 3.10 fallback is worth its own line.** It is the branch Diogenes named as unexercised on
 THREE CONSECUTIVE NIGHTS ("Python 3.13 ONLY"), and codex found a real defect in it independently.
 MEASURED: `SQLITE_LOCKED_SHAREDCACHE` reports `'database table is locked: sqlite_master'`, which
@@ -94,9 +97,40 @@ countdown on it.**
 ⚠ **glm was CUT OFF part-way through and opened one file. This was NOT a clean three-seat pass.**
 The region it never reached is unreviewed, and a later reader should not count this as coverage.
 
+### ⚖ THE VERSION-GUARD RULING — SHIPPED NARROWER THAN IT WAS WORDED, AND READ THE GAP CLAUSE
+Escalated to `0905+1 fanin`; Phill delegated it (*"out of knowledge base... choose the best
+approach"*); `0905+0 main` ruled STAMP ON WRITE; the fan-in then read `store.py` itself and
+**revised the ruling before it shipped.** The revision is the part to keep.
+
+▶ **SHIPPED:** `format_version` is stamped after the migration sequence on write-capable opens, as
+a **conditional** upsert (`WHERE metadata.value IS NOT excluded.value`) that writes nothing when the
+marker is already current. Two tests: the v1→"v2"→v1 refusal sequence, and one pinning that a
+`read_only` open **cannot** stamp — structural, since `__init__` returns before `_init_schema`
+exists. That second test guards a property nothing else does: **a reader that stamps locks the
+writing binary out of the user's own memory.**
+⛔ **AND THE CLAUSE THAT MATTERS MORE THAN THE FIX — do not let a future reader undo it.** This
+stamps the **SCHEMA generation, not the PACKAGE version.** `spore-747` / `spore-751` are about two
+anneal RELEASES on one store — measured, `0.9.9` vs `0.9.10.dev0` — and **both are
+`_SCHEMA_VERSION == 1`.** A schema stamp structurally cannot see that skew. **Reading this fix as
+"the downgrade hazard is handled" is a true statement standing in for a different question — the
+exact class the fix exists to correct, one level up.** Written into `store.py` AND the CHANGELOG so
+the inference cannot be made from either surface. `last_writer_version` is the field that would
+answer spore-747. **NOT BUILT, NOT RULED.**
+⚡ **My own escalation carried the conflation before the ruling did** — I asked "does the store stamp
+the writing version", which is two fields in one question. The fan-in caught it downstream. If you
+hand a version question up, say WHICH version.
+
 ### ⛔ OPEN, AND DELIBERATELY NOT DECIDED HERE
-· **spore-747 / the version-guard cluster — ESCALATED TO PHILL via `0905+1 fanin`, awaiting a
-  ruling. Do not decide it from this seat.** codex filed FOUR findings on `_refuse_a_newer_schema`.
+· **`last_writer_version` (spore-747's actual answer) — NOT BUILT, held pending a ruling.**
+· ⚠ **`spore-773` ALREADY HOLDS codex's check-then-act finding, with a deliberate NOT-BUILT
+  ruling and a RISING TRIGGER — read it before re-filing anything in this area.** It records that
+  the version check and the migrations are not one atomic step (process A passes the guard, B
+  upgrades, A runs this version's DDL against a v2 database), that the fix needs a real restructure
+  of `_init_schema` because `executescript()` can implicitly COMMIT, and that it was deliberately
+  not built because *"the levain-side fix (one authoritative anneal per install) removes the
+  scenario at its source. Do that first; this is the belt to those braces. **If the levain fix does
+  NOT land, this rises.**"* codex re-raised a neighbour of it today; the ruling stands.
+· **The old spore-747 escalation line, for the trail:** codex filed FOUR findings on `_refuse_a_newer_schema`.
   I verified two: the guard **only protects databases the newer binary CREATED** (`format_version`
   is seeded via `INSERT OR IGNORE`, so a v2 binary migrating a v1 database never re-stamps it), and
   the unparseable-version branch codex flagged is a **DOCUMENTED DELIBERATE RULING** (CHANGELOG:

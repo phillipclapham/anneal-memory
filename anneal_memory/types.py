@@ -125,6 +125,17 @@ class StoreStatus:
     #
     # ⛔ LIFETIME-SCOPED AND DURABLE, not process-local — the distinction is
     # the whole value of the field.
+    # It is persisted in the store's SQLite ``metadata`` table (a different
+    # I/O path from the JSONL sink that is already failing) and seeded from
+    # disk at open, so a one-shot CLI run
+    # reports losses caused by a process that has long exited. The first
+    # version was a plain instance attribute, which made every CLI ``status``
+    # structurally zero on the one surface the README says to poll.
+    # It is MONOTONIC and never resets: a trail that lost an entry is
+    # permanently incomplete, so a number that healed would be a lie. That is
+    # enforced by an UPSERT that ADDS a per-process delta — the first version
+    # wrote the whole in-memory total and two writers could drive it backwards
+    # (codex L3, 2026-09-04).
     # ⚠ DURABLE REQUIRES A FLUSH POINT, and for six days it had only one.
     # ``_persist_audit_health`` must not commit inside a caller's open
     # transaction (it would publish their uncommitted DML), so a failure that
@@ -134,17 +145,7 @@ class StoreStatus:
     # loss correctly in-process and ZERO after reopen, on exactly the path
     # ``validated_save_continuity`` uses. There are now three flush points
     # (that handler, ``_batch()`` exit, ``close()``); the honest residue is a
-    # process killed mid-batch, which loses that last delta. It is persisted in the store's SQLite
-    # ``metadata`` table (a different I/O path from the JSONL sink that is
-    # already failing) and seeded from disk at open, so a one-shot CLI run
-    # reports losses caused by a process that has long exited. The first
-    # version was a plain instance attribute, which made every CLI ``status``
-    # structurally zero on the one surface the README says to poll.
-    # It is MONOTONIC and never resets: a trail that lost an entry is
-    # permanently incomplete, so a number that healed would be a lie. That is
-    # enforced by an UPSERT that ADDS a per-process delta — the first version
-    # wrote the whole in-memory total and two writers could drive it backwards
-    # (codex L3, 2026-09-04).
+    # process killed mid-batch, which loses that last delta.
     # ⚠ BOUNDED, NOT ABSOLUTE: the write is best-effort and issued after the
     # mutation committed, so a full volume can fail it too and a process that
     # exits before a later flush loses the count. The guarantee is that a loss

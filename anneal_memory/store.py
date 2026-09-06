@@ -1688,6 +1688,27 @@ class Store:
         cannot run inside a transaction, so the lock cannot be taken before
         it.
 
+        ⛔ WHAT THIS LOCK DOES **NOT** COVER, STATED SO IT IS NOT INFERRED
+        (codex L3 HIGH, 2026-09-06). It makes OPEN-TIME atomic. It says
+        nothing about a handle that is ALREADY OPEN. Process A opens under
+        generation 1 and goes idle; B opens, migrates, stamps 2 and releases
+        this lock; A then calls ``record()`` or any other writer WITHOUT
+        rechecking the marker, and writes generation-1-shaped data into a
+        generation-2 schema. Under a breaking migration that is silent
+        defaulting or a runtime SQL failure.
+        ⚠ Reading "the check and the migrations are one locked step" as "an
+        older binary can no longer write to a migrated store" is a TRUE
+        statement standing in for a different question — the same shape as the
+        create-time ``format_version`` stamp this guard family already got
+        wrong once. The honest scope is: **open-time, not lifetime.**
+        ▶ NOT BUILT, DELIBERATELY. Closing it means revalidating the
+        generation inside every write transaction — a read per write, on a
+        hazard that requires a BREAKING migration to matter, and
+        ``_SCHEMA_VERSION`` has only ever been 1. It is forward-looking like
+        the rest of this family. Routed rather than built; if a second
+        generation is ever introduced, this becomes a release blocker and must
+        be built WITH it, not after.
+
         ⚠ THIS TAKES THE WRITE LOCK EARLIER THAN BEFORE, AND THAT IS NOT A
         NEW FAILURE MODE — MEASURED 2026-09-06. Opening a write-capable store
         while another process holds the write lock ALREADY failed, with

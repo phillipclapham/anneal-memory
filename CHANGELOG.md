@@ -120,6 +120,23 @@ asserts the file on disk holds the new text.
 ⚠ Run that mutation with the new test selected **alone**: under the mutant the older sibling aborts
 the pytest session first, so selecting both reports an abort and looks like neither can go red.
 
+### Known and deliberately not fixed — the schema lock is open-time, not lifetime
+
+`_init_schema`'s writer lock makes the version check and the migrations one atomic step at OPEN
+time. It says nothing about a handle that is **already open**: process A opens under generation 1
+and idles, B migrates and stamps 2, and A then writes generation-1-shaped data into a generation-2
+schema without rechecking. Under a breaking migration that is silent defaulting or a runtime SQL
+failure.
+
+⚠ Reading "the check and the migrations are one locked step" as "an older binary can no longer write
+to a migrated store" is a true statement standing in for a different question — the same shape as
+the create-time `format_version` stamp this guard family already got wrong once. The honest scope is
+**open-time, not lifetime**.
+
+Closing it means revalidating the generation inside every write transaction — a read per write, for
+a hazard that requires a breaking migration to matter, and `_SCHEMA_VERSION` has only ever been 1.
+**If a second generation is ever introduced this becomes a release blocker and must ship with it.**
+
 ### Known and deliberately not fixed — the commit/ack race in `_persist_audit_health`
 
 If `commit()` lands durably and a terminal exception arrives before the in-memory decrement, the next

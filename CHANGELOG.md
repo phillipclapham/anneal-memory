@@ -52,7 +52,9 @@ audit file at all — every one of the four "a swallow must not become silence" 
 because none of them ran, and `verify()` would have walked the hole and reported a clean trail.
 
 The catch is now `BaseException`, which routes the drop through those existing channels and lets the
-tail continue. A real Ctrl-C is delivered once, so containing it per event costs the one interrupted
+tail continue. ⚠ Per `spore-774` this is **best-effort, not durable**: the `dropped_before` marker
+rides into the next entry that lands, so it survives the process only once a later write happens.
+What changed is that it is emitted at all — before the fix, nothing was. A real Ctrl-C is delivered once, so containing it per event costs the one interrupted
 emit instead of every event after it.
 
 ⚠ The cost, stated: a `SystemExit` from the **sink** is now recorded and swallowed rather than

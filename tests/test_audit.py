@@ -2428,6 +2428,16 @@ class TestCodexL3TwentySixOhNineOhFour:
             "attempt to write a readonly database",
             "unable to open database file",
             "cannot start a transaction within a transaction",
+            # ⛔ codex L3 MED, 2026-09-06. The row above it was already here
+            # and passed for the WRONG REASON: it happens to omit the word
+            # "database", so the old two-substring test never fired on it. Put
+            # "database" INTO the identifier and the same predicate classified
+            # a schema error as write-lock contention, and the operator was
+            # told another process was writing right now. The list looked like
+            # it covered this class and covered one spelling of it.
+            "no such table: database_locked_items",
+            "no such column: database_is_locked",
+            "table locked_database has no column named x",
         ]
         for msg in not_contention:
             assert not _is_write_lock_contention(_NoCode(msg)), (

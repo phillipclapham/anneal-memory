@@ -67,6 +67,15 @@ from .associations import (
 )
 from .audit import AuditTrail
 
+#: SQLite's own write-lock message grammar, for the Python 3.10 fallback in
+#: :func:`_is_write_lock_contention` where no primary result code is available.
+#: Anchored so a table or column name that merely CONTAINS "database" and
+#: "locked" cannot pass.
+_WRITE_LOCK_MESSAGE = re.compile(
+    r"^database(?: table| schema)? is (?:locked|busy)(?::|$)"
+)
+
+
 def _is_write_lock_contention(exc: StoreDatabaseError) -> bool:
     """True when a StoreDatabaseError came from SQLite write-lock contention.
 
@@ -126,8 +135,24 @@ def _is_write_lock_contention(exc: StoreDatabaseError) -> bool:
     # about the word.
     # ⚠ AND IT IS A HEURISTIC, which the code-based branch above is not. It
     # runs only where the stable classification is unavailable.
-    text = str(cause).lower()
-    return ("locked" in text or "busy" in text) and "database" in text
+    # ⛔ ANCHORED, NOT A SUBSTRING TEST (codex L3 MED, 2026-09-06). The bare
+    # form was `("locked" in text or "busy" in text) and "database" in text`,
+    # which classifies `no such table: database_locked_items` as write-lock
+    # contention — a SCHEMA error reported to the operator as "another process
+    # is writing right now". MEASURED: the anchored form rejects it and still
+    # matches every real phrasing, including the two this predicate was
+    # explicitly widened to keep on 2026-09-05 (`database table is locked:
+    # sqlite_master`, the SQLITE_LOCKED_SHAREDCACHE form, and `database schema
+    # is locked`).
+    # ⚠ NARROWING THIS IS THE DANGEROUS DIRECTION and has already been got
+    # wrong once: a breadth seat proposed excluding any message containing
+    # "schema", which would have broken the fix outright. Any change here must
+    # be measured against real messages, not reasoned about — the table above
+    # is the one to re-run.
+    # ⚠ 3.10 ONLY. On 3.11+ the primary result code decides and this is never
+    # reached, which is exactly why it went three nights flagged as
+    # unexercised and has now yielded two real defects in two days.
+    return bool(_WRITE_LOCK_MESSAGE.match(str(cause).lower()))
 
 
 #: Parameter names of :meth:`Store._audit_log_after_commit` that must never

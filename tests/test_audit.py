@@ -2465,7 +2465,15 @@ class TestCodexL3TwentySixOhNineOhFour:
         Two properties, and the second is the one the four channels exist for:
         the tail is still written (a real Ctrl-C is delivered ONCE, so
         containing it per event costs the one interrupted emit), and the drop
-        is RECORDED — durably, in the hash chain, not just as a warning.
+        is RECORDED in the hash chain rather than only as a warning.
+
+        ⚠ "RECORDED IN THE CHAIN" CARRIES ``spore-774``'s BOUND AND IS NOT THE
+        SAME AS "DURABLE". The ``dropped_before`` marker rides into the NEXT
+        entry that lands, so it survives the process only once a later write
+        actually happens — a crash before that still loses it. What this test
+        pins is that the marker is EMITTED at all, which it was not before:
+        the pre-fix measurement had zero entries and zero counters. The field
+        is best-effort by design; do not restate it as durable.
         """
         import json
 

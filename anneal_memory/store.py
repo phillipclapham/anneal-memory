@@ -4709,11 +4709,35 @@ class Store:
             return self._audit_last_failure
 
     @staticmethod
-    def _failure_stamp(value: str | None) -> str | None:
+    def _failure_stamp(value: str | None) -> datetime | None:
         """The trailing ``at <ISO-Z>`` stamp ``_audit_log_after_commit`` writes.
 
         Returns ``None`` for anything that does not carry one, which every
         caller reads as "not comparable" rather than as "older".
+
+        ⛔ PARSED, NOT SHAPE-CHECKED, AND COMPARED AS A ``datetime`` (codex L3,
+        2026-09-06). This used to accept any 20-character string ending in
+        ``Z`` with a ``-`` in position 4 and return it for a STRING compare.
+        Two defects, both measured:
+
+        · ``9999-99-99T99:99:99Z`` passed the shape check and string-compares
+          GREATER than every real timestamp, so one corrupt stored value
+          pinned ``audit_last_failure`` permanently — the exact opposite of
+          this function's documented "fails toward REPLACING an unreadable
+          stored value".
+        · a string compare cannot mix precisions. Second-resolution stamps
+          made the stale-writer guard a coin flip inside any one second: A
+          fails at ``.100``, B persists at ``.900``, A flushes later, both
+          stamps read ``10:00:00Z``, ``theirs > mine`` is False and A
+          overwrote B's NEWER failure.
+
+        ⚠ BOTH FORMATS ARE ACCEPTED ON READ, DELIBERATELY. Stores written
+        before today hold the 20-character form and must keep comparing
+        correctly against the sub-second form written now. This is also why
+        the comparison is on parsed datetimes rather than text: ``Z`` sorts
+        AFTER ``.`` so ``...:00Z`` string-compares GREATER than
+        ``...:00.500000Z``, which would make the old value win inside the
+        second it was supposed to lose.
         """
         if not value:
             return None
@@ -4722,10 +4746,11 @@ class Store:
         if idx == -1:
             return None
         stamp = value[idx + len(marker):].strip()
-        # Shape check only — this is an ordering key, not a parsed datetime,
-        # and the format is fixed by the one site that writes it.
-        if len(stamp) == 20 and stamp.endswith("Z") and stamp[4] == "-":
-            return stamp
+        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+            try:
+                return datetime.strptime(stamp, fmt).replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
         return None
 
     def _stored_failure_is_newer(self, candidate: str) -> bool:
@@ -5137,7 +5162,15 @@ class Store:
                     f" [dropped before audit seq {missing_seq}]"
                     if missing_seq is not None else ""
                 )
-                when = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                # ⚠ SUB-SECOND, and the precision is load-bearing rather than
+                # cosmetic: this stamp is the ordering key the stale-writer
+                # guard compares. At second resolution two writers failing in
+                # the same second tie, and the OLDER one wins by falling
+                # through to the replace branch (codex L3 MED, 2026-09-06).
+                # ``_failure_stamp`` still reads the old 20-character form.
+                when = datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%S.%fZ"
+                )
                 self._audit_last_failure = f"{method}: {exc!r}{where} at {when}"
                 # Write through to the metadata table so the count OUTLIVES
                 # this process. Without this the channel is real only for a

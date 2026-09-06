@@ -113,6 +113,59 @@ multi-writer correctness and pinned by `test_two_writers_cannot_make_the_lifetim
 so the only correct fix is codex's per-attempt token — new durable machinery, under one-in-one-out.
 **It is the token or nothing; do not "fix" it by moving the decrement.**
 
+
+### ⛔⛔ L3 RAN TWICE AND ROUND 2 FOUND DEFECTS INSIDE ROUND 1'S OWN FIXES — INCLUDING CHAIN CORRUPTION I CREATED
+This is the second consecutive day this repo has had that shape, and it is the reusable finding:
+**L3 after the fix catches what L3 before the fix structurally cannot.** Round 2's seven findings
+were largely in code round 1 had just written.
+
+⚡ **THE WORST ONE, AND IT WAS MINE.** Round 1's widening of `_audit_log_after_commit`'s catch to
+`BaseException` was correct for RECORDING and made a latent hole in `audit.py` REACHABLE. That
+module's write-first rollback was `except Exception`, so a `KeyboardInterrupt` between a durable
+append and the chain-state advance left the entry ON DISK with `_seq`/`_prev_hash` unchanged and NO
+rollback. Harmless while an interrupt abandoned the whole replay — **once the store started
+recording the drop and CONTINUING, the next append reused the stale seq.** REPRODUCED: seqs
+`[0, 1, 1]`, `verify()` reporting a hash mismatch — *a durability hiccup read as tampering, on the
+record whose entire value is telling those two apart.* Identical signature to the 09-04 fsync-EIO
+HIGH, reached through the other exception branch.
+▶ **THE GENERAL FORM: widening a catch changes WHICH FAILURES ARE REACHABLE DOWNSTREAM, not just
+what this handler does.** Before widening one, check what the callee's own handlers exclude.
+
+⚖ **AND THE SAME WIDENING WAS RIGHT FOR RECORDING AND WRONG FOR POLICY.** It swallowed `SystemExit`
+on every ordinary post-commit call — a SIGTERM handler written as `sys.exit()` eaten, the server
+running on. Now split by call site, mirroring `_persist_audit_health`: the shared handler RECORDS
+then re-raises `SystemExit`; `_replay_deferred_audits` suppresses it PER EVENT and continues,
+because the batched path is the one place a raise makes the caller unlink a committed wrap's
+sidecars. **Suppression is stated at the site that needs it, not inherited by every caller.**
+⚠ `KeyboardInterrupt` stays swallowed — that is the 09-05 refusal, mutation-tested; reversing it
+reintroduces the data loss.
+
+### ⛔ TWO BOUNDS RECORDED, NOT FIXED — READ BEFORE RE-FILING EITHER
+1. **The schema lock is OPEN-TIME, NOT LIFETIME.** `spore-773`'s lock says nothing about a handle
+   already open: A opens at generation 1 and idles, B migrates and stamps 2, A then writes
+   generation-1-shaped data into a generation-2 schema. **Reading "one locked step" as "an older
+   binary can no longer write to a migrated store" is a true statement standing in for a different
+   question** — the same shape the create-time stamp already got wrong. Closing it means
+   revalidating inside every write transaction; `_SCHEMA_VERSION` has only ever been 1.
+   ▶ **CONDITION ATTACHED: if a second generation is ever introduced this is a RELEASE BLOCKER and
+   ships WITH it.**
+2. **The commit/ack race** — refused with three reasons at the site. **It is the token or nothing;
+   do not "fix" it by moving the decrement**, which buys an under-count, and under-counting a
+   degraded-audit channel is the silence the whole apparatus exists to prevent.
+
+### ⚠ TWO PROCESS FINDINGS FROM ROUND 2 WORTH MORE THAN THE CODE
+1. **I NEARLY DECLARED A HEALTHY L3 RUN DEAD, from a fourth angle the doctrine has not recorded.**
+   Not a positional-vs-name error: my `pgrep -cf 'deep_review.py --paths anneal_memory'` returned 0
+   while `pgrep -f "deep_review.py --paths"` returned three PIDs, and I had separately checked for
+   `codex-darwin` *before it spawned*. Two independent measurement errors compounding into "the run
+   died". The name-matched `lsof` settled it: codex held two ESTABLISHED sockets and was 8 minutes
+   into a 552s run. ▶ **Confirm a dead run with the socket check, never with a pgrep that returned
+   nothing — a pattern that fails to match and a process that is absent are indistinguishable.**
+2. **A PATCH SCRIPT THAT ABORTS PART-WAY LEAVES YOU BELIEVING IT APPLIED.** My combined patch
+   asserted on a second anchor, failed, and wrote NOTHING — but I had already read the first half as
+   landed. Caught only by running the behaviour, which showed `SystemExit` still being eaten.
+   ▶ **Verify the BEHAVIOUR, not the exit of the edit.**
+
 ### ⚠ APPARATUS FINDINGS THAT OUTLIVE THIS REPO
 1. ⛔ **THIS REPO'S `.venv` SHADOWS THE WORKING TREE.** It holds a NON-EDITABLE `anneal_memory`
    **0.9.1 from Jun 18** (4,606 lines) against a 6,089-line tree. `pytest` from the repo root is

@@ -4889,6 +4889,36 @@ class Store:
                     (_AUDIT_LAST_FAILURE_KEY, self._audit_last_failure),
                 )
             self._conn.commit()
+            # ⚖ A COMMIT/ACK RACE LIVES IN THIS GAP AND IS DELIBERATELY NOT
+            # CLOSED — REFUSED WITH REASONS 2026-09-06, do not re-file it.
+            # codex L3 MED, REPRODUCED before being refused: if ``commit()``
+            # lands durably and a terminal exception arrives before the
+            # decrement below, the handler rolls back a now-empty transaction
+            # and leaves the delta pending, so the next flush ADDS IT AGAIN.
+            # Measured: one failure persisted as a count of 2.
+            # Three reasons it stays:
+            # 1. THE DIRECTION IS THE SAFE ONE. This counter answers "is the
+            #    audit sink degraded?" — an over-count still answers it
+            #    correctly (non-zero means degraded and the operator looks).
+            #    An under-count is silence, which is the failure this whole
+            #    four-channel apparatus exists to prevent.
+            # 2. EVERY CHEAPER ORDERING IS WORSE. Decrementing BEFORE the
+            #    commit, or in a ``finally``, drops the delta when the commit
+            #    actually fails — trading a rare over-count for a rare
+            #    under-count, i.e. for the failure mode in (1).
+            # 3. THE REAL FIX IS NOT CHEAP, and the thing that makes it
+            #    expensive is a property with a test on it. The persisted
+            #    write is ADDITIVE on purpose: a whole-value write loses
+            #    updates between two writers, which is pinned by
+            #    ``test_two_writers_cannot_make_the_lifetime_count_decrease``.
+            #    Additive is what makes a retry double-count, so the only
+            #    correct fix is the per-attempt token codex named — a new
+            #    durable field plus a lookup on every ambiguous flush, in the
+            #    method that already carries three codex HIGHs.
+            # ⚠ The window is between a durable commit and the next bytecode,
+            # and it needs a signal to land exactly there. If this is ever
+            # revisited, it is the TOKEN or nothing; do not "fix" it by moving
+            # the decrement.
             self._audit_failures_unpersisted -= delta
         except BaseException as exc:
             # ⛔ ``BaseException``, NOT ``Exception`` (codex L3 HIGH,

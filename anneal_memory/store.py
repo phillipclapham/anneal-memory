@@ -1068,6 +1068,11 @@ def _sql_statements(script: str) -> list[str]:
     breaks on any semicolon inside a string literal or a future trigger body.
     VERIFIED: the schema produced statement-by-statement is byte-identical to
     the schema ``executescript`` produces from the same three scripts.
+
+    ⚠ A script ending in a bare comment yields that comment as a trailing
+    "statement". MEASURED: SQLite executes it as a no-op and the transaction
+    stays open, so this needs no filter — do not add one on the assumption it
+    would raise.
     """
     statements: list[str] = []
     buffer = ""

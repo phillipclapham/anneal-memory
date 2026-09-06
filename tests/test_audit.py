@@ -2762,6 +2762,62 @@ class TestCodexL3TwentySixOhNineOhFour:
             "one from later in the same second"
         )
 
+    def test_mixed_precision_in_one_second_does_not_clobber_the_stored_value(
+        self, tmp_path
+    ):
+        """codex L3 MED, 2026-09-06 — a gap opened by the precision fix itself.
+
+        Writing microseconds fixed same-second ties between two NEW writers and
+        created a new hazard for a MIXED-VERSION fleet: a legacy stamp parses
+        as ``.000000``, which is not the same as being older — it is UNKNOWN
+        within its second. So a new writer overwrote a genuinely NEWER failure
+        persisted by an old one: A fails at ``10:00:00.100000`` and stays
+        pending, B fails LATER and persists ``10:00:00Z``, A flushes, reads B
+        as ``.000000`` and clobbers it. The stale-writer race this guard exists
+        to prevent, reopened by the fix meant to close it.
+
+        ⚠ This is the ONE case that does not fail toward replacing. The general
+        direction exists so an UNREADABLE stored value cannot pin the field; a
+        READABLE value of coarser precision cannot be shown to be older, so it
+        is kept. The unambiguous cases are asserted alongside so the exception
+        cannot quietly widen into "never replace".
+        """
+        from anneal_memory.store import Store, _AUDIT_LAST_FAILURE_KEY
+
+        def stored_is_newer(stored, candidate):
+            store = Store(tmp_path / f"p{abs(hash((stored, candidate)))}.db")
+            try:
+                store.record("seed", episode_type="observation")
+                store._conn.execute(
+                    "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                    (_AUDIT_LAST_FAILURE_KEY, f"record: X at {stored}"),
+                )
+                store._conn.commit()
+                return store._stored_failure_is_newer(f"record: Y at {candidate}")
+            finally:
+                store.close()
+
+        assert stored_is_newer(
+            "2026-09-06T10:00:00Z", "2026-09-06T10:00:00.100000Z"
+        ), (
+            "a sub-second writer overwrote a legacy stamp from the same second "
+            "— coarser precision was read as older, which it is not"
+        )
+
+        # The unambiguous cases must be unaffected.
+        assert stored_is_newer(
+            "2026-09-06T10:00:00.900000Z", "2026-09-06T10:00:00.100000Z"
+        )
+        assert not stored_is_newer(
+            "2026-09-06T10:00:00.100000Z", "2026-09-06T10:00:00.900000Z"
+        )
+        assert not stored_is_newer(
+            "2026-09-06T09:00:00Z", "2026-09-06T10:00:00.100000Z"
+        ), "a legacy stamp from an EARLIER second must still lose"
+        assert stored_is_newer(
+            "2026-09-06T11:00:00Z", "2026-09-06T10:00:00.100000Z"
+        ), "a legacy stamp from a LATER second must still win"
+
     # -- #4f: DIRECTION, not just frequency, for every conditional write --
 
     @pytest.mark.parametrize(

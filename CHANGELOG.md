@@ -24,9 +24,14 @@ the caller genuinely is exiting.
 filed both `except BaseException` sites as HIGH and prescribed re-raising *everything* — that
 prescription **reintroduces the data-loss defect the handler exists to close**, demonstrated by
 mutation: applying it makes the wrap-protection test abort the run. The same seat filed the widened
-lock-contention heuristic as risking an "infinite retry loop"; **there is no retry loop** — both
-callers (`cli.py:270`, `server.py:712`) use the predicate to produce a better error message and then
-stop, one with `sys.exit(1)`. Its proposed `"schema" not in text` exclusion would also break the
+lock-contention heuristic as risking an "infinite retry loop"; **there is no retry loop** — EVERY
+caller uses the predicate to produce a better error message and then STOPS. The CLI prints and
+`sys.exit(1)`s at both its open-time and its command-time boundary; the MCP server returns a tool
+result. None of them retries. ⚠ Stated as a RULE and not as a coordinate roster on purpose: an
+earlier version of this sentence named two of the three call sites, and the omitted one was the
+broadest — the command-time boundary that covers every subcommand that writes. This block exists to
+be RE-CHECKED, so the re-derivation is the useful thing to write down:
+`grep -rn _is_write_lock_contention anneal_memory/`. Its proposed `"schema" not in text` exclusion would also break the
 fix, because `database schema is locked` is a real `SQLITE_LOCKED` phrasing.
 
 ### Fixed — `format_version` was a true statement about the wrong moment

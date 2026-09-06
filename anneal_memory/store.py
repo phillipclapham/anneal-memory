@@ -4714,7 +4714,7 @@ class Store:
             return self._audit_last_failure
 
     @staticmethod
-    def _failure_stamp(value: str | None) -> datetime | None:
+    def _failure_stamp(value: str | None) -> tuple[datetime, bool] | None:
         """The trailing ``at <ISO-Z>`` stamp ``_audit_log_after_commit`` writes.
 
         Returns ``None`` for anything that does not carry one, which every
@@ -4751,11 +4751,15 @@ class Store:
         if idx == -1:
             return None
         stamp = value[idx + len(marker):].strip()
-        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+        for fmt, subsecond in (
+            ("%Y-%m-%dT%H:%M:%S.%fZ", True),
+            ("%Y-%m-%dT%H:%M:%SZ", False),
+        ):
             try:
-                return datetime.strptime(stamp, fmt).replace(tzinfo=timezone.utc)
+                parsed = datetime.strptime(stamp, fmt)
             except ValueError:
                 continue
+            return parsed.replace(tzinfo=timezone.utc), subsecond
         return None
 
     def _stored_failure_is_newer(self, candidate: str) -> bool:
@@ -4765,9 +4769,10 @@ class Store:
         write are atomic against another writer. Fails toward REPLACING: an
         absent, unstamped or unreadable stored value returns False.
         """
-        mine = self._failure_stamp(candidate)
-        if mine is None:
+        parsed_mine = self._failure_stamp(candidate)
+        if parsed_mine is None:
             return False
+        mine, mine_precise = parsed_mine
         try:
             row = self._conn.execute(
                 "SELECT value FROM metadata WHERE key = ?",
@@ -4775,10 +4780,32 @@ class Store:
             ).fetchone()
         except Exception:
             return False
-        theirs = self._failure_stamp(row[0] if row else None)
-        if theirs is None:
+        parsed_theirs = self._failure_stamp(row[0] if row else None)
+        if parsed_theirs is None:
             return False
-        # ISO-8601 UTC at fixed width sorts lexically as it sorts temporally.
+        theirs, theirs_precise = parsed_theirs
+        # ⛔ MIXED PRECISION INSIDE ONE SECOND IS UNORDERED, AND THE TIE GOES
+        # TO THE STORED VALUE (codex L3 MED, 2026-09-06). Parsing a legacy
+        # second-resolution stamp as ``.000000`` does not make it OLDER — it
+        # makes it UNKNOWN within its second. Without this clause a writer at
+        # the new precision overwrote a genuinely NEWER failure persisted by an
+        # older one: A fails at ``10:00:00.100000`` and stays pending, B fails
+        # LATER and persists ``10:00:00Z``, A flushes, reads B as ``.000000``
+        # and clobbers it. That is the stale-writer race this method exists to
+        # prevent, reopened by the precision fix meant to close it, for exactly
+        # as long as a fleet runs mixed versions.
+        # ⚠ THIS IS THE ONE CASE THAT DOES NOT FAIL TOWARD REPLACING, and the
+        # distinction is deliberate: the general direction exists so an
+        # UNREADABLE stored value cannot pin the field forever. A READABLE
+        # value of coarser precision is a different thing — it cannot be shown
+        # to be older, so it is not overwritten.
+        if mine_precise != theirs_precise and mine.replace(
+            microsecond=0
+        ) == theirs.replace(microsecond=0):
+            return True
+        # Compared as datetimes, NOT as text: ``Z`` sorts after ``.``, so a
+        # lexical compare puts a legacy ``…:00Z`` AFTER a newer
+        # ``…:00.5Z`` from the same second.
         return theirs > mine
 
     def _persist_audit_health(self) -> None:

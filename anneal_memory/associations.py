@@ -75,7 +75,9 @@ CREATE INDEX IF NOT EXISTS idx_assoc_strength ON associations(strength DESC);
 """
 
 
-def migrate_add_affective_columns(conn: sqlite3.Connection) -> None:
+def migrate_add_affective_columns(
+    conn: sqlite3.Connection, *, commit: bool = True
+) -> None:
     """Add affective columns to existing associations tables.
 
     Safe to call on tables that already have the columns (checks first).
@@ -93,7 +95,12 @@ def migrate_add_affective_columns(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE associations ADD COLUMN affective_intensity REAL NOT NULL DEFAULT 0.0"
         )
-    conn.commit()
+    # ``commit=False`` when called from ``Store._init_schema_locked``: a commit
+    # there releases the writer lock that method holds across the version check
+    # and every migration (``spore-773``). Same convention as
+    # ``record_associations`` below.
+    if commit:
+        conn.commit()
 
 
 def canonical_pair(id_a: str, id_b: str) -> tuple[str, str] | None:

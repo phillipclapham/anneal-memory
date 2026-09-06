@@ -174,8 +174,19 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
         monkeypatch.setattr(
             Store, "_refuse_a_newer_schema", guard_then_the_newer_binary_lands
         )
-        raced = Store(db)
-        raced.close()
+        # ⚖ THE OUTCOME STRENGTHENED ON 2026-09-06 AND THIS ASSERTION MOVED
+        # WITH IT. Until spore-773 was built, A could only be stopped from
+        # making things WORSE: it proceeded into the migrated database and the
+        # monotonic predicate merely kept it from writing the marker back down
+        # — damage limitation, because the check and the migrations were not
+        # one atomic step. `_init_schema` now re-runs the guard UNDER its
+        # `BEGIN IMMEDIATE`, so A is REFUSED outright and never reaches the
+        # stamp at all. Both properties are asserted: the refusal, which is
+        # the new one, and the marker, which is the old one and still matters
+        # (a future restructure that drops the lock must not silently fall
+        # back to a lowered marker).
+        with pytest.raises(StoreError, match="refusing to open"):
+            Store(db)
         monkeypatch.setattr(Store, "_refuse_a_newer_schema", real_guard)
 
         conn = sqlite3.connect(db)
@@ -190,6 +201,121 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
 
         with pytest.raises(StoreError, match="refusing to open"):
             Store(db)
+
+    def test_the_version_check_and_the_migrations_are_one_locked_step(
+        self, tmp_path
+    ):
+        """spore-773, built 2026-09-06 — codex L3 HIGH, filed twice.
+
+        The guard and the migrations were a check-then-act. Process A read
+        ``format_version = 1`` and passed; process B migrated and stamped 2;
+        A then ran THIS version's DDL against a v2 database and stayed live on
+        it as a write-capable older handle. The monotonic stamp stopped the
+        marker being written back DOWN and did nothing about A's writes.
+
+        ``_init_schema`` now takes ``BEGIN IMMEDIATE`` and re-runs the guard
+        under it. Two properties, and the second is the one a reader will
+        doubt: the transaction is genuinely open across the migrations, AND it
+        genuinely excludes another process.
+
+        ⚠ WHY THE DDL IS NO LONGER ``executescript``: it implicitly COMMITs,
+        which would end this transaction and release the lock. That is the
+        restructure spore-773 said the fix needed.
+        """
+        import sqlite3
+
+        from anneal_memory.store import Store
+
+        db = tmp_path / "locked.db"
+        seed = Store(db)
+        seed.record("seeded", episode_type="observation")
+        seed.close()
+
+        observed = {}
+        real_migration = Store._migrate_wraps_recovery_columns
+
+        def probe_from_inside_the_locked_region(self, *, commit=True):
+            observed["in_transaction"] = self._conn.in_transaction
+            observed["asked_to_commit"] = commit
+            outsider = sqlite3.connect(str(db), timeout=0.3)
+            try:
+                outsider.execute("BEGIN IMMEDIATE")
+                observed["outsider"] = "acquired"
+                outsider.rollback()
+            except sqlite3.OperationalError:
+                observed["outsider"] = "blocked"
+            finally:
+                outsider.close()
+            return real_migration(self, commit=commit)
+
+        Store._migrate_wraps_recovery_columns = (
+            probe_from_inside_the_locked_region
+        )
+        try:
+            reopened = Store(db)
+            reopened.close()
+        finally:
+            Store._migrate_wraps_recovery_columns = real_migration
+
+        assert observed["in_transaction"] is True, (
+            "the migrations no longer run inside _init_schema's transaction — "
+            "something between the BEGIN IMMEDIATE and here committed, which "
+            "releases the writer lock and reopens the spore-773 race"
+        )
+        assert observed["asked_to_commit"] is False, (
+            "a migration was invoked with commit=True inside the locked "
+            "region; its commit would release the lock mid-sequence"
+        )
+        assert observed["outsider"] == "blocked", (
+            "another process acquired the write lock DURING the migration "
+            "window, so the version check and the migrations are not one "
+            "serialized step after all"
+        )
+
+    def test_a_noncanonical_marker_is_still_stamped(self, tmp_path, monkeypatch):
+        """codex L3 HIGH, 2026-09-06 — a hole opened by the morning's own fix.
+
+        The guard parses the marker in Python (``int(str(v).strip())``); the
+        stamp used to decide in SQL whether the text was canonical. The two
+        disagreed about ``'01'`` and ``'+1'``: Python reads them as version 1,
+        so a v2 process MIGRATED the store, and the SQL predicate then refused
+        to restamp it — leaving the marker naming a generation the database
+        had already left. MEASURED: a v1 process was afterwards ADMITTED to
+        the migrated store, which is the exact hazard the guard exists to
+        prevent, reached through the fix meant to protect it.
+
+        One parser, ``_parse_format_version``, used by both. This test is the
+        thing that stops a second one being introduced.
+        """
+        import sqlite3
+
+        import anneal_memory.store as store_mod
+        from anneal_memory.store import Store, StoreError
+
+        # Indexed, not derived from the value: " 1" and "1 " both reduce to
+        # the same slug, and the collision silently reopened the previous
+        # iteration's already-migrated store.
+        for index, planted in enumerate(("01", "+1", " 1", "1 ")):
+            db = tmp_path / f"noncanon_{index}.db"
+            monkeypatch.setattr(store_mod, "_SCHEMA_VERSION", 1)
+            seed = Store(db)
+            seed.record("seeded", episode_type="observation")
+            seed.close()
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "UPDATE metadata SET value = ? WHERE key = 'format_version'",
+                (planted,),
+            )
+            conn.commit()
+            conn.close()
+
+            monkeypatch.setattr(store_mod, "_SCHEMA_VERSION", 2)
+            newer = Store(db)  # migrates, and must restamp
+            newer.close()
+
+            monkeypatch.setattr(store_mod, "_SCHEMA_VERSION", 1)
+            with pytest.raises(StoreError, match="refusing to open"):
+                Store(db)
 
     def test_the_batch_contract_matches_the_code(self):
         """Diogenes MED, 2026-09-06 — derive the roster, stop maintaining it.
@@ -3697,35 +3823,55 @@ class TestDbBoundaryErrorWrapping:
 
     # -- schema_init --------------------------------------------
 
-    def test_schema_init_wraps_executescript_error(
+    def test_schema_init_wraps_ddl_error(
         self, tmp_path, monkeypatch
     ):
-        """10.5c.6 L3 contrarian F3 — the _FlakyExecuteProxy covers
-        ``execute`` but ``_init_schema`` uses ``executescript``. The
-        _db_boundary catches ``sqlite3.DatabaseError`` regardless of
-        which connection method raised it, but a dedicated test
-        proves this (and catches future refactors that move
-        executescript out of the boundary).
+        """A DDL failure during schema init flows through the _db_boundary.
+
+        10.5c.6 L3 contrarian F3 wrote this against ``executescript``, whose
+        errors the boundary had to catch as surely as ``execute``'s. ⚖ IT
+        CAUGHT EXACTLY THE REFACTOR IT WAS WRITTEN TO CATCH: on 2026-09-06
+        ``_init_schema`` stopped using ``executescript`` entirely — it now
+        runs the schema statement by statement so it can hold one writer lock
+        across the version check and every migration (``spore-773``), and
+        ``executescript`` would implicitly COMMIT and drop that lock. The
+        package no longer calls it anywhere.
+
+        So the target moves to the method the DDL actually goes through, and
+        the PROPERTY is unchanged: a raw ``sqlite3.DatabaseError`` raised
+        while creating the schema must surface as ``StoreDatabaseError`` with
+        ``operation="schema_init"``, not leak out of the constructor.
         """
         import sqlite3
 
         real_connect = sqlite3.connect
 
-        class FailingScriptConn:
+        class FailingDDLConn:
             def __init__(self, real):
                 self._real = real
 
             def __getattr__(self, name):
                 return getattr(self._real, name)
 
-            def executescript(self, *args, **kwargs):
-                raise sqlite3.DatabaseError(
-                    "malformed database schema"
-                )
+            def __setattr__(self, name, value):
+                # Forward everything except our own backing attribute, so
+                # ``row_factory`` lands on the REAL connection. The original
+                # proxy swallowed it silently and every row came back a plain
+                # tuple — invisible while the failure fired before any row was
+                # read, and a TypeError the moment one was.
+                if name == "_real":
+                    object.__setattr__(self, name, value)
+                else:
+                    setattr(self._real, name, value)
+
+            def execute(self, sql, *args, **kwargs):
+                if sql.lstrip().upper().startswith("CREATE"):
+                    raise sqlite3.DatabaseError("malformed database schema")
+                return self._real.execute(sql, *args, **kwargs)
 
         def wrapping_connect(*args, **kwargs):
             real_conn = real_connect(*args, **kwargs)
-            return FailingScriptConn(real_conn)
+            return FailingDDLConn(real_conn)
 
         monkeypatch.setattr(
             "anneal_memory.store.sqlite3.connect", wrapping_connect

@@ -118,7 +118,9 @@ _INDEPENDENT_BASES = frozenset({"keyword", "assoc_hop", "episode_evidence", "ass
 PROCESSED_EVENT_RETENTION_DAYS = 30
 
 
-# Schema. Appended to the Store's _init_schema via executescript, so existing
+# Schema. Executed by the Store's _init_schema statement-by-statement (it
+# holds a writer lock across the version check and every migration, and
+# executescript would implicitly COMMIT and drop it — spore-773), so existing
 # DBs upgrade safely via CREATE IF NOT EXISTS (additive). The pattern graph
 # lives in the episodic DB alongside the episode `associations` table but is a
 # SEPARATE table (NOT typed rows in `associations`): pattern names and episode

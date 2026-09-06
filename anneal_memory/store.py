@@ -1028,6 +1028,53 @@ _NEW_FORMAT_PAIR_ID_RE = re.compile(r"[0-9a-f]{12}-[0-9a-f]{8}")
 # Schema version — increment on breaking changes
 _SCHEMA_VERSION = 1
 
+def _sql_statements(script: str) -> list[str]:
+    """Split a DDL script into individual statements.
+
+    ⛔ EXISTS BECAUSE ``executescript`` IMPLICITLY COMMITS. Python's sqlite3
+    issues a COMMIT before running a script, which ENDS any open transaction
+    and RELEASES SQLite's writer lock. ``_init_schema`` has to hold that lock
+    across the version check and every migration (``spore-773``), so the DDL
+    is executed statement by statement instead. MEASURED 2026-09-06: after
+    ``BEGIN IMMEDIATE``, ``executescript`` leaves ``in_transaction`` False
+    while ``execute`` leaves it True.
+
+    Split with SQLite's own tokenizer rather than on ``;`` — a naive split
+    breaks on any semicolon inside a string literal or a future trigger body.
+    VERIFIED: the schema produced statement-by-statement is byte-identical to
+    the schema ``executescript`` produces from the same three scripts.
+    """
+    statements: list[str] = []
+    buffer = ""
+    for line in script.splitlines(keepends=True):
+        buffer += line
+        if buffer.strip() and sqlite3.complete_statement(buffer):
+            statements.append(buffer.strip())
+            buffer = ""
+    if buffer.strip():
+        statements.append(buffer.strip())
+    return statements
+
+
+def _parse_format_version(raw: object) -> int | None:
+    """The ONE rule for reading a ``format_version`` marker. ``None`` = garbage.
+
+    ⛔ ONE RULE, IN ONE LANGUAGE, AND THAT IS THE WHOLE POINT (codex L3 HIGH,
+    2026-09-06). The guard parsed the marker in Python with ``int(...)`` while
+    the stamp decided in SQL whether the text was canonical, and the two
+    disagreed about ``'01'`` and ``'+1'``: Python read them as version 1 and
+    migrated, SQL refused to restamp them, and the marker stayed at ``'01'``
+    naming a generation the database had left. MEASURED — an older binary was
+    then ADMITTED to the migrated store, which is precisely the hazard the
+    guard exists to prevent. Two notions of "parseable" in two languages is
+    the defect; a shared parser is the fix.
+    """
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS episodes (
     id TEXT PRIMARY KEY,
@@ -1585,20 +1632,82 @@ class Store:
         self._seed_audit_health()
 
     def _init_schema(self) -> None:
-        """Initialize database schema and default metadata."""
-        self._conn.executescript(_SCHEMA_SQL)
-        self._conn.executescript(_ASSOCIATIONS_SCHEMA_SQL)
-        self._conn.executescript(_PATTERN_ASSOCIATIONS_SCHEMA_SQL)
+        """Initialize database schema and default metadata.
+
+        ⛔ THE VERSION CHECK AND EVERY MIGRATION RUN UNDER ONE WRITER LOCK
+        (``spore-773``, codex L3 HIGH 2026-09-04 and again 2026-09-06, built
+        2026-09-06). Before this they were a check-then-act: process A read
+        ``format_version = 1`` and passed ``_refuse_a_newer_schema``; process
+        B migrated and stamped 2; A then ran THIS version's DDL against a v2
+        database and stayed live on it as a write-capable older handle. The
+        stamp's monotonic predicate stops the marker being written back DOWN;
+        it does nothing about A's subsequent writes.
+
+        ``BEGIN IMMEDIATE`` takes SQLite's RESERVED lock up front, so the
+        re-check below and everything after it are one serialized critical
+        section against any other process opening the same store.
+
+        ⚠ WHY ``_refuse_a_newer_schema`` IS CALLED TWICE, AND NEITHER CALL IS
+        REDUNDANT — do not delete one. The FIRST call, in ``__init__``, runs
+        before the WAL pragma, because ``PRAGMA journal_mode=WAL`` is a
+        PERSISTENT write and a store we are about to decline must not be
+        mutated by the declining (codex, 2026-09-04). The SECOND is this one,
+        which is the only one that is ATOMIC with the migrations. The first
+        answers "may I touch this at all", the second answers "is it still
+        true now that I hold the lock". They cannot be merged: the pragma
+        cannot run inside a transaction, so the lock cannot be taken before
+        it.
+
+        ⚠ THIS TAKES THE WRITE LOCK EARLIER THAN BEFORE, AND THAT IS NOT A
+        NEW FAILURE MODE — MEASURED 2026-09-06. Opening a write-capable store
+        while another process holds the write lock ALREADY failed, with
+        ``database is locked`` after the same ~5s sqlite timeout, because the
+        unconditional commit at the end of this method needed the same lock.
+        ``BEGIN IMMEDIATE`` moves that acquisition earlier; it does not add
+        contention that was not already there.
+        """
+        # ⛔ NOT ``executescript`` — it implicitly COMMITs and would drop the
+        # lock this method exists to hold. See ``_sql_statements``.
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._init_schema_locked()
+            self._conn.commit()
+        except BaseException:
+            try:
+                self._conn.rollback()
+            except sqlite3.Error:
+                pass
+            raise
+
+    def _init_schema_locked(self) -> None:
+        """The body of :meth:`_init_schema`, run under its writer lock.
+
+        Split out so the lock acquisition, the commit and the rollback read as
+        one unit above, and so nothing in here can be mistaken for a step that
+        may commit on its own. NOTHING CALLED FROM HERE MAY COMMIT — a commit
+        releases the lock and reopens ``spore-773``. That is why the three
+        migrations below are passed ``commit=False``.
+        """
+        # Re-check UNDER the lock. This is the call that makes the sequence
+        # atomic; see the docstring above for why the __init__ call stays too.
+        self._refuse_a_newer_schema()
+        for script in (
+            _SCHEMA_SQL,
+            _ASSOCIATIONS_SCHEMA_SQL,
+            _PATTERN_ASSOCIATIONS_SCHEMA_SQL,
+        ):
+            for statement in _sql_statements(script):
+                self._conn.execute(statement)
         # Migrate existing associations tables to include affective columns
         # (safe no-op if columns already exist or table was just created)
-        _migrate_affective(self._conn)
+        _migrate_affective(self._conn, commit=False)
         # Migrate wraps table to include association metric columns
-        self._migrate_wraps_association_columns()
+        self._migrate_wraps_association_columns(commit=False)
         # Migrate wraps table to include the durable recovery-oracle columns
         # (AM-SNAPSHOT ①). Runs after the association migration and BEFORE
         # _warn_orphan_tmp_files (called later in __init__), so the orphan
         # classifier can query pair_id on a legacy store without faulting.
-        self._migrate_wraps_recovery_columns()
+        self._migrate_wraps_recovery_columns(commit=False)
 
         # Insert default metadata (ignore if already exists)
         defaults = {**_DEFAULT_METADATA, "project_name": self._project_name}
@@ -1652,46 +1761,36 @@ class Store:
         # A schema generation only ever advances, so a strictly-less-than
         # predicate is the honest one and the no-lower property is structural
         # rather than a rule someone has to remember.
-        # ⛔ BUT ONLY OVER VALUES SQLITE READS AS THEIR OWN INTEGER, AND THE
-        # SENTENCE ABOVE OVERSTATED IT (Diogenes MED, 2026-09-06). A bare
-        # ``CAST`` of a non-numeric marker yields 0, so ``'v2'``, ``'garbled'``
-        # and ``''`` all compared as 0 < 1 and were SILENTLY REWRITTEN TO '1'
-        # — destroying exactly the evidence the paragraph above says this
-        # predicate exists to protect, and doing it in one open rather than
-        # needing a race. MEASURED 2026-09-06, planting each value and
-        # reopening: '2'/'10' refused by the guard and preserved; '2.0' and
-        # '1' preserved; 'v2'/'garbled'/'' DESTROYED. A marker with a leading
-        # digit survived and one without did not — so the exposure was
-        # precisely the foreign or corrupt marker, which is the case that
-        # matters.
-        # ⚠ AND IT OVERRULED A DELIBERATE RULING TWO SCREENS DOWN.
-        # ``_refuse_a_newer_schema`` documents "value UNPARSEABLE → left
-        # alone", on the reasoning that locking someone out of every episode
-        # they own over a garbled metadata string is the worse outcome. The
-        # guard let those values through as it promised and this statement
-        # then overwrote them. The second conjunct below — the stored text
-        # must be exactly its own canonical integer rendering — is what makes
-        # the stamp honour that ruling.
-        # ⚠ STILL ONE STATEMENT, DELIBERATELY. A SELECT-then-UPDATE would
-        # reintroduce the ``spore-773`` check-then-act race this stamp is
-        # written against.
-        # ⚠ It still no-ops when the marker is already right (``1 < 1`` is
-        # false), which was the point of the original predicate. MEASURED,
-        # because the objection to writing per-open was a cost one: ``_init_schema`` already runs its DDL and the ``INSERT OR
-        # IGNORE`` defaults loop above and commits ONCE at the end of this
-        # method, unconditionally, on every write-capable open. So this adds a
-        # statement to an existing transaction, not a transaction or a commit —
-        # and with the guard below it adds a row version only when the
-        # generation actually moved, which is a migration.
-        self._conn.execute(
-            "INSERT INTO metadata (key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value "
-            "WHERE CAST(metadata.value AS INTEGER) "
-            "    < CAST(excluded.value AS INTEGER) "
-            "  AND CAST(CAST(metadata.value AS INTEGER) AS TEXT) "
-            "    = TRIM(metadata.value)",
-            ("format_version", str(_SCHEMA_VERSION)),
-        )
+        # ⛔ THE MARKER IS READ AND COMPARED IN PYTHON, WITH THE SAME PARSER
+        # THE GUARD USES (codex L3 HIGH, 2026-09-06). It was an SQL predicate
+        # with a CAST, and that split the notion of "parseable" across two
+        # languages that disagreed. A bare CAST reads any non-numeric string
+        # as 0, so ``'v2'`` / ``'garbled'`` / ``''`` all compared as 0 < 1 and
+        # were silently rewritten — destroying the evidence this stamp exists
+        # to protect, and overruling ``_refuse_a_newer_schema``'s written
+        # ruling that an UNPARSEABLE value is left alone. A canonical-text
+        # conjunct fixed those three and immediately opened a WORSE hole:
+        # ``'01'`` and ``'+1'`` PARSE as 1 in Python, so a v2 process migrated
+        # the store and then could not restamp it, and a v1 process was
+        # afterwards ADMITTED to the migrated database. MEASURED both ways
+        # 2026-09-06. Two parsers was the defect; ``_parse_format_version`` is
+        # the fix, and it must stay the only one.
+        # ⚠ A read-then-update is safe HERE and would not have been before:
+        # this runs inside ``_init_schema``'s ``BEGIN IMMEDIATE`` (spore-773),
+        # so no other process can change the marker between the two
+        # statements. If that lock is ever removed, this becomes a
+        # check-then-act and needs a CAS on the exact raw value instead.
+        # ⚠ It still no-ops when the marker is already current, which was the
+        # point of the original predicate.
+        stamped = self._conn.execute(
+            "SELECT value FROM metadata WHERE key = 'format_version'"
+        ).fetchone()
+        marker = _parse_format_version(stamped["value"]) if stamped else None
+        if stamped is not None and marker is not None and marker < _SCHEMA_VERSION:
+            self._conn.execute(
+                "UPDATE metadata SET value = ? WHERE key = 'format_version'",
+                (str(_SCHEMA_VERSION),),
+            )
         # ⛔ WHAT THIS DOES **NOT** CLOSE, and the distinction is the whole
         # point: this stamps the SCHEMA generation, not the PACKAGE version.
         # ``spore-747`` / ``spore-751`` are about two anneal RELEASES wiring one
@@ -1729,9 +1828,10 @@ class Store:
                     "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                     ("section_schema", json.dumps(self._init_section_schema)),
                 )
-        self._conn.commit()
+        # No commit here — ``_init_schema`` owns it, so the writer lock is
+        # held from the re-check above through to that single commit.
 
-    def _migrate_wraps_association_columns(self) -> None:
+    def _migrate_wraps_association_columns(self, *, commit: bool = True) -> None:
         """Add association metric columns to existing wraps tables.
 
         Safe to call on tables that already have the columns (checks first).
@@ -1752,9 +1852,13 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE wraps ADD COLUMN associations_decayed INTEGER NOT NULL DEFAULT 0"
             )
-        self._conn.commit()
+        # ``commit=False`` from ``_init_schema_locked``: a commit there
+        # releases the writer lock that method holds across the version
+        # check and every migration (``spore-773``).
+        if commit:
+            self._conn.commit()
 
-    def _migrate_wraps_recovery_columns(self) -> None:
+    def _migrate_wraps_recovery_columns(self, *, commit: bool = True) -> None:
         """Add the durable recovery-oracle columns to existing wraps tables.
 
         AM-SNAPSHOT ① — the per-commit content-hash + pair-id that make
@@ -1785,7 +1889,11 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE wraps ADD COLUMN pair_id TEXT"
             )
-        self._conn.commit()
+        # ``commit=False`` from ``_init_schema_locked``: a commit there
+        # releases the writer lock that method holds across the version
+        # check and every migration (``spore-773``).
+        if commit:
+            self._conn.commit()
 
     # -- Core API --
 
@@ -4503,9 +4611,8 @@ class Store:
             ) from exc
         if row is None:
             return
-        try:
-            found = int(str(row["value"]).strip())
-        except (TypeError, ValueError):
+        found = _parse_format_version(row["value"])
+        if found is None:
             return
         if found > _SCHEMA_VERSION:
             raise StoreError(

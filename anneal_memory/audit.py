@@ -247,7 +247,25 @@ class AuditTrail:
                 f.write(json_line + "\n")
                 f.flush()
                 os.fsync(f.fileno())
-        except Exception:
+        except BaseException:
+            # ⛔ ``BaseException``, NOT ``Exception`` (codex L3 HIGH,
+            # 2026-09-06). The all-or-nothing property this block exists to
+            # provide did not hold for terminal exceptions: a
+            # ``KeyboardInterrupt`` landing after the line was written and
+            # fsynced but before the chain state advanced left the entry ON
+            # DISK with ``_seq``/``_prev_hash`` unchanged and NO rollback,
+            # because it walked past this handler.
+            # ⚠ IT BECAME REACHABLE THE SAME DAY. Until the store's own
+            # per-event catch was widened to ``BaseException``, an interrupt
+            # here abandoned the whole replay, so no retry followed and the
+            # inconsistency died with the run. Once the store started
+            # RECORDING the drop and CONTINUING, the next append reused the
+            # same ``seq`` and ``prev_hash``. REPRODUCED 2026-09-06: seqs on
+            # disk ``[0, 1, 1]`` and ``verify()`` reporting a hash mismatch —
+            # the identical signature as the 2026-09-04 fsync-EIO HIGH this
+            # rollback was written for, reached through the other exception
+            # branch. A durability hiccup read as tampering, on the record
+            # whose entire value is telling those apart.
             # Best-effort rollback. If THIS fails too, the ambiguity stands and
             # the exception below still surfaces it — we do not mask the
             # original failure with a rollback failure.

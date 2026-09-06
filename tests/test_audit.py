@@ -174,6 +174,85 @@ class TestHashChainVerification:
         assert result.valid is False
 
 
+class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
+    """codex L3 HIGH, 2026-09-06 — the rollback's own class had a hole."""
+
+    def test_an_interrupt_mid_append_does_not_duplicate_a_sequence_number(
+        self, tmp_path, monkeypatch
+    ):
+        """The write-first rollback was ``except Exception``, so it skipped this.
+
+        ``log()`` is write-first: chain state advances only after fsync
+        returns, and the rollback exists because that leaves a THIRD state —
+        the line already visible on disk while ``_seq``/``_prev_hash`` are
+        unchanged. A caller that swallows and retries then emits the SAME seq
+        and the SAME prev_hash.
+
+        The 2026-09-04 HIGH fixed that for ``Exception`` (a failing fsync).
+        A ``KeyboardInterrupt`` in the same window walked straight past the
+        handler and no rollback ran.
+
+        ⚠ IT BECAME REACHABLE ON 2026-09-06, hours before this test was
+        written. Until the store's per-event catch was widened to
+        ``BaseException``, an interrupt here abandoned the whole replay — no
+        retry followed, so the inconsistency died with the run. Once the store
+        began RECORDING the drop and CONTINUING, the next append reused the
+        stale sequence. REPRODUCED: seqs on disk ``[0, 1, 1]`` and ``verify()``
+        reporting a hash mismatch — the identical signature as the fsync-EIO
+        HIGH, reached through the other exception branch. **A durability
+        hiccup read as tampering**, on the record whose entire value is
+        telling those two apart.
+        """
+        import json
+        import os
+
+        import anneal_memory.audit as audit_module
+        from anneal_memory.audit import AuditTrail
+
+        db = tmp_path / "chain.db"
+        trail = AuditTrail(db)
+        trail.log("record", {"i": 0})
+
+        real_fsync = os.fsync
+        fired = {"yet": False}
+
+        def fsync_then_interrupt(fd):
+            # The line is already durable when this raises — the exact window
+            # between a completed append and the chain-state advance.
+            real_fsync(fd)
+            if not fired["yet"]:
+                fired["yet"] = True
+                raise KeyboardInterrupt("Ctrl+C after the line landed")
+
+        monkeypatch.setattr(audit_module.os, "fsync", fsync_then_interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            trail.log("record", {"i": 1})
+        monkeypatch.setattr(audit_module.os, "fsync", real_fsync)
+
+        # What the store now does on that path: record the drop and continue.
+        trail.note_write_failure()
+        trail.log("record", {"i": 2})
+
+        entries = [
+            json.loads(line)
+            for line in (tmp_path / "chain.audit.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if line.strip()
+        ]
+        seqs = [e["seq"] for e in entries]
+        assert len(seqs) == len(set(seqs)), (
+            f"duplicate sequence numbers on disk ({seqs}) — the interrupted "
+            "append was left in place while the chain state stayed behind, so "
+            "the retry reused its seq and prev_hash"
+        )
+        assert AuditTrail.verify(str(db)).valid, (
+            "the chain no longer verifies: an interrupted append was read back "
+            "as tampering, which is the one thing this record exists to rule "
+            "out"
+        )
+
+
 class TestCrashRecovery:
     """Recovery from crashes and restarts."""
 
@@ -2528,6 +2607,100 @@ class TestCodexL3TwentySixOhNineOhFour:
             "that outlives the process is the hash-chained one, and without it "
             "verify() walks the gap and reports a clean trail"
         )
+
+    # -- #4h3: WHERE a terminal exception is suppressed is a policy (09-06) --
+
+    def test_the_terminal_exception_policy_is_split_by_call_site(self, tmp_path):
+        """codex L3 MED x2, 2026-09-06 — round 1's fix over-applied.
+
+        Widening ``_audit_log_after_commit``'s catch to ``BaseException`` was
+        right for RECORDING and wrong for POLICY: it swallowed an explicit
+        termination request on EVERY post-commit call. An unbatched
+        ``record()`` whose sink raised ``SystemExit`` committed, recorded, and
+        returned — a SIGTERM handler written as ``sys.exit()`` eaten, and the
+        server running on until something killed it. That is the fail-open
+        ``_persist_audit_health`` refuses one level down, acquired by the same
+        edit that fixed the replay tail.
+
+        Three behaviours, and they must hold TOGETHER — each one alone is
+        satisfied by a wrong fix:
+
+        A. unbatched + ``SystemExit`` → PROPAGATES, after recording. A
+           termination request is not the audit layer's to eat.
+        B. unbatched + ``KeyboardInterrupt`` → still swallowed. That trade
+           dates to 2026-09-05 and reversing it reintroduces the data-loss
+           defect that was mutation-tested and refused.
+        C. batched + ``SystemExit`` → suppressed AND the tail still replayed.
+           The batched path is the one place a raise makes the caller read a
+           committed wrap as failed and unlink its staged sidecars, so
+           suppression lives at that call site, visibly, rather than in the
+           shared handler on everyone's behalf.
+        """
+        from anneal_memory.store import Store
+
+        def sink_raising(exc):
+            def raise_it(*args, **kwargs):
+                raise exc
+            return raise_it
+
+        # A -- the termination request must get out.
+        store = Store(tmp_path / "a.db")
+        store._audit.log = sink_raising(SystemExit(3))
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with pytest.raises(SystemExit):
+                    store.record("unbatched", episode_type="observation")
+            assert store.status().total_episodes == 1, (
+                "the episode was rolled back; the exit must not undo a "
+                "committed write"
+            )
+            assert store.status().audit_write_failures == 1, (
+                "the drop was not recorded before the exit propagated"
+            )
+        finally:
+            store._audit.log = None
+            store.close()
+
+        # B -- Ctrl-C stays swallowed.
+        store = Store(tmp_path / "b.db")
+        store._audit.log = sink_raising(KeyboardInterrupt("ctrl-c"))
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                store.record("unbatched", episode_type="observation")
+        finally:
+            store._audit.log = None
+            store.close()
+
+        # C -- batched: suppressed, and the tail is still replayed.
+        store = Store(tmp_path / "c.db")
+        real_log = store._audit.log
+        attempts = {"n": 0}
+
+        def exit_on_the_first_emit(*args, **kwargs):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise SystemExit(0)
+            return real_log(*args, **kwargs)
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with store._batch():
+                    for i in range(4):
+                        store.record(f"episode {i}", episode_type="observation")
+                    store._audit.log = exit_on_the_first_emit
+            store._audit.log = real_log
+            assert attempts["n"] == 4, (
+                "a SystemExit on the first replayed event abandoned the tail "
+                f"(attempted {attempts['n']} of 4)"
+            )
+            assert store.status().total_episodes == 4
+            assert store.status().audit_write_failures == 1
+        finally:
+            store._audit.log = real_log
+            store.close()
 
     # -- #4i: the ordering key must be a TIME, not a 20-char string (09-06) --
 

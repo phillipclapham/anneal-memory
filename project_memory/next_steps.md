@@ -66,7 +66,10 @@ is one shared parser (`_parse_format_version`) used by both, and the test exists
 one appearing. **Any field whose guard and whose writer are implemented in different languages has
 this shape available.**
 
-### ▶ WHAT LANDED (8 commits, `git log --oneline a12e66a..HEAD`)
+### ▶ WHAT LANDED — `git log --oneline a12e66a..HEAD`
+⚠ **No commit count here on purpose.** An earlier draft of this heading said "8 commits" and was
+stale before the session closed — the count more than doubled after it was written. The command is
+the only form that cannot go stale; the categories below are what it will not tell you.
 1. **MED `tests/test_audit.py`** — the wrap-destruction guard was pinned by a test that drives
    `store._batch()` and never reads the continuity file. Now asserts on the artifact, through the
    canonical pipeline. ⚠ **Run its mutation with that test selected ALONE** — under the mutant the

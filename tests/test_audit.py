@@ -2444,6 +2444,66 @@ class TestCodexL3TwentySixOhNineOhFour:
                 f"non-contention classified as contention: {msg!r}"
             )
 
+    # -- #4i: the ordering key must be a TIME, not a 20-char string (09-06) --
+
+    def test_a_corrupt_stamp_cannot_pin_the_last_failure_forever(self):
+        """codex L3 LOW, 2026-09-06 — the shape check accepted impossible dates.
+
+        ``_failure_stamp`` tested for "20 characters, ends in Z, hyphen at
+        index 4" and returned the STRING for a lexicographic compare. So
+        ``9999-99-99T99:99:99Z`` passed, and it string-compares GREATER than
+        every real timestamp — one corrupt stored value pinned
+        ``audit_last_failure`` permanently, which is the exact opposite of the
+        function's documented "fails toward REPLACING an unreadable stored
+        value".
+        """
+        from anneal_memory.store import Store
+
+        for impossible in (
+            "9999-99-99T99:99:99Z",
+            "2026-13-45T99:99:99Z",
+            "2026-02-30T00:00:00Z",
+        ):
+            assert Store._failure_stamp(f"record: X at {impossible}") is None, (
+                f"{impossible!r} passed the stamp check; it compares greater "
+                "than every real timestamp and pins the field forever"
+            )
+
+    def test_two_failures_in_one_second_are_ordered(self):
+        """codex L3 MED, 2026-09-06 — second resolution made the guard a tie.
+
+        The stale-writer guard exists so a writer flushing an OLD failure
+        cannot overwrite a newer one. At second resolution any two failures
+        inside the same second compared EQUAL, ``theirs > mine`` was False,
+        and the older one won by falling through to the replace branch —
+        exactly the overwrite the guard was written to prevent.
+
+        ⚠ THE LEGACY FORM MUST STILL ORDER CORRECTLY AGAINST THE NEW ONE, and
+        this is why the comparison is on parsed datetimes rather than text: in
+        a string compare ``Z`` sorts after ``.``, so a stored
+        ``...:00:00Z`` would compare GREATER than a newer
+        ``...:00:00.500000Z`` and win the second it was supposed to lose.
+        """
+        from anneal_memory.store import Store
+
+        early = Store._failure_stamp("record: A at 2026-09-06T10:00:00.100000Z")
+        late = Store._failure_stamp("record: B at 2026-09-06T10:00:00.900000Z")
+        assert early is not None and late is not None
+        assert early < late, (
+            "two failures in the same second did not order — the stale-writer "
+            "guard cannot fire inside one second"
+        )
+
+        legacy = Store._failure_stamp("record: OLD at 2026-09-06T10:00:00Z")
+        assert legacy is not None, (
+            "a stamp written before 2026-09-06 no longer parses; stores in the "
+            "wild hold this form"
+        )
+        assert legacy < late, (
+            "a legacy second-resolution stamp compared NEWER than a sub-second "
+            "one from later in the same second"
+        )
+
     # -- #4f: DIRECTION, not just frequency, for every conditional write --
 
     @pytest.mark.parametrize(

@@ -5278,6 +5278,30 @@ class Store:
                 # operator the operation FAILED when it succeeded, which is
                 # strictly worse.
                 pass
+            # ⛔ SystemExit PROPAGATES, AFTER THE FOUR CHANNELS HAVE RECORDED
+            # (codex L3 MED, 2026-09-06). Widening the catch above to
+            # ``BaseException`` was right for RECORDING and wrong for POLICY:
+            # it also swallowed an explicit termination request on every
+            # ordinary post-commit call, so an unbatched ``record()`` whose
+            # sink raised ``SystemExit`` committed, recorded, and RETURNED — a
+            # SIGTERM handler written as ``sys.exit()`` eaten, and the server
+            # running on until something killed it. That is the precise
+            # fail-open ``_persist_audit_health`` refuses one level down, and
+            # this method had quietly acquired it in the same edit that fixed
+            # the replay tail.
+            # ⚠ THE SPLIT MIRRORS THAT METHOD: RECORD everything, then let the
+            # terminal request through. Suppression belongs at the ONE call
+            # site that needs it — the batched replay, where a raise makes the
+            # caller read a committed wrap as failed and unlink its staged
+            # sidecars. ``_replay_deferred_audits`` owns that policy per event
+            # and states it, so it is visible rather than inherited by every
+            # caller.
+            # ⚠ ``KeyboardInterrupt`` is deliberately NOT re-raised: swallowing
+            # Ctrl-C for the width of a recorded audit drop is the trade this
+            # handler has made since 2026-09-05, and reversing it reintroduces
+            # the data-loss defect that was mutation-tested and refused.
+            if isinstance(exc, SystemExit):
+                raise
 
     @contextmanager
     def _db_boundary(self, operation: StoreOperation) -> Iterator[None]:
@@ -5723,50 +5747,74 @@ class Store:
         ``except BaseException`` at its single call site, rather than relying
         on every statement inside it to be individually non-raising.
         """
-        if commit_succeeded and self._audit is not None:
-            for event, payload, kwargs, origin_method, origin_committed in deferred:
-                # The "future pass" this loop's comment promised: routed
-                # through the shared after-commit helper, so a failed flush
-                # now warns instead of vanishing, and continues flushing the
-                # rest exactly as before.
-                self._audit_log_after_commit(
-                    event,
-                    payload,
-                    method=origin_method,
-                    committed=origin_committed,
-                    # ⚠ NOT the default 3. ``_batch`` is a @contextmanager, so
-                    # at flush time frame 3 is ``contextlib.__exit__`` — every
-                    # batch-flush warning was attributed to
-                    # ``contextlib.py:148`` (measured 2026-09-04), pointing the
-                    # operator at stdlib AND keying Python's per-location dedup
-                    # registry there, collapsing every such failure
-                    # process-wide into one warning at a bogus location. There
-                    # is no meaningful user frame for a deferred replay, so
-                    # attribute it here.
-                    stacklevel=1,
-                    # Already past the commit and past the _defer_commit reset;
-                    # re-queueing would be a loop.
-                    batch_aware=False,
-                    **kwargs,
-                )
+        # ⛔ PER EVENT, AND THE LOOP CONTINUES (codex L3 MED, 2026-09-06).
+        # A terminal exception escaping ONE event used to abandon every event
+        # after it: measured with four committed deferred events, an interrupt
+        # on the first left events two through four never attempted and never
+        # counted, while the batch reported success. Two routes reach it — the
+        # sink raising, and ``_persist_audit_health`` re-raising ``SystemExit``
+        # from inside the recording handler.
+        # ⚠ THIS SITE OWNS THE SUPPRESSION POLICY, deliberately.
+        # ``_audit_log_after_commit`` propagates ``SystemExit`` so an ordinary
+        # post-commit call cannot eat a termination request; the batched path
+        # is the ONE place where a raise makes the caller read a committed wrap
+        # as failed and unlink its staged sidecars. So it is suppressed HERE,
+        # visibly, rather than by the shared handler on everyone's behalf.
+        try:
+            if commit_succeeded and self._audit is not None:
+                for event, payload, kwargs, origin_method, origin_committed in deferred:
+                    # The "future pass" this loop's comment promised: routed
+                    # through the shared after-commit helper, so a failed flush
+                    # now warns instead of vanishing, and continues flushing the
+                    # rest exactly as before.
+                    try:
+                        self._audit_log_after_commit(
+                            event,
+                            payload,
+                            method=origin_method,
+                            committed=origin_committed,
+                            # ⚠ NOT the default 3. ``_batch`` is a @contextmanager, so
+                            # at flush time frame 3 is ``contextlib.__exit__`` — every
+                            # batch-flush warning was attributed to
+                            # ``contextlib.py:148`` (measured 2026-09-04), pointing the
+                            # operator at stdlib AND keying Python's per-location dedup
+                            # registry there, collapsing every such failure
+                            # process-wide into one warning at a bogus location. There
+                            # is no meaningful user frame for a deferred replay, so
+                            # attribute it here.
+                            stacklevel=1,
+                            # Already past the commit and past the _defer_commit reset;
+                            # re-queueing would be a loop.
+                            batch_aware=False,
+                            **kwargs,
+                        )
+                    except BaseException:
+                        # Already recorded by the four channels
+                        # inside that method. Continue, so one bad
+                        # event does not cost the rest of the queue.
+                        continue
+        finally:
+            # ``finally`` so the health flush still lands if the loop exits
+            # abnormally — it is the only thing that makes the recorded count
+            # outlive this process.
 
-        # ⛔ FLUSH POINT 2 OF 3. Nothing above this line is guaranteed to
-        # persist a degraded-audit delta that was deferred INSIDE the batch.
-        # ``_persist_audit_health`` refuses to commit while a caller owns the
-        # transaction, so an audit failure on a non-batch-aware path (
-        # ``save_continuity`` is the live one) leaves its delta pending; the
-        # only other flush is the failure handler itself, which needs a LATER
-        # failure that happens to land outside a transaction. A sink that
-        # heals before the batch exits produces neither, and the count dies
-        # with the process while README/types.py/CHANGELOG all promise it is
-        # durable. MEASURED 2026-09-05: after-reopen 0 without this line, 1
-        # with it. The batch's transaction is closed by the time this runs —
-        # ``_batch()`` does its outer commit and resets ``_defer_commit`` in a
-        # ``finally`` BEFORE calling this method — so this is a legal place to
-        # own one. (Said of ``_batch()``, not of the lines above: this moved
-        # out of ``_batch()`` on 2026-09-05 when the whole post-commit region
-        # was put under one ``except BaseException`` there.)
-        self._persist_audit_health()
+            # ⛔ FLUSH POINT 2 OF 3. Nothing above this line is guaranteed to
+            # persist a degraded-audit delta that was deferred INSIDE the batch.
+            # ``_persist_audit_health`` refuses to commit while a caller owns the
+            # transaction, so an audit failure on a non-batch-aware path (
+            # ``save_continuity`` is the live one) leaves its delta pending; the
+            # only other flush is the failure handler itself, which needs a LATER
+            # failure that happens to land outside a transaction. A sink that
+            # heals before the batch exits produces neither, and the count dies
+            # with the process while README/types.py/CHANGELOG all promise it is
+            # durable. MEASURED 2026-09-05: after-reopen 0 without this line, 1
+            # with it. The batch's transaction is closed by the time this runs —
+            # ``_batch()`` does its outer commit and resets ``_defer_commit`` in a
+            # ``finally`` BEFORE calling this method — so this is a legal place to
+            # own one. (Said of ``_batch()``, not of the lines above: this moved
+            # out of ``_batch()`` on 2026-09-05 when the whole post-commit region
+            # was put under one ``except BaseException`` there.)
+            self._persist_audit_health()
 
     # -- 10.5c.5 L3 fix: unique tmp sidecar filename pattern.
     #

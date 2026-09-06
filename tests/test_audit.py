@@ -2444,6 +2444,83 @@ class TestCodexL3TwentySixOhNineOhFour:
                 f"non-contention classified as contention: {msg!r}"
             )
 
+    # -- #4h2: a terminal exception must not silently eat the replay tail --
+
+    def test_an_interrupt_in_the_replay_does_not_silently_eat_the_tail(
+        self, tmp_path
+    ):
+        """codex L3 HIGH, 2026-09-06 — the swallow HAD become silence.
+
+        ``_audit_log_after_commit``'s per-event catch was ``except
+        Exception``, so a ``KeyboardInterrupt`` from the sink walked past it
+        and out of ``_replay_deferred_audits``. ``_batch()``'s post-commit
+        handler caught it, warned once, and ABANDONED THE REST OF THE QUEUE.
+
+        MEASURED BEFORE THE FIX, with a four-episode batch: four episodes
+        committed, ONE audit emit attempted, ``audit_write_failures`` 0,
+        nothing pending, and no audit file at all. Every one of the four
+        "swallow must not become silence" channels stayed quiet because none
+        of them ran, and ``verify()`` would have walked the hole clean.
+
+        Two properties, and the second is the one the four channels exist for:
+        the tail is still written (a real Ctrl-C is delivered ONCE, so
+        containing it per event costs the one interrupted emit), and the drop
+        is RECORDED — durably, in the hash chain, not just as a warning.
+        """
+        import json
+
+        from anneal_memory.store import Store
+
+        db = tmp_path / "tail.db"
+        store = Store(db)
+        real_log = store._audit.log
+        attempts = {"n": 0}
+
+        def interrupt_the_first_emit(*args, **kwargs):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise KeyboardInterrupt("Ctrl+C on the first replayed event")
+            return real_log(*args, **kwargs)
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with store._batch():
+                    for i in range(4):
+                        store.record(f"episode {i}", episode_type="observation")
+                    store._audit.log = interrupt_the_first_emit
+            store._audit.log = real_log
+
+            assert store.status().total_episodes == 4, (
+                "the committed episodes did not survive"
+            )
+            assert attempts["n"] > 1, (
+                "the replay stopped at the interrupted event — every audit "
+                f"event after it was dropped (attempted {attempts['n']} of 4)"
+            )
+            assert store.status().audit_write_failures == 1, (
+                "the dropped audit event left the failure counter at zero, so "
+                "a caller polling for degraded audit health sees a clean trail "
+                "over a real hole"
+            )
+        finally:
+            store._audit.log = real_log
+            store.close()
+
+        entries = [
+            json.loads(line)
+            for line in (tmp_path / "tail.audit.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if line.strip()
+        ]
+        assert entries, "the tail was never written"
+        assert any(e.get("dropped_before") for e in entries), (
+            "no dropped_before marker rode into the chain — the ONLY channel "
+            "that outlives the process is the hash-chained one, and without it "
+            "verify() walks the gap and reports a clean trail"
+        )
+
     # -- #4i: the ordering key must be a TIME, not a 20-char string (09-06) --
 
     def test_a_corrupt_stamp_cannot_pin_the_last_failure_forever(self):

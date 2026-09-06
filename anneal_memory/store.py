@@ -1652,6 +1652,29 @@ class Store:
         # A schema generation only ever advances, so a strictly-less-than
         # predicate is the honest one and the no-lower property is structural
         # rather than a rule someone has to remember.
+        # ⛔ BUT ONLY OVER VALUES SQLITE READS AS THEIR OWN INTEGER, AND THE
+        # SENTENCE ABOVE OVERSTATED IT (Diogenes MED, 2026-09-06). A bare
+        # ``CAST`` of a non-numeric marker yields 0, so ``'v2'``, ``'garbled'``
+        # and ``''`` all compared as 0 < 1 and were SILENTLY REWRITTEN TO '1'
+        # — destroying exactly the evidence the paragraph above says this
+        # predicate exists to protect, and doing it in one open rather than
+        # needing a race. MEASURED 2026-09-06, planting each value and
+        # reopening: '2'/'10' refused by the guard and preserved; '2.0' and
+        # '1' preserved; 'v2'/'garbled'/'' DESTROYED. A marker with a leading
+        # digit survived and one without did not — so the exposure was
+        # precisely the foreign or corrupt marker, which is the case that
+        # matters.
+        # ⚠ AND IT OVERRULED A DELIBERATE RULING TWO SCREENS DOWN.
+        # ``_refuse_a_newer_schema`` documents "value UNPARSEABLE → left
+        # alone", on the reasoning that locking someone out of every episode
+        # they own over a garbled metadata string is the worse outcome. The
+        # guard let those values through as it promised and this statement
+        # then overwrote them. The second conjunct below — the stored text
+        # must be exactly its own canonical integer rendering — is what makes
+        # the stamp honour that ruling.
+        # ⚠ STILL ONE STATEMENT, DELIBERATELY. A SELECT-then-UPDATE would
+        # reintroduce the ``spore-773`` check-then-act race this stamp is
+        # written against.
         # ⚠ It still no-ops when the marker is already right (``1 < 1`` is
         # false), which was the point of the original predicate. MEASURED,
         # because the objection to writing per-open was a cost one: ``_init_schema`` already runs its DDL and the ``INSERT OR
@@ -1664,7 +1687,9 @@ class Store:
             "INSERT INTO metadata (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value "
             "WHERE CAST(metadata.value AS INTEGER) "
-            "    < CAST(excluded.value AS INTEGER)",
+            "    < CAST(excluded.value AS INTEGER) "
+            "  AND CAST(CAST(metadata.value AS INTEGER) AS TEXT) "
+            "    = TRIM(metadata.value)",
             ("format_version", str(_SCHEMA_VERSION)),
         )
         # ⛔ WHAT THIS DOES **NOT** CLOSE, and the distinction is the whole

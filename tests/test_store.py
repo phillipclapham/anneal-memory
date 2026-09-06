@@ -191,6 +191,82 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
         with pytest.raises(StoreError, match="refusing to open"):
             Store(db)
 
+    def test_the_stamp_leaves_an_unparseable_marker_alone(
+        self, tmp_path, monkeypatch
+    ):
+        """Diogenes MED, 2026-09-06 — the no-lower property was not structural.
+
+        The predicate compares ``CAST(value AS INTEGER)``, and SQLite casts a
+        non-numeric string to 0. So every foreign or corrupt marker compared
+        as ``0 < 1`` and was SILENTLY REWRITTEN to the current version —
+        destroying the very evidence the sibling test above exists to protect,
+        and needing no race at all to do it.
+
+        ⛔ IT ALSO OVERRULED A DELIBERATE RULING. ``_refuse_a_newer_schema``
+        documents "value UNPARSEABLE → left alone", because locking someone
+        out of every episode they own over a garbled metadata string is the
+        worse outcome. The guard let those values through exactly as it
+        promised, and ``_init_schema`` then overwrote them.
+
+        MEASURED 2026-09-06, planting each value and reopening. Before: 'v2',
+        'garbled' and '' all became '1'. After: all three survive. The
+        discriminator is a leading digit — '2.0' survived even before, 'v2'
+        did not — so the exposure was precisely the foreign marker.
+
+        BOTH DIRECTIONS ARE ASSERTED HERE, because a fix that simply stopped
+        writing would also pass the first half: '0' is unparseable-adjacent
+        (it casts to 0 like the others) but IS its own canonical rendering,
+        so the legitimate raise must still fire.
+        """
+        import sqlite3
+
+        import anneal_memory.store as store_mod
+
+        monkeypatch.setattr(store_mod, "_SCHEMA_VERSION", 1)
+
+        def marker_after_reopen(db, planted):
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES "
+                "('format_version', ?)",
+                (planted,),
+            )
+            conn.commit()
+            conn.close()
+            reopened = Store(db)
+            reopened.close()
+            conn = sqlite3.connect(db)
+            value = conn.execute(
+                "SELECT value FROM metadata WHERE key = 'format_version'"
+            ).fetchone()[0]
+            conn.close()
+            return value
+
+        for planted in ("v2", "garbled", ""):
+            db = tmp_path / f"unparseable_{planted or 'empty'}.db"
+            seed = Store(db)
+            seed.record("seeded", episode_type="observation")
+            seed.close()
+            assert marker_after_reopen(db, planted) == planted, (
+                f"opening the store rewrote an unparseable marker {planted!r} "
+                "to the current version, erasing the evidence that some other "
+                "writer had been here — and overruling "
+                "_refuse_a_newer_schema's documented decision to leave it "
+                "alone"
+            )
+
+        # The legitimate raise still fires: '0' casts to 0 like the values
+        # above, but it IS its own canonical integer rendering, so it is a
+        # real older generation rather than a marker this process cannot read.
+        db = tmp_path / "legit_raise.db"
+        seed = Store(db)
+        seed.record("seeded", episode_type="observation")
+        seed.close()
+        assert marker_after_reopen(db, "0") == "1", (
+            "the fix went too wide — a genuinely older generation is no "
+            "longer raised to the current one"
+        )
+
     def test_a_read_only_open_does_not_restamp_the_version(
         self, tmp_path, monkeypatch
     ):

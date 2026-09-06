@@ -4607,6 +4607,26 @@ class Store:
         swallows its own failure at all three — the handler's contract is that
         nothing it does propagates to the caller, and a flush must never turn
         a clean batch exit or close into a raising one.
+        ⛔ WITH EXACTLY ONE EXCEPTION, AND THE SENTENCE ABOVE IS OLDER THAN IT:
+        ``SystemExit`` IS re-raised (see the handler at the bottom of this
+        method). Where it lands differs PER SITE, so do not read "swallows at
+        all three" as covering it. MEASURED 2026-09-06, both paths driven:
+        · site 2 is reached through ``_replay_deferred_audits``, which
+          ``_batch()`` calls under its own post-commit ``except
+          BaseException``. Contained there — the batch exits normally.
+        · site 1's two enclosing handlers are BOTH ``except Exception``, which
+          does not catch it. Inside a batch it still ends up in ``_batch()``'s
+          catch above; on an UNBATCHED path it propagates out of
+          ``_audit_log_after_commit`` and out of the store method the caller
+          invoked (measured: it escaped ``record()``). Doubly narrow — the
+          audit sink must ALREADY have failed — and deliberately left alone,
+          because an explicit termination request escaping is the intended
+          direction. It is named here so the next reader does not have to
+          re-derive it, and does not "fix" it by widening those handlers to
+          ``BaseException``: that would re-swallow the exit.
+        · site 3, ``close()``, is the one the re-raise's own rationale names.
+          It wraps this call so the connection is still closed and
+          ``self._closed`` still set before the exit propagates.
 
         ⛔⛔ THREE CODEX L3 HIGHs LIVE IN THIS METHOD'S HISTORY; READ BEFORE
         SIMPLIFYING IT (2026-09-04).
@@ -6043,6 +6063,13 @@ class Store:
                 ``self._closed`` stays ``False`` — the connection is
                 in an indeterminate state the caller can inspect or
                 retry closing.
+            SystemExit: If one is raised while the pre-close audit-health
+                flush runs — ``_persist_audit_health`` re-raises that one
+                ``BaseException`` and swallows the rest. The connection is
+                still closed and ``self._closed`` still set before it
+                propagates; see the comment at the call site for why this
+                path deviates from the ``StoreDatabaseError`` contract
+                above.
         """
         if self._closed:
             return
@@ -6057,11 +6084,39 @@ class Store:
             return
         # ⛔ FLUSH POINT 3 OF 3 — THE LAST ONE THIS PROCESS WILL EVER GET.
         # A delta still pending here is one no failure handler and no batch
-        # exit reached, and the connection is about to go away. Swallows its
-        # own errors (see the method), so it cannot turn a clean close into a
-        # raising one. Deliberately BEFORE the boundary block: a flush after
-        # ``self._conn.close()`` would have no connection to write through.
-        self._persist_audit_health()
+        # exit reached, and the connection is about to go away. Deliberately
+        # BEFORE the boundary block: a flush after ``self._conn.close()``
+        # would have no connection to write through.
+        #
+        # ⛔ AND IT CAN RAISE — THIS IS THE ONE CALL SITE WHERE THAT SHOWS
+        # (Diogenes MED, 2026-09-06). This comment previously said the flush
+        # "cannot turn a clean close into a raising one". That was true when
+        # written and was falsified twelve commits later in the same window by
+        # ``_persist_audit_health``'s ``SystemExit`` re-raise — whose own
+        # rationale names ``close()`` as the ONE path it changes. Without the
+        # ``try`` below, an explicit ``sys.exit()`` landing in that window
+        # skipped ``self._conn.close()`` and left ``self._closed`` False:
+        # MEASURED 2026-09-06 — the sqlite handle stayed usable and the store
+        # reported itself open, so a caller that catches the exit (a CLI
+        # wrapper, a test, an embedding app) inherits a leaked connection
+        # holding its locks.
+        # ⚠ THE PRECEDENCE IS DELIBERATE: on this path a close failure is
+        # swallowed and ``_closed`` is set anyway, which is the opposite of
+        # the ``Raises:`` contract above. That contract exists so a caller can
+        # inspect or retry an indeterminate connection. There is no retry
+        # here — something asked the process to terminate, and letting a
+        # ``StoreDatabaseError`` replace that request is the fail-open the
+        # re-raise was added to prevent (a SIGTERM handler's ``sys.exit(0)``
+        # would be eaten and a long-lived server would keep running).
+        try:
+            self._persist_audit_health()
+        except SystemExit:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._closed = True
+            raise
         with self._db_boundary("close"):
             self._conn.close()
         self._closed = True

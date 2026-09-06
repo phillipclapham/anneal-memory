@@ -2586,6 +2586,55 @@ class TestCodexL3TwentySixOhNineOhFour:
         finally:
             store.close()
 
+    # -- #4h: and close() is the ONE site that re-raise changes (09-06) --
+
+    def test_a_systemexit_in_the_close_flush_still_closes_the_connection(
+        self, tmp_path
+    ):
+        """Diogenes MED, 2026-09-06 — the call site #4g's rationale singles out.
+
+        ``_persist_audit_health`` re-raises ``SystemExit``. That re-raise's own
+        comment says sites 1 and 2 are unaffected (both sit under
+        ``_batch()``'s post-commit ``except BaseException``) and that
+        ``close()`` is the one path that changes. ``close()`` called it BEFORE
+        ``self._conn.close()``, under a comment promising the flush "cannot
+        turn a clean close into a raising one" — true when written, false
+        twelve commits later in the same window.
+
+        MEASURED BEFORE THE FIX: the exit skipped the sqlite close entirely.
+        ``self._closed`` stayed False and the handle stayed USABLE, so a
+        caller that catches the exit — a CLI wrapper, a test, an embedding
+        app — inherits a live connection holding its locks while the store
+        reports itself open.
+
+        BOTH halves are asserted, because either one alone can be satisfied by
+        the wrong fix: swallowing the exit would close the handle and lose the
+        termination request; leaving it as it was propagates the request and
+        leaks the handle.
+        """
+        from anneal_memory.store import Store
+
+        store = Store(tmp_path / "exit_close.db")
+
+        def exit_during_the_flush() -> None:
+            # Stands in for a SIGTERM handler's ``sys.exit(0)`` landing inside
+            # the flush window. Patched at the method rather than driven
+            # through a real signal so the test is deterministic; #4g above
+            # already pins that the real handler re-raises this exception.
+            raise SystemExit(0)
+
+        store._persist_audit_health = exit_during_the_flush  # type: ignore[method-assign]
+
+        with pytest.raises(SystemExit):
+            store.close()
+
+        assert store._closed, (
+            "close() left _closed False after a SystemExit in the flush — the "
+            "store believes it is still open"
+        )
+        with pytest.raises(Exception):
+            store._conn.execute("select 1")
+
     # -- #5: the count must never go backwards between writers --
 
     def test_two_writers_cannot_make_the_lifetime_count_decrease(self, tmp_path):

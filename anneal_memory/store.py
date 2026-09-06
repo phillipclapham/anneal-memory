@@ -5289,6 +5289,8 @@ class Store:
         - :meth:`gc_pattern_associations`
         - :meth:`rename_pattern_association`
         - :meth:`sever_pattern_concept`
+        - :meth:`upsert_pattern_history`
+        - :meth:`seed_pattern_max_level`
 
         ⚠ The last five were MISSING from this list until 2026-09-05 (L3
         complement) while being batch-aware in fact — each passes
@@ -5297,11 +5299,34 @@ class Store:
         list is read as a safety contract, so an omission here reads as "not
         safe inside a batch" for a method that is, which is the more dangerous
         direction for a list like this to be wrong in.
+        ⛔ AND THAT FIX LEFT IT INCOMPLETE IN BOTH DIRECTIONS (Diogenes MED,
+        2026-09-06). The final two above were still missing — both guard with
+        ``if not self._defer_commit`` and both were RUN-VERIFIED invisible to a
+        second connection until the batch commits — and
+        ``set_section_schema`` was in NEITHER list, against a sentence
+        worded as an exhaustive universal over the complement. Twice wrong in two days.
+        ⚖ SO THE LISTS ARE NO LONGER HAND-MAINTAINED ON TRUST. A roster of
+        method names living beside the code it describes is the same shape as
+        the name allowlist ``_is_write_lock_contention`` was rewritten to
+        abandon, and the same shape ``_RESERVED_AUDIT_KWARGS`` already
+        replaced with a derivation. ``test_the_batch_contract_matches_the_code``
+        walks ``Store`` with ``ast`` and asserts BOTH lists below partition the
+        methods that actually read ``_defer_commit``, so an omission fails a
+        test rather than waiting to be noticed by a reviewer. Add a method
+        here and the test tells you; do not add one without it.
 
-        All other write methods (``prune``, ``wrap_started``,
-        ``wrap_cancelled``, ``save_continuity``, ``save_meta``)
-        commit immediately and are NOT safe to call inside a batch —
-        doing so would break the single-transaction invariant.
+        All other write methods commit immediately and are NOT safe to call
+        inside a batch. Two groups, unsafe for DIFFERENT reasons — the split
+        matters because only the first is mechanically derivable:
+        - DB-COMMITTING (``prune``, ``wrap_started``, ``wrap_cancelled``,
+          ``set_section_schema``) — these call ``commit()`` unconditionally
+          and would break the single-transaction invariant.
+        - FILE-EXTERNALIZING (``save_continuity``, ``save_meta``) — these
+          never touch the connection at all; they rename a sidecar into
+          place. Calling them inside a batch externalizes state before the
+          DB commits, which is the audit-ordering inversion measured
+          2026-09-04 (the file landed and its audit event was discarded with
+          the uncommitted batch).
         ⚠ ``wrap_started`` and ``wrap_cancelled`` now FAIL LOUD there rather
         than corrupting quietly: they open with ``BEGIN IMMEDIATE``, so inside
         a batch that has already issued DML they raise

@@ -191,6 +191,131 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
         with pytest.raises(StoreError, match="refusing to open"):
             Store(db)
 
+    def test_the_batch_contract_matches_the_code(self):
+        """Diogenes MED, 2026-09-06 — derive the roster, stop maintaining it.
+
+        ``_batch()``'s docstring carries two lists that callers read as a
+        SAFETY CONTRACT: which write methods are batch-aware, and which commit
+        immediately and must not be called inside a batch. It was hand-written
+        beside the code it describes and was wrong TWICE IN TWO DAYS — five
+        names missing on 09-05, two more plus ``set_section_schema`` on 09-06.
+
+        An omission in the first list is the dangerous direction: it reads as
+        "not safe inside a batch" for a method that is, so a caller routes
+        around a method that would have been fine, or a maintainer "fixes" a
+        method that was never broken.
+
+        This is the repo's own established answer to a hand-maintained name
+        roster — ``_RESERVED_AUDIT_KWARGS`` derives itself from
+        ``inspect.signature``, and ``_is_write_lock_contention`` was rewritten
+        to abandon a name allowlist. Here the derivation is ``ast`` over
+        ``Store``, and the assertion is that the two documented lists PARTITION
+        the methods that actually touch ``_defer_commit``.
+
+        Adding a batch-aware write method without listing it fails this test.
+        """
+        import ast
+        import re
+        from pathlib import Path as _Path
+
+        import anneal_memory.store as store_mod
+
+        source = _Path(store_mod.__file__).read_text(encoding="utf-8")
+        klass = next(
+            node
+            for node in ast.parse(source).body
+            if isinstance(node, ast.ClassDef) and node.name == "Store"
+        )
+        methods = [
+            node
+            for node in klass.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+
+        def reads_defer_commit(fn):
+            return any(
+                isinstance(node, ast.Attribute)
+                and node.attr == "_defer_commit"
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "self"
+                for node in ast.walk(fn)
+            )
+
+        def commits(fn):
+            return any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "commit"
+                for node in ast.walk(fn)
+            )
+
+        # ``close`` reads the flag to REFUSE inside a batch rather than to
+        # defer, so it is governed by its own Raises: contract, not by this
+        # one. Named rather than pattern-matched so the exclusion cannot widen
+        # silently; asserted below so it cannot rot either.
+        NOT_A_BATCH_AWARE_WRITE = {"close"}
+        assert NOT_A_BATCH_AWARE_WRITE <= {m.name for m in methods}, (
+            "the documented exclusion names a method Store no longer has"
+        )
+
+        actually_batch_aware = {
+            m.name
+            for m in methods
+            if not m.name.startswith("_")
+            and reads_defer_commit(m)
+            and m.name not in NOT_A_BATCH_AWARE_WRITE
+        }
+        actually_immediate = {
+            m.name
+            for m in methods
+            if not m.name.startswith("_")
+            and commits(m)
+            and not reads_defer_commit(m)
+        }
+
+        docstring = ast.get_docstring(
+            next(m for m in methods if m.name == "_batch")
+        )
+        assert docstring is not None
+        # Anchored on the whole clause, not "All other write methods" alone:
+        # that opening phrase is quoted inside the ⛔ paragraph above the list
+        # it names, and partitioning on it split the docstring at the prose
+        # instead of at the roster. Caught by this test on its second run.
+        head, _, tail = docstring.partition(
+            "All other write methods commit immediately"
+        )
+        _, _, batch_section = head.partition("**Batch-aware methods**")
+        # BULLET LINES ONLY. The section HEADING also carries a ``:meth:``
+        # reference — "route audit events through :meth:`_audit_log`" — which
+        # is prose about the mechanism, not a roster entry. This test caught
+        # that on its first run, which is the behaviour it exists for.
+        documented_batch_aware = {
+            name
+            for line in batch_section.splitlines()
+            if line.strip().startswith("- ")
+            for name in re.findall(r":meth:`(\w+)`", line)
+        }
+        db_group, _, _ = tail.partition("- FILE-EXTERNALIZING")
+        documented_immediate = set(re.findall(r"``(\w+)``", db_group))
+
+        assert documented_batch_aware == actually_batch_aware, (
+            "the batch-aware list in _batch()'s docstring disagrees with the "
+            "code. Undocumented but batch-aware: "
+            f"{sorted(actually_batch_aware - documented_batch_aware)}; "
+            "documented but not batch-aware: "
+            f"{sorted(documented_batch_aware - actually_batch_aware)}"
+        )
+        assert documented_immediate == actually_immediate, (
+            "the immediate-commit list in _batch()'s docstring disagrees with "
+            "the code. Undocumented but commits immediately: "
+            f"{sorted(actually_immediate - documented_immediate)}; "
+            "documented but does not: "
+            f"{sorted(documented_immediate - actually_immediate)}"
+        )
+        assert not (documented_batch_aware & documented_immediate), (
+            "a method is in BOTH lists — the contract contradicts itself"
+        )
+
     def test_the_stamp_leaves_an_unparseable_marker_alone(
         self, tmp_path, monkeypatch
     ):

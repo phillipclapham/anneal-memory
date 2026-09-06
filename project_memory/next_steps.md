@@ -47,7 +47,11 @@ Diogenes reviews this repo again. That is his count at 02:xx today, taken BEFORE
 All five filed are closed below; the sixth is the `_BARE_GRADUATION_RE` deferral, unchanged.
 **This block has now mis-set the pickup THREE mornings running.** The 09-05 note said that a third
 occurrence makes it a routing defect to fix rather than a note to re-write. ▶ It is the third.
-Route it: `route_diogenes.py` writes a count it never reconciles against the triage beneath it.
+⚠ **And the mechanism is not what it looks like — I checked the router before naming it.**
+`route_diogenes.py` does NOT compute this number; it republishes the count Diogenes declared in its
+own `STILL OPEN (N)` slot at review time. So there is nothing for the router to reconcile: the
+staleness is structural to a generated block that reports a REVIEW-TIME answer while sitting above a
+triage that moves it. The fix belongs at the block's WORDING or at a write-back, not in the parser.
 
 ### ⛔ THE ONE THING TO CARRY FORWARD: MY FIX OPENED A STRICTLY WORSE HOLE THAN IT CLOSED, WITHIN THE HOUR
 The morning fix made the version stamp refuse to overwrite an UNPARSEABLE marker — correct, and it

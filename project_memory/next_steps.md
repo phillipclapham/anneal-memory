@@ -8,13 +8,13 @@
 > Git history was NOT carried across the repo boundary (a cross-repo move cannot); flow's history
 > retains it up to this commit.
 
-> ### 🔬 DIOGENES — NEWEST: `diogenes_20260905.md` · **STILL OPEN: 7** @ `5b79172`
-> 9 episode(s) — HIGH 1 · LOW 3 · MEDIUM 2 — 6 of 9 episode(s) carry a severity; the other 3 are COVERAGE 1 · COVERAGE-OPEN 1 · STILL OPEN 1. Routed UNTRIAGED by `route_diogenes.py`; the count above is Diogenes' own slot, not the ritual's.
-> ▶ 32 human commit(s) in the last 24h — the count could move in either direction this window.
-> ⚡ **2 finding(s) carry `[prescription: run]`** — candidates for `seat_run.py`, but only with an executable acceptance test.
+> ### 🔬 DIOGENES — NEWEST: `diogenes_20260906.md` · **STILL OPEN: 6** @ `a12e66a`
+> 14 episode(s) — LOW 1 · MEDIUM 4 — 5 of 14 episode(s) carry a severity; the other 9 are COVERAGE 1 · COVERAGE-OPEN 1 · SELF 6 · STILL OPEN 1. Routed UNTRIAGED by `route_diogenes.py`; the count above is Diogenes' own slot, not the ritual's.
+> ▶ 17 human commit(s) in the last 24h — the count could move in either direction this window.
+> ⚡ **3 finding(s) carry `[prescription: run]`** — candidates for `seat_run.py`, but only with an executable acceptance test.
 > *(Counted by each finding's OWN trailing tag — a quoted tag is not a verdict — and a tag withdrawn by a later SELF-CORRECTION does not count at all. If this number moved while the report did not, that rule changed: see flow `scripts/prescription.py`.)*
-> ⚙ COORDINATES: 0 of 6 finding(s) carried quoted text, so NONE could be checked. This is not a clean result.
-> *(Pointer written 2026-09-05 by route_diogenes.py. `spore-473`: a routed report with no reader is a disposal chute.)*
+> ⚙ COORDINATES: 0 of 5 finding(s) carried quoted text, so NONE could be checked. This is not a clean result.
+> *(Pointer written 2026-09-06 by route_diogenes.py. `spore-473`: a routed report with no reader is a disposal chute.)*
 
 > ⬇ **TRIAGE BELOW THIS LINE — the block above is a DISPOSABLE SPAN.** `route_diogenes.py`
 > regenerates that block every night, so anything written inside it is deleted by the next
@@ -22,6 +22,106 @@
 > the fix, the refutation and the date here. *(Written once; `spore-473` — a routed report
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
+
+## ▶▶ PICKUP 2026-09-06 (SEAT 0906+6) — ALL FIVE DIOGENES FINDINGS CLOSED, spore-773 BUILT, AND L3 FOUND A HIGH INSIDE MY OWN MORNING FIX.
+
+**Seat 0906+6, Sunday.** Opened for the five Diogenes filed overnight (0 HIGH / 4 MED / 1 LOW +
+1 carried). All five closed. Then `spore-773` rose (the levain-side fix did not land, confirmed
+from disk by the levain seat) and was built. Then L3 returned seven findings, one of which was a
+defect **created by this session's own stamp fix, ninety minutes earlier**. Six closed, one
+refused with reasons at the site.
+
+▶ **RE-DERIVE STATE, DO NOT READ IT FROM HERE.** Every number below was true at close and none can
+stay true on its own:
+```
+push state   git ls-remote origin main   vs   git rev-parse HEAD
+tree         git status --short
+tests        .venv/bin/python -m pytest -q          (rose all session; never fell)
+types        .venv/bin/python -m mypy anneal_memory (clean at every commit)
+lint         .venv/bin/python -m ruff check .       (63 all session, unchanged)
+findings     project_memory/diogenes_20260906.md — its OWN still-open slot, newest wins
+what landed  git log --oneline a12e66a..HEAD
+```
+⛔ **THE GENERATED BLOCK AT THE TOP OF THIS FILE SAYS `STILL OPEN: 6` AND WILL KEEP SAYING 6** until
+Diogenes reviews this repo again. That is his count at 02:xx today, taken BEFORE any of this work.
+All five filed are closed below; the sixth is the `_BARE_GRADUATION_RE` deferral, unchanged.
+**This block has now mis-set the pickup THREE mornings running.** The 09-05 note said that a third
+occurrence makes it a routing defect to fix rather than a note to re-write. ▶ It is the third.
+Route it: `route_diogenes.py` writes a count it never reconciles against the triage beneath it.
+
+### ⛔ THE ONE THING TO CARRY FORWARD: MY FIX OPENED A STRICTLY WORSE HOLE THAN IT CLOSED, WITHIN THE HOUR
+The morning fix made the version stamp refuse to overwrite an UNPARSEABLE marker — correct, and it
+closed the finding. It also made `'01'` and `'+1'` un-stampable, and **those PARSE as 1 in Python**.
+So a v2 process migrated the store, could not restamp it, and **a v1 process was afterwards ADMITTED
+to the migrated database** — the exact hazard the guard exists to prevent, reached through the fix
+meant to protect it. Found by codex at L3, reproduced here before being believed.
+▶ **THE ROOT CAUSE GENERALISES AND IS THE REUSABLE PART: TWO NOTIONS OF "PARSEABLE" IN TWO
+LANGUAGES.** The guard parsed in Python with `int()`; the stamp decided canonicality in SQL. They
+agreed on every value anyone thought to test and disagreed on exactly the ones that matter. The fix
+is one shared parser (`_parse_format_version`) used by both, and the test exists to stop a second
+one appearing. **Any field whose guard and whose writer are implemented in different languages has
+this shape available.**
+
+### ▶ WHAT LANDED (8 commits, `git log --oneline a12e66a..HEAD`)
+1. **MED `tests/test_audit.py`** — the wrap-destruction guard was pinned by a test that drives
+   `store._batch()` and never reads the continuity file. Now asserts on the artifact, through the
+   canonical pipeline. ⚠ **Run its mutation with that test selected ALONE** — under the mutant the
+   SIBLING test aborts the pytest session first, so `-k interrupt` reports an abort and looks like
+   this one cannot go red either. It can: selected alone the mutant gives `1 failed`.
+2. **MED `store.py` `close()`** — a real leak, reproduced first: a `SystemExit` in the pre-close
+   flush skipped `self._conn.close()`, leaving `_closed` False and the handle USABLE.
+3. **MED `store.py` version stamp** — see the section above.
+4. **MED `store.py` batch roster** — incomplete in both directions one day after the fix meant to
+   complete it. **No longer hand-maintained:** an `ast` test asserts both documented lists PARTITION
+   the methods that read `_defer_commit`.
+5. **LOW CHANGELOG + this file** — a caller census short by one, the omitted site the broadest.
+   Fixed by stating the RULE and handing over the grep.
+6. **`spore-773` BUILT** — `_init_schema` holds ONE writer lock across the version check and every
+   migration. See below.
+7. **codex round: the 3.10 contention fallback anchored; the last-failure ordering key parsed
+   instead of shape-checked; the deferred-replay tail no longer silently eaten.**
+8. **One refusal recorded at the site** (the commit/ack race — see below).
+
+### ⚖ spore-773 — BUILT, AND THE MEASUREMENT THAT SHAPED IT
+`_init_schema` now takes `BEGIN IMMEDIATE` and **re-runs the guard under it**. The DDL is no longer
+`executescript` — MEASURED: after `BEGIN IMMEDIATE`, `executescript` leaves `in_transaction` False
+(it implicitly COMMITs and drops the lock) while `execute` leaves it True. The schema runs
+statement-by-statement, split with SQLite's own tokenizer; **verified the resulting schema is
+byte-identical** to what `executescript` produced. The three migrations take `commit=False`.
+⛔ **THE GUARD IS CALLED TWICE AND NEITHER CALL IS REDUNDANT — do not delete one.** The `__init__`
+call runs before the WAL pragma, because that pragma is a PERSISTENT write and a store we are about
+to decline must not be mutated by the declining. The locked call is the only one atomic with the
+migrations. **They cannot be merged: a pragma cannot run inside a transaction, so the lock cannot be
+taken first.**
+⭐ **AND IT IS NOT NEW CONTENTION, WHICH IS THE OBJECTION IT WILL DRAW.** MEASURED: opening a
+write-capable store while another process held the write lock **already** failed with `database is
+locked` after the same ~5s timeout, because the unconditional commit at the end of the method needed
+the same lock. `BEGIN IMMEDIATE` moves the acquisition earlier and adds none. *That measurement
+killed a fast-path optimisation I had half-designed to avoid contention that was never there.*
+
+### ⛔ REFUSED, WITH REASONS AT THE SITE — DO NOT RE-FILE
+**The commit/ack race** (codex MED, reproduced: one failure persisted as a count of 2). If `commit()`
+lands durably and a terminal exception arrives before the in-memory decrement, the next flush adds
+the delta again. Refused because **(a)** over-counting a degraded-audit counter still answers the
+question it exists to answer, while under-counting is the silence the whole apparatus prevents;
+**(b)** every cheaper ordering buys that under-count; **(c)** the additive write is load-bearing for
+multi-writer correctness and pinned by `test_two_writers_cannot_make_the_lifetime_count_decrease`,
+so the only correct fix is codex's per-attempt token — new durable machinery, under one-in-one-out.
+**It is the token or nothing; do not "fix" it by moving the decrement.**
+
+### ⚠ APPARATUS FINDINGS THAT OUTLIVE THIS REPO
+1. ⛔ **THIS REPO'S `.venv` SHADOWS THE WORKING TREE.** It holds a NON-EDITABLE `anneal_memory`
+   **0.9.1 from Jun 18** (4,606 lines) against a 6,089-line tree. `pytest` from the repo root is
+   UNAFFECTED — verified, it imports the tree — but **anything run from another directory silently
+   grades a 2.5-month-old package.** My first probe of the day did exactly that and reported the
+   09-05 fix ABSENT on HEAD; I caught it only because a traceback named a site-packages path. Any
+   scratch probe written outside the repo root needs `PYTHONPATH` or it is measuring a fossil.
+2. **L3 ROUND 1 WAS TWO LINEAGES, NOT THREE** — `complement` produced NOTHING (`max_turns`, 30
+   turns, exit 1) while the run exited 0. Read the BODY, never the exit code.
+3. **The baseline I was handed (1864) was wrong; measured 1867.** Re-measure a baseline before
+   quoting a delta from it — it costs one run.
+
+---
 
 ## ▶▶ PICKUP 2026-09-05 (SEAT 0905+5) — EVERY FILED FINDING CLOSED; TWO L3 ROUNDS EACH FOUND DEFECTS INSIDE THE PREVIOUS FIX.
 
@@ -114,8 +214,10 @@ either.
 `except BaseException` sites as HIGH and prescribed re-raising EVERYTHING. **That reintroduces the
 data-loss defect the handlers exist to close**; applying its fix makes the wrap-protection test abort
 the run, exactly as the original defect did. It also filed the lock-contention heuristic as risking
-an "infinite retry loop" — **there is no retry loop** (verified on disk: `cli.py:270` prints and
-`sys.exit(1)`; `server.py:712` returns a tool result), and its proposed `"schema" not in text`
+an "infinite retry loop" — **there is no retry loop** (verified on disk: every caller messages and
+STOPS — the CLI prints and `sys.exit(1)`s at both its open-time and command-time boundary, the MCP
+server returns a tool result; re-derive with `grep -rn _is_write_lock_contention anneal_memory/`
+rather than trusting a coordinate roster, which is how this census came to be short by one), and its proposed `"schema" not in text`
 exclusion would have BROKEN the fix, since `database schema is locked` is a real `SQLITE_LOCKED`
 phrasing. **Recorded so it does not return a third time.**
 

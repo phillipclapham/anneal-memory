@@ -4,6 +4,130 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — the schema version check and the migrations are now one locked step (`spore-773`)
+
+`_init_schema` takes `BEGIN IMMEDIATE` and **re-runs the compatibility guard under it**. Before this
+they were a check-then-act: process A read `format_version = 1` and passed the guard, process B
+migrated and stamped 2, and A then ran *this* version's DDL against a v2 database and stayed live on
+it as a write-capable older handle. The monotonic stamp only stopped the marker being written back
+*down*; it did nothing about A's subsequent writes.
+
+The schema DDL no longer goes through `executescript`. **Measured:** after `BEGIN IMMEDIATE`,
+`executescript` leaves `in_transaction` False — it issues an implicit COMMIT and drops the writer
+lock — while `execute` leaves it True. So the three schema scripts run statement by statement, split
+with SQLite's own tokenizer, and the three migrations take `commit=False`. The resulting schema is
+byte-identical to what `executescript` produced.
+
+⛔ **The guard is called twice and neither call is redundant.** The `__init__` call runs *before* the
+WAL pragma, because `PRAGMA journal_mode=WAL` is a persistent write and a store we are about to
+decline must not be mutated by the declining. The second call is the only one atomic with the
+migrations. They cannot be merged — a pragma cannot run inside a transaction, so the lock cannot be
+taken first.
+
+⚠ **This is not new contention.** Opening a write-capable store while another process held the write
+lock *already* failed with `database is locked` after the same ~5s timeout, because the
+unconditional commit at the end of the method needed the same lock. The acquisition simply moves
+earlier.
+
+### Fixed — one parser for `format_version`, because two disagreed exactly where it mattered
+
+The guard parsed the marker in Python (`int(str(v).strip())`) while the stamp decided in SQL whether
+the stored text was canonical. They agreed on every value anyone thought to test and disagreed on
+`'01'` and `'+1'`: Python reads those as version 1, so a v2 process **migrated** the store and the
+SQL predicate then refused to restamp it — leaving the marker naming a generation the database had
+already left. **Measured: a v1 process was afterwards admitted to the migrated store**, which is
+precisely the hazard the guard exists to prevent.
+
+Both now go through `_parse_format_version`. Unparseable markers (`'v2'`, `''`) are still left
+alone, per `_refuse_a_newer_schema`'s documented ruling that locking someone out of every episode
+they own over a garbled metadata string is the worse outcome.
+
+### Fixed — a terminal exception no longer silently eats the audit replay tail
+
+`_audit_log_after_commit`'s per-event catch was `except Exception`, so a `KeyboardInterrupt` from the
+sink walked past it and out of the deferred replay; `_batch()`'s post-commit handler caught it,
+warned once, and **abandoned the rest of the queue**. Measured with a four-episode batch: four
+episodes committed, one audit emit attempted, `audit_write_failures` 0, nothing pending, and no
+audit file at all — every one of the four "a swallow must not become silence" channels stayed quiet
+because none of them ran, and `verify()` would have walked the hole and reported a clean trail.
+
+The catch is now `BaseException`, which routes the drop through those existing channels and lets the
+tail continue. A real Ctrl-C is delivered once, so containing it per event costs the one interrupted
+emit instead of every event after it.
+
+⚠ The cost, stated: a `SystemExit` from the **sink** is now recorded and swallowed rather than
+escaping. This method runs post-commit and its whole contract is that nothing it does propagates —
+a raise makes the caller read a successful commit as a failure and unlink committed sidecars.
+**Do not narrow it back and do not add a re-raise**; that prescription was refused and
+mutation-tested on 2026-09-05 and reintroduces the original data-loss bug.
+
+### Fixed — `close()` closes the connection even when the pre-close flush exits
+
+`_persist_audit_health` re-raises `SystemExit`, and `close()` called it *before*
+`self._conn.close()`. Measured: an explicit `sys.exit()` in that window skipped the sqlite close
+entirely, leaving `self._closed` False and the handle **usable** — a caller that catches the exit
+inherits a live connection holding its locks while the store reports itself open. The exit still
+propagates; the handle is now closed behind it.
+
+### Fixed — the last-failure pointer is ordered by parsed time, not by string shape
+
+Two defects, one cause: an ordering key treated as text. The shape check accepted any 20-character
+string ending in `Z` with a hyphen at index 4, so `9999-99-99T99:99:99Z` passed and string-compared
+greater than every real timestamp, **pinning `audit_last_failure` permanently** — the opposite of
+the documented "fails toward replacing an unreadable stored value". And second-resolution stamps
+made the stale-writer guard a coin flip inside any one second.
+
+Stamps are now parsed to `datetime` and compared as such, and are written with microseconds. The old
+20-character form is still accepted on read — stores in the wild hold it, and it has to keep ordering
+correctly against the new form. That is also why the comparison had to leave text entirely: `Z`
+sorts after `.`, so a stored `…:00:00Z` string-compares *greater* than a newer `…:00:00.500000Z`.
+
+### Fixed — the Python 3.10 contention fallback is anchored on SQLite's message grammar
+
+`("locked" in text or "busy" in text) and "database" in text` classified
+`no such table: database_locked_items` as write-lock contention: a schema error reported to the
+operator as "another process is writing to this store right now". Now anchored. Measured against
+real messages rather than reasoned about — it still matches every contention phrasing, including
+`database table is locked: sqlite_master` and `database schema is locked`.
+
+⚠ Narrowing this is the dangerous direction and has been got wrong once already: a breadth seat
+proposed excluding any message containing `"schema"`, which would have broken the fix outright.
+
+### Fixed — the batch-safety contract is derived from the code instead of maintained beside it
+
+`_batch()`'s two documented lists were incomplete **in both directions**, one day after the fix meant
+to complete them: `upsert_pattern_history` and `seed_pattern_max_level` were batch-aware and unlisted,
+and `set_section_schema` appeared in neither list against a sentence worded as an exhaustive universal.
+Wrong twice in two days is the signal that a hand-written roster beside the code is the wrong shape —
+the same shape `_is_write_lock_contention` was rewritten to abandon and `_RESERVED_AUDIT_KWARGS`
+already replaced with a derivation. A test now walks `Store` with `ast` and asserts both lists
+partition the methods that read `_defer_commit`.
+
+The second list also split in two, because its members are unsafe for different reasons: `prune`,
+`wrap_started`, `wrap_cancelled` and `set_section_schema` commit the DB immediately, while
+`save_continuity` and `save_meta` never touch the connection at all.
+
+### Fixed — the wrap-destruction guard is graded on the artifact it protects
+
+The 2026-09-05 HIGH was pinned by a test that drives `store._batch()` directly and asserts
+`total_episodes == 1`. That grades whether the batch exited and whether the caller's DML survived; it
+never reads the continuity file, which is the whole of the loss. Removing the guard did not turn it
+red. A new test drives the canonical pipeline with the interrupt in the deferred-audit replay and
+asserts the file on disk holds the new text.
+
+⚠ Run that mutation with the new test selected **alone**: under the mutant the older sibling aborts
+the pytest session first, so selecting both reports an abort and looks like neither can go red.
+
+### Known and deliberately not fixed — the commit/ack race in `_persist_audit_health`
+
+If `commit()` lands durably and a terminal exception arrives before the in-memory decrement, the next
+flush adds the delta again (measured: one failure persisted as a count of 2). Refused with reasons at
+the site. The direction is the safe one — over-counting a degraded-audit counter still answers the
+question it exists to answer, while under-counting is silence. Every cheaper ordering buys that
+under-count, and the additive write is load-bearing for multi-writer correctness, so the only correct
+fix is a per-attempt token. **It is the token or nothing; do not "fix" it by moving the decrement.**
+
+
 ### Fixed — `SystemExit` is not `KeyboardInterrupt`, and conflating them was a second fail-open
 
 Widening `_persist_audit_health`'s handler to `BaseException` earlier the same day was correct for

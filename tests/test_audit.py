@@ -2069,10 +2069,19 @@ class TestCodexL3TwentySixOhNineOhFour:
 
         MUTATION-CHECKED, and the failure MODE is the point: narrowing the
         post-commit ``except BaseException`` in ``_batch()`` back to ``except
-        Exception`` does not turn this test red — the interrupt escapes the
-        ``with`` block and ABORTS the pytest run at that line. A caller has no
-        more defence against it than the test runner does, which is the whole
-        argument for containing it at the source.
+        Exception`` does not turn THIS test red — the interrupt escapes the
+        ``with`` block and ABORTS the pytest run at that line.
+
+        ⛔ AMENDED 2026-09-06 (Diogenes MED, tests/test_audit.py). That abort
+        is a fact about THIS coordinate, not about the property, and the
+        paragraph above originally read as though a red test were therefore
+        unavailable. It is not: the interrupt is catchable one frame out, at
+        the ``validated_save_continuity`` CALL rather than at the batch. What
+        this test grades is that the batch exited and the caller's DML
+        survived — it never reads the continuity file, which is what the HIGH
+        is about. The regression gate for THAT is
+        ``test_an_interrupt_in_the_replay_cannot_destroy_a_committed_wrap``
+        below; it asserts on the file and it does go red.
         """
         from anneal_memory.store import Store
 
@@ -2100,6 +2109,142 @@ class TestCodexL3TwentySixOhNineOhFour:
         try:
             assert reopened.status().total_episodes == 1, (
                 "the committed episode did not survive — a post-commit "
+                "interrupt was allowed to look like a failed batch"
+            )
+        finally:
+            reopened.close()
+
+    def test_an_interrupt_in_the_replay_cannot_destroy_a_committed_wrap(
+        self, tmp_path
+    ):
+        """Diogenes MED, 2026-09-06 — the same guard, graded on the ARTIFACT.
+
+        The sibling test above drives ``store._batch()`` directly and asserts
+        ``total_episodes == 1``. That grades whether the batch exited and
+        whether the caller's DML survived. It never reads the continuity
+        file — and a destroyed continuity file is the entire loss the HIGH
+        describes. Removing the guard does not turn it red, so the property
+        had no regression gate at all: a green check that cannot fail for the
+        reason it exists (``a_gate_nothing_can_pass_is_not_a_gate``, this
+        repo, 2026-09-05).
+
+        This one drives the CANONICAL pipeline — ``prepare_wrap`` ->
+        ``validated_save_continuity`` — with ``_audit.log`` raising
+        ``KeyboardInterrupt`` on its first call of the second wrap. That call
+        lands inside ``_replay_deferred_audits``, the post-commit window the
+        guard exists to contain (verified by stack trace at
+        ``store.py`` ``_replay_deferred_audits`` -> ``_audit_log_after_commit``
+        -> ``self._audit.log``, not assumed from the call order).
+
+        MUTATION-CHECKED IN BOTH DIRECTIONS, and it does NOT abort the runner:
+        narrowing ``_batch()``'s post-commit ``except BaseException`` back to
+        ``except Exception`` makes the interrupt escape the batch, so
+        ``validated_save_continuity`` never reaches ``db_committed = True``,
+        its own ``except BaseException`` unlinks BOTH staged sidecars, and the
+        continuity file is left holding the PREVIOUS session's text while the
+        wrap row and the episodes' wrap assignments stay durable. The
+        assertion below is what goes red.
+
+        ⚠ RE-RUN THE MUTATION WITH THIS TEST SELECTED ALONE, by node id or
+        ``-k cannot_destroy_a_committed_wrap``. Under the mutant the SIBLING
+        test above aborts the whole pytest session before this one is
+        reached, so a mutation run that selects both (``-k interrupt``)
+        reports an abort and looks like this test cannot go red either. It
+        can — measured 2026-09-06: selected alone the mutant gives
+        ``1 failed``, selected together it gives an abort at the sibling.
+        """
+        from anneal_memory import prepare_wrap, validated_save_continuity
+        from anneal_memory.store import EpisodeType, Store
+
+        def continuity_text(marker: str) -> str:
+            return (
+                "# Interrupt — Memory (v1)\n\n"
+                f"## State\n{marker}\n\n"
+                "## Patterns\nNone yet.\n\n"
+                "## Decisions\nNone.\n\n"
+                f"## Context\n{marker}\n"
+            )
+
+        db = tmp_path / "memory.db"
+        store = Store(str(db), project_name="Interrupt")
+        try:
+            # Wrap 1 is not scaffolding — it is what makes the mutant
+            # distinguishable. Without a prior wrap the regression leaves NO
+            # continuity file, and a weaker assertion ("the file exists")
+            # would report the loss as a pass. With one, the destroyed wrap
+            # shows up as the OLD text sitting where the NEW text belongs,
+            # which is the loss the CHANGELOG actually describes.
+            store.record("first observation", EpisodeType.OBSERVATION)
+            prepare_wrap(store)
+            validated_save_continuity(store, continuity_text("OLDTEXT"))
+            assert "OLDTEXT" in store.continuity_path.read_text(
+                encoding="utf-8"
+            ), "wrap 1 did not land — the baseline for wrap 2 is not set up"
+
+            store.record("second observation", EpisodeType.OBSERVATION)
+            prepare_wrap(store)
+
+            real_log = store._audit.log
+            calls = {"n": 0}
+
+            def interrupt_once(*args, **kwargs):
+                # ONE-SHOT on purpose. The first audit emit of this wrap is
+                # the deferred ``wrap_completed`` replay; later emits must run
+                # normally or the arms stop discriminating. Phase 4's
+                # post-rename ``continuity_saved`` site swallows only
+                # ``Exception``, so a second interrupt would escape THERE and
+                # the failure would no longer name the handler under test.
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise KeyboardInterrupt("Ctrl+C during the audit replay")
+                return real_log(*args, **kwargs)
+
+            escaped: BaseException | None = None
+            store._audit.log = interrupt_once
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    validated_save_continuity(store, continuity_text("NEWTEXT"))
+            except BaseException as exc:  # noqa: BLE001
+                # DELIBERATE, and it is the whole reason this test can go red
+                # where its sibling cannot. An uncaught ``KeyboardInterrupt``
+                # ABORTS the pytest run rather than failing a test; catching
+                # it one frame out converts the regression into the
+                # assertions below. Nothing is swallowed — ``escaped`` is
+                # asserted on.
+                escaped = exc
+            finally:
+                store._audit.log = real_log
+
+            assert calls["n"] >= 1, (
+                "the interrupt never fired — the post-commit replay no longer "
+                "emits an audit event, so this test is not exercising the "
+                "guard it was written for"
+            )
+            assert store.continuity_path.exists(), (
+                "the continuity file is gone entirely after an interrupted "
+                "wrap"
+            )
+            body = store.continuity_path.read_text(encoding="utf-8")
+            assert "NEWTEXT" in body and "OLDTEXT" not in body, (
+                "a post-commit interrupt DESTROYED a committed wrap: the "
+                "continuity file still holds the previous session's text "
+                "while the wrap row and the episodes' wrap assignments are "
+                "durable. This is the data-loss path the post-commit "
+                "``except BaseException`` in ``_batch()`` exists to close."
+            )
+            assert escaped is None, (
+                f"{type(escaped).__name__} escaped the pipeline after the "
+                "batch committed; the caller cannot tell that from a batch "
+                "that failed, which is what triggers the sidecar unlink"
+            )
+        finally:
+            store.close()
+
+        reopened = Store(str(db))
+        try:
+            assert reopened.status().total_episodes == 2, (
+                "the committed episodes did not survive — a post-commit "
                 "interrupt was allowed to look like a failed batch"
             )
         finally:

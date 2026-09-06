@@ -2762,6 +2762,64 @@ class TestCodexL3TwentySixOhNineOhFour:
             "one from later in the same second"
         )
 
+    def test_status_reports_the_genuinely_newer_failure_not_just_the_local_one(
+        self, tmp_path
+    ):
+        """codex L3 MED, 2026-09-06 — the stale-writer class, on the READ side.
+
+        ``_current_audit_last_failure`` returned this process's own unflushed
+        failure whenever it had one, on the written premise that it "is
+        strictly newer than anything already committed". False as soon as a
+        second writer exists: A's flush fails and its failure stays pending, B
+        persists a LATER one, and A's ``status()`` kept reporting its own older
+        string without ever reading the row — the forensic pointer naming the
+        wrong final loss.
+
+        Both directions are asserted, because returning the stored value
+        unconditionally would pass the first half and be just as wrong.
+        """
+        from anneal_memory.store import Store, _AUDIT_LAST_FAILURE_KEY
+
+        db = tmp_path / "status.db"
+        store = Store(db)
+        try:
+            store.record("seed", episode_type="observation")
+            store._audit_failures_unpersisted = 1
+
+            def persist_from_another_writer(value):
+                other = Store(db)
+                try:
+                    other._conn.execute(
+                        "INSERT OR REPLACE INTO metadata (key, value) "
+                        "VALUES (?, ?)",
+                        (_AUDIT_LAST_FAILURE_KEY, value),
+                    )
+                    other._conn.commit()
+                finally:
+                    other.close()
+
+            persist_from_another_writer(
+                "record: THEIRS at 2026-09-06T10:00:05.000000Z"
+            )
+
+            store._audit_last_failure = (
+                "record: MINE at 2026-09-06T10:00:00.100000Z"
+            )
+            assert "THEIRS" in (store.status().audit_last_failure or ""), (
+                "status reported this process's older pending failure while a "
+                "newer one was already persisted by another writer"
+            )
+
+            store._audit_last_failure = (
+                "record: MINE at 2026-09-06T10:00:09.000000Z"
+            )
+            assert "MINE" in (store.status().audit_last_failure or ""), (
+                "status ignored a genuinely newer local failure in favour of "
+                "the stored one"
+            )
+        finally:
+            store.close()
+
     def test_mixed_precision_in_one_second_does_not_clobber_the_stored_value(
         self, tmp_path
     ):

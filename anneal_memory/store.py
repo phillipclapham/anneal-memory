@@ -4703,15 +4703,34 @@ class Store:
     def _current_audit_last_failure(self) -> str | None:
         """The last failure as of NOW — see :meth:`_current_audit_failures`.
 
-        This process's own unflushed failure wins when it has one, because it
-        is strictly newer than anything already committed.
+        ⛔ THE PENDING VALUE DOES NOT AUTOMATICALLY WIN (codex L3 MED,
+        2026-09-06). This used to return this process's own unflushed failure
+        whenever it had one, on the stated reasoning that it "is strictly newer
+        than anything already committed". That premise is false the moment a
+        second writer exists: A's flush fails and stays pending, B then
+        persists a LATER failure, and A's ``status()`` kept reporting its own
+        older string without ever reading the row. The forensic pointer named
+        the wrong final loss — the same class the stale-writer guard was
+        written for, on the read side instead of the write side.
+
+        Both candidates are now ordered with :meth:`_stored_failure_is_newer`,
+        so this shares one comparison with the write path — including its
+        mixed-precision rule — rather than growing a second opinion about
+        which of two stamps is later.
         """
-        if self._audit_failures_unpersisted and self._audit_last_failure:
-            return self._audit_last_failure
+        pending = (
+            self._audit_last_failure if self._audit_failures_unpersisted else None
+        )
         try:
-            return self._get_metadata(_AUDIT_LAST_FAILURE_KEY) or None
+            stored = self._get_metadata(_AUDIT_LAST_FAILURE_KEY) or None
         except Exception:
+            # Unreadable row: the in-memory value is all there is.
             return self._audit_last_failure
+        if pending is None:
+            return stored
+        if stored is None:
+            return pending
+        return stored if self._stored_failure_is_newer(pending) else pending
 
     @staticmethod
     def _failure_stamp(value: str | None) -> tuple[datetime, bool] | None:

@@ -5108,7 +5108,37 @@ class Store:
             return
         try:
             self._audit.log(event, payload, **kwargs)
-        except Exception as exc:
+        except BaseException as exc:
+            # ⛔ ``BaseException``, NOT ``Exception`` (codex L3 HIGH,
+            # 2026-09-06) — AND THE WIDENING IS ABOUT RECORDING, NOT ABOUT
+            # PROPAGATION. A ``KeyboardInterrupt`` from the sink walked past
+            # ``except Exception`` and out of the deferred replay, so
+            # ``_batch()``'s post-commit handler caught it, warned once, and
+            # ABANDONED THE REST OF THE QUEUE. MEASURED 2026-09-06 with a
+            # four-episode batch: four episodes committed, ONE audit emit
+            # attempted, ``audit_write_failures`` 0, nothing pending, and no
+            # audit file at all — every one of the four channels below stayed
+            # silent because none of them ran. The trail lost the window and
+            # ``verify()`` would have walked it clean.
+            # ⚠ AND THE TAIL NOW CONTINUES, which is the half that matters in
+            # practice: a real Ctrl-C is delivered ONCE, so containing it per
+            # event costs the one interrupted emit and writes the rest,
+            # instead of dropping every event after it.
+            # ⚠ THE COST, STATED, because it is the same trade ``_batch()``
+            # already made one level up: a ``SystemExit`` raised by the SINK
+            # is now recorded and swallowed here rather than escaping. This
+            # method runs POST-COMMIT and its whole contract is that nothing
+            # it does propagates — a raise makes the caller read a successful
+            # commit as a failure and unlink committed sidecars, which is the
+            # data-loss defect this handler exists to close. Do NOT "simplify"
+            # this back to ``Exception``, and do NOT add a re-raise: that is
+            # the prescription refused on 2026-09-05, mutation-tested, and it
+            # reintroduces the original bug.
+            # ⚠ UNCHANGED BY THIS: ``_persist_audit_health``'s own
+            # ``SystemExit`` re-raise, at the flush inside this handler below.
+            # A raise from THERE is inside the handler already and still
+            # propagates — ``except Exception`` around it does not catch it.
+            # That is deliberate and documented on that method.
             # ⛔ THE SWALLOW MUST NOT BECOME SILENCE, and the warning alone
             # cannot carry that load. FOUR channels, most-suppressible LAST,
             # so no filter configuration can blank all of them:

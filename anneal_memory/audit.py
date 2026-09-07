@@ -244,7 +244,11 @@ class AuditTrail:
         resume_at = active.stat().st_size if active.exists() else 0
         # ``_compute_hash`` is a staticmethod, pure in ``json_line``, so
         # hoisting it OUT of the guarded region below is side-effect-free
-        # and leaves that region containing nothing but the three stores.
+        # and leaves that region holding only the file write and the three
+        # stores — ``open`` / ``write`` / ``flush`` / ``fsync``, none of
+        # which can reach ``self``. (It did NOT leave "nothing but the three
+        # stores", as this line said until L1 read it on 2026-09-07; the
+        # allow-list in the AST test is the authority on that set.)
         # It also means a hash failure now raises BEFORE anything is
         # written, instead of after — no line on disk, nothing to roll back.
         new_prev_hash = self._compute_hash(json_line)
@@ -319,8 +323,21 @@ class AuditTrail:
             # assertion would not have found both: OUTSIDE-the-``try`` fails
             # on DUPLICATE SEQS on disk (``[0, 1, 2, 2]``) because nothing
             # rolls back, while inside-without-restore fails on
-            # ``verify(): valid=False`` (seqs ``[0, 1, 3]``) because the
-            # file rolled back and memory did not.
+            # ``verify(): valid=False`` because the file rolled back and
+            # memory did not.
+            #
+            # ⛔ AND THAT SECOND COLUMN'S TWO ARMS DO NOT LOOK ALIKE ON
+            # DISK — an earlier version of this comment gave one seq list
+            # for both, which is wrong and wrong in the reassuring
+            # direction:
+            #     ``_seq`` arm ............ seqs ``[0, 1, 2]``, mismatch at 2
+            #     ``_dropped`` arm ........ seqs ``[0, 1, 3]``, mismatch at 3
+            # The ``_seq`` arm is the ALARMING one: the seqs are
+            # CONTIGUOUS, there is no gap to notice, and ``verify()`` still
+            # reports tampering. An operator handed only the ``[0, 1, 3]``
+            # signature goes looking for a hole in the numbering and finds
+            # none. (Caught by L1, 2026-09-07, against a block labelled
+            # "transcribed from the run".)
             #
             # ⛔ SO DO NOT "SIMPLIFY" THIS BY DROPPING THE RESTORE. Moving
             # the advance inside the ``try`` without it does not take the
@@ -397,16 +414,48 @@ class AuditTrail:
             # rollback was written for, reached through the other exception
             # branch. A durability hiccup read as tampering, on the record
             # whose entire value is telling those apart.
-            # Best-effort rollback. If THIS fails too, the ambiguity stands and
-            # the exception below still surfaces it — we do not mask the
-            # original failure with a rollback failure.
+            # Best-effort rollback. If THIS fails too we do not mask the
+            # original failure with a rollback failure — the exception below
+            # still surfaces it.
+            # ⛔ BUT "THE AMBIGUITY STANDS" UNDERSTATES IT, AND THIS LINE
+            # SAID EXACTLY THAT UNTIL 2026-09-07. A failed truncate does not
+            # leave a neutral unknown: the entry stays on disk while the
+            # restore below unconditionally rewinds memory to "nothing
+            # landed", so the caller's retry reuses the seq. MEASURED (L2,
+            # 2026-09-07) with NO terminal signal at all — an ``fsync``
+            # reporting EIO after the data landed, then the rollback's
+            # ``open`` failing EROFS on the same sick disk: seqs
+            # ``[0, 1, 2, 2]``, ``verify(): valid=False``. A FALSE TAMPERING
+            # VERDICT, in the dangerous direction, reachable with ordinary
+            # exceptions only.
+            # ▶ NOT CLOSED HERE, and the candidate fix is recorded so the
+            # next reader does not have to re-derive it: make the restore
+            # CONDITIONAL on the truncate having succeeded. If the entry is
+            # still on disk, leaving memory ADVANCED is what makes the two
+            # agree. It is a rollback-semantics change on a file whose
+            # independent review was cut off twice on 2026-09-07, and the
+            # outcome is unchanged from before this handler existed, so it
+            # is filed rather than smuggled in. See ``next_steps.md``.
             try:
                 with open(active, "r+b") as f_trunc:
                     f_trunc.truncate(resume_at)
                     f_trunc.flush()
                     os.fsync(f_trunc.fileno())
             except Exception:
-                pass
+                # ⛔ NOT A BARE ``pass``. This module logs the far more
+                # benign ``on_event`` and orphan-adoption failures, and this
+                # is the branch that ends in ``verify(): valid=False`` — an
+                # operator hitting it got a red integrity verdict with zero
+                # breadcrumbs. Logged, not raised: raising here would mask
+                # the original failure with the rollback's.
+                logger.warning(
+                    "audit rollback failed for seq %d; the aborted entry is "
+                    "still on disk and the chain state has been rewound, so "
+                    "a retry will reuse this seq and verify() will report a "
+                    "hash mismatch",
+                    entry["seq"],
+                    exc_info=True,
+                )
             (
                 self._prev_hash,
                 self._seq,
@@ -626,7 +675,23 @@ class AuditTrail:
         self._adopt_orphaned_files()
 
         active = self._active_path
-        if not active.exists():
+        # ⛔ ``or st_size == 0`` IS LOAD-BEARING, AND THIS FILE ALREADY KNEW
+        # IT — ``_rotate_if_needed`` uses exactly this predicate. The two
+        # disagreed, and the rollback below can CREATE the state they
+        # disagree about: an append that fails as the first write into a
+        # freshly rotated file truncates back to ``resume_at = 0`` and
+        # leaves a ZERO-BYTE active file. A bare ``exists()`` then reads
+        # that as "an active file with entries", skips the manifest
+        # continuity branch, and keeps ``_prev_hash = GENESIS`` while the
+        # sealed files ended somewhere else entirely.
+        # MEASURED 2026-09-07 (L2): the next process writes seq 0 chained
+        # from GENESIS and ``verify()`` returns
+        # ``Hash mismatch at seq 0: expected sha256:6101402b..., got
+        # sha256:GENESIS...`` — a false tampering verdict produced by the
+        # rollback SUCCEEDING. A zero-byte file holds no entries, so
+        # continuity must come from the manifest; there is no reading under
+        # which the bare ``exists()`` was right.
+        if not active.exists() or active.stat().st_size == 0:
             # Fresh start — check manifest for chain continuity from sealed files
             if self._manifest_path.exists():
                 try:

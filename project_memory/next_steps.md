@@ -23,6 +23,156 @@
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
 
+## ▶▶ PICKUP 2026-09-07 (SEAT 0907+8) — 3 FILED, ALL 3 CLOSED, AND THE ONE I "CORRECTED" WAS RIGHT.
+
+**⛔ COVERAGE IS UNKNOWN FOR THIS REPO TODAY — 3 CLOSED, NOT "CLEAN".** Diogenes opened a
+COVERAGE-OPEN slot for anneal-memory and never closed it, so the finding list was PARTIAL and how
+far the review got is not known. It also ran SINGLE-LINEAGE. ▶ The fan-in's measurement (`0907+1`):
+the four repos whose reviews did not close are **exactly** the four with the SMALL commit windows
+(flow 11, video-poker 5, anneal-memory 1, nowhere 1) and **exactly** the four that ran
+single-lineage. Two properties, perfectly correlated, **cause UNKNOWN and deliberately not guessed
+at** — it inverts the intuition that big reviews die. Held by the fan-in as an open question.
+⛔ **Do not read the absence of a finding in this repo today as health.**
+
+### 1. MEDIUM `audit.py:282` — CLOSED, AND THE FILED PRESCRIPTION WOULD HAVE MADE IT WORSE
+The chain-state advance sat OUTSIDE the `try` that rolls the file back, so an interrupt after fsync
+left the entry on disk with `_seq`/`_prev_hash` unchanged and the retry produced `verify():
+valid=False` — **a durability hiccup read as tampering**, on the record whose whole value is telling
+those apart. Real, reproduced.
+⛔ **THE PRESCRIPTION AS FILED — "move the three chain-state lines inside the `try`" — TAKES THE
+BROKEN WINDOWS FROM ONE TO TWO.** The advance is THREE SEPARATE STORES; moving it in without
+restoring the prior values means an interrupt between two of them rolls the FILE back while memory
+stays ahead, and the retry chains over a hole. Measured, 4 interrupt points x 3 variants:
+
+| interrupt before | advance OUTSIDE try (was) | inside, NO restore (as filed) | inside + restore (shipped) |
+|---|---|---|---|
+| `os.fsync` | pass | pass | pass |
+| `_prev_hash` store | **FAIL** | pass | pass |
+| `_seq` store | pass | **FAIL** | pass |
+| `_dropped_since_last` | pass | **FAIL** | pass |
+
+⚠ The two failing columns fail DIFFERENTLY — outside-the-try on **duplicate seqs** (`[0,1,2,2]`),
+inside-without-restore on **`verify(): valid=False`** (`[0,1,3]`) — so one assertion would not have
+caught both. ▶ The filed verification tested only the FIRST injection point and reported the full
+suite green, because no test covered the windows the fix opened. **The suite passing is not
+evidence about a window nothing exercises.**
+▶ **SHIPPED:** hoist `_compute_hash` (pure staticmethod) out of the guarded region, snapshot the
+trio before the `try`, advance inside it, restore the snapshot FIRST in the handler (it cannot
+raise; the truncate can).
+▶ **STILL OPEN, NAMED IN THE CODE:** an interrupt landing INSIDE the handler — between two restore
+stores, or after the restore and before the truncate — needs a second terminal signal during the
+handling of the first. Collapsing the trio into ONE attribute closes the first of those. ⚖ **Scope
+re-measured: the trio is PRIVATE TO `audit.py`** (`store.py`'s only mention is a comment), so this
+is a one-module change, cheaper than the "two modules" I first wrote from a loose grep.
+▶ **TWO NEW GATES, both mutation-verified in both directions:** a 3-arm parametrized interrupt test,
+and an **AST structural invariant** asserting all three stores are inside the guarded region and
+that the region contains no call that can reach `self` (moving a store out → red; adding
+`self._initialize()` inside → red).
+
+### 2. MEDIUM `test_audit.py:2219` + `next_steps.md` — CLOSED. **THE GATE IS ALIVE; THE RECIPE WAS DEAD.**
+The docstring's single-site mutation recipe returns `1 passed`. Confirmed. True when written and
+falsified by two later commits in the same window, each adding an independent containment layer
+*upstream* of the named site.
+⛔ **AND I NEARLY FILED A FALSE CONTRADICTION OF A CORRECT FINDING.** My first run said the
+THREE-site arm also passed — contradicting the report. It was never a three-site arm: two sites read
+`except BaseException:` and one reads `except BaseException as exc:`, and my mutator asserted on
+`.startswith(...)` while replacing on the literal `"except BaseException:"`. The third site was
+never mutated and **the script printed success**. With the mutator fixed to read the line back off
+disk: `5798` alone → `1 passed` · `5213`+`5858` → `1 passed` · **all three → `1 FAILED`** · control
+→ `1 passed`. Diogenes was right on every arm.
+⭐ **THE RULE: A MUTANT MUST BE READ BACK OFF DISK AFTER IT IS WRITTEN.** Asserting the site LOOKS
+right before mutating is not confirming the mutation LANDED, and the two are indistinguishable from
+the test's output — both green. Routed cross-repo.
+▶ Recipe corrected in BOTH homes (the docstring and this file), with the structural reason: the
+three handlers are a **nested containment chain on one path**, innermost wins, so no single-site
+mutation can ever be observable. ▶ **NOT split into per-layer arms**, and the reason is structural:
+no injection point exists that only one layer can contain. A per-layer arm would have to assert each
+layer's distinctive side effect (drop RECORDED / replay CONTINUES / sidecars NOT unlinked) rather
+than that the wrap survived — a different test with a different subject. **Worth building.**
+
+### 3. LOW `store.py:1715` — **DOES NOT REPRODUCE.** The `~5s` stands; the finding does not.
+Filed as "the figure is the CONFIGURED setting wearing the word measured; the real block is ~11.7s,
+2.4x". Re-derived five ways here and it comes out ~5.4s:
+· four probe runs — **5.37 / 5.36 / 5.41 / 5.38 s**, `PRAGMA busy_timeout` read back as **5000 ms**
+· the open traced to **EXACTLY ONE `BEGIN IMMEDIATE`** — no second acquisition, no hidden retry,
+  which is what an 11.7s reading would most naturally be (two 5s timeouts back to back)
+· ⭐ **and the strongest, because it is not mine:** a standing suite test that reaches the identical
+  failure through real contention, timed by pytest — `5.21s` / `5.22s`
+  (`pytest tests/test_cli.py --durations=3 -k real_contention_reports_a_peer`)
+⚠ **NOT "the review was wrong"** — one box, one filesystem, one SQLite build against another. What
+is established is that the number is not merely the setting copied down. The finding's own
+load-bearing half (that the contention is NOT NEW) was confirmed by both runs independently.
+▶ The claim has a **THIRD home the report did not name** — this file, line ~116 — alongside
+`store.py` and `CHANGELOG.md`. Left as-is because the figure holds. The propagation pattern held
+again: three surfaces for one sentence.
+
+### 4. ⛔ L3 FOUND A REAL DEFECT IN MY OWN FIX, AND THE ORDER INSIDE THE HANDLER IS NOW INVERTED
+**codex (L3) against the version I had just written:** the handler restored the in-memory state
+FIRST and truncated second, on my argument that "the restore cannot raise; the truncate can". codex:
+that optimises the wrong thing — **the truncate is the step that MUST happen**, and a terminal signal
+inside the handler kills everything after where it lands. It also falsified the residual note I had
+just shipped, which claimed the window needed a SECOND terminal signal.
+▶ **MEASURED — original failure an ordinary `OSError` (ENOSPC), then ONE `KeyboardInterrupt` during
+the restore:**
+
+| signal during restore of | restore first (what I shipped) | truncate first (now) |
+|---|---|---|
+| `_prev_hash` | seqs `[0,1,2,2]` · **valid=False** | seqs `[0,1,2]` · valid=True |
+| `_seq` | **valid=False** | valid=True |
+| `_dropped_since_last` | **valid=False** | valid=True |
+
+⚖ **ONE signal is enough, not two — because the original failure need not be terminal at all.**
+Order inverted, rationale rewritten, and pinned by a new 3-arm test
+(`test_the_rollback_truncates_before_it_restores`) that goes red on all three arms when the order is
+swapped back, while the other five tests stay green under that same mutant.
+⚠ **complement (also L3) flagged the SAME site and graded it BENIGN** — "a seq gap, not a false
+tampering verdict, because `verify()` checks hash linkage not seq monotonicity". **Measured false:**
+it produces `valid=False`. Two seats, same site, opposite severity, and the measurement decided it.
+
+### 5. 🔴 NEW, CONFIRMED, DELIBERATELY NOT LANDED — `audit.py:400`, a terminal exception from `on_event`
+**codex (L3).** The `on_event` callback is invoked AFTER the entry is durable and the chain state has
+advanced, and its handler catches only `Exception`. A `KeyboardInterrupt` or `SystemExit` from the
+callback therefore ESCAPES `log()`, and the caller cannot tell that from a failed append: it calls
+`note_write_failure()`, and the next entry carries **`dropped_before=1` naming a write that is
+sitting on disk**. Measured:
+
+```
+KeyboardInterrupt  escaped  seqs=[0,1,2] events=['first','second','third'] dropped_before=[None,None,1]
+SystemExit         escaped  seqs=[0,1,2] events=['first','second','third'] dropped_before=[None,None,1]
+RuntimeError       handled  seqs=[0,1,2] events=['first','second','third'] dropped_before=[None,None,None]
+```
+
+`verify()` stays `valid=True` — the chain is intact. **The damage is that the record makes a false
+statement about itself**, on the artifact whose entire value is telling a durability problem from
+tampering. Ordinary exceptions are handled correctly; the asymmetry is exactly the terminal ones.
+⛔ **NOT FIXED TODAY, and this is a decision rather than a deferral.** Three reasons: (1) it is
+**pre-existing**, not a regression from this change — the callback block is untouched, so nothing
+degrades by filing it; (2) both available fixes are POLICY changes to terminal-signal semantics —
+either swallow `KeyboardInterrupt` raised by user callback code, or change the `AuditTrail`↔`Store`
+contract so "the append failed" and "the post-append callback failed" are distinguishable — and this
+repo has been tuning terminal-signal handling all week, so that is a design call, not a patch;
+(3) **L3 coverage on this file was INCOMPLETE** — see below.
+▶ Pick this up with the contract question first: what should `Store` do when the append LANDED but
+the callback died?
+
+### ▶ L3 COVERAGE WAS INCOMPLETE ON `audit.py` — DO NOT READ THE FINDING LIST AS EXHAUSTIVE
+`complement` and `codex` both ran and read through (codex 429s, 2 MED, both confirmed against disk).
+**`glm` was CUT OFF** — it produced output but never read the target through. A second pass
+(`glm-5.3`, `gpt-oss`) was dispatched. The reviewed surface is a file that was ENTIRELY rewritten in
+this window, and the base-rate gauge flagged it: **2 of 2 cited files (100%) were changed in the last
+24h.** Fixing a class does not exempt the fix from the class — and today it did not: codex found a
+real defect inside the fix, and the fix's own comment carried a false claim.
+
+### ▶ WHAT THIS SESSION'S OWN ERRORS WERE, because they are the day's class landing on the corrector
+1. The filed prescription, applied literally, would have opened two windows while closing one.
+2. My mutator silently no-op'd and reported success → a confident, wrong contradiction of a correct
+   finding. **Caught only by running it, never by reading it.**
+3. My first draft of the fix's own comment claimed the two mutants "fail DISJOINT arms". They
+   overlap at `_seq`. Caught by transcribing the arm sets from the run instead of the diff.
+4. My scope claim said "35 sites across `audit.py` and `store.py`". Measured: 27, one module.
+**Four errors, all inside work whose subject was this exact class, and not one of them was found by
+re-reading.**
+
 ## ▶▶ PICKUP 2026-09-06 (SEAT 0906+6) — ALL FIVE DIOGENES FINDINGS CLOSED, spore-773 BUILT, AND L3 FOUND A HIGH INSIDE MY OWN MORNING FIX.
 
 **Seat 0906+6, Sunday.** Opened for the five Diogenes filed overnight (0 HIGH / 4 MED / 1 LOW +
@@ -72,9 +222,20 @@ stale before the session closed — the count more than doubled after it was wri
 the only form that cannot go stale; the categories below are what it will not tell you.
 1. **MED `tests/test_audit.py`** — the wrap-destruction guard was pinned by a test that drives
    `store._batch()` and never reads the continuity file. Now asserts on the artifact, through the
-   canonical pipeline. ⚠ **Run its mutation with that test selected ALONE** — under the mutant the
-   SIBLING test aborts the pytest session first, so `-k interrupt` reports an abort and looks like
-   this one cannot go red either. It can: selected alone the mutant gives `1 failed`.
+   canonical pipeline.
+   ⛔ **CORRECTED 2026-09-07 — THE MUTATION RECIPE THAT STOOD HERE WAS FALSE.** It said the mutant
+   "selected alone gives `1 failed`". Run verbatim it gives **`1 passed`**. True when written and
+   falsified by two commits later in the same window (`926be6a`, `200382d`), each of which added an
+   independent containment layer *upstream* of the site the recipe named. **The gate is fine; the
+   recipe was dead.** The three handlers are a NESTED chain on one path — innermost wins — so no
+   single-site mutation is observable. Measured 2026-09-07, test selected alone
+   (`-k cannot_destroy_a_committed_wrap`), narrowing `except BaseException` → `except Exception`:
+   `store.py:5798` alone → `1 passed` · `5213`+`5858` → `1 passed` · **all three → `1 FAILED`** ·
+   control → `1 passed`. The full recipe now lives in the test's own docstring.
+   ⚠ **And verify your mutation applied by reading it back off disk** — one of the three sites is
+   `except BaseException as exc:`, so a mutator matching only `except BaseException:` no-ops there
+   and reports success. That produced a confident, wrong contradiction of a correct finding during
+   this very repair.
 2. **MED `store.py` `close()`** — a real leak, reproduced first: a `SystemExit` in the pre-close
    flush skipped `self._conn.close()`, leaving `_closed` False and the handle USABLE.
 3. **MED `store.py` version stamp** — see the section above.

@@ -163,6 +163,56 @@ this window, and the base-rate gauge flagged it: **2 of 2 cited files (100%) wer
 24h.** Fixing a class does not exempt the fix from the class — and today it did not: codex found a
 real defect inside the fix, and the fix's own comment carried a false claim.
 
+### 6. ⛔ THE SECOND L3 PASS FALSIFIED MY CORRECTION'S OWN CORRECTION — `glm-5.3`, and it was right
+I shipped, one hour after inverting the handler order, a comment saying truncate-first "needs TWO
+terminal signals (one to enter the handler, one to interrupt it) — **MEASURED, not assumed**".
+**False in the ordinary-entry regime, and the MEASURED tag was unearned:** my table and my ordering
+test interrupt only at the three RESTORE stores — the one place truncate-first wins — and **never
+interrupt the truncate itself.** glm-5.3 named exactly that and named why it was invisible.
+▶ **MEASURED, ordinary `OSError` entry + ONE `KeyboardInterrupt`:**
+
+| signal lands at | result |
+|---|---|
+| any of the 3 restore stores | seqs `[0,1,2]` · valid=True |
+| **the truncate's `open()`** | **seqs `[0,1,2,2]` · valid=False** |
+| the truncate's `fsync()` | seqs `[0,1,2]` · valid=True — `truncate()` already took effect |
+
+⚖ **HONEST STATEMENT: in the ordinary-entry regime BOTH orderings need exactly ONE terminal signal.
+Truncate-first does not raise the count — it NARROWS WHERE the signal must land**, from "anywhere in
+the handler" to "inside the truncate, before it takes effect". Still strictly better, still the right
+order; a smaller claim than the one I made. Two signals are required only when the ENTERING exception
+is itself terminal.
+▶ **PINNED, not just described:** `test_a_signal_inside_the_truncate_is_still_an_open_window`, an
+`xfail(strict=True)` arm. When the structural close lands it reports XPASS — the notification is
+mechanical rather than a comment someone has to re-read. (First xfail in this suite; the idiom is
+deliberate for a known-open residual.)
+
+### 7. 🔵 FILED, NOT LANDED — `verify()` cannot see a duplicated entry whose chain is continuous
+`glm-5.3` LOW, found while substantiating the above. `AuditTrail.verify` checks **only `prev_hash`
+linkage** — `seq` is parsed solely to populate `chain_break_at`. So a retry that chains off a
+still-present aborted line yields disk seqs `[0,1,2,2]` with **every link valid** and
+`verify() -> valid=True, error=None`: a clean bill of health over a trail with a duplicated logical
+entry. ⚠ This also explains why my own earlier duplicate-seq measurements DID report `valid=False` —
+there `_prev_hash` had not advanced, so linkage broke. **Both are real; they are different states.**
+▶ Fix is cheap and bounded: enforce seq monotonicity WITHIN each file in `verify()`, reseeding at
+rotation boundaries from the manifest's `active_last_seq`. ⛔ Not landed: it changes the semantics of
+the operator's public integrity tool, at the end of a session, on a file whose L3 coverage came back
+INCOMPLETE **twice** (glm cut off in pass 1, glm-5.3 cut off in pass 2).
+
+### ▶ `gpt-oss` (breadth seat) — ALL FOUR SUGGESTIONS REFUSED, WITH REASONS
+1. *"Add a `threading.Lock` around the append"* — `AuditTrail` is documented single-writer, not
+   thread-safe, not reentrant; the README states multi-writer breaks the chain by construction. A
+   mutex would imply a guarantee the class does not make.
+2. *"Restrict the catch to `except Exception` so terminal exceptions are not intercepted"* — this is
+   a straight **revert of the codex L3 HIGH from 2026-09-06**, and of the defect closed today. It
+   would reopen both.
+3. *"Do not silently ignore rollback failures"* — already documented at the site as deliberate
+   best-effort: masking the original failure with a rollback failure is worse.
+4. *"Document that `_compute_hash` stays pure and test it"* — **already done today**, and more
+   strongly than suggested: the AST invariant pins the whole guarded region's call set.
+⚠ Useful as a base-rate reading: a breadth seat with no repo context proposed undoing two verified
+fixes. Weight accordingly.
+
 ### ▶ APPARATUS FAILURE — L1 AND L2 RETURNED NOTHING, AND THAT IS NOT "CLEAN"
 Both review agents were dispatched in parallel at the start, both went **idle**, and **neither ever
 delivered a report** — including after two direct follow-up requests each naming the questions I

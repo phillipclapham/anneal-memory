@@ -23,8 +23,13 @@ one to two rather than to zero. The restore is what closes it.
 terminal signal inside the handler kills everything past where it lands, so the fallible-but-
 essential operation goes first. Measured with an ordinary `OSError` as the original failure plus a
 single `KeyboardInterrupt` during the restore: restore-first gives seqs `[0, 1, 2, 2]` and
-`valid=False` on all three arms; truncate-first gives `[0, 1, 2]` and `valid=True`. One terminal
-signal is enough to hit this, not two.
+`valid=False` on all three arms; truncate-first gives `[0, 1, 2]` and `valid=True`.
+
+**This narrows the window; it does not close it.** With an ordinary I/O failure as the entry, one
+terminal signal is still enough if it lands inside the truncate before `truncate()` takes effect —
+so both orderings need exactly one signal in that regime, and truncate-first only moves where it has
+to land. Two are required only when the exception that entered the handler was itself terminal. The
+residual is pinned by a strict `xfail` arm, so it announces itself when a later change closes it.
 
 Graded by four interrupt points across the append, a three-arm ordering test, and an AST invariant
 asserting the guarded region contains all three stores and no call that can reach `self` — because

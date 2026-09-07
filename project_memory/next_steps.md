@@ -1822,3 +1822,104 @@ branch — in which case the restore must stay and codex's guarantee-one-of-two 
 
 ⚠ **`glm` returned `{"findings": []}` on the same diff codex found three HIGHs in.** One seat's clean
 pass is not coverage — recorded so the next reader does not read two seats as two opinions.
+
+
+---
+
+## 17. ⛔⛔ CODEX ROUND 2 GRADED THE GATES THEMSELVES — 9 FINDINGS, 8 REAL, AND ONE OF MINE WAS A REPEAT OF THE DEFECT I HAD JUST FIXED
+
+`deep_review.py --diff 0e6f1564 --paths tests/test_audit.py --seats codex --timeout 900`, 760s.
+**No HIGH; 7 MED, 2 LOW — and that grading is right.** None of them was a live product bug. **Every
+one was a gate that could pass without grading its subject**, which is the only class that matters
+when the gates are the artifact. ⚠ **codex could NOT execute these tests** (no writable tmpdir in
+the review environment), so its runtime claims are DERIVATIONS. Two were checked by measurement
+before being believed; one of those was refuted.
+
+### ⛔ THE ONE THAT MATTERS MOST: I REPRODUCED, IN MY OWN NEW TEST, THE DEFECT I HAD FOUND AND FIXED HOURS EARLIER IN THIS FILE
+`_sick_disk` raised on **every** `os.fsync` while armed — the identical unscoped-injection defect
+I had caught in `test_the_rollback_truncates_before_it_restores` that morning, written a rule about
+in §15, and recorded as a transferable lesson. **Then wrote again, in the same file, in the same
+session.** ⚡ **Knowing a class does not immunise you against producing it, and the strongest form
+of that evidence is producing it while the class is the explicit subject of your own notes.**
+⛔ **AND CODEX NAMED THE TRIGGER THAT MAKES IT LIVE — IT IS THIS REPO'S OWN NEXT FILED TASK.** *"If
+`log()` gains an earlier directory/file fsync inside the guarded region, that call consumes the
+fault before any line is written."* **Item 2 of the OPEN block at the top of this file is "add the
+`_fsync_dir` idiom to this module."** The latent defect was scheduled to be activated by work
+already on the list. ▶ All injections now fire ONCE, record that they fired, and the callers
+**assert** it — an injection that stops reaching its site now fails loudly instead of passing quietly.
+
+### ⛔ MY FIX SILENTLY TURNED THE MORNING'S OWN GATE INTO DECORATION
+`_seed_from_manifest()` in the no-valid-entry branch also catches the zero-byte case, so
+`or active.stat().st_size == 0` stopped being load-bearing **for correctness**. MEASURED: delete
+that clause and the entire audit suite still passes, 165 green — **the mutant its docstring claims
+to be killed by no longer kills it.** A gate written and mutation-verified that morning became
+decoration by lunchtime, **without being edited, while staying green.**
+⚠ **And it invalidated a claim I had made the same hour:** my new test cited "the zero-byte sibling
+stays green under that mutant" as a PAIRED POSITIVE proving correct scoping. **It was worthless as
+a control** — the sibling is now insensitive to both mutants, so it discriminated nothing.
+▶ The clause is KEPT, because it is still load-bearing for a DIFFERENT property: read errors now
+propagate, so routing an empty file through the scan turns a recoverable state into a raise. That
+property now has its own gate (`test_the_zero_byte_fast_path_avoids_a_read_that_can_now_raise`),
+mutation-verified. **A guard that outlives its original justification needs a new gate, not an
+obsolete claim.**
+
+### ⭐ THE ARM-4 ANSWER — ENUMERATE THE NODE TYPES, NOT THE SCENARIOS
+I asked codex explicitly: *for the structural gates, enumerate the node types the property could be
+expressed in and say which the gate does NOT see.* It did, and the answer is why every mutant ever
+written for that gate scored perfectly against a gate that was blind to most of Python.
+**`test_the_guarded_region_cannot_be_widened_into_something_self_touching` saw only `Assign` and
+direct-attribute `AugAssign`, flattening tuples one level.** It could not see `AnnAssign`,
+`For`/`AsyncFor`, `With`/`AsyncWith`, comprehension and walrus targets, `Delete`, `Starred`, nesting
+deeper than one level, `self.__dict__[...]` subscript writes, or `setattr`/`object.__setattr__` —
+**and `ast.walk` descended into nested `FunctionDef`/`Lambda`/`ClassDef`, so a store in a closure
+that NEVER RUNS could satisfy `stored_inside == trio` by itself.**
+▶ Fixed: recursive leaf extraction, every store-form node type, a scope-limited walker, and an
+outright refusal of indirect mutation. **MUTATION-CHECKED ON ALL SIX NEW FORMS — `__dict__` write,
+`setattr`, `AnnAssign`, `For` target, nested destructuring, `with ... as self._seq` — every one
+KILLED, and every one would have left the gate green before.**
+⚖ **`test_the_restore_puts_prev_hash_before_seq` had the same disease**: it accepted ANY
+single-target tuple whose element names matched, requiring neither `self` as base, nor placement in
+the handler, nor `saved_chain_state` as the RHS. **MEASURED: a REVERSED real restore plus a decoy
+correctly-ordered tuple elsewhere in `log()` passed it.** Now anchored to the handler and the
+snapshot; both mutants killed.
+
+### ▶ THE REST, ALL LANDED
+- **The strict `xfail` treated ANY failure as the expected one**, so a residual that got FIXED while
+  some other part of the test broke would still print XFAIL and the promised XPASS notification
+  would never arrive. **A green that covers every possible red is not reporting on its subject.**
+  Now: preconditions are hard failures, `pytest.xfail()` fires only on the exact signature
+  (duplicate seqs AND an invalid chain, both printed in the reason), and **any other outcome fails
+  loudly saying so is the notification.**
+- **The read-failure gate injected only `OSError`** while the suppression removed covered `OSError`
+  *and* `UnicodeDecodeError` — re-suppressing the second alone passed it. Parameterised over both.
+  ⚡ **A guard removed over N exception types needs N arms; mutating the arms that exist cannot find
+  a missing one.**
+- **The `note_write_failure` fixture never built the state it claimed.** It flipped `_initialized`
+  by hand after two healthy writes, where `_seq` is 2, disk ends at seq 1, and **2 is the CORRECT
+  location** — so it could not tell "returns None when invalidated" from "returns None usefully".
+  Now reached through a real failed rollback, asserting seq 2 IS on disk first.
+- **The raising-log-handler gate exploded every `logger.warning`**, not the rollback one. Scoped,
+  and it now asserts the rollback warning actually fired.
+- **A mutation recipe's coordinates were all stale** — it named `store.py` 5212/5798/5858 while the
+  handlers had moved to 5242/5827/5887, so following it verbatim narrows a COMMENT and an
+  ASSIGNMENT and returns the reassuring green the docstring itself warns about. ⚠ **And a bare
+  `grep` is not the fix either: `_batch` has THREE `except BaseException` handlers.** Replaced with
+  an AST derivation keyed on function name.
+
+### ⚖ REFUTED BY MEASUREMENT — ONE FINDING, AND THE MECHANISM WAS WRONG
+codex claimed the ordering gate's property setter **never fires**, so all three arms pass without
+exercising restore ordering. **MEASURED: `fired=1` on all three arms, `KeyboardInterrupt` escaping,
+seqs `[0,1,2]`** — and the restore-first mutant kills all three. It could not run the tests and
+derived that the injected `OSError` satisfies `pytest.raises(BaseException)` first; it does not,
+because the restore runs INSIDE the handler and the interrupt is what escapes.
+▶ **But the finding identified real looseness even with a false mechanism**: `BaseException` would
+accept the `OSError` if the setter ever stopped firing, so the gate could not NOTICE that. Now
+`pytest.raises(KeyboardInterrupt)` plus an asserted fired-counter. **A wrong mechanism can still
+point at a real hole — grade the claim, not the reasoning.**
+
+### ⚖ ROUND 3: NOT WARRANTED, AND THE REASON IS NOT CAPACITY
+Round 2 changed **only test code** — no product behaviour moved, and the suite went 1897 -> 1899
+with mypy clean throughout. The round-1 → round-2 pattern that justified round 2 (fixes carrying
+their own class) does not reproduce here: **every round-2 change is a gate becoming STRICTER, and
+each was mutation-verified in the same pass rather than asserted.** ▶ WHAT WOULD CHANGE MY MIND: a
+round-2 change that altered `anneal_memory/` rather than `tests/`. There were none.

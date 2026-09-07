@@ -403,7 +403,7 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
         from anneal_memory.audit import AuditTrail
 
         shadow = "__order" + store_attr
-        armed = {"attr": None}
+        armed = {"attr": None, "fired": 0}
 
         def _getter(self):
             return self.__dict__[shadow]
@@ -411,6 +411,7 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
         def _setter(self, value):
             if armed["attr"] == store_attr:
                 armed["attr"] = None
+                armed["fired"] += 1
                 raise KeyboardInterrupt("Ctrl+C inside the rollback handler")
             self.__dict__[shadow] = value
 
@@ -460,8 +461,21 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
 
         monkeypatch.setattr(audit_module.os, "fsync", fsync_then_enospc)
         armed["attr"] = store_attr
-        with pytest.raises(BaseException):
+        # ⛔ ``KeyboardInterrupt``, NOT ``BaseException``. The injected
+        # ``OSError`` also satisfies a bare ``BaseException``, so the loose
+        # form passes on a tree where the restore stopped running and the
+        # interrupt therefore never fired — it would grade nothing and say
+        # nothing. Named by codex (L3, 2026-09-07) as a false-green risk;
+        # ⚠ MEASURED the same hour, the setter DOES fire on all three arms
+        # today (`fired=1`, ``KeyboardInterrupt`` escaping, seqs [0,1,2]),
+        # so the gate is under-asserted rather than broken. The counter
+        # below is what makes the difference detectable.
+        with pytest.raises(KeyboardInterrupt):
             trail.log("record", {"i": 2})
+        assert armed["fired"] == 1, (
+            "the interrupt never fired at the "
+            f"{store_attr} store, so this arm graded nothing"
+        )
         monkeypatch.setattr(audit_module.os, "fsync", real_fsync)
 
         trail.note_write_failure()
@@ -524,19 +538,47 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
             n for n in cls.body
             if isinstance(n, ast.FunctionDef) and n.name == "log"
         )
+        # ⛔ ANCHORED TO THE HANDLER, AND TO THE SNAPSHOT IT RESTORES FROM.
+        # This search was ``ast.walk(log)`` for any single-target tuple
+        # assign whose elements are Attributes — it required neither
+        # ``self`` as the base, nor placement inside the rollback handler,
+        # nor ``saved_chain_state`` as the RHS. So a dead or unrelated
+        # correctly-ordered tuple anywhere in ``log()`` satisfied it while
+        # the REAL restore was reversed, or expressed as sequential
+        # ``Assign``s, and this gate stayed green. codex (L3, 2026-09-07).
+        handlers = [
+            h for n in ast.walk(log) if isinstance(n, ast.Try)
+            for h in n.handlers
+            if isinstance(h.type, ast.Name) and h.type.id == "BaseException"
+        ]
+        assert len(handlers) == 1, (
+            f"expected exactly one BaseException handler in log(), found "
+            f"{len(handlers)}"
+        )
+        handler = handlers[0]
+
+        def _is_self_attr(e):
+            return (
+                isinstance(e, ast.Attribute)
+                and isinstance(e.value, ast.Name)
+                and e.value.id == "self"
+            )
+
         restores = [
-            n for n in ast.walk(log)
+            n for n in ast.walk(handler)
             if isinstance(n, ast.Assign)
             and len(n.targets) == 1
             and isinstance(n.targets[0], ast.Tuple)
-            and all(
-                isinstance(e, ast.Attribute) for e in n.targets[0].elts
-            )
+            and n.targets[0].elts
+            and all(_is_self_attr(e) for e in n.targets[0].elts)
+            and isinstance(n.value, ast.Name)
+            and n.value.id == "saved_chain_state"
         ]
         assert len(restores) == 1, (
-            f"expected exactly one tuple restore in log(), found "
-            f"{len(restores)} — if the rollback grew a second one, this "
-            f"test no longer knows which order it is grading"
+            f"expected exactly one tuple restore from ``saved_chain_state`` "
+            f"inside the rollback handler, found {len(restores)} — if the "
+            f"rollback grew a second one, or the restore stopped reading the "
+            f"snapshot, this test no longer knows which order it is grading"
         )
         names = [e.attr for e in restores[0].targets[0].elts]
         assert names[0] == "_prev_hash", (
@@ -551,18 +593,6 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
             f"['_prev_hash', '_seq', '_dropped_since_last']"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "KNOWN-OPEN residual, measured 2026-09-07 (glm-5.3, L3). One "
-            "ordinary I/O failure plus ONE terminal signal landing inside "
-            "the truncate before it takes effect still corrupts. Closing it "
-            "needs the structural change (one attribute, or a persisted "
-            "dirty marker reconciled on the next append). When that lands "
-            "this arm starts passing and pytest reports it as an unexpected "
-            "pass — which is the notification, not a nuisance."
-        ),
-    )
     def test_a_signal_inside_the_truncate_is_still_an_open_window(
         self, tmp_path, monkeypatch
     ):
@@ -611,12 +641,13 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
         def open_that_dies_in_the_handler(*args, **kwargs):
             mode = args[1] if len(args) > 1 else kwargs.get("mode", "")
             if phase["at"] == "handler" and "b" in str(mode):
+                phase["fired"] = phase.get("fired", 0) + 1
                 raise KeyboardInterrupt("Ctrl+C before the truncate landed")
             return real_open(*args, **kwargs)
 
         monkeypatch.setattr(audit_module.os, "fsync", fsync_then_enospc)
         monkeypatch.setattr(builtins, "open", open_that_dies_in_the_handler)
-        with pytest.raises(BaseException):
+        with pytest.raises(KeyboardInterrupt):
             trail.log("record", {"i": 2})
         monkeypatch.setattr(builtins, "open", real_open)
         monkeypatch.setattr(audit_module.os, "fsync", real_fsync)
@@ -632,10 +663,42 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
             if line.strip()
         ]
         seqs = [e["seq"] for e in entries]
-        assert len(seqs) == len(set(seqs)), f"duplicate seqs on disk: {seqs}"
-        assert AuditTrail.verify(str(db)).valid, (
-            f"one terminal signal inside the truncate produced a false "
-            f"tampering verdict — seqs on disk {seqs}"
+        r = AuditTrail.verify(str(db))
+
+        # ⛔ THE PRECONDITIONS ARE HARD FAILURES, NOT PART OF THE xfail.
+        # This gate used ``@pytest.mark.xfail(strict=True)``, which treats
+        # ANY failure anywhere in the test as the expected one — so if the
+        # residual were CLOSED but the fixture, the retry or the parsing
+        # developed a different bug, CI would still print XFAIL and the
+        # promised XPASS notification would never arrive. **A gate whose
+        # green covers every possible red is not reporting on its subject.**
+        # Named by codex (L3, 2026-09-07).
+        assert phase.get("fired") == 1, (
+            "the interrupt never landed inside the truncate, so this test "
+            "did not reach the window it exists to describe"
+        )
+
+        # ⚖ THE KNOWN-BAD SIGNATURE, NAMED EXACTLY. Only this one is xfail.
+        if len(seqs) != len(set(seqs)) and not r.valid:
+            pytest.xfail(
+                f"KNOWN-OPEN residual, measured 2026-09-07 (glm-5.3, L3) and "
+                f"re-identified independently by codex 2026-09-07. One "
+                f"ordinary I/O failure plus ONE terminal signal landing "
+                f"inside the truncate before it takes effect still corrupts: "
+                f"seqs {seqs}, {r.error}. Closing it needs the structural "
+                f"change — see next_steps.md item 1, where both candidate "
+                f"fixes and the falsifier are recorded."
+            )
+
+        # Anything else is news, and it is reported LOUDLY in both
+        # directions rather than absorbed into the xfail.
+        assert False, (
+            f"the known-open residual did NOT reproduce. THIS IS THE "
+            f"NOTIFICATION, not a bug in the test. Observed: seqs={seqs}, "
+            f"valid={r.valid}, error={r.error}. If the structural close "
+            f"landed, convert this into a positive assertion and delete the "
+            f"xfail branch. If it did not, the scenario has drifted and this "
+            f"test is no longer describing the window it names."
         )
 
     def test_the_guarded_region_cannot_be_widened_into_something_self_touching(
@@ -720,6 +783,28 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
 
         trio = {"_prev_hash", "_seq", "_dropped_since_last"}
 
+        # ⛔ ENUMERATE THE NODE TYPES THE PROPERTY CAN BE EXPRESSED IN, NOT
+        # THE SCENARIOS. Mutation-checking the arms that exist cannot find a
+        # MISSING arm: every mutant anyone wrote for this gate happened to
+        # be an ``Assign`` or an ``AugAssign``, so the gate scored perfectly
+        # while being blind to most of Python's store forms. codex (L3,
+        # 2026-09-07) enumerated what it could not see: ``AnnAssign``,
+        # ``For``/``AsyncFor``, ``With``/``AsyncWith``, comprehension and
+        # walrus targets, ``Delete``, ``Starred``, nesting deeper than one
+        # level, ``self.__dict__[...]`` subscript writes, and
+        # ``setattr``/``object.__setattr__``. **Each is a store to the trio
+        # that would have left this gate GREEN.**
+        def _leaves(tgt):
+            """Every leaf target, through arbitrary nesting."""
+            if isinstance(tgt, (ast.Tuple, ast.List)):
+                out = []
+                for e in tgt.elts:
+                    out.extend(_leaves(e))
+                return out
+            if isinstance(tgt, ast.Starred):
+                return _leaves(tgt.value)
+            return [tgt]
+
         def trio_targets(node):
             """Every trio attribute this statement stores to.
 
@@ -729,15 +814,23 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
             ``(self._seq, self._prev_hash) = (...)`` invisible anywhere in
             ``log()`` — measured green 2026-09-07.
             """
-            if isinstance(node, ast.AugAssign):
-                raw = [node.target]
+            if isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.NamedExpr)):
+                raw = _leaves(node.target)
             elif isinstance(node, ast.Assign):
                 raw = []
                 for tgt in node.targets:
-                    raw.extend(
-                        tgt.elts if isinstance(tgt, (ast.Tuple, ast.List))
-                        else [tgt]
-                    )
+                    raw.extend(_leaves(tgt))
+            elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+                raw = _leaves(node.target)
+            elif isinstance(node, (ast.With, ast.AsyncWith)):
+                raw = []
+                for item in node.items:
+                    if item.optional_vars is not None:
+                        raw.extend(_leaves(item.optional_vars))
+            elif isinstance(node, ast.Delete):
+                raw = []
+                for tgt in node.targets:
+                    raw.extend(_leaves(tgt))
             else:
                 return []
             return [
@@ -748,8 +841,48 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
                 and t.value.id == "self"
             ]
 
+        def walk_this_scope(root):
+            """``ast.walk``, but never descending into a NESTED scope.
+
+            ⛔ ``ast.walk`` descends ``FunctionDef``/``Lambda``/``ClassDef``,
+            so a trio store inside a nested closure — which does NOT run when
+            ``log()`` runs — counted toward ``stored_inside`` and could
+            satisfy the ``== trio`` assertion on its own. A gate satisfied by
+            code that never executes is worse than no gate.
+            """
+            todo = [root]
+            while todo:
+                n = todo.pop()
+                for child in ast.iter_child_nodes(n):
+                    if isinstance(
+                        child,
+                        (ast.FunctionDef, ast.AsyncFunctionDef,
+                         ast.Lambda, ast.ClassDef),
+                    ):
+                        continue
+                    todo.append(child)
+                    yield child
+
+        # ⛔ NO INDIRECT MUTATION. These reach the trio without ever
+        # producing an ``ast.Attribute`` target, so every name-based check
+        # above is blind to them by construction.
+        for node in walk_this_scope(log):
+            if isinstance(node, ast.Call):
+                fname = ast.unparse(node.func)
+                assert fname not in {"setattr", "object.__setattr__"}, (
+                    f"{fname}() inside log() can store to the trio without "
+                    f"an Attribute target, making every check in this test "
+                    f"blind to it. Assign directly."
+                )
+            if isinstance(node, ast.Attribute) and node.attr == "__dict__":
+                raise AssertionError(
+                    "log() reaches self.__dict__ — a subscript write there "
+                    "mutates the trio invisibly to this gate. Assign to the "
+                    "attribute directly."
+                )
+
         stored_inside = set()
-        for node in ast.walk(log):
+        for node in walk_this_scope(log):
             attrs = trio_targets(node)
             if not attrs:
                 continue
@@ -2819,20 +2952,46 @@ class TestCodexL3TwentySixOhNineOhFour:
         ▶ WHY NO SINGLE-SITE MUTATION CAN WORK, which is the part worth
         keeping: the three handlers are a NESTED CONTAINMENT CHAIN on one
         path, so only the innermost ever fires and defeating any one of them
-        just hands the interrupt to the next. Stack captured at the raise:
+        just hands the interrupt to the next. The containment chain, from
+        outermost to innermost:
 
-            continuity.py:2111  validated_save_continuity
-            store.py:5797       _batch                 (post-commit)
-            store.py:5838       _replay_deferred_audits (per-event)
-            store.py:5212       _audit_log_after_commit (innermost)
+            validated_save_continuity   (continuity.py)
+            _batch                      (store.py, its POST-COMMIT handler)
+            _replay_deferred_audits     (store.py, the per-event handler)
+            _audit_log_after_commit     (store.py, innermost)
+
+        ⛔ **DERIVE THE COORDINATES; DO NOT READ THEM FROM HERE.** This
+        docstring carried literal line numbers until 2026-09-07 and **every
+        one of them was stale** — it named ``store.py`` 5212 / 5798 / 5858
+        while the handlers had moved to 5242 / 5827 / 5887. Following it
+        verbatim narrows a COMMENT and an ASSIGNMENT, changes nothing, and
+        returns the reassuring green this docstring warns about. Caught by
+        codex (L3, 2026-09-07). ⚡ **A stored coordinate is an answer, and
+        answers rot; this file moves on almost every touch.**
+        ⚠ **AND A BARE ``grep -n "except BaseException" store.py`` IS NOT
+        ENOUGH EITHER** — ``_batch`` has THREE of them and only the
+        post-commit one (the LAST in the function) is on this path. Use:
+
+            python3 - <<'EOF'
+            import ast, pathlib
+            src = pathlib.Path("anneal_memory/store.py").read_text()
+            want = {"_batch", "_replay_deferred_audits",
+                    "_audit_log_after_commit"}
+            for n in ast.walk(ast.parse(src)):
+                if isinstance(n, ast.FunctionDef) and n.name in want:
+                    for h in ast.walk(n):
+                        if (isinstance(h, ast.ExceptHandler) and h.type
+                                and "BaseException" in ast.unparse(h.type)):
+                            print(n.name, h.lineno)
+            EOF
 
         ⛔ THE WORKING RECIPE, RUN 2026-09-07, ALL FOUR ARMS, THIS TEST
         SELECTED ALONE (``-k cannot_destroy_a_committed_wrap``). Narrow
         ``except BaseException`` -> ``except Exception`` at:
 
-            5798 alone (the old recipe) ............... 1 passed
-            5213 + 5858 .............................. 1 passed
-            5213 + 5798 + 5858 ....................... 1 FAILED
+            the _batch post-commit handler ALONE ...... 1 passed
+            innermost + per-event ..................... 1 passed
+            ALL THREE ................................ 1 FAILED
             control (no mutation) .................... 1 passed
 
         The red arm fails on the assertion below: the interrupt escapes the
@@ -4706,18 +4865,36 @@ class TestAFailedRollbackDoesNotRewindMemoryPastDisk:
         ``mode='complete'``: fsync reports EIO after a full line landed.
         ``mode='partial'``:  write dies mid-line (ENOSPC).
         Both then fail the rollback's ``open`` with EROFS, same sick disk.
+
+        ⛔ EACH INJECTION FIRES **ONCE** AND RECORDS THAT IT FIRED, AND THE
+        FIRST VERSION OF THIS HELPER DID NEITHER — written by the same seat,
+        in the same file, hours after it FOUND AND FIXED exactly this defect
+        in ``test_the_rollback_truncates_before_it_restores`` and wrote a
+        rule about it. Knowing the class does not immunise you against
+        producing it.
+        ⚡ AND CODEX (L3, 2026-09-07) NAMED THE TRIGGER THAT MAKES IT LIVE,
+        WHICH IS ALREADY ON THIS REPO'S OWN OPEN LIST: *if ``log()`` gains an
+        earlier directory fsync inside the guarded region, that call consumes
+        the fault before any line is written* — the arm then passes without
+        ever grading the complete-line ambiguity. `next_steps.md` item 2 is
+        precisely "add the ``_fsync_dir`` idiom to this module". **The latent
+        defect was scheduled to be activated by this repo's next filed task.**
+        ▶ So the counters are not bookkeeping: ``fired`` is asserted by the
+        caller, and an injection that stops reaching its intended call site
+        fails LOUDLY instead of quietly passing.
         """
         import builtins
 
         real_open, real_fsync = builtins.open, os.fsync
-        armed = {"on": True}
+        armed = {"on": True, "write": 0, "fsync": 0, "rollback_open": 0}
 
         class _Sick:
             def __init__(self, f):
                 self._f = f
 
             def write(self, s):
-                if armed["on"] and mode == "partial":
+                if armed["on"] and mode == "partial" and not armed["write"]:
+                    armed["write"] += 1
                     self._f.write(s[:60])
                     self._f.flush()
                     raise OSError(28, "No space left on device")
@@ -4741,12 +4918,15 @@ class TestAFailedRollbackDoesNotRewindMemoryPastDisk:
                 if mode_ == "a":
                     return _SickCtx(real_open(path, mode_, *a, **kw))
                 if mode_ == "r+b":
+                    armed["rollback_open"] += 1
                     raise OSError(30, "Read-only file system")
 
             return real_open(path, mode_, *a, **kw)
 
         def sick_fsync(fd):
-            if armed["on"] and mode == "complete":
+            # FIRE ONCE — see the class note in this helper's docstring.
+            if armed["on"] and mode == "complete" and not armed["fsync"]:
+                armed["fsync"] += 1
                 raise OSError(5, "Input/output error")
             return real_fsync(fd)
 
@@ -4781,6 +4961,19 @@ class TestAFailedRollbackDoesNotRewindMemoryPastDisk:
             with pytest.raises(OSError):
                 trail.log("third")
         armed["on"] = False
+
+        # ⛔ THE INJECTIONS MUST HAVE REACHED THE SITES THEY NAME. Without
+        # this the arm can pass having graded nothing — the failure mode
+        # codex found in this file's other gates, asserted rather than
+        # assumed.
+        assert armed["rollback_open"] == 1, (
+            "the rollback's open() was never reached, so the failed-truncate "
+            "branch this test exists to grade never ran"
+        )
+        if mode == "complete":
+            assert armed["fsync"] == 1, "the entry's fsync fault never fired"
+        else:
+            assert armed["write"] == 1, "the mid-line write fault never fired"
 
         assert any("audit rollback failed" in r.message for r in caplog.records), (
             "the rollback failed and left no breadcrumb — this is the branch "
@@ -4827,10 +5020,23 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
         this fails with ``Hash mismatch at seq 0: expected sha256:...,
         got sha256:GENESIS...``.
 
-        ⚠ PAIRED POSITIVE: the zero-byte sibling
-        (``test_a_rolled_back_first_append_does_not_restart_the_chain``)
-        stays green under that mutant — which is the whole point. One
-        predicate, two call sites, and only one of them was fixed.
+        ⛔ AND THIS CHANGE RETIRED THE SIBLING GATE'S MUTATION CLAIM, WHICH
+        IS A COST AND IS RECORDED AS ONE. An earlier draft of this docstring
+        cited "the zero-byte sibling stays green under that mutant" as a
+        PAIRED POSITIVE proving correct scoping. **That was worthless as a
+        control**: codex (L3, 2026-09-07) showed the sibling now stays green
+        under its OWN mutant too, so it discriminates nothing. MEASURED —
+        delete ``or active.stat().st_size == 0`` from ``_initialize`` and the
+        WHOLE audit suite still passes, 165 green.
+        ⚡ Because ``_seed_from_manifest()`` here catches the empty file as
+        well, so the zero-byte clause stopped being load-bearing FOR
+        CORRECTNESS the moment this branch was added. **A gate written and
+        mutation-verified that morning became decoration by lunchtime,
+        without being edited, while staying green** — the same shape as an
+        answer invalidated by something that never touched it.
+        ▶ The clause is KEPT because it is still load-bearing for a
+        different property — it avoids a read that can now raise — and that
+        property gets its own gate below rather than an obsolete claim.
         """
         db = tmp_path / "rot.db"
         trail = AuditTrail(db)
@@ -4855,8 +5061,63 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
         r = AuditTrail.verify(db)
         assert r.valid, f"false tampering verdict: {r.error}"
 
-    def test_a_read_failure_during_recovery_is_not_an_empty_file(
+    def test_the_zero_byte_fast_path_avoids_a_read_that_can_now_raise(
         self, tmp_path, monkeypatch
+    ):
+        """What the ``st_size == 0`` clause still protects, now that
+        ``_seed_from_manifest()`` covers its correctness case.
+
+        Read errors propagate from the scan as of 2026-09-07. So on a sick
+        disk an empty active file MUST NOT be routed through
+        ``_read_last_valid_entry`` — there is nothing in it to read, and
+        attempting the read turns a recoverable state into a raise.
+
+        ⛔ MUTATION-CHECKED 2026-09-07, mutant re-read off disk: delete
+        ``or active.stat().st_size == 0`` from ``_initialize`` and this
+        fails with the injected OSError escaping. **This is the claim the
+        sibling gate can no longer make** — it is stated here because the
+        clause is now a durability guard rather than a correctness one.
+        """
+        import builtins
+
+        db = tmp_path / "fast.db"
+        trail = AuditTrail(db)
+        for i in range(2):
+            trail.log("before", {"i": i})
+        trail._last_week = "1999-W01"
+        trail.log("after_rotation", {})
+
+        active = db.parent / "fast.audit.jsonl"
+        active.write_text("")                      # the rolled-back state
+        assert active.stat().st_size == 0
+
+        real_open = builtins.open
+
+        def sick_open(path, mode="r", *a, **kw):
+            if str(path) == str(active) and "r" in mode and "+" not in mode:
+                raise OSError(5, "Input/output error")
+            return real_open(path, mode, *a, **kw)
+
+        monkeypatch.setattr(builtins, "open", sick_open)
+        fresh = AuditTrail(db)
+        fresh._initialize()                        # must NOT raise
+        monkeypatch.undo()
+
+        assert fresh._initialized is True
+        assert fresh._prev_hash != GENESIS_HASH, (
+            "the fast path ran but did not anchor on the manifest"
+        )
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            OSError(5, "Input/output error"),
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+        ],
+        ids=["OSError", "UnicodeDecodeError"],
+    )
+    def test_a_read_failure_during_recovery_is_not_an_empty_file(
+        self, tmp_path, monkeypatch, exc
     ):
         """A failed scan must not be mistaken for a completed empty one.
 
@@ -4870,6 +5131,15 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
         ``except (OSError, UnicodeDecodeError): pass`` around the scan and
         this fails — ``_initialize`` returns having "recovered" from a read
         that died, with ``_initialized`` True and ``_seq`` short.
+
+        ⚠ **PARAMETERISED OVER BOTH TYPES, AND THE FIRST VERSION WAS NOT.**
+        The suppression that was removed caught ``OSError`` *and*
+        ``UnicodeDecodeError``; a gate injecting only the first passes on a
+        tree that re-suppresses the second. Caught by codex (L3,
+        2026-09-07). ⚡ **A guard removed over N exception types needs N
+        arms** — mutating the arms that exist cannot find a missing one, and
+        invalid UTF-8 after a valid prefix is a real torn-write shape on
+        this file, not a hypothetical.
         """
         db = tmp_path / "eio.db"
         trail = AuditTrail(db)
@@ -4893,7 +5163,7 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
             def __next__(self):
                 self._n += 1
                 if self._n > 1:
-                    raise OSError(5, "Input/output error")
+                    raise exc
                 return next(iter(self._f))
 
             def __getattr__(self, n):
@@ -4916,8 +5186,9 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
 
         monkeypatch.setattr("builtins.open", dying_open)
         fresh = AuditTrail(db)
-        with pytest.raises(OSError):
+        with pytest.raises(type(exc)):
             fresh._initialize()
+        assert state["armed"], "fixture never armed"
         assert fresh._initialized is False, (
             "the trail marked itself initialised after a scan that FAILED "
             "— the next append writes a chain derived from a partial read"
@@ -4945,20 +5216,32 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
         active = db.parent / "loud.audit.jsonl"
 
         real_open, real_fsync = builtins.open, os.fsync
-        armed = {"on": True}
+        armed = {"on": True, "fsync": 0, "rollback_open": 0}
+        exploded = {"n": 0}
 
         def sick_open(path, mode="r", *a, **kw):
             if armed["on"] and str(path) == str(active) and mode == "r+b":
+                armed["rollback_open"] += 1
                 raise OSError(30, "Read-only file system")
             return real_open(path, mode, *a, **kw)
 
         def sick_fsync(fd):
-            if armed["on"]:
+            # FIRE ONCE, on the entry's own fsync.
+            if armed["on"] and not armed["fsync"]:
+                armed["fsync"] += 1
                 raise OSError(5, "Input/output error")
             return real_fsync(fd)
 
-        def exploding_warning(*a, **kw):
-            raise RuntimeError("a logging handler blew up")
+        def exploding_warning(msg, *a, **kw):
+            # ⛔ SCOPED TO THE ROLLBACK WARNING. Exploding on EVERY
+            # ``logger.warning`` grades more than this test claims and would
+            # pass if some unrelated warning happened to fire first —
+            # the same unscoped-injection class codex found across this
+            # file's gates on 2026-09-07.
+            if isinstance(msg, str) and "audit rollback failed" in msg:
+                exploded["n"] += 1
+                raise RuntimeError("a logging handler blew up")
+            return None
 
         monkeypatch.setattr(builtins, "open", sick_open)
         monkeypatch.setattr(os, "fsync", sick_fsync)
@@ -4970,6 +5253,12 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
             trail.log("third")
         armed["on"] = False
         monkeypatch.undo()
+
+        assert exploded["n"] == 1, (
+            "the rollback warning never fired, so the raising-handler "
+            "scenario this test names was never actually exercised"
+        )
+        assert armed["rollback_open"] == 1 and armed["fsync"] == 1
 
         trail.note_write_failure()
         trail.log("retry")
@@ -4983,7 +5272,7 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
         assert AuditTrail.verify(db).valid
 
     def test_note_write_failure_reports_no_location_when_invalidated(
-        self, tmp_path
+        self, tmp_path, monkeypatch
     ):
         """Flagged by BOTH L3 seats — a knowingly-stale seq made durable.
 
@@ -4996,6 +5285,8 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
         guard and this fails — a seq is returned where the location is not
         known. The docstring already promises ``None`` means exactly that.
         """
+        import builtins
+
         db = tmp_path / "loc.db"
         trail = AuditTrail(db)
         trail.log("first")
@@ -5008,8 +5299,46 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
         )
         trail._dropped_since_last = 0
 
-        trail._initialized = False        # the post-failed-rollback state
+        # ⛔ REACH THE STATE THROUGH A REAL FAILED ROLLBACK, NOT BY FLIPPING
+        # THE FLAG. An earlier draft set ``_initialized = False`` by hand
+        # after two healthy writes — where ``_seq`` is 2, disk ends at seq 1,
+        # and 2 is therefore the CORRECT location. It asserted the guard
+        # fires without ever creating the staleness the guard exists for,
+        # so it could not distinguish "returns None when invalidated" from
+        # "returns None usefully". Named by codex (L3, 2026-09-07).
+        active = db.parent / "loc.audit.jsonl"
+        real_open, real_fsync = builtins.open, os.fsync
+        armed = {"on": True, "fsync": 0, "rollback_open": 0}
+
+        def sick_open(path, mode="r", *a, **kw):
+            if armed["on"] and str(path) == str(active) and mode == "r+b":
+                armed["rollback_open"] += 1
+                raise OSError(30, "Read-only file system")
+            return real_open(path, mode, *a, **kw)
+
+        def sick_fsync(fd):
+            if armed["on"] and not armed["fsync"]:
+                armed["fsync"] += 1
+                raise OSError(5, "Input/output error")
+            return real_fsync(fd)
+
+        monkeypatch.setattr(builtins, "open", sick_open)
+        monkeypatch.setattr(os, "fsync", sick_fsync)
+        with pytest.raises(OSError):
+            trail.log("third")
+        monkeypatch.undo()
+        armed["on"] = False
+
+        assert armed["fsync"] == 1 and armed["rollback_open"] == 1
+        assert trail._initialized is False, (
+            "fixture precondition: the failed rollback must have invalidated"
+        )
+        # the entry IS on disk at seq 2 — the stale value would name it
+        _, seqs = _audit_lines(active)
+        assert 2 in seqs, f"fixture: seq 2 should be on disk, got {seqs}"
+
         assert trail.note_write_failure() is None, (
-            "a seq known to be stale was handed back to be persisted as "
-            "the durable location of the gap"
+            f"a seq known to be stale was handed back to be persisted as "
+            f"the durable location of the gap — and seq 2 is ON DISK "
+            f"({seqs}), so it names an entry that exists"
         )

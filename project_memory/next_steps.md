@@ -8,13 +8,13 @@
 > Git history was NOT carried across the repo boundary (a cross-repo move cannot); flow's history
 > retains it up to this commit.
 
-> ### 🔬 DIOGENES — NEWEST: `diogenes_20260906.md` · **STILL OPEN: 6** @ `a12e66a`
-> 14 episode(s) — LOW 1 · MEDIUM 4 — 5 of 14 episode(s) carry a severity; the other 9 are COVERAGE 1 · COVERAGE-OPEN 1 · SELF 6 · STILL OPEN 1. Routed UNTRIAGED by `route_diogenes.py`; the count above is Diogenes' own slot, not the ritual's.
-> ▶ 17 human commit(s) in the last 24h — the count could move in either direction this window.
-> ⚡ **3 finding(s) carry `[prescription: run]`** — candidates for `seat_run.py`, but only with an executable acceptance test.
+> ### 🔬 DIOGENES — NEWEST: `diogenes_20260907.md` · **STILL OPEN: 6 — CARRIED from `diogenes_20260906.md`, no slot emitted this window** @ `0e6f156`
+> 6 episode(s) — LOW 1 · MEDIUM 2 — 3 of 6 episode(s) carry a severity; the other 3 are COVERAGE-OPEN 1 · SELF 2. Routed UNTRIAGED by `route_diogenes.py`; ⚠ the count above is **STALE, NOT MEASURED TONIGHT** — Diogenes emitted no still-open slot this window. The ritual carried forward the last number he did generate (`diogenes_20260906.md`). It is NOT verified against this report's HEAD and may be lower than the truth: tonight's findings are not in it.
+> ▶ 20 human commit(s) in the last 24h — the count could move in either direction this window.
+> ⚡ **1 finding(s) carry `[prescription: run]`** — candidates for `seat_run.py`, but only with an executable acceptance test.
 > *(Counted by each finding's OWN trailing tag — a quoted tag is not a verdict — and a tag withdrawn by a later SELF-CORRECTION does not count at all. If this number moved while the report did not, that rule changed: see flow `scripts/prescription.py`.)*
-> ⚙ COORDINATES: 0 of 5 finding(s) carried quoted text, so NONE could be checked. This is not a clean result.
-> *(Pointer written 2026-09-06 by route_diogenes.py. `spore-473`: a routed report with no reader is a disposal chute.)*
+> ⚙ COORDINATES: 0 of 3 finding(s) carried quoted text, so NONE could be checked. This is not a clean result.
+> *(Pointer written 2026-09-07 by route_diogenes.py. `spore-473`: a routed report with no reader is a disposal chute.)*
 
 > ⬇ **TRIAGE BELOW THIS LINE — the block above is a DISPOSABLE SPAN.** `route_diogenes.py`
 > regenerates that block every night, so anything written inside it is deleted by the next

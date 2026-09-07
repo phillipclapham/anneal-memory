@@ -163,6 +163,18 @@ this window, and the base-rate gauge flagged it: **2 of 2 cited files (100%) wer
 24h.** Fixing a class does not exempt the fix from the class — and today it did not: codex found a
 real defect inside the fix, and the fix's own comment carried a false claim.
 
+### ▶ APPARATUS FAILURE — L1 AND L2 RETURNED NOTHING, AND THAT IS NOT "CLEAN"
+Both review agents were dispatched in parallel at the start, both went **idle**, and **neither ever
+delivered a report** — including after two direct follow-up requests each naming the questions I
+most wanted answered. They are not recorded as clean passes because they did not pass; they were
+dark. What actually reviewed this change was **L0** (mine, while the diff was loaded), **L3**
+(complement + codex; glm cut off), and **L4** (mine). ⚠ The tempting sentence — *"L1+L2 came back
+with nothing"* — would have been absence of signal rendered as health, on a day whose whole subject
+was instruments failing in the reassuring direction.
+▶ Worth noting what did the work instead: **every real correction today came from RUNNING something**
+— the four-point injection matrix, the two mutants, the five lock measurements, the callback probe —
+and **not one came from re-reading the diff.**
+
 ### ▶ WHAT THIS SESSION'S OWN ERRORS WERE, because they are the day's class landing on the corrector
 1. The filed prescription, applied literally, would have opened two windows while closing one.
 2. My mutator silently no-op'd and reported success → a confident, wrong contradiction of a correct

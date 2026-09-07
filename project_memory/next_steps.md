@@ -30,33 +30,41 @@
 > `git ls-remote origin main` vs `git rev-parse HEAD` · `git status --porcelain` ·
 > `.venv/bin/python3 -m pytest -q` · `.venv/bin/python3 -m mypy anneal_memory`
 
-### 1. ⚖ HELD, NOT MISSED — THE STRICT-`xfail` RESIDUAL, AND THE FIX IS AN ARCHITECTURAL CHOICE
+### 1. ✅ CLOSED 2026-09-07 — AND THE DEFERRAL THAT HELD IT WAS WRONG ABOUT ITS OWN COST
 
-`test_a_signal_inside_the_truncate_is_still_an_open_window` (strict `xfail`) pins it: one ordinary
-I/O failure PLUS one terminal signal landing inside the rollback's `open(active, "r+b")` **before
-`truncate()` takes effect**. The inner `except Exception` does not catch it, so neither the restore
-nor the invalidation runs; the retry then duplicates the seq and `verify()` cries tampering.
-Independently found by codex at L3 on 2026-09-07, which named this same test.
+The strict-`xfail` residual (a terminal signal inside the rollback's `open`, after an ordinary I/O
+failure) is **CLOSED**. Suite is `1900 passed`, **zero xfailed**.
 
-**TWO CANDIDATE FIXES, and choosing between them is the open question:**
-- **codex's:** catch `BaseException` around the rollback and guarantee that EITHER restoration OR
-  `_initialized = False` happens before any exception leaves the handler. (Better than the older
-  note on file, which was "collapse the three chain attributes into one" — larger, closes less.)
-- **▶ MINE, AND I THINK IT IS RIGHT:** §15 establishes that **re-deriving from disk is correct in
-  every branch**. If that holds, the right shape is not *guarantee one of two outcomes* — it is
-  **INVALIDATE UNCONDITIONALLY AS THE HANDLER'S FIRST ACT AND DELETE THE RESTORE ENTIRELY**, which
-  makes the window **unreachable by construction** rather than guarded against.
+⛔ **THE FIX IS ONE LINE AND I HELD IT ON A COST THAT WAS NOT REAL.** `self._initialized = False`
+as the handler's FIRST act, re-set to `True` only after a complete restore. Every exceptional or
+terminal exit then leaves disk as the authority — which is the property the conditional restore
+already depended on.
 
-⛔ **WHY IT IS HELD RATHER THAN MISSED, and this is the payload:** that change **retires two
-mutation-graded gates** — `test_the_restore_puts_prev_hash_before_seq` and
-`test_the_rollback_truncates_before_it_restores`, whose entire subject is an ordering that would
-cease to exist — and it **orphans `_dropped_since_last`**, which `_initialize` does not re-derive.
-**A change that deletes graded invariants earns its own review. Smuggling it in behind a bugfix is
-how a graded invariant gets deleted by accident.**
+⚖ **WHAT I WROTE WHEN DEFERRING:** *"the right move is to invalidate unconditionally and delete the
+restore entirely… that deletes two mutation-graded gates and orphans `_dropped_since_last`. A change
+that deletes graded invariants earns its own review."* ⛔ **Every clause of that is true of the fix
+shape I had in mind and NONE of it is a property of the problem.** MEASURED with codex's shape:
+the residual closes (`seqs [0,1,2,3]`, `valid=True`) · the reversed-restore mutant is **still
+killed** · `_dropped_since_last` is **still restored on both paths**. **Nothing was retired.**
 
-⚖ **THE KILL CRITERION — WHAT WOULD CHANGE MY MIND:** a measurement showing **re-derivation is NOT
-correct in some branch**. If one exists, the restore must stay and codex's guarantee-one-of-two is
-the right fix. ▶ That is the experiment to run FIRST; it decides the design.
+⚡ **AND MY FALSIFIER WAS SCOPED TO THE WRONG THING, WHICH IS THE TRANSFERABLE PART.** I wrote:
+*"what would change my mind: a measurement showing re-derivation is NOT correct in some branch."*
+That is a falsifier for the DESIGN CLAIM. **The deferral rested on a COST CLAIM, and I supplied no
+falsifier for that at all** — so the thing that actually overturned it could not have been triggered
+by my own kill criterion. ▶ **A deferral's falsifier must target the reason for deferring, not the
+reasoning behind the fix.** Here the reason was "it costs two gates", and the test for that is
+"does a shape exist that closes it without paying" — which nobody was looking for.
+
+⚖ **THIRD INSTANCE IN ONE DAY OF THE SAME META-CLASS**, and this one is mine: the morning's
+torn-tail deferral argued against ONE FIX SHAPE (*"it deletes bytes at open"*), §15 named that
+error explicitly, and I then reproduced it in my own held item hours later. **"The fix is
+expensive" is almost always a claim about one fix shape.**
+
+✅ The gate ANNOUNCED ITS OWN CLOSURE. Rewritten hours earlier so anything but the exact known-bad
+signature fails loudly, it printed *"the known-open residual did NOT reproduce. THIS IS THE
+NOTIFICATION"* on its first real occasion. A blanket `xfail(strict=True)` would have swallowed the
+good news as an expected failure. It is now a positive assertion, mutation-checked: remove the
+invalidate-first line and it goes red.
 
 ### 2. ▶ NO DIRECTORY FSYNC ANYWHERE IN THE MODULE — A FINDING, NOT TIDINESS
 `audit.py` is the only durability-sensitive module in the repo without the `_fsync_dir` idiom, and
@@ -1923,3 +1931,58 @@ with mypy clean throughout. The round-1 → round-2 pattern that justified round
 their own class) does not reproduce here: **every round-2 change is a gate becoming STRICTER, and
 each was mutation-verified in the same pass rather than asserted.** ▶ WHAT WOULD CHANGE MY MIND: a
 round-2 change that altered `anneal_memory/` rather than `tests/`. There were none.
+
+
+---
+
+## 18. ⛔⛔ ROUND 2 ON `audit.py` — 3 HIGH, ALL INSIDE ROUND 1'S OWN FIXES, EXACTLY AS THE GAUGE PREDICTED
+
+`deep_review.py --diff 0e6f1564 --paths anneal_memory/audit.py --seats codex --timeout 900`, 550s.
+**3 HIGH · 1 MED · 1 LOW. All five real, all five landed.** The decision to run this was written into
+§16 **before any round-2 output existed**, on the reasoning that five substantive changes had one
+reviewer. *Fixing a class does not exempt the fix from the class* — measured again, here, on me.
+
+### ⛔ I MADE TWO OPPOSITE DECISIONS ABOUT ONE CLASS IN A SINGLE COMMIT
+Round 1's payoff finding was that `_read_last_valid_entry` **swallowed read errors**, so a FAILED
+scan was indistinguishable from an EMPTY one — I made them propagate. ⚡ **In the same commit,
+twenty lines away, I wrote `except (json.JSONDecodeError, OSError): return` into
+`_seed_from_manifest`.** The inlined original had caught `(json.JSONDecodeError, KeyError)`; **I
+ADDED the `OSError` swallow while removing one.** A transient manifest read error then fails OPEN to
+genesis while sealed history ends elsewhere — so the chain restarts and `verify()` cries tampering
+once the disk recovers. ▶ Absent is now `FileNotFoundError` and nothing else; everything else
+propagates and leaves `_initialized` False.
+
+### ⛔ EXTRACTING A HELPER MADE IT WRONG, BECAUSE ITS CORRECTNESS WAS A PROPERTY OF ITS CALLER
+`_seed_from_manifest` did not establish genesis when no manifest exists — **it silently retained
+whatever was cached.** That was correct in the inlined original *by accident of who called it*: only
+a FRESH instance reached it, where `_prev_hash` was already `GENESIS_HASH`. ⚡ **Round 1's cache
+invalidation made `_initialize` re-runnable on a DIRTY instance**, and then "leave the cached values
+alone" retains the hash of an entry that was just truncated away. MEASURED: one entry, no manifest,
+file emptied by a failed rollback, re-init, next append → `Hash mismatch at seq 1: expected
+sha256:GENESIS..., got sha256:04eb388b...`. **A false tampering verdict produced by the fix written
+to prevent false tampering verdicts.** ▶ The helper resets to genesis first now.
+⚖ **THE CLASS: a function extracted unchanged can still become wrong, because "unchanged" is about
+its body and its correctness lived in its call sites.** Both round-2 HIGHs are the same shape as
+round 1's — **my change altered WHICH pre-existing behaviours are reachable, and the diff that does
+that does not contain them.**
+
+### ▶ AND ONE REACHED OUTSIDE THIS FILE ENTIRELY
+Propagating `UnicodeDecodeError` **broke `Store.status()`**, which guards `self._audit.stats()` with
+`except OSError` — and `UnicodeError` is not an `OSError`. An active audit file holding invalid
+UTF-8 now **crashes the health endpoint** instead of degrading it. Verified both ways: with the
+widened guard `status()` returns; reverted, it raises `UnicodeDecodeError`. ⚡ **Widening what a
+callee raises is an API change for every caller's `except` clause, and the callers do not appear in
+the diff that makes it.**
+▶ Also landed (LOW): the rollback's `logger.warning` could **replace the disk failure on the way
+out** — a raising handler meant the caller got the logging exception instead of the original
+`OSError` and the bare `raise` was never reached. Wrapped.
+
+### ⚖ ROUND 3: NOT WARRANTED — AND THE ARGUMENT IS DIFFERENT FROM §17's
+Round 2's changes are four narrow guards plus one one-line ordering change, each mutation-verified
+in the same pass. ⛔ **But that is the same thing I could have said about round 1, and round 2 found
+three HIGHs in it.** The honest reason is `spore-913`: **when round N keeps finding defects in round
+N−1's fixes, that is evidence the changes are too large per pass, not evidence another round is
+needed.** Round 1 changed five things at once and three were defective. **Round 2 changed five
+things at once. The correct response is to stop editing this file today**, not to run a fourth pass
+against a sixth set of edits. ▶ WHAT WOULD CHANGE MY MIND: someone touching `audit.py` again before
+a clean round lands — then it needs a review, because the count of unreviewed changes would restart.

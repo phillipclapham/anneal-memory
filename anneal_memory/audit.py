@@ -518,6 +518,25 @@ class AuditTrail:
             # into the torn-tail defect. These were filed as two HIGHs on
             # 2026-09-07; they are ONE change, and the cheap-looking half is
             # downstream of the other.
+            # ⛔ INVALIDATE FIRST, RE-VALIDATE ONLY ON A COMPLETE RESTORE.
+            # This closes the residual that stood as a strict-xfail from
+            # 2026-09-07 morning: a terminal signal landing inside the
+            # rollback's ``open`` walks past the ``except Exception`` below,
+            # so NEITHER branch ran and memory stayed behind disk with
+            # ``_initialized`` still true — the retry then reused the seq.
+            # Clearing it up here means every exceptional or terminal exit
+            # from this handler leaves DISK as the authority, which is the
+            # property the conditional restore already relies on.
+            # ⚖ THE SHAPE IS CODEX'S (L3 round 2, 2026-09-07) AND IT IS
+            # CHEAPER THAN BOTH RECORDED ALTERNATIVES. This was HELD on the
+            # argument that closing the window meant deleting the restore
+            # entirely, retiring two mutation-graded gates and orphaning
+            # ``_dropped_since_last``. **That cost was real for that fix and
+            # is not a property of the problem.** MEASURED with this shape:
+            # the residual closes (seqs ``[0,1,2,3]``, valid=True) AND the
+            # reversed-restore mutant is still killed AND the drop count is
+            # still restored on both paths. Nothing was retired.
+            self._initialized = False
             truncated = True
             try:
                 with open(active, "r+b") as f_trunc:
@@ -538,20 +557,30 @@ class AuditTrail:
                 # config. codex (L3, 2026-09-07).
                 truncated = False
                 self._initialized = False
-                logger.warning(
-                    # ⚠ "MAY still be on disk", not "is". The truncate can
-                    # fail AFTER ``truncate()`` took effect (its ``fsync``
-                    # raising), and the original ``open`` can fail before
-                    # anything was written at all. This message said "is"
-                    # and was wrong in both. What is certain is the part
-                    # the operator needs: state comes from the file now.
-                    "audit rollback failed for seq %d; the aborted entry may "
-                    "still be on disk, so the chain state has NOT been "
-                    "rewound — the next append re-derives seq/prev_hash from "
-                    "the file rather than reusing this seq",
-                    entry["seq"],
-                    exc_info=True,
-                )
+                # ⛔ A LOGGING HANDLER MUST NOT REPLACE THE DISK FAILURE.
+                # Handlers are application callbacks; one that raises here
+                # means the caller receives ITS exception instead of the
+                # original ``OSError`` and never reaches the bare ``raise``
+                # below — the disk fault is swapped for a logging fault on
+                # the way out. codex (L3 round 2, 2026-09-07).
+                # ⚠ "MAY still be on disk", not "is": the truncate can fail
+                # AFTER ``truncate()`` took effect (its ``fsync`` raising),
+                # and the original ``open`` can fail before anything was
+                # written at all. This message said "is" and was wrong in
+                # both. What is certain is the part the operator needs:
+                # state comes from the file now.
+                try:
+                    logger.warning(
+                        "audit rollback failed for seq %d; the aborted entry "
+                        "may still be on disk, so the chain state has NOT "
+                        "been rewound — the next append re-derives "
+                        "seq/prev_hash from the file rather than reusing "
+                        "this seq",
+                        entry["seq"],
+                        exc_info=True,
+                    )
+                except Exception:
+                    pass
             # ⛔ THE ORDER OF THESE THREE IS LOAD-BEARING — ``_prev_hash``
             # BEFORE ``_seq``. It was accidental until 2026-09-07, when L2
             # asked and the measurement answered. A signal landing BETWEEN
@@ -575,6 +604,7 @@ class AuditTrail:
                     self._seq,
                     self._dropped_since_last,
                 ) = saved_chain_state
+                self._initialized = True
             else:
                 # Disk is the authority now — see the block above.
                 # (``_initialized`` was already cleared in the except above,
@@ -882,17 +912,44 @@ class AuditTrail:
 
         Called from BOTH no-usable-entry branches of :meth:`_initialize` —
         a missing/zero-byte active file, and a nonempty one holding no line
-        that parses. Silent when there is no manifest or it is unreadable:
-        genesis is then the only defensible anchor.
+        that parses.
+
+        ⛔ IT RESETS TO GENESIS FIRST, AND OMITTING THAT WAS A DEFECT THIS
+        HELPER INTRODUCED BY BEING EXTRACTED. The inlined version it came
+        from only ever ran on a FRESH instance, where ``_prev_hash`` was
+        already ``GENESIS_HASH``, so "leave the cached values alone when
+        there is no manifest" was correct by accident of its caller. The
+        2026-09-07 rollback change made ``_initialize`` re-runnable on a
+        DIRTY instance — and then "leave the cached values alone" retains
+        the hash of an entry that has just been truncated away.
+        MEASURED (codex L3 round 2, 2026-09-07): one entry, no manifest,
+        the file emptied by a rollback whose fsync failed, re-init, next
+        append -> ``Hash mismatch at seq 1: expected sha256:GENESIS...,
+        got sha256:04eb388b...``. **A false tampering verdict, produced by
+        the fix that was written to prevent false tampering verdicts.**
+
+        ⛔ AND A MANIFEST THAT CANNOT BE READ IS NOT A MANIFEST THAT IS
+        ABSENT. This caught ``OSError`` and returned — failing OPEN to
+        genesis while sealed history ended somewhere else, so a TRANSIENT
+        read error silently restarts the chain and ``verify()`` cries
+        tampering once the disk recovers. ⚠ The inlined original caught
+        ``(json.JSONDecodeError, KeyError)``; **the ``OSError`` was added by
+        the same commit that made read errors PROPAGATE out of
+        ``_read_last_valid_entry`` twenty lines away.** Two opposite
+        decisions about the same class, in one commit.
+        ▶ Absent is ``FileNotFoundError`` and nothing else. Everything else
+        propagates, leaving ``_initialized`` False so the next ``log()``
+        retries rather than writing from a guessed anchor.
         """
-        if not self._manifest_path.exists():
-            return
+        # Reset FIRST: this can run on an instance whose cached chain state
+        # is stale, and genesis is the only defensible starting anchor.
+        self._prev_hash = GENESIS_HASH
+        self._seq = 0
         try:
-            manifest = json.loads(
-                self._manifest_path.read_text(encoding="utf-8")
-            )
-        except (json.JSONDecodeError, OSError):
+            raw = self._manifest_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
             return
+        manifest = json.loads(raw)
         self._prev_hash = manifest.get("active_last_hash", GENESIS_HASH)
         self._seq = manifest.get("active_last_seq", 0)
 

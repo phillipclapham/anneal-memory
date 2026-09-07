@@ -2319,11 +2319,25 @@ class Store:
         if self._audit is not None:
             try:
                 audit_stats = self._audit.stats()
-            except OSError:
+            except (OSError, UnicodeError):
                 # Audit layer is enabled but its files are unreadable
                 # (permissions, disk issue, etc.). Surface enabled=True
                 # with None fields so the operator sees the state without
                 # status() itself raising.
+                #
+                # ⛔ ``UnicodeError`` IS NOT AN ``OSError``, AND IT BECAME
+                # REACHABLE HERE ON 2026-09-07 WITHOUT THIS LINE BEING
+                # TOUCHED. ``_read_last_valid_entry`` used to swallow
+                # ``UnicodeDecodeError``; it now propagates, deliberately,
+                # so a FAILED scan cannot be mistaken for an EMPTY one.
+                # ``stats()`` calls that scan, so an active audit file
+                # holding invalid UTF-8 now crashes the health endpoint
+                # instead of degrading it. Found by codex (L3 round 2,
+                # 2026-09-07) as a CROSS-MODULE consequence of an
+                # audit.py-local fix.
+                # ⚡ The general shape: widening what a callee raises is an
+                # API change for every caller's except clause, and the
+                # callers do not appear in the diff that makes it.
                 pass
             else:
                 audit_log_path = audit_stats["log_path"]

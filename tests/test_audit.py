@@ -2,6 +2,7 @@
 
 import gzip
 import json
+import logging
 import os
 import tempfile
 import uuid
@@ -12,6 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import anneal_memory.audit as audit_module
 from anneal_memory.audit import GENESIS_HASH, AuditTrail, AuditVerifyResult
 
 
@@ -422,11 +424,39 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
         trail.log("record", {"i": 1})
 
         real_fsync = audit_module.os.fsync
+        fsyncs = {"n": 0}
 
         def fsync_then_enospc(fd):
             # The line is durable; the failure is ORDINARY, not terminal.
+            #
+            # ⛔ FIRE ONCE, ON THE ENTRY'S OWN FSYNC ONLY. Until 2026-09-07
+            # this raised on EVERY fsync, so the rollback's own
+            # ``os.fsync(f_trunc.fileno())`` raised too and the scenario
+            # actually run was TWO I/O failures — not the one this
+            # docstring describes and grades. It passed anyway because
+            # ``truncate()`` takes effect before its fsync, so the file was
+            # rolled back regardless and the restore-order property was
+            # still the only thing left to observe.
+            #
+            # ⚠ IT STOPPED BEING HARMLESS THE MOMENT THE RESTORE BECAME
+            # CONDITIONAL. A handler that asks "did the truncate block
+            # succeed?" reads the injected second failure as "it did not",
+            # takes the invalidation branch, and never reaches the restore
+            # this test exists to order — the arm then fires inside
+            # ``_initialize`` during the RETRY, outside the
+            # ``pytest.raises`` below, and escapes as a bare
+            # ``KeyboardInterrupt`` that aborts the whole run.
+            #
+            # ⚖ THE GENERAL RULE, and this file already knew it one layer
+            # over: scope a fault injection to the CALL SITE it names.
+            # ``next_steps.md`` records the identical defect being caught in
+            # a hand probe the same day ("my probe raised ENOSPC on *every*
+            # fsync including the truncate's") — in the shipped test it went
+            # unchecked.
             real_fsync(fd)
-            raise OSError(28, "No space left on device")
+            fsyncs["n"] += 1
+            if fsyncs["n"] == 1:
+                raise OSError(28, "No space left on device")
 
         monkeypatch.setattr(audit_module.os, "fsync", fsync_then_enospc)
         armed["attr"] = store_attr
@@ -4536,3 +4566,450 @@ class TestFailureLandsAtDifferentPointsInTheWrite:
             if line.strip():
                 json.loads(line)  # must all parse
         assert AuditTrail.verify(store._path).valid
+
+
+def _audit_lines(active):
+    """(events, seqs) off disk, malformed lines named rather than skipped."""
+    events, seqs = [], []
+    for line in active.read_text().splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        try:
+            e = json.loads(s)
+            events.append(e.get("event"))
+            seqs.append(e.get("seq"))
+        except json.JSONDecodeError:
+            events.append(f"MALFORMED({len(s)}B)")
+            seqs.append(f"MALFORMED({len(s)}B)")
+    return events, seqs
+
+
+class TestAnAppendNeverMergesIntoATornTail:
+    """L2 HIGH, filed 2026-09-07 and closed 2026-09-07 by the next seat.
+
+    ``_read_last_valid_entry`` recovers ``seq``/``prev_hash`` from the last
+    line that PARSES and leaves the unparseable tail in place. The next
+    ``open(active, "a")`` then writes straight onto those bytes, and the
+    merged line parses as nothing — **so the entry that is destroyed is the
+    NEW one, not the torn one**, and the writer sees a successful append.
+
+    ⛔ WHY IT WAS FILED RATHER THAN FIXED, AND WHY THAT PREMISE DID NOT
+    SURVIVE RE-TESTING. The recorded reason was that the fix "is a
+    recovery-time truncation — it DELETES bytes at open — which is not a
+    thing to land unreviewed". That is an argument against ONE FIX SHAPE,
+    and it was never an argument against the fix: the damage comes from the
+    CONCATENATION, not from the fragment existing. Terminating the fragment
+    costs one byte and deletes nothing.
+    """
+
+    def test_the_entry_after_a_torn_tail_survives_a_reopen(self, tmp_path):
+        """The re-opening-process shape — the general case on the CLI.
+
+        ``audit.py`` records that EVERY CLI INVOCATION OPENS AND CLOSES A
+        STORE, so this is the shape an operator actually meets.
+
+        ⛔ MUTATION-CHECKED 2026-09-07, mutant re-read off disk before the
+        run: drop the ``needs_boundary`` prefix from ``payload`` in
+        ``log()`` and this fails with the third event MISSING and
+        ``verify()`` still reporting ``valid=True`` — which is the whole
+        finding: the loss is silent.
+        """
+        db = tmp_path / "torn.db"
+        AuditTrail(db).log("first")
+        active = db.parent / "torn.audit.jsonl"
+        AuditTrail(db).log("second")
+
+        # A torn write: a partial line with NO terminating newline.
+        with open(active, "a", encoding="utf-8") as f:
+            f.write('{"v":1,"seq":2,"ts":"2026-09-07T00:00:00.0000')
+
+        AuditTrail(db).log("third")          # the entry at risk
+        AuditTrail(db).log("fourth")
+
+        events, _ = _audit_lines(active)
+        assert "third" in events, (
+            f"the entry written after a torn tail was merged into it and "
+            f"destroyed — events on disk: {events}"
+        )
+        assert events[:2] == ["first", "second"] and events[-1] == "fourth"
+
+        r = AuditTrail.verify(db)
+        assert r.valid, f"chain broken at {r.chain_break_at}: {r.error}"
+        # ⚠ PAIRED POSITIVE — without it this test passes on a tree that
+        # "fixed" the merge by DELETING the fragment, which is the fix this
+        # change deliberately rejected. The evidence must still be there.
+        assert r.skipped_lines == 1, (
+            f"the torn bytes were removed rather than terminated "
+            f"(skipped_lines={r.skipped_lines}). On a tamper-evident log a "
+            f"repair that deletes is the wrong primitive — terminate the "
+            f"fragment and leave it readable."
+        )
+
+    def test_the_guard_is_on_the_append_not_on_init(self, tmp_path):
+        """PLACEMENT, not presence — the arm an init-time fix would fail.
+
+        ``log()`` calls ``_initialize()`` only when ``_initialized`` is
+        False, so a LONG-LIVED process that tore its own tail mid-run never
+        re-initialises. A repair living in ``_initialize`` never fires for
+        it and this shape stays broken; a repair on the APPEND covers both.
+
+        ⛔ This is the arm that distinguishes the two candidate homes, and
+        nothing else in this file does. ⚠ Mutation-checked BOTH ways: with
+        the boundary prefix dropped it fails; with the repair moved into
+        ``_initialize`` it also fails, while the sibling test above passes.
+        """
+        db = tmp_path / "live.db"
+        trail = AuditTrail(db)
+        trail.log("first")
+        trail.log("second")
+        active = db.parent / "live.audit.jsonl"
+
+        assert trail._initialized is True, (
+            "fixture precondition: this arm only grades placement while the "
+            "trail is already initialised, so _initialize() cannot run again"
+        )
+
+        with open(active, "a", encoding="utf-8") as f:
+            f.write('{"v":1,"seq":2,"ts":"2026-09-07T00:00:00.0000')
+
+        trail.log("third")                   # SAME instance — no re-init
+
+        events, _ = _audit_lines(active)
+        assert "third" in events, (
+            f"a long-lived process merged its next entry into its own torn "
+            f"tail — an init-time repair cannot reach this. events: {events}"
+        )
+
+
+class TestAFailedRollbackDoesNotRewindMemoryPastDisk:
+    """L2 HIGH, filed 2026-09-07 and closed 2026-09-07 by the next seat.
+
+    The truncate is best-effort; the restore was unconditional. So a failed
+    truncate left the entry ON DISK while memory was rewound to "nothing
+    landed", and the caller's contracted retry reused the seq.
+
+    ⛔ THE FIX RECORDED AT THE SITE WAS WRONG, AND WRONG IN THE DANGEROUS
+    DIRECTION. It read: "leave memory ADVANCED — the entry is still on
+    disk." That assumes the on-disk line is COMPLETE, which it is not when
+    the failure was an ENOSPC mid-``write``. MEASURED 2026-09-07 with that
+    fix in place: seqs ``[0, 1, MALFORMED, 3]``, ``verify(): valid=False`` —
+    the exact false-tampering verdict the handler exists to prevent.
+    Invalidating the cache instead asserts nothing about disk and is
+    therefore correct in every branch.
+    """
+
+    @staticmethod
+    def _sick_disk(monkeypatch, active, mode):
+        """Ordinary exceptions only — NO terminal signal anywhere.
+
+        ``mode='complete'``: fsync reports EIO after a full line landed.
+        ``mode='partial'``:  write dies mid-line (ENOSPC).
+        Both then fail the rollback's ``open`` with EROFS, same sick disk.
+        """
+        import builtins
+
+        real_open, real_fsync = builtins.open, os.fsync
+        armed = {"on": True}
+
+        class _Sick:
+            def __init__(self, f):
+                self._f = f
+
+            def write(self, s):
+                if armed["on"] and mode == "partial":
+                    self._f.write(s[:60])
+                    self._f.flush()
+                    raise OSError(28, "No space left on device")
+                return self._f.write(s)
+
+            def __getattr__(self, n):
+                return getattr(self._f, n)
+
+        class _SickCtx:
+            def __init__(self, f):
+                self._f = f
+
+            def __enter__(self):
+                return _Sick(self._f.__enter__())
+
+            def __exit__(self, *a):
+                return self._f.__exit__(*a)
+
+        def sick_open(path, mode_="r", *a, **kw):
+            if armed["on"] and str(path) == str(active):
+                if mode_ == "a":
+                    return _SickCtx(real_open(path, mode_, *a, **kw))
+                if mode_ == "r+b":
+                    raise OSError(30, "Read-only file system")
+
+            return real_open(path, mode_, *a, **kw)
+
+        def sick_fsync(fd):
+            if armed["on"] and mode == "complete":
+                raise OSError(5, "Input/output error")
+            return real_fsync(fd)
+
+        monkeypatch.setattr(builtins, "open", sick_open)
+        monkeypatch.setattr(os, "fsync", sick_fsync)
+        return armed
+
+    @pytest.mark.parametrize("mode", ["complete", "partial"])
+    def test_the_retry_after_a_failed_rollback_does_not_reuse_the_seq(
+        self, tmp_path, monkeypatch, caplog, mode
+    ):
+        """⛔ MUTATION-CHECKED 2026-09-07, each mutant re-read off disk:
+
+          restore unconditionally (delete the ``if truncated``) .......
+            ``complete`` fails on ``[0, 1, 2, 2]`` / valid=False
+          leave memory ADVANCED instead of invalidating (the fix that was
+          recorded at the site) ......................................
+            ``partial`` fails on ``[0, 1, MALFORMED, 3]`` / valid=False
+
+        ⚠ THE TWO ARMS FAIL UNDER DIFFERENT MUTANTS AND THAT IS THE POINT.
+        One mutant alone leaves the other arm green, so a single-arm test
+        would have graded whichever half its author happened to write.
+        """
+        db = tmp_path / "sick.db"
+        trail = AuditTrail(db)
+        trail.log("first")
+        trail.log("second")
+        active = db.parent / "sick.audit.jsonl"
+
+        armed = self._sick_disk(monkeypatch, active, mode)
+        with caplog.at_level(logging.WARNING, logger="anneal-memory"):
+            with pytest.raises(OSError):
+                trail.log("third")
+        armed["on"] = False
+
+        assert any("audit rollback failed" in r.message for r in caplog.records), (
+            "the rollback failed and left no breadcrumb — this is the branch "
+            "an operator reaches with a red verdict and nothing to read"
+        )
+
+        trail.note_write_failure()           # caller contract: swallow, retry
+        trail.log("retry")
+
+        events, seqs = _audit_lines(active)
+        real = [s for s in seqs if isinstance(s, int)]
+        assert len(real) == len(set(real)), (
+            f"the retry reused a seq already on disk: {seqs}. Memory was "
+            f"rewound past what the failed truncate left behind."
+        )
+        assert "retry" in events, f"the retry entry never landed: {events}"
+
+        r = AuditTrail.verify(db)
+        assert r.valid, (
+            f"a durability failure was read as TAMPERING — seqs {seqs}, "
+            f"break at {r.chain_break_at}: {r.error}"
+        )
+
+
+class TestRecoveryHasAnAnchorOrRefusesToInitialise:
+    """codex L3, 2026-09-07 — three ways ``_initialize`` claimed to have
+    recovered when it had not. All three end in the same place: a false
+    tampering verdict from ``verify()``, which is the one verdict this
+    record exists to make impossible.
+    """
+
+    def test_a_torn_only_active_file_still_anchors_on_the_manifest(
+        self, tmp_path
+    ):
+        """The zero-byte fix was scoped by symptom; this is the class.
+
+        A nonempty active file holding no line that PARSES gives no chain
+        anchor, exactly as a zero-byte one gives none — but the branch for
+        it fell through on the constructor defaults and started a fresh
+        chain from genesis after sealed files that ended elsewhere.
+
+        ⛔ MUTATION-CHECKED 2026-09-07, mutant re-read off disk: drop the
+        ``_seed_from_manifest()`` call from the no-valid-entry branch and
+        this fails with ``Hash mismatch at seq 0: expected sha256:...,
+        got sha256:GENESIS...``.
+
+        ⚠ PAIRED POSITIVE: the zero-byte sibling
+        (``test_a_rolled_back_first_append_does_not_restart_the_chain``)
+        stays green under that mutant — which is the whole point. One
+        predicate, two call sites, and only one of them was fixed.
+        """
+        db = tmp_path / "rot.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("before", {"i": i})
+        trail._last_week = "1999-W01"          # force the weekly rotation
+        trail.log("after_rotation", {})
+
+        active = db.parent / "rot.audit.jsonl"
+        # what a failed rollback on a freshly rotated file leaves behind
+        active.write_text('{"v":1,"seq":4,"ts":"2026-09-07T00:00:00.0000')
+        assert active.stat().st_size > 0, "fixture: must be NONEMPTY"
+
+        fresh = AuditTrail(db)
+        fresh._initialize()
+        assert fresh._prev_hash != GENESIS_HASH, (
+            "recovery restarted the chain from genesis over a torn-only "
+            "active file, ignoring the sealed files the manifest names"
+        )
+
+        fresh.log("next", {})
+        r = AuditTrail.verify(db)
+        assert r.valid, f"false tampering verdict: {r.error}"
+
+    def test_a_read_failure_during_recovery_is_not_an_empty_file(
+        self, tmp_path, monkeypatch
+    ):
+        """A failed scan must not be mistaken for a completed empty one.
+
+        ``_read_last_valid_entry`` suppressed ``OSError`` and returned
+        whatever it had found so far; ``_initialize`` then set
+        ``_initialized = True`` on that partial answer. The failure is
+        CORRELATED with the caller that most needs recovery — a rollback
+        that already failed on this disk.
+
+        ⛔ MUTATION-CHECKED 2026-09-07: restore the
+        ``except (OSError, UnicodeDecodeError): pass`` around the scan and
+        this fails — ``_initialize`` returns having "recovered" from a read
+        that died, with ``_initialized`` True and ``_seq`` short.
+        """
+        db = tmp_path / "eio.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("entry", {"i": i})
+        active = db.parent / "eio.audit.jsonl"
+
+        real_open = open
+        state = {"armed": True}
+
+        class _DyingReader:
+            """Yields the first line, then the disk gives out."""
+
+            def __init__(self, f):
+                self._f = f
+                self._n = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self._n += 1
+                if self._n > 1:
+                    raise OSError(5, "Input/output error")
+                return next(iter(self._f))
+
+            def __getattr__(self, n):
+                return getattr(self._f, n)
+
+        class _Ctx:
+            def __init__(self, f):
+                self._f = f
+
+            def __enter__(self):
+                return _DyingReader(self._f.__enter__())
+
+            def __exit__(self, *a):
+                return self._f.__exit__(*a)
+
+        def dying_open(path, mode="r", *a, **kw):
+            if state["armed"] and str(path) == str(active) and mode == "r":
+                return _Ctx(real_open(path, mode, *a, **kw))
+            return real_open(path, mode, *a, **kw)
+
+        monkeypatch.setattr("builtins.open", dying_open)
+        fresh = AuditTrail(db)
+        with pytest.raises(OSError):
+            fresh._initialize()
+        assert fresh._initialized is False, (
+            "the trail marked itself initialised after a scan that FAILED "
+            "— the next append writes a chain derived from a partial read"
+        )
+
+    def test_a_raising_log_handler_does_not_skip_the_invalidation(
+        self, tmp_path, monkeypatch
+    ):
+        """Logging is an application callback; it can raise.
+
+        The rollback's ``logger.warning`` ran BEFORE ``_initialized`` was
+        cleared, so a handler that raised took the safe state with it and
+        the next append reused the seq.
+
+        ⛔ MUTATION-CHECKED 2026-09-07: move ``self._initialized = False``
+        back below the ``logger.warning`` call and this fails on duplicate
+        seqs with ``verify(): valid=False``.
+        """
+        import builtins
+
+        db = tmp_path / "loud.db"
+        trail = AuditTrail(db)
+        trail.log("first")
+        trail.log("second")
+        active = db.parent / "loud.audit.jsonl"
+
+        real_open, real_fsync = builtins.open, os.fsync
+        armed = {"on": True}
+
+        def sick_open(path, mode="r", *a, **kw):
+            if armed["on"] and str(path) == str(active) and mode == "r+b":
+                raise OSError(30, "Read-only file system")
+            return real_open(path, mode, *a, **kw)
+
+        def sick_fsync(fd):
+            if armed["on"]:
+                raise OSError(5, "Input/output error")
+            return real_fsync(fd)
+
+        def exploding_warning(*a, **kw):
+            raise RuntimeError("a logging handler blew up")
+
+        monkeypatch.setattr(builtins, "open", sick_open)
+        monkeypatch.setattr(os, "fsync", sick_fsync)
+        monkeypatch.setattr(
+            audit_module.logger, "warning", exploding_warning
+        )
+
+        with pytest.raises(BaseException):
+            trail.log("third")
+        armed["on"] = False
+        monkeypatch.undo()
+
+        trail.note_write_failure()
+        trail.log("retry")
+
+        _, seqs = _audit_lines(active)
+        real = [s for s in seqs if isinstance(s, int)]
+        assert len(real) == len(set(real)), (
+            f"a raising log handler skipped the invalidation and the retry "
+            f"reused a seq: {seqs}"
+        )
+        assert AuditTrail.verify(db).valid
+
+    def test_note_write_failure_reports_no_location_when_invalidated(
+        self, tmp_path
+    ):
+        """Flagged by BOTH L3 seats — a knowingly-stale seq made durable.
+
+        After a failed rollback ``_seq`` is deliberately stale until the
+        next ``_initialize()``. ``note_write_failure`` handed it back, and
+        ``Store`` folds it into the durable ``audit_last_failure`` record,
+        so an operator is pointed at an entry that exists.
+
+        ⛔ MUTATION-CHECKED 2026-09-07: drop the ``if self._initialized``
+        guard and this fails — a seq is returned where the location is not
+        known. The docstring already promises ``None`` means exactly that.
+        """
+        db = tmp_path / "loc.db"
+        trail = AuditTrail(db)
+        trail.log("first")
+        trail.log("second")
+
+        assert trail.note_write_failure() is not None, (
+            "paired positive: a HEALTHY trail must still report the "
+            "location, or this test passes on a method that always "
+            "returns None"
+        )
+        trail._dropped_since_last = 0
+
+        trail._initialized = False        # the post-failed-rollback state
+        assert trail.note_write_failure() is None, (
+            "a seq known to be stale was handed back to be persisted as "
+            "the durable location of the gap"
+        )

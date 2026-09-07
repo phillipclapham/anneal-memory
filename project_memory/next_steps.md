@@ -271,7 +271,11 @@ clause → red). ✅ Also landed L2's LOW: the rollback's failure is now **logge
 `pass` — it is the branch that ends in `valid=False`, and an operator was getting a red verdict with
 zero breadcrumbs.
 
-### 11. 🔴 FILED, VERIFIED, NOT LANDED — TWO MORE, BOTH REACHABLE WITHOUT ANY TERMINAL SIGNAL
+### 11. ✅ CLOSED 2026-09-07 BY SEAT `0907+11` — WAS: FILED, VERIFIED, NOT LANDED
+> ⛔ **BOTH LANDED. The deferral did not survive the higher bar** (Phill: *"deferred with solid,
+> unassailable evidence that deferral was the best long-term architectural decision"*). The
+> reasoning below is kept as the trail — **but its stated fix for the first bullet is WRONG**, see
+> §15. The third bullet (no directory fsync / `F_FULLFSYNC`) is STILL OPEN and untouched.
 · **The restore is unconditional while the truncate is best-effort (L2 HIGH).** MEASURED with
   ordinary exceptions only — `fsync` reporting EIO after the data landed, then the rollback's `open`
   failing EROFS on the same sick disk: seqs `[0,1,2,2]`, `verify(): valid=False`. **The dangerous
@@ -322,7 +326,11 @@ raised ENOSPC on *every* fsync including the truncate's, and in the one-signal c
 runs so the restore is a NO-OP and both orders trivially pass. The property only exists once memory
 is partly advanced.
 
-### 13. ⛔ THE TWO FILED HIGHs HAVE A FORCED FIX ORDER, AND THAT IS WORTH MORE THAN EITHER FIX
+### 13. ⭐ THE TWO FILED HIGHs HAVE A FORCED FIX ORDER — RIGHT, AND IT IS WHAT MADE THE FIX BUILDABLE
+> ✅ The ordering call below was CORRECT and was followed exactly: recovery first, then the
+> rollback shrinks to a cache invalidation. It is the most valuable thing the 09-07 review
+> produced. ⚠ The conclusion drawn FROM it — *"which is why neither was landed today"* — did not
+> follow: a forced order is a build sequence, not a reason to build neither. See §15.
 L2 proposed a better fix for the unconditional-restore HIGH than the one I recorded: instead of
 conditioning the restore on the truncate succeeding, **invalidate the cache** — `truncate` →
 `self._initialized = False` → restore only `_dropped_since_last`. Verified mechanically sound:
@@ -1559,3 +1567,201 @@ The full reverse-chron SHIPPED LEDGER (0.4.x → **0.9.6**, the current public P
 ## Positioning frame (daemon 2026-06-10 — not a build)
 
 Drop "notes + search," adopt **"memory lifecycle / control plane"** (MemOS/MemoryOS/Memori converge on memory-as-system-resource; anneal is the sovereign version — vocabulary lags architecture). Candidate eval-harness scoping: grade whether a wrap chose the *right operation under mutation* (Memory-R1 trains ADD/UPDATE/DELETE/NOOP; anneal's human-judged compression is the manual high-fidelity version). Research grounding (single-paper each, don't fearmonger): Memora/FAMA (2604.20006) penalizes obsolete-memory use → validates capture/judged-compression/staleness/contradiction/demotion as the measured surface. Poisoning (2606.04329) → routed to augmentation_harness. Multi-party memory ceiling (2605.14498): speaker/source/agent identity must be first-class at ingestion AND retrieval AND consolidation. The forward-facing claim is **governed memory transformations improve specific regimes**, never "memory always improves agents" (EvoMemBench — memory can hurt by injecting irrelevant evidence / stripping execution detail / transferring mismatched procedures).
+
+
+---
+
+## 15. ⚖⚖ 2026-09-07, SEAT `0907+11` — THE TWO FILED HIGHs ARE CLOSED, AND THE DEFERRAL'S PREMISE WAS FALSE
+
+Re-tested against the bar Phill set after they were filed: **a deferral must be an ARCHITECTURAL
+argument that survives adversarial reading — name the alternative rejected, why it is worse
+long-term, and what would change your mind.** Neither cleared it. One had a premise that is simply
+false, and it was falsifiable by one measurement.
+
+### ⛔ THE PREMISE THAT DID NOT SURVIVE: "THE FIX DELETES BYTES AT OPEN"
+
+§11 filed the torn-tail HIGH with: *"Fix is a recovery-time truncation — it DELETES bytes at open —
+which is not a thing to land unreviewed."* True of that fix. **It is not a property of the defect.**
+The damage comes from the CONCATENATION, not from the fragment existing, so terminating the fragment
+closes it and deletes nothing. MEASURED, one fixture, three arms:
+
+| repair | events on disk | evidence |
+|---|---|---|
+| none (shipped) | `['first','second','MALFORMED(233B)','fourth']` | **entry destroyed**, `valid=True` |
+| additive (one `\n`) | `['first','second','MALFORMED(60B)','third_real','fourth']` | entry AND fragment kept |
+| destructive truncate | `['first','second','third_real','fourth']` | entry kept, **fragment gone** |
+
+⚡ **THE ADDITIVE REPAIR IS NOT A COMPROMISE, IT IS THE BETTER PRIMITIVE.** On a tamper-evident log,
+a repair that never removes bytes is strictly preferable to one that does, and deleting at open is
+an operation this module should not own at all. **The reviewed-deletion question the deferral was
+protecting does not need answering.**
+⚖ **THE GENERAL FORM, and it is the transferable half:** *"the fix is dangerous"* is almost always
+a claim about ONE FIX SHAPE. A deferral is only real once a SECOND shape has been looked for and
+also rejected. §11 recorded the first shape it thought of and deferred against it.
+
+### ⚡ AND THE THING THAT ENDED THE DEFERRAL WAS INSIDE THE OTHER DEFERRAL
+
+Measuring §11's SECOND bullet on its own terms (ordinary ENOSPC, no terminal signal) produced a
+shape **not in the filed report**: on the partial-write arm the caller's retry is swallowed by the
+fragment the failed rollback left — `[0, 1, 'MALFORMED(247B)']`, `verify(): valid=True`. So the two
+HIGHs do not merely have a forced order: **the rollback HIGH CAUSES the torn-tail HIGH on the
+partial-write path**, silently, under a clean bill of health. Neither report says this, because each
+was measured inside its own scenario.
+
+### ⛔ THE FIX RECORDED AT THE SITE FOR THE ROLLBACK HIGH WAS WRONG, IN THE DANGEROUS DIRECTION
+
+The site comment prescribed: *"make the restore CONDITIONAL on the truncate having succeeded — if
+the entry is still on disk, leaving memory ADVANCED is what makes the two agree."* **That assumes
+the on-disk line is COMPLETE.** It is not, whenever the failure was an ENOSPC mid-`write`: advancing
+sets `_prev_hash` to the hash of the line we MEANT to write while disk holds a fragment hashing to
+nothing. MEASURED with that fix in place — `[0, 1, MALFORMED, 3]`, **`valid=False`** — the exact
+false-tampering verdict the handler exists to prevent, reached from the other side.
+
+⭐ **CACHE INVALIDATION IS CORRECT IN EVERY BRANCH BECAUSE IT ASSERTS NOTHING** (L2's answer, now
+verified): clear `_initialized`, and the next append re-derives `seq`/`prev_hash` from the FILE.
+Complete line → chains from it. Fragment → skipped, and the boundary guard stops the retry merging.
+`truncate()` took effect but its `fsync` raised → re-derives from the truncated file, which is what
+the restore would have produced. **No branch has to be identified**, which is the architectural
+reason — and it is not the reason on file.
+
+### ▶ RESULT (ordinary exceptions only, no terminal signal anywhere)
+
+| arm | before | after |
+|---|---|---|
+| fsync EIO, complete line | `[0,1,2,2]` **valid=False** | `[0,1,2,3]` valid=True |
+| ENOSPC mid-write, partial | `[0,1,'MALFORMED(247B)']` valid=True, **retry destroyed** | `[0,1,'MALFORMED(60B)',2]` valid=True, retry landed |
+| torn tail, re-opened process | third event **gone**, valid=True | third event present, fragment kept |
+
+### ⛔ AND A DEFECT IN THE EXISTING GATE — THE FAULT INJECTION WAS NOT SCOPED TO ITS CALL SITE
+
+`test_the_rollback_truncates_before_it_restores` patched `audit_module.os.fsync` GLOBALLY, so **the
+rollback's own `os.fsync(f_trunc.fileno())` raised too.** It has been running TWO I/O failures while
+its docstring describes and grades ONE. It passed because `truncate()` takes effect before its
+fsync, so the file rolled back regardless and the ordering property was the only thing left to
+observe — and it went red the instant the restore became conditional, escaping as a bare
+`KeyboardInterrupt` that aborted the whole run.
+
+⚡ **§12 ABOVE RECORDS THIS EXACT DEFECT BEING CAUGHT IN A HAND PROBE THE SAME DAY** — *"my probe
+raised ENOSPC on *every* fsync including the truncate's"* — and the shipped test was never checked
+for it. **A correction applied to the probe and not to the gate.** Injection now fires once, on the
+entry's own fsync; the restore-first mutant still kills all three arms, so the gate is sharper, not
+weaker.
+
+### ▶ GRADING — 4 new tests, 4 mutants, each re-read OFF DISK before its run
+
+| mutant | killed |
+|---|---|
+| drop the boundary prefix from `payload` | BOTH torn-tail tests |
+| **move the repair into `_initialize`** | `test_the_guard_is_on_the_append_not_on_init` **only** — sibling green |
+| restore unconditionally | `[complete]`, on `[0,1,2,2]` |
+| leave memory ADVANCED (the site's own fix) | `[partial]`, on the tampering verdict |
+
+⚡ **THE PLACEMENT MUTANT IS THE ONE WORTH KEEPING.** Nothing else in the file distinguishes the two
+candidate homes for the repair, and the init-time home is the one a reader would reach for first —
+it fails only on the long-lived-process arm, because `log()` re-initialises only when
+`_initialized` is False.
+⚠ **The two rollback arms fail under DIFFERENT mutants.** A single-arm test would have graded
+whichever half its author happened to write, and reported success.
+
+### ▶ STILL OPEN, UNTOUCHED
+
+- The strict `xfail` residual: one ordinary I/O failure **plus** a terminal signal landing inside
+  the truncate *before it takes effect*. A different window; not closed here.
+- §11's third bullet: **no directory fsync anywhere in the module**, and macOS needs `F_FULLFSYNC`,
+  which `store.py` documents for the SQLite store and nothing documents for this sidecar.
+- §7: `verify()` cannot see a duplicated entry whose chain is continuous.
+- Collapsing the three chain attributes into one (closes the second-signal-in-the-handler window).
+
+### ▶ L0 ON THIS SEAT'S OWN DIFF (two found, both fixed)
+- A line-number self-reference (`audit.py:113-116`) written into a file that had just grown 50
+  lines — re-anchored on the comment it names. This is `spore-492`'s failure mode.
+- `_read_last_valid_entry`'s docstring said it *"walks backward from the end"*. It has always been a
+  plain `for line in f` — forward, reading the whole active file every open. Behaviour identical,
+  which is why it survived; the cost claim was misleading in the cheap direction.
+
+
+---
+
+## 16. ⛔ CODEX L3 ON `audit.py` — SIX FINDINGS, FIVE LANDED, AND THE BEST ONE SAYS MY OWN FIX CREATED A DEPENDENCY
+
+Dispatched 2026-09-07 by seat `0907+11` (`deep_review.py --diff 0e6f1564 --paths anneal_memory/audit.py
+--seats codex --timeout 900`, 584s) after `complement` + `glm` at L3 (complement: 2 findings, no HIGH;
+glm: `{"findings": []}`). Codex returned **3 HIGH, 2 MED, 1 LOW**. Every one resolved against disk
+before being believed; **all six were REAL** — no hallucinated sites, no false positives.
+
+⚖ **ROUND-2 DECISION, WRITTEN BEFORE ANY ROUND-2 OUTPUT WAS SEEN** (the base-rate gauge's rule):
+**round 2 on `audit.py` IS warranted.** Round 1 produced five substantive changes to the same file,
+and *fixing a class does not exempt the fix from the class* — six repos measured that 2026-09-04, one
+finding 4 HIGHs inside round 1's own fixes. The five fixes below are new, and the only review they
+have had is mine.
+
+### ⚡ THE PAYOFF FINDING: MY FIX MADE A LATENT DEFECT LOAD-BEARING
+
+`_read_last_valid_entry` swallowed `OSError`/`UnicodeDecodeError` and returned whatever it had found
+before the error; `_initialize` then set `_initialized = True` on that partial answer. **Latent and
+mostly harmless — until §15's conditional restore made re-derivation the thing a failed rollback
+DEPENDS ON.** Before, a failed rollback restored memory from a snapshot; now it clears the cache and
+trusts the scan. ⛔ **So the fix did not introduce the defect — it promoted it onto the critical
+path**, and the two failures are CORRELATED rather than independent: the caller that most needs the
+scan is a rollback that already failed on this disk. Read errors now propagate; `_initialize`'s own
+docstring already promised that ("the next `log()` call retries init instead of writing with broken
+state") — swallowing was the deviation from a contract that was already written down.
+
+### ⛔ AND THE ZERO-BYTE FIX FROM THIS MORNING WAS SCOPED BY SYMPTOM
+
+A **nonempty** active file holding no line that PARSES gives no chain anchor, exactly as a zero-byte
+one gives none — but that branch fell through on the constructor defaults. MEASURED: rotate, tear the
+first append into the new file, reopen → `Hash mismatch at seq 0: expected sha256:a0db9699..., got
+sha256:GENESIS...`. **The identical error string, and the identical false-tampering shape, as the
+zero-byte defect fixed four hours earlier.** The morning fix asked *"is the file empty?"*; the
+question is *"does the active file give me a chain anchor?"* Both branches now call one
+`_seed_from_manifest()` helper — **two pieces of code computing one thing, disagreeing exactly where
+the rollback puts you, is now the defect this file has shipped TWICE.**
+
+### ▶ THE OTHER THREE
+
+- **MED, `logger.warning` ran BEFORE `_initialized = False`.** Logging handlers are application
+  callbacks and can raise; one that did took the safe state with it and the next append reused the
+  seq. **A false tampering verdict caused by a logging config.** Safe state is established first now.
+- **MED, `note_write_failure()` handed back a knowingly-stale `_seq`** — flagged by BOTH L3 seats,
+  the only consensus finding. After a failed rollback that seq is deliberately stale, and `Store`
+  folds it into the DURABLE `audit_last_failure` record, pointing an operator at an entry that
+  exists. Returns `None` now, which its docstring already defined as "could not be determined".
+- **LOW, the warning said the aborted entry "is still on disk"** — false when `truncate()` took
+  effect and only its `fsync` raised, and false when the original `open` failed before writing
+  anything. "may still be on disk" now.
+
+### ⚖ WHAT WAS **NOT** LANDED, AND WHY THE DEFERRAL IS REAL THIS TIME
+
+**HIGH #1 — a terminal signal inside the rollback's `open`, after an ordinary I/O failure.** The
+inner `except Exception` does not catch it, so neither restore nor invalidation runs.
+▶ **This is the EXISTING strict-`xfail` residual** (`test_a_signal_inside_the_truncate_is_still_an_
+open_window`) — codex identified it independently and named the same test. Pre-existing, unchanged in
+reachability by §15, and pinned by a gate that will start passing and say so when it closes.
+⭐ **CODEX'S FIX SHAPE IS BETTER THAN THE ONE ON FILE AND IS RECORDED HERE:** catch `BaseException`
+around the rollback and guarantee that EITHER restoration OR `_initialized = False` happens before
+any exception leaves the handler. The recorded alternative was "collapse the three chain attributes
+into one", which is larger and closes less.
+⛔ **WHY IT IS NOT LANDED HERE, AND THIS IS AN ARCHITECTURAL ARGUMENT, NOT A SCOPE ONE:** §15
+establishes that re-deriving from disk is correct in EVERY branch. If that holds, the right shape is
+not "guarantee one of two outcomes" — it is **invalidate unconditionally as the handler's FIRST act
+and delete the restore entirely**, which makes the terminal-signal window unreachable by
+construction rather than guarded against. ⚠ **That deletes two mutation-graded gates**
+(`test_the_restore_puts_prev_hash_before_seq` and `test_the_rollback_truncates_before_it_restores`,
+whose whole subject is an ordering that would no longer exist) and leaves `_dropped_since_last`
+without a home, since `_initialize` does not re-derive it. **A change that retires two gates earns
+its own review; smuggling it in behind a bugfix is how a graded invariant gets deleted by
+accident.** ▶ WHAT WOULD CHANGE MY MIND: a measurement showing re-derivation is NOT correct in some
+branch — in which case the restore must stay and codex's guarantee-one-of-two is the right fix.
+
+### ▶ GRADING — 4 more tests, 4 mutants, each re-read off disk
+
+| mutant | killed |
+|---|---|
+| drop `_seed_from_manifest()` from the no-valid-entry branch | `test_a_torn_only_active_file_still_anchors_on_the_manifest` **only — the zero-byte sibling stays GREEN**, which is the finding |
+| re-swallow read errors in the scan | `test_a_read_failure_during_recovery_is_not_an_empty_file` |
+| invalidate AFTER the log call | `test_a_raising_log_handler_does_not_skip_the_invalidation` **+** the `[complete]` rollback arm |
+| drop the `_initialized` guard in `note_write_failure` | `test_note_write_failure_reports_no_location_when_invalidated` |
+
+⚠ **`glm` returned `{"findings": []}` on the same diff codex found three HIGHs in.** One seat's clean
+pass is not coverage — recorded so the next reader does not read two seats as two opinions.

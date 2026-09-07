@@ -242,6 +242,57 @@ class AuditTrail:
         active = self._active_path
         active.parent.mkdir(parents=True, exist_ok=True)
         resume_at = active.stat().st_size if active.exists() else 0
+        # ⛔ THE APPEND MUST START AT A LINE BOUNDARY, AND UNTIL 2026-09-07
+        # NOTHING MADE IT. Every write here is ``json_line + "\n"``, so a
+        # file NOT ending in a newline is ALWAYS an incomplete write — there
+        # is no legitimate reading of that state. Opening in ``"a"`` and
+        # writing anyway CONCATENATES this entry onto the fragment, and the
+        # merged line parses as nothing: THIS ENTRY IS DESTROYED, not the
+        # torn one.
+        #
+        # ⚠ AND IT IS DESTROYED SILENTLY, WHICH IS THE WHOLE COST. MEASURED
+        # 2026-09-07 on the re-opening-process shape — the general case on
+        # the surface the README points operators at, because
+        # ``_dropped_since_last``'s comment in ``__init__`` records that
+        # EVERY CLI INVOCATION OPENS AND CLOSES A STORE (anchored on that
+        # comment, not on a line number: this file moves every time it is
+        # touched, and it was touched three times today) — four events
+        # logged, the file holding
+        # ``['first', 'second', 'MALFORMED(233B)', 'fourth']`` and
+        # ``verify()`` returning ``valid=True, skipped_lines=1``. The third
+        # event is simply gone. From the writer's side the append SUCCEEDED,
+        # so ``note_write_failure`` never fires, ``dropped_before`` is never
+        # emitted and ``audit_write_failures`` stays 0 — none of the
+        # loss-reporting machinery has anything to report.
+        #
+        # ⚖ THE REPAIR IS ADDITIVE, AND THAT IS A DELIBERATE REJECTION OF
+        # THE FIX THIS WAS FILED WITH. The recorded candidate was a
+        # recovery-time TRUNCATION — delete the torn bytes at open — which
+        # is what made it "not a thing to land unreviewed". It is also not
+        # necessary: the damage comes from the CONCATENATION, not from the
+        # fragment existing. Terminating the fragment costs one byte,
+        # DELETES NOTHING, and leaves the torn bytes on disk as a skipped
+        # line an operator can still read. On a tamper-evident log, a repair
+        # that never removes bytes is the strictly better primitive — and
+        # deleting at open is an operation this module should not own at
+        # all. MEASURED, same fixture: additive gives
+        # ``['first', 'second', 'MALFORMED(60B)', 'third_real', 'fourth']``
+        # — the entry survives AND the evidence survives.
+        #
+        # ⛔ IT LIVES HERE AND NOT IN ``_initialize`` FOR A REASON THAT IS
+        # NOT STYLE: ``log()`` calls ``_initialize()`` only when
+        # ``_initialized`` is False, so a LONG-LIVED process that tore its
+        # own tail mid-run never re-initialises and an init-time repair
+        # never fires for it. That is L2's loud ``[0,1,MALFORMED,3]`` shape.
+        # The append is the operation that does the damage, so the guard
+        # belongs on the append — where it covers both shapes. It also then
+        # sits INSIDE the existing all-or-nothing rollback: ``resume_at`` is
+        # taken above, so a failed append rolls the boundary byte back too.
+        needs_boundary = False
+        if resume_at:
+            with open(active, "rb") as f_probe:
+                f_probe.seek(-1, os.SEEK_END)
+                needs_boundary = f_probe.read(1) != b"\n"
         # ``_compute_hash`` is a staticmethod, pure in ``json_line``, so
         # hoisting it OUT of the guarded region below is side-effect-free
         # and leaves that region holding only the file write and the three
@@ -252,6 +303,9 @@ class AuditTrail:
         # It also means a hash failure now raises BEFORE anything is
         # written, instead of after — no line on disk, nothing to roll back.
         new_prev_hash = self._compute_hash(json_line)
+        # Built out here so the guarded region below still holds nothing but
+        # ``open`` / ``write`` / ``flush`` / ``fsync`` and the three stores.
+        payload = ("\n" if needs_boundary else "") + json_line + "\n"
         # Snapshot for the rollback. See the handler for why rolling the
         # FILE back is only half of it.
         saved_chain_state = (
@@ -261,7 +315,7 @@ class AuditTrail:
         )
         try:
             with open(active, "a", encoding="utf-8") as f:
-                f.write(json_line + "\n")
+                f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
             # Update chain state
@@ -422,25 +476,49 @@ class AuditTrail:
             # Best-effort rollback. If THIS fails too we do not mask the
             # original failure with a rollback failure — the exception below
             # still surfaces it.
-            # ⛔ BUT "THE AMBIGUITY STANDS" UNDERSTATES IT, AND THIS LINE
-            # SAID EXACTLY THAT UNTIL 2026-09-07. A failed truncate does not
-            # leave a neutral unknown: the entry stays on disk while the
-            # restore below unconditionally rewinds memory to "nothing
-            # landed", so the caller's retry reuses the seq. MEASURED (L2,
+            # ⛔ A FAILED TRUNCATE IS NOT A NEUTRAL UNKNOWN, AND THIS LINE
+            # SAID "THE AMBIGUITY STANDS" UNTIL 2026-09-07. The entry stays
+            # on disk while the restore rewinds memory to "nothing landed",
+            # so the caller's retry reuses the seq. MEASURED (L2,
             # 2026-09-07) with NO terminal signal at all — an ``fsync``
             # reporting EIO after the data landed, then the rollback's
             # ``open`` failing EROFS on the same sick disk: seqs
             # ``[0, 1, 2, 2]``, ``verify(): valid=False``. A FALSE TAMPERING
             # VERDICT, in the dangerous direction, reachable with ordinary
             # exceptions only.
-            # ▶ NOT CLOSED HERE, and the candidate fix is recorded so the
-            # next reader does not have to re-derive it: make the restore
-            # CONDITIONAL on the truncate having succeeded. If the entry is
-            # still on disk, leaving memory ADVANCED is what makes the two
-            # agree. It is a rollback-semantics change on a file whose
-            # independent review was cut off twice on 2026-09-07, and the
-            # outcome is unchanged from before this handler existed, so it
-            # is filed rather than smuggled in. See ``next_steps.md``.
+            #
+            # ⚖ SO THE RESTORE IS CONDITIONAL — AND WHEN THE TRUNCATE FAILS
+            # THIS HANDLER STOPS GUESSING WHAT DISK LOOKS LIKE AND ASKS IT.
+            # The fix first recorded here was "leave memory ADVANCED, the
+            # entry is still on disk". ⛔ THAT IS WRONG, AND WRONG IN THE
+            # DANGEROUS DIRECTION, BECAUSE IT ASSUMES THE LINE ON DISK IS
+            # COMPLETE. It is not, whenever the failure was an ENOSPC in the
+            # middle of ``write`` — advancing then sets ``_prev_hash`` to the
+            # hash of the line we MEANT to write while disk holds a fragment
+            # that hashes to nothing, and every later entry chains from a
+            # line that does not exist.
+            #
+            # ⭐ INVALIDATING THE CACHE IS CORRECT IN EVERY BRANCH BECAUSE IT
+            # ASSERTS NOTHING (L2's answer, 2026-09-07, verified here):
+            # ``log()`` re-runs ``_initialize()`` when ``_initialized`` is
+            # False, and ``_initialize`` re-derives ``seq``/``prev_hash``
+            # from the FILE. Complete line on disk -> it chains from that
+            # line. Fragment on disk -> ``_read_last_valid_entry`` skips it
+            # and chains from the last good entry, and the boundary guard at
+            # the top of this method keeps the retry from merging into it.
+            # ``truncate()`` took effect but its ``fsync`` raised -> it
+            # re-derives from the truncated file, which is what the restore
+            # would have produced anyway. No branch needs to be identified,
+            # which is why this needs no condition beyond "did the truncate
+            # succeed".
+            #
+            # ⛔ ORDER WAS FORCED AND IS NOW PAID: re-deriving from the file
+            # is only correct if recovery is correct, and until the boundary
+            # guard landed above, recovery handed the next append straight
+            # into the torn-tail defect. These were filed as two HIGHs on
+            # 2026-09-07; they are ONE change, and the cheap-looking half is
+            # downstream of the other.
+            truncated = True
             try:
                 with open(active, "r+b") as f_trunc:
                     f_trunc.truncate(resume_at)
@@ -449,15 +527,28 @@ class AuditTrail:
             except Exception:
                 # ⛔ NOT A BARE ``pass``. This module logs the far more
                 # benign ``on_event`` and orphan-adoption failures, and this
-                # is the branch that ends in ``verify(): valid=False`` — an
-                # operator hitting it got a red integrity verdict with zero
-                # breadcrumbs. Logged, not raised: raising here would mask
-                # the original failure with the rollback's.
+                # branch means the file could not be rolled back. Logged,
+                # not raised: raising here would mask the original failure
+                # with the rollback's.
+                # ⛔ THE SAFE STATE IS ESTABLISHED BEFORE THE LOG CALL, NOT
+                # AFTER. Logging handlers are application callbacks and can
+                # raise; with the invalidation below the warning, a handler
+                # that raised skipped it entirely and the next append reused
+                # the seq — a false tampering verdict caused by a logging
+                # config. codex (L3, 2026-09-07).
+                truncated = False
+                self._initialized = False
                 logger.warning(
-                    "audit rollback failed for seq %d; the aborted entry is "
-                    "still on disk and the chain state has been rewound, so "
-                    "a retry will reuse this seq and verify() will report a "
-                    "hash mismatch",
+                    # ⚠ "MAY still be on disk", not "is". The truncate can
+                    # fail AFTER ``truncate()`` took effect (its ``fsync``
+                    # raising), and the original ``open`` can fail before
+                    # anything was written at all. This message said "is"
+                    # and was wrong in both. What is certain is the part
+                    # the operator needs: state comes from the file now.
+                    "audit rollback failed for seq %d; the aborted entry may "
+                    "still be on disk, so the chain state has NOT been "
+                    "rewound — the next append re-derives seq/prev_hash from "
+                    "the file rather than reusing this seq",
                     entry["seq"],
                     exc_info=True,
                 )
@@ -478,11 +569,27 @@ class AuditTrail:
             #                 seq 2" — and the seqs are CONTIGUOUS, so
             #                 there is no gap to notice.
             # Pinned by ``test_the_restore_puts_prev_hash_before_seq``.
-            (
-                self._prev_hash,
-                self._seq,
-                self._dropped_since_last,
-            ) = saved_chain_state
+            if truncated:
+                (
+                    self._prev_hash,
+                    self._seq,
+                    self._dropped_since_last,
+                ) = saved_chain_state
+            else:
+                # Disk is the authority now — see the block above.
+                # (``_initialized`` was already cleared in the except above,
+                # before the log call that can raise. This branch owns only
+                # the drop count.)
+                # ⚠ THE DROP COUNT IS RESTORED IN BOTH BRANCHES, AND IN THIS
+                # ONE IT MAY OVER-REPORT. If the line landed COMPLETE it
+                # already carries ``dropped_before``, so the next entry
+                # carries the same count a second time. That is deliberate:
+                # this counter's whole job is to say "writes were lost
+                # here", and double-counting a loss is the safe direction
+                # where under-counting is the failure the counter exists to
+                # prevent. ``_initialize`` does not touch this attribute, so
+                # it survives the re-derivation.
+                self._dropped_since_last = saved_chain_state[2]
             raise
 
         # Fire callback after successful write
@@ -525,7 +632,17 @@ class AuditTrail:
             could not be determined. Deliberately cannot raise.
         """
         try:
-            missing_seq = self._seq
+            # ⛔ ``None`` WHEN THE CACHE HAS BEEN INVALIDATED. A failed
+            # rollback deliberately leaves ``_seq`` stale and defers the
+            # truth to the next ``_initialize()``, so reading it here
+            # persists a location that is knowingly wrong — the durable
+            # ``audit_last_failure`` record would point an operator at an
+            # entry that exists. Flagged by BOTH L3 seats, 2026-09-07.
+            # The docstring already promises ``None`` means "could not be
+            # determined", which is exactly the case; re-deriving instead
+            # would mean doing disk I/O in a method contracted never to
+            # raise, on the disk that just failed.
+            missing_seq = self._seq if self._initialized else None
         except Exception:  # pragma: no cover — defensive, see docstring
             missing_seq = None
         try:
@@ -714,18 +831,8 @@ class AuditTrail:
         # continuity must come from the manifest; there is no reading under
         # which the bare ``exists()`` was right.
         if not active.exists() or active.stat().st_size == 0:
-            # Fresh start — check manifest for chain continuity from sealed files
-            if self._manifest_path.exists():
-                try:
-                    manifest = json.loads(
-                        self._manifest_path.read_text(encoding="utf-8")
-                    )
-                    self._prev_hash = manifest.get(
-                        "active_last_hash", GENESIS_HASH
-                    )
-                    self._seq = manifest.get("active_last_seq", 0)
-                except (json.JSONDecodeError, KeyError):
-                    pass
+            # Fresh start — anchor on the sealed files via the manifest.
+            self._seed_from_manifest()
             self._last_week = _iso_week_now()
             self._initialized = True
             return
@@ -748,9 +855,46 @@ class AuditTrail:
             else:
                 self._last_week = _iso_week_now()
         else:
+            # ⛔ A NONEMPTY ACTIVE FILE WITH NO VALID ENTRY IS THE SAME CASE
+            # AS A ZERO-BYTE ONE, AND THIS BRANCH DID NOT KNOW IT. It fell
+            # through keeping the constructor defaults — ``_seq = 0``,
+            # ``_prev_hash = GENESIS`` — so the next append started a fresh
+            # chain from genesis after sealed files that ended somewhere
+            # else. MEASURED 2026-09-07 (codex, L3): rotate, tear the first
+            # append into the new file, reopen ->
+            # ``Hash mismatch at seq 0: expected sha256:a0db9699..., got
+            # sha256:GENESIS...``. A false tampering verdict, identical in
+            # shape to the zero-byte one fixed hours earlier the same day.
+            # ⚡ THE ZERO-BYTE FIX WAS SCOPED BY SYMPTOM. It asked "is the
+            # file empty?" when the question is "does the active file give
+            # me a chain anchor?" — and a file holding only a torn fragment
+            # answers no just as completely. Both branches now call ONE
+            # helper, so they cannot drift apart again; two pieces of code
+            # computing one thing, disagreeing exactly where the rollback
+            # puts you, is the defect this file has now shipped twice.
+            self._seed_from_manifest()
             self._last_week = _iso_week_now()
 
         self._initialized = True
+
+    def _seed_from_manifest(self) -> None:
+        """Anchor the chain on the sealed files when the active file has none.
+
+        Called from BOTH no-usable-entry branches of :meth:`_initialize` —
+        a missing/zero-byte active file, and a nonempty one holding no line
+        that parses. Silent when there is no manifest or it is unreadable:
+        genesis is then the only defensible anchor.
+        """
+        if not self._manifest_path.exists():
+            return
+        try:
+            manifest = json.loads(
+                self._manifest_path.read_text(encoding="utf-8")
+            )
+        except (json.JSONDecodeError, OSError):
+            return
+        self._prev_hash = manifest.get("active_last_hash", GENESIS_HASH)
+        self._seq = manifest.get("active_last_seq", 0)
 
     def _adopt_orphaned_files(self) -> None:
         """Adopt sealed files that the manifest doesn't know about.
@@ -1092,25 +1236,42 @@ def _read_last_valid_entry(path: Path) -> str:
     """Read the last valid JSON line from an audit file.
 
     Reads line-by-line (not chunk-based) so entries of any size are
-    handled correctly. Walks backward from the end to find the last
-    line that parses as valid JSON — skips partial writes from crashes.
+    handled correctly. Scans FORWARD to the end keeping the last line
+    that parses as valid JSON — skips partial writes from crashes.
+
+    ⚠ THIS SAID "WALKS BACKWARD FROM THE END" UNTIL 2026-09-07 AND THE
+    CODE HAS NEVER DONE THAT — it is a plain ``for line in f``. The two
+    are not equivalent for cost (backward would stop at the first valid
+    line; this reads the whole active file every open) and a reader
+    sizing the recovery path would have been misled in the cheap
+    direction. Behaviour is identical, which is why it survived.
 
     Memory-safe: only keeps the last valid line in memory at a time.
     """
     last_valid = ""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                try:
-                    json.loads(stripped)
-                    last_valid = stripped
-                except json.JSONDecodeError:
-                    pass  # Partial write — skip
-    except (OSError, UnicodeDecodeError):
-        pass
+    # ⛔ READ ERRORS PROPAGATE — THEY USED TO BE SWALLOWED, AND THAT MADE A
+    # FAILED SCAN INDISTINGUISHABLE FROM AN EMPTY ONE. ``except (OSError,
+    # UnicodeDecodeError): pass`` returned whatever had been found before the
+    # error, and ``_initialize`` then marked itself initialised on a partial
+    # answer. codex (L3, 2026-09-07): a complete seq N on disk, a read that
+    # hits EIO after seq N-1, and the next append re-emits seq N — a false
+    # tampering verdict built out of a suppressed read error.
+    # ⚠ AND THE TWO FAILURES ARE CORRELATED, NOT INDEPENDENT: the caller that
+    # most needs this is a rollback that ALREADY failed on this disk.
+    # ⚖ Raising is the DOCUMENTED contract, not a new one — ``_initialize``'s
+    # own docstring says a step that raises leaves the trail uninitialised so
+    # the next ``log()`` retries "instead of writing with broken state".
+    # Swallowing here was the deviation from it.
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                json.loads(stripped)
+                last_valid = stripped
+            except json.JSONDecodeError:
+                pass  # Partial write — skip
     return last_valid
 
 

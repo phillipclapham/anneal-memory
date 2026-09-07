@@ -4,6 +4,86 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — recovery now has a chain anchor, or refuses to call itself recovered
+
+Found by the frontier code seat at L3 on the change below, and all three end in the same place: a
+false tampering verdict from `verify()`.
+
+**A nonempty active file holding no line that parses gave no chain anchor, and that branch did not
+know it.** It fell through on the constructor defaults, so the next append started a fresh chain from
+genesis after sealed files that ended somewhere else: `Hash mismatch at seq 0`. That is the same
+error, in the same shape, as the zero-byte case fixed hours earlier — the earlier fix asked "is the
+file empty?" when the question is "does the active file give me an anchor?" Both branches now call
+one helper.
+
+**A failed scan looked exactly like an empty one.** `_read_last_valid_entry` suppressed `OSError` and
+`UnicodeDecodeError` and returned whatever it had found before the error, and initialization then
+marked itself complete on that partial answer. The failures are correlated rather than independent —
+the caller that most needs recovery is a rollback that already failed on this disk. Read errors now
+propagate, which is what initialization's own contract already promised.
+
+**A raising log handler could skip the cache invalidation.** The rollback's warning ran before the
+safe state was established, so a logging callback that raised took the invalidation with it and the
+next append reused the seq — a false tampering verdict caused by a logging config.
+
+**`note_write_failure()` handed back a sequence it knew was stale.** After a failed rollback that
+value is deliberately stale until the next re-derivation, and it is folded into the durable
+`audit_last_failure` record — pointing an operator at an entry that exists. It returns `None` there
+now, which is what its contract already defined as "could not be determined". The rollback warning
+also no longer claims the aborted entry *is* still on disk: that is false when `truncate()` took
+effect and only its `fsync` raised.
+
+
+### Fixed — an append never merges into a torn tail, and a failed rollback no longer rewinds past disk
+
+Two HIGHs found by the domain-lens review on 2026-09-07, filed the same day as verified-but-not-
+landed, and closed on re-test. **They are one change with a forced order**, and the cheap-looking
+half is downstream of the other.
+
+**An append onto an unterminated file destroyed the new entry, not the torn one.** `_initialize`
+recovers `seq`/`prev_hash` from the last line that *parses* and leaves the unparseable tail in
+place; the next `open(active, "a")` then wrote straight onto those bytes and the merged line parsed
+as nothing. Measured across four events: the file held `['first', 'second', 'MALFORMED(233B)',
+'fourth']` while `verify()` returned `valid=True, skipped_lines=1`. **One audit entry silently
+destroyed with a clean bill of health** — and from the writer's side the append *succeeded*, so
+`note_write_failure` never fired, no `dropped_before` marker was emitted and `audit_write_failures`
+stayed 0. None of the loss-reporting machinery had anything to report.
+
+Every write here is `json_line + "\n"`, so **a file not ending in a newline is always an incomplete
+write** — there is no legitimate reading of that state. The append now terminates the fragment
+before writing. **The repair is additive on purpose:** the candidate fix on file was a recovery-time
+truncation, and deleting bytes at open is not an operation a tamper-evident log should own. The
+damage came from the concatenation, not from the fragment existing. Measured on the same fixture,
+the fragment survives as a readable skipped line and the entry survives with it.
+
+It lives on the **append**, not in `_initialize`, and that is not style: `log()` re-initialises only
+when `_initialized` is False, so a long-lived process that tore its own tail mid-run never
+re-initialises and an init-time repair never fires for it. The append is the operation that does the
+damage. It also then sits inside the existing all-or-nothing rollback, so a failed append rolls the
+boundary byte back with everything else.
+
+**A failed truncate is not a neutral unknown.** The rollback's truncate is best-effort while the
+restore was unconditional, so a failure there left the entry on disk while memory was rewound to
+"nothing landed" and the caller's contracted retry reused the seq. Measured with **no terminal
+signal at all** — `fsync` reporting EIO after the data landed, then the rollback's `open` failing
+EROFS on the same sick disk: seqs `[0, 1, 2, 2]`, `verify(): valid=False`.
+
+The restore is now conditional, and when the truncate fails the handler **stops guessing what disk
+looks like and asks it**: `_initialized` is cleared so the next append re-derives `seq`/`prev_hash`
+from the file. The fix recorded at the site was to leave memory *advanced* instead — that assumes
+the on-disk line is complete, which it is not after an ENOSPC mid-`write`, and measured with it in
+place the partial-write case gives `[0, 1, MALFORMED, 3]` and `valid=False`: the same false
+tampering verdict, reached from the other side. Re-deriving asserts nothing about disk, so it is
+correct in every branch — including the one where `truncate()` took effect but its `fsync` did not.
+
+Re-deriving is only correct if recovery is correct, which is why the boundary fix above had to land
+first.
+
+*Not closed:* one ordinary I/O failure plus a terminal signal landing inside the truncate *before it
+takes effect* still corrupts. That residual is pinned by a strict `xfail` arm which will start
+passing, and saying so, when the structural change lands.
+
+
 ### Fixed — a zero-byte active file no longer restarts the hash chain from genesis
 
 `_initialize` tested `active.exists()` alone. The rollback above truncates back to the pre-append

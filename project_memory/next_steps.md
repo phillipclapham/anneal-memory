@@ -60,9 +60,13 @@ the right fix. ▶ That is the experiment to run FIRST; it decides the design.
 
 ### 2. ▶ NO DIRECTORY FSYNC ANYWHERE IN THE MODULE — A FINDING, NOT TIDINESS
 `audit.py` is the only durability-sensitive module in the repo without the `_fsync_dir` idiom, and
-macOS needs `F_FULLFSYNC`, which `store.py` documents for the SQLite store and **nothing documents
-for this sidecar**. Filed 2026-09-07, untouched. Every crash-consistency guarantee in this file is
-qualified by it.
+macOS needs `F_FULLFSYNC`, which the siblings document and **nothing documents for this sidecar**.
+Filed 2026-09-07, untouched. Every crash-consistency guarantee in this file is qualified by it.
+▶ VERIFIED at close, and there are THREE working precedents to copy rather than a design to invent:
+`grep -rn '_fsync_dir\|F_FULLFSYNC' anneal_memory` returns `store.py` (defines it, `:751`; used at
+`:6395`/`:6445`), `spores.py` (defines its own, `:220`; used at `:376`) and `crystal.py` (cites the
+idiom) — and **zero hits in `audit.py`**. All three also state the macOS limit in prose, so the
+wording exists too.
 
 ### 3. ▶ `verify()` CANNOT SEE A DUPLICATED ENTRY WHOSE CHAIN IS CONTINUOUS (§7) — still open.
 

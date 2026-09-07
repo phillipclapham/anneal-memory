@@ -4,6 +4,33 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — an interrupted audit append no longer leaves disk and memory disagreeing
+
+`AuditTrail.log` is write-first: the entry is fsynced, then three pieces of chain state advance
+(`_prev_hash`, `_seq`, `_dropped_since_last`). Those three stores sat **outside** the `try` that
+rolls the file back, so a terminal exception arriving after the fsync left the line durable with the
+chain state unchanged, and the caller's retry reused the same `seq` and `prev_hash` — `verify()`
+reporting a hash mismatch. **A durability hiccup read as tampering**, on the record whose entire
+value is telling those two apart.
+
+The stores moved inside the guarded region, the hash computation moved out of it (it is pure), and
+the handler now restores a snapshot of the three attributes. **Moving the stores in is not on its
+own a fix**: the advance is three separate stores, so an interrupt between any two of them leaves
+memory ahead of disk and the retry chains over a hole — measured, it takes the broken windows from
+one to two rather than to zero. The restore is what closes it.
+
+**The truncate runs before the restore, not after.** The truncate is the step that must happen and a
+terminal signal inside the handler kills everything past where it lands, so the fallible-but-
+essential operation goes first. Measured with an ordinary `OSError` as the original failure plus a
+single `KeyboardInterrupt` during the restore: restore-first gives seqs `[0, 1, 2, 2]` and
+`valid=False` on all three arms; truncate-first gives `[0, 1, 2]` and `valid=True`. One terminal
+signal is enough to hit this, not two.
+
+Graded by four interrupt points across the append, a three-arm ordering test, and an AST invariant
+asserting the guarded region contains all three stores and no call that can reach `self` — because
+the restore is only sound while nothing inside that region legitimately changes what it restores.
+
+
 ### Fixed — the schema version check and the migrations are now one locked step (`spore-773`)
 
 `_init_schema` takes `BEGIN IMMEDIATE` and **re-runs the compatibility guard under it**. Before this

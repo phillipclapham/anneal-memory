@@ -242,19 +242,130 @@ class AuditTrail:
         active = self._active_path
         active.parent.mkdir(parents=True, exist_ok=True)
         resume_at = active.stat().st_size if active.exists() else 0
+        # ``_compute_hash`` is a staticmethod, pure in ``json_line``, so
+        # hoisting it OUT of the guarded region below is side-effect-free
+        # and leaves that region containing nothing but the three stores.
+        # It also means a hash failure now raises BEFORE anything is
+        # written, instead of after — no line on disk, nothing to roll back.
+        new_prev_hash = self._compute_hash(json_line)
+        # Snapshot for the rollback. See the handler for why rolling the
+        # FILE back is only half of it.
+        saved_chain_state = (
+            self._prev_hash,
+            self._seq,
+            self._dropped_since_last,
+        )
         try:
             with open(active, "a", encoding="utf-8") as f:
                 f.write(json_line + "\n")
                 f.flush()
                 os.fsync(f.fileno())
+            # Update chain state
+            self._prev_hash = new_prev_hash
+            self._seq += 1
+            # Cleared only now — after fsync — so a failure while writing THIS
+            # entry keeps the pending count for the next attempt rather than
+            # losing the very fact it exists to preserve.
+            self._dropped_since_last = 0
         except BaseException:
+            # ⛔ ROLLING THE FILE BACK IS ONLY HALF OF IT — the in-memory
+            # chain state is restored too, at the BOTTOM of this handler.
+            # The advance in the guarded block above is THREE SEPARATE
+            # STORES, so an interrupt between any two of them leaves memory
+            # ahead of disk; truncating without restoring then chains the
+            # NEXT entry over a hole — the same false-tampering signature
+            # this handler exists to prevent, reached from the other side.
+            #
+            # ⚖ AND THE TRUNCATE GOES FIRST, WHICH IS THE OPPOSITE OF THE
+            # ORDER THIS HANDLER SHIPPED WITH FOR AN HOUR ON 2026-09-07.
+            # The original argument was "restore first, it cannot raise."
+            # That optimises the wrong thing: the truncate is the step that
+            # MUST happen, and a terminal signal delivered inside this
+            # handler kills everything after the point it lands. So the
+            # fallible-but-essential operation goes first and the
+            # infallible one second. Measured, original failure an ordinary
+            # ``OSError`` (ENOSPC) plus ONE ``KeyboardInterrupt`` during the
+            # restore — the realistic case, not two signals:
+            #
+            #   signal during restore of | restore first | truncate first
+            #   -------------------------|---------------|---------------
+            #   _prev_hash               | seqs [0,1,2,2]| seqs [0,1,2]
+            #                            | valid=FALSE   | valid=True
+            #   _seq                     | valid=FALSE   | valid=True
+            #   _dropped_since_last      | valid=FALSE   | valid=True
+            #
+            # Found by codex at L3 against the restore-first version, which
+            # had shipped with a comment claiming the residual needed a
+            # SECOND terminal signal. It does not: one is enough when the
+            # original failure is ordinary I/O. Pinned by
+            # ``test_the_rollback_truncates_before_it_restores``.
+            #
+            # MEASURED 2026-09-07 — four interrupt points x three
+            # structural variants, graded by the tests named at the bottom
+            # of this comment, each variant a full copy of the tree, each
+            # arm run as interrupt -> ``note_write_failure()`` -> retry ->
+            # read the seqs off disk -> ``verify()``:
+            #
+            #   interrupt before    | advance   | advance in | advance in
+            #                       | OUTSIDE   | try, NO    | try, WITH
+            #                       | try (was) | restore    | restore
+            #   --------------------|-----------|------------|-----------
+            #   os.fsync            |   pass    |   pass     |   pass
+            #   _prev_hash store    |   FAIL    |   pass     |   pass
+            #   _seq store          |   FAIL    |   FAIL     |   pass
+            #   _dropped_since_last |   pass    |   FAIL     |   pass
+            #
+            # ⚠ THE TWO FAILING COLUMNS FAIL DIFFERENTLY, which is why one
+            # assertion would not have found both: OUTSIDE-the-``try`` fails
+            # on DUPLICATE SEQS on disk (``[0, 1, 2, 2]``) because nothing
+            # rolls back, while inside-without-restore fails on
+            # ``verify(): valid=False`` (seqs ``[0, 1, 3]``) because the
+            # file rolled back and memory did not.
+            #
+            # ⛔ SO DO NOT "SIMPLIFY" THIS BY DROPPING THE RESTORE. Moving
+            # the advance inside the ``try`` without it does not take the
+            # broken windows from two to zero — it takes them from two to
+            # two, and moves which ones. That middle column is the fix
+            # exactly as it was first prescribed on 09-07; it was measured
+            # rather than adopted. Only the third column is green.
+            #
+            # ⚠ WHAT IS STILL NOT CLOSED, stated because the paragraph
+            # above would otherwise read as a total guarantee: a terminal
+            # signal landing inside this handler BEFORE the truncate
+            # completes, or between two of the restore's own stores, still
+            # leaves the two halves disagreeing. With the truncate first
+            # that needs TWO terminal signals (one to enter the handler,
+            # one to interrupt it) — MEASURED, not assumed; with the
+            # restore first it needed only one, which is why the order
+            # changed.
+            # Collapsing the three attributes into ONE would make each
+            # half a single store and close the first of those. ⚖ SCOPE,
+            # MEASURED 2026-09-07 rather than estimated: the three are
+            # PRIVATE TO THIS MODULE — ``store.py``'s only mention of any
+            # of them is a comment, so there is no cross-module contract to
+            # renegotiate. Count the sites with
+            #     grep -c 'self\._prev_hash\|self\._seq\b\|self\._dropped_since_last' anneal_memory/audit.py
+            # It is cheaper than it looks and still NOT done here: it is a
+            # separate change with its own review, and it closes only the
+            # second-signal-during-the-handler window, not anything a first
+            # signal can reach.
+            #
+            # Graded by ``TestTheAppendIsAllOrNothingForTerminalExceptions
+            # Too`` in ``tests/test_audit.py``, whose two mutants are the
+            # re-derivation recipe for the table above.
             # ⛔ ``BaseException``, NOT ``Exception`` (codex L3 HIGH,
             # 2026-09-06). The all-or-nothing property this block exists to
             # provide did not hold for terminal exceptions: a
             # ``KeyboardInterrupt`` landing after the line was written and
             # fsynced but before the chain state advanced left the entry ON
             # DISK with ``_seq``/``_prev_hash`` unchanged and NO rollback,
-            # because it walked past this handler.
+            # because it walked past this handler. ⚠ AND WIDENING THIS
+            # HANDLER WAS NOT SUFFICIENT, WHICH THIS COMMENT ASSERTED FOR A
+            # DAY (2026-09-06 -> 09-07): the advance it names sat OUTSIDE
+            # the ``try`` — thirty-three lines past the end of the guarded
+            # body, one whole handler in between — so no widening could
+            # reach it. The advance was moved inside on 09-07, and that is
+            # what makes this handler's promise true rather than stated.
             # ⚠ IT BECAME REACHABLE THE SAME DAY. Until the store's own
             # per-event catch was widened to ``BaseException``, an interrupt
             # here abandoned the whole replay, so no retry followed and the
@@ -276,15 +387,12 @@ class AuditTrail:
                     os.fsync(f_trunc.fileno())
             except Exception:
                 pass
+            (
+                self._prev_hash,
+                self._seq,
+                self._dropped_since_last,
+            ) = saved_chain_state
             raise
-
-        # Update chain state
-        self._prev_hash = self._compute_hash(json_line)
-        self._seq += 1
-        # Cleared only now — after fsync — so a failure while writing THIS
-        # entry keeps the pending count for the next attempt rather than
-        # losing the very fact it exists to preserve.
-        self._dropped_since_last = 0
 
         # Fire callback after successful write
         if self._on_event is not None:

@@ -252,6 +252,306 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
             "out"
         )
 
+    # -- 2026-09-07: the window above is not the whole window --
+
+    @pytest.mark.parametrize(
+        "store_attr",
+        ["_prev_hash", "_seq", "_dropped_since_last"],
+    )
+    def test_an_interrupt_between_the_chain_state_stores_rolls_back_too(
+        self, tmp_path, monkeypatch, store_attr
+    ):
+        """The advance is three stores; a signal can land between any two.
+
+        The sibling test above injects at ``os.fsync`` — INSIDE the ``with``,
+        inside the guarded block — and the truncate has always covered that.
+        It is a real arm and it is narrower than the window the handler's own
+        comment describes: *"after the line was written and fsynced but before
+        the chain state advanced"*. On 2026-09-06 the tail of that window sat
+        OUTSIDE the ``try`` entirely, so widening the handler could not reach
+        it (diogenes, 2026-09-07).
+
+        Each parameter interrupts immediately BEFORE one of the three stores,
+        so the arms bracket the whole advance:
+
+        · ``_prev_hash``          — nothing stored yet
+        · ``_seq``                — ``_prev_hash`` stored, ``_seq`` not
+        · ``_dropped_since_last`` — ``_prev_hash`` and ``_seq`` both stored
+
+        ⛔ MUTATION RECIPE — BOTH MUTANTS BUILT AND RUN 2026-09-07, ARM
+        SETS TRANSCRIBED FROM THE RUN. Selected alone
+        (``-k between_the_chain_state_stores``), three arms, 3 passed at
+        HEAD:
+
+        1. Move the three chain-state stores back OUT of the ``try`` in
+           ``AuditTrail.log``, below the handler's ``raise`` (where they sat
+           until 09-07) → ``_prev_hash`` and ``_seq`` FAIL on DUPLICATE SEQS
+           (``[0, 1, 2, 2]``: nothing rolls back, so the retry reuses the
+           seq); ``_dropped_since_last`` PASSES, because by then ``_seq``
+           has already advanced and the retry gets a fresh number.
+        2. Move them INSIDE the ``try`` but delete the chain-state restore
+           at the top of the handler → ``_seq`` and ``_dropped_since_last``
+           FAIL on ``verify(): valid=False`` (seqs ``[0, 1, 3]``: the file
+           rolled back and memory did not, so the retry chains over a
+           hole); ``_prev_hash`` PASSES, because nothing had been stored.
+
+        ⚠ THE TWO MUTANTS OVERLAP AT ``_seq`` AND EACH LEAVES A DIFFERENT
+        ARM GREEN — they are NOT disjoint, and an earlier draft of this
+        docstring said they were, which is why the sets above are
+        transcribed from the run rather than reasoned from the diff. What
+        the arms actually establish: no single arm grades both containment
+        layers, and neither layer can be dropped on the grounds that the
+        suite still passes without it.
+        """
+        import json
+
+        from anneal_memory.audit import AuditTrail
+
+        shadow = "__shadow" + store_attr
+        armed = {"attr": None}
+
+        def _getter(self):
+            return self.__dict__[shadow]
+
+        def _setter(self, value):
+            if armed["attr"] == store_attr:
+                armed["attr"] = None
+                raise KeyboardInterrupt(f"Ctrl+C just before {store_attr}")
+            self.__dict__[shadow] = value
+
+        monkeypatch.setattr(
+            AuditTrail, store_attr, property(_getter, _setter), raising=False
+        )
+
+        db = tmp_path / "chain.db"
+        trail = AuditTrail(db)
+        trail.log("record", {"i": 0})
+        trail.log("record", {"i": 1})
+
+        armed["attr"] = store_attr
+        with pytest.raises(KeyboardInterrupt):
+            trail.log("record", {"i": 2})
+
+        # Caller contract: swallow, record the drop, retry.
+        trail.note_write_failure()
+        trail.log("record", {"i": 3})
+
+        entries = [
+            json.loads(line)
+            for line in (tmp_path / "chain.audit.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if line.strip()
+        ]
+        seqs = [e["seq"] for e in entries]
+        assert len(seqs) == len(set(seqs)), (
+            f"duplicate sequence numbers on disk ({seqs}) after an interrupt "
+            f"before the {store_attr} store"
+        )
+        assert AuditTrail.verify(str(db)).valid, (
+            f"an interrupt before the {store_attr} store left disk and the "
+            f"in-memory chain state disagreeing, so the retry chained over a "
+            f"hole and verify() reports tampering — seqs on disk {seqs}"
+        )
+
+
+    @pytest.mark.parametrize(
+        "store_attr",
+        ["_prev_hash", "_seq", "_dropped_since_last"],
+    )
+    def test_the_rollback_truncates_before_it_restores(
+        self, tmp_path, monkeypatch, store_attr
+    ):
+        """ORDER, not presence: the fallible step must run first.
+
+        The handler does two things — truncate the file back, and restore
+        the in-memory chain state. It shipped restore-first for an hour on
+        2026-09-07 on the argument that the restore cannot raise. codex (L3)
+        pointed out that this optimises the wrong thing: the TRUNCATE is the
+        step that must happen, and a terminal signal delivered inside the
+        handler kills everything after where it lands.
+
+        The realistic case needs only ONE terminal signal, because the
+        original failure need not be terminal at all — here an ordinary
+        ``OSError`` (ENOSPC) after a successful write+flush puts us in the
+        handler, and a single ``KeyboardInterrupt`` during the restore then
+        skips the truncate. Restore-first leaves the entry on disk with the
+        chain state never advanced, so the caller's retry reuses the seq:
+        ``[0, 1, 2, 2]`` and ``verify(): valid=False`` — a durability
+        hiccup read as tampering, which is the one verdict this record
+        exists to make impossible.
+
+        ⛔ MUTATION-CHECKED 2026-09-07: move the chain-state restore back
+        ABOVE the truncate's ``try`` in ``AuditTrail.log``'s handler and all
+        three arms fail with ``valid=False``. Selected alone
+        (``-k truncates_before_it_restores``).
+        """
+        import json
+
+        import anneal_memory.audit as audit_module
+        from anneal_memory.audit import AuditTrail
+
+        shadow = "__order" + store_attr
+        armed = {"attr": None}
+
+        def _getter(self):
+            return self.__dict__[shadow]
+
+        def _setter(self, value):
+            if armed["attr"] == store_attr:
+                armed["attr"] = None
+                raise KeyboardInterrupt("Ctrl+C inside the rollback handler")
+            self.__dict__[shadow] = value
+
+        monkeypatch.setattr(
+            AuditTrail, store_attr, property(_getter, _setter), raising=False
+        )
+
+        db = tmp_path / "order.db"
+        trail = AuditTrail(db)
+        trail.log("record", {"i": 0})
+        trail.log("record", {"i": 1})
+
+        real_fsync = audit_module.os.fsync
+
+        def fsync_then_enospc(fd):
+            # The line is durable; the failure is ORDINARY, not terminal.
+            real_fsync(fd)
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(audit_module.os, "fsync", fsync_then_enospc)
+        armed["attr"] = store_attr
+        with pytest.raises(BaseException):
+            trail.log("record", {"i": 2})
+        monkeypatch.setattr(audit_module.os, "fsync", real_fsync)
+
+        trail.note_write_failure()
+        trail.log("record", {"i": 3})
+
+        entries = [
+            json.loads(line)
+            for line in (tmp_path / "order.audit.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if line.strip()
+        ]
+        seqs = [e["seq"] for e in entries]
+        assert len(seqs) == len(set(seqs)), (
+            f"duplicate sequence numbers on disk ({seqs}): one terminal "
+            f"signal during the restore of {store_attr} skipped the "
+            f"truncate, so the aborted entry stayed on disk"
+        )
+        assert AuditTrail.verify(str(db)).valid, (
+            f"a single terminal signal during the restore of {store_attr} "
+            f"produced a false tampering verdict — seqs on disk {seqs}"
+        )
+
+    def test_the_guarded_region_cannot_be_widened_into_something_self_touching(
+        self,
+    ):
+        """Structural: the rollback is only sound because the region is tiny.
+
+        The handler restores a snapshot of ``_prev_hash`` / ``_seq`` /
+        ``_dropped_since_last``. That is correct ONLY while nothing inside
+        the guarded ``try`` can legitimately change them — otherwise the
+        restore would UNDO a real change instead of an aborted one. Today
+        that holds because the region contains three stores and five calls
+        (``open``, ``write``, ``flush``, ``fsync``, ``fileno``), none of
+        which can reach ``self``.
+
+        That is a property of the region's SHAPE, so it is asserted rather
+        than commented: a future edit that moves a store out, or that calls
+        a method on ``self`` in there (a rotation, a re-seed, anything
+        re-entering ``log()``), silently invalidates the rollback and is
+        exactly the kind of change nobody re-derives this argument for.
+
+        ⛔ MUTATION-CHECKED 2026-09-07, both directions, selected alone:
+        moving ``self._seq += 1`` back below the handler fails the first
+        assertion; adding ``self._initialize()`` inside the ``try`` fails
+        the second.
+        """
+        import ast
+        import inspect
+
+        import anneal_memory.audit as audit_module
+
+        src = inspect.getsource(audit_module)
+        tree = ast.parse(src)
+        cls = next(
+            n for n in tree.body
+            if isinstance(n, ast.ClassDef) and n.name == "AuditTrail"
+        )
+        log = next(
+            n for n in cls.body
+            if isinstance(n, ast.FunctionDef) and n.name == "log"
+        )
+        guarded = [
+            n for n in ast.walk(log)
+            if isinstance(n, ast.Try)
+            and any(
+                isinstance(h.type, ast.Name) and h.type.id == "BaseException"
+                for h in n.handlers
+            )
+        ]
+        assert len(guarded) == 1, (
+            f"expected exactly one BaseException-guarded try in log(), "
+            f"found {len(guarded)}"
+        )
+        try_node = guarded[0]
+        lo = try_node.body[0].lineno
+        hi = try_node.body[-1].end_lineno
+
+        trio = {"_prev_hash", "_seq", "_dropped_since_last"}
+        stored_inside = set()
+        for node in ast.walk(log):
+            if isinstance(node, (ast.Assign, ast.AugAssign)):
+                targets = (
+                    node.targets if isinstance(node, ast.Assign)
+                    else [node.target]
+                )
+                for tgt in targets:
+                    if (
+                        isinstance(tgt, ast.Attribute)
+                        and tgt.attr in trio
+                        and isinstance(tgt.value, ast.Name)
+                        and tgt.value.id == "self"
+                    ):
+                        in_handler = any(
+                            h.lineno <= node.lineno <= h.end_lineno
+                            for h in try_node.handlers
+                        )
+                        if in_handler:
+                            continue
+                        assert lo <= node.lineno <= hi, (
+                            f"self.{tgt.attr} is assigned at line "
+                            f"{node.lineno}, OUTSIDE the guarded try "
+                            f"({lo}-{hi}). An interrupt there advances the "
+                            f"chain state with no rollback — the 2026-09-06 "
+                            f"defect, reintroduced."
+                        )
+                        stored_inside.add(tgt.attr)
+        assert stored_inside == trio, (
+            f"the guarded region advances {sorted(stored_inside)} but the "
+            f"rollback restores {sorted(trio)} — the two sets must match or "
+            f"the restore is either incomplete or clobbering"
+        )
+
+        allowed = {"open", "f.write", "f.flush", "os.fsync", "f.fileno"}
+        for node in ast.walk(try_node):
+            if not isinstance(node, ast.Call):
+                continue
+            if not (lo <= node.lineno <= hi):
+                continue
+            name = ast.unparse(node.func)
+            assert name in allowed, (
+                f"a new call {name!r} appeared inside the guarded try at "
+                f"line {node.lineno}. If it can reach `self`, the handler's "
+                f"snapshot restore may now UNDO a legitimate change rather "
+                f"than an aborted one. Widen this allow-list only after "
+                f"establishing that it cannot touch "
+                f"_prev_hash / _seq / _dropped_since_last."
+            )
+
 
 class TestCrashRecovery:
     """Recovery from crashes and restarts."""
@@ -2215,22 +2515,64 @@ class TestCodexL3TwentySixOhNineOhFour:
         ``store.py`` ``_replay_deferred_audits`` -> ``_audit_log_after_commit``
         -> ``self._audit.log``, not assumed from the call order).
 
-        MUTATION-CHECKED IN BOTH DIRECTIONS, and it does NOT abort the runner:
-        narrowing ``_batch()``'s post-commit ``except BaseException`` back to
-        ``except Exception`` makes the interrupt escape the batch, so
-        ``validated_save_continuity`` never reaches ``db_committed = True``,
-        its own ``except BaseException`` unlinks BOTH staged sidecars, and the
-        continuity file is left holding the PREVIOUS session's text while the
-        wrap row and the episodes' wrap assignments stay durable. The
-        assertion below is what goes red.
+        ⛔ MUTATION RECIPE — THE SINGLE-SITE FORM THIS DOCSTRING CARRIED
+        UNTIL 2026-09-07 WAS FALSE, AND IT IS THE RECIPE, NOT THE GATE, THAT
+        WAS BROKEN. It read: narrow ``_batch()``'s post-commit
+        ``except BaseException`` to ``except Exception`` and this test goes
+        red. Run verbatim it returns ``1 passed``. The claim was true when
+        written (``7de2007``) and two commits LATER IN THE SAME WINDOW —
+        ``926be6a`` widening ``_audit_log_after_commit``'s catch, ``200382d``
+        adding the per-event catch in ``_replay_deferred_audits`` — each
+        independently contains the interrupt before it can reach ``_batch``.
 
-        ⚠ RE-RUN THE MUTATION WITH THIS TEST SELECTED ALONE, by node id or
+        ▶ WHY NO SINGLE-SITE MUTATION CAN WORK, which is the part worth
+        keeping: the three handlers are a NESTED CONTAINMENT CHAIN on one
+        path, so only the innermost ever fires and defeating any one of them
+        just hands the interrupt to the next. Stack captured at the raise:
+
+            continuity.py:2111  validated_save_continuity
+            store.py:5797       _batch                 (post-commit)
+            store.py:5838       _replay_deferred_audits (per-event)
+            store.py:5212       _audit_log_after_commit (innermost)
+
+        ⛔ THE WORKING RECIPE, RUN 2026-09-07, ALL FOUR ARMS, THIS TEST
+        SELECTED ALONE (``-k cannot_destroy_a_committed_wrap``). Narrow
+        ``except BaseException`` -> ``except Exception`` at:
+
+            5798 alone (the old recipe) ............... 1 passed
+            5213 + 5858 .............................. 1 passed
+            5213 + 5798 + 5858 ....................... 1 FAILED
+            control (no mutation) .................... 1 passed
+
+        The red arm fails on the assertion below: the interrupt escapes the
+        batch, ``validated_save_continuity`` never reaches
+        ``db_committed = True``, its own handler unlinks BOTH staged
+        sidecars, and the continuity file is left holding the PREVIOUS
+        session's text while the wrap row and the episodes' wrap assignments
+        stay durable.
+
+        ⚠ VERIFY THAT YOUR MUTATION APPLIED, BY READING IT BACK OFF DISK.
+        Two of the three sites are ``except BaseException:`` and one is
+        ``except BaseException as exc:``; a mutator that string-matches the
+        first form silently no-ops on the third site and reports success,
+        and the resulting ``1 passed`` is indistinguishable from containment
+        working. That is not hypothetical — it happened while this docstring
+        was being repaired, and it produced a confident, wrong contradiction
+        of a correct finding.
+
+        ⚠ RE-RUN WITH THIS TEST SELECTED ALONE, by node id or
         ``-k cannot_destroy_a_committed_wrap``. Under the mutant the SIBLING
         test above aborts the whole pytest session before this one is
         reached, so a mutation run that selects both (``-k interrupt``)
-        reports an abort and looks like this test cannot go red either. It
-        can — measured 2026-09-06: selected alone the mutant gives
-        ``1 failed``, selected together it gives an abort at the sibling.
+        reports an abort and looks like this test cannot go red either.
+
+        ▶ NOT SPLIT INTO PER-LAYER ARMS, and the reason is structural rather
+        than effort: because the layers are nested on ONE path, no injection
+        point exists that only one of them can contain. An arm that graded a
+        single layer would have to assert that layer's own distinctive side
+        effect (the drop is RECORDED, the replay CONTINUES, the sidecars are
+        NOT unlinked) rather than that the wrap survived — a different test
+        with a different subject. Worth building; it is not this test.
         """
         from anneal_memory import prepare_wrap, validated_save_continuity
         from anneal_memory.store import EpisodeType, Store

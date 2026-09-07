@@ -678,28 +678,27 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
             "did not reach the window it exists to describe"
         )
 
-        # ⚖ THE KNOWN-BAD SIGNATURE, NAMED EXACTLY. Only this one is xfail.
-        if len(seqs) != len(set(seqs)) and not r.valid:
-            pytest.xfail(
-                f"KNOWN-OPEN residual, measured 2026-09-07 (glm-5.3, L3) and "
-                f"re-identified independently by codex 2026-09-07. One "
-                f"ordinary I/O failure plus ONE terminal signal landing "
-                f"inside the truncate before it takes effect still corrupts: "
-                f"seqs {seqs}, {r.error}. Closing it needs the structural "
-                f"change — see next_steps.md item 1, where both candidate "
-                f"fixes and the falsifier are recorded."
-            )
-
-        # Anything else is news, and it is reported LOUDLY in both
-        # directions rather than absorbed into the xfail.
-        assert False, (
-            f"the known-open residual did NOT reproduce. THIS IS THE "
-            f"NOTIFICATION, not a bug in the test. Observed: seqs={seqs}, "
-            f"valid={r.valid}, error={r.error}. If the structural close "
-            f"landed, convert this into a positive assertion and delete the "
-            f"xfail branch. If it did not, the scenario has drifted and this "
-            f"test is no longer describing the window it names."
+        # ✅ CLOSED 2026-09-07 (same day it was opened). Kept as a POSITIVE
+        # assertion rather than deleted: the window is narrow, reachable only
+        # by an ordinary I/O failure plus a terminal signal in a specific
+        # place, and nothing else in the suite would notice it reopening.
+        #
+        # ⚡ THIS GATE ANNOUNCED ITS OWN CLOSURE. It had been rewritten hours
+        # earlier so that anything OTHER than the exact known-bad signature
+        # fails loudly — and on its first real occasion it printed
+        # "the known-open residual did NOT reproduce. THIS IS THE
+        # NOTIFICATION" with seqs [0,1,2,3] and valid=True. A blanket
+        # ``xfail(strict=True)`` would have swallowed the good news as an
+        # expected failure.
+        assert len(seqs) == len(set(seqs)), (
+            f"the closed residual REOPENED — duplicate seqs on disk: {seqs}"
         )
+        assert r.valid, (
+            f"the closed residual REOPENED — one ordinary I/O failure plus "
+            f"one terminal signal inside the truncate produced a false "
+            f"tampering verdict again: seqs {seqs}, {r.error}"
+        )
+        return
 
     def test_the_guarded_region_cannot_be_widened_into_something_self_touching(
         self,

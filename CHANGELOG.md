@@ -4,6 +4,36 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — recovery seeds from genesis, a manifest that cannot be read is not one that is absent, and the rollback's last window is closed
+
+Found by the frontier code seat reviewing the previous round's own fixes.
+
+**Seeding the chain from the manifest did not establish genesis when there is no manifest** — it
+retained whatever chain state was already cached. That was correct while only a fresh instance could
+reach it; making the rollback re-derive from disk meant it could now run on an instance whose cached
+state was stale, and it would then keep the hash of an entry that had just been truncated away. The
+next append chained from data no longer on disk. It resets to genesis first now.
+
+**A manifest that could not be read was treated as absent**, failing open to genesis while the sealed
+files ended somewhere else — so a transient read error restarted the chain and integrity verification
+reported tampering once the disk recovered. Only a missing file is now treated as missing.
+
+**Propagating decode errors from the scan broke the store's health endpoint**, which guarded that
+call against `OSError` only. An active audit file holding invalid UTF-8 crashed `status()` instead of
+degrading it to unavailable fields.
+
+**The rollback's diagnostic could replace the failure it was describing.** A logging handler that
+raised meant the caller received the logging exception rather than the original disk error, and the
+re-raise was never reached.
+
+**And the last known-open window in the rollback is closed.** A terminal signal arriving while the
+handler opened the file walked past its inner guard, so neither the file rollback nor the cache
+invalidation ran and the retry reused the sequence number. The cache is now invalidated as the
+handler's first act and re-validated only after a complete restore, so every exceptional exit leaves
+the file as the authority. This had been deferred on the belief that closing it meant removing the
+restore altogether; that cost belonged to one candidate fix, not to the problem.
+
+
 ### Fixed — recovery now has a chain anchor, or refuses to call itself recovered
 
 Found by the frontier code seat at L3 on the change below, and all three end in the same place: a

@@ -30,7 +30,29 @@
 > `git ls-remote origin main` vs `git rev-parse HEAD` · `git status --porcelain` ·
 > `.venv/bin/python3 -m pytest -q` · `.venv/bin/python3 -m mypy anneal_memory`
 
-### 1. ✅ CLOSED 2026-09-07 — AND THE DEFERRAL THAT HELD IT WAS WRONG ABOUT ITS OWN COST
+### 1. ▶ NO DIRECTORY FSYNC ANYWHERE IN THE MODULE — A FINDING, NOT TIDINESS
+`audit.py` is the only durability-sensitive module in the repo without the `_fsync_dir` idiom, and
+macOS needs `F_FULLFSYNC`, which the siblings document and **nothing documents for this sidecar**.
+Filed 2026-09-07, untouched. Every crash-consistency guarantee in this file is qualified by it.
+▶ VERIFIED at close, and there are THREE working precedents to copy rather than a design to invent:
+`grep -rn '_fsync_dir\|F_FULLFSYNC' anneal_memory` returns `store.py` (defines it, `:751`; used at
+`:6395`/`:6445`), `spores.py` (defines its own, `:220`; used at `:376`) and `crystal.py` (cites the
+idiom) — and **zero hits in `audit.py`**. All three also state the macOS limit in prose, so the
+wording exists too.
+
+### 2. ▶ `verify()` CANNOT SEE A DUPLICATED ENTRY WHOSE CHAIN IS CONTINUOUS (§7) — still open.
+
+### 3. ⚠ COVERAGE CAVEAT ON THE 2026-09-07 L3 — DO NOT READ IT AS THREE OPINIONS
+`codex` found 3 HIGH / 2 MED / 1 LOW (all six real). `complement` found 2, no HIGH. **`glm` returned
+`{"findings": []}`.** ⛔ **That is not evidence of a clean file.** The fan-in measured all 612 rows of
+`state/verdicts.jsonl` on 2026-09-07: **19 of 25 "healthy chars but `metadata.complete=False`"
+truncations are glm**, whose two failure modes are a 16/32-char null and a 2,000–4,000-char plausible
+truncation. **Two seats are not two opinions when one of them did not finish.** This file's
+independent review was cut off twice on 09-06 as well.
+
+### ✅ NOT WORK — CLOSED THE SAME DAY. KEPT HERE FOR THE LESSON ONLY
+
+#### The strict-`xfail` residual, and the deferral that held it was wrong about its own cost
 
 The strict-`xfail` residual (a terminal signal inside the rollback's `open`, after an ordinary I/O
 failure) is **CLOSED**. Suite is `1900 passed`, **zero xfailed**.
@@ -65,26 +87,6 @@ signature fails loudly, it printed *"the known-open residual did NOT reproduce. 
 NOTIFICATION"* on its first real occasion. A blanket `xfail(strict=True)` would have swallowed the
 good news as an expected failure. It is now a positive assertion, mutation-checked: remove the
 invalidate-first line and it goes red.
-
-### 2. ▶ NO DIRECTORY FSYNC ANYWHERE IN THE MODULE — A FINDING, NOT TIDINESS
-`audit.py` is the only durability-sensitive module in the repo without the `_fsync_dir` idiom, and
-macOS needs `F_FULLFSYNC`, which the siblings document and **nothing documents for this sidecar**.
-Filed 2026-09-07, untouched. Every crash-consistency guarantee in this file is qualified by it.
-▶ VERIFIED at close, and there are THREE working precedents to copy rather than a design to invent:
-`grep -rn '_fsync_dir\|F_FULLFSYNC' anneal_memory` returns `store.py` (defines it, `:751`; used at
-`:6395`/`:6445`), `spores.py` (defines its own, `:220`; used at `:376`) and `crystal.py` (cites the
-idiom) — and **zero hits in `audit.py`**. All three also state the macOS limit in prose, so the
-wording exists too.
-
-### 3. ▶ `verify()` CANNOT SEE A DUPLICATED ENTRY WHOSE CHAIN IS CONTINUOUS (§7) — still open.
-
-### 4. ⚠ COVERAGE CAVEAT ON THE 2026-09-07 L3 — DO NOT READ IT AS THREE OPINIONS
-`codex` found 3 HIGH / 2 MED / 1 LOW (all six real). `complement` found 2, no HIGH. **`glm` returned
-`{"findings": []}`.** ⛔ **That is not evidence of a clean file.** The fan-in measured all 612 rows of
-`state/verdicts.jsonl` on 2026-09-07: **19 of 25 "healthy chars but `metadata.complete=False`"
-truncations are glm**, whose two failure modes are a 16/32-char null and a 2,000–4,000-char plausible
-truncation. **Two seats are not two opinions when one of them did not finish.** This file's
-independent review was cut off twice on 09-06 as well.
 
 ---
 

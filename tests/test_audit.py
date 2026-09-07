@@ -264,7 +264,12 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
         """The advance is three stores; a signal can land between any two.
 
         The sibling test above injects at ``os.fsync`` — INSIDE the ``with``,
-        inside the guarded block — and the truncate has always covered that.
+        inside the guarded block. The truncate covers that TODAY; it did not
+        always, and the sibling's own docstring says so 70-odd lines up: for
+        a ``KeyboardInterrupt`` at ``fsync`` — exactly what it injects — the
+        handler was ``except Exception`` and no rollback ran until the
+        2026-09-06 widening. (An earlier draft of this line said "has always
+        covered that", contradicting its own sibling; caught by L1.)
         It is a real arm and it is narrower than the window the handler's own
         comment describes: *"after the line was written and fsynced but before
         the chain state advanced"*. On 2026-09-06 the tail of that window sat
@@ -291,9 +296,13 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
            has already advanced and the retry gets a fresh number.
         2. Move them INSIDE the ``try`` but delete the chain-state restore
            at the top of the handler → ``_seq`` and ``_dropped_since_last``
-           FAIL on ``verify(): valid=False`` (seqs ``[0, 1, 3]``: the file
-           rolled back and memory did not, so the retry chains over a
-           hole); ``_prev_hash`` PASSES, because nothing had been stored.
+           FAIL on ``verify(): valid=False`` — the file rolled back and
+           memory did not, so the retry chains over a hole. ⚠ THE TWO ARMS
+           LEAVE DIFFERENT DISKS: ``_seq`` gives seqs ``[0, 1, 2]``,
+           mismatch at 2 — CONTIGUOUS, no gap to spot — and
+           ``_dropped_since_last`` gives ``[0, 1, 3]``, mismatch at 3. An
+           earlier draft gave ``[0, 1, 3]`` for both and hid the alarming
+           one. ``_prev_hash`` PASSES, because nothing had been stored.
 
         ⚠ THE TWO MUTANTS OVERLAP AT ``_seq`` AND EACH LEAVES A DIFFERENT
         ARM GREEN — they are NOT disjoint, and an earlier draft of this
@@ -552,10 +561,23 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
         re-entering ``log()``), silently invalidates the rollback and is
         exactly the kind of change nobody re-derives this argument for.
 
-        ⛔ MUTATION-CHECKED 2026-09-07, both directions, selected alone:
-        moving ``self._seq += 1`` back below the handler fails the first
-        assertion; adding ``self._initialize()`` inside the ``try`` fails
-        the second.
+        ⛔ MUTATION-CHECKED 2026-09-07, FOUR mutants, each verified present
+        on disk by re-parsing before the test was run, selected alone:
+
+          move ``self._seq += 1`` below the handler ... the OUTSIDE-the-try
+            assertion fires
+          ``self._initialize()`` inside the ``try`` ... the allow-list
+            assertion fires
+          ``finally: self._rotate_if_needed()`` on the try ... the
+            no-else/finally assertion fires
+          ``(self._seq, self._prev_hash) = (...)`` outside the try ... the
+            OUTSIDE-the-try assertion fires, via the tuple-unpack path
+
+        ⚠ THE LAST TWO WERE HOLES IN THIS TEST UNTIL 2026-09-07, both found
+        by L1 and both demonstrated with a mutant that left it GREEN. They
+        are listed here as arms rather than as history because a gate's
+        recipe should name every hole that was ever in it — the next edit
+        that reintroduces one will reintroduce it the same way.
         """
         import ast
         import inspect
@@ -588,35 +610,67 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
         lo = try_node.body[0].lineno
         hi = try_node.body[-1].end_lineno
 
+        # ⛔ NO ``else:`` / ``finally:`` ON THIS TRY. Both run outside the
+        # body the allow-list below walks, so either one is a hole straight
+        # through this test — measured 2026-09-07: adding
+        # ``finally: self._rotate_if_needed()``, the exact hazard this
+        # docstring names, left the invariant GREEN. Refusing the clauses
+        # outright beats walking them, because it cannot be half-done.
+        assert not try_node.orelse and not try_node.finalbody, (
+            "the guarded try grew an else/finally clause. Code there runs "
+            "outside the region this test checks, so it can reach `self` "
+            "unseen. Put it before the try or after the whole statement."
+        )
+
         trio = {"_prev_hash", "_seq", "_dropped_since_last"}
+
+        def trio_targets(node):
+            """Every trio attribute this statement stores to.
+
+            ⚠ TUPLE-UNPACK IS NOT OPTIONAL TO HANDLE: the handler's own
+            restore is written that way, so it is the local idiom a future
+            edit copies. Matching only ``ast.Attribute`` left
+            ``(self._seq, self._prev_hash) = (...)`` invisible anywhere in
+            ``log()`` — measured green 2026-09-07.
+            """
+            if isinstance(node, ast.AugAssign):
+                raw = [node.target]
+            elif isinstance(node, ast.Assign):
+                raw = []
+                for tgt in node.targets:
+                    raw.extend(
+                        tgt.elts if isinstance(tgt, (ast.Tuple, ast.List))
+                        else [tgt]
+                    )
+            else:
+                return []
+            return [
+                t.attr for t in raw
+                if isinstance(t, ast.Attribute)
+                and t.attr in trio
+                and isinstance(t.value, ast.Name)
+                and t.value.id == "self"
+            ]
+
         stored_inside = set()
         for node in ast.walk(log):
-            if isinstance(node, (ast.Assign, ast.AugAssign)):
-                targets = (
-                    node.targets if isinstance(node, ast.Assign)
-                    else [node.target]
+            attrs = trio_targets(node)
+            if not attrs:
+                continue
+            # the handler's restore is allowed to store — that is its job
+            if any(
+                h.lineno <= node.lineno <= h.end_lineno
+                for h in try_node.handlers
+            ):
+                continue
+            for attr in attrs:
+                assert lo <= node.lineno <= hi, (
+                    f"self.{attr} is assigned at line {node.lineno}, "
+                    f"OUTSIDE the guarded try ({lo}-{hi}). An interrupt "
+                    f"there advances the chain state with no rollback — the "
+                    f"2026-09-06 defect, reintroduced."
                 )
-                for tgt in targets:
-                    if (
-                        isinstance(tgt, ast.Attribute)
-                        and tgt.attr in trio
-                        and isinstance(tgt.value, ast.Name)
-                        and tgt.value.id == "self"
-                    ):
-                        in_handler = any(
-                            h.lineno <= node.lineno <= h.end_lineno
-                            for h in try_node.handlers
-                        )
-                        if in_handler:
-                            continue
-                        assert lo <= node.lineno <= hi, (
-                            f"self.{tgt.attr} is assigned at line "
-                            f"{node.lineno}, OUTSIDE the guarded try "
-                            f"({lo}-{hi}). An interrupt there advances the "
-                            f"chain state with no rollback — the 2026-09-06 "
-                            f"defect, reintroduced."
-                        )
-                        stored_inside.add(tgt.attr)
+                stored_inside.add(attr)
         assert stored_inside == trio, (
             f"the guarded region advances {sorted(stored_inside)} but the "
             f"rollback restores {sorted(trio)} — the two sets must match or "
@@ -638,6 +692,60 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
                 f"establishing that it cannot touch "
                 f"_prev_hash / _seq / _dropped_since_last."
             )
+
+
+class TestAZeroByteActiveFileIsNotAnActiveFile:
+    """L2 (L3 domain lens), 2026-09-07 — the rollback can create this state."""
+
+    def test_a_rolled_back_first_append_does_not_restart_the_chain(
+        self, tmp_path
+    ):
+        """A zero-byte active file must fall through to the manifest.
+
+        ``log()``'s rollback truncates back to the pre-append size. When the
+        failing append is the FIRST write into a freshly rotated file that
+        size is 0, so a successful rollback leaves a zero-byte active file
+        on disk. ``_initialize`` tested ``active.exists()`` alone, read that
+        as "an active file with entries", skipped the manifest continuity
+        branch, and kept ``_prev_hash = GENESIS`` — while the sealed files
+        ended somewhere else entirely. The next process then wrote seq 0
+        chained from GENESIS and ``verify()`` cried tampering.
+
+        ⚖ The same file already had the right predicate in
+        ``_rotate_if_needed`` (``not exists() or st_size == 0``). Two places
+        computing one thing, disagreeing exactly where the rollback puts
+        you. **This is a false tampering verdict produced by the rollback
+        SUCCEEDING**, which is why it is graded here rather than filed.
+
+        ⛔ MUTATION-CHECKED 2026-09-07, verified on disk: drop the
+        ``or active.stat().st_size == 0`` clause from ``_initialize`` and
+        this test fails with ``Hash mismatch at seq 0 ... got
+        sha256:GENESIS...``.
+        """
+        from anneal_memory.audit import AuditTrail
+
+        db = tmp_path / "zero.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("before", {"i": i})
+
+        # force the weekly rotation, then land one entry in the new file
+        trail._last_week = "1999-W01"
+        trail.log("after_rotation", {})
+        active = trail._active_path
+        assert active.stat().st_size > 0
+
+        # what a rolled-back first-append-into-a-fresh-file leaves behind
+        active.write_text("")
+        assert active.exists() and active.stat().st_size == 0
+
+        AuditTrail(db).log("next_process", {})
+
+        result = AuditTrail.verify(str(db))
+        assert result.valid, (
+            f"a zero-byte active file restarted the chain from GENESIS "
+            f"instead of continuing from the manifest: {result.error}"
+        )
 
 
 class TestCrashRecovery:

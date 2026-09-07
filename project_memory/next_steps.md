@@ -213,17 +213,90 @@ INCOMPLETE **twice** (glm cut off in pass 1, glm-5.3 cut off in pass 2).
 ⚠ Useful as a base-rate reading: a breadth seat with no repo context proposed undoing two verified
 fixes. Weight accordingly.
 
-### ▶ APPARATUS FAILURE — L1 AND L2 RETURNED NOTHING, AND THAT IS NOT "CLEAN"
-Both review agents were dispatched in parallel at the start, both went **idle**, and **neither ever
-delivered a report** — including after two direct follow-up requests each naming the questions I
-most wanted answered. They are not recorded as clean passes because they did not pass; they were
-dark. What actually reviewed this change was **L0** (mine, while the diff was loaded), **L3**
-(complement + codex; glm cut off), and **L4** (mine). ⚠ The tempting sentence — *"L1+L2 came back
-with nothing"* — would have been absence of signal rendered as health, on a day whose whole subject
-was instruments failing in the reassuring direction.
-▶ Worth noting what did the work instead: **every real correction today came from RUNNING something**
-— the four-point injection matrix, the two mutants, the five lock measurements, the callback probe —
-and **not one came from re-reading the diff.**
+### ▶ ⛔ CORRECTED — L1 AND L2 WERE **LATE, NOT DARK**, AND THE GAP HELD THE SHARPEST FINDINGS
+**This section said they "never delivered a report" and was committed that way (`354ea01`). Wrong.**
+Dispatched ~08:35, both `idle` in `ListAgents` by ~09:05, both probed twice by SendMessage with no
+reply, both recorded as dark, and I closed the session. **Then at 12:44–13:03 — roughly 90 minutes
+after they first showed idle — both delivered full reviews.** L2: 2 HIGH / 2 MED / 1 LOW. L1: 2
+WARNING / 3 NOTE, several with mutants it ran itself.
+⚖ **THE RULE SURVIVES; ITS COROLLARY DOES NOT.** "A reviewer that returns no output is recorded as
+NOT HAVING RUN, never as clean" is right and I would record it that way again. What is false is the
+implicit *"and it is never coming back"*. **`idle` is not terminal.** ▶ Record it as
+**`NO OUTPUT YET — not run`** and re-check before the day is graded, or the honest record ossifies
+into a wrong one — which is exactly what mine did, in a commit.
+⚡ **AND THE GAP WAS NOT EMPTY. It contained two demonstrated holes in a gate I had shipped that
+morning**, plus four false claims in my own comments, plus two HIGHs. Details below.
+
+### 8. ⛔ MY OWN AST GATE HAD TWO HOLES, BOTH PROVEN WITH MUTANTS THAT LEFT IT GREEN (L1)
+The invariant I added this morning to pin the guarded region did not gate. Reproduced both myself
+with mutants **verified present on disk by re-parsing before the run**:
+· **`else:` / `finally:` bypass** — the walker only covered `try_node.body`, so a self-touching call
+  in a `finally:` is invisible. L1 added `finally: self._rotate_if_needed()` — *the exact hazard my
+  own docstring names* — and the invariant stayed GREEN.
+· **tuple-unpack bypass** — the store walker matched only `ast.Attribute` targets, so
+  `(self._seq, self._prev_hash) = (...)` was invisible anywhere in `log()`. ⚠ **And the handler's own
+  restore is written in tuple-unpack form**, so that is the local idiom a future edit copies.
+▶ **CLOSED.** The guarded try now REFUSES an `else`/`finally` outright (cannot be half-done, unlike
+walking them) and the walker matches tuple targets. **Four mutants, control green, all four red:**
+move a store out · a self-touching call inside · `finally:` on the try · tuple-unpack outside.
+⚡ **This is the day's class landing on the gate built to catch the day's class**, and it needed an
+outside reader — I had mutation-checked the gate in both directions that morning and both mutants
+were real. **Mutation-checking each arm cannot detect a missing arm** — the same rule that caught me
+at L3, one layer down.
+
+### 9. ⛔ FOUR FALSE CLAIMS IN MY OWN COMMENTS (L1) — ALL CORRECTED
+1. **The seq signature was wrong, and wrong in the reassuring direction.** I gave seqs `[0,1,3]` for
+   BOTH failing arms of mutant 2, in a block labelled *"ARM SETS TRANSCRIBED FROM THE RUN"*.
+   Measured: `_seq` → **`[0,1,2]`, mismatch at 2** · `_dropped_since_last` → `[0,1,3]`, mismatch at 3.
+   ⚠ **The omitted one is the alarming one: CONTIGUOUS seqs, no gap to notice, and `verify()` still
+   cries tampering.** An operator handed only `[0,1,3]` looks for a hole in the numbering and finds
+   none.
+2. *"leaves that region containing nothing but the three stores"* — false; it also holds
+   `open`/`write`/`flush`/`fsync`. The AST allow-list is the authority on that set.
+3. *"the truncate has always covered that"* — contradicted by its own sibling docstring 70 lines up:
+   a KI at `fsync` was NOT covered until the 09-06 widening.
+4. *"fails the first assertion / the second"* — they fail the second and fourth.
+
+### 10. ✅ FIXED — A ZERO-BYTE ACTIVE FILE RESTARTED THE CHAIN FROM GENESIS (L2 MED)
+`_initialize` tested `active.exists()` alone. A rollback to `resume_at = 0` — which happens when the
+failing append is the FIRST write into a freshly rotated file — leaves a **zero-byte** active file,
+which that predicate reads as "an active file with entries". The manifest continuity branch is
+skipped, `_prev_hash` stays GENESIS, and the next process writes seq 0 chained from GENESIS while the
+sealed files ended elsewhere. **Measured: `Hash mismatch at seq 0 ... got sha256:GENESIS...` — a
+false tampering verdict produced by the rollback SUCCEEDING.**
+⚖ **Fixed rather than filed, because it is not a policy call:** the same file already had the right
+predicate in `_rotate_if_needed` (`not exists() or st_size == 0`). Two places computing one thing and
+disagreeing exactly where the rollback puts you. Regression test added; mutation-checked (revert the
+clause → red). ✅ Also landed L2's LOW: the rollback's failure is now **logged** instead of a bare
+`pass` — it is the branch that ends in `valid=False`, and an operator was getting a red verdict with
+zero breadcrumbs.
+
+### 11. 🔴 FILED, VERIFIED, NOT LANDED — TWO MORE, BOTH REACHABLE WITHOUT ANY TERMINAL SIGNAL
+· **The restore is unconditional while the truncate is best-effort (L2 HIGH).** MEASURED with
+  ordinary exceptions only — `fsync` reporting EIO after the data landed, then the rollback's `open`
+  failing EROFS on the same sick disk: seqs `[0,1,2,2]`, `verify(): valid=False`. **The dangerous
+  direction, and a far wider door than the terminal-signal residual I pinned.** ▶ Candidate fix,
+  recorded at the site: make the restore CONDITIONAL on the truncate having succeeded — if the entry
+  is still on disk, leaving memory ADVANCED is what makes the two agree. Not landed: rollback
+  semantics, on a file whose independent review was cut off twice today, and **the outcome is
+  unchanged from before this handler existed**, so nothing degrades by filing it. The comment at the
+  site no longer says "the ambiguity stands" — that understated it.
+· **A torn tail is never truncated at recovery (L2 HIGH).** `_initialize` recovers `seq`/`prev_hash`
+  from the last VALID line but leaves the partial record in place, so the next append concatenates
+  onto it. ⚠ **My reproduction differs in shape from L2's and is arguably worse:** L2 measured
+  `[0,1,MALFORMED,3]` / `valid=False`; I measured `[0, 1, 'MALFORMED(235B)', 2]` with
+  **`verify(): valid=True, skipped_lines=1`** — one audit entry **silently destroyed**, no
+  `dropped_before`, no `audit_write_failures`, and a clean bill of health. From the writer's side the
+  write succeeded, so none of the loss-reporting machinery fires. Both shapes are real; the shared
+  mechanism is confirmed. ▶ Fix is a recovery-time truncation — it DELETES bytes at open — which is
+  not a thing to land unreviewed.
+· Also filed, safe-direction: **no directory fsync anywhere in the module** (the only durability-
+  sensitive module in the repo without the `_fsync_dir` idiom), and macOS needs `F_FULLFSYNC`, which
+  `store.py:5680` documents for the SQLite store and nothing documents for this sidecar.
+
+▶ Worth noting what did the work: **every real correction today came from RUNNING something** — the
+four-point injection matrix, the mutants, the five lock measurements, the callback probe, the AST
+walk. **Not one came from re-reading the diff**, including the four that were in my own comments.
 
 ### ▶ WHAT THIS SESSION'S OWN ERRORS WERE, because they are the day's class landing on the corrector
 1. The filed prescription, applied literally, would have opened two windows while closing one.

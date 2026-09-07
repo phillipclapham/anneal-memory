@@ -4,6 +4,23 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — a zero-byte active file no longer restarts the hash chain from genesis
+
+`_initialize` tested `active.exists()` alone. The rollback above truncates back to the pre-append
+size, and when the failing append is the first write into a freshly rotated file that size is zero —
+so a *successful* rollback leaves a zero-byte active file, which that predicate read as "an active
+file with entries". The manifest continuity branch was skipped, `_prev_hash` stayed at genesis, and
+the next process wrote seq 0 chained from genesis while the sealed files ended somewhere else:
+`verify()` reporting `Hash mismatch at seq 0`. **A false tampering verdict produced by the rollback
+succeeding.**
+
+`_rotate_if_needed` already used the correct predicate (`not exists() or st_size == 0`); the two
+disagreed exactly where the rollback puts you. They are now one.
+
+The rollback's own failure is logged rather than swallowed with a bare `pass`. It is the branch that
+ends in `verify(): valid=False`, and an operator hitting it was getting a red integrity verdict with
+no breadcrumbs.
+
 ### Fixed — an interrupted audit append no longer leaves disk and memory disagreeing
 
 `AuditTrail.log` is write-first: the entry is fsynced, then three pieces of chain state advance

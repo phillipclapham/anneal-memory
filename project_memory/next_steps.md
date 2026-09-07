@@ -294,6 +294,68 @@ zero breadcrumbs.
   sensitive module in the repo without the `_fsync_dir` idiom), and macOS needs `F_FULLFSYNC`, which
   `store.py:5680` documents for the SQLite store and nothing documents for this sidecar.
 
+### 12. ⭐ L2'S REMAINDER — IT WITHDREW ITS OWN Q1 ANSWER, GAVE A BETTER REASON THAN MINE, AND FOUND A LOAD-BEARING ORDER I HAD BY ACCIDENT
+L2 graded the PRE-inversion tree and said so unprompted. Its Q1 answer argued for keeping
+restore-first; **it withdrew it against my measurement and supplied the reason that actually
+generalises**, which is better than the one I committed:
+> **The truncate's effect OUTLIVES THE PROCESS; the restore's DIES WITH IT.** The file is the only
+> durable state, so the durable operation goes first — after it, every subsequent partial failure
+> leaves a file `_initialize` can re-derive from correctly.
+My version was "the truncate is the step that MUST happen", which is true but is a restatement of
+the conclusion. Replaced at the site.
+
+⛔ **AND THE RESTORE'S INTERNAL ORDER IS LOAD-BEARING — `_prev_hash` BEFORE `_seq` — WHICH I HAD
+RIGHT BY ACCIDENT.** It is written the way the snapshot tuple happens to be written and nothing said
+it mattered. MEASURED (two signals: one mid-advance leaving memory partly advanced, one mid-restore):
+
+| restore order | result |
+|---|---|
+| `_prev_hash` then `_seq` (shipped) | seqs `[0,1,2]` · **valid=True** — chains correctly, merely skips a seq number, and `verify()` checks linkage not monotonicity |
+| `_seq` then `_prev_hash` (reversed) | seqs `[0,1,2]` · **valid=False**, `Hash mismatch at seq 2` — `_prev_hash` still points at the entry the truncate removed |
+
+⚠ Note both give **CONTIGUOUS** seqs. Nothing looks wrong until `verify()` runs — the third time
+today that shape has appeared. ▶ Pinned structurally by
+`test_the_restore_puts_prev_hash_before_seq` (mutation-checked: swap the first two names → red),
+because a future edit tidying a three-element tuple would not re-derive any of this.
+⚠ **My first attempt to measure this returned "order does not matter" and was wrong** — my probe
+raised ENOSPC on *every* fsync including the truncate's, and in the one-signal case the advance never
+runs so the restore is a NO-OP and both orders trivially pass. The property only exists once memory
+is partly advanced.
+
+### 13. ⛔ THE TWO FILED HIGHs HAVE A FORCED FIX ORDER, AND THAT IS WORTH MORE THAN EITHER FIX
+L2 proposed a better fix for the unconditional-restore HIGH than the one I recorded: instead of
+conditioning the restore on the truncate succeeding, **invalidate the cache** — `truncate` →
+`self._initialized = False` → restore only `_dropped_since_last`. Verified mechanically sound:
+`log()` at `audit.py:176` re-runs `_initialize()` when `_initialized` is False, so the next append
+re-derives `seq`/`prev_hash` **from the file**. L2's argument is that this **needs no condition**,
+because re-deriving is correct whether or not the truncate succeeded.
+⛔ **BUT IT ROUTES THE FAILURE INTO THE OTHER UNFIXED HIGH.** Re-deriving from the file is only
+correct if recovery is correct, and recovery currently **does not truncate a torn tail**. So
+invalidation after a failed truncate hands the next append to `_initialize` → `_read_last_valid_entry`
+→ straight into the torn-tail defect.
+⚖ **THEREFORE THE ORDER IS FORCED: fix recovery FIRST (truncate the torn tail at open), and only
+then can the rollback shrink to a cache invalidation.** That is L2's Q3 answer arriving as a
+constraint rather than an opinion, and it is why neither was landed today: **they are one change, not
+two, and the cheap-looking one is downstream of the expensive one.**
+
+### 14. ⚖ THE TORN-TAIL SHAPES ARE ONE DEFECT, AND MINE IS THE GENERAL CASE ON THE CLI SURFACE
+L2 explained the divergence and it is not the fragment's content: **it is whether the process
+re-opened between the two post-crash writes.**
+· **Long-lived process** (L2's probe): in-memory `_prev_hash` is the hash of the entry swallowed into
+  the merged line, so the next entry chains from a line that no longer parses → `[0,1,MALFORMED,3]`,
+  **valid=False**. Loud and permanent.
+· **Re-opening process** (mine): `_initialize` → `_read_last_valid_entry` skips the merged line and
+  re-derives from E1, so the next entry chains from E1 and matches → `[0,1,MALFORMED,2]`,
+  **valid=True**, one entry gone silently.
+⛔ **`audit.py:113-116` already records that EVERY CLI INVOCATION OPENS AND CLOSES A STORE** — cited
+by L2, verified on disk. So the silent shape is the general case on the CLI surface the README points
+operators at, and the loud one is the general case for the long-lived MCP server. **File the silent
+one as primary: it is the dangerous one.**
+⚡ **AND THE SHARPEST LINE OF THE DAY IS L2'S:** `_initialize`'s re-derivation is what **CONVERTS the
+loud failure into the silent one**. It is a partial mitigation that hides the damage instead of
+repairing it — which is the tell that this belongs in recovery and that recovery is currently doing
+half the job.
+
 ▶ Worth noting what did the work: **every real correction today came from RUNNING something** — the
 four-point injection matrix, the mutants, the five lock measurements, the callback probe, the AST
 walk. **Not one came from re-reading the diff**, including the four that were in my own comments.

@@ -329,15 +329,35 @@ class AuditTrail:
             # exactly as it was first prescribed on 09-07; it was measured
             # rather than adopted. Only the third column is green.
             #
-            # ⚠ WHAT IS STILL NOT CLOSED, stated because the paragraph
-            # above would otherwise read as a total guarantee: a terminal
-            # signal landing inside this handler BEFORE the truncate
-            # completes, or between two of the restore's own stores, still
-            # leaves the two halves disagreeing. With the truncate first
-            # that needs TWO terminal signals (one to enter the handler,
-            # one to interrupt it) — MEASURED, not assumed; with the
-            # restore first it needed only one, which is why the order
-            # changed.
+            # ⚠ WHAT IS STILL NOT CLOSED, AND THE SIGNAL COUNT HERE WAS
+            # WRONG FOR AN HOUR — this paragraph first said truncate-first
+            # "needs TWO terminal signals", tagged MEASURED. It is false in
+            # the ordinary-entry regime, and the tag was unearned: the table
+            # above and the ordering test both interrupt only at the three
+            # RESTORE stores, which is the one place truncate-first wins.
+            # Neither ever interrupted the truncate. Caught by glm-5.3 at
+            # L3 (2026-09-07) and then measured — ordinary ``OSError``
+            # entry plus ONE ``KeyboardInterrupt``:
+            #
+            #   signal lands at        | result
+            #   -----------------------|--------------------------------
+            #   any of the 3 restores  | seqs [0,1,2]   valid=True
+            #   the truncate's open()  | seqs [0,1,2,2] valid=False
+            #   the truncate's fsync() | seqs [0,1,2]   valid=True
+            #                          | (``truncate()`` already took
+            #                          |  effect by then)
+            #
+            # ⚖ SO, STATED HONESTLY: in the ordinary-entry regime BOTH
+            # orderings need exactly ONE terminal signal. Truncate-first
+            # does not raise the count — it NARROWS WHERE the signal has to
+            # land, from "anywhere in the handler" to "inside the truncate,
+            # before it takes effect". That is still strictly better and is
+            # why the order stands, but it is a smaller claim than the one
+            # this comment made. TWO signals are needed only when the
+            # exception that ENTERED the handler was itself terminal.
+            # The residual is pinned by an xfail arm on
+            # ``test_the_rollback_truncates_before_it_restores``; when the
+            # structural close lands, that arm starts passing and says so.
             # Collapsing the three attributes into ONE would make each
             # half a single store and close the first of those. ⚖ SCOPE,
             # MEASURED 2026-09-07 rather than estimated: the three are

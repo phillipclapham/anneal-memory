@@ -446,6 +446,93 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
             f"produced a false tampering verdict — seqs on disk {seqs}"
         )
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "KNOWN-OPEN residual, measured 2026-09-07 (glm-5.3, L3). One "
+            "ordinary I/O failure plus ONE terminal signal landing inside "
+            "the truncate before it takes effect still corrupts. Closing it "
+            "needs the structural change (one attribute, or a persisted "
+            "dirty marker reconciled on the next append). When that lands "
+            "this arm starts passing and pytest reports it as an unexpected "
+            "pass — which is the notification, not a nuisance."
+        ),
+    )
+    def test_a_signal_inside_the_truncate_is_still_an_open_window(
+        self, tmp_path, monkeypatch
+    ):
+        """Pins the residual the ordering table does NOT cover.
+
+        ``test_the_rollback_truncates_before_it_restores`` interrupts at the
+        three restore stores — the one place truncate-first wins. It never
+        interrupts the truncate. That gap is exactly where the handler's
+        comment briefly claimed "TWO terminal signals" and was wrong: in the
+        ordinary-entry regime BOTH orderings need only one, and truncate-
+        first merely narrows WHERE it has to land.
+
+        So this arm lands it there: ENOSPC after a successful write+flush
+        puts us in the handler, then a single ``KeyboardInterrupt`` at the
+        truncate's ``open`` — before ``truncate(resume_at)`` takes effect.
+        The aborted line stays on disk, the retry reuses its seq, and
+        ``verify()`` reports tampering. Measured: seqs ``[0, 1, 2, 2]``,
+        ``valid=False``.
+
+        ⚠ A signal at the truncate's *fsync* is SAFE — ``truncate()`` has
+        already taken effect by then — which is why the window is "before it
+        takes effect" and not "anywhere in the truncate".
+        """
+        import builtins
+        import json
+
+        import anneal_memory.audit as audit_module
+        from anneal_memory.audit import AuditTrail
+
+        db = tmp_path / "resid.db"
+        trail = AuditTrail(db)
+        trail.log("record", {"i": 0})
+        trail.log("record", {"i": 1})
+
+        real_fsync = audit_module.os.fsync
+        real_open = builtins.open
+        phase = {"at": "append"}
+
+        def fsync_then_enospc(fd):
+            if phase["at"] == "append":
+                real_fsync(fd)
+                phase["at"] = "handler"
+                raise OSError(28, "No space left on device")
+            return real_fsync(fd)
+
+        def open_that_dies_in_the_handler(*args, **kwargs):
+            mode = args[1] if len(args) > 1 else kwargs.get("mode", "")
+            if phase["at"] == "handler" and "b" in str(mode):
+                raise KeyboardInterrupt("Ctrl+C before the truncate landed")
+            return real_open(*args, **kwargs)
+
+        monkeypatch.setattr(audit_module.os, "fsync", fsync_then_enospc)
+        monkeypatch.setattr(builtins, "open", open_that_dies_in_the_handler)
+        with pytest.raises(BaseException):
+            trail.log("record", {"i": 2})
+        monkeypatch.setattr(builtins, "open", real_open)
+        monkeypatch.setattr(audit_module.os, "fsync", real_fsync)
+
+        trail.note_write_failure()
+        trail.log("record", {"i": 3})
+
+        entries = [
+            json.loads(line)
+            for line in (tmp_path / "resid.audit.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if line.strip()
+        ]
+        seqs = [e["seq"] for e in entries]
+        assert len(seqs) == len(set(seqs)), f"duplicate seqs on disk: {seqs}"
+        assert AuditTrail.verify(str(db)).valid, (
+            f"one terminal signal inside the truncate produced a false "
+            f"tampering verdict — seqs on disk {seqs}"
+        )
+
     def test_the_guarded_region_cannot_be_widened_into_something_self_touching(
         self,
     ):

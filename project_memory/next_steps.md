@@ -23,6 +23,59 @@
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
 
+## ⛔⛔ STILL OPEN AFTER 2026-09-07 — READ THIS FIRST, IT IS WHAT THE NEXT SEAT ACTS ON
+
+> Written at close by seat `0907+11`. Everything below this block is HISTORY and reasoning; this is
+> the live list. **Re-derive, do not trust these as answers** (`spore-764`):
+> `git ls-remote origin main` vs `git rev-parse HEAD` · `git status --porcelain` ·
+> `.venv/bin/python3 -m pytest -q` · `.venv/bin/python3 -m mypy anneal_memory`
+
+### 1. ⚖ HELD, NOT MISSED — THE STRICT-`xfail` RESIDUAL, AND THE FIX IS AN ARCHITECTURAL CHOICE
+
+`test_a_signal_inside_the_truncate_is_still_an_open_window` (strict `xfail`) pins it: one ordinary
+I/O failure PLUS one terminal signal landing inside the rollback's `open(active, "r+b")` **before
+`truncate()` takes effect**. The inner `except Exception` does not catch it, so neither the restore
+nor the invalidation runs; the retry then duplicates the seq and `verify()` cries tampering.
+Independently found by codex at L3 on 2026-09-07, which named this same test.
+
+**TWO CANDIDATE FIXES, and choosing between them is the open question:**
+- **codex's:** catch `BaseException` around the rollback and guarantee that EITHER restoration OR
+  `_initialized = False` happens before any exception leaves the handler. (Better than the older
+  note on file, which was "collapse the three chain attributes into one" — larger, closes less.)
+- **▶ MINE, AND I THINK IT IS RIGHT:** §15 establishes that **re-deriving from disk is correct in
+  every branch**. If that holds, the right shape is not *guarantee one of two outcomes* — it is
+  **INVALIDATE UNCONDITIONALLY AS THE HANDLER'S FIRST ACT AND DELETE THE RESTORE ENTIRELY**, which
+  makes the window **unreachable by construction** rather than guarded against.
+
+⛔ **WHY IT IS HELD RATHER THAN MISSED, and this is the payload:** that change **retires two
+mutation-graded gates** — `test_the_restore_puts_prev_hash_before_seq` and
+`test_the_rollback_truncates_before_it_restores`, whose entire subject is an ordering that would
+cease to exist — and it **orphans `_dropped_since_last`**, which `_initialize` does not re-derive.
+**A change that deletes graded invariants earns its own review. Smuggling it in behind a bugfix is
+how a graded invariant gets deleted by accident.**
+
+⚖ **THE KILL CRITERION — WHAT WOULD CHANGE MY MIND:** a measurement showing **re-derivation is NOT
+correct in some branch**. If one exists, the restore must stay and codex's guarantee-one-of-two is
+the right fix. ▶ That is the experiment to run FIRST; it decides the design.
+
+### 2. ▶ NO DIRECTORY FSYNC ANYWHERE IN THE MODULE — A FINDING, NOT TIDINESS
+`audit.py` is the only durability-sensitive module in the repo without the `_fsync_dir` idiom, and
+macOS needs `F_FULLFSYNC`, which `store.py` documents for the SQLite store and **nothing documents
+for this sidecar**. Filed 2026-09-07, untouched. Every crash-consistency guarantee in this file is
+qualified by it.
+
+### 3. ▶ `verify()` CANNOT SEE A DUPLICATED ENTRY WHOSE CHAIN IS CONTINUOUS (§7) — still open.
+
+### 4. ⚠ COVERAGE CAVEAT ON THE 2026-09-07 L3 — DO NOT READ IT AS THREE OPINIONS
+`codex` found 3 HIGH / 2 MED / 1 LOW (all six real). `complement` found 2, no HIGH. **`glm` returned
+`{"findings": []}`.** ⛔ **That is not evidence of a clean file.** The fan-in measured all 612 rows of
+`state/verdicts.jsonl` on 2026-09-07: **19 of 25 "healthy chars but `metadata.complete=False`"
+truncations are glm**, whose two failure modes are a 16/32-char null and a 2,000–4,000-char plausible
+truncation. **Two seats are not two opinions when one of them did not finish.** This file's
+independent review was cut off twice on 09-06 as well.
+
+---
+
 ## ▶▶ PICKUP 2026-09-07 (SEAT 0907+8) — 3 FILED, ALL 3 CLOSED, AND THE ONE I "CORRECTED" WAS RIGHT.
 
 **⛔ COVERAGE IS UNKNOWN FOR THIS REPO TODAY — 3 CLOSED, NOT "CLEAN".** Diogenes opened a

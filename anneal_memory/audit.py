@@ -283,11 +283,16 @@ class AuditTrail:
             # ⚖ AND THE TRUNCATE GOES FIRST, WHICH IS THE OPPOSITE OF THE
             # ORDER THIS HANDLER SHIPPED WITH FOR AN HOUR ON 2026-09-07.
             # The original argument was "restore first, it cannot raise."
-            # That optimises the wrong thing: the truncate is the step that
-            # MUST happen, and a terminal signal delivered inside this
-            # handler kills everything after the point it lands. So the
-            # fallible-but-essential operation goes first and the
-            # infallible one second. Measured, original failure an ordinary
+            # That optimises the wrong thing.
+            # ⭐ THE REASON THAT ACTUALLY GENERALISES (L2, 2026-09-07, after
+            # it had argued the other side and withdrew): **THE TRUNCATE'S
+            # EFFECT OUTLIVES THE PROCESS AND THE RESTORE'S DIES WITH IT.**
+            # The file is the only durable state, so the durable operation
+            # goes first — after it, every subsequent partial failure leaves
+            # a file ``_initialize`` can re-derive from correctly. Restore
+            # first inverts that: a signal mid-restore escapes with the
+            # entry STILL on disk and memory half-restored, which is the
+            # compounding case. Measured, original failure an ordinary
             # ``OSError`` (ENOSPC) plus ONE ``KeyboardInterrupt`` during the
             # restore — the realistic case, not two signals:
             #
@@ -456,6 +461,23 @@ class AuditTrail:
                     entry["seq"],
                     exc_info=True,
                 )
+            # ⛔ THE ORDER OF THESE THREE IS LOAD-BEARING — ``_prev_hash``
+            # BEFORE ``_seq``. It was accidental until 2026-09-07, when L2
+            # asked and the measurement answered. A signal landing BETWEEN
+            # them (so: one signal mid-advance to get here with memory
+            # partly advanced, one mid-restore) leaves:
+            #   this order  — ``_prev_hash`` back at hash(E1), ``_seq``
+            #                 still advanced. The next entry chains
+            #                 CORRECTLY and merely skips a seq number, and
+            #                 ``verify()`` checks linkage, not seq
+            #                 monotonicity. MEASURED: valid=True.
+            #   reversed    — ``_prev_hash`` still pointing at the entry
+            #                 just truncated away. The next entry chains
+            #                 from a line that is no longer on disk.
+            #                 MEASURED: valid=False, "Hash mismatch at
+            #                 seq 2" — and the seqs are CONTIGUOUS, so
+            #                 there is no gap to notice.
+            # Pinned by ``test_the_restore_puts_prev_hash_before_seq``.
             (
                 self._prev_hash,
                 self._seq,

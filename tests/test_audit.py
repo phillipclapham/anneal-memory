@@ -455,6 +455,72 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
             f"produced a false tampering verdict — seqs on disk {seqs}"
         )
 
+    def test_the_restore_puts_prev_hash_before_seq(self):
+        """The restore's element order is load-bearing, so it is asserted.
+
+        Two terminal signals — one mid-advance (leaving memory partly
+        advanced), one mid-restore between two of the three stores:
+
+          ``_prev_hash`` first ... ``_prev_hash`` is back at hash(E1) while
+            ``_seq`` stays advanced. The next entry chains CORRECTLY and
+            merely skips a seq number; ``verify()`` checks linkage, not seq
+            monotonicity. MEASURED 2026-09-07: valid=True.
+          ``_seq`` first .......... ``_prev_hash`` is still pointing at the
+            entry the truncate just removed, so the next entry chains from
+            a line that is no longer on disk. MEASURED: valid=False, "Hash
+            mismatch at seq 2" — with CONTIGUOUS seqs, so nothing looks
+            wrong until verify() runs.
+
+        ⚠ THIS ORDER WAS ACCIDENTAL UNTIL IT WAS MEASURED. It is written
+        the way the snapshot tuple happens to be written, and nothing said
+        it mattered. Asserted structurally rather than commented, because a
+        future edit reordering a three-element tuple for tidiness would not
+        think to re-derive any of the above.
+
+        ⛔ MUTATION-CHECKED 2026-09-07: swap the first two names in the
+        restore tuple and this test fails.
+        """
+        import ast
+        import inspect
+
+        import anneal_memory.audit as audit_module
+
+        tree = ast.parse(inspect.getsource(audit_module))
+        cls = next(
+            n for n in tree.body
+            if isinstance(n, ast.ClassDef) and n.name == "AuditTrail"
+        )
+        log = next(
+            n for n in cls.body
+            if isinstance(n, ast.FunctionDef) and n.name == "log"
+        )
+        restores = [
+            n for n in ast.walk(log)
+            if isinstance(n, ast.Assign)
+            and len(n.targets) == 1
+            and isinstance(n.targets[0], ast.Tuple)
+            and all(
+                isinstance(e, ast.Attribute) for e in n.targets[0].elts
+            )
+        ]
+        assert len(restores) == 1, (
+            f"expected exactly one tuple restore in log(), found "
+            f"{len(restores)} — if the rollback grew a second one, this "
+            f"test no longer knows which order it is grading"
+        )
+        names = [e.attr for e in restores[0].targets[0].elts]
+        assert names[0] == "_prev_hash", (
+            f"the rollback restores {names} — ``_prev_hash`` must come "
+            f"FIRST. A terminal signal between it and ``_seq`` otherwise "
+            f"leaves _prev_hash pointing at the entry the truncate removed, "
+            f"and the next append chains from a line that is not on disk: "
+            f"verify() reports a hash mismatch over contiguous seqs."
+        )
+        assert names == ["_prev_hash", "_seq", "_dropped_since_last"], (
+            f"the rollback restores {names}; the measured-safe order is "
+            f"['_prev_hash', '_seq', '_dropped_since_last']"
+        )
+
     @pytest.mark.xfail(
         strict=True,
         reason=(

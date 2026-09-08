@@ -775,9 +775,14 @@ class AuditTrail:
 
                 try:
                     entry = json.loads(line)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    # A torn multibyte tail (diogenes, 2026-09-08) is the
+                    # same "not a complete entry" shape as malformed JSON —
+                    # ``_iter_lines`` now yields raw bytes so this is the
+                    # single place both get counted, never a traceback.
                     skipped += 1
                     continue
+                line = line.decode("utf-8")  # safe: json.loads just proved it
 
                 actual_prev = entry.get("prev_hash", "")
                 if actual_prev != expected_hash:
@@ -1036,16 +1041,17 @@ class AuditTrail:
                 if not stripped:
                     continue
                 try:
-                    e = json.loads(stripped)
-                    ts = e.get("ts", "")
-                    if not first_ts:
-                        first_ts = ts
-                    last_ts = ts
-                    entry_count += 1
-                    # Hash the line from disk, not a re-serialization
-                    last_hash = self._compute_hash(stripped)
-                except json.JSONDecodeError:
-                    pass
+                    stripped_str = stripped.decode("utf-8")
+                    e = json.loads(stripped_str)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue  # Torn or malformed — skip, same shape either way
+                ts = e.get("ts", "")
+                if not first_ts:
+                    first_ts = ts
+                last_ts = ts
+                entry_count += 1
+                # Hash the line from disk, not a re-serialization
+                last_hash = self._compute_hash(stripped_str)
 
             # Extract period from filename (e.g., "memory.audit.2026-W14.jsonl.gz")
             period = orphan_path.name.removeprefix(prefix)
@@ -1319,9 +1325,20 @@ def _read_last_valid_entry(path: Path) -> str:
     # own docstring says a step that raises leaves the trail uninitialised so
     # the next ``log()`` retries "instead of writing with broken state".
     # Swallowing here was the deviation from it.
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            stripped = line.strip()
+    # ⛔ BUT PROPAGATION WAS SCOPED BY EXCEPTION TYPE, NOT BY WHAT FAILED
+    # (diogenes, 2026-09-08): opening in text mode means the file's own
+    # line-splitting has to decode first, so a torn multibyte character
+    # anywhere in the file raised ``UnicodeDecodeError`` out of the ``for
+    # line in f`` before a single line ever reached the JSON check below —
+    # a TORN LINE, not a failed read, treated as the latter. Reading raw
+    # bytes and decoding per line puts the tear back where the rest of this
+    # loop already handles it: skipped, like a partial ``json.loads``.
+    with open(path, "rb") as f:
+        for raw in f:
+            try:
+                stripped = raw.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                continue  # Torn line — skip, same as a partial write
             if not stripped:
                 continue
             try:
@@ -1333,10 +1350,22 @@ def _read_last_valid_entry(path: Path) -> str:
 
 
 def _iter_lines(path: Path):
-    """Iterate lines from an audit file (handles .gz transparently)."""
+    """Iterate raw (undecoded) lines from an audit file, .gz transparent.
+
+    ⛔ YIELDS BYTES, NOT STR (diogenes, 2026-09-08). This used to open in
+    text mode, which decodes while splitting lines — so a torn multibyte
+    character anywhere in the file raised ``UnicodeDecodeError`` straight
+    out of the generator, past every caller's ``except json.JSONDecodeError``,
+    including out of ``verify()`` and the CLI. Yielding raw bytes defers
+    decoding to ``json.loads`` at each call site, which raises
+    ``UnicodeDecodeError`` on a bad line the same way it raises
+    ``JSONDecodeError`` on a malformed one — so a caller that already
+    catches both treats a torn line as what it is: one skipped line, not a
+    dead generator.
+    """
     if path.name.endswith(".gz"):
-        with gzip.open(path, "rt", encoding="utf-8") as f:
+        with gzip.open(path, "rb") as f:
             yield from f
     else:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "rb") as f:
             yield from f

@@ -1620,7 +1620,7 @@ def cmd_audit(args: argparse.Namespace) -> None:
                 continue
             try:
                 entry = json.loads(line)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
 
             # Apply filters

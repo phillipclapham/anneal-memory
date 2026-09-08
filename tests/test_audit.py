@@ -1112,6 +1112,41 @@ class TestWeeklyRotation:
         entry = json.loads(lines[0])
         assert entry["data"]["content"] == "test episode"
 
+    def test_a_torn_tail_inside_a_sealed_gz_file_is_skipped_not_raised(
+        self, tmp_path
+    ):
+        """The gzip branch of ``_iter_lines`` carries the identical
+        conflation the plain-text branch had, and diogenes (2026-09-08)
+        flagged it as NEVER EXERCISED: the HIGH measured only the
+        plain-text branch, "the ``gzip.open(..., 'rt')`` branch carries the
+        identical conflation by inspection and I did not plant an
+        undecodable byte in a sealed ``.gz``". An unexercised branch of the
+        same defect is how the class survives its own fix.
+
+        A torn multibyte tail inside a SEALED (already-rotated) file must
+        not raise ``UnicodeDecodeError`` out of ``verify()`` any more than
+        one in the active file does.
+        """
+        db = tmp_path / "sealed.db"
+        trail = AuditTrail(db)
+        trail.log("record", {"id": "1"})
+        trail._last_week = "1999-W01"
+        trail.log("record", {"id": "2"})       # forces rotation, seals W01
+
+        gz_files = list(tmp_path.glob("*.audit.1999-W01.jsonl.gz"))
+        assert len(gz_files) == 1
+        gz_path = gz_files[0]
+
+        content = gzip.decompress(gz_path.read_bytes())
+        torn = '{"v":1,"seq":9,"ts":"2026-09-08T00:00:00.0000⛔'.encode("utf-8")[:-1]
+        gz_path.write_bytes(gzip.compress(content + b"\n" + torn))
+
+        result = AuditTrail.verify(db)  # must NOT raise
+        assert result.skipped_lines >= 1, (
+            "a torn multibyte tail inside a sealed .gz file must be "
+            "counted as a skipped line, not silent or fatal"
+        )
+
 
 class TestMultiRotationIntegration:
     """Multi-rotation → crash → recovery integration tests."""
@@ -4232,6 +4267,43 @@ class TestAnInvalidTrailStillReportsWhatItCouldNotRead:
         assert result.valid is True
         assert result.skipped_lines == 1
 
+    def test_a_torn_multibyte_tail_reports_skipped_not_a_traceback(
+        self, tmp_path
+    ):
+        """The HIGH one layer out from the recovery fix (diogenes,
+        2026-09-08): ``_iter_lines`` opened in text mode, so a torn
+        multibyte tail raised ``UnicodeDecodeError`` straight out of
+        ``verify()``'s scan loop — the one surface ``AuditTrail.verify``
+        (a classmethod that never constructs a trail) cannot recover
+        itself, and the one an operator runs FIRST to ask "was my log
+        tampered with". It answered with a bare traceback.
+
+        ``AuditVerifyResult`` already carries ``skipped_lines`` for exactly
+        this condition; a decodable torn tail already reports it via
+        ``json.JSONDecodeError``. This pins the undecodable case getting
+        the same treatment instead of escaping the generator entirely.
+        """
+        from anneal_memory.audit import AuditTrail
+
+        db = tmp_path / "torn_verify.db"
+        store_trail = AuditTrail(db)
+        for i in range(3):
+            store_trail.log(f"ep-{i}", {"i": i})
+
+        active = db.parent / "torn_verify.audit.jsonl"
+        with open(active, "ab") as f:
+            f.write(b"\n")
+            # Cut one byte inside a multibyte character (⛔, U+26D4).
+            f.write('{"v":1,"seq":9,"ts":"2026-09-08T00:00:00.0000⛔'.encode("utf-8")[:-1])
+
+        result = AuditTrail.verify(db)  # must NOT raise
+
+        assert result.valid is True
+        assert result.skipped_lines == 1, (
+            "a torn multibyte tail must be counted the same way a torn "
+            "JSON line already is, not silently dropped or fatal"
+        )
+
     def test_the_cli_tells_the_operator_on_BOTH_paths(self, tmp_path, capsys):
         """The dataclass is not the surface — this is the operator's actual view."""
         from anneal_memory.cli import build_parser
@@ -5109,11 +5181,8 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
 
     @pytest.mark.parametrize(
         "exc",
-        [
-            OSError(5, "Input/output error"),
-            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
-        ],
-        ids=["OSError", "UnicodeDecodeError"],
+        [OSError(5, "Input/output error")],
+        ids=["OSError"],
     )
     def test_a_read_failure_during_recovery_is_not_an_empty_file(
         self, tmp_path, monkeypatch, exc
@@ -5131,14 +5200,20 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
         this fails — ``_initialize`` returns having "recovered" from a read
         that died, with ``_initialized`` True and ``_seq`` short.
 
-        ⚠ **PARAMETERISED OVER BOTH TYPES, AND THE FIRST VERSION WAS NOT.**
-        The suppression that was removed caught ``OSError`` *and*
-        ``UnicodeDecodeError``; a gate injecting only the first passes on a
-        tree that re-suppresses the second. Caught by codex (L3,
-        2026-09-07). ⚡ **A guard removed over N exception types needs N
-        arms** — mutating the arms that exist cannot find a missing one, and
-        invalid UTF-8 after a valid prefix is a real torn-write shape on
-        this file, not a hypothetical.
+        ⚠ **THE UnicodeDecodeError ARM RETIRED 2026-09-08 (diogenes), AND
+        THIS IS THE COST STATED IN THE FINDING, NOT A QUIET DROP.** The
+        scan now opens ``rb`` and decodes per line, so ``for raw in f``
+        itself can never raise ``UnicodeDecodeError`` — only the explicit
+        ``.decode()`` inside the loop can, and that is now CAUGHT AND
+        SKIPPED, not propagated (a torn line is not a failed read). The
+        injected-iterator shape this test used for that arm modelled a
+        text-mode ``for line in f`` raising mid-iteration, which is no
+        longer the code path; re-pointing it at bytes would test a
+        scenario the source can't produce. The real behaviour — a torn
+        multibyte tail on disk is skipped, not raised — is pinned by
+        ``test_a_torn_multibyte_tail_is_skipped_not_raised`` below, using a
+        real torn byte instead of an injected exception. OSError still
+        must propagate, so that arm stays and is the only one left.
         """
         db = tmp_path / "eio.db"
         trail = AuditTrail(db)
@@ -5179,7 +5254,7 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
                 return self._f.__exit__(*a)
 
         def dying_open(path, mode="r", *a, **kw):
-            if state["armed"] and str(path) == str(active) and mode == "r":
+            if state["armed"] and str(path) == str(active) and mode == "rb":
                 return _Ctx(real_open(path, mode, *a, **kw))
             return real_open(path, mode, *a, **kw)
 
@@ -5192,6 +5267,47 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
             "the trail marked itself initialised after a scan that FAILED "
             "— the next append writes a chain derived from a partial read"
         )
+
+    def test_a_torn_multibyte_tail_is_skipped_not_raised(self, tmp_path):
+        """The class diogenes named HIGH (2026-09-08): propagation scoped
+        by EXCEPTION TYPE instead of by what failed.
+
+        A ``UnicodeDecodeError`` off a torn multibyte tail is not a failed
+        read — it's the same "incomplete entry" shape ``json.JSONDecodeError``
+        already gets skipped for four lines below in this same loop.
+        Before the fix this raised out of ``_read_last_valid_entry``,
+        ``_initialized`` stayed False, and ``_seed_from_manifest`` (added
+        this same window for exactly this no-valid-entry case) never ran —
+        every subsequent ``log()`` re-scanned and re-raised. Permanent,
+        silent trail loss while the store kept writing.
+        """
+        db = tmp_path / "torn.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("before", {"i": i})
+        trail._last_week = "1999-W01"          # force a weekly rotation
+        trail.log("after_rotation", {})
+
+        active = db.parent / "torn.audit.jsonl"
+        # A JSON line cut one byte inside a multibyte character (⛔,
+        # U+26D4) — the diogenes probe's arm B, the untested half of the
+        # already-tested arm A (a torn ASCII tail).
+        active.write_bytes(
+            '{"v":1,"seq":4,"ts":"2026-09-07T00:00:00.0000⛔'.encode("utf-8")[:-1]
+        )
+        assert active.stat().st_size > 0, "fixture: must be NONEMPTY"
+
+        fresh = AuditTrail(db)
+        fresh._initialize()  # must NOT raise
+        assert fresh._initialized is True
+        assert fresh._prev_hash != GENESIS_HASH, (
+            "a torn multibyte tail left the trail unanchored — recovery "
+            "should fall back to the manifest, not stay uninitialised"
+        )
+
+        fresh.log("next", {})
+        r = AuditTrail.verify(db)
+        assert r.valid, f"false tampering verdict: {r.error}"
 
     def test_a_raising_log_handler_does_not_skip_the_invalidation(
         self, tmp_path, monkeypatch

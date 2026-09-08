@@ -23,7 +23,50 @@
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
 
-## ⛔⛔ STILL OPEN AFTER 2026-09-07 — READ THIS FIRST, IT IS WHAT THE NEXT SEAT ACTS ON
+## ⛔⛔ STILL OPEN AFTER 2026-09-08 — READ THIS FIRST, IT IS WHAT THE NEXT SEAT ACTS ON
+
+Written at close by seat `0908+4`. **Both HIGHs from `diogenes_20260908.md` are CLOSED.**
+Re-derive, do not trust this as an answer:
+`git log --oneline -3` (HEAD should be `bbc79f4` or later) ·
+`.venv/bin/python3 -m pytest -q` (was `1902 passed, 0 failed` at close) ·
+`.venv/bin/python3 -m mypy anneal_memory` · `.venv/bin/python3 -m ruff check anneal_memory/audit.py anneal_memory/cli.py`
+
+### CLOSED TODAY — both HIGHs, one conflation, two call sites
+`_read_last_valid_entry` (audit.py, the `_initialize` recovery scan) and `_iter_lines` (audit.py,
+used by `verify()`, `_adopt_orphaned_files`, and cli.py's audit-log reader) both opened audit files
+in TEXT mode, so a torn multibyte UTF-8 tail raised `UnicodeDecodeError` before the line ever
+reached the existing `json.JSONDecodeError` skip. Consequence: `_initialized` stayed `False`,
+`_seed_from_manifest` never ran, every `log()` re-scanned and re-raised — permanent silent trail
+loss while the store kept writing. `verify()` hit the identical conflation and tracebacked instead
+of reporting `skipped_lines`.
+
+**Fix:** both now open `"rb"`; `json.loads` (which decodes internally) raises
+`UnicodeDecodeError` alongside `JSONDecodeError`, so every caller's existing "skip a malformed
+line" `except` clause now covers a torn line too, no new exception taxonomy needed. `_iter_lines`
+now yields raw bytes on **both** branches (`gzip.open(path, "rb")` too) — its three callers were
+each updated to catch `UnicodeDecodeError` and decode-after-parse where `_compute_hash` needs `str`.
+
+**Tests:** `test_a_torn_multibyte_tail_is_skipped_not_raised` (the recovery-scan case),
+`test_a_torn_multibyte_tail_reports_skipped_not_a_traceback` (`verify()`),
+`test_a_torn_tail_inside_a_sealed_gz_file_is_skipped_not_raised` (the gzip branch diogenes flagged
+as never exercised). Retired the `UnicodeDecodeError` parametrize arm of
+`test_a_read_failure_during_recovery_is_not_an_empty_file` — it injected the exception via a fake
+reader wrapping a TEXT-mode file, a shape the `"rb"`-mode scan can no longer produce; its `OSError`
+arm stays (disk I/O errors still propagate) and its monkeypatch mode-check was corrected from
+`"r"` to `"rb"` (it had silently stopped intercepting anything). Full suite: `1902 passed, 0
+failed` (net +2: 3 new, 1 retired). `mypy` clean. `ruff` on the touched files: 20 errors both
+before and after (verified via `git stash`) — no new issues. Committed `bbc79f4`.
+
+**OUT OF SCOPE, deliberately left for the next seat:** the 4 MEDIUMs from `diogenes_20260908.md`
+(the manifest-parse policy split at `audit.py:952`, the `_batch()` docstring roster naming
+`_audit_log` instead of `_audit_log_after_commit`, the two false docstring claims in
+`test_audit.py` about mutant behaviour and green counts) — none touched, budget was 3 tests for
+the two HIGHs only.
+
+---
+
+## ⛔ STILL OPEN AFTER 2026-09-07 — SUPERSEDED BY THE BLOCK ABOVE for the torn-tail item; the
+fsync and duplicate-entry items below are STILL LIVE and were not this window's scope.
 
 > Written at close by seat `0907+11`. Everything below this block is HISTORY and reasoning; this is
 > the live list. **Re-derive, do not trust these as answers** (`spore-764`):

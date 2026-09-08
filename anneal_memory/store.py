@@ -5595,7 +5595,7 @@ class Store:
         The 10.5c.5 two-phase commit primitive. Write-path methods
         check ``self._defer_commit`` and skip their own ``commit()``
         calls while the flag is True; audit events route through
-        :meth:`_audit_log`, which queues them into
+        :meth:`_audit_log_after_commit`, which queues them into
         ``_deferred_audits``. On successful ``__exit__`` this context
         manager does the single outer commit and then replays the
         queued audit events, preserving the "audit only fires for
@@ -5642,7 +5642,7 @@ class Store:
         asyncio tasks while a batch is in flight.
 
         **Batch-aware methods** (check ``_defer_commit`` and route
-        audit events through :meth:`_audit_log`):
+        audit events through :meth:`_audit_log_after_commit`):
 
         - :meth:`record` (episode writes)
         - :meth:`delete` (episode deletions)

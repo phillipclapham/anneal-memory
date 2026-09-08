@@ -23,15 +23,74 @@
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
 
-## ⛔⛔ STILL OPEN AFTER 2026-09-08 — READ THIS FIRST, IT IS WHAT THE NEXT SEAT ACTS ON
+## ✅ CLOSED AFTER 2026-09-08 — READ THIS FIRST, IT IS WHAT THE NEXT SEAT ACTS ON
 
-Written at close by seat `0908+4`. **Both HIGHs from `diogenes_20260908.md` are CLOSED.**
+**All 7 `diogenes_20260908.md` findings are CLOSED** (2 HIGH by seat `0908+4`, then the 5 MEDIUM
+by seat `0908+11` — see that block below). Nothing open from this window.
 Re-derive, do not trust this as an answer:
 `git log --oneline -3` (HEAD should be `bbc79f4` or later) ·
 `.venv/bin/python3 -m pytest -q` (was `1902 passed, 0 failed` at close) ·
 `.venv/bin/python3 -m mypy anneal_memory` · `.venv/bin/python3 -m ruff check anneal_memory/audit.py anneal_memory/cli.py`
 
-### CLOSED TODAY — both HIGHs, one conflation, two call sites
+### CLOSED TODAY (seat `0908+11`) — the 5 remaining `diogenes_20260908.md` items, all 5
+
+Re-derive, do not trust this as an answer: `git log --oneline -3` (HEAD should be past this
+commit) · `.venv/bin/python3 -m pytest -q` (`1904 passed, 0 failed` at close) ·
+`.venv/bin/python3 -m mypy anneal_memory` · `.venv/bin/python3 -m ruff check anneal_memory tests`
+(63 errors, unchanged from the 09-06 baseline — none in the touched files: 16 before, 16 after).
+
+**The manifest-parse policy split (`audit.py:952`, MEDIUM).** `_seed_from_manifest` and
+`_load_manifest` read the SAME manifest file and disagreed on a corrupt one: one propagated
+`json.JSONDecodeError` forever (wedging `log()` on every retry), the other degraded to defaults.
+Fixed by matching the existing tolerant policy: `OSError` still propagates (the transient case the
+original change was written for), `json.JSONDecodeError` now degrades to genesis with a
+`logger.warning`. No new test — the split closes by deleting the disagreement, not by adding a
+behavior; the existing manifest-corruption fixtures cover the parse-failure path.
+
+**The `_batch()` docstring roster naming the wrong helper (`store.py:5645`, MEDIUM).** Diogenes'
+AST census found all ten batch-aware methods call `_audit_log_after_commit`, zero call
+`_audit_log` — confirmed by `TestNoBareAuditEmitSites::test_the_pre_commit_helper_has_no_production_callers`,
+which already asserts `_audit_log` has no production callers. Fixed the heading (`store.py:5645`)
+and the one other copy of the same wrong name (`store.py:5598`) to name the helper that's actually
+called. No new test — a roster gate already pins the ten names; the wrong-helper reference was
+prose the gate deliberately doesn't cover (by design, per `tests/test_store.py:414-416`), and a
+correct sentence needs no gate to stay correct.
+
+**Two false docstring claims in `test_audit.py` about mutant/green counts (MEDIUM).** One
+docstring claimed "the whole suite still passes, 165 green" for a mutant that Diogenes measured as
+`1 failed, 167 passed`. Both the pass/fail claim and the count were wrong. Deleted rather than
+corrected (a re-derived count is tomorrow's finding) — replaced with a pointer to the sibling test
+that actually discriminates the mutant, which is checkable by running it rather than by trusting a
+transcribed number.
+
+**No directory fsync anywhere in `audit.py` (carried from 09-07).** The only durability-sensitive
+module without the `_fsync_dir` idiom (`store.py`, `spores.py` both have it). Added a local
+`_fsync_dir` (duplicated, not imported — this module is zero-dependency by design) and wired it
+after the three atomic renames rotation performs: the active-file seal, the gzip replace, and
+`_save_manifest`'s replace. **Test added, mutation-checked 3 ways** (each call site individually
+removed and re-verified to drop the spy's count from 3 to 2):
+`test_rotation_and_manifest_save_fsync_their_directory`.
+
+**`verify()` cannot see a duplicated entry whose chain is continuous (carried from 09-07, §7).**
+`verify()` checked only `prev_hash` linkage; a retry that chains cleanly off an entry still on disk
+reuses that entry's `seq` and passed as a clean trail. Added a seq-monotonicity check per file
+(reset at file boundaries, since rotation always restarts `_seq` at 0) — strictly increasing, not
+`== last + 1`, so a legitimate gap from a skipped torn line doesn't itself read as tampering.
+**Test added, mutation-checked**: `test_verify_catches_a_duplicated_seq_with_a_continuous_chain`
+(hand-crafts the exact `[0,1,2,2]`-with-continuous-chain shape from `next_steps.md` §7's own
+reproduction).
+
+**Verification budget: 2 tests for 2 code fixes, at the 1-per-fix / 2-total ceiling.** The other
+three fixes are record-only (a policy split, a wrong name, two false numbers) and added zero tests
+by design — a corrected sentence and a deleted number need no gate to stay true; the existing
+suite already covers their behavior.
+
+**§7 in the block below (2026-09-07 pickup) and its `next_steps.md:1782`/`:300` cross-references
+are now HISTORY — the fix described there is landed here, not there.**
+
+---
+
+### HISTORY — both HIGHs, one conflation, two call sites
 `_read_last_valid_entry` (audit.py, the `_initialize` recovery scan) and `_iter_lines` (audit.py,
 used by `verify()`, `_adopt_orphaned_files`, and cli.py's audit-log reader) both opened audit files
 in TEXT mode, so a torn multibyte UTF-8 tail raised `UnicodeDecodeError` before the line ever
@@ -65,15 +124,16 @@ the two HIGHs only.
 
 ---
 
-## ⛔ STILL OPEN AFTER 2026-09-07 — SUPERSEDED BY THE BLOCK ABOVE for the torn-tail item; the
-fsync and duplicate-entry items below are STILL LIVE and were not this window's scope.
+## ✅ CLOSED AFTER 2026-09-07/08 — the torn-tail item was superseded by the 09-08 HIGHs block
+above; the fsync and duplicate-entry items (#1, #2 below) are CLOSED by seat `0908+11`, see the
+block above.
 
 > Written at close by seat `0907+11`. Everything below this block is HISTORY and reasoning; this is
 > the live list. **Re-derive, do not trust these as answers** (`spore-764`):
 > `git ls-remote origin main` vs `git rev-parse HEAD` · `git status --porcelain` ·
 > `.venv/bin/python3 -m pytest -q` · `.venv/bin/python3 -m mypy anneal_memory`
 
-### 1. ▶ NO DIRECTORY FSYNC ANYWHERE IN THE MODULE — A FINDING, NOT TIDINESS
+### 1. ✅ CLOSED 2026-09-08 BY SEAT `0908+11` — NO DIRECTORY FSYNC ANYWHERE IN THE MODULE
 `audit.py` is the only durability-sensitive module in the repo without the `_fsync_dir` idiom, and
 macOS needs `F_FULLFSYNC`, which the siblings document and **nothing documents for this sidecar**.
 Filed 2026-09-07, untouched. Every crash-consistency guarantee in this file is qualified by it.
@@ -83,7 +143,8 @@ Filed 2026-09-07, untouched. Every crash-consistency guarantee in this file is q
 idiom) — and **zero hits in `audit.py`**. All three also state the macOS limit in prose, so the
 wording exists too.
 
-### 2. ▶ `verify()` CANNOT SEE A DUPLICATED ENTRY WHOSE CHAIN IS CONTINUOUS (§7) — still open.
+### 2. ✅ CLOSED 2026-09-08 BY SEAT `0908+11` — `verify()` CANNOT SEE A DUPLICATED ENTRY WHOSE
+CHAIN IS CONTINUOUS (§7). See the block above.
 
 ### 3. ⚠ COVERAGE CAVEAT ON THE 2026-09-07 L3 — DO NOT READ IT AS THREE OPINIONS
 `codex` found 3 HIGH / 2 MED / 1 LOW (all six real). `complement` found 2, no HIGH. **`glm` returned
@@ -1777,9 +1838,10 @@ whichever half its author happened to write, and reported success.
 
 - The strict `xfail` residual: one ordinary I/O failure **plus** a terminal signal landing inside
   the truncate *before it takes effect*. A different window; not closed here.
-- §11's third bullet: **no directory fsync anywhere in the module**, and macOS needs `F_FULLFSYNC`,
-  which `store.py` documents for the SQLite store and nothing documents for this sidecar.
-- §7: `verify()` cannot see a duplicated entry whose chain is continuous.
+- ~~§11's third bullet: no directory fsync anywhere in the module~~ — **CLOSED 2026-09-08**, see
+  the top-of-file pickup block.
+- ~~§7: `verify()` cannot see a duplicated entry whose chain is continuous~~ — **CLOSED 2026-09-08**,
+  see the top-of-file pickup block.
 - Collapsing the three chain attributes into one (closes the second-signal-in-the-handler window).
 
 ### ▶ L0 ON THIS SEAT'S OWN DIFF (two found, both fixed)

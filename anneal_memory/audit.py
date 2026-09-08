@@ -44,6 +44,34 @@ GENESIS_HASH = "sha256:GENESIS"
 _ENTRY_VERSION = 1
 
 
+def _fsync_dir(path: Path) -> None:
+    """Best-effort directory fsync after an atomic rename/replace.
+
+    Same idiom as ``store._fsync_dir`` / ``spores._fsync_dir`` (duplicated
+    rather than imported — this module is zero-dependency, including on
+    its siblings). ``fsync(file)`` durability does not extend to the
+    directory entry created by a subsequent rename; a crash in that gap
+    can leave the rename's target missing on recovery even though the
+    data was durable. macOS ``fsync`` is weaker than Linux (true
+    durability needs ``F_FULLFSYNC``, which stdlib doesn't expose) but
+    the directory sync still narrows the window. Windows can't fsync a
+    directory handle; no-op there. Swallows ``OSError`` — best-effort,
+    not a guarantee callers may rely on.
+    """
+    if os.name != "posix":
+        return
+    try:
+        dir_fd = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
+
+
 @dataclass
 class AuditVerifyResult:
     """Result of verifying a hash chain."""
@@ -768,6 +796,16 @@ class AuditTrail:
         files_verified = 0
 
         for fpath in files_to_verify:
+            # ⛔ SEQ MONOTONICITY, WITHIN EACH FILE, RESET AT EVERY FILE
+            # BOUNDARY (rotation always restarts ``_seq`` at 0 for a new
+            # file — see ``_rotate_if_needed``). ``prev_hash`` linkage alone
+            # cannot see a duplicated entry whose chain is otherwise
+            # continuous: a retry that chains correctly off an entry still
+            # on disk reuses that entry's ``seq``, and the hash check above
+            # has nothing to say about it. Strictly increasing (not
+            # ``== last_seq + 1``) so a legitimate gap from a skipped torn
+            # line does not itself become a false tampering verdict.
+            last_seq: int | None = None
             for line in _iter_lines(fpath):
                 line = line.strip()
                 if not line:
@@ -808,6 +846,27 @@ class AuditTrail:
                               f"expected {expected_hash[:20]}..., "
                               f"got {actual_prev[:20]}...",
                     )
+
+                actual_seq = entry.get("seq")
+                if (
+                    isinstance(actual_seq, int)
+                    and last_seq is not None
+                    and actual_seq <= last_seq
+                ):
+                    return AuditVerifyResult(
+                        valid=False,
+                        total_entries=total_entries,
+                        files_verified=files_verified,
+                        skipped_lines=skipped,
+                        chain_break_at=actual_seq,
+                        chain_break_file=fpath.name,
+                        error=f"Duplicated or non-increasing seq {actual_seq} "
+                              f"after seq {last_seq}: prev_hash linked "
+                              "cleanly but the entry did not advance the "
+                              "sequence",
+                    )
+                if isinstance(actual_seq, int):
+                    last_seq = actual_seq
 
                 # Compute hash from the line on disk, not a re-serialization.
                 # _compute_hash normalizes whitespace (see its docstring).
@@ -942,9 +1001,12 @@ class AuditTrail:
         the same commit that made read errors PROPAGATE out of
         ``_read_last_valid_entry`` twenty lines away.** Two opposite
         decisions about the same class, in one commit.
-        ▶ Absent is ``FileNotFoundError`` and nothing else. Everything else
-        propagates, leaving ``_initialized`` False so the next ``log()``
-        retries rather than writing from a guessed anchor.
+        ▶ Absent is ``FileNotFoundError`` and nothing else undecodable-JSON:
+        a manifest that does not PARSE is not a disk that will recover, so
+        it degrades to genesis (matching :meth:`_load_manifest`'s existing
+        policy for the same file) rather than retrying forever. ``OSError``
+        still propagates, leaving ``_initialized`` False so the next
+        ``log()`` retries rather than writing from a guessed anchor.
         """
         # Reset FIRST: this can run on an instance whose cached chain state
         # is stale, and genesis is the only defensible starting anchor.
@@ -954,7 +1016,14 @@ class AuditTrail:
             raw = self._manifest_path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return
-        manifest = json.loads(raw)
+        try:
+            manifest = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning(
+                "Manifest %s is not valid JSON; anchoring on genesis",
+                self._manifest_path,
+            )
+            return
         self._prev_hash = manifest.get("active_last_hash", GENESIS_HASH)
         self._seq = manifest.get("active_last_seq", 0)
 
@@ -1128,6 +1197,7 @@ class AuditTrail:
 
         # Rename → compress (atomic) → update manifest
         active.rename(sealed_path)
+        _fsync_dir(sealed_path.parent)
 
         # Gzip compress to temp file, then atomic rename.
         # Crash during gzip write → partial .tmp + complete .jsonl on disk.
@@ -1158,6 +1228,7 @@ class AuditTrail:
 
         # Atomic rename — .gz is either complete or doesn't exist
         tmp_gz_path.replace(sealed_gz_path)
+        _fsync_dir(sealed_gz_path.parent)
 
         # Remove uncompressed sealed file
         sealed_path.unlink()
@@ -1262,6 +1333,7 @@ class AuditTrail:
                 f.flush()
                 os.fsync(f.fileno())
             tmp_path.replace(path)
+            _fsync_dir(path.parent)
         except Exception:
             try:
                 tmp_path.unlink()

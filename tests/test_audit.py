@@ -155,6 +155,47 @@ class TestHashChainVerification:
         result = AuditTrail.verify(db)
         assert result.valid is False
 
+    def test_verify_catches_a_duplicated_seq_with_a_continuous_chain(
+        self, tmp_path
+    ):
+        """`verify()` checked ONLY `prev_hash` linkage — `seq` was parsed
+        solely to populate `chain_break_at` on an already-detected break.
+        A retry that chains cleanly off an entry still on disk (the
+        aborted write wasn't rolled back, but the retry's `prev_hash`
+        correctly points at it) reuses that entry's `seq`: every hash
+        link is valid and the old code returned `valid=True`. glm-5.3,
+        filed `next_steps.md` §7, 2026-09-07.
+
+        MUTATION-CHECKED: delete the seq-monotonicity check in `verify()`
+        and this fails — `valid` comes back `True`.
+        """
+        db = tmp_path / "test.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("record", {"id": str(i)})
+
+        audit_path = tmp_path / "test.audit.jsonl"
+        lines = audit_path.read_text(encoding="utf-8").strip().split("\n")
+        last_entry_line = lines[-1]
+        last_hash = AuditTrail._compute_hash(last_entry_line)
+
+        # A duplicate of the last entry's seq, correctly chained off it —
+        # the exact "retry reused the seq, chain stayed continuous" shape.
+        dup = json.loads(last_entry_line)
+        dup["ts"] = "2099-01-01T00:00:00.000000Z"
+        dup["prev_hash"] = last_hash
+        lines.append(
+            json.dumps(dup, sort_keys=True, separators=(",", ":"))
+        )
+        audit_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        result = AuditTrail.verify(db)
+        assert result.valid is False, (
+            "a duplicated seq with an unbroken hash chain must not read "
+            "as a clean trail"
+        )
+        assert result.chain_break_at == dup["seq"]
+
     def test_verify_detects_insertion(self, tmp_path):
         db = tmp_path / "test.db"
         trail = AuditTrail(db)
@@ -1067,6 +1108,40 @@ class TestWeeklyRotation:
         assert len(manifest["files"]) == 1
         assert manifest["files"][0]["period"] == "2026-W01"
         assert manifest["files"][0]["entries"] == 1
+
+    def test_rotation_and_manifest_save_fsync_their_directory(
+        self, tmp_path, monkeypatch
+    ):
+        """audit.py was the only durability-sensitive module without the
+        directory-fsync idiom (`store._fsync_dir` / `spores._fsync_dir`);
+        a crash between a rename's file fsync and its directory entry
+        landing durably could leave the renamed target missing on
+        recovery. Rotation makes THREE renames durable this way: the
+        active-file seal, the gzip atomic replace, and the manifest
+        save's atomic replace. MUTATION-CHECKED, each re-read off disk:
+        drop any ONE of the three `_fsync_dir` call sites and this fails
+        — the spy sees 2 calls instead of 3.
+        """
+        synced_dirs = []
+        real_fsync_dir = audit_module._fsync_dir
+
+        def spy(path):
+            synced_dirs.append(path)
+            real_fsync_dir(path)
+
+        monkeypatch.setattr(audit_module, "_fsync_dir", spy)
+
+        db = tmp_path / "test.db"
+        trail = AuditTrail(db)
+        trail.log("record", {"id": "1"})
+        trail._last_week = "2026-W01"
+        trail.log("record", {"id": "2"})  # triggers rotation
+
+        assert len(synced_dirs) == 3, (
+            "rotation must fsync its directory 3 times: the seal rename, "
+            "the gzip atomic replace, and the manifest save"
+        )
+        assert all(d == tmp_path for d in synced_dirs)
 
     def test_chain_survives_rotation(self, tmp_path):
         db = tmp_path / "test.db"
@@ -5095,10 +5170,10 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
         IS A COST AND IS RECORDED AS ONE. An earlier draft of this docstring
         cited "the zero-byte sibling stays green under that mutant" as a
         PAIRED POSITIVE proving correct scoping. **That was worthless as a
-        control**: codex (L3, 2026-09-07) showed the sibling now stays green
-        under its OWN mutant too, so it discriminates nothing. MEASURED —
-        delete ``or active.stat().st_size == 0`` from ``_initialize`` and the
-        WHOLE audit suite still passes, 165 green.
+        control**: codex (L3, 2026-09-07) showed the sibling no longer
+        discriminates that mutant — this gate does, in
+        :meth:`test_the_zero_byte_fast_path_avoids_a_read_that_can_now_raise`
+        below.
         ⚡ Because ``_seed_from_manifest()`` here catches the empty file as
         well, so the zero-byte clause stopped being load-bearing FOR
         CORRECTNESS the moment this branch was added. **A gate written and

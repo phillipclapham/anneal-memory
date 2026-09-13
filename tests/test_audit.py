@@ -6853,7 +6853,7 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         assert result.error is not None and "Unmanifested sealed audit file" in result.error
 
     @pytest.mark.parametrize(
-        "stall_at", ["after_rename", "after_replace", "before_manifest_load", "after_manifest_save"]
+        "stall_at", ["after_rename", "after_replace", "before_manifest_save", "after_manifest_save"]
     )
     def test_verify_inside_a_stalled_rotation_step_settles_to_valid(
         self, tmp_path, monkeypatch, stall_at
@@ -6871,7 +6871,9 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         ⛔ MUTATION-CHECKED, one mutant per window: open the gzip temp after
         the rename (after_rename fails); drop "an unmanifested .gz beside its
         .jsonl" from the in-flight markers (after_replace fails); unlink the
-        .jsonl before saving the manifest (before_manifest_load fails); stop
+        .jsonl before saving the manifest (before_manifest_save fails; the
+        hybrid loads the manifest before the rename, so the stall hooks the
+        save rather than a reload); stop
         ignoring a covered week's leftover .jsonl (after_manifest_save fails).
         """
         import threading
@@ -6884,7 +6886,7 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         fsyncs = [0]
         seen: dict = {}
         real_fsync = audit_module._fsync_dir
-        real_load = AuditTrail._load_manifest
+        real_save = AuditTrail._save_manifest
 
         def mine():
             return bool(rotator) and threading.get_ident() == rotator[0]
@@ -6905,13 +6907,13 @@ class TestFixDiffRound10RecoveryNeverDeletes:
                 }:
                     snapshot_and_stall()
 
-        def load(self):
-            if mine() and stall_at == "before_manifest_load":
+        def save(self, *args, **kwargs):
+            if mine() and stall_at == "before_manifest_save":
                 snapshot_and_stall()
-            return real_load(self)
+            return real_save(self, *args, **kwargs)
 
         monkeypatch.setattr(audit_module, "_fsync_dir", fsync)
-        monkeypatch.setattr(AuditTrail, "_load_manifest", load)
+        monkeypatch.setattr(AuditTrail, "_save_manifest", save)
         trail._last_week = "1999-W02"
 
         failures: list[BaseException] = []
@@ -6935,7 +6937,7 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         names, manifested = seen["names"], seen["manifested"]
         if stall_at == "after_rename":
             assert plain in names and packed + ".tmp" in names and "m.audit.jsonl" not in names
-        elif stall_at in ("after_replace", "before_manifest_load"):
+        elif stall_at in ("after_replace", "before_manifest_save"):
             assert packed in names and plain in names and packed not in manifested
         else:
             assert packed in manifested and plain in names
@@ -7212,6 +7214,36 @@ class TestFixDiffRound10RecoveryNeverDeletes:
             store.chmod(0o700)
 
         assert AuditTrail.verify(db).total_entries == 2
+
+    @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root lists a mode-300 directory")
+    def test_an_unlistable_directory_cannot_hide_a_quarantine(self, tmp_path):
+        """Rebase of the hybrid onto round 10b, reproduced by a probe first.
+        With the manifest quarantined, the active file gone and the directory
+        unlistable, the marker cannot be seen. Reading "cannot list" as "no
+        marker" returned a fresh manifest and the next ``log()`` wrote seq 0
+        from GENESIS past the quarantine: a forked chain.
+
+        ⛔ MUTATION-CHECKED: swallow the listing error in ``_load_manifest`` as
+        "no markers" and ``log()`` succeeds here, writing an active file.
+        """
+        store = tmp_path / "store"
+        store.mkdir()
+        db = store / "m.db"
+        AuditTrail(db).log("first", {})
+        (store / "m.audit.manifest.json").write_text("{not json")
+        with pytest.raises(audit_module._ManifestQuarantined):
+            AuditTrail(db)._load_manifest()
+        (store / "m.audit.jsonl").unlink()
+        before = sorted(p.name for p in store.iterdir())
+
+        store.chmod(0o300)
+        try:
+            with pytest.raises(audit_module._ManifestUnavailable):
+                AuditTrail(db).log("second", {})
+        finally:
+            store.chmod(0o700)
+
+        assert sorted(p.name for p in store.iterdir()) == before, "nothing written"
 
 
 class TestRotationFsyncUsesAWritableHandle:

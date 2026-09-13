@@ -1749,10 +1749,11 @@ class AuditTrail:
         # ⛔ QUARANTINE RETURNS BEFORE ANYTHING IS LISTED OR SET ASIDE (hybrid,
         # 2026-09-13). Adopting into a fresh manifest is the automatic rebuild
         # the hybrid forbids. Orphans stay on disk; verify() reports the
-        # quarantine.
+        # quarantine. A manifest unavailable right now skips recovery the same
+        # way instead of failing the write: the next open retries.
         try:
             manifest = self._load_manifest()
-        except _ManifestQuarantined as exc:
+        except _ManifestUnavailable as exc:
             logger.warning("Not adopting orphaned audit files: %s", exc)
             return
         try:
@@ -2218,7 +2219,17 @@ class AuditTrail:
         - Absent -> a fresh manifest, as before.
         """
         stem = self._db_path.stem
-        markers = _quarantine_markers(self._db_path.parent, stem)
+        # ⛔ A DIRECTORY THAT CANNOT BE LISTED CANNOT RULE OUT A MARKER (rebase
+        # onto round 10b). Raising here failed every log() in a writable but
+        # unlistable directory, the case round 10 had just fixed. A present
+        # manifest is read as usual. An absent one is refused below: returning
+        # a fresh manifest there is the rebuild the hybrid forbids whenever an
+        # unseen marker exists.
+        list_error: OSError | None = None
+        try:
+            markers = _quarantine_markers(self._db_path.parent, stem)
+        except OSError as e:
+            markers, list_error = [], e
         if markers:
             raise _ManifestQuarantined(
                 f"the audit manifest is quarantined as {markers[-1]}; "
@@ -2227,6 +2238,11 @@ class AuditTrail:
         try:
             raw = self._manifest_path.read_bytes()
         except FileNotFoundError:
+            if list_error is not None:
+                raise _ManifestUnavailable(
+                    "the audit manifest is absent and the directory cannot be "
+                    f"listed to rule out a quarantine: {list_error}"
+                ) from list_error
             return self._fresh_manifest()
         except OSError as e:
             raise _ManifestUnavailable(f"the audit manifest cannot be read right now: {e}") from e

@@ -6426,3 +6426,48 @@ class TestFixDiffRound7OneFilenameLanguage:
 
         assert result.valid is False
         assert result.error is not None and "Unreadable audit file" in result.error
+
+    def test_an_unreadable_orphan_does_not_make_the_trail_unwritable(self, tmp_path):
+        """HIGH, complement, round 8 (input_id 7240dbf9a80216ae). Adoption
+        read orphans with no OSError path, from ``_initialize()`` — which
+        re-runs on every ``log()`` until it succeeds — so one truncated
+        orphan ``.gz`` made EVERY write raise, measured 3 of 3.
+
+        ⛔ MUTATION-CHECKED: read orphans with ``_iter_lines`` directly in
+        ``_adopt_orphaned_files`` and this raises ``OSError``.
+        """
+        db = tmp_path / "memory.db"
+        trail = AuditTrail(db)
+        for i in range(50):
+            trail.log("before", {"i": i, "pad": "x" * 200})
+        self._rotate(trail, "1999-W01")
+        raw = (tmp_path / "memory.audit.1999-W01.jsonl.gz").read_bytes()
+        orphan = tmp_path / "memory.audit.1998-W52.jsonl.gz"
+        orphan.write_bytes(raw[: len(raw) // 2])
+
+        reopened = AuditTrail(db)
+        reopened.log("after_reopen", {})  # must NOT raise
+        reopened.log("again", {})
+
+        names = [f["filename"] for f in reopened._load_manifest()["files"]]
+        assert orphan.name not in names
+
+    def test_a_refused_log_call_does_not_rotate_first(self, tmp_path):
+        """MED, codex, round 8. The type check ran on the finished entry,
+        AFTER initialization and rotation — ``log(123, {})`` at a week
+        boundary sealed the active file and saved a manifest, measured,
+        before raising.
+
+        ⛔ MUTATION-CHECKED: delete the entry-time ``_require_entry_dict(probe)``
+        call from ``log()`` and this fails — the directory changes.
+        """
+        db = tmp_path / "memory.db"
+        trail = AuditTrail(db)
+        trail.log("first", {})
+        trail._last_week = "1999-W01"
+        before = sorted(p.name for p in tmp_path.iterdir())
+
+        with pytest.raises(TypeError):
+            trail.log(123, {})  # type: ignore[arg-type]
+
+        assert sorted(p.name for p in tmp_path.iterdir()) == before

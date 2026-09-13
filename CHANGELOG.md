@@ -17,10 +17,11 @@ sealed files.
 
 **A truncated sealed `.gz` crashed `verify()` and `anneal-memory audit`**, because gzip raises
 `EOFError`/`zlib.error`, not `OSError`. A file that is unreadable or disappears while `verify()` reads
-it now yields `valid=False` with an "Unreadable audit file" error.
+it now yields `valid=False` with an "Unreadable audit file" error. An unreadable orphaned sealed file
+is now skipped with a warning; it used to make every later `log()` call raise.
 
 **`AuditTrail.log()` now raises `TypeError` for a non-`str` `event` or a non-`dict` `data`**, before
-writing anything. Such an entry used to be written and then treated as invalid on recovery, which
+writing anything, including before a pending weekly rotation. Such an entry used to be written and then treated as invalid on recovery, which
 reset the chain and made `verify()` fail.
 
 ### Fixed — recovery seeds from genesis, a manifest that cannot be read is not one that is absent, and the rollback's last window is closed

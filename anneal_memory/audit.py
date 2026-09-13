@@ -369,6 +369,16 @@ class AuditTrail:
         Returns:
             The complete entry dict that was written.
         """
+        # Validate the caller's fields FIRST (codex, round 8): initialization
+        # and rotation below rename, compress and save files, so a type
+        # check that only ran on the finished entry let a refused call
+        # mutate the trail before raising. The check on the full entry
+        # further down stays as the writer/reader invariant.
+        probe: dict[str, Any] = {"event": event}
+        if data is not None:
+            probe["data"] = data
+        _require_entry_dict(probe)
+
         if not self._initialized:
             self._initialize()
 
@@ -1339,7 +1349,13 @@ class AuditTrail:
             last_ts = ""
             last_hash = ""
 
-            for line in _iter_lines(orphan_path):
+            # ⛔ An orphan that cannot be read (a truncated .gz) must not
+            # raise out of here: this runs from ``_initialize()`` on every
+            # ``log()`` until it succeeds, so a raise made the trail
+            # permanently unwritable (complement, round 8 — measured, every
+            # log() raised). Skip it whole; never adopt a partial read.
+            read_error: list[OSError] = []
+            for line in _guarded_lines(orphan_path, read_error):
                 stripped = line.strip()
                 if not stripped:
                     continue
@@ -1355,6 +1371,13 @@ class AuditTrail:
                 entry_count += 1
                 # Hash the line from disk, not a re-serialization
                 last_hash = self._compute_hash(stripped_str)
+
+            if read_error:
+                logger.warning(
+                    "Not adopting unreadable orphaned audit file %s: %s",
+                    orphan_path.name, read_error[0],
+                )
+                continue
 
             # Extract period from filename (e.g., "memory.audit.2026-W14.jsonl.gz")
             period = orphan_path.name.removeprefix(prefix)
@@ -1686,7 +1709,9 @@ def _iter_lines(path: Path):
         # A truncated or corrupt gzip stream raises ``EOFError`` or
         # ``zlib.error``, neither an ``OSError`` (codex, round 7: both
         # escaped ``verify()`` and ``cmd_audit``'s OSError handler).
-        # Normalized here, once, so every consumer's OSError path covers it.
+        # Normalized here, once. ⚠ That only helps a consumer that HAS an
+        # OSError path — read through ``_guarded_lines`` where a raise
+        # must not escape (round 8 found adoption had none).
         try:
             with gzip.open(path, "rb") as f:
                 yield from f

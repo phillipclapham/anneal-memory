@@ -380,6 +380,34 @@ its own mutant via `mutate_r7.py` (the mutated file is restored byte-identical a
 unmutated. Receipt at commit time, 2026-09-13: full suite `1939 passed` (was 1932), 0 failed; mypy
 clean; ruff 63, unchanged. Re-derive with `.venv/bin/python3 -m pytest -q`.**
 
+### EIGHTH RE-PASS (against `09e6cac`, seat `0913+29`, 2026-09-13) — 1 REAL HIGH IN ROUND 7'S OWN CLAIM, 1 MED, REST ROUTED
+
+Review rows: input_id `7240dbf9a80216ae`. glm returned `{"findings": []}` after opening 2 files, so that
+is a THIN lineage, not an independent clean verdict. Every fixed item was reproduced on the round-7
+tree before fixing.
+
+1. **FIXED — HIGH [run] (complement), an unreadable orphan made the trail permanently unwritable.**
+   Round 7's comment said the `_iter_lines` gzip normalization covered "every consumer's OSError path";
+   `_adopt_orphaned_files` HAD none, and it runs from `_initialize()` on every `log()` until it succeeds.
+   Measured: a truncated orphan `.gz` → `log()` raised `OSError` on 3 of 3 calls. The store's
+   after-commit path swallows that, so every event would be dropped. Adoption now reads through
+   `_guarded_lines` and skips an unreadable orphan whole (never a partial adoption), with a warning.
+2. **FIXED — MED [run] (codex), `log()`'s type check ran after rotation.** `log(123, {})` at a week
+   boundary sealed the active file and saved a manifest, measured, then raised — so round 7's new
+   docstring ("before anything is written") was false. `event`/`data` are now validated on entry; the
+   check on the finished entry stays as the writer/reader invariant.
+3. **REFUTED — LOW (complement), "the CHANGELOG attributes the TypeError to this round."** Round 6 is
+   also unreleased; `[Unreleased]` records changes against the last release.
+4. **ROUTED — MED [run] (codex), a huge JSON integer escapes every reader.** A 5,000-digit
+   `active_last_seq` made `verify()` raise `ValueError` (Python's integer-string limit), measured. Same
+   decode class, not introduced by round 7. Exact fix: catch `ValueError` wherever `JSONDecodeError`/
+   `UnicodeDecodeError` are caught today — both are `ValueError` subclasses, so it is a narrowing of
+   the tuples, not a new branch. List the sites with `grep -n "JSONDecodeError" anneal_memory/audit.py anneal_memory/cli.py`.
+5. **Codex HIGHs 1-4 + the `cmd_audit` race MED** are routed items A, B and C above, unchanged.
+
+**Verification: 2 new tests, each killed by its own mutant (`mutate_r8.py`, file restored byte-identical),
+passing unmutated. Receipt at commit time: suite `1941 passed` (was 1939), mypy clean, ruff 63 unchanged.**
+
 ## ✅ CLOSED AFTER 2026-09-08 — READ THIS FIRST, IT IS WHAT THE NEXT SEAT ACTS ON
 
 ⛔ **CORRECTED 2026-09-13 (diogenes MEDIUM, filed 09-09, re-derived and closed).** The line below

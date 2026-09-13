@@ -6148,3 +6148,133 @@ class TestFixDiffRound5DotFilenamesAndTextRenderFields:
     # a hand-crafted ``prev_hash``, not the crash being tested for).
     # Moved to ``tests/test_cli.py::TestCmdAudit`` where the vulnerable
     # code actually runs.
+
+
+class TestFixDiffRound6WriterReaderConsistency:
+    """complement + codex L3, round 6, 2026-09-13 — a real HIGH still in
+    the twin of a fix landed the same round, plus a writer/reader schema
+    mismatch the round-5 sweep created without noticing.
+    """
+
+    def test_verify_survives_an_unreadable_manifest(self, tmp_path, monkeypatch):
+        """HIGH, complement. ``verify()``'s manifest read lacked
+        ``OSError`` — the exact twin of `cmd_audit`'s round-4 fix, on
+        the classmethod every "is this trail intact" check depends on.
+
+        ⛔ MUTATION-CHECKED: drop ``OSError`` from the except tuple and
+        this raises ``PermissionError`` instead of returning a result.
+        """
+        db = tmp_path / "unreadable_manifest.db"
+        trail = AuditTrail(db)
+        trail.log("first", {"i": 0})
+
+        manifest_path = trail._manifest_path
+        manifest_path.write_text('{"files": []}', encoding="utf-8")
+        real_read_bytes = Path.read_bytes
+
+        def sick_read_bytes(self):
+            if self == manifest_path:
+                raise PermissionError(13, "Permission denied")
+            return real_read_bytes(self)
+
+        monkeypatch.setattr(Path, "read_bytes", sick_read_bytes)
+
+        result = AuditTrail.verify(db)  # must NOT raise
+
+        assert result.valid is False
+        assert result.error is not None and "Corrupt manifest" in result.error
+
+    def test_manifest_filename_must_match_the_sealed_pattern(self, tmp_path):
+        """HIGH, codex. The filename blacklist (empty, path separators,
+        ``.``/``..``) could never close the general case: any basename
+        matching an EXISTING REGULAR FILE that isn't a legitimate sealed
+        audit file (this ``is_file()`` alone cannot distinguish from a
+        real one) passes it, then gets read and hash-chain-walked as if
+        it were audit data. Replaced with a positive requirement
+        matching the shape ``_rotate_if_needed`` is the only thing that
+        generates.
+
+        ⛔ MUTATION-CHECKED: revert to the blacklist form (drop the
+        ``_SEALED_FILENAME_RE`` check) and this fails — an unrelated
+        existing file is accepted as a sealed audit file instead of
+        being rejected.
+        """
+        db = tmp_path / "subdir_filename.db"
+        trail = AuditTrail(db)
+        trail.log("first", {"i": 0})
+
+        decoy = trail._active_path.parent / "notes.txt"
+        decoy.write_text("not an audit file", encoding="utf-8")
+        trail._manifest_path.write_text(
+            '{"files": [{"filename": "notes.txt"}]}', encoding="utf-8"
+        )
+
+        result = AuditTrail.verify(db)  # must NOT raise
+
+        assert result.valid is False
+        assert result.error is not None and "Corrupt manifest" in result.error
+
+    def test_manifest_rejects_a_duplicate_filename(self, tmp_path):
+        """MED, codex. A manifest listing the same sealed file twice
+        passed every per-record check and made every reader walk that
+        file twice — doubled totals in `cmd_audit`, a duplicated
+        hash-chain segment in `verify()`.
+
+        ⛔ MUTATION-CHECKED: drop the duplicate-filename check from
+        ``_parse_manifest_bytes`` and this fails — the manifest is
+        accepted instead of rejected.
+        """
+        db = tmp_path / "dup_filename.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("before", {"i": i})
+        trail._last_week = "1999-W01"
+        trail.log("after_rotation", {})
+
+        sealed_name = "dup_filename.audit.1999-W01.jsonl.gz"
+        assert (trail._active_path.parent / sealed_name).exists()
+
+        manifest = trail._load_manifest()
+        manifest["files"] = manifest["files"] * 2
+        trail._save_manifest(manifest)
+
+        result = AuditTrail.verify(db)  # must NOT raise
+
+        assert result.valid is False
+        # Discriminator is the ERROR SHAPE, not bare invalidity: without
+        # the dedup guard, verify() still ends up valid=False (walking the
+        # sealed file twice re-chains from GENESIS a second time and trips
+        # a hash mismatch) — codex's own named harm, "a duplicated
+        # hash-chain segment" — so bare invalidity can't tell the fix from
+        # the mutant. The guard's own early return names it explicitly.
+        assert result.error is not None and "Corrupt manifest" in result.error
+
+    def test_log_rejects_a_non_string_event_before_writing(self, tmp_path):
+        """HIGH, codex + fan-in: writer/reader schema mismatch.
+        ``log()`` enforced nothing at runtime (``event: str`` was a type
+        hint only) while every READER now rejects the same shape via
+        ``_require_entry_dict`` — so a caller passing a non-str
+        ``event`` wrote a record that recovery then treats as NOT A
+        VALID ENTRY, silently resetting the chain to genesis and
+        reusing ``seq``. ``log()`` now calls the SAME validator before
+        writing, so writer and reader cannot disagree by construction.
+
+        ⛔ MUTATION-CHECKED: drop the ``_require_entry_dict(entry)`` call
+        from ``log()`` and this fails — the malformed entry is written
+        successfully instead of being refused.
+        """
+        db = tmp_path / "bad_write.db"
+        trail = AuditTrail(db)
+        trail.log("first", {"i": 0})
+
+        with pytest.raises(TypeError):
+            trail.log([], {"i": 1})  # type: ignore[arg-type]
+
+        # the trail must be exactly as it was before the refused write
+        assert trail._seq == 1
+        result = AuditTrail.verify(db)
+        assert result.valid is True
+        assert result.total_entries == 1
+    # test_cmd_audit_survives_a_file_removed_mid_iteration lives in
+    # tests/test_cli.py::TestCmdAudit — it needs that file's fixtures
+    # and imports cmd_audit directly.

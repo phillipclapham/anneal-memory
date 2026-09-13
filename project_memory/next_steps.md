@@ -90,6 +90,38 @@ test itself). complement and glm both returned clean.
 **Verification budget for the fix-diff: 2 tests, both mutation-checked. Full suite: `1909 passed`
 (was 1907), 0 failed. mypy clean. ruff: 63, unchanged.**
 
+### SECOND FIX-DIFF RE-PASS (fan-in-dispatched, against `ac055fb`, 2026-09-13) — 3 REAL, 1 REFUTED
+
+codex + complement reviewed the first fix-diff itself and found the same class recurring inside
+its own fix, twice more, plus a genuine pre-existing sibling. glm returned an empty-findings body
+in 248s with only 2 files opened — counted as a THIN lineage on this pass per the fan-in, not
+weighted as a second independent clean verdict.
+
+1. **FIXED — HIGH (complement), `verify()`'s entry-line loop.** Called `json.loads(line)` on raw
+   bytes, then re-decoded the same bytes strictly OUTSIDE the try with a comment claiming that was
+   "safe" — false, for the identical surrogatepass reason item 2 of the first fix-diff closed for
+   the manifest. Reordered to decode-then-parse, both inside the try. 1 test, mutation-checked.
+2. **FIXED — MED (complement), the rotation-sealing gzip loop.** Same class, pre-existing
+   (untouched by either prior commit), needs a torn active-file tail surviving its own rollback
+   truncate to reach. Same reorder. 1 test, mutation-checked.
+3. **FIXED — HIGH (codex), `_parse_manifest_bytes` validated only the root container.** A
+   manifest with the right shape but wrong field types (`{"chain_anchor": 1}`) parsed past the
+   root check and crashed `verify()` at `expected_hash[:20]` on an int. Added field-type
+   validation for `chain_anchor`, `active_last_hash` (must be str), `active_last_seq` (must be
+   int), `files` (must be a list of `{"filename": str}` records). 1 test, mutation-checked.
+4. **REFUTED — MED (codex), `tests/test_audit.py` early-return rotation test.** codex argued the
+   test "enshrines the wrong rotation-recovery state" and that `_seq` should reset to 0 in that
+   branch, citing `stats()["entry_count"]` becoming 4 as evidence of a bug. False: `entry_count`
+   IS `self._seq`, and its own docstring says it "reflects the true count on disk (including any
+   entries recovered from a prior active file)" — cumulative by design, not "entries in the active
+   file." This asymmetry was already the subject of `audit.py:800`'s MEDIUM in the original 9,
+   where a prior review explicitly verified it fails safe with zero false positives; my own test's
+   `verify().valid is True` assertion demonstrates the same. No change made.
+
+**Verification budget: 3 tests, all mutation-checked. Full suite: `1912 passed` (was 1909), 0
+failed. mypy clean. ruff: 63 (one new F541 introduced and fixed in the same pass, so the count
+nets to unchanged).**
+
 ## ✅ CLOSED AFTER 2026-09-08 — READ THIS FIRST, IT IS WHAT THE NEXT SEAT ACTS ON
 
 ⛔ **CORRECTED 2026-09-13 (diogenes MEDIUM, filed 09-09, re-derived and closed).** The line below

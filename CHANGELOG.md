@@ -18,7 +18,8 @@ name, where `verify()` reports it.
 
 **`verify()` could call a trail valid with its first sealed week missing.** The manifest was statted
 after the directory listing, so a first rotation landing between the two, followed by an empty active
-file, passed as valid with no entries. The manifest is now statted before the listing.
+file, passed as valid with no entries. The manifest is now statted before the listing, and every valid
+verdict, including the one for an empty trail, re-checks it.
 
 **One refused rotation stopped rotation for the rest of the process.** After refusing to seal a week
 already on disk, every later week boundary retried the same name, so neither rotation nor retention ran

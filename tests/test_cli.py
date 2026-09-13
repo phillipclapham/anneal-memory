@@ -3877,3 +3877,46 @@ class TestHybridAuditCli:
         assert text.returncode == 1 and "nothing to repair" in text.stderr
         as_json = self._run("--db", str(db), "audit-repair", "--json")
         assert as_json.returncode == 1 and json.loads(as_json.stdout)["repaired"] is False
+
+
+class TestHybridL3AuditCli:
+    """CLI side of the hybrid's L3 (input 6e433954439ed92b), reproduced at mode
+    0o300 before the fixes."""
+
+    _two_sealed_weeks = staticmethod(TestHybridAuditCli._two_sealed_weeks)
+    _run = staticmethod(TestHybridAuditCli._run)
+
+    def _quarantined(self, tmp_path):
+        from anneal_memory.audit import AuditTrail
+
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        AuditTrail(db).log("quarantines", {})
+        return db
+
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root lists a mode-300 directory")
+    def test_audit_warns_when_it_cannot_rule_out_a_quarantine(self, tmp_path):
+        """codex HIGH: the active file was printed as the whole history, with
+        anchor_trusted true and no warning."""
+        db = self._quarantined(tmp_path)
+        tmp_path.chmod(0o300)
+        try:
+            result = self._run("--db", str(db), "audit", "--json")
+        finally:
+            tmp_path.chmod(0o700)
+
+        assert result.returncode == 0
+        assert "cannot be listed" in result.stderr
+        assert json.loads(result.stdout)["anchor_trusted"] is False
+
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root lists a mode-300 directory")
+    def test_audit_repair_in_an_unlistable_directory_exits_1_without_a_traceback(self, tmp_path):
+        db = self._quarantined(tmp_path)
+        tmp_path.chmod(0o300)
+        try:
+            result = self._run("--db", str(db), "audit-repair")
+        finally:
+            tmp_path.chmod(0o700)
+
+        assert result.returncode == 1
+        assert "Traceback" not in result.stderr and "Cannot list" in result.stderr

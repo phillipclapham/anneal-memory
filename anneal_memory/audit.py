@@ -119,11 +119,17 @@ def _sealed_period(name: str, stem: str) -> str:
 _QUARANTINE_SUFFIX_PATTERN = r"\.corrupt-\d{8}T\d{12}Z"
 
 
-def _quarantine_markers(audit_dir: Path, stem: str) -> list[str]:
-    """Unresolved quarantined manifests for ``stem``, oldest first."""
+def _markers_in(names: set[str] | list[str], stem: str) -> list[str]:
+    """The quarantine markers for ``stem`` among ``names``, oldest first."""
     pattern = re.escape(f"{stem}.audit.manifest.json") + _QUARANTINE_SUFFIX_PATTERN
+    return sorted(n for n in names if re.fullmatch(pattern, n))
+
+
+def _quarantine_markers(audit_dir: Path, stem: str) -> list[str]:
+    """Unresolved quarantined manifests for ``stem``, oldest first. A listing
+    error other than a missing directory is raised."""
     try:
-        return sorted(p.name for p in audit_dir.iterdir() if re.fullmatch(pattern, p.name))
+        return _markers_in([p.name for p in audit_dir.iterdir()], stem)
     except FileNotFoundError:
         return []
 
@@ -1130,7 +1136,10 @@ class AuditTrail:
         missing_files: list[str] = []
         anchor_trusted = True
 
-        markers = _quarantine_markers(audit_dir, stem)
+        # From the listing this pass already took, never a second one: round
+        # 10's list-once rule, which a second listing broke by raising out of
+        # verify() (complement + codex, L3 of the hybrid).
+        markers = _markers_in(names, stem)
         if markers:
             return AuditVerifyResult(
                 valid=False, total_entries=0, files_verified=0,
@@ -1202,6 +1211,7 @@ class AuditTrail:
         if unmanifested:
             return AuditVerifyResult(
                 valid=False, total_entries=0, files_verified=0,
+                anchor_trusted=anchor_trusted,
                 error=(
                     "Unmanifested sealed audit file(s) on disk, not "
                     f"covered by the manifest: {unmanifested}{_RERUN_HINT}"
@@ -1218,6 +1228,7 @@ class AuditTrail:
         if missing_files:
             return AuditVerifyResult(
                 valid=False, total_entries=0, files_verified=0,
+                anchor_trusted=anchor_trusted,
                 error=(
                     "Missing sealed files referenced in manifest: "
                     f"{missing_files}{_RERUN_HINT}"
@@ -1233,6 +1244,7 @@ class AuditTrail:
             if _stat_signature(manifest_path) != manifest_signature:
                 return AuditVerifyResult(
                     valid=False, total_entries=0, files_verified=0,
+                    anchor_trusted=anchor_trusted,
                     error=f"The manifest changed during verification{_RERUN_HINT}",
                 )
             # ⛔ AND A FRESH LISTING MUST SHOW NO AUDIT FILE THE PASS DID NOT SEE
@@ -1244,6 +1256,7 @@ class AuditTrail:
             except OSError as e:
                 return AuditVerifyResult(
                     valid=False, total_entries=0, files_verified=0,
+                    anchor_trusted=anchor_trusted,
                     error=f"Cannot list audit directory: {e}",
                 )
             appeared = sorted(
@@ -1253,9 +1266,12 @@ class AuditTrail:
             if appeared:
                 return AuditVerifyResult(
                     valid=False, total_entries=0, files_verified=0,
+                    anchor_trusted=anchor_trusted,
                     error=f"Audit files appeared during verification: {appeared}{_RERUN_HINT}",
                 )
-            return AuditVerifyResult(valid=True, total_entries=0, files_verified=0)
+            return AuditVerifyResult(
+                valid=True, total_entries=0, files_verified=0, anchor_trusted=anchor_trusted
+            )
 
         # Walk all files, verify chain
         total_entries = 0
@@ -1387,6 +1403,7 @@ class AuditTrail:
                 total_entries=total_entries,
                 files_verified=files_verified,
                 skipped_lines=skipped,
+                anchor_trusted=anchor_trusted,
                 error=f"The manifest changed during verification{_RERUN_HINT}",
             )
 
@@ -1405,12 +1422,13 @@ class AuditTrail:
         The ONLY way out of quarantine (hybrid, ruled by Phill 2026-09-13).
         Operator-run: do not run it while another process is writing the trail.
 
-        Refuses, writing nothing, when a sealed week is unreadable or empty, or
-        when consecutive sealed files do not hash-chain — it never guesses
+        Refuses, writing nothing, when the directory cannot be listed, when a
+        sealed week is unreadable, empty or breaks its own chain, or when
+        consecutive sealed files do not hash-chain — it never guesses
         across a gap. ``sha256_file`` is left empty rather than recomputed,
         because a checksum of the bytes now on disk would bless whatever
-        changed. If the first sealed file does not start at genesis, its
-        starting hash is recorded as ``chain_anchor`` together with
+        changed. If the first sealed file, or with none left the active
+        file's first entry, does not start at genesis, its starting hash is recorded as ``chain_anchor`` together with
         ``chain_anchor_recovered: true``, and :meth:`verify` then reports
         ``anchor_trusted=False``.
         """
@@ -1418,13 +1436,27 @@ class AuditTrail:
         stem = db_path.stem
         audit_dir = db_path.parent
         trail = cls(db_path)
-        markers = _quarantine_markers(audit_dir, stem)
+        # A listing error is a refusal, not a traceback (complement + codex, L3
+        # of the hybrid, reproduced at mode 0o300).
+        try:
+            markers = _quarantine_markers(audit_dir, stem)
+        except OSError as e:
+            return AuditRepairResult(
+                repaired=False,
+                error=f"Cannot list the audit directory: {e}; nothing was written.",
+            )
 
         if not markers and trail._manifest_path.exists():
             try:
                 trail._load_manifest()
             except _ManifestQuarantined:
-                markers = _quarantine_markers(audit_dir, stem)  # quarantined just now
+                try:
+                    markers = _quarantine_markers(audit_dir, stem)  # quarantined just now
+                except OSError as e:
+                    return AuditRepairResult(
+                        repaired=False,
+                        error=f"Cannot list the audit directory: {e}; nothing was written.",
+                    )
             except _ManifestUnavailable as e:
                 return AuditRepairResult(repaired=False, error=str(e))
             else:
@@ -1441,23 +1473,33 @@ class AuditTrail:
             records: list[dict[str, Any]] = []
             untracked: list[str] = []
             for period in sorted(by_period):
-                chosen: tuple[Path, dict[str, Any]] | None = None
-                for path in sorted(by_period[period], key=lambda q: not q.name.endswith(".gz")):
-                    info = _sealed_record(path)
-                    if chosen is None and info is not None and info["entries"] > 0:
-                        chosen = (path, info)
-                    elif chosen is not None:
-                        untracked.append(path.name)
-                if chosen is None:
+                # Every copy is scanned before one is chosen, so a copy that
+                # was not chosen is listed as untracked however it read (codex,
+                # L3 of the hybrid: an unreadable .gz scanned first was dropped
+                # from ``untracked``). A copy that breaks its own chain is never
+                # chosen (codex, same review: repair released the marker over a
+                # week verify() rejected at once).
+                candidates = sorted(by_period[period], key=lambda q: not q.name.endswith(".gz"))
+                scanned = [(p, _sealed_record(p)) for p in candidates]
+                usable = [
+                    (p, i) for p, i in scanned
+                    if i is not None and i["entries"] > 0 and i["chain_break_seq"] is None
+                ]
+                if not usable:
+                    broken = [(p, i) for p, i in scanned if i is not None and i["chain_break_seq"] is not None]
                     names = sorted(q.name for q in by_period[period])
                     return AuditRepairResult(
                         repaired=False,
                         error=(
+                            f"{broken[0][0].name} does not hash-chain internally at seq "
+                            f"{broken[0][1]['chain_break_seq']}; nothing was written."
+                            if broken else
                             f"No readable entry in the sealed file(s) for {period} "
                             f"({names}); nothing was written."
                         ),
                     )
-                path, info = chosen
+                path, info = usable[0]
+                untracked.extend(p.name for p, _ in scanned if p != path)
                 records.append({"path": path, "period": period, **info})
         except OSError as e:
             return AuditRepairResult(
@@ -1493,11 +1535,35 @@ class AuditTrail:
                 for r in records
             ],
         }
-        recovered = bool(records) and records[0]["first_prev_hash"] != GENESIS_HASH
+        if records:
+            anchor = records[0]["first_prev_hash"]
+        else:
+            # No sealed file survives (glm, L3 of the hybrid, reproduced: the
+            # rebuilt manifest anchored at genesis and verify() reported a hash
+            # mismatch at seq 0). The active file's first entry is then the
+            # only record of where the chain starts.
+            try:
+                anchor = _first_prev_hash(trail._active_path) or GENESIS_HASH
+            except FileNotFoundError:
+                anchor = GENESIS_HASH
+            except OSError as e:
+                return AuditRepairResult(
+                    repaired=False,
+                    error=f"Could not read the active audit file: {e}; nothing was written.",
+                )
+        recovered = anchor != GENESIS_HASH
         if recovered:
-            manifest["chain_anchor"] = records[0]["first_prev_hash"]
+            manifest["chain_anchor"] = anchor
             manifest["chain_anchor_recovered"] = True
-        trail._save_manifest(manifest)
+        try:
+            trail._save_manifest(manifest)
+        except OSError as e:
+            # codex, L3 of the hybrid: a failed save escaped as a traceback.
+            # The markers are untouched, so the trail stays quarantined.
+            return AuditRepairResult(
+                repaired=False,
+                error=f"Could not save the rebuilt manifest: {e}; the quarantine marker is kept.",
+            )
 
         # Markers are released only AFTER the rebuilt manifest is durable: a
         # crash in between leaves the trail quarantined, and repair re-runs.
@@ -2506,11 +2572,19 @@ def _last_valid_sealed_line(path: Path) -> str | None:
 
 def _sealed_record(path: Path) -> dict[str, Any] | None:
     """What a manifest record needs, computed from the file's own lines, or
-    None if the file is corrupt. A transient read failure is re-raised."""
+    None if the file is corrupt. A transient read failure is re-raised.
+
+    ``chain_break_seq`` is the seq of the first entry whose ``prev_hash`` does
+    not match the entry before it, or whose seq does not advance; None when the
+    file chains end to end (codex, L3 of the hybrid: without this check repair
+    accepted a week with an internal break).
+    """
     errors: list[OSError] = []
     entries = 0
     first_ts = last_ts = last_hash = ""
     first_prev_hash: str | None = None
+    last_seq: int | None = None
+    chain_break_seq: int | None = None
     for raw in _guarded_lines(path, errors):
         stripped = raw.strip()
         if not stripped:
@@ -2520,8 +2594,16 @@ def _sealed_record(path: Path) -> dict[str, Any] | None:
             entry = _require_entry_dict(json.loads(text))
         except _UNPARSEABLE_JSON:
             continue
+        seq = entry.get("seq")
         if first_prev_hash is None:
             first_prev_hash = entry.get("prev_hash", "")
+        elif chain_break_seq is None and (
+            entry.get("prev_hash", "") != last_hash
+            or (isinstance(seq, int) and last_seq is not None and seq <= last_seq)
+        ):
+            chain_break_seq = seq if isinstance(seq, int) else -1
+        if isinstance(seq, int):
+            last_seq = seq
         ts = entry.get("ts", "")
         first_ts = first_ts or ts
         last_ts = ts
@@ -2537,6 +2619,7 @@ def _sealed_record(path: Path) -> dict[str, Any] | None:
         "last_ts": last_ts,
         "first_prev_hash": first_prev_hash or "",
         "last_hash": last_hash,
+        "chain_break_seq": chain_break_seq,
     }
 
 

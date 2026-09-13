@@ -39,7 +39,8 @@
 - `.venv` here imports a stale 0.9.1 unless PYTHONPATH points at a tree [desk `0913+38`, 17:4x].
 
 ### ⛔⛔ W37 DUTY (2026-09-13 19:45) — RESULT
-- [`0913+41` fills this after 19:45: HEAD, the code-unchanged check, manifest records before→after, verify, PASS/FAIL. If this line is still a placeholder, the result is in the desk's fan-in log, not here.]
+- **PRE-FLIGHT PASS, 2026-09-13 19:43:46 EDT, on a COPY of the real trail** [run by `0913+41`]: script sha256 `b8b33359…c093cb4` matched; HEAD `64baf50` == origin/main, tree clean; `git diff --quiet 2ed7579 HEAD -- anneal_memory` passed. The copy went from 15 to 16 manifest records (new `memory.audit.2026-W37.jsonl.gz`), and verify stayed valid, 10,728 → 10,729 entries.
+- ⚠ **That is not the real rotation.** The real W37 rotation happens on the first store write after 20:00 EDT (in practice `0913+0 main`'s EOD capture) and is verified by main's `spore-1018` check, NOT by this seat. For its result, check the real manifest's record count and run verify: `python3 -c "import json;print(len(json.load(open('$HOME/.anneal-memory/memory.audit.manifest.json'))['files']))"`.
 
 ### ⚖ RULINGS IN FORCE (do not re-litigate)
 - **FF HOLD** (desk reading of Phill's `spore-1019`, 15:5x: *"agree, pin it after EOD, so maybe tomorrow morning?"*): flow gets a NON-editable commit pin (flow/venv and the uv-tool CLI) at the commit tonight's rotation ran on; a flow seat builds it. After it, a branch reaches main only after its review passes AND a copy-of-real-trail pre-flight on the exact merge commit.

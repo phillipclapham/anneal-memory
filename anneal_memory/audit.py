@@ -102,6 +102,29 @@ def _parse_manifest_bytes(raw: bytes) -> dict[str, Any]:
     ``_adopt_orphaned_files()``'s ``manifest.get("files", [])`` iteration.
     Validated here rather than at each of the (growing) call sites, same
     as the root-type check above.
+
+    codex (L3, 2026-09-13, round 3) found two more: ``isinstance(x, int)``
+    accepts a JSON boolean (``bool`` is an ``int`` subclass in Python), so
+    ``{"active_last_seq": true}`` passed this check, then set ``_seq =
+    True`` and wrote ``"seq": true`` into the chain, which ``verify()``
+    also accepted as valid. And an empty ``"filename"`` resolves to the
+    audit DIRECTORY itself, so ``verify()``'s ``open(fpath, "rb")``
+    crashed with an uncaught ``IsADirectoryError`` instead of "Corrupt
+    manifest" — closed by requiring a nonempty basename with no path
+    separators, not full path-traversal hardening (this manifest is
+    written only by this process; the threat model is corruption, not a
+    hostile author).
+
+    complement (L3, round 3) found a third: this function validated
+    ``"files"``'s type ONLY IF THE KEY WAS PRESENT, never requiring it to
+    exist — so a manifest that's a valid object but omits ``"files"``
+    entirely (a plausible older/migrated shape, given the ``"version"``
+    field) passed clean and then crashed the two WRITER call sites
+    (``_adopt_orphaned_files``, ``_rotate_if_needed``) at an unguarded
+    ``manifest["files"].append(...)`` — the sweep had covered only the
+    ``.get("files", [])`` reader sites. Normalized here instead: missing
+    ``"files"`` degrades to ``[]``, matching ``_load_manifest()``'s own
+    from-scratch default.
     """
     manifest = json.loads(raw.decode("utf-8"))
     if not isinstance(manifest, dict):
@@ -109,17 +132,21 @@ def _parse_manifest_bytes(raw: bytes) -> dict[str, Any]:
     for key in ("chain_anchor", "active_last_hash"):
         if key in manifest and not isinstance(manifest[key], str):
             raise TypeError(f"manifest field {key!r} is not a string")
-    if "active_last_seq" in manifest and not isinstance(
-        manifest["active_last_seq"], int
+    if "active_last_seq" in manifest:
+        seq = manifest["active_last_seq"]
+        if not isinstance(seq, int) or isinstance(seq, bool):
+            raise TypeError("manifest field 'active_last_seq' is not an int")
+    files = manifest.get("files", [])
+    if not isinstance(files, list) or not all(
+        isinstance(f, dict)
+        and isinstance(f.get("filename"), str)
+        and f["filename"]
+        and "/" not in f["filename"]
+        and "\\" not in f["filename"]
+        for f in files
     ):
-        raise TypeError("manifest field 'active_last_seq' is not an int")
-    if "files" in manifest:
-        files = manifest["files"]
-        if not isinstance(files, list) or not all(
-            isinstance(f, dict) and isinstance(f.get("filename"), str)
-            for f in files
-        ):
-            raise TypeError("manifest field 'files' is not a list of file records")
+        raise TypeError("manifest field 'files' is not a list of file records")
+    manifest["files"] = files
     return manifest
 
 
@@ -131,9 +158,28 @@ def _require_entry_dict(entry: Any) -> dict[str, Any]:
     of them (same class as ``_parse_manifest_bytes``'s root check,
     swept to every entry-line call site: complement/codex L3,
     2026-09-13, round 3).
+
+    codex (L3, round 3) found the same class one level deeper: an
+    object-root entry with the WRONG FIELD TYPES parses fine and crashes
+    past the root check — ``{"prev_hash": 1}`` degrades ``verify()``
+    into ``actual_prev[:20]`` on an int; a string ``seq`` degrades
+    ``_initialize()``'s ``last_entry.get("seq", 0) + 1``; a numeric
+    ``ts`` degrades the same method's ``ts.replace("Z", "+00:00")``.
+    Only these three fields are checked (each only if present, same
+    policy as the manifest) — they are the ones this file dereferences
+    in a type-unsafe way; ``event``/``actor`` are only ever compared for
+    equality, which is safe for any type.
     """
     if not isinstance(entry, dict):
         raise TypeError(f"entry line root is {type(entry).__name__}, not an object")
+    if "prev_hash" in entry and not isinstance(entry["prev_hash"], str):
+        raise TypeError("entry field 'prev_hash' is not a string")
+    if "seq" in entry:
+        seq = entry["seq"]
+        if not isinstance(seq, int) or isinstance(seq, bool):
+            raise TypeError("entry field 'seq' is not an int")
+    if "ts" in entry and not isinstance(entry["ts"], str):
+        raise TypeError("entry field 'ts' is not a string")
     return entry
 
 

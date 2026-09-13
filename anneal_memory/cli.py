@@ -1607,7 +1607,19 @@ def cmd_audit(args: argparse.Namespace) -> None:
                 if fpath.exists():
                     files_to_read.append(fpath)
         except (json.JSONDecodeError, UnicodeDecodeError, TypeError, KeyError):
-            pass
+            # codex (L3, round 3): silently degrading to "active file
+            # only" presented an INCOMPLETE audit history as if it were
+            # complete, with nothing telling the operator sealed history
+            # was omitted. Surfaced on stderr (not raised — the same
+            # degrade-and-keep-working policy every other reader in this
+            # module uses) so the JSON/text output shape is unchanged
+            # but the omission is no longer silent.
+            print(
+                f"Warning: manifest {manifest_path} is corrupt or "
+                "unreadable; sealed audit history is omitted, showing "
+                "the active file only.",
+                file=sys.stderr,
+            )
     if active_path.exists():
         files_to_read.append(active_path)
 

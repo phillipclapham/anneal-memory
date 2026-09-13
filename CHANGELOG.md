@@ -17,8 +17,18 @@ sealed files.
 
 **A truncated sealed `.gz` crashed `verify()` and `anneal-memory audit`**, because gzip raises
 `EOFError`/`zlib.error`, not `OSError`. A file that is unreadable or disappears while `verify()` reads
-it now yields `valid=False` with an "Unreadable audit file" error. An unreadable orphaned sealed file
-is now skipped with a warning; it used to make every later `log()` call raise.
+it now yields `valid=False` with an "Unreadable audit file" error.
+
+**A corrupt orphaned sealed file no longer blocks writes, and no longer disappears silently.** It used
+to make every later `log()` call raise. It is now left on disk, unadopted, and `verify()` reports any
+sealed file the manifest does not cover as `valid=False`. A transient read error during recovery is
+raised so the next call retries. When both a `.gz` and a `.jsonl` copy of one week exist, the `.gz` is
+used only if it reads clean, and the other copy is deleted only after the manifest is saved; previously
+an intact `.jsonl` could be deleted in favour of a truncated `.gz`.
+
+**An audit line or manifest containing a JSON integer over Python's 4,300-digit limit, or deeply
+nested JSON, is now treated as unreadable.** Either one used to raise out of `log()` on every call, and
+out of `verify()` and `anneal-memory audit`.
 
 **`AuditTrail.log()` now raises `TypeError` for a non-`str` `event` or a non-`dict` `data`**, before
 writing anything, including before a pending weekly rotation. Such an entry used to be written and then treated as invalid on recovery, which

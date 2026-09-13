@@ -53,6 +53,8 @@ from typing import Any
 from . import __version__
 from .audit import (
     AuditTrail,
+    _CORRUPT_MANIFEST as _CORRUPT_AUDIT_MANIFEST,
+    _UNPARSEABLE_JSON as _UNPARSEABLE_AUDIT_JSON,
     _iter_lines as _iter_audit_lines,
     _parse_manifest_bytes as _parse_audit_manifest_bytes,
     _require_entry_dict as _require_audit_entry_dict,
@@ -1609,7 +1611,7 @@ def cmd_audit(args: argparse.Namespace) -> None:
                 # crashes the reader further down.
                 if fpath.is_file():
                     files_to_read.append(fpath)
-        except (json.JSONDecodeError, UnicodeDecodeError, TypeError, KeyError, OSError):
+        except _CORRUPT_AUDIT_MANIFEST:
             # codex (L3, round 3): silently degrading to "active file
             # only" presented an INCOMPLETE audit history as if it were
             # complete, with nothing telling the operator sealed history
@@ -1665,7 +1667,7 @@ def cmd_audit(args: argparse.Namespace) -> None:
                     # encoding (complement L3, 2026-09-13, round 3 — same
                     # class as ``verify()``'s entry loop).
                     entry = _require_audit_entry_dict(json.loads(line.decode("utf-8")))
-                except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+                except _UNPARSEABLE_AUDIT_JSON:
                     continue
 
                 # Apply filters

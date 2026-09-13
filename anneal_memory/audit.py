@@ -58,6 +58,23 @@ _ENTRY_VERSION = 1
 # reference another database's sealed files (codex round 7).
 _SEALED_SUFFIX_PATTERN = r"\.audit\.\d{4}-W\d{2}\.jsonl(?:\.gz)?"
 
+# ⛔ EVERY WAY A LINE OR MANIFEST CAN FAIL TO BE AN ENTRY, IN ONE PLACE.
+# ``ValueError`` covers ``JSONDecodeError``, ``UnicodeDecodeError`` and the
+# int-string limit (a >4300-digit integer); ``RecursionError`` is deep
+# nesting and is NOT a ``ValueError``; ``TypeError`` is a wrong shape from
+# the validators. Round 9 measured both of the first two blocking every
+# ``log()`` through a readable file, because each site kept its own tuple.
+_UNPARSEABLE_JSON: tuple[type[Exception], ...] = (ValueError, RecursionError, TypeError)
+# Derived, never re-listed, so a new member of the base reaches every site.
+_UNPARSEABLE_OR_IO: tuple[type[Exception], ...] = _UNPARSEABLE_JSON + (OSError,)
+_CORRUPT_MANIFEST: tuple[type[Exception], ...] = _UNPARSEABLE_JSON + (KeyError, OSError)
+
+
+class _CorruptAuditFile(OSError):
+    """A sealed file whose bytes are corrupt (truncated/invalid gzip) — as
+    opposed to a transient read failure, which callers must retry rather
+    than treat as permanent."""
+
 
 def _sealed_filename(stem: str, week: str) -> str:
     """The uncompressed sealed-file name rotation writes (``.gz`` is appended)."""
@@ -969,10 +986,7 @@ class AuditTrail:
                         files_to_verify.append(fpath)
                     else:
                         missing_files.append(f["filename"])
-            except (
-                json.JSONDecodeError, UnicodeDecodeError, TypeError, KeyError,
-                OSError,
-            ) as e:
+            except _CORRUPT_MANIFEST as e:
                 # OSError added round 6 (complement): the twin of cmd_audit's
                 # round-4 fix — a real read failure (permission, I/O) on
                 # this manifest still tracebacked out of the CLASSMETHOD
@@ -981,6 +995,31 @@ class AuditTrail:
                 return AuditVerifyResult(
                     valid=False, total_entries=0, files_verified=0,
                     error=f"Corrupt manifest: {e}",
+                )
+
+        # ⛔ A SEALED FILE THE MANIFEST DOES NOT COVER IS A GAP, NOT NOISE
+        # (codex, round 9). Skipping a corrupt orphan left it on disk while
+        # this method walked only the manifest, so it returned valid=True
+        # over missing history, measured. The file on disk is the record.
+        if audit_dir.is_dir():
+            known = {p.name for p in files_to_verify} | set(missing_files)
+            try:
+                unmanifested = sorted(
+                    p.name for p in audit_dir.iterdir()
+                    if _is_sealed_filename(p.name, stem) and p.name not in known
+                )
+            except OSError as e:
+                return AuditVerifyResult(
+                    valid=False, total_entries=0, files_verified=0,
+                    error=f"Cannot list audit directory: {e}",
+                )
+            if unmanifested:
+                return AuditVerifyResult(
+                    valid=False, total_entries=0, files_verified=0,
+                    error=(
+                        "Unmanifested sealed audit file(s) on disk, not "
+                        f"covered by the manifest: {unmanifested}"
+                    ),
                 )
 
         if active_path.exists():
@@ -1038,7 +1077,7 @@ class AuditTrail:
                     # shape raised ``UnicodeDecodeError`` uncaught).
                     line = line.decode("utf-8")
                     entry = _require_entry_dict(json.loads(line))
-                except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+                except _UNPARSEABLE_JSON:
                     # A torn multibyte tail (diogenes, 2026-09-08) is the
                     # same "not a complete entry" shape as malformed JSON —
                     # ``_iter_lines`` now yields raw bytes so this is the
@@ -1258,7 +1297,7 @@ class AuditTrail:
             # ``surrogatepass`` and would NOT have raised), or a
             # syntactically valid non-object root.
             manifest = _parse_manifest_bytes(raw, self._db_path.stem)
-        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+        except _UNPARSEABLE_JSON:
             logger.warning(
                 "Manifest %s is not valid JSON; anchoring on genesis",
                 self._manifest_path,
@@ -1318,25 +1357,26 @@ class AuditTrail:
         if not orphans_by_period:
             return
 
-        # Deduplicate: if both .gz and .jsonl exist for same period,
-        # prefer .gz (gzip completed) and remove the .jsonl duplicate.
+        # Deduplicate: if both .gz and .jsonl exist for same period, prefer
+        # the .gz ONLY IF IT READS CLEAN, and delete the .jsonl only after
+        # the manifest recording the .gz is saved. Deleting first destroyed
+        # the only readable copy when the .gz was truncated (codex, round 9,
+        # measured); a corrupt .gz is left on disk for verify() to report.
         # Sort by period to ensure manifest entries are chronological —
         # without sorting, two-pass glob inserts all .gz periods before
         # all .jsonl periods, breaking chronological order in the manifest
         # when mixed orphan types span non-adjacent periods.
         orphans: list[Path] = []
+        deferred_deletes: list[Path] = []
         for period, paths in sorted(orphans_by_period.items()):
             if len(paths) > 1:
                 gz_paths = [p for p in paths if p.name.endswith(".gz")]
                 jsonl_paths = [p for p in paths if not p.name.endswith(".gz")]
-                if gz_paths:
+                if gz_paths and jsonl_paths and _is_corrupt(gz_paths[0]):
+                    orphans.append(jsonl_paths[0])
+                elif gz_paths:
                     orphans.append(gz_paths[0])
-                    for dup in jsonl_paths:
-                        try:
-                            dup.unlink()
-                            logger.info("Removed duplicate orphan: %s (preferring .gz)", dup.name)
-                        except OSError:
-                            logger.warning("Failed to remove duplicate orphan: %s", dup.name)
+                    deferred_deletes.extend(jsonl_paths)
                 else:
                     orphans.append(paths[0])
             else:
@@ -1349,11 +1389,16 @@ class AuditTrail:
             last_ts = ""
             last_hash = ""
 
-            # ⛔ An orphan that cannot be read (a truncated .gz) must not
-            # raise out of here: this runs from ``_initialize()`` on every
-            # ``log()`` until it succeeds, so a raise made the trail
-            # permanently unwritable (complement, round 8 — measured, every
-            # log() raised). Skip it whole; never adopt a partial read.
+            # ⛔ CORRUPT AND UNREADABLE ARE DIFFERENT, AND SO IS WHAT EACH OWES.
+            # A CORRUPT orphan must not raise out of here: this runs from
+            # ``_initialize()`` on every ``log()`` until it succeeds, so a
+            # raise made the trail permanently unwritable (round 8). It is
+            # left on disk, unadopted, and ``verify()`` reports it as an
+            # unmanifested sealed file — loud, not silent (round 9: skipping
+            # it silently let verify() pass over the missing history).
+            # A TRANSIENT read error propagates, so init retries instead of
+            # seeding past a segment that is merely unreachable right now
+            # and splicing it in behind newer entries later (round 9).
             read_error: list[OSError] = []
             for line in _guarded_lines(orphan_path, read_error):
                 stripped = line.strip()
@@ -1362,7 +1407,7 @@ class AuditTrail:
                 try:
                     stripped_str = stripped.decode("utf-8")
                     e = _require_entry_dict(json.loads(stripped_str))
-                except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+                except _UNPARSEABLE_JSON:
                     continue  # Torn or malformed — skip, same shape either way
                 ts = e.get("ts", "")
                 if not first_ts:
@@ -1373,8 +1418,11 @@ class AuditTrail:
                 last_hash = self._compute_hash(stripped_str)
 
             if read_error:
+                if not isinstance(read_error[0], _CorruptAuditFile):
+                    raise read_error[0]
                 logger.warning(
-                    "Not adopting unreadable orphaned audit file %s: %s",
+                    "Not adopting corrupt orphaned audit file %s (left on "
+                    "disk; verify() reports it): %s",
                     orphan_path.name, read_error[0],
                 )
                 continue
@@ -1399,6 +1447,13 @@ class AuditTrail:
             logger.info("Adopted orphaned audit file: %s (%d entries)", orphan_path.name, entry_count)
 
         self._save_manifest(manifest)
+
+        for dup in deferred_deletes:
+            try:
+                dup.unlink()
+                logger.info("Removed duplicate orphan: %s (preferring .gz)", dup.name)
+            except OSError:
+                logger.warning("Failed to remove duplicate orphan: %s", dup.name)
 
     def _rotate_if_needed(self) -> None:
         """Rotate the active file if the ISO week has changed."""
@@ -1487,7 +1542,7 @@ class AuditTrail:
                         if not first_ts:
                             first_ts = ts
                         last_ts = ts
-                    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+                    except _UNPARSEABLE_JSON:
                         pass
 
         # Atomic rename — .gz is either complete or doesn't exist
@@ -1574,7 +1629,7 @@ class AuditTrail:
                 return _parse_manifest_bytes(
                     self._manifest_path.read_bytes(), self._db_path.stem
                 )
-            except (json.JSONDecodeError, UnicodeDecodeError, TypeError, OSError):
+            except _UNPARSEABLE_OR_IO:
                 pass
 
         return {
@@ -1681,7 +1736,7 @@ def _read_last_valid_entry(path: Path) -> str:
             try:
                 _require_entry_dict(json.loads(stripped))
                 last_valid = stripped
-            except (json.JSONDecodeError, TypeError):
+            except _UNPARSEABLE_JSON:
                 pass  # Partial write, or valid JSON that isn't an entry — skip
     return last_valid
 
@@ -1715,11 +1770,22 @@ def _iter_lines(path: Path):
         try:
             with gzip.open(path, "rb") as f:
                 yield from f
-        except (EOFError, zlib.error) as e:
-            raise OSError(f"corrupt compressed stream: {e!r}") from e
+        except (EOFError, zlib.error, gzip.BadGzipFile) as e:
+            raise _CorruptAuditFile(f"corrupt compressed stream: {e!r}") from e
     else:
         with open(path, "rb") as f:
             yield from f
+
+
+def _is_corrupt(path: Path) -> bool:
+    """Read ``path`` to the end. True if its bytes are corrupt; a transient
+    read failure is re-raised, never reported as corruption."""
+    errors: list[OSError] = []
+    for _ in _guarded_lines(path, errors):
+        pass
+    if errors and not isinstance(errors[0], _CorruptAuditFile):
+        raise errors[0]
+    return bool(errors)
 
 
 def _guarded_lines(path: Path, errors: list[OSError]):

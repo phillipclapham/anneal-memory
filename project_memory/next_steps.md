@@ -408,6 +408,50 @@ tree before fixing.
 **Verification: 2 new tests, each killed by its own mutant (`mutate_r8.py`, file restored byte-identical),
 passing unmutated. Receipt at commit time: suite `1941 passed` (was 1939), mypy clean, ruff 63 unchanged.**
 
+⚠ **Item 4 above was NOT a MED, and round 9 fixed it.** glm showed the same `ValueError` blocks every
+`log()` through a READABLE file; see the next section.
+
+### NINTH RE-PASS (against `4d39047`, seat `0913+29`, 2026-09-13) — ROUND 8'S SKIP WAS SILENT, AND A READABLE FILE COULD STILL BLOCK WRITES
+
+Review rows: input_id `b10cfdecea5fdd9d` (complement clean; glm-5.2 primary, 1 file opened; codex 2 HIGH).
+All three reproduced [run] on `9cd52cd` before fixing. The desk chose the shape with this seat: LOUD and
+non-destructive now (option a), so Phill's hybrid generalises it rather than reversing it.
+
+1. **FIXED — HIGH [run] (glm), a JSON parse error no tuple caught blocked every write.** A readable
+   orphan `.gz` holding a 5,000-digit integer → `log()` raised `ValueError` 3 of 3; the same line in the
+   active file blocked `log()` on reopen and made `verify()` raise. Deep nesting raises `RecursionError`
+   (not a `ValueError`) and blocked `log()` the same way, measured. Fix: ONE constant,
+   `_UNPARSEABLE_JSON = (ValueError, RecursionError, TypeError)`, at every audit/manifest parse site in
+   `audit.py` and `cli.py`; list them with `grep -n "_UNPARSEABLE" anneal_memory/audit.py anneal_memory/cli.py`.
+2. **FIXED — HIGH [run] (codex #1), round 8's skip turned a loud failure into a silent gap.** After a
+   rotation crashed before its manifest update, a corrupt orphan was skipped, init seeded from the stale
+   manifest hash, and `verify()` returned valid=True over 5 entries while the orphan's 41 were missing,
+   measured. A one-off EIO during adoption did the same, then spliced the segment in behind newer entries
+   once readable (valid=False), measured. Fix: `_iter_lines` raises `_CorruptAuditFile` (an `OSError`
+   subclass) only for corrupt bytes; adoption re-raises any other read error so init retries, and leaves a
+   corrupt orphan on disk unadopted; `verify()` returns valid=False for any sealed file on disk that the
+   manifest does not cover. No rename and no new stored state — the file is the record. ⚠ Accepted side
+   effect: a readable orphan left by a crash also verifies invalid until the next open adopts it.
+3. **FIXED — HIGH [run] (codex #2, complement's LOW), dedup destroyed the only readable copy.** With an
+   intact `.jsonl` and a truncated `.gz` for one week, the `.jsonl` was deleted before the `.gz` was read,
+   measured. Dedup now reads the `.gz` fully first (`_is_corrupt`), adopts the `.jsonl` if the `.gz` is
+   corrupt (leaving the `.gz` for `verify()` to report), and deletes a duplicate only after the manifest
+   is saved.
+
+**Verification: 8 new tests (7 `TestFixDiffRound9LoudNotSilent`, 1 `TestCmdAudit`); 5 mutants (`mutate_r9.py`:
+drop `ValueError`, drop `RecursionError`, disable the unmanifested check, skip every adoption read error,
+trust the `.gz` unread) killed all 8 of their target runs, and the file was restored byte-identical.
+Receipt at commit time: suite `1949 passed` (was 1941), mypy clean, ruff 63 unchanged.**
+
+**▶ HYBRID (Phill ruled, 2026-09-13, via `0913+31`): build it on a branch in a separate worktree, and
+merge only when fully reviewed.** Quarantine lives inside `_load_manifest`. Appending continues only
+with a seed fallback to the sealed tail when the active file is empty, and refuses otherwise.
+`verify()` reports quarantine as valid=False. Rebuild happens only via `audit-repair`, which never
+recomputes `sha256_file`. A recovered `chain_anchor` is surfaced as additive
+`AuditVerifyResult.anchor_trusted=False`, and that field must appear in `verify --json`, the CLI
+human summary, `server.py --verify-audit`'s summary and `cmd_audit --json` (Phill's condition), each
+path tested. This round's item 2 becomes that design's orphan case. Routed item A above is now RULED.
+
 ## ✅ CLOSED AFTER 2026-09-08 — READ THIS FIRST, IT IS WHAT THE NEXT SEAT ACTS ON
 
 ⛔ **CORRECTED 2026-09-13 (diogenes MEDIUM, filed 09-09, re-derived and closed).** The line below

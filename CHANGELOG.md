@@ -4,6 +4,26 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — from the review of round 10b: a Windows rotation fsync, a hidden differing copy, a short valid verdict, and a stuck rotation
+
+**Rotation fsynced its gzip temp through a second, read-only handle.** On Windows `os.fsync` is
+`_commit`, which calls `FlushFileBuffers`, and that needs write access, so every weekly rotation there
+would have raised. The temp is now fsynced through the handle that wrote it. This is reasoned from the
+CPython, UCRT and Win32 documentation; nothing in this project's CI runs Windows.
+
+**A differing or unreadable copy of an orphaned week was set aside.** Recovery adopted the `.jsonl`,
+renamed the other copy out of the sealed-file names, and `verify()` returned valid without the entries
+only that copy held. Only a readable, byte-identical copy is set aside now; any other stays on its
+name, where `verify()` reports it.
+
+**`verify()` could call a trail valid with its first sealed week missing.** The manifest was statted
+after the directory listing, so a first rotation landing between the two, followed by an empty active
+file, passed as valid with no entries. The manifest is now statted before the listing.
+
+**One refused rotation stopped rotation for the rest of the process.** After refusing to seal a week
+already on disk, every later week boundary retried the same name, so neither rotation nor retention ran
+again until a restart. The refusal now moves on to the current week.
+
 ### Fixed — one sealed-filename language for writers and readers, and an unreadable file is a result, not a traceback
 
 **The manifest's sealed-filename check refused names this library writes itself.** A database whose

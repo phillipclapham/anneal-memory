@@ -4243,12 +4243,13 @@ class TestAFailedRotationDoesNotLeaveAFalseTamperingVerdict:
         # Make the next append cross a week boundary, then break the gzip so
         # rotation dies AFTER the rename and BEFORE the manifest update.
         trail._last_week = "2026-W01"
-        real_open = gzip_mod.open
+        real_gzipfile = gzip_mod.GzipFile
 
         def boom(*args, **kwargs):
-            # Rotation opens the gzip temp BEFORE the rename (round 10), so
-            # the failure has to come from a write for the rename to happen.
-            handle = real_open(*args, **kwargs)
+            # Rotation writes the gzip temp through ``gzip.GzipFile`` over a
+            # raw handle it can fsync (round 10b), opened BEFORE the rename,
+            # so the failure has to come from a write for the rename to happen.
+            handle = real_gzipfile(*args, **kwargs)
 
             def no_space(_data):
                 raise OSError(28, "No space left on device")
@@ -4256,12 +4257,12 @@ class TestAFailedRotationDoesNotLeaveAFalseTamperingVerdict:
             handle.write = no_space
             return handle
 
-        audit_mod.gzip.open = boom
+        audit_mod.gzip.GzipFile = boom
         try:
             with pytest.raises(OSError):
                 trail.log("record", {"i": "during the failed rotation"})
         finally:
-            audit_mod.gzip.open = real_open
+            audit_mod.gzip.GzipFile = real_gzipfile
         return db, trail
 
     def test_the_orphan_is_adopted_by_the_process_that_created_it(self, tmp_path):
@@ -6518,12 +6519,13 @@ class TestFixDiffRound9LoudNotSilent:
             trail.log("seg", {"i": i, "pad": "x" * 200})
         trail._last_week = "1999-W02"
 
-        real_open = gzip.open
+        real_gzipfile = gzip.GzipFile
 
         def boom(*args, **kwargs):
-            # Rotation opens the gzip temp BEFORE the rename (round 10), so
-            # the failure has to come from a write for the rename to happen.
-            handle = real_open(*args, **kwargs)
+            # Rotation writes the gzip temp through ``gzip.GzipFile`` over a
+            # raw handle it can fsync (round 10b), opened BEFORE the rename,
+            # so the failure has to come from a write for the rename to happen.
+            handle = real_gzipfile(*args, **kwargs)
 
             def no_space(_data):
                 raise OSError(28, "No space left on device")
@@ -6532,7 +6534,7 @@ class TestFixDiffRound9LoudNotSilent:
             return handle
 
         with monkeypatch.context() as m:
-            m.setattr(audit_module.gzip, "open", boom)
+            m.setattr(audit_module.gzip, "GzipFile", boom)
             with pytest.raises(OSError):
                 trail.log("during_failed_rotation", {})
         orphan = tmp_path / "m.audit.1999-W02.jsonl"
@@ -6685,11 +6687,11 @@ class TestFixDiffRound9LoudNotSilent:
         assert plain.exists(), "the only readable copy was deleted"
         names = [f["filename"] for f in AuditTrail(db)._load_manifest()["files"]]
         assert plain.name in names
-        # Round 10: the corrupt copy is set aside under a name outside the
-        # sealed-file language, bytes intact, instead of left on its own name.
-        assert not sealed.exists()
-        aside = _set_aside_copies(tmp_path, sealed.name, "dup")
-        assert [p.read_bytes() for p in aside] == [raw[: len(raw) // 2]]
+        # L3 of round 10b (codex, reproduced): a copy that is not a readable,
+        # byte-identical duplicate stays on its own name, bytes intact, where
+        # verify() reports it. Round 10 set it aside, which hid what it held.
+        assert sealed.read_bytes() == raw[: len(raw) // 2]
+        assert _set_aside_copies(tmp_path, sealed.name, "dup") == []
 
 
 def _set_aside_copies(directory, name, reason):
@@ -6751,7 +6753,7 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         was gone behind a ``skipped_lines`` count.
 
         ⛔ MUTATION-CHECKED: adopt the ``.gz`` whenever it reads, ignoring the
-        digest, and this fails — ``skipped_lines`` is 1.
+        digest, and this fails — the manifest names the ``.gz``.
         """
         db, trail, sealed = self._trail_with_a_sealed_week(tmp_path)
         raw = gzip.decompress(sealed.read_bytes())
@@ -6768,11 +6770,11 @@ class TestFixDiffRound10RecoveryNeverDeletes:
 
         names = [f["filename"] for f in AuditTrail(db)._load_manifest()["files"]]
         assert names == [plain.name]
-        assert [p.read_bytes() for p in _set_aside_copies(tmp_path, sealed.name, "dup")] == [torn]
-        result = AuditTrail.verify(db)
-        assert result.valid is True, result.error
-        assert result.skipped_lines == 0
-        assert result.total_entries == 7  # 5 sealed + "rot" + "after"
+        # L3 of round 10b (codex, reproduced): the differing .gz stays on its
+        # name and verify() reports it, instead of being set aside.
+        assert sealed.read_bytes() == torn
+        assert _set_aside_copies(tmp_path, sealed.name, "dup") == []
+        assert AuditTrail.verify(db).valid is False
 
     def test_recovery_leaves_every_original_byte_on_disk(self, tmp_path):
         """HIGH, codex #1-#3, as a property rather than one path: whatever
@@ -7200,3 +7202,148 @@ class TestFixDiffRound10RecoveryNeverDeletes:
             store.chmod(0o700)
 
         assert AuditTrail.verify(db).total_entries == 2
+
+
+class TestRotationFsyncUsesAWritableHandle:
+    """complement HIGH, L3 of round 10b (input 96866d6e049777cd). REASONED from
+    documents, not run, because nothing here runs Windows: CPython's os.fsync
+    is _commit there, the UCRT's _commit calls FlushFileBuffers, and
+    FlushFileBuffers needs a handle with GENERIC_WRITE. Round 10b reopened the
+    gzip temp read-only to fsync it. This test emulates that one requirement on
+    POSIX: an fsync on a regular file opened read-only fails.
+
+    ⛔ MUTATION-CHECKED against 397e4a3's read-only reopen: this fails there.
+    """
+
+    def test_rotation_fsyncs_the_temp_through_a_writable_handle(self, tmp_path, monkeypatch):
+        import errno
+        import stat
+
+        fcntl = pytest.importorskip("fcntl")
+        real_fsync = os.fsync
+        modes: list[int] = []
+
+        def windows_like_fsync(fd):
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                mode = fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE
+                modes.append(mode)
+                if mode == os.O_RDONLY:
+                    raise OSError(errno.EBADF, "FlushFileBuffers needs GENERIC_WRITE")
+            return real_fsync(fd)
+
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("pre", {"i": i})
+        monkeypatch.setattr(os, "fsync", windows_like_fsync)
+        trail._last_week = "1999-W01"
+        trail.log("rot", {})
+
+        assert (tmp_path / "m.audit.1999-W01.jsonl.gz").exists()
+        assert modes and os.O_RDONLY not in modes
+
+
+class TestRound10bL3Fixes:
+    """L3 of round 10b (input 96866d6e049777cd): codex X1, X2 and X3 (X3 also
+    complement). Each was reproduced on 397e4a3 before it was fixed."""
+
+    def test_a_differing_orphan_copy_stays_on_its_name(self, tmp_path):
+        """codex X1, reproduced: the ``.gz`` of an orphaned week held one more
+        chained entry than its ``.jsonl``. Recovery adopted the ``.jsonl``, set
+        the ``.gz`` aside, and ``verify()`` returned valid=True without it.
+
+        ⛔ MUTATION-CHECKED: set aside every copy that was not adopted and this
+        fails. Timed too: the left copy must not read as a rotation in flight.
+        """
+        import time
+
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("pre", {"i": i})
+        trail._last_week = "1999-W01"
+        trail.log("rot0", {})
+        for i in range(4):
+            trail.log("seg", {"i": i})
+        active = tmp_path / "m.audit.jsonl"
+        lines = [l for l in active.read_text().splitlines() if l.strip()]
+        last = json.loads(lines[-1])
+        extra = json.dumps(
+            dict(last, seq=last["seq"] + 1, event="only-in-gz",
+                 prev_hash=AuditTrail._compute_hash(lines[-1])),
+            separators=(",", ":"), sort_keys=True,
+        )
+        plain = tmp_path / "m.audit.1999-W02.jsonl"
+        packed = tmp_path / "m.audit.1999-W02.jsonl.gz"
+        plain.write_text("\n".join(lines) + "\n")
+        packed_bytes = gzip.compress(("\n".join(lines + [extra]) + "\n").encode())
+        packed.write_bytes(packed_bytes)
+        active.unlink()  # the rotation had renamed it away
+
+        AuditTrail(db).log("after", {})
+
+        assert packed.read_bytes() == packed_bytes, "the differing copy stays on its name"
+        assert not list(tmp_path.glob("*.dup-*"))
+        started = time.monotonic()
+        result = AuditTrail.verify(db)
+        assert time.monotonic() - started < audit_module._ROTATION_SETTLE_MAX_SECONDS
+        assert result.valid is False, "the extra entry must not vanish behind a valid verify"
+
+    def test_a_first_rotation_between_listing_and_pass_is_not_a_short_valid_verdict(
+        self, tmp_path, monkeypatch
+    ):
+        """codex X2, reproduced on 397e4a3 (the zero-byte active file is
+        SIMULATED by truncation, standing in for the rollback of a failed first
+        append): ``verify()`` listed the directory before the first manifest
+        existed, a whole rotation landed, and the pass returned valid=True with
+        0 entries while the sealed week held 3.
+
+        ⛔ MUTATION-CHECKED: take the manifest signature after the listing and
+        this fails with total_entries == 0.
+        """
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("pre", {"i": i})
+        real = AuditTrail.__dict__["_verify_listed"].__func__
+        fired: list[bool] = []
+
+        def racing(cls, *args, **kwargs):
+            if not fired:
+                fired.append(True)
+                trail._last_week = "1999-W01"
+                trail.log("rot", {})
+                (tmp_path / "m.audit.jsonl").write_bytes(b"")
+            return real(cls, *args, **kwargs)
+
+        monkeypatch.setattr(AuditTrail, "_verify_listed", classmethod(racing))
+        result = AuditTrail.verify(db)
+
+        assert fired
+        assert result.valid is True and result.total_entries == 3, result
+
+    def test_a_collision_refusal_does_not_stop_later_rotations(self, tmp_path, monkeypatch):
+        """codex X3 + complement, reproduced: after one refusal onto a sealed
+        week, ``_last_week`` stayed on that week, so a long-lived process never
+        rotated again, even weeks later.
+
+        ⛔ MUTATION-CHECKED: leave ``_last_week`` unchanged on the refusal and
+        this fails.
+        """
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("pre", {"i": i})
+        trail._last_week = "1999-W01"
+        trail.log("rot", {})
+
+        monkeypatch.setattr(audit_module, "_iso_week_now", lambda: "2099-W05")
+        trail._last_week = "1999-W01"
+        trail.log("clock-back", {})  # refused: 1999-W01 is already sealed
+        assert not (tmp_path / "m.audit.2099-W05.jsonl.gz").exists()
+
+        monkeypatch.setattr(audit_module, "_iso_week_now", lambda: "2099-W06")
+        trail.log("next-week", {})
+
+        assert (tmp_path / "m.audit.2099-W05.jsonl.gz").exists()
+        assert AuditTrail.verify(db).valid is True

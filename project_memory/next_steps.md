@@ -122,6 +122,51 @@ weighted as a second independent clean verdict.
 failed. mypy clean. ruff: 63 (one new F541 introduced and fixed in the same pass, so the count
 nets to unchanged).**
 
+### CLASS SWEEP (fan-in-directed, before a third re-pass, 2026-09-13) — ONE CLASS, EVERY SITE
+
+Two rounds each found the next instance of the same class one review at a time: bytes parsed as
+JSON without a strict decode first, and without validating the parsed shape before `.get()`. The
+fan-in's instruction: stop fixing one site per round, grep every `json.loads`/`json.load`/
+`.decode(`/gzip-read site touching the manifest or audit files, route through shared helpers, and
+close all of them in one pass.
+
+**Grepped `anneal_memory/audit.py` + `anneal_memory/cli.py` for every such site.** Two shared
+helpers now cover all of them: `_parse_manifest_bytes` (manifest, extended in the prior two
+rounds) and a NEW `_require_entry_dict` (audit-entry JSONL lines — the same class, one level down:
+a line that parses to a list/string/number crashes every reader's `.get()` just as a non-object
+manifest root did).
+
+**Sites closed this round (4 in `audit.py`, all previously undiscovered dict-type gaps; 2 in
+`cli.py`, a FOURTH manifest reader and its own entry-line reader that no prior round had touched
+at all):**
+1. `verify()`'s entry loop — `entry` now validated as a dict before `.get("prev_hash")`/`.get("seq")`.
+2. `_read_last_valid_entry` — the module helper only validated a line PARSED, not that it parsed
+   to an object; `_initialize()`'s `last_entry.get("seq", 0)` was exposed. Now validates dict-shape,
+   so its own comment ("Guaranteed valid by helper") is finally true rather than an overclaim.
+3. `_adopt_orphaned_files`'s per-line loop — `e.get("ts", "")` guarded.
+4. The rotation-sealing gzip loop — `e.get("ts", "")` guarded (same site whose decode-order was
+   fixed last round; the type gap was separate and survived that fix).
+5. **`cli.py`'s `cmd_audit` manifest read — a manifest reader NO PRIOR ROUND HAD TOUCHED.**
+   `json.loads(read_text(...))` / `except (JSONDecodeError, KeyError)` — same non-object-root and
+   wrong-field-type exposure as the original `verify()` bug. Routed through `_parse_manifest_bytes`.
+6. **`cmd_audit`'s entry-line read — same, never touched.** `json.loads(line)` on raw bytes, no
+   dict check. Routed through `_require_entry_dict` with a strict decode first.
+
+Also corrected `_iter_lines`'s docstring, which still claimed (pre-dating this window's own
+findings) that deferring decode to `json.loads` "raises `UnicodeDecodeError` the same way it
+raises `JSONDecodeError`" — false, per round 2's surrogatepass measurement; every call site now
+decodes strictly before parsing instead of relying on that claim.
+
+**6 new tests (4 `test_audit.py`, 2 `test_cli.py`), each mutation-checked in both directions —
+including one docstring self-correction:** the `cmd_audit` entry-line test's first draft claimed
+the missing check "crashed with an uncaught `AttributeError`"; measured directly against the
+pre-fix code with no `--event`/`--since` filter set, it does NOT crash — the malformed line flows
+silently into the JSON output instead, which is what the shipped test actually pins (the crash
+shape is real too, but only when a filter is set, and this test doesn't set one).
+
+**Verification budget: 6 tests, all mutation-checked. Full suite: `1918 passed` (was 1912), 0
+failed. mypy clean. ruff: 63, unchanged.**
+
 ## ✅ CLOSED AFTER 2026-09-08 — READ THIS FIRST, IT IS WHAT THE NEXT SEAT ACTS ON
 
 ⛔ **CORRECTED 2026-09-13 (diogenes MEDIUM, filed 09-09, re-derived and closed).** The line below

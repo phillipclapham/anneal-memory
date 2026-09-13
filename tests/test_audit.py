@@ -5837,3 +5837,122 @@ class TestFixDiffRound2Ac055fb:
 
         assert result.valid is False
         assert result.error is not None and "Corrupt manifest" in result.error
+
+
+class TestFixDiffRound3EntryLineTypeSweep:
+    """complement + codex L3, round 3, 2026-09-13 — the fan-in asked for
+    a full sweep after two rounds each found the next site of the same
+    class (bytes parsed as JSON without a strict decode first, and
+    without validating the parsed shape). This class covers the four
+    ``audit.py`` entry-line readers newly routed through the shared
+    ``_require_entry_dict`` helper; ``cli.py``'s ``cmd_audit`` (a fourth
+    manifest reader plus its own entry-line reader, never touched by any
+    prior round) is covered in ``tests/test_cli.py::TestCmdAudit``.
+    """
+
+    def test_verify_skips_a_non_object_entry_line(self, tmp_path):
+        """``verify()``'s entry loop parsed the line and called
+        ``.get("prev_hash")``/``.get("seq")`` without checking the
+        result was an object — a line that parses to a list crashed
+        with an uncaught ``AttributeError``.
+
+        ⛔ MUTATION-CHECKED: replace ``_require_entry_dict(json.loads(line))``
+        with a bare ``json.loads(line)`` at this site and this raises
+        instead of counting the line as skipped.
+        """
+        db = tmp_path / "entry_non_object.db"
+        trail = AuditTrail(db)
+        trail.log("first", {"i": 0})
+
+        active = trail._active_path
+        active.write_bytes(active.read_bytes() + b"[1, 2, 3]\n")
+
+        result = AuditTrail.verify(db)  # must NOT raise
+
+        assert result.valid is True, f"unexpected: {result.error}"
+        assert result.skipped_lines == 1
+
+    def test_initialize_skips_a_last_valid_line_that_is_not_an_object(
+        self, tmp_path
+    ):
+        """``_read_last_valid_entry`` validated only that a line PARSED,
+        not that it parsed to an object — ``_initialize`` then called
+        ``.get("seq", 0)`` on whatever came back. A file whose only line
+        is valid JSON but not an object (``[1, 2, 3]``) crashed recovery
+        with an uncaught ``AttributeError`` instead of falling through to
+        the manifest, exactly like an empty or all-malformed file would.
+
+        ⛔ MUTATION-CHECKED: revert ``_read_last_valid_entry`` to bare
+        ``json.loads(stripped)`` (no ``_require_entry_dict``) and this
+        raises instead of anchoring on genesis.
+        """
+        db = tmp_path / "recovery_non_object.db"
+        active = db.parent / "recovery_non_object.audit.jsonl"
+        active.parent.mkdir(parents=True, exist_ok=True)
+        active.write_bytes(b"[1, 2, 3]\n")
+
+        trail = AuditTrail(db)
+        trail._initialize()  # must NOT raise
+
+        assert trail._initialized is True
+        assert trail._prev_hash == GENESIS_HASH, (
+            "a non-object 'valid JSON' line should be treated the same "
+            "as no valid entry at all"
+        )
+
+    def test_adopt_orphaned_files_skips_a_non_object_entry_line(
+        self, tmp_path
+    ):
+        """``_adopt_orphaned_files``'s per-line loop called
+        ``e.get("ts", "")`` without checking ``e`` was an object — an
+        orphan file with a non-object JSON line crashed adoption with
+        an uncaught ``AttributeError``.
+
+        ⛔ MUTATION-CHECKED: revert to bare
+        ``e = json.loads(stripped_str)`` (no ``_require_entry_dict``)
+        and this raises instead of adopting the orphan with the
+        malformed line's timestamp simply not counted.
+        """
+        db = tmp_path / "orphan_non_object.db"
+        trail = AuditTrail(db)
+        trail.log("first", {"i": 0})
+        active = trail._active_path
+
+        # An orphan: renamed as if rotation had sealed it, with a
+        # trailing line that parses but isn't an object.
+        orphan = active.parent / "orphan_non_object.audit.1999-W01.jsonl"
+        active.rename(orphan)
+        orphan.write_bytes(orphan.read_bytes() + b"[1, 2, 3]\n")
+
+        fresh = AuditTrail(db)
+        fresh._adopt_orphaned_files()  # must NOT raise
+
+        manifest = fresh._load_manifest()
+        assert any(
+            f["filename"] == orphan.name for f in manifest.get("files", [])
+        ), "the orphan should still be adopted despite the trailing junk line"
+
+    def test_rotation_sealing_skips_a_non_object_entry_line(self, tmp_path):
+        """The rotation-sealing gzip loop called ``e.get("ts", "")``
+        without checking ``e`` was an object — a non-object JSON line in
+        the file being sealed crashed rotation with an uncaught
+        ``AttributeError``.
+
+        ⛔ MUTATION-CHECKED: revert to bare
+        ``e = json.loads(line.decode("utf-8").strip())`` (no
+        ``_require_entry_dict``) and this raises out of
+        ``_rotate_if_needed`` instead of sealing the file.
+        """
+        db = tmp_path / "seal_non_object.db"
+        trail = AuditTrail(db)
+        trail.log("first", {"i": 0})
+
+        active = trail._active_path
+        active.write_bytes(active.read_bytes() + b"[1, 2, 3]\n")
+
+        trail._last_week = "1999-W01"  # force the weekly rotation
+
+        trail._rotate_if_needed()  # must NOT raise
+
+        sealed = active.parent / "seal_non_object.audit.1999-W01.jsonl.gz"
+        assert sealed.exists()

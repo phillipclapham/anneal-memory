@@ -4208,8 +4208,8 @@ class TestTheGapLocationSurvivesTheProcess:
 class TestAFailedRotationDoesNotLeaveAFalseTamperingVerdict:
     """"Active file missing" is not proof the rotation succeeded (spore-746).
 
-    Rotation renames the active file FIRST, then gzips, then updates the
-    manifest. If a later step raises — disk full during the gzip is the
+    Rotation renames the active file before it compresses it and records
+    the week in the manifest. If a later step raises — disk full during the gzip is the
     measured case — the sealed file exists, the manifest does not know about
     it, and the active file is gone. The next call arrived at the
     "active missing" branch and simply advanced ``_last_week``, recording a
@@ -4246,7 +4246,15 @@ class TestAFailedRotationDoesNotLeaveAFalseTamperingVerdict:
         real_open = gzip_mod.open
 
         def boom(*args, **kwargs):
-            raise OSError(28, "No space left on device")
+            # Rotation opens the gzip temp BEFORE the rename (round 10), so
+            # the failure has to come from a write for the rename to happen.
+            handle = real_open(*args, **kwargs)
+
+            def no_space(_data):
+                raise OSError(28, "No space left on device")
+
+            handle.write = no_space
+            return handle
 
         audit_mod.gzip.open = boom
         try:
@@ -6510,8 +6518,18 @@ class TestFixDiffRound9LoudNotSilent:
             trail.log("seg", {"i": i, "pad": "x" * 200})
         trail._last_week = "1999-W02"
 
+        real_open = gzip.open
+
         def boom(*args, **kwargs):
-            raise OSError(28, "No space left on device")
+            # Rotation opens the gzip temp BEFORE the rename (round 10), so
+            # the failure has to come from a write for the rename to happen.
+            handle = real_open(*args, **kwargs)
+
+            def no_space(_data):
+                raise OSError(28, "No space left on device")
+
+            handle.write = no_space
+            return handle
 
         with monkeypatch.context() as m:
             m.setattr(audit_module.gzip, "open", boom)
@@ -6822,40 +6840,93 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         assert result.valid is False
         assert result.error is not None and "Unmanifested sealed audit file" in result.error
 
-    def test_verify_during_a_healthy_rotation_settles_to_valid(self, tmp_path, monkeypatch):
-        """HIGH, complement, reproduced. Round 9's unmanifested-file check ran
-        while a rotation was compressing: the renamed week was on disk and
-        not yet in the manifest, and ``verify()`` returned valid=False.
+    @pytest.mark.parametrize(
+        "stall_at", ["after_rename", "after_replace", "before_manifest_load", "after_manifest_save"]
+    )
+    def test_verify_inside_a_stalled_rotation_step_settles_to_valid(
+        self, tmp_path, monkeypatch, stall_at
+    ):
+        """complement C1, and the fan-in desk's positive control, round 10: a
+        rotation that stalls 300ms at any step, with ``verify()`` run inside
+        the stall. On 93895d8 a stall after the rename, after the ``.gz``
+        replace, or between the unlink and the manifest save each gave a
+        false invalid in about 0.1s, measured; only a stall while the temp
+        file existed settled.
 
-        ⛔ MUTATION-CHECKED: re-check once after the poll interval and stop,
-        instead of polling while the gzip temp file exists, and this fails —
-        compression is still paused at the re-check.
+        The on-disk shape at the stall is asserted AFTER the verdict, so this
+        proves which window it hit rather than trusting the hook count.
+
+        ⛔ MUTATION-CHECKED, one mutant per window: open the gzip temp after
+        the rename (after_rename fails); drop "an unmanifested .gz beside its
+        .jsonl" from the in-flight markers (after_replace fails); unlink the
+        .jsonl before saving the manifest (before_manifest_load fails); stop
+        ignoring a covered week's leftover .jsonl (after_manifest_save fails).
         """
         import threading
         import time
 
         db, trail, _ = self._trail_with_a_sealed_week(tmp_path)
         trail.log("seg", {})
-        real_open = gzip.open
-        compressing = threading.Event()
+        stalled = threading.Event()
+        rotator: list[int] = []
+        fsyncs = [0]
+        seen: dict = {}
+        real_fsync = audit_module._fsync_dir
+        real_load = AuditTrail._load_manifest
 
-        def slow_open(filename, mode="rb", *args, **kwargs):
-            handle = real_open(filename, mode, *args, **kwargs)
-            if "w" in mode and not compressing.is_set():
-                compressing.set()
-                time.sleep(0.4)  # the temp file exists; the manifest is not saved
-            return handle
+        def mine():
+            return bool(rotator) and threading.get_ident() == rotator[0]
 
-        monkeypatch.setattr(audit_module.gzip, "open", slow_open)
+        def snapshot_and_stall():
+            seen["names"] = {p.name for p in tmp_path.iterdir()}
+            manifest = json.loads((tmp_path / "m.audit.manifest.json").read_text())
+            seen["manifested"] = {f["filename"] for f in manifest["files"]}
+            stalled.set()
+            time.sleep(0.3)
+
+        def fsync(path):
+            real_fsync(path)
+            if mine():
+                fsyncs[0] += 1
+                if (stall_at, fsyncs[0]) in {
+                    ("after_rename", 1), ("after_replace", 2), ("after_manifest_save", 3)
+                }:
+                    snapshot_and_stall()
+
+        def load(self):
+            if mine() and stall_at == "before_manifest_load":
+                snapshot_and_stall()
+            return real_load(self)
+
+        monkeypatch.setattr(audit_module, "_fsync_dir", fsync)
+        monkeypatch.setattr(AuditTrail, "_load_manifest", load)
         trail._last_week = "1999-W02"
-        rotator = threading.Thread(target=trail.log, args=("rot2", {}))
-        rotator.start()
-        assert compressing.wait(5)
 
+        failures: list[BaseException] = []
+
+        def rotate():
+            rotator.append(threading.get_ident())
+            try:
+                trail.log("rot2", {})
+            except BaseException as exc:  # surfaced below, not lost in the thread
+                failures.append(exc)
+
+        worker = threading.Thread(target=rotate)
+        worker.start()
+        assert stalled.wait(5), f"the rotation never reached {stall_at}"
         result = AuditTrail.verify(db)
-        rotator.join(5)
+        worker.join(5)
 
+        assert not worker.is_alive() and not failures, failures
         assert result.valid is True, result.error
+        plain, packed = "m.audit.1999-W02.jsonl", "m.audit.1999-W02.jsonl.gz"
+        names, manifested = seen["names"], seen["manifested"]
+        if stall_at == "after_rename":
+            assert plain in names and packed + ".tmp" in names and "m.audit.jsonl" not in names
+        elif stall_at in ("after_replace", "before_manifest_load"):
+            assert packed in names and plain in names and packed not in manifested
+        else:
+            assert packed in manifested and plain in names
 
     def test_a_rotation_between_the_manifest_read_and_the_active_read_settles(
         self, tmp_path, monkeypatch
@@ -6943,3 +7014,189 @@ class TestFixDiffRound10RecoveryNeverDeletes:
 
         assert result.valid is True
         assert result.total_entries == 0
+
+    def test_set_aside_names_are_outside_the_sealed_language_and_stay_put(self, tmp_path):
+        """Fan-in desk, round 10: the claim that a ``.dup-`` or ``.stale-`` name
+        is outside the sealed-file language was a docstring. Round 5's
+        dot-filename bugs lived in exactly this kind of unasserted name rule.
+        Set-aside files must not be adopted, must not be reported as
+        unmanifested, and a second open must neither rename nor adopt them.
+
+        ⛔ MUTATION-CHECKED: let ``_SEALED_SUFFIX_PATTERN`` accept any tail after
+        ``.jsonl`` and this fails.
+        """
+        db, _, sealed = self._trail_with_a_sealed_week(tmp_path)
+        (tmp_path / "m.audit.1999-W01.jsonl").write_bytes(gzip.decompress(sealed.read_bytes()))
+        (tmp_path / "m.audit.1998-W40.jsonl.gz.tmp").write_bytes(b"partial")
+
+        def set_aside_names():
+            return sorted(p.name for p in tmp_path.iterdir() if ".dup-" in p.name or ".stale-" in p.name)
+
+        AuditTrail(db).log("first_open", {})
+        aside = set_aside_names()
+        assert len(aside) == 2, aside
+        assert not any(audit_module._is_sealed_filename(n, "m") for n in aside)
+        manifest_after_first = (tmp_path / "m.audit.manifest.json").read_bytes()
+
+        AuditTrail(db).log("second_open", {})
+
+        assert set_aside_names() == aside
+        assert (tmp_path / "m.audit.manifest.json").read_bytes() == manifest_after_first
+        result = AuditTrail.verify(db)
+        assert result.valid is True, result.error
+
+    @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root reads a mode-000 file")
+    @pytest.mark.parametrize("rotated_past", [False, True])
+    def test_an_orphan_skipped_while_unreadable_is_never_spliced_in_later(
+        self, tmp_path, monkeypatch, rotated_past
+    ):
+        """HIGH, L1 + L2, round 10, reproduced. An orphan unreadable past the
+        retries was skipped and writes continued from the sealed tip; once
+        readable, the next open appended it after them and ``verify()``
+        reported "Hash mismatch" on every later run. ``rotated_past=True`` is
+        L1's exact repro, with a newer week sealed in between.
+
+        ⛔ MUTATION-CHECKED: drop the active-file link check and the
+        ``rotated_past=False`` case fails (the chain-tip check alone cannot
+        refuse it, because the orphan does continue the sealed chain).
+        """
+        db, orphan = TestFixDiffRound9LoudNotSilent._failed_rotation(tmp_path, monkeypatch, segment=5)
+        orphan.chmod(0)
+        try:
+            reopened = AuditTrail(db)
+            reopened.log("while_unreadable", {})
+            if rotated_past:
+                reopened._last_week = "1999-W03"
+                reopened.log("next_week", {})
+        finally:
+            orphan.chmod(0o600)
+
+        AuditTrail(db).log("readable_again", {})
+
+        names = [f["filename"] for f in AuditTrail(db)._load_manifest()["files"]]
+        assert orphan.name not in names
+        result = AuditTrail.verify(db)
+        assert result.valid is False
+        assert "Unmanifested sealed audit file" in (result.error or ""), result.error
+
+    def test_an_orphan_that_does_not_continue_the_sealed_chain_is_not_adopted(
+        self, tmp_path, monkeypatch
+    ):
+        """The chain-tip half of the no-splice rule, isolated: the active file
+        is gone, so only the tip check can refuse. Shape: a second failed
+        rotation after a week was skipped leaves an orphan that links to an
+        older week than the manifest's last one.
+
+        ⛔ MUTATION-CHECKED: drop the chain-tip check and this fails — the
+        orphan is adopted and ``verify()`` reports a hash mismatch.
+        """
+        db, orphan = TestFixDiffRound9LoudNotSilent._failed_rotation(tmp_path, monkeypatch, segment=5)
+        foreign = json.dumps(
+            {"v": 1, "seq": 0, "ts": "1999-01-10T00:00:00.000000Z", "event": "x",
+             "actor": "a", "prev_hash": GENESIS_HASH},
+            sort_keys=True, separators=(",", ":"),
+        )
+        orphan.write_text(foreign + "\n", encoding="utf-8")
+
+        AuditTrail(db).log("after", {})
+
+        names = [f["filename"] for f in AuditTrail(db)._load_manifest()["files"]]
+        assert orphan.name not in names
+        result = AuditTrail.verify(db)
+        assert result.valid is False
+        assert "Unmanifested sealed audit file" in (result.error or ""), result.error
+
+    def test_a_different_copy_under_a_manifested_week_name_stays_reported(self, tmp_path):
+        """MED, L1, round 10, reproduced. A copy under the name of a week the
+        manifest already lists was set aside unread. After a clock regression
+        that copy can hold entries the listed one lacks, and ``verify()`` then
+        returned valid=True with them missing.
+
+        ⛔ MUTATION-CHECKED: set the copy aside without comparing digests and
+        this fails — ``verify()`` is valid.
+        """
+        db, _, sealed = self._trail_with_a_sealed_week(tmp_path)
+        other = tmp_path / "m.audit.1999-W01.jsonl"
+        other.write_bytes(gzip.decompress(sealed.read_bytes()) + b'{"extra":1}\n')
+
+        AuditTrail(db).log("after", {})
+
+        assert other.exists(), "a different copy must stay on its name"
+        assert _set_aside_copies(tmp_path, other.name, "dup") == []
+        result = AuditTrail.verify(db)
+        assert result.valid is False
+        assert "Unmanifested sealed audit file" in (result.error or ""), result.error
+
+    def test_a_rotation_landing_mid_pass_is_not_a_short_valid_verdict(self, tmp_path, monkeypatch):
+        """MED, L2, round 10, reproduced. A whole rotation landed after
+        ``verify()`` had read the manifest, the new active file was still
+        empty when read, and the pass returned valid=True without the week
+        it never walked.
+
+        ⛔ MUTATION-CHECKED: drop the manifest signature check and this fails
+        — valid, with the newly sealed week's entries missing from the count.
+        """
+        db, trail, _ = self._trail_with_a_sealed_week(tmp_path)
+        for i in range(4):
+            trail.log("seg", {"i": i})
+        real_iter = audit_module._iter_lines
+        fired = []
+
+        def rotate_first(path):
+            if path.name == "m.audit.jsonl" and not fired:
+                fired.append(path)
+                trail._last_week = "1999-W02"
+                trail._rotate_if_needed()  # seals the week; nothing appended yet
+                path.touch()  # the next append has opened the new active file
+            return real_iter(path)
+
+        monkeypatch.setattr(audit_module, "_iter_lines", rotate_first)
+        result = AuditTrail.verify(db)
+
+        assert fired, "the rotation never ran inside verify()"
+        assert result.valid is True, result.error
+        assert result.total_entries == 5 + 1 + 4  # sealed W01, "rot", the segment
+
+    def test_rotation_never_overwrites_a_week_already_sealed(self, tmp_path, caplog):
+        """MED, L2, round 10, reproduced. A clock stepped back across a week
+        boundary sealed the same week twice: the replace overwrote the first
+        copy and the duplicate manifest record made the manifest unreadable.
+
+        ⛔ MUTATION-CHECKED: drop the existing-target refusal and this fails.
+        """
+        db, trail, sealed = self._trail_with_a_sealed_week(tmp_path)
+        before = sealed.read_bytes()
+        trail.log("later", {})
+        trail._last_week = "1999-W01"  # the clock went back
+
+        with caplog.at_level(logging.WARNING, logger="anneal-memory"):
+            trail.log("again", {})
+            trail.log("still", {})
+
+        assert sealed.read_bytes() == before
+        assert [f["filename"] for f in trail._load_manifest()["files"]] == [sealed.name]
+        assert sum("already on disk" in r.getMessage() for r in caplog.records) == 1
+        result = AuditTrail.verify(db)
+        assert result.valid is True, result.error
+        assert result.total_entries == 5 + 4  # sealed, then rot/later/again/still
+
+    @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root lists a mode-300 directory")
+    def test_a_directory_that_cannot_be_listed_does_not_block_writes(self, tmp_path):
+        """LOW, L1, round 10, reproduced: with the audit directory writable but
+        not listable (mode 0o300), recovery's listing raised and every
+        ``log()`` failed.
+
+        ⛔ MUTATION-CHECKED: let recovery's listing raise ``OSError`` and this
+        fails.
+        """
+        store = tmp_path / "store"
+        store.mkdir()
+        db = store / "m.db"
+        AuditTrail(db).log("first", {})
+        store.chmod(0o300)
+        try:
+            AuditTrail(db).log("second", {})  # must NOT raise
+        finally:
+            store.chmod(0o700)
+
+        assert AuditTrail.verify(db).total_entries == 2

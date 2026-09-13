@@ -23,83 +23,69 @@
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
 
-## ▶▶ PICKUP — READ FIRST (seat `0913+35`, written 2026-09-13 ~16:55, successor to `0913+32`). EVERY STATE LINE IS A COMMAND.
+## ▶▶ PICKUP — READ FIRST (seat `0913+41`, written 2026-09-13 ~18:05, successor to `0913+35`). EVERY STATE LINE IS A COMMAND.
+
+⚖ **ANNEAL STOPPED FOR THE NIGHT ON PHILL'S RULING (~18:01, via desk `0913+42`): "stop at a breaking point tonight and pick up tomorrow".** The only work that ran after it was the 19:45 W37 pre-flight. Nothing below is merged; nothing below has been reviewed after its last commit.
 
 **Re-derive, do not trust:**
-- main: `git rev-parse --short HEAD` vs `git ls-remote origin refs/heads/main`; tree `git status --short`
-- branches: `git ls-remote origin 'refs/heads/audit-*'`
+- main: `git rev-parse --short HEAD` vs `git ls-remote origin refs/heads/main`; tree `git status --short`; code unchanged since the rotation: `git diff --quiet 2ed7579 HEAD -- anneal_memory && echo code-unchanged`
+- branches: `git ls-remote origin 'refs/heads/audit-*' 'refs/heads/trial-*'`
 - round 10b over main: `git log --oneline 2ed7579..origin/audit-r10b`
-- hybrid over its base: `git log --oneline $(git merge-base origin/audit-hybrid-r10b origin/audit-r10b)..origin/audit-hybrid-r10b`
-- whether the hybrid sits on the CURRENT r10b: `git merge-base --is-ancestor origin/audit-r10b origin/audit-hybrid-r10b && echo on-current || echo needs-rebase`
-- worktrees: `git worktree list`. A worktree in a job's tmp dies with that job; `git worktree prune` drops only
-  registrations whose directory is gone.
-- a branch's suite: check it out in a worktree OUTSIDE the repo root, assert `anneal_memory.audit.__file__` is that
-  worktree's (spore-845), then `PYTHONPATH=<worktree> ~/Briefcase/anneal-memory/.venv/bin/python3 -m pytest -q -p no:cacheprovider`
-- review rows: `~/Briefcase/flow/state/verdicts.jsonl`, by input_id; a commit message names the input_id it answers.
+- hybrid fix branch over its base: `git log --oneline 93073b6..origin/audit-hybrid-r10b3-fix`
+- trial rebase over round 10b: `git log --oneline origin/audit-r10b..origin/trial-hybrid-rebase-01b2ed8`
+- which rebased commits changed their own lines: `git range-diff 93073b6..origin/audit-hybrid-r10b3-fix origin/audit-r10b..origin/trial-hybrid-rebase-01b2ed8`
+- review rows: `~/Briefcase/flow/state/verdicts.jsonl`, by input_id; each commit message names the input_id it answers.
+- a branch's suite: worktree OUTSIDE the repo root, assert `anneal_memory.audit.__file__` (spore-845), then `PYTHONPATH=<worktree> ~/Briefcase/anneal-memory/.venv/bin/python3 -m pytest -q -p no:cacheprovider`. ⛔ Run python FROM a directory that is not this repo root: stdin and `-c` put the cwd first on sys.path and import main's tree over PYTHONPATH [run 2026-09-13 17:4x by `0913+41`, caught by the `__file__` assert].
+- `.venv` here imports a stale 0.9.1 unless PYTHONPATH points at a tree [desk `0913+38`, 17:4x].
 
-### ⛔⛔ DUTY AT ~19:45 EDT TONIGHT (2026-09-13) — REPORT TO THE FAN-IN DESK BEFORE 20:00
-Flow's venv installs this repo EDITABLE, so main's working tree is flow's live memory code until the pin below exists.
-1. Main committed and clean; never mid-edit across 19:30–20:15. No audit branch is fast-forwarded into main tonight.
-2. Check the rehearsed script before running it: `shasum -a 256 ~/Briefcase/_backups/anneal-w37-duty/preflight_w38.py`
-   must print `b8b333592b53eeaf982bd2ccdeb5d5fef6b5528c3c5778f007bd59bd4c093cb4`.
-3. `cd ~/Briefcase/anneal-memory && PYTHONPATH=$PWD .venv/bin/python3 ~/Briefcase/_backups/anneal-w37-duty/preflight_w38.py`
-   It asserts the import is this tree, prints HEAD and tree state, copies `~/.anneal-memory/memory.audit.*` into
-   `preflight_real/` beside the script (never into the repo), forces a W37→W38 rotation on the copy, prints manifest
-   records / sealed files / verify before and after, deletes the copy, and ends `PREFLIGHT PASS` or `FAIL` (exit 0/1).
-   Receipt 2026-09-13 15:59 on `2ed7579` [run]: records 15→16, sealed 15→16, new `memory.audit.2026-W37.jsonl.gz`,
-   verify valid, total_entries 10674→10675.
-4. SendMessage the desk: HEAD sha, before→after, verify.
-5. On FAIL or an unclean tree: tell the desk before 20:00, check out `4d00ca7` (PASS at 15:09) in this tree until the EOD
-   capture, then return to main.
+### ⛔⛔ W37 DUTY (2026-09-13 19:45) — RESULT
+- [`0913+41` fills this after 19:45: HEAD, the code-unchanged check, manifest records before→after, verify, PASS/FAIL. If this line is still a placeholder, the result is in the desk's fan-in log, not here.]
 
 ### ⚖ RULINGS IN FORCE (do not re-litigate)
-- **FF HOLD**, the desk's reading of Phill's `spore-1019` ruling (15:5x: *"agree, pin it after EOD, so maybe tomorrow
-  morning?"*). Tomorrow flow gets a NON-editable commit pin (flow/venv and the uv-tool CLI) at the commit tonight's
-  rotation ran on. Until that pin exists main IS flow's live code, so no audit branch merges into main tonight. After it,
-  a branch reaches main only after its review passes AND a copy-of-real-trail pre-flight on the exact merge commit.
-- Hybrid = option A, chain_anchor = option (2): the HYBRID section below. No release, no version bump.
+- **FF HOLD** (desk reading of Phill's `spore-1019`, 15:5x: *"agree, pin it after EOD, so maybe tomorrow morning?"*): flow gets a NON-editable commit pin (flow/venv and the uv-tool CLI) at the commit tonight's rotation ran on; a flow seat builds it. After it, a branch reaches main only after its review passes AND a copy-of-real-trail pre-flight on the exact merge commit.
+- Hybrid = option A, chain_anchor = option (2) (anchor_trusted on `verify --json`, the verify summary line, `server.py --verify-audit`, `audit --json`). "Recovery never deletes."
+- **RELEASE** (Phill 17:31, relayed by desk `0913+38`): *"if we need to release a new version of Levain yes let's do it - the goal is to get Levain and anneal to a place where we do not need to touch them for a days again"*. The desk read it as authorising anneal 0.9.10, answering `spore-1022` as a PATCH [judged by desk, confirming the anneal half with Phill]. ⛔ **No cut before Phill rules (i) whether spore-1019's pin targets released 0.9.10 or the rotation commit, and (ii) the absent-manifest-without-marker path.** Before any upload: `python3 ~/Briefcase/flow/scripts/spores.py list --disposition note` and read `spore-424` (TOKEN3 as a one-shot env var, twine >= 7, name the two dist files). After it is live: tell the levain seat so it can raise its pin.
 
-### ▶ ROUND 10b — REVIEWED, FIX-DIFF ON THE BRANCH, NOT MERGED
-- L3 `96866d6e049777cd` on `397e4a3` (complement, codex, glm) was triaged against `397e4a3` on disk by `0913+35`. The
-  fix-diff is the commit after `397e4a3` on `origin/audit-r10b`; its message carries each finding, its reproduction and
-  its mutant: `git log --format=%B 397e4a3..origin/audit-r10b`.
-- ⚠ DESIGN CHANGE, recorded so it is not re-derived: round 10 set a differing or unreadable orphan copy aside as `.dup`.
-  codex showed [run] that this hid entries only that copy held behind a valid `verify()`. Only a readable,
-  byte-identical copy is set aside now; any other stays on its sealed name and `verify()` reports it.
-- Next: a fix-diff re-review (spore-779). Its input_id is whichever verdicts.jsonl row has `--diff 397e4a3` on the
-  fix-diff commit. After the pin exists (spore-1019), a merge needs that review passed AND a copy-of-real-trail pre-flight
-  on the exact merge commit.
-- Residue no instrument here holds (spore-938): the Windows fsync path (reasoned from CPython, UCRT and Win32 documents;
-  no Windows runner); a real second PROCESS racing `verify()` against a real rotation (tests inject the interleaving in
-  one process); macOS `fsync` without F_FULLFSYNC.
-- Routed, not fixed (carried from `0913+32`): L2 M4, retention unlinks sealed files before saving the manifest (needs a
-  pending-delete record first); B, retention interleavings under `verify()`; a `stats()` or open in ANOTHER process sets
-  aside a live rotation's temp.
-- Pre-existing, not changed: `anneal-memory verify --json` exits 0 on an invalid result; only the human path exits 1.
-  Check: `grep -n "sys.exit(1)" anneal_memory/cli.py` near `def cmd_verify`.
+### ▶ NEXT, IN ORDER
+1. TRIAGE the fix-diff re-pass of `a6ea0c1..1e42dc9` (spore-779). It was dispatched 2026-09-13 ~18:05 with desk `0913+42`'s GO and deliberately NOT triaged under Phill's stop: find its rows in `~/Briefcase/flow/state/verdicts.jsonl` where `metadata.label` starts `a6ea0c1..HEAD` and `metadata.repo` is `anneal-hyb-fix`, and confirm all three seats (complement, codex, glm) have rows and none errored. If any are missing, re-run it: `deep_review.py --diff a6ea0c1 --paths anneal_memory/audit.py anneal_memory/cli.py tests/test_audit.py tests/test_cli.py CHANGELOG.md --seats complement,codex,glm` from a worktree of `origin/audit-hybrid-r10b3-fix`, through the desk. Measure chars with the paths as explicit args: zsh does not split an unquoted `$P`, which measured 0 once on 2026-09-13.
+2. Fix what it finds on `audit-hybrid-r10b3-fix`, re-pass again. Expect a finding in the previous fix: every re-pass on 2026-09-13 found one.
+3. When the fix branch is clean: rebuild the trial rebase from the clean tip (`git rebase --onto origin/audit-r10b 93073b6`), or cherry-pick the new commits onto `trial-hybrid-rebase-01b2ed8`. The recipe and its traps are in that branch's commit messages: `git log --format=%B origin/audit-r10b..origin/trial-hybrid-rebase-01b2ed8`.
+4. Review what the rebase changed: `git range-diff` as above. Own-line changes found on 2026-09-13: only the `1870ad8` equivalent (`_verify_listed`'s empty-trail block) plus the test commit on top of it. They need a real review, not a placement check. They have had none.
+5. Merge only after the pin exists, the review passes, and a copy-of-real-trail pre-flight runs on the exact merge commit (`~/Briefcase/_backups/anneal-w37-duty/preflight_w38.py` is the template; it forces a rotation on a copy).
+6. Then the release questions above.
 
-### ▶ HYBRID MANIFEST QUARANTINE — REBASED ONTO 10b, CHECKLIST BUILT, IN REVIEW
-Rulings (Phill 2026-09-13, via desk `0913+31`), unchanged: quarantine an invalid manifest to
-`<stem>.audit.manifest.json.corrupt-<UTC stamp>`, never overwrite; appending continues (seed from the newest sealed tail,
-refuse if none); rotation, adoption and retention pause; `verify()` reports quarantine as invalid; rebuild only via an
-explicit repair that never recomputes `sha256_file`; a recovered anchor is `anchor_trusted=False` on `verify --json`, the
-verify summary line, `server.py --verify-audit` and `audit --json`. No release.
-- Branch: `origin/audit-hybrid-r10b`. `origin/audit-hybrid` (`9ad1b54`) is the pre-rebase record and is kept.
-- What is built, and each piece's evidence: `git log --format=%B 397e4a3..origin/audit-hybrid-r10b`. In short: the rebase
-  onto `397e4a3` with its conflict decisions; `_load_manifest` refusing an ABSENT manifest when the directory cannot be
-  listed (reproduced first: otherwise `log()` forked the chain from GENESIS past a quarantine); the `audit-repair` CLI;
-  `anchor_trusted` on the four ruled paths; the `audit` quarantine warning; export, README, CHANGELOG;
-  `TestHybridManifestQuarantine` and `TestHybridAuditCli`. Mutants 11 of 12; the survivor (the retention guard) survives
-  by construction and the commit says why.
-- L3 dispatched 2026-09-13 16:47 on `1cc71b2` with `--diff 397e4a3` over 8 paths; find its rows in verdicts.jsonl.
-- Next, in order: (1) triage that L3; (2) rebase onto the r10b fix-diff (expect `audit.py` conflicts in adoption's final
-  loop and in `_verify_listed`'s signature); (3) review ONLY what the rebase changed:
-  `git range-diff 397e4a3..<old hybrid tip> <new r10b tip>..<new hybrid tip>` (desk `0913+33`'s instruction).
-- Open, unruled, not blocking: an ABSENT manifest with no marker still takes the old path (fresh manifest and automatic
-  orphan adoption). A question for Phill.
-- Open design: `repair_manifest`'s chain check and adoption's chain rule answer the same question and could share a helper.
-- Hygiene: `git worktree prune` removed nothing at 16:26 because `jobs/7c81fb41/tmp/anneal-hybrid` still exists on disk and
-  holds branch `audit-hybrid`. [judged by 0913+35, 2026-09-13 16:26, against `git worktree prune --dry-run -v`]
+### ▶ ROUND 10b — FINAL HEAD, NOT MERGED
+- `origin/audit-r10b` head's re-pass `20ae65c80b132650` (910086e..01b2ed8): no HIGH or MED [triaged by `0913+35` and the desk; glm opened 1 file = thin; codex short body with a verdict line].
+- Pre-existing gap, not from that diff (complement): a NON-empty verify pass re-checks only the manifest signature and never re-lists, so a sealed file appearing mid-walk is not caught the way the empty branch now catches it. Next hardening round.
+- **0.9.9 EXPOSURE:** the published 0.9.9 returns valid=True with 0 entries when sealed and active files are both deleted (reproduced on tag v0.9.9 by `0913+35`; episode `flow-20260913-173156-3ef07336c95c`). Fixed on `audit-r10b` (01b2ed8). `spore-1022`.
+- Routed, not fixed: B, the cross-process rotation race (incl. the pre-rename-open append window); M4, retention unlinks sealed files before saving the manifest (needs a pending-delete record).
+
+### ▶ HYBRID — WHAT EACH BRANCH HOLDS, PER FINDING
+**`origin/audit-hybrid-r10b3-fix`** (built on `1870ad8`, the pre-rebase hybrid tip). Two commits, both UNMERGED:
+- `a6ea0c1` answers re-pass `a927e791ce5df4eb`. Reviewed by `598cd40ffcfcbc18`: complement none; glm 1 HIGH; codex 1 HIGH + 3 MED. All five are addressed in the next commit.
+- `1e42dc9` answers `598cd40ffcfcbc18`. ⛔ **NOT REVIEWED.** Per finding [each test failed on a6ea0c1's source first unless stated]:
+  - **G1** (glm HIGH): quarantine carried one marker, so repair released only the newest [run, injection]. Fixed: `_ManifestQuarantined.markers` is the full list. Test `test_repair_releases_every_marker_the_quarantine_saw`.
+  - **C1** (codex HIGH): a rename between `cmd_audit`'s marker listing and its manifest probe showed the active file as trusted. ⚠ **NOT reproduced as filed.** The injected rename during the READ was already untrusted on a6ea0c1. The probe was replaced by one listing; the test guards that path only.
+  - **C2** (codex MED): a marker beside a saved manifest warned that history was omitted but printed every sealed entry [run: 6 vs the active file's 1]. Fixed: no manifest read while a marker exists.
+  - **C3** (codex MED): mode-000 directory tracebacked at `manifest_path.exists()` [run, Python 3.13]. Fixed: one listing, guarded reads, JSON with anchor_trusted false.
+  - **C4** (codex MED): after repair quarantined the manifest, refusals said "nothing was written" [run, injection]. Fixed: they name the marker.
+  - Mutants and suite: `git log --format=%B -1 1e42dc9`.
+**`origin/trial-hybrid-rebase-01b2ed8`**: the hybrid rebased onto round 10b's final head 01b2ed8, plus both fix commits. ⛔ **NOT REVIEWED.** Conflict decisions, the deterministic test-file rebuild, and the moved-return test are in its commit messages.
+- ⚠ `1870ad8`'s message names mutants H1-H7 but carries no recipes. Only the moved H7 returns were mutation-checked on the rebased tree.
+- Superseded, kept: `origin/audit-hybrid-r10b2` (1870ad8), `origin/audit-hybrid-r10b` (1cc71b2), `origin/audit-hybrid` (9ad1b54).
+- **Open, unruled, for Phill:** an ABSENT manifest with no marker still takes the old path (fresh manifest + automatic orphan adoption).
+- Open design: `repair_manifest`'s chain check and adoption's chain rule could share a helper.
+
+### ▶ CROSS-VERSION — 0.9.9 ON A STORE THE HYBRID QUARANTINED [run 2026-09-13 17:49 by `0913+41`, temp copies, imports asserted]
+- Reproduce: quarantine a copy with the hybrid tree, `log()` once from a v0.9.9 worktree, `verify()` under both.
+- Result: 0.9.9 does not know the marker, writes a fresh manifest, adopts the sealed weeks, and its verify says VALID (8 entries). The hybrid still says INVALID afterwards (the marker survives). 0.9.9 never reads the manifest "version", so bumping it would not stop an old writer.
+- Second writer, today [desk `0913+38` measured 17:4x; levain part is a code read]: flow/venv and the uv-tool CLI both import this repo's tree; levain keeps its own store (`grep -rn '".levain" / "memory.db"' ~/Briefcase/levain/levain`) and its floor denies `~/.anneal-memory`. Not measured: whether any levain process ever wrote flow's store.
+- **Proposal, for Phill:** a 0.9.10 release-notes line ("do not mix 0.9.9 and 0.9.10 writers on one store; after a quarantine only 0.9.10's `audit-repair` clears it"), not a manifest-version change.
+
+### Residue no instrument here holds (spore-938)
+- The Windows fsync path; a real second PROCESS racing `verify()` or `cmd_audit` against a real rotation or quarantine (every race above was injected in one process); macOS `fsync` without F_FULLFSYNC.
+- Pre-existing, not changed: `anneal-memory verify --json` exits 0 on an invalid result. Check: `grep -n "sys.exit(1)" anneal_memory/cli.py` near `def cmd_verify`.
+- Hygiene: worktrees under `~/.claude/jobs/*/tmp` die with their job. `git worktree prune --dry-run -v` shows which registrations are already dead.
 
 ## ✅ CLOSED 2026-09-13 (seat `0913+22`) — ALL 9 `diogenes_20260909.md` STILL-OPEN ITEMS
 DISPOSITIONED @ HEAD `304f242` (no code changed `43cea97..304f242`; `git diff --stat` empty).

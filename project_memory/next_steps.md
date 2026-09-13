@@ -222,28 +222,41 @@ decode-and-type-validate) routed to Phill rather than fixed under this window's 
    `prev_hash`, not the crash being tested). Corrected to go through `cmd_audit` in text mode,
    where the vulnerable code actually runs.
 4. **REFUTED — HIGH (codex), "a corrupted final audit record receives a clean integrity verdict"
-   and my own test enshrines it.** MEASURED: a plain unparseable line (`b"not even json\n"`,
-   nothing to do with today's work) ALREADY produces `valid=True, skipped_lines=1` — this has been
-   the established policy since the 2026-09-08 torn-tail fix (a malformed/torn line degrades
-   gracefully rather than failing the whole trail). A schema-violating-but-parseable entry getting
-   the identical treatment (skip, count, stay valid) is the SAME policy extended one category, not
-   a new gap my change introduced. No change made.
-5. **ROUTED, not fixed — 3 findings that are a different class from this window's scope
-   (decode-and-type-validate a manifest/entry before dereferencing it), each requiring new
-   machinery rather than a guard:**
-   - codex HIGH: `_cleanup()` doesn't validate `last_ts`/`last_hash` on sealed-file records before
-     using them to set `chain_anchor` and delete files — would need full per-record schema
-     validation of the manifest's `files` array, not just the root fields this window covered.
-   - codex HIGH: a manifest that loses its `"files"` key but is later rotated can adopt sealed
-     files out of chronological order — would need a reconciliation algorithm (scan disk,
-     reconstruct chronological order) that doesn't exist today, not a validation guard.
-   - codex HIGH: `cmd_audit` doesn't warn when a manifest is VALID but references a sealed file
-     that's been deleted from disk (as opposed to the manifest itself being corrupt) — a
-     referential-integrity check against the filesystem, a different question from "is this JSON
-     shaped right."
-   ▶ All three are real, plausible corruption/operational scenarios, not manufactured. Left for
-   Phill's call on whether they're worth the added complexity, per this window's explicit
-   out-of-scope: no new machinery, only closing the class this seat was dispatched to close.
+   and my own test enshrines it.** ⚖ **Verified by the fan-in against `verify()` (audit.py
+   ~941-1026) with the stronger reason, recorded here instead of my original premise:** the skip
+   path (`except (JSONDecodeError, UnicodeDecodeError, TypeError): skipped += 1; continue`) never
+   advances `expected_hash`. So a schema-violating entry that REPLACES a real chain member still
+   fails — the next entry's `prev_hash` was computed from the ORIGINAL line, producing a hash
+   mismatch, `valid=False`. `valid=True` with `skipped_lines+1` is reachable only for a LAST line
+   (torn tail) or an INSERTED line that was never a chain member — both surfaced via
+   `skipped_lines`, exactly as an unparseable line already is. Not a new hole; no change made.
+5. **ROUTED, not fixed — 3 findings from codex (input_id `bb4fac91fc8aee52`, round 4 against
+   `85265a3`) that are a different class from this window's scope (decode-and-type-validate a
+   manifest/entry before dereferencing it), each requiring new machinery rather than a guard.
+   Scoped as an open next dispatch — not urgent, not blocking, Phill's call on priority:**
+   - **`anneal_memory/audit.py`, `AuditTrail._cleanup`** (codex HIGH): doesn't validate
+     `last_ts`/`last_hash` on sealed-file records before using them to set `chain_anchor` and
+     delete files. Repro: a record with `"last_hash": 1` passes today's root/field checks (they
+     don't reach into `files[]` entries' `last_ts`/`last_hash`), `_cleanup` deletes the sealed file
+     and saves `chain_anchor = 1` — unrecoverable, future `verify()` reports only "Corrupt
+     manifest." Would need full per-record schema validation of the manifest's `files` array, not
+     just the root fields this window covered.
+   - **`anneal_memory/audit.py`, `AuditTrail._rotate_if_needed` + `_adopt_orphaned_files`** (codex
+     HIGH): a manifest that loses its `"files"` key but is later rotated can adopt sealed files out
+     of chronological order. Repro (codex's reasoning, not yet driven end-to-end): sealed file A
+     exists, manifest loses `"files"` only, a later `log()` triggers rotation writing sealed file B,
+     `_load_manifest()` returns `files=[]` and saves only B — reopening then adopts A after B.
+     Would need a reconciliation algorithm (scan disk, reconstruct chronological order), not a
+     validation guard.
+   - **`anneal_memory/cli.py`, `cmd_audit`** (codex HIGH): doesn't warn when a manifest is VALID
+     but references a sealed file that's been deleted from disk (as opposed to the manifest itself
+     being corrupt) — `fpath.exists()` is `False`, silently omitted, `total` reports active-only as
+     complete. A referential-integrity check against the filesystem, a different question from "is
+     this JSON shaped right," which is what round 4's warning covers.
+   ▶ All three are real, plausible corruption/operational scenarios, not manufactured — but they
+   don't stop any current work, so they are not a blocking decision. Left for Phill's call on
+   priority/worth, per this window's explicit out-of-scope: no new machinery, only closing the
+   class this seat was dispatched to close.
 
 **4 new/updated tests, all mutation-checked in both directions (2 corrected mid-round after the
 first draft tested the wrong function). Full suite: `1927 passed` (was 1923), 0 failed. mypy

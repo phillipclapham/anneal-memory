@@ -1019,7 +1019,8 @@ class AuditTrail:
         reproduced as a traceback). ``Path.exists()`` raised
         ``PermissionError`` on a directory without search permission, and
         ``Path.is_dir()`` swallows the same error into ``False``. An absent
-        directory is an empty trail; any other listing failure is invalid.
+        directory, or a parent path that is not a directory, is an empty
+        trail; any other listing failure is invalid.
         """
         stem = db_path.stem
         audit_dir = db_path.parent
@@ -1900,8 +1901,11 @@ def _set_aside(path: Path, reason: str) -> None:
     directory — the only way recovery takes a file off its name.
 
     Never replaces an existing file and never deletes. A failure is logged,
-    not raised: the file then stays under its own name, where ``verify()``
-    still reports it and the next open tries again, and writes continue.
+    not raised, and writes continue: the file stays under its own name and
+    the next open tries again. ⚠ A sealed name left in place is still
+    reported by ``verify()``; a ``.jsonl.gz.tmp`` left in place is not
+    reported, and ``verify()`` reads it as a rotation compressing, so an
+    invalid verdict on that trail waits out ``_ROTATION_SETTLE_MAX_SECONDS``.
     """
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     target = path.with_name(f"{path.name}.{reason}-{stamp}")

@@ -72,6 +72,33 @@ def _fsync_dir(path: Path) -> None:
         os.close(dir_fd)
 
 
+def _parse_manifest_bytes(raw: bytes) -> dict[str, Any]:
+    """Parse manifest bytes into a mapping, or raise trying.
+
+    codex (L3, 2026-09-13) found two ways a manifest could parse
+    "successfully" into something every caller's ``.get()``/subscript
+    access then crashes on, past the 2026-09-09 fix that added
+    ``UnicodeDecodeError`` to the callers' catch tuples:
+
+    1. ``json.loads(bytes)`` decodes via ``surrogatepass``, which does
+       NOT raise on byte sequences that are invalid strict UTF-8 but
+       happen to be a valid lone-surrogate encoding — a corrupt manifest
+       silently parses into a string field containing ``'\\ud800'``
+       instead of raising. Decoding strictly first (``bytes.decode``,
+       no ``surrogatepass``) makes an invalid manifest raise
+       ``UnicodeDecodeError`` the way the callers already expect.
+    2. A syntactically valid JSON document whose root isn't an object
+       (``null``, a list, a bare number) parses fine and then blows up
+       with ``AttributeError``/``TypeError`` at the first ``.get()`` —
+       uncaught by any of the three callers' tuples, which only expect
+       parse/decode failures.
+    """
+    manifest = json.loads(raw.decode("utf-8"))
+    if not isinstance(manifest, dict):
+        raise TypeError(f"manifest root is {type(manifest).__name__}, not an object")
+    return manifest
+
+
 @dataclass
 class AuditVerifyResult:
     """Result of verifying a hash chain."""
@@ -759,7 +786,7 @@ class AuditTrail:
 
         if manifest_path.exists():
             try:
-                manifest = json.loads(manifest_path.read_bytes())
+                manifest = _parse_manifest_bytes(manifest_path.read_bytes())
                 # Chain anchor from retention cleanup — trust point for
                 # chains that no longer start from GENESIS
                 anchor = manifest.get("chain_anchor", "")
@@ -771,7 +798,9 @@ class AuditTrail:
                         files_to_verify.append(fpath)
                     else:
                         missing_files.append(f["filename"])
-            except (json.JSONDecodeError, UnicodeDecodeError, KeyError) as e:
+            except (
+                json.JSONDecodeError, UnicodeDecodeError, TypeError, KeyError,
+            ) as e:
                 return AuditVerifyResult(
                     valid=False, total_entries=0, files_verified=0,
                     error=f"Corrupt manifest: {e}",
@@ -1021,11 +1050,14 @@ class AuditTrail:
         except FileNotFoundError:
             return
         try:
-            # bytes, not text: json.loads raises UnicodeDecodeError alongside
-            # JSONDecodeError from one call, so a torn multibyte manifest
-            # degrades to genesis the same way an unparseable one does.
-            manifest = json.loads(raw)
-        except (json.JSONDecodeError, UnicodeDecodeError):
+            # A strict decode + parse degrades to genesis on the same
+            # shapes ``verify()`` does: a torn multibyte tail, a byte
+            # sequence that parses but isn't valid strict UTF-8 (codex
+            # L3, 2026-09-13 — ``json.loads(bytes)`` tolerates that via
+            # ``surrogatepass`` and would NOT have raised), or a
+            # syntactically valid non-object root.
+            manifest = _parse_manifest_bytes(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
             logger.warning(
                 "Manifest %s is not valid JSON; anchoring on genesis",
                 self._manifest_path,
@@ -1314,8 +1346,8 @@ class AuditTrail:
         """Load or create the manifest index."""
         if self._manifest_path.exists():
             try:
-                return json.loads(self._manifest_path.read_bytes())
-            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+                return _parse_manifest_bytes(self._manifest_path.read_bytes())
+            except (json.JSONDecodeError, UnicodeDecodeError, TypeError, OSError):
                 pass
 
         return {

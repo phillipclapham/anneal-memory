@@ -62,6 +62,34 @@ uncounted there.** Re-derive, do not trust this as an answer:
 mutation-checked in both directions. Record/comment/docstring-only fixes (items 4-8) added 0 tests
 by design.** New class `tests/test_audit.py::TestDiogenes20260909StillOpen`.
 
+### FIX-DIFF RE-PASS (codex L3, dispatched by the fan-in, 2026-09-13) — 2 REAL FINDINGS, BOTH FIXED
+
+codex reviewed the diff above (`--diff 304f242`, seats complement/codex/glm) and found two real
+gaps in item 1's own fix, plus a MED on item 1's test 3 fixture (already corrected above, in the
+test itself). complement and glm both returned clean.
+
+1. **FIXED — HIGH, `verify()`/`_seed_from_manifest`/`_load_manifest` (`audit.py:762`
+   pre-fix-diff).** A syntactically valid JSON manifest whose root isn't an object (`null`, a
+   list, a bare number) parsed fine under this window's new exception tuples and then crashed
+   with an uncaught `AttributeError` at the first `.get()`. Measured: `json.loads(b"null")` then
+   `.get(...)` raises. Added a shared `_parse_manifest_bytes()` helper used by all three readers,
+   validating `isinstance(manifest, dict)` and raising `TypeError` (now in all three catch
+   tuples) otherwise. 1 test, mutation-checked (drop the isinstance check → uncaught
+   `AttributeError`).
+2. **FIXED — MED, `_seed_from_manifest` (`audit.py:1020` pre-fix-diff).** This window's own fix
+   read the manifest as bytes and called `json.loads(bytes)` directly, on the premise (stated in
+   a comment) that this raises `UnicodeDecodeError` for invalid UTF-8. False: `json.loads(bytes)`
+   decodes via `surrogatepass`, which does NOT raise for a byte sequence that is invalid strict
+   UTF-8 but happens to be a valid lone-surrogate encoding — measured with
+   `b'{"active_last_hash":"\xed\xa0\x80",...}'` parsing to `'\ud800'` without raising.
+   `_parse_manifest_bytes()` now decodes strictly (`raw.decode("utf-8")`) before calling
+   `json.loads` on the resulting text, closing the gap for all three readers at once. 1 test,
+   mutation-checked (revert to `json.loads(raw)` on bytes → the corrupt anchor is silently
+   accepted instead of degrading to genesis).
+
+**Verification budget for the fix-diff: 2 tests, both mutation-checked. Full suite: `1909 passed`
+(was 1907), 0 failed. mypy clean. ruff: 63, unchanged.**
+
 ## ✅ CLOSED AFTER 2026-09-08 — READ THIS FIRST, IT IS WHAT THE NEXT SEAT ACTS ON
 
 ⛔ **CORRECTED 2026-09-13 (diogenes MEDIUM, filed 09-09, re-derived and closed).** The line below

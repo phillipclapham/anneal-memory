@@ -262,6 +262,46 @@ decode-and-type-validate) routed to Phill rather than fixed under this window's 
 first draft tested the wrong function). Full suite: `1927 passed` (was 1923), 0 failed. mypy
 clean. ruff: 63, unchanged.**
 
+### FIFTH RE-PASS (against `e62102f`, 2026-09-13) — 5 REAL, STRUCTURAL SHAPE PER FAN-IN
+
+Sixth round. The fan-in read codex's body directly and named the shape rather than letting this
+seat patch piecemeal again: two of codex's HIGHs were "the same class not converging" (a filename
+blacklist growing one entry at a time; a writer/reader schema disagreement), so the fix here is
+structural, not incremental.
+
+1. **FIXED — HIGH (complement), `verify()`'s manifest read still lacked `OSError`.** The exact
+   twin of `cmd_audit`'s round-4 fix, on the classmethod every "is this trail intact" check
+   (`verify()`, `--verify-audit`) depends on. Added to the tuple.
+2. **FIXED — HIGH (codex), the filename check was a growing blacklist, not a positive
+   requirement.** `""`, `"."`, `".."` closed three cases one at a time; codex named the general
+   one — any basename matching an EXISTING file that isn't a legitimate sealed audit file (a
+   subdirectory, a FIFO, or an unrelated regular file `is_file()` alone cannot distinguish from a
+   real one). Replaced the blacklist with `_SEALED_FILENAME_RE`, matching the shape
+   `_rotate_if_needed` is the only thing that generates. `verify()`'s and `cmd_audit`'s file checks
+   also changed `exists()` → `is_file()`, closing the subdirectory/FIFO case at the point of use
+   too, in case a future manifest source ever bypasses the regex.
+3. **FIXED — MED (codex), duplicate filenames in `"files"` were never rejected.** A manifest
+   listing the same sealed file twice made every reader walk it twice — doubled totals, a
+   duplicated hash-chain segment. Added a set-uniqueness check.
+4. **FIXED — HIGH (codex + fan-in), writer/reader schema mismatch.** `log()` enforced nothing at
+   runtime (`event: str` was a type hint, not a guard) while every reader now rejects the same
+   shape via `_require_entry_dict` — a caller passing a non-str `event` wrote a record that
+   recovery then treats as NOT A VALID ENTRY, resetting the chain to genesis and reusing `seq`.
+   Per the fan-in's recommended shape: `log()` now calls the SAME `_require_entry_dict` validator
+   before writing, so writer and reader cannot disagree by construction rather than by two checks
+   kept in sync by hand.
+5. **FIXED — MED (codex), a TOCTOU race in `cmd_audit`.** A concurrent rotation/retention cleanup
+   can remove a sealed or active file after the `is_file()` check but before (or during)
+   iteration — this command is read-only and meant to run against a store a live process may still
+   be writing to. Wrapped per-file iteration in `try/except OSError`; one vanished file now
+   degrades to an "incomplete" warning instead of crashing the command.
+
+**5 new tests, all mutation-checked in both directions (one fixture corrected mid-round: a
+subdirectory target was ALSO caught by the `is_file()` fix from item 2, so it didn't isolate the
+regex's marginal value — switched to an existing unrelated regular file, which `is_file()` alone
+cannot distinguish from a real sealed file). Full suite: `1932 passed` (was 1927), 0 failed. mypy
+clean. ruff: 63, unchanged.**
+
 ## ✅ CLOSED AFTER 2026-09-08 — READ THIS FIRST, IT IS WHAT THE NEXT SEAT ACTS ON
 
 ⛔ **CORRECTED 2026-09-13 (diogenes MEDIUM, filed 09-09, re-derived and closed).** The line below

@@ -1728,6 +1728,43 @@ class TestCmdAudit:
         captured = capsys.readouterr()
         assert "Audit trail:" in captured.out
 
+    def test_audit_survives_a_file_removed_mid_iteration(
+        self, base_args_with_data, capsys, monkeypatch
+    ):
+        """MED, codex, round 6 — a TOCTOU race: a concurrent rotation
+        or retention cleanup can remove a sealed/active file after the
+        ``is_file()``/``exists()`` check but before (or during)
+        iteration, since this is a read-only reporting command that can
+        run against a store a live process is still writing to. Wrapped
+        per-file so one vanished file degrades to "incomplete" instead
+        of crashing the command.
+
+        ⛔ MUTATION-CHECKED: remove the ``try/except OSError`` around
+        the per-file iteration in ``cmd_audit`` and this raises
+        ``FileNotFoundError`` instead of returning a result.
+        """
+        import anneal_memory.cli as cli_module
+
+        real_iter = cli_module._iter_audit_lines
+        calls = {"n": 0}
+
+        def dying_iter(path):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise FileNotFoundError(2, "No such file or directory")
+            return real_iter(path)
+
+        monkeypatch.setattr(cli_module, "_iter_audit_lines", dying_iter)
+
+        base_args_with_data.json = False
+        base_args_with_data.since = None
+        base_args_with_data.event = None
+        base_args_with_data.limit = 50
+        cli_module.cmd_audit(base_args_with_data)  # must NOT raise
+
+        captured = capsys.readouterr()
+        assert "incomplete" in captured.err.lower()
+
 
 # -- cmd_diff tests --
 

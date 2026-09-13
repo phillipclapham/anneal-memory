@@ -30,6 +30,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -42,6 +43,14 @@ GENESIS_HASH = "sha256:GENESIS"
 
 # Schema version for JSONL entries
 _ENTRY_VERSION = 1
+
+# A sealed audit file's name is always ``<stem>.audit.<ISO-week>.jsonl``,
+# optionally gzipped — generated only by ``_rotate_if_needed``. A manifest
+# ``"files"`` entry is structurally rejected if its filename doesn't match
+# this shape (codex, round 6: "archive", ".", "..", or any other basename
+# that happens to exist all passed the prior nonempty/no-separator check
+# and then crashed on ``open()``/``IsADirectoryError`` further down).
+_SEALED_FILENAME_RE = re.compile(r"^[^./\\][^/\\]*\.audit\.\d{4}-W\d{2}\.jsonl(\.gz)?$")
 
 
 def _fsync_dir(path: Path) -> None:
@@ -119,7 +128,15 @@ def _parse_manifest_bytes(raw: bytes) -> dict[str, Any]:
     fix incomplete: ``"."`` and ``".."`` are nonempty and contain no
     path separator, so both passed the check above and resolve to a
     directory the SAME way ``""`` did (``audit_dir / "."`` is
-    ``audit_dir`` itself). Rejected explicitly.
+    ``audit_dir`` itself). codex (round 6) found the general case one
+    blacklist entry could never close: ANY basename that happens to
+    exist and isn't a regular file (a subdirectory, a FIFO) passes a
+    nonempty/no-separator/not-dot check the same way. Replaced the
+    growing blacklist with a positive requirement: the filename must
+    match ``_SEALED_FILENAME_RE`` — the shape ``_rotate_if_needed`` is
+    the only thing that ever generates. codex also found a duplicated
+    filename entry passed every per-record check and made every reader
+    walk that file twice; rejected as a set-uniqueness check below.
 
     complement (L3, round 3) found a third: this function validated
     ``"files"``'s type ONLY IF THE KEY WAS PRESENT, never requiring it to
@@ -146,13 +163,17 @@ def _parse_manifest_bytes(raw: bytes) -> dict[str, Any]:
     if not isinstance(files, list) or not all(
         isinstance(f, dict)
         and isinstance(f.get("filename"), str)
-        and f["filename"]
-        and "/" not in f["filename"]
-        and "\\" not in f["filename"]
-        and f["filename"] not in (".", "..")
+        and _SEALED_FILENAME_RE.match(f["filename"])
         for f in files
     ):
         raise TypeError("manifest field 'files' is not a list of file records")
+    # codex, round 6: a duplicated filename (two records, same sealed
+    # file) passed every per-record check above and made every reader
+    # walk that file twice — doubled totals in cmd_audit, a duplicated
+    # hash-chain segment in verify().
+    names = [f["filename"] for f in files]
+    if len(names) != len(set(names)):
+        raise TypeError("manifest field 'files' contains a duplicate filename")
     manifest["files"] = files
     return manifest
 
@@ -346,6 +367,18 @@ class AuditTrail:
         }
         if data is not None:
             entry["data"] = data
+        # ⛔ WRITER AND READER MUST AGREE ON WHAT A VALID ENTRY IS (codex,
+        # round 6): every reader in this file now rejects an entry whose
+        # ``event``/``data``/``seq``/``ts``/``prev_hash`` has the wrong
+        # type, via ``_require_entry_dict``. Before this call, ``log()``
+        # itself enforced nothing at runtime (``event: str`` was a type
+        # hint, not a guard) — a caller passing e.g. a non-str ``event``
+        # wrote a record that recovery then treats as NOT A VALID ENTRY,
+        # silently resetting the chain to genesis and reusing ``seq``.
+        # Calling the SAME validator here, before the write, means writer
+        # and reader cannot disagree about what "valid" means by
+        # construction, not by keeping two checks in sync by hand.
+        _require_entry_dict(entry)
         # ⛔ A DROPPED ENTRY MUST BE A FACT IN THE CHAIN, NOT AN ABSENCE.
         # This class is write-first: chain state is updated only after fsync
         # returns, so a failed write leaves ``_prev_hash``/``_seq`` untouched
@@ -894,13 +927,27 @@ class AuditTrail:
                     chain_anchor = anchor
                 for f in manifest.get("files", []):
                     fpath = audit_dir / f["filename"]
-                    if fpath.exists():
+                    # is_file(), not exists() (codex, round 6): a filename
+                    # that resolves to a subdirectory (or a FIFO/device)
+                    # passes exists() and then crashes open() with
+                    # IsADirectoryError/OSError further down — "." and ".."
+                    # were the two guaranteed-to-exist cases closed at the
+                    # manifest-validation boundary; this closes the general
+                    # one (any non-regular-file target) at the point it's
+                    # actually used.
+                    if fpath.is_file():
                         files_to_verify.append(fpath)
                     else:
                         missing_files.append(f["filename"])
             except (
                 json.JSONDecodeError, UnicodeDecodeError, TypeError, KeyError,
+                OSError,
             ) as e:
+                # OSError added round 6 (complement): the twin of cmd_audit's
+                # round-4 fix — a real read failure (permission, I/O) on
+                # this manifest still tracebacked out of the CLASSMETHOD
+                # every "is this trail intact" check (`verify()`,
+                # `--verify-audit`) depends on, instead of reporting it.
                 return AuditVerifyResult(
                     valid=False, total_entries=0, files_verified=0,
                     error=f"Corrupt manifest: {e}",

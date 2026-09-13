@@ -1604,7 +1604,10 @@ def cmd_audit(args: argparse.Namespace) -> None:
             manifest = _parse_audit_manifest_bytes(manifest_path.read_bytes())
             for f in manifest.get("files", []):
                 fpath = audit_dir / f["filename"]
-                if fpath.exists():
+                # is_file(), not exists() (codex, round 6): a filename
+                # resolving to a subdirectory passes exists() and then
+                # crashes the reader further down.
+                if fpath.is_file():
                     files_to_read.append(fpath)
         except (json.JSONDecodeError, UnicodeDecodeError, TypeError, KeyError, OSError):
             # codex (L3, round 3): silently degrading to "active file
@@ -1640,29 +1643,47 @@ def cmd_audit(args: argparse.Namespace) -> None:
 
     # Read and filter entries
     entries: list[dict] = []
+    incomplete = False
     for fpath in files_to_read:
-        for line in _iter_audit_lines(fpath):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                # Decode strictly before parsing — ``json.loads(line)``
-                # on raw bytes decodes via ``surrogatepass`` and does
-                # not raise for a byte sequence that is invalid strict
-                # UTF-8 but happens to be a valid lone-surrogate
-                # encoding (complement L3, 2026-09-13, round 3 — same
-                # class as ``verify()``'s entry loop).
-                entry = _require_audit_entry_dict(json.loads(line.decode("utf-8")))
-            except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
-                continue
+        try:
+            # codex, round 6: a concurrent rotation or retention cleanup
+            # can remove a sealed or active file AFTER the is_file()/
+            # exists() check above but BEFORE (or during) this iteration
+            # — a TOCTOU race, since this is a read-only reporting
+            # command running against a store a live process may still
+            # be writing to. Wrapped per-file so one vanished file
+            # degrades to "incomplete", not a crash.
+            for line in _iter_audit_lines(fpath):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    # Decode strictly before parsing — ``json.loads(line)``
+                    # on raw bytes decodes via ``surrogatepass`` and does
+                    # not raise for a byte sequence that is invalid strict
+                    # UTF-8 but happens to be a valid lone-surrogate
+                    # encoding (complement L3, 2026-09-13, round 3 — same
+                    # class as ``verify()``'s entry loop).
+                    entry = _require_audit_entry_dict(json.loads(line.decode("utf-8")))
+                except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+                    continue
 
-            # Apply filters
-            if args.event and entry.get("event") != args.event:
-                continue
-            if since_ts and entry.get("ts", "") < since_ts:
-                continue
+                # Apply filters
+                if args.event and entry.get("event") != args.event:
+                    continue
+                if since_ts and entry.get("ts", "") < since_ts:
+                    continue
 
-            entries.append(entry)
+                entries.append(entry)
+        except OSError:
+            incomplete = True
+
+    if incomplete:
+        print(
+            "Warning: one or more audit files became unavailable while "
+            "reading; output may be incomplete.",
+            file=sys.stderr,
+        )
 
     # Apply limit (from the end — most recent)
     total = len(entries)

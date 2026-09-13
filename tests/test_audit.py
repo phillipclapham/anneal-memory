@@ -6471,3 +6471,185 @@ class TestFixDiffRound7OneFilenameLanguage:
             trail.log(123, {})  # type: ignore[arg-type]
 
         assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+
+class TestFixDiffRound9LoudNotSilent:
+    """glm + codex L3, round 9 (input_id b10cfdecea5fdd9d), 2026-09-13.
+    Round 8 made an unreadable orphan skippable so writes could continue,
+    and in doing so turned a loud failure into a SILENT gap: ``verify()``
+    returned valid=True over omitted history. And a readable file could
+    still block every write through a JSON parse error no tuple caught.
+    All reproduced before fixing.
+    """
+
+    HUGE = "1" * 5000  # past CPython's 4300-digit int-string limit
+
+    @staticmethod
+    def _failed_rotation(tmp_path, monkeypatch, segment=40):
+        """A rotation that crashed after the rename, before its manifest
+        update: the sealed segment exists as an orphan ``.jsonl`` and the
+        active file is gone."""
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("pre", {"i": i})
+        trail._last_week = "1999-W01"
+        trail.log("rot0", {})
+        for i in range(segment):
+            trail.log("seg", {"i": i, "pad": "x" * 200})
+        trail._last_week = "1999-W02"
+
+        def boom(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        with monkeypatch.context() as m:
+            m.setattr(audit_module.gzip, "open", boom)
+            with pytest.raises(OSError):
+                trail.log("during_failed_rotation", {})
+        orphan = tmp_path / "m.audit.1999-W02.jsonl"
+        assert orphan.exists() and not (tmp_path / "m.audit.jsonl").exists()
+        return db, orphan
+
+    def test_a_huge_integer_in_a_readable_orphan_does_not_block_writes(self, tmp_path):
+        """HIGH, glm. ``json.loads`` raises ``ValueError`` (not
+        ``JSONDecodeError``) past the int-string limit; adoption's tuple
+        missed it and every ``log()`` raised, measured 3 of 3.
+
+        ⛔ MUTATION-CHECKED: drop ``ValueError`` from ``_UNPARSEABLE_JSON``
+        and this raises ``ValueError``.
+        """
+        db = tmp_path / "m.db"
+        AuditTrail(db).log("first", {})
+        line = f'{{"v":1,"seq":{self.HUGE},"event":"x","prev_hash":"sha256:GENESIS"}}\n'
+        (tmp_path / "m.audit.1998-W52.jsonl.gz").write_bytes(gzip.compress(line.encode()))
+
+        reopened = AuditTrail(db)
+        reopened.log("after", {})  # must NOT raise
+        reopened.log("again", {})
+
+    def test_a_huge_integer_in_the_active_tail_does_not_block_writes(self, tmp_path):
+        """HIGH, glm. Same parse error through ``_read_last_valid_entry``
+        on reopen, and ``verify()`` raised it too.
+
+        ⛔ MUTATION-CHECKED: drop ``ValueError`` from ``_UNPARSEABLE_JSON``
+        and this raises ``ValueError``.
+        """
+        db = tmp_path / "m.db"
+        AuditTrail(db).log("first", {})
+        with open(tmp_path / "m.audit.jsonl", "ab") as f:
+            f.write(f'{{"v":1,"seq":{self.HUGE},"event":"x"}}\n'.encode())
+
+        AuditTrail(db).log("after", {})  # must NOT raise
+        result = AuditTrail.verify(db)  # must NOT raise
+        assert result.skipped_lines >= 1
+
+    def test_deeply_nested_json_in_the_active_tail_does_not_block_writes(self, tmp_path):
+        """HIGH. Deep nesting raises ``RecursionError``, which is not a
+        ``ValueError`` at all — measured to block ``log()`` the same way.
+
+        ⛔ MUTATION-CHECKED: drop ``RecursionError`` from
+        ``_UNPARSEABLE_JSON`` and this raises ``RecursionError``.
+        """
+        db = tmp_path / "m.db"
+        AuditTrail(db).log("first", {})
+        with open(tmp_path / "m.audit.jsonl", "ab") as f:
+            f.write(("[" * 200000 + "]" * 200000 + "\n").encode())
+
+        AuditTrail(db).log("after", {})  # must NOT raise
+
+    def test_a_huge_integer_in_the_manifest_is_a_corrupt_manifest_verdict(self, tmp_path):
+        """MED, codex round 8. ``verify()`` raised ``ValueError``.
+
+        ⛔ MUTATION-CHECKED: drop ``ValueError`` from ``_UNPARSEABLE_JSON``
+        and ``verify()`` raises instead of returning a result.
+        """
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        trail.log("first", {})
+        trail._manifest_path.write_text(f'{{"active_last_seq": {self.HUGE}}}', encoding="utf-8")
+
+        result = AuditTrail.verify(db)
+
+        assert result.valid is False
+        assert result.error is not None and "Corrupt manifest" in result.error
+
+    def test_a_corrupt_orphan_makes_verify_invalid_not_silently_valid(self, tmp_path, monkeypatch):
+        """HIGH, codex #1. A corrupt orphan was skipped, init seeded from the
+        stale manifest hash, and ``verify()`` returned valid=True over 5
+        entries while 41 were missing, measured.
+
+        ⛔ MUTATION-CHECKED: remove the unmanifested-sealed-file check from
+        ``verify()`` and this fails — valid is True.
+        """
+        db, orphan = self._failed_rotation(tmp_path, monkeypatch)
+        packed = gzip.compress(orphan.read_bytes())
+        corrupt = tmp_path / "m.audit.1999-W02.jsonl.gz"
+        corrupt.write_bytes(packed[: len(packed) // 2])
+        orphan.unlink()
+
+        reopened = AuditTrail(db)
+        reopened.log("after_reopen", {})  # writes continue (round 8)
+
+        result = AuditTrail.verify(db)
+        assert result.valid is False
+        assert result.error is not None and "Unmanifested sealed audit file" in result.error
+        assert corrupt.exists(), "a corrupt orphan must be left on disk, untouched"
+
+    def test_a_transient_read_error_during_adoption_propagates(self, tmp_path, monkeypatch):
+        """HIGH, codex #1. A one-off EIO during adoption was treated like
+        corruption: init seeded past the orphan, and when it became readable
+        a later open spliced it behind newer entries (valid=False), measured.
+
+        ⛔ MUTATION-CHECKED: skip every read error in adoption (not only
+        corruption) and this fails — the first log does not raise, and the
+        trail no longer verifies.
+        """
+        db, orphan = self._failed_rotation(tmp_path, monkeypatch, segment=5)
+        real_iter = audit_module._iter_lines
+        calls = {"n": 0}
+
+        def flaky(path):
+            if path.name == orphan.name and calls["n"] == 0:
+                calls["n"] += 1
+                raise OSError(5, "Input/output error")
+            return real_iter(path)
+
+        monkeypatch.setattr(audit_module, "_iter_lines", flaky)
+        reopened = AuditTrail(db)
+        with pytest.raises(OSError):
+            reopened.log("during_transient", {})
+
+        reopened.log("after_recovery", {})  # init retried and adopted
+        names = [f["filename"] for f in reopened._load_manifest()["files"]]
+        assert orphan.name in names
+        assert AuditTrail.verify(db).valid is True
+
+    def test_dedup_keeps_the_intact_jsonl_when_the_gz_is_corrupt(self, tmp_path):
+        """HIGH, codex #2. Dedup deleted the intact ``.jsonl`` before reading
+        a truncated ``.gz``, then the ``.gz`` was skipped: the only readable
+        copy was destroyed, measured.
+
+        ⛔ MUTATION-CHECKED: restore "prefer the .gz without reading it" in
+        dedup and this fails — the ``.jsonl`` is gone.
+        """
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(40):
+            trail.log("pre", {"i": i, "pad": "x" * 200})
+        trail._last_week = "1999-W01"
+        trail.log("rot", {})
+        sealed = tmp_path / "m.audit.1999-W01.jsonl.gz"
+        plain = tmp_path / "m.audit.1999-W01.jsonl"
+        plain.write_bytes(gzip.decompress(sealed.read_bytes()))
+        manifest = trail._load_manifest()
+        manifest["files"] = []
+        trail._save_manifest(manifest)
+        raw = sealed.read_bytes()
+        sealed.write_bytes(raw[: len(raw) // 2])
+
+        AuditTrail(db).log("after", {})
+
+        assert plain.exists(), "the only readable copy was deleted"
+        names = [f["filename"] for f in AuditTrail(db)._load_manifest()["files"]]
+        assert plain.name in names
+        assert sealed.exists(), "the corrupt copy must be left for the operator"

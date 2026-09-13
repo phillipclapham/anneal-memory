@@ -1796,6 +1796,27 @@ class TestCmdAudit:
         captured = capsys.readouterr()
         assert "incomplete" in captured.err.lower()
 
+    def test_audit_skips_an_entry_with_a_huge_integer(self, tmp_path, capsys):
+        """HIGH, glm, round 9 (input_id b10cfdecea5fdd9d). A >4300-digit
+        integer makes ``json.loads`` raise ``ValueError``, outside
+        ``cmd_audit``'s per-line tuple.
+
+        ⛔ MUTATION-CHECKED: drop ``ValueError`` from
+        ``audit._UNPARSEABLE_JSON`` and this raises ``ValueError``.
+        """
+        import argparse
+
+        from anneal_memory.audit import AuditTrail
+
+        db = tmp_path / "memory.db"
+        AuditTrail(db).log("first", {})
+        with open(tmp_path / "memory.audit.jsonl", "ab") as f:
+            f.write(('{"seq":' + "1" * 5000 + ',"event":"x"}\n').encode())
+
+        cmd_audit(argparse.Namespace(db=str(db), json=True, event=None, since=None, limit=50))
+
+        assert json.loads(capsys.readouterr().out)["total"] == 1
+
 
 # -- cmd_diff tests --
 

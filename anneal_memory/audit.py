@@ -1141,6 +1141,16 @@ class AuditTrail:
             files_to_verify.append(active_path)
 
         if not files_to_verify:
+            # ⛔ THE EMPTY-TRAIL VALID RETURN RE-CHECKS THE MANIFEST TOO (codex,
+            # L3 re-pass of round 10b, reproduced with a simulated empty
+            # listing): a listing that saw nothing while a first rotation
+            # landed returned valid=True with 0 entries. Every valid=True
+            # return goes through the signature check.
+            if _stat_signature(manifest_path) != manifest_signature:
+                return AuditVerifyResult(
+                    valid=False, total_entries=0, files_verified=0,
+                    error=f"The manifest changed during verification{_RERUN_HINT}",
+                )
             return AuditVerifyResult(valid=True, total_entries=0, files_verified=0)
 
         if missing_files:

@@ -7347,3 +7347,37 @@ class TestRound10bL3Fixes:
 
         assert (tmp_path / "m.audit.2099-W05.jsonl.gz").exists()
         assert AuditTrail.verify(db).valid is True
+
+    def test_an_empty_listing_during_a_first_rotation_is_not_a_valid_verdict(
+        self, tmp_path, monkeypatch
+    ):
+        """codex, L3 re-pass of round 10b (input 83b3b563fba06d97), reproduced
+        with a SIMULATED listing: the pass is handed an empty listing, standing
+        in for a directory enumeration that missed every name while a first
+        rotation landed. The empty-trail return skipped the signature check and
+        called the trail valid with 0 entries while the sealed week held 3.
+
+        ⛔ MUTATION-CHECKED: drop the signature check before the empty-trail
+        return and this fails with total_entries == 0.
+        """
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("pre", {"i": i})
+        real = AuditTrail.__dict__["_verify_listed"].__func__
+        fired: list[bool] = []
+
+        def racing(cls, db_path, names, manifest_signature):
+            if not fired:
+                fired.append(True)
+                trail._last_week = "1999-W01"
+                trail.log("rot", {})
+                (tmp_path / "m.audit.jsonl").write_bytes(b"")
+                names = set()
+            return real(cls, db_path, names, manifest_signature)
+
+        monkeypatch.setattr(AuditTrail, "_verify_listed", classmethod(racing))
+        result = AuditTrail.verify(db)
+
+        assert fired
+        assert result.valid is True and result.total_entries == 3, result

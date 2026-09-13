@@ -1559,6 +1559,72 @@ class TestCmdAudit:
         # All entries should be recent
         assert data["total"] > 0
 
+    def test_audit_survives_a_wrong_shaped_manifest(
+        self, base_args_with_data, capsys
+    ):
+        """A FOURTH manifest reader, missed by three prior fix rounds
+        (complement L3, 2026-09-13, round 3) — ``cmd_audit`` parsed the
+        manifest with ``json.loads(read_text(...))`` and caught only
+        ``(JSONDecodeError, KeyError)``, so the same non-object-root and
+        wrong-field-type shapes that crashed ``verify()`` crashed this
+        command too. Now routed through the shared
+        ``_parse_manifest_bytes`` validator.
+
+        ⛔ MUTATION-CHECKED: revert to
+        ``json.loads(manifest_path.read_text(encoding="utf-8"))`` /
+        ``except (json.JSONDecodeError, KeyError)`` and this raises
+        ``TypeError`` instead of falling back to the active file alone.
+        """
+        db_path = Path(base_args_with_data.db)
+        manifest_path = db_path.parent / f"{db_path.stem}.audit.manifest.json"
+        manifest_path.write_text('{"files": null}', encoding="utf-8")
+
+        base_args_with_data.json = True
+        base_args_with_data.since = None
+        base_args_with_data.event = None
+        base_args_with_data.limit = 50
+        cmd_audit(base_args_with_data)  # must NOT raise
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["total"] > 0, (
+            "a corrupt manifest should degrade to the active file alone, "
+            "not lose all entries"
+        )
+
+    def test_audit_skips_a_non_object_entry_line(
+        self, base_args_with_data, capsys
+    ):
+        """HIGH, complement L3, round 3. ``cmd_audit``'s entry loop
+        never checked the parsed line was an object before ``.get()``.
+        With ``--event``/``--since`` set the missing check crashes on
+        ``entry.get(...)`` with an uncaught ``AttributeError``; with
+        neither set (this test's shape, measured directly against the
+        pre-fix code) the malformed line instead flows straight into
+        the output untouched — a bare list where every other entry is a
+        dict. Both are real; this test pins the second, which the fix
+        also closes as a side effect of the same guard.
+
+        ⛔ MUTATION-CHECKED: revert to
+        ``entry = json.loads(line)`` (bytes, no decode, no
+        ``_require_audit_entry_dict``) and this fails — the malformed
+        line appears in ``data["entries"]`` as a bare list instead of
+        being skipped.
+        """
+        db_path = Path(base_args_with_data.db)
+        active_path = db_path.parent / f"{db_path.stem}.audit.jsonl"
+        active_path.write_bytes(active_path.read_bytes() + b"[1, 2, 3]\n")
+
+        base_args_with_data.json = True
+        base_args_with_data.since = None
+        base_args_with_data.event = None
+        base_args_with_data.limit = 50
+        cmd_audit(base_args_with_data)  # must NOT raise
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert all(isinstance(e, dict) for e in data["entries"])
+
 
 # -- cmd_diff tests --
 

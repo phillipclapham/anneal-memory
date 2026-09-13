@@ -51,7 +51,12 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .audit import AuditTrail, _iter_lines as _iter_audit_lines
+from .audit import (
+    AuditTrail,
+    _iter_lines as _iter_audit_lines,
+    _parse_manifest_bytes as _parse_audit_manifest_bytes,
+    _require_entry_dict as _require_audit_entry_dict,
+)
 from .continuity import (
     _matching_required_headings,
     format_wrap_package_text,
@@ -1591,12 +1596,17 @@ def cmd_audit(args: argparse.Namespace) -> None:
     files_to_read: list[Path] = []
     if manifest_path.exists():
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            # A FOURTH manifest reader, missed by all three prior fix
+            # rounds (complement L3, 2026-09-13, round 3) — same class
+            # as ``verify()``/``_seed_from_manifest``/``_load_manifest``:
+            # a torn multibyte or wrong-shaped manifest tracebacked out
+            # of this command instead of degrading to "no files."
+            manifest = _parse_audit_manifest_bytes(manifest_path.read_bytes())
             for f in manifest.get("files", []):
                 fpath = audit_dir / f["filename"]
                 if fpath.exists():
                     files_to_read.append(fpath)
-        except (json.JSONDecodeError, KeyError):
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError, KeyError):
             pass
     if active_path.exists():
         files_to_read.append(active_path)
@@ -1619,8 +1629,14 @@ def cmd_audit(args: argparse.Namespace) -> None:
             if not line:
                 continue
             try:
-                entry = json.loads(line)
-            except (json.JSONDecodeError, UnicodeDecodeError):
+                # Decode strictly before parsing — ``json.loads(line)``
+                # on raw bytes decodes via ``surrogatepass`` and does
+                # not raise for a byte sequence that is invalid strict
+                # UTF-8 but happens to be a valid lone-surrogate
+                # encoding (complement L3, 2026-09-13, round 3 — same
+                # class as ``verify()``'s entry loop).
+                entry = _require_audit_entry_dict(json.loads(line.decode("utf-8")))
+            except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
                 continue
 
             # Apply filters

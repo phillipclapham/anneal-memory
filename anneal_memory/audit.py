@@ -123,6 +123,20 @@ def _parse_manifest_bytes(raw: bytes) -> dict[str, Any]:
     return manifest
 
 
+def _require_entry_dict(entry: Any) -> dict[str, Any]:
+    """An audit-entry JSONL line that parses to anything but an object
+    (a bare list, string, or number) is exactly as corrupt as one that
+    fails to parse at all — every one of this file's four entry-line
+    readers immediately calls ``.get()`` on the result, uncaught by any
+    of them (same class as ``_parse_manifest_bytes``'s root check,
+    swept to every entry-line call site: complement/codex L3,
+    2026-09-13, round 3).
+    """
+    if not isinstance(entry, dict):
+        raise TypeError(f"entry line root is {type(entry).__name__}, not an object")
+    return entry
+
+
 @dataclass
 class AuditVerifyResult:
     """Result of verifying a hash chain."""
@@ -879,8 +893,8 @@ class AuditTrail:
                     # decode AFTER json.loads and OUTSIDE this try, so that
                     # shape raised ``UnicodeDecodeError`` uncaught).
                     line = line.decode("utf-8")
-                    entry = json.loads(line)
-                except (json.JSONDecodeError, UnicodeDecodeError):
+                    entry = _require_entry_dict(json.loads(line))
+                except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
                     # A torn multibyte tail (diogenes, 2026-09-08) is the
                     # same "not a complete entry" shape as malformed JSON —
                     # ``_iter_lines`` now yields raw bytes so this is the
@@ -1184,8 +1198,8 @@ class AuditTrail:
                     continue
                 try:
                     stripped_str = stripped.decode("utf-8")
-                    e = json.loads(stripped_str)
-                except (json.JSONDecodeError, UnicodeDecodeError):
+                    e = _require_entry_dict(json.loads(stripped_str))
+                except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
                     continue  # Torn or malformed — skip, same shape either way
                 ts = e.get("ts", "")
                 if not first_ts:
@@ -1296,12 +1310,14 @@ class AuditTrail:
                         # ``line.decode("utf-8")`` outside this try raised
                         # ``UnicodeDecodeError`` uncaught for a torn tail
                         # inside the sealed file the rotation is writing).
-                        e = json.loads(line.decode("utf-8").strip())
+                        e = _require_entry_dict(
+                            json.loads(line.decode("utf-8").strip())
+                        )
                         ts = e.get("ts", "")
                         if not first_ts:
                             first_ts = ts
                         last_ts = ts
-                    except (json.JSONDecodeError, UnicodeDecodeError):
+                    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
                         pass
 
         # Atomic rename — .gz is either complete or doesn't exist
@@ -1491,10 +1507,10 @@ def _read_last_valid_entry(path: Path) -> str:
             if not stripped:
                 continue
             try:
-                json.loads(stripped)
+                _require_entry_dict(json.loads(stripped))
                 last_valid = stripped
-            except json.JSONDecodeError:
-                pass  # Partial write — skip
+            except (json.JSONDecodeError, TypeError):
+                pass  # Partial write, or valid JSON that isn't an entry — skip
     return last_valid
 
 
@@ -1505,12 +1521,17 @@ def _iter_lines(path: Path):
     text mode, which decodes while splitting lines — so a torn multibyte
     character anywhere in the file raised ``UnicodeDecodeError`` straight
     out of the generator, past every caller's ``except json.JSONDecodeError``,
-    including out of ``verify()`` and the CLI. Yielding raw bytes defers
-    decoding to ``json.loads`` at each call site, which raises
-    ``UnicodeDecodeError`` on a bad line the same way it raises
-    ``JSONDecodeError`` on a malformed one — so a caller that already
-    catches both treats a torn line as what it is: one skipped line, not a
-    dead generator.
+    including out of ``verify()`` and the CLI. Yielding raw bytes lets each
+    call site decode strictly ITSELF before parsing, so a torn line raises
+    ``UnicodeDecodeError`` at a point the caller's own try/except covers.
+    ⚠ CORRECTED 2026-09-13 (complement L3): this docstring used to say
+    decoding was deferred "to ``json.loads``," which raises
+    ``UnicodeDecodeError`` the same way it raises ``JSONDecodeError`` —
+    false. ``json.loads(bytes)`` decodes via ``surrogatepass`` and does
+    NOT raise for a byte sequence that is invalid strict UTF-8 but happens
+    to be a valid lone-surrogate encoding; every call site now decodes
+    with ``bytes.decode("utf-8")`` (strict) BEFORE calling ``json.loads``
+    on the resulting text, inside the same try.
     """
     if path.name.endswith(".gz"):
         with gzip.open(path, "rb") as f:

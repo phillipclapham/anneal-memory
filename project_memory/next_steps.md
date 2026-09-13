@@ -23,6 +23,102 @@
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
 
+## ▶▶ PICKUP — READ FIRST (seat `0913+29` rotated 2026-09-13 ~15:40 at a context seam). EVERY STATE LINE IS A COMMAND.
+
+**Re-derive, do not trust:**
+- main: `git rev-parse --short HEAD` vs `git ls-remote origin refs/heads/main`; tree `git status --short`
+- hybrid branch: `git ls-remote origin refs/heads/audit-hybrid`; `git log --oneline main..audit-hybrid`
+- suite `.venv/bin/python3 -m pytest -q` · mypy `.venv/bin/python3 -m mypy anneal_memory` · ruff baseline 63
+- today's rounds: the SIXTH..NINTH RE-PASS sections below; review rows by input_id in `~/Briefcase/flow/state/verdicts.jsonl`
+
+### ⛔⛔ DUTY AT ~19:45 EDT TONIGHT (2026-09-13) — OWED TO THE FAN-IN DESK BEFORE 20:00
+Flow's venv installs this repo EDITABLE, so main's WORKING TREE is flow's live memory code, and flow's real trail
+(`~/.anneal-memory/memory.audit.*`) rotates W37→W38 on its first write after 20:00 EDT (Mon 00:00 UTC).
+1. The tree must be committed and clean; never mid-edit across 19:30–20:15.
+2. `cp -p ~/.anneal-memory/memory.audit.* <scratch>/preflight_real/` — a COPY; never touch the real trail.
+3. From the repo root, `PYTHONPATH=$PWD .venv/bin/python3` a script that asserts `anneal_memory.audit.__file__` is under
+   this repo, patches `_iso_week_now` to return `"2026-W38"`, opens `AuditTrail(<copy>/memory.db)`, logs once, and prints
+   manifest record count, sealed file count and `AuditTrail.verify()` before and after.
+   Receipts 2026-09-13: at `9cd52cd` and at `4d00ca7`, 15→16 records, 15→16 sealed, verify valid=True, old records kept.
+4. Delete the copy. SendMessage the desk: HEAD sha, records before→after, verify valid.
+5. If it fails or the tree cannot be committed cleanly: tell the desk BEFORE 20:00 and check out the last pre-flighted
+   commit (`4d00ca7`, else `9cd52cd`) in this tree until EOD. No unproven HEAD live across 20:00.
+
+### ⛔ ROUND 10 — OPEN ON MAIN. Review `110815bd496759e4` against `4d00ca7`: CLOSE CRITERION NOT MET
+glm thin (via retry, 709s, 1 file opened, no findings). All reproduced [run] on `4d00ca7` unless marked.
+1. **HIGH (complement) — `verify()` during a HEALTHY rotation reports a false invalid.** Paused inside `_save_manifest`,
+   a verify read "Unmanifested sealed audit file(s)… W02"; at `9cd52cd` the same moment was a silent valid over 5 of 12
+   entries. The window is the whole gzip, because the uncompressed sealed `.jsonl` matches `_is_sealed_filename`.
+   **Designed fix (agreed with the desk):** `_verify_once` returns (result, unmanifested names) and `verify()` wraps it.
+   Always one re-check after `_ROTATION_POLL_SECONDS` (0.1). Keep polling while an in-flight marker exists (a `.jsonl`
+   with its `.jsonl.gz.tmp`, a `.jsonl` with no `.gz`, a `.gz` whose `.jsonl` still exists), capped at
+   `_ROTATION_SETTLE_MAX_SECONDS` (5). Still unmanifested → invalid, and the error adds "if a rotation was in progress,
+   re-run verify". Tests: gzip open paused 0.4s → valid; a lone corrupt `.gz` orphan → invalid in under ~1s; a mutant
+   with a single fixed re-check fails the first test. The real fix (a lock or generation stamp) stays routed B.
+2. **HIGH (complement) — a permanently unreadable non-gzip orphan blocks every write again.** A `chmod 000` orphan
+   `.jsonl` made `log()` raise `PermissionError` 3 of 3, because round 9 infers "transient" from "not gzip-shaped".
+   Direction: a bounded per-instance retry count, then skip; round 9's unmanifested check keeps the skip loud.
+3. **HIGH (codex #1) — a crash between `_save_manifest` and the duplicate's unlink.** The next open adopted the leftover
+   `.jsonl` as a second segment; the manifest listed both `.gz` and `.jsonl` for one week, and verify reported a hash
+   mismatch at seq 0.
+4. **HIGH (codex #2, #3) [reasoned, not run] — dedup authorizes deletion on gzip readability, not on content
+   equivalence, and on a first read that adoption does not repeat.**
+   ▶ **STRUCTURAL FIX FOR 3 AND 4, ADOPTED WITH THE DESK: RECOVERY NEVER DELETES AUDIT FILES.** Rounds 7, 8 and 9
+   each lost data in a recovery path that deletes. Adopt one copy and rename the other aside to `.dup-<UTC stamp>`, a
+   name outside `_is_sealed_filename`, so it is neither re-adopted nor reported unmanifested. Adoption treats a
+   manifest-known `.gz` plus a leftover counterpart as unfinished and renames the counterpart aside. Removal happens
+   only through an explicit repair command, the same principle as Phill's hybrid.
+5. **HIGH (codex #5) — `verify()` on an audit directory without search permission.** It raised an uncaught
+   `PermissionError` from `manifest_path.exists()` (codex predicted valid=True; the run gave a traceback). Fix: stat or
+   iterdir explicitly; `FileNotFoundError` means no trail, and any other `OSError` means valid=False.
+6. codex #4 (snapshot atomicity between the directory scan and the rotation) → routed item B, unchanged.
+
+### ▶ HYBRID MANIFEST QUARANTINE — RULED BY PHILL 2026-09-13, BUILDING ON BRANCH `audit-hybrid` (merge AFTER round 10)
+**Rulings (via desk `0913+31`):**
+- Quarantine inside `_load_manifest`: an invalid manifest is renamed `<stem>.audit.manifest.json.corrupt-<UTC stamp>`
+  and never overwritten, and the marker on disk is what every later process sees.
+- Appending continues. With an empty active file, seed from the newest sealed file's last entry; refuse if none is
+  readable.
+- Rotation, orphan adoption and retention pause while quarantined. A transient manifest read error neither quarantines
+  nor overwrites.
+- `verify()` reports quarantine as valid=False. Rebuild ONLY via an explicit repair command, which never recomputes
+  `sha256_file`.
+- A recovered `chain_anchor` → additive `AuditVerifyResult.anchor_trusted=False`, with `valid` staying about the linked
+  chain. ⛔ Phill's condition: `anchor_trusted` must ALSO appear in `anneal-memory verify --json`, the CLI human summary
+  line, `server.py --verify-audit`'s summary and `anneal-memory audit --json`, each with a test.
+- No release until it is merged and reviewed.
+
+**The worktree was in job scratch and is gone.** Recreate it OUTSIDE the repo root, because repo-read review seats can
+reach anything under it: `git worktree add <scratch>/anneal-hybrid audit-hybrid`. Test there with
+`PYTHONPATH=<worktree>` and assert `anneal_memory.audit.__file__` points into the worktree (spore-845). Commit and push
+the branch at every green step. Rebase onto round 10 before continuing: both touch adoption and `verify()`.
+
+**Built on the branch** (existing suite green there at the last push, with three tests re-pinned from "degrade to
+genesis" to quarantine-and-refuse): `_quarantine_markers`, `_ManifestUnavailable` / `_ManifestQuarantined`, the
+`_load_manifest` gate + `_quarantine_manifest`, writers skipping while unavailable (adoption on quarantine, rotation
+loading BEFORE the rename, cleanup), `_seed_from_manifest` → `_seed_from_sealed_tail` or refuse, `verify()` quarantine
+check + `anchor_trusted` on the chain returns, `AuditRepairResult` + `AuditTrail.repair_manifest()` (period order,
+hash-chain check, refuse on a gap, `sha256_file` left "", `chain_anchor_recovered`, markers renamed `.repaired` only
+after the save), `_scan_sealed`, `_last_valid_sealed_line`, bool validation of `chain_anchor_recovered`.
+
+**Not built (checklist):**
+1. Dedicated tests:
+   - quarantine on an invalid manifest (the marker holds the original bytes, no manifest recreated, appends continue,
+     verify reports quarantine)
+   - rotation refused and cleanup skipped while quarantined
+   - seed from the sealed tail; refuse when there is no tail
+   - a transient manifest read error leaves no marker and overwrites nothing
+   - repair rebuilds in order with `sha256_file` "" and releases the markers
+   - repair on a retention-cleaned trail gives `anchor_trusted=False`
+   - repair refuses a corrupt week, a non-chaining pair, and a valid manifest
+2. The CLI `anneal-memory audit-repair` (+ `--json`), exiting 1 on refusal.
+3. `anchor_trusted` on the four output paths above, plus a `cmd_audit` warning while quarantined (today it would show
+   the active file only, silently, because the quarantined manifest file is gone).
+4. Export `AuditRepairResult` from `__init__.py`; a README line under `anneal-memory audit --since 7d`; CHANGELOG.
+5. A mutant for each guard; an L3 review of the branch diff; merge to main only after that, and never across 19:30–20:15.
+⚠ State in review, unruled: an ABSENT manifest (no marker) still takes the old path (fresh manifest + automatic orphan
+adoption). The ruling covers an invalid manifest.
+
 ## ✅ CLOSED 2026-09-13 (seat `0913+22`) — ALL 9 `diogenes_20260909.md` STILL-OPEN ITEMS
 DISPOSITIONED @ HEAD `304f242` (no code changed `43cea97..304f242`; `git diff --stat` empty).
 **READ THIS FIRST, IT SUPERSEDES the 09-08 block below for the two items it names as still

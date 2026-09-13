@@ -1752,8 +1752,8 @@ class AuditTrail:
         # quarantine.
         try:
             manifest = self._load_manifest()
-        except _ManifestQuarantined as e:
-            logger.warning("Not adopting orphaned audit files: %s", e)
+        except _ManifestQuarantined as exc:
+            logger.warning("Not adopting orphaned audit files: %s", exc)
             return
         try:
             names = sorted(p.name for p in audit_dir.iterdir())
@@ -2015,9 +2015,9 @@ class AuditTrail:
         # not read.
         try:
             manifest = self._load_manifest()
-        except _ManifestUnavailable as e:
+        except _ManifestUnavailable as exc:
             if not self._rotation_refusal_logged:
-                logger.warning("Not rotating the audit trail: %s", e)
+                logger.warning("Not rotating the audit trail: %s", exc)
                 self._rotation_refusal_logged = True
             return
 

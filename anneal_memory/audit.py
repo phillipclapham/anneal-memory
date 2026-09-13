@@ -103,6 +103,41 @@ def _is_sealed_filename(name: str, stem: str) -> bool:
     return re.fullmatch(re.escape(stem) + _SEALED_SUFFIX_PATTERN, name) is not None
 
 
+def _sealed_period(name: str, stem: str) -> str:
+    """The ISO-week label of a sealed filename (``2026-W37``); sorts in time order."""
+    return name[len(f"{stem}.audit."):].removesuffix(".gz").removesuffix(".jsonl")
+
+
+# ⛔ QUARANTINE IS A FILE ON DISK, NOT A FLAG IN MEMORY (hybrid, ruled by Phill
+# 2026-09-13). An invalid manifest is renamed to
+# ``<stem>.audit.manifest.json.corrupt-<UTC stamp>`` and never overwritten.
+# Every later process must see that, including one that finds no manifest at
+# all — otherwise the rename would read as "absent" and the next writer would
+# rebuild a fresh manifest automatically, which is exactly the history loss the
+# hybrid exists to stop. ``anneal-memory audit-repair`` is the only way out; it
+# renames markers to ``...corrupt-<stamp>.repaired``, which this no longer matches.
+_QUARANTINE_SUFFIX_PATTERN = r"\.corrupt-\d{8}T\d{12}Z"
+
+
+def _quarantine_markers(audit_dir: Path, stem: str) -> list[str]:
+    """Unresolved quarantined manifests for ``stem``, oldest first."""
+    pattern = re.escape(f"{stem}.audit.manifest.json") + _QUARANTINE_SUFFIX_PATTERN
+    try:
+        return sorted(p.name for p in audit_dir.iterdir() if re.fullmatch(pattern, p.name))
+    except FileNotFoundError:
+        return []
+
+
+class _ManifestUnavailable(OSError):
+    """The manifest cannot be used right now. Writers that need it skip their
+    step; appending to the active file does not need it. A plain instance is
+    transient (a read error) and callers retry; see ``_ManifestQuarantined``."""
+
+
+class _ManifestQuarantined(_ManifestUnavailable):
+    """The manifest was invalid and is quarantined; only audit-repair clears it."""
+
+
 def _fsync_dir(path: Path) -> None:
     """Best-effort directory fsync after an atomic rename/replace.
 
@@ -225,6 +260,10 @@ def _parse_manifest_bytes(raw: bytes, stem: str) -> dict[str, Any]:
     names = [f["filename"] for f in files]
     if len(names) != len(set(names)):
         raise TypeError("manifest field 'files' contains a duplicate filename")
+    if "chain_anchor_recovered" in manifest and not isinstance(
+        manifest["chain_anchor_recovered"], bool
+    ):
+        raise TypeError("manifest field 'chain_anchor_recovered' is not a boolean")
     manifest["files"] = files
     return manifest
 
@@ -281,6 +320,26 @@ class AuditVerifyResult:
     chain_break_at: int | None = None  # seq number where chain broke
     chain_break_file: str | None = None  # file where break occurred
     skipped_lines: int = 0  # malformed JSON lines skipped during verification
+    error: str | None = None
+    # False when the chain's starting anchor was RECOVERED by audit-repair
+    # rather than recorded by retention cleanup. ``valid`` then speaks only for
+    # the linked chain from that anchor on: whatever preceded it (entries
+    # removed by retention, or a truncated front) cannot be verified. Ruled by
+    # Phill 2026-09-13: reported alongside ``valid``, never folded into it.
+    anchor_trusted: bool = True
+
+
+@dataclass
+class AuditRepairResult:
+    """Result of :meth:`AuditTrail.repair_manifest`."""
+
+    repaired: bool
+    files: list[str] = field(default_factory=list)
+    chain_anchor_recovered: bool = False
+    # Sealed files left on disk that the rebuilt manifest does not list (a
+    # duplicate copy of a week already covered). Nothing is deleted; verify()
+    # reports them until the operator removes them.
+    untracked: list[str] = field(default_factory=list)
     error: str | None = None
 
 
@@ -1069,6 +1128,17 @@ class AuditTrail:
         files_to_verify: list[Path] = []
         chain_anchor = GENESIS_HASH
         missing_files: list[str] = []
+        anchor_trusted = True
+
+        markers = _quarantine_markers(audit_dir, stem)
+        if markers:
+            return AuditVerifyResult(
+                valid=False, total_entries=0, files_verified=0,
+                error=(
+                    f"Manifest quarantined ({markers[-1]}): sealed history is "
+                    "not covered until `anneal-memory audit-repair` rebuilds it"
+                ),
+            )
 
         # ⛔ THE MANIFEST'S SIGNATURE, TAKEN BEFORE THE LISTING, IS CHECKED AGAIN
         # BEFORE THE PASS IS CALLED VALID (L2, round 10, reproduced). A whole
@@ -1084,6 +1154,7 @@ class AuditTrail:
                 anchor = manifest.get("chain_anchor", "")
                 if anchor:
                     chain_anchor = anchor
+                anchor_trusted = manifest.get("chain_anchor_recovered") is not True
                 for f in manifest.get("files", []):
                     fpath = audit_dir / f["filename"]
                     # is_file(), not exists() (codex, round 6): a filename
@@ -1257,6 +1328,7 @@ class AuditTrail:
                         skipped_lines=skipped,
                         chain_break_at=entry.get("seq", total_entries),
                         chain_break_file=fpath.name,
+                        anchor_trusted=anchor_trusted,
                         error=f"Hash mismatch at seq {entry.get('seq')}: "
                               f"expected {expected_hash[:20]}..., "
                               f"got {actual_prev[:20]}...",
@@ -1275,6 +1347,7 @@ class AuditTrail:
                         skipped_lines=skipped,
                         chain_break_at=actual_seq,
                         chain_break_file=fpath.name,
+                        anchor_trusted=anchor_trusted,
                         error=f"Duplicated or non-increasing seq {actual_seq} "
                               f"after seq {last_seq}: prev_hash linked "
                               "cleanly but the entry did not advance the "
@@ -1300,6 +1373,7 @@ class AuditTrail:
                     files_verified=files_verified,
                     skipped_lines=skipped,
                     chain_break_file=fpath.name,
+                    anchor_trusted=anchor_trusted,
                     error=(
                         f"Unreadable audit file {fpath.name}: {read_error[0]}"
                         f"{_RERUN_HINT if vanished else ''}"
@@ -1321,6 +1395,131 @@ class AuditTrail:
             total_entries=total_entries,
             files_verified=files_verified,
             skipped_lines=skipped,
+            anchor_trusted=anchor_trusted,
+        )
+
+    @classmethod
+    def repair_manifest(cls, db_path: str | Path) -> AuditRepairResult:
+        """Rebuild a quarantined (or missing) manifest from the sealed files on disk.
+
+        The ONLY way out of quarantine (hybrid, ruled by Phill 2026-09-13).
+        Operator-run: do not run it while another process is writing the trail.
+
+        Refuses, writing nothing, when a sealed week is unreadable or empty, or
+        when consecutive sealed files do not hash-chain — it never guesses
+        across a gap. ``sha256_file`` is left empty rather than recomputed,
+        because a checksum of the bytes now on disk would bless whatever
+        changed. If the first sealed file does not start at genesis, its
+        starting hash is recorded as ``chain_anchor`` together with
+        ``chain_anchor_recovered: true``, and :meth:`verify` then reports
+        ``anchor_trusted=False``.
+        """
+        db_path = Path(db_path)
+        stem = db_path.stem
+        audit_dir = db_path.parent
+        trail = cls(db_path)
+        markers = _quarantine_markers(audit_dir, stem)
+
+        if not markers and trail._manifest_path.exists():
+            try:
+                trail._load_manifest()
+            except _ManifestQuarantined:
+                markers = _quarantine_markers(audit_dir, stem)  # quarantined just now
+            except _ManifestUnavailable as e:
+                return AuditRepairResult(repaired=False, error=str(e))
+            else:
+                return AuditRepairResult(
+                    repaired=False, error="The manifest is valid; there is nothing to repair."
+                )
+
+        try:
+            by_period: dict[str, list[Path]] = {}
+            for p in audit_dir.iterdir():
+                if _is_sealed_filename(p.name, stem):
+                    by_period.setdefault(_sealed_period(p.name, stem), []).append(p)
+
+            records: list[dict[str, Any]] = []
+            untracked: list[str] = []
+            for period in sorted(by_period):
+                chosen: tuple[Path, dict[str, Any]] | None = None
+                for path in sorted(by_period[period], key=lambda q: not q.name.endswith(".gz")):
+                    info = _sealed_record(path)
+                    if chosen is None and info is not None and info["entries"] > 0:
+                        chosen = (path, info)
+                    elif chosen is not None:
+                        untracked.append(path.name)
+                if chosen is None:
+                    names = sorted(q.name for q in by_period[period])
+                    return AuditRepairResult(
+                        repaired=False,
+                        error=(
+                            f"No readable entry in the sealed file(s) for {period} "
+                            f"({names}); nothing was written."
+                        ),
+                    )
+                path, info = chosen
+                records.append({"path": path, "period": period, **info})
+        except OSError as e:
+            return AuditRepairResult(
+                repaired=False, error=f"Could not read the sealed files: {e}; nothing was written."
+            )
+
+        for prev, cur in zip(records, records[1:]):
+            if cur["first_prev_hash"] != prev["last_hash"]:
+                return AuditRepairResult(
+                    repaired=False,
+                    error=(
+                        f"{cur['path'].name} does not chain from {prev['path'].name}; "
+                        "nothing was written."
+                    ),
+                )
+
+        manifest: dict[str, Any] = {
+            "version": 1,
+            "db_path": db_path.name,
+            "active_file": trail._active_path.name,
+            "active_last_hash": records[-1]["last_hash"] if records else GENESIS_HASH,
+            "active_last_seq": 0,
+            "files": [
+                {
+                    "filename": r["path"].name,
+                    "period": r["period"],
+                    "entries": r["entries"],
+                    "first_ts": r["first_ts"],
+                    "last_ts": r["last_ts"],
+                    "last_hash": r["last_hash"],
+                    "sha256_file": "",  # never recomputed: see docstring
+                }
+                for r in records
+            ],
+        }
+        recovered = bool(records) and records[0]["first_prev_hash"] != GENESIS_HASH
+        if recovered:
+            manifest["chain_anchor"] = records[0]["first_prev_hash"]
+            manifest["chain_anchor_recovered"] = True
+        trail._save_manifest(manifest)
+
+        # Markers are released only AFTER the rebuilt manifest is durable: a
+        # crash in between leaves the trail quarantined, and repair re-runs.
+        for marker in markers:
+            src = audit_dir / marker
+            try:
+                src.rename(src.with_name(f"{marker}.repaired"))
+            except OSError as e:
+                return AuditRepairResult(
+                    repaired=False,
+                    files=[r["path"].name for r in records],
+                    chain_anchor_recovered=recovered,
+                    untracked=untracked,
+                    error=f"Manifest rebuilt, but quarantine marker {marker} could not be released: {e}",
+                )
+        _fsync_dir(audit_dir)
+
+        return AuditRepairResult(
+            repaired=True,
+            files=[r["path"].name for r in records],
+            chain_anchor_recovered=recovered,
+            untracked=untracked,
         )
 
     # -- Internal --
@@ -1440,38 +1639,58 @@ class AuditTrail:
         the same commit that made read errors PROPAGATE out of
         ``_read_last_valid_entry`` twenty lines away.** Two opposite
         decisions about the same class, in one commit.
-        ▶ Absent is ``FileNotFoundError`` or a manifest that does not parse
-        or decode, and nothing else: a manifest that does not PARSE (or does
-        not DECODE as UTF-8) is not a disk that will recover, so it degrades
-        to genesis (matching :meth:`_load_manifest`'s existing policy for
-        the same file) rather than retrying forever. ``OSError`` still
-        propagates, leaving ``_initialized`` False so the next ``log()``
+        ▶ Absent is ``FileNotFoundError`` and nothing else. A transient read
+        error propagates, leaving ``_initialized`` False so the next ``log()``
         retries rather than writing from a guessed anchor.
+
+        ⛔ HYBRID (Phill, 2026-09-13): an INVALID manifest no longer degrades
+        to genesis. :meth:`_load_manifest` quarantines it, and this seeds from
+        the newest sealed file's last entry instead — the value rotation would
+        have recorded — so appending continues on the true chain. If there is
+        no readable sealed tail, it refuses (raises); genesis would be a guess.
         """
         # Reset FIRST: this can run on an instance whose cached chain state
         # is stale, and genesis is the only defensible starting anchor.
         self._prev_hash = GENESIS_HASH
         self._seq = 0
         try:
-            raw = self._manifest_path.read_bytes()
-        except FileNotFoundError:
-            return
-        try:
-            # A strict decode + parse degrades to genesis on the same
-            # shapes ``verify()`` does: a torn multibyte tail, a byte
-            # sequence that parses but isn't valid strict UTF-8 (codex
-            # L3, 2026-09-13 — ``json.loads(bytes)`` tolerates that via
-            # ``surrogatepass`` and would NOT have raised), or a
-            # syntactically valid non-object root.
-            manifest = _parse_manifest_bytes(raw, self._db_path.stem)
-        except _UNPARSEABLE_JSON:
-            logger.warning(
-                "Manifest %s is not valid JSON; anchoring on genesis",
-                self._manifest_path,
-            )
+            manifest = self._load_manifest()  # absent -> fresh (genesis)
+        except _ManifestQuarantined:
+            self._seed_from_sealed_tail()
             return
         self._prev_hash = manifest.get("active_last_hash", GENESIS_HASH)
         self._seq = manifest.get("active_last_seq", 0)
+
+    def _seed_from_sealed_tail(self) -> None:
+        """Seed from the newest sealed file's last valid entry, or refuse.
+
+        Used only while the manifest is quarantined. ``seq`` restarts at 0, as
+        it does after a rotation. Refuses rather than falling back to an older
+        week, which would silently skip a segment.
+        """
+        stem = self._db_path.stem
+        audit_dir = self._db_path.parent
+        sealed = [p for p in audit_dir.iterdir() if _is_sealed_filename(p.name, stem)]
+        if not sealed:
+            raise _ManifestQuarantined(
+                "the audit manifest is quarantined and there is no sealed file to "
+                "continue the chain from; run `anneal-memory audit-repair`"
+            )
+        newest = max(_sealed_period(p.name, stem) for p in sealed)
+        candidates = sorted(
+            (p for p in sealed if _sealed_period(p.name, stem) == newest),
+            key=lambda p: not p.name.endswith(".gz"),
+        )
+        for path in candidates:
+            last = _last_valid_sealed_line(path)
+            if last is not None:
+                self._prev_hash = self._compute_hash(last)
+                self._seq = 0
+                return
+        raise _ManifestQuarantined(
+            f"the audit manifest is quarantined and the newest sealed week ({newest}) "
+            "has no readable entry to continue the chain from; run `anneal-memory audit-repair`"
+        )
 
     def _adopt_orphaned_files(self) -> None:
         """Adopt sealed files that the manifest doesn't know about.
@@ -1527,6 +1746,15 @@ class AuditTrail:
         stem = self._db_path.stem
         audit_dir = self._db_path.parent
         prefix = f"{stem}.audit."
+        # ⛔ QUARANTINE RETURNS BEFORE ANYTHING IS LISTED OR SET ASIDE (hybrid,
+        # 2026-09-13). Adopting into a fresh manifest is the automatic rebuild
+        # the hybrid forbids. Orphans stay on disk; verify() reports the
+        # quarantine.
+        try:
+            manifest = self._load_manifest()
+        except _ManifestQuarantined as e:
+            logger.warning("Not adopting orphaned audit files: %s", e)
+            return
         try:
             names = sorted(p.name for p in audit_dir.iterdir())
         except FileNotFoundError:
@@ -1546,7 +1774,6 @@ class AuditTrail:
             ):
                 _set_aside(audit_dir / name, "stale")
 
-        manifest = self._load_manifest()
         files = manifest["files"]
         known_files = {f["filename"] for f in files}
         listed_by_week = {_week_of(n, prefix): audit_dir / n for n in known_files}
@@ -1781,6 +2008,19 @@ class AuditTrail:
             self._last_week = current_week
             return
 
+        # ⛔ LOAD THE MANIFEST BEFORE THE RENAME (hybrid, 2026-09-13). If it is
+        # quarantined or unreadable, do not rotate: keep appending to the active
+        # file, leave ``_last_week`` alone so the next log() retries, and never
+        # reach the save below with a manifest that stands in for one we could
+        # not read.
+        try:
+            manifest = self._load_manifest()
+        except _ManifestUnavailable as e:
+            if not self._rotation_refusal_logged:
+                logger.warning("Not rotating the audit trail: %s", e)
+                self._rotation_refusal_logged = True
+            return
+
         # Seal the active file with the old week label
         sealed_name = _sealed_filename(self._db_path.stem, self._last_week)
         sealed_path = active.parent / sealed_name
@@ -1882,7 +2122,8 @@ class AuditTrail:
         tmp_gz_path.replace(sealed_gz_path)
         _fsync_dir(sealed_gz_path.parent)
 
-        manifest = self._load_manifest()
+        # Update the manifest loaded before the rename (hybrid); the .jsonl is
+        # unlinked only after the save below (round 10 order, step 4 then 5).
         manifest["files"].append({
             "filename": sealed_gz_path.name,
             "period": self._last_week,
@@ -1917,7 +2158,11 @@ class AuditTrail:
             return 0
 
         if manifest is None:
-            manifest = self._load_manifest()
+            try:
+                manifest = self._load_manifest()
+            except _ManifestUnavailable as e:
+                logger.warning("Skipping audit retention cleanup: %s", e)
+                return 0
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=self._retention_days)
         cutoff_str = cutoff.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
@@ -1957,15 +2202,65 @@ class AuditTrail:
         return removed
 
     def _load_manifest(self) -> dict[str, Any]:
-        """Load or create the manifest index."""
-        if self._manifest_path.exists():
-            try:
-                return _parse_manifest_bytes(
-                    self._manifest_path.read_bytes(), self._db_path.stem
-                )
-            except _UNPARSEABLE_OR_IO:
-                pass
+        """Load the manifest, or a fresh one ONLY when none exists.
 
+        ⛔ THE ONE GATE (hybrid, ruled by Phill 2026-09-13). This used to return
+        a fresh manifest for ANY failure, and the next writer saved it over the
+        original: every validator stricter than a writer became history loss
+        (rounds 6 and 7), and a new process overwrote a corrupt manifest on open.
+
+        - Quarantined (a marker is on disk) -> raises ``_ManifestQuarantined``.
+        - Invalid -> renamed to a quarantine marker (never overwritten), then
+          raises ``_ManifestQuarantined``.
+        - Unreadable right now (permission, I/O) -> raises ``_ManifestUnavailable``
+          with nothing renamed, so a flaky read can neither quarantine nor
+          overwrite.
+        - Absent -> a fresh manifest, as before.
+        """
+        stem = self._db_path.stem
+        markers = _quarantine_markers(self._db_path.parent, stem)
+        if markers:
+            raise _ManifestQuarantined(
+                f"the audit manifest is quarantined as {markers[-1]}; "
+                "run `anneal-memory audit-repair`"
+            )
+        try:
+            raw = self._manifest_path.read_bytes()
+        except FileNotFoundError:
+            return self._fresh_manifest()
+        except OSError as e:
+            raise _ManifestUnavailable(f"the audit manifest cannot be read right now: {e}") from e
+        try:
+            return _parse_manifest_bytes(raw, stem)
+        except _UNPARSEABLE_JSON as e:
+            marker = self._quarantine_manifest()
+            raise _ManifestQuarantined(
+                f"the audit manifest is invalid ({e}) and was quarantined as {marker}; "
+                "run `anneal-memory audit-repair`"
+            ) from e
+
+    def _quarantine_manifest(self) -> str:
+        """Rename the invalid manifest to a quarantine marker; never overwrite."""
+        path = self._manifest_path
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        target = path.with_name(f"{path.name}.corrupt-{stamp}")
+        if target.exists():
+            raise _ManifestUnavailable(
+                f"quarantine target {target.name} already exists; not overwriting it"
+            )
+        try:
+            path.rename(target)
+        except OSError as e:
+            raise _ManifestUnavailable(f"could not quarantine the invalid audit manifest: {e}") from e
+        _fsync_dir(path.parent)
+        logger.warning(
+            "Quarantined an invalid audit manifest as %s. Appending continues; "
+            "rotation, orphan adoption and retention are paused until "
+            "`anneal-memory audit-repair` rebuilds it.", target.name,
+        )
+        return target.name
+
+    def _fresh_manifest(self) -> dict[str, Any]:
         return {
             "version": 1,
             "db_path": self._db_path.name,
@@ -2169,6 +2464,64 @@ def _same_uncompressed_bytes(a: Path, b: Path) -> bool:
             return False
         digests.append(digest.digest())
     return digests[0] == digests[1]
+
+
+def _last_valid_sealed_line(path: Path) -> str | None:
+    """The last line of ``path`` that is a valid entry, or None if the file is
+    corrupt or holds none. A transient read failure is re-raised."""
+    errors: list[OSError] = []
+    last: str | None = None
+    for raw in _guarded_lines(path, errors):
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        try:
+            text = stripped.decode("utf-8")
+            _require_entry_dict(json.loads(text))
+        except _UNPARSEABLE_JSON:
+            continue
+        last = text
+    if errors:
+        if not isinstance(errors[0], _CorruptAuditFile):
+            raise errors[0]
+        return None
+    return last
+
+
+def _sealed_record(path: Path) -> dict[str, Any] | None:
+    """What a manifest record needs, computed from the file's own lines, or
+    None if the file is corrupt. A transient read failure is re-raised."""
+    errors: list[OSError] = []
+    entries = 0
+    first_ts = last_ts = last_hash = ""
+    first_prev_hash: str | None = None
+    for raw in _guarded_lines(path, errors):
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        try:
+            text = stripped.decode("utf-8")
+            entry = _require_entry_dict(json.loads(text))
+        except _UNPARSEABLE_JSON:
+            continue
+        if first_prev_hash is None:
+            first_prev_hash = entry.get("prev_hash", "")
+        ts = entry.get("ts", "")
+        first_ts = first_ts or ts
+        last_ts = ts
+        entries += 1
+        last_hash = AuditTrail._compute_hash(text)
+    if errors:
+        if not isinstance(errors[0], _CorruptAuditFile):
+            raise errors[0]
+        return None
+    return {
+        "entries": entries,
+        "first_ts": first_ts,
+        "last_ts": last_ts,
+        "first_prev_hash": first_prev_hash or "",
+        "last_hash": last_hash,
+    }
 
 
 def _first_prev_hash(path: Path) -> str | None:

@@ -1647,17 +1647,23 @@ def cmd_audit(args: argparse.Namespace) -> None:
         markers = _quarantine_audit_markers(audit_dir, stem)
     except OSError as e:
         markers, marker_list_error = [], e
+    # ⛔ anchor_trusted only ever moves from True to False below (re-pass of the
+    # hybrid fix-diff, input a927e791ce5df4eb): a later branch that assigned
+    # True back reported a quarantined, unreadable or unlistable trail as trusted.
     if markers:
+        anchor_trusted = False
         print(
             f"Warning: the audit manifest is quarantined as {markers[-1]}; "
             "sealed audit history is omitted, showing the active file only. "
             "Run `anneal-memory audit-repair` to rebuild it.",
             file=sys.stderr,
         )
-    elif marker_list_error is not None and not manifest_path.exists():
+    elif marker_list_error is not None:
         # codex, L3 of the hybrid, reproduced at mode 0o300: an unlistable
         # directory read as "no marker", so a quarantined trail printed its
-        # active file as the whole history with anchor_trusted true.
+        # active file as the whole history with anchor_trusted true. A readable
+        # manifest does not rule a marker out: a repair can save the manifest
+        # and then fail to release its marker.
         anchor_trusted = False
         print(
             f"Warning: the audit directory cannot be listed ({marker_list_error}), "
@@ -1673,7 +1679,7 @@ def cmd_audit(args: argparse.Namespace) -> None:
             # a torn multibyte or wrong-shaped manifest tracebacked out
             # of this command instead of degrading to "no files."
             manifest = _parse_audit_manifest_bytes(manifest_path.read_bytes(), stem)
-            anchor_trusted = manifest.get("chain_anchor_recovered") is not True
+            anchor_trusted = anchor_trusted and manifest.get("chain_anchor_recovered") is not True
             for f in manifest.get("files", []):
                 fpath = audit_dir / f["filename"]
                 # is_file(), not exists() (codex, round 6): a filename
@@ -1694,6 +1700,7 @@ def cmd_audit(args: argparse.Namespace) -> None:
             # (PermissionError, I/O error) — this reporting command
             # should degrade the same way a corrupt manifest does, not
             # traceback on a disk error it cannot fix.
+            anchor_trusted = False
             print(
                 f"Warning: manifest {manifest_path} is corrupt or "
                 "unreadable; sealed audit history is omitted, showing "

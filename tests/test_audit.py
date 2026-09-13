@@ -5732,3 +5732,108 @@ class TestDiogenes20260909StillOpen:
         trail.log("next", {})
         result = AuditTrail.verify(db)
         assert result.valid, f"false tampering verdict: {result.error}"
+
+
+class TestFixDiffRound2Ac055fb:
+    """codex + complement L3, 2026-09-13, second fix-diff pass — three
+    real findings against ``ac055fb`` (the first fix-diff, which itself
+    closed two real findings against the original 09-09 fix). The class
+    kept surfacing new instances of itself inside its own fix each
+    round, which is the point of re-reviewing a fix rather than trusting
+    it because it closed the finding that prompted it.
+    """
+
+    def test_verify_decodes_before_parsing_an_entry_line(self, tmp_path):
+        """HIGH, complement L3. ``verify()``'s per-entry loop called
+        ``json.loads(line)`` on raw bytes (tolerant of invalid-strict-
+        UTF-8-but-surrogatepass-valid sequences), then re-decoded the
+        same bytes strictly OUTSIDE the try/except with a comment
+        claiming that was "safe" — it wasn't, because ``json.loads``
+        succeeding does not prove ``bytes.decode("utf-8")`` (strict)
+        will. Measured: ``json.loads(b'{"a":"\\xed\\xa0\\x80"}')``
+        parses; ``.decode("utf-8")`` on the same bytes raises. A crafted
+        entry line crashed ``verify()`` with an uncaught
+        ``UnicodeDecodeError`` instead of returning a skipped-line
+        result.
+
+        ⛔ MUTATION-CHECKED: move the decode back outside the try (after
+        ``json.loads(line)`` on bytes) and this raises instead of
+        returning a result.
+        """
+        db = tmp_path / "entry_surrogate.db"
+        trail = AuditTrail(db)
+        trail.log("first", {"i": 0})
+
+        active = trail._active_path
+        lines = active.read_bytes().splitlines()
+        assert len(lines) == 1
+        # A JSON entry line whose only field value is the same invalid-
+        # strict-UTF-8-but-surrogatepass-valid byte sequence used above.
+        bad_line = b'{"v":1,"seq":1,"ts":"x","event":"bad",' \
+            b'"actor":"a","prev_hash":"\xed\xa0\x80"}'
+        active.write_bytes(lines[0] + b"\n" + bad_line + b"\n")
+
+        result = AuditTrail.verify(db)  # must NOT raise
+
+        assert result.valid is True, f"unexpected: {result.error}"
+        assert result.skipped_lines == 1, (
+            "the malformed entry line should be counted as skipped, not "
+            "crash the walk"
+        )
+
+    def test_rotation_sealing_decodes_before_parsing_a_torn_entry(
+        self, tmp_path
+    ):
+        """MED, complement L3 — the same decode-outside-try class as the
+        HIGH above, in the rotation sealing path's gzip loop. Pre-
+        existing (untouched by the 2026-09-09 or first fix-diff
+        commits), needs a torn active-file tail that survived its own
+        rollback truncate to reach — rare, but the same shape, fixed in
+        the same pass.
+
+        ⛔ MUTATION-CHECKED: move the decode back outside the try (before
+        ``entry_count += 1`` check, as ``line.decode("utf-8").strip()``)
+        and this raises ``UnicodeDecodeError`` out of ``_rotate_if_needed``
+        instead of sealing the file with the malformed line counted but
+        skipped for timestamp extraction.
+        """
+        db = tmp_path / "seal_torn.db"
+        trail = AuditTrail(db)
+        trail.log("first", {"i": 0})
+
+        active = trail._active_path
+        good_line = active.read_bytes().rstrip(b"\n")
+        bad_line = b'{"ts":"\xed\xa0\x80"}'
+        active.write_bytes(good_line + b"\n" + bad_line + b"\n")
+
+        trail._last_week = "1999-W01"  # force the weekly rotation
+
+        trail._rotate_if_needed()  # must NOT raise
+
+        sealed = active.parent / "seal_torn.audit.1999-W01.jsonl.gz"
+        assert sealed.exists()
+
+    def test_parse_manifest_bytes_rejects_wrong_field_types(self, tmp_path):
+        """HIGH, codex L3, second pass. A manifest whose root is an
+        object but whose FIELDS carry the wrong type parsed fine past
+        the first fix-diff's root-only validation and then crashed
+        downstream: ``{"chain_anchor": 1}`` degrades ``verify()`` into
+        ``expected_hash[:20]`` on an int (``TypeError``, uncaught).
+
+        ⛔ MUTATION-CHECKED: remove the ``chain_anchor``/``active_last_hash``
+        field-type check from ``_parse_manifest_bytes`` and this fails
+        with an uncaught ``TypeError`` instead of a clean
+        ``AuditVerifyResult``.
+        """
+        db = tmp_path / "bad_field_type.db"
+        trail = AuditTrail(db)
+        trail.log("first", {"i": 0})
+
+        trail._manifest_path.write_text(
+            '{"chain_anchor": 1, "files": []}', encoding="utf-8"
+        )
+
+        result = AuditTrail.verify(db)  # must NOT raise
+
+        assert result.valid is False
+        assert result.error is not None and "Corrupt manifest" in result.error

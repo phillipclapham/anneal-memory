@@ -92,10 +92,34 @@ def _parse_manifest_bytes(raw: bytes) -> dict[str, Any]:
        with ``AttributeError``/``TypeError`` at the first ``.get()`` —
        uncaught by any of the three callers' tuples, which only expect
        parse/decode failures.
+
+    codex (L3, 2026-09-13, second pass) found the same class one level
+    deeper: an object root with the WRONG FIELD TYPES parses fine and
+    crashes past the root check — ``{"chain_anchor": 1}`` degrades
+    ``verify()`` into ``expected_hash[:20]`` on an int (``TypeError``,
+    uncaught); ``{"active_last_seq": "7"}`` degrades ``log()``'s
+    ``self._seq += 1`` the same way; ``{"files": null}`` crashes
+    ``_adopt_orphaned_files()``'s ``manifest.get("files", [])`` iteration.
+    Validated here rather than at each of the (growing) call sites, same
+    as the root-type check above.
     """
     manifest = json.loads(raw.decode("utf-8"))
     if not isinstance(manifest, dict):
         raise TypeError(f"manifest root is {type(manifest).__name__}, not an object")
+    for key in ("chain_anchor", "active_last_hash"):
+        if key in manifest and not isinstance(manifest[key], str):
+            raise TypeError(f"manifest field {key!r} is not a string")
+    if "active_last_seq" in manifest and not isinstance(
+        manifest["active_last_seq"], int
+    ):
+        raise TypeError("manifest field 'active_last_seq' is not an int")
+    if "files" in manifest:
+        files = manifest["files"]
+        if not isinstance(files, list) or not all(
+            isinstance(f, dict) and isinstance(f.get("filename"), str)
+            for f in files
+        ):
+            raise TypeError("manifest field 'files' is not a list of file records")
     return manifest
 
 
@@ -844,6 +868,17 @@ class AuditTrail:
                     continue
 
                 try:
+                    # Decode strictly FIRST, then parse the text — not
+                    # ``json.loads(line)`` on the raw bytes, which decodes
+                    # via ``surrogatepass`` and does not raise for a byte
+                    # sequence that is invalid strict UTF-8 but happens to
+                    # be a valid lone-surrogate encoding (complement L3,
+                    # 2026-09-13 — the exact class ``_parse_manifest_bytes``
+                    # above was written to close, present again a few lines
+                    # away in the same method: the old order left this
+                    # decode AFTER json.loads and OUTSIDE this try, so that
+                    # shape raised ``UnicodeDecodeError`` uncaught).
+                    line = line.decode("utf-8")
                     entry = json.loads(line)
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     # A torn multibyte tail (diogenes, 2026-09-08) is the
@@ -852,7 +887,6 @@ class AuditTrail:
                     # single place both get counted, never a traceback.
                     skipped += 1
                     continue
-                line = line.decode("utf-8")  # safe: json.loads just proved it
 
                 actual_prev = entry.get("prev_hash", "")
                 if actual_prev != expected_hash:
@@ -1253,16 +1287,21 @@ class AuditTrail:
             for line in f_in:
                 file_hash.update(line)
                 f_out.write(line)
-                stripped = line.decode("utf-8").strip()
-                if stripped:
+                if line.strip():
                     entry_count += 1
                     try:
-                        e = json.loads(stripped)
+                        # Decode strictly, then parse — both guarded (same
+                        # class complement L3 found at the ``verify()``
+                        # entry loop, 2026-09-13: the old unguarded
+                        # ``line.decode("utf-8")`` outside this try raised
+                        # ``UnicodeDecodeError`` uncaught for a torn tail
+                        # inside the sealed file the rotation is writing).
+                        e = json.loads(line.decode("utf-8").strip())
                         ts = e.get("ts", "")
                         if not first_ts:
                             first_ts = ts
                         last_ts = ts
-                    except json.JSONDecodeError:
+                    except (json.JSONDecodeError, UnicodeDecodeError):
                         pass
 
         # Atomic rename — .gz is either complete or doesn't exist

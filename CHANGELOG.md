@@ -22,22 +22,40 @@ it now yields `valid=False` with an "Unreadable audit file" error.
 **An orphaned sealed file that cannot be read no longer blocks writes, and no longer disappears
 silently.** A corrupt or permanently unreadable orphan used to make every later `log()` call raise. A
 read error is now retried a bounded number of times within the call; if it persists, the file is left
-on disk, unadopted, and writes continue. `verify()` reports any sealed file the manifest does not cover
-as `valid=False`.
+on disk, unadopted, and writes continue. Each process opening such a trail pays up to about 100 ms on
+its first write while the file stays unreadable. `verify()` reports any sealed file the manifest does
+not cover as `valid=False`.
+
+**Crash recovery adopts an orphaned week only where it continues the chain.** Its first entry must link
+to the last sealed week (or the retention anchor, or genesis), and a non-empty active file must link to
+the last week adopted. A week that does not fit stays on disk under its own name and `verify()` reports
+it. Previously a week skipped while unreadable was appended after newer weeks once it could be read, and
+`verify()` then reported a hash mismatch permanently.
 
 **Crash recovery no longer deletes audit files.** When a week has both a `.gz` and a `.jsonl` copy,
 recovery adopts one and renames the other to `<name>.dup-<UTC timestamp>`; a stale gzip temp file is
 renamed to `<name>.stale-<UTC timestamp>`. The `.gz` is adopted only when both copies hold the same
 bytes, otherwise the copy that reads. A copy left behind for a week the manifest already lists is
-renamed aside rather than adopted as a second segment. Previously recovery deleted the other copy, which
-could destroy the only complete one, and a crash before that deletion made `verify()` report a hash
-mismatch on an intact trail.
+renamed aside if it holds the same bytes and otherwise left in place for `verify()` to report; it is
+never adopted as a second segment. Set-aside copies are not removed by retention. Previously recovery
+deleted the other copy, which could destroy the only complete one, and a crash before that deletion
+made `verify()` report a hash mismatch on an intact trail.
 
-**`verify()` no longer reports a healthy rotation as a broken trail.** A rotation running in another
-process passes through states that look broken — the sealed week is on disk before the manifest names
-it — and `verify()` returned `valid=False` for them. An invalid result is now re-checked before it is
-returned, for as long as a rotation is visibly compressing (at most 5 seconds). A trail that stays
-broken still fails, and the error for an unlisted, missing or vanished file says a re-run may clear it.
+**`verify()` no longer misreads a rotation running in another process.** Rotation passes through states
+that look broken — the sealed week is on disk before the manifest names it — and `verify()` returned
+`valid=False` for them; a whole rotation landing mid-pass could also give `valid=True` without the week
+just sealed. Rotation now orders its steps so every intermediate state is recognisable on disk, and
+`verify()` re-checks an invalid result for as long as a rotation is visible, up to about 5 seconds after
+the first pass, treating a manifest that changed during the pass as a pass to re-run. A trail that stays
+broken still fails, and a genuinely invalid verdict costs at least one extra pass. A retention cleanup in
+another process is not covered and can still produce an invalid result that a re-run clears, as the
+error says. A crash between compressing a week and recording it leaves a state `verify()` waits out in
+full until the trail is next opened.
+
+**Rotation fsyncs the compressed week before replacing its temp file, and never seals a week that is
+already on disk.** After a power loss the compressed file could be empty while it was the only copy. A
+clock stepped back across a week boundary used to overwrite the earlier copy of that week and leave the
+manifest unreadable; rotation now waits and keeps appending to the active file.
 
 **`verify()` on an audit directory it cannot search returns `valid=False`** instead of raising
 `PermissionError`. A directory that does not exist is still an empty, valid trail.

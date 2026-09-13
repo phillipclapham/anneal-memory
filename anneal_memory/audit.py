@@ -292,6 +292,7 @@ class _SealedScan:
     first_ts: str = ""
     last_ts: str = ""
     last_hash: str = ""
+    first_prev_hash: str | None = None  # prev_hash of the first valid entry
     digest: str = ""  # sha256 of the uncompressed bytes
     error: OSError | None = None  # the read error that ended the last attempt
 
@@ -335,6 +336,7 @@ class AuditTrail:
         self._seq: int = 0
         self._prev_hash: str = GENESIS_HASH
         self._last_week: str = ""
+        self._rotation_refusal_logged = False
         # Writes a caller swallowed since the last entry that landed. Rides
         # into the next successful entry as ``dropped_before`` so a gap becomes
         # a chained fact rather than an absence — see :meth:`note_write_failure`.
@@ -978,15 +980,17 @@ class AuditTrail:
         ⛔ AN INVALID PASS IS RE-CHECKED BEFORE IT IS RETURNED (complement,
         round 10, reproduced). Nothing serialises this classmethod against a
         writer in another process, and a healthy rotation passes through
-        states that read as broken: the renamed week is on disk before the
-        manifest names it, and a whole rotation can land between the sealed
-        walk and the active read. So an invalid pass is repeated after
-        ``_ROTATION_POLL_SECONDS``, and again for as long as a gzip temp file
-        shows a rotation compressing, up to ``_ROTATION_SETTLE_MAX_SECONDS``.
-        A result is returned invalid only after two consecutive failing
-        passes with no compression visible, or at the cap. A trail that
-        stays broken fails every pass, so this delays that verdict; it does
-        not change it. It is not a lock.
+        states that read as broken, and one that read as valid over a week
+        the pass never saw (L2, round 10, reproduced). So an invalid pass is
+        repeated after ``_ROTATION_POLL_SECONDS``, and again for as long as
+        the directory shows a rotation in flight (see ``_verify_once``), up
+        to ``_ROTATION_SETTLE_MAX_SECONDS`` after the first pass. A result is
+        returned invalid only after two consecutive failing passes with no
+        rotation visible, or at the cap. A trail that stays broken fails
+        every pass, so this delays that verdict; it does not change it. It
+        is not a lock: a retention cleanup in another process leaves no
+        marker, so a cleanup slower than one poll interval can still be
+        reported invalid, with a hint to re-run.
 
         Args:
             db_path: Path to the SQLite database (audit files derive from this).
@@ -1012,17 +1016,18 @@ class AuditTrail:
     @classmethod
     def _verify_once(cls, db_path: Path) -> tuple[AuditVerifyResult, bool]:
         """One pass over the audit files as they are now, and whether a
-        rotation was compressing (a sealed ``.jsonl.gz.tmp``) at the listing.
+        rotation was in flight at the listing (``_rotation_in_flight``).
 
-        ⛔ THE DIRECTORY IS LISTED ONCE, FIRST, AND EVERY "DOES IT EXIST"
-        BELOW IS A MEMBERSHIP TEST ON THAT LISTING (codex #5, round 10,
-        reproduced as a traceback). ``Path.exists()`` raised
+        ⛔ THE DIRECTORY IS LISTED ONCE, FIRST, AND THE MANIFEST, ACTIVE AND
+        UNMANIFESTED CHECKS BELOW ARE MEMBERSHIP TESTS ON THAT LISTING (codex
+        #5, round 10, reproduced as a traceback). A manifested file's own
+        check stays ``is_file()``, which reports a permission fault on that
+        file as missing. ``Path.exists()`` raised
         ``PermissionError`` on a directory without search permission, and
         ``Path.is_dir()`` swallows the same error into ``False``. An absent
         directory, or a parent path that is not a directory, is an empty
         trail; any other listing failure is invalid.
         """
-        stem = db_path.stem
         audit_dir = db_path.parent
         try:
             names = {p.name for p in audit_dir.iterdir()}
@@ -1033,11 +1038,7 @@ class AuditTrail:
                 valid=False, total_entries=0, files_verified=0,
                 error=f"Cannot list audit directory: {e}",
             ), False
-        compressing = any(
-            n.endswith(".jsonl.gz.tmp") and _is_sealed_filename(n.removesuffix(".tmp"), stem)
-            for n in names
-        )
-        return cls._verify_listed(db_path, names), compressing
+        return cls._verify_listed(db_path, names), _rotation_in_flight(db_path, names)
 
     @classmethod
     def _verify_listed(cls, db_path: Path, names: set[str]) -> AuditVerifyResult:
@@ -1052,6 +1053,13 @@ class AuditTrail:
         chain_anchor = GENESIS_HASH
         missing_files: list[str] = []
 
+        # ⛔ STAT THE MANIFEST BEFORE READING IT, AND AGAIN BEFORE CALLING THE
+        # PASS VALID (L2, round 10, reproduced). A whole rotation can land
+        # after this read: the pass then walks the old file list, reads an
+        # empty new active file, and returned valid=True without the week it
+        # never walked. Rotation and retention replace the manifest, so a
+        # changed signature means this pass was not a snapshot.
+        manifest_signature = _stat_signature(manifest_path)
         if manifest_path.name in names:
             try:
                 manifest = _parse_manifest_bytes(manifest_path.read_bytes(), stem)
@@ -1091,7 +1099,18 @@ class AuditTrail:
         # over missing history, measured. The file on disk is the record.
         known = {p.name for p in files_to_verify} | set(missing_files)
         unmanifested = sorted(
-            n for n in names if _is_sealed_filename(n, stem) and n not in known
+            n for n in names
+            if _is_sealed_filename(n, stem) and n not in known
+            # A week's leftover .jsonl beside its manifested .gz is pending
+            # cleanup only if it holds the same bytes: rotation leaves it
+            # between saving the manifest and unlinking, and adoption sets an
+            # identical copy aside. A different copy is reported (L1, round
+            # 10: a clock regression can put another segment under that name).
+            and not (
+                n.endswith(".jsonl")
+                and n + ".gz" in known
+                and _same_uncompressed_bytes(audit_dir / n, audit_dir / (n + ".gz"))
+            )
         )
         if unmanifested:
             return AuditVerifyResult(
@@ -1237,6 +1256,15 @@ class AuditTrail:
                     ),
                 )
             files_verified += 1
+
+        if _stat_signature(manifest_path) != manifest_signature:
+            return AuditVerifyResult(
+                valid=False,
+                total_entries=total_entries,
+                files_verified=files_verified,
+                skipped_lines=skipped,
+                error=f"The manifest changed during verification{_RERUN_HINT}",
+            )
 
         return AuditVerifyResult(
             valid=True,
@@ -1418,14 +1446,27 @@ class AuditTrail:
         and the bytes stay on disk for an operator.
 
         Per week:
-        - the manifest already names a copy → any other copy is an
-          unfinished cleanup and is set aside, unread;
-        - both copies read and hold the same bytes → the ``.gz`` is adopted;
-        - both read and differ → the ``.jsonl`` is adopted, because rotation
-          writes the ``.gz`` from it;
-        - only one reads → that one is adopted;
+        - the manifest already names a copy → another copy holding the same
+          bytes is an unfinished cleanup and is set aside; a different one
+          stays on its name, where ``verify()`` reports it;
+        - both copies read and hold the same bytes → the ``.gz`` is the copy;
+        - both read and differ → the ``.jsonl`` is, because rotation writes
+          the ``.gz`` from it;
+        - only one reads → that one is;
         - neither reads → nothing is set aside or adopted, ``verify()``
           reports the week, and writes continue.
+
+        ⛔ AND A COPY IS ADOPTED ONLY WHERE IT CHAINS (L1 + L2, round 10,
+        reproduced). An orphan skipped while unreadable let writes continue
+        from the sealed tip; once readable it was appended after them and
+        ``verify()`` reported a hash mismatch for good — a tampering verdict
+        built from a transient read error. So an orphan's first entry must
+        link to the sealed chain's tip (the last manifested file, else
+        ``chain_anchor``, else genesis), each adopted week moves the tip, and
+        a non-empty active file must link to the last week adopted; weeks
+        after that one are left. A week that does not chain stays on its
+        name, unadopted, and ``verify()`` reports it: loud, and not shaped
+        like tampering.
         Every decision and every manifest field for a file come from one
         read of it (``_scan_sealed``).
         """
@@ -1436,6 +1477,12 @@ class AuditTrail:
             names = sorted(p.name for p in audit_dir.iterdir())
         except FileNotFoundError:
             return  # no directory yet, so nothing to adopt
+        except OSError as e:
+            # Writable but not listable. Recovery is skipped rather than
+            # failing every write (L1, round 10, reproduced at mode 0o300);
+            # verify() reports the directory itself.
+            logger.warning("Cannot list audit directory for recovery: %s", e)
+            return
 
         # A crash while compressing leaves ``<sealed>.jsonl.gz.tmp`` beside
         # the ``.jsonl`` it was being written from. Nothing adopts it.
@@ -1446,8 +1493,12 @@ class AuditTrail:
                 _set_aside(audit_dir / name, "stale")
 
         manifest = self._load_manifest()
-        known_files = {f["filename"] for f in manifest["files"]}
-        known_weeks = {_week_of(n, prefix) for n in known_files}
+        files = manifest["files"]
+        known_files = {f["filename"] for f in files}
+        listed_by_week = {_week_of(n, prefix): audit_dir / n for n in known_files}
+        tip = files[-1].get("last_hash", "") if files else (
+            manifest.get("chain_anchor") or GENESIS_HASH
+        )
 
         # Grouped by week and walked in sorted order, so manifest entries are
         # chronological whatever mix of .gz and .jsonl orphans there is.
@@ -1461,11 +1512,25 @@ class AuditTrail:
                     audit_dir / name
                 )
 
-        adopted = False
+        chain: list[tuple[str, Path, _SealedScan, list[Path]]] = []
         for week, paths in sorted(orphans_by_week.items()):
-            if week in known_weeks:
+            if week in listed_by_week:
+                listed = self._scan_sealed(listed_by_week[week])
                 for path in paths:
-                    _set_aside(path, "dup")
+                    copy = self._scan_sealed(path)
+                    if (
+                        listed.error is None
+                        and copy.error is None
+                        and copy.digest == listed.digest
+                    ):
+                        _set_aside(path, "dup")
+                    else:
+                        logger.warning(
+                            "Leaving %s on its name: it is not a readable, "
+                            "byte-identical copy of the manifested %s "
+                            "(verify() reports it)",
+                            path.name, listed_by_week[week].name,
+                        )
                 continue
 
             scans = {path: self._scan_sealed(path) for path in paths}
@@ -1496,11 +1561,40 @@ class AuditTrail:
                         "the uncompressed copy",
                         plain.name, gz.name,
                     )
+            scan = scans[keep]
+            if scan.first_prev_hash != tip:
+                logger.warning(
+                    "Not adopting orphaned audit file %s: its first entry does "
+                    "not continue the sealed chain (verify() reports it)",
+                    keep.name,
+                )
+                continue
+            chain.append((week, keep, scan, paths))
+            tip = scan.last_hash
+
+        if chain and self._active_path.name in names:
+            try:
+                active_prev = _first_prev_hash(self._active_path)
+            except OSError:
+                active_prev = ""  # unreadable: no week can be shown to lead into it
+            if active_prev is not None:
+                links = [
+                    i for i, (_, _, linked, _) in enumerate(chain)
+                    if linked.last_hash == active_prev
+                ]
+                kept = chain[: links[-1] + 1] if links else []
+                for _, path, _, _ in chain[len(kept):]:
+                    logger.warning(
+                        "Not adopting orphaned audit file %s: the active file "
+                        "does not continue from it (verify() reports it)",
+                        path.name,
+                    )
+                chain = kept
+
+        for week, keep, scan, paths in chain:
             for path in paths:
                 if path != keep:
                     _set_aside(path, "dup")
-
-            scan = scans[keep]
             manifest["files"].append({
                 "filename": keep.name,
                 "period": week,
@@ -1512,12 +1606,11 @@ class AuditTrail:
             })
             if scan.last_hash:
                 manifest["active_last_hash"] = scan.last_hash
-            adopted = True
             logger.info(
                 "Adopted orphaned audit file: %s (%d entries)", keep.name, scan.entries
             )
 
-        if adopted:
+        if chain:
             self._save_manifest(manifest)
 
     def _scan_sealed(self, path: Path) -> _SealedScan:
@@ -1552,6 +1645,8 @@ class AuditTrail:
                     e = _require_entry_dict(json.loads(text))
                 except _UNPARSEABLE_JSON:
                     continue  # Torn or malformed — skip, same shape either way
+                if scan.entries == 0:
+                    scan.first_prev_hash = e.get("prev_hash", "")
                 ts = e.get("ts", "")
                 if not scan.first_ts:
                     scan.first_ts = ts
@@ -1580,10 +1675,11 @@ class AuditTrail:
         active = self._active_path
         if not active.exists() or active.stat().st_size == 0:
             # ⛔ "ACTIVE MISSING" IS NOT PROOF THE ROTATION SUCCEEDED.
-            # Rotation renames the active file FIRST, then gzips, then updates
-            # the manifest. If either later step raises — disk full during the
-            # gzip is the measured case — the sealed file exists, the manifest
-            # does not know about it, and the active file is GONE. Arriving
+            # Rotation renames the active file before it compresses it and
+            # before it records the week in the manifest (the numbered order
+            # below). If a later step raises — disk full during the gzip is the
+            # measured case — the sealed file exists, the manifest does not know
+            # about it, and the active file is GONE. Arriving
             # here and simply advancing ``_last_week`` records that rotation as
             # done, and the next append starts a fresh active file chaining to
             # the orphan's hash.
@@ -1618,55 +1714,94 @@ class AuditTrail:
         sealed_name = _sealed_filename(self._db_path.stem, self._last_week)
         sealed_path = active.parent / sealed_name
         sealed_gz_path = sealed_path.with_suffix(".jsonl.gz")
-
-        # Rename → compress (atomic) → update manifest
-        active.rename(sealed_path)
-        _fsync_dir(sealed_path.parent)
-
-        # Gzip compress to temp file, then atomic rename.
-        # Crash during gzip write → partial .tmp + complete .jsonl on disk;
-        # orphan adoption adopts the .jsonl and sets the .tmp aside. The
-        # .tmp's existence is also what verify() reads as "a rotation is
-        # compressing". Without atomic write, a crash leaves a partial .gz
-        # under the sealed name, which adoption would have to compare
-        # against the .jsonl instead of simply finding no .gz.
         tmp_gz_path = Path(str(sealed_gz_path) + ".tmp")
+
+        # ⛔ NEVER ROTATE ONTO A WEEK ALREADY ON DISK (L2, round 10,
+        # reproduced). The label comes from the clock, and a clock stepped
+        # back across a week boundary (NTP, a restored VM snapshot) sealed the
+        # same week twice: the replace overwrote the first copy's bytes, and
+        # the duplicate manifest record then made every read reject the
+        # manifest. A leftover temp of that week may be the last trace of it.
+        # Refused: appending continues in the active file, and ``_last_week``
+        # is left so a later call retries.
+        if sealed_path.exists() or sealed_gz_path.exists() or tmp_gz_path.exists():
+            if not self._rotation_refusal_logged:
+                logger.warning(
+                    "Not rotating the audit trail: sealed week %s is already on "
+                    "disk; appending to the active file instead",
+                    self._last_week,
+                )
+                self._rotation_refusal_logged = True
+            return
+
+        # ⛔ THIS ORDER IS WHAT LETS verify() IN ANOTHER PROCESS TELL A ROTATION
+        # IN FLIGHT FROM A BROKEN TRAIL, AND WHAT KEEPS A POWER LOSS FROM
+        # LEAVING AN EMPTY .gz AS THE ONLY COPY (round 10: the fan-in desk's
+        # stall control and L2, reproduced). ``verify()`` re-checks an invalid
+        # pass only while ``_rotation_in_flight`` sees a rotation, so no step
+        # may leave a shape it cannot recognise:
+        #   1. create the gzip temp before the rename; the temp is the marker
+        #   2. rename the active file to the sealed .jsonl and compress it
+        #   3. fsync the temp's data, then replace it with the .gz; a .gz the
+        #      manifest does not name, beside its .jsonl, is also in flight
+        #   4. save the manifest before the unlink; an identical leftover
+        #      .jsonl of a manifested week is not reported
+        #   5. unlink the .jsonl
+        # The previous order renamed first and unlinked before saving: a 300ms
+        # stall after the rename, after the replace, or between the unlink and
+        # the save gave a false invalid in about 0.1s. Pinned per step by
+        # ``test_verify_inside_a_stalled_rotation_step_settles_to_valid``.
         file_hash = hashlib.sha256()
         entry_count = 0
         first_ts = ""
         last_ts = ""
 
-        with open(sealed_path, "rb") as f_in, gzip.open(tmp_gz_path, "wb") as f_out:
-            for line in f_in:
-                file_hash.update(line)
-                f_out.write(line)
-                if line.strip():
-                    entry_count += 1
-                    try:
-                        # Decode strictly, then parse — both guarded (same
-                        # class complement L3 found at the ``verify()``
-                        # entry loop, 2026-09-13: the old unguarded
-                        # ``line.decode("utf-8")`` outside this try raised
-                        # ``UnicodeDecodeError`` uncaught for a torn tail
-                        # inside the sealed file the rotation is writing).
-                        e = _require_entry_dict(
-                            json.loads(line.decode("utf-8").strip())
-                        )
-                        ts = e.get("ts", "")
-                        if not first_ts:
-                            first_ts = ts
-                        last_ts = ts
-                    except _UNPARSEABLE_JSON:
-                        pass
+        try:
+            with gzip.open(tmp_gz_path, "wb") as f_out:
+                active.rename(sealed_path)
+                _fsync_dir(sealed_path.parent)
+                with open(sealed_path, "rb") as f_in:
+                    for line in f_in:
+                        file_hash.update(line)
+                        f_out.write(line)
+                        if line.strip():
+                            entry_count += 1
+                            try:
+                                # Decode strictly, then parse — both guarded
+                                # (same class complement L3 found at the
+                                # ``verify()`` entry loop, 2026-09-13: the old
+                                # unguarded ``line.decode("utf-8")`` outside
+                                # this try raised ``UnicodeDecodeError``
+                                # uncaught for a torn tail inside the sealed
+                                # file the rotation is writing).
+                                e = _require_entry_dict(
+                                    json.loads(line.decode("utf-8").strip())
+                                )
+                                ts = e.get("ts", "")
+                                if not first_ts:
+                                    first_ts = ts
+                                last_ts = ts
+                            except _UNPARSEABLE_JSON:
+                                pass
+            fd = os.open(tmp_gz_path, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except BaseException:
+            # The temp was created before the rename. If the rename never
+            # happened it holds no audit data, and left behind it would read
+            # as a rotation in flight until the next open.
+            if not sealed_path.exists():
+                try:
+                    tmp_gz_path.unlink()
+                except OSError:
+                    pass
+            raise
 
-        # Atomic rename — .gz is either complete or doesn't exist
         tmp_gz_path.replace(sealed_gz_path)
         _fsync_dir(sealed_gz_path.parent)
 
-        # Remove uncompressed sealed file
-        sealed_path.unlink()
-
-        # Update manifest
         manifest = self._load_manifest()
         manifest["files"].append({
             "filename": sealed_gz_path.name,
@@ -1684,6 +1819,10 @@ class AuditTrail:
         self._seq = 0
         manifest["active_last_seq"] = self._seq
         self._save_manifest(manifest)
+
+        # Only now does the manifest name the .gz; until this line the .jsonl
+        # was the copy recovery would fall back to.
+        sealed_path.unlink()
 
         self._last_week = current_week
 
@@ -1889,6 +2028,81 @@ def _iter_lines(path: Path):
     else:
         with open(path, "rb") as f:
             yield from f
+
+
+def _rotation_in_flight(db_path: Path, names: set[str]) -> bool:
+    """Whether a directory listing shows a rotation between its first and last
+    step, in the order ``_rotate_if_needed`` documents: a sealed gzip temp
+    exists, or a week's ``.gz`` sits beside its ``.jsonl`` while the manifest
+    does not name the ``.gz``. A pair whose ``.gz`` IS named is not in flight:
+    it is cleanup ``verify()`` ignores or a different copy it reports, and
+    counting it would make every verify of that trail wait out the cap.
+    """
+    stem = db_path.stem
+    if any(
+        n.endswith(".jsonl.gz.tmp") and _is_sealed_filename(n.removesuffix(".tmp"), stem)
+        for n in names
+    ):
+        return True
+    pairs = {
+        n for n in names
+        if n.endswith(".gz") and _is_sealed_filename(n, stem) and n.removesuffix(".gz") in names
+    }
+    if not pairs:
+        return False
+    manifest_path = db_path.parent / f"{stem}.audit.manifest.json"
+    try:
+        manifest = _parse_manifest_bytes(manifest_path.read_bytes(), stem)
+    except FileNotFoundError:
+        return True
+    except _CORRUPT_MANIFEST:
+        return False
+    return bool(pairs - {f["filename"] for f in manifest["files"]})
+
+
+def _stat_signature(path: Path) -> tuple[int, int, int] | None:
+    """``(inode, size, mtime_ns)`` of ``path``; None if it does not exist, and
+    ``(-1, -1, -1)`` if it cannot be stat'ed for another reason."""
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return (-1, -1, -1)
+    return (st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def _same_uncompressed_bytes(a: Path, b: Path) -> bool:
+    """True iff both files read to the end and yield identical bytes."""
+    digests = []
+    for path in (a, b):
+        errors: list[OSError] = []
+        digest = hashlib.sha256()
+        for line in _guarded_lines(path, errors):
+            digest.update(line)
+        if errors:
+            return False
+        digests.append(digest.digest())
+    return digests[0] == digests[1]
+
+
+def _first_prev_hash(path: Path) -> str | None:
+    """``prev_hash`` of the first valid entry in ``path`` ("" if that entry has
+    none), or None if the file holds no valid entry. A read error raises."""
+    errors: list[OSError] = []
+    for line in _guarded_lines(path, errors):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            entry = _require_entry_dict(json.loads(stripped.decode("utf-8")))
+        except _UNPARSEABLE_JSON:
+            continue
+        prev = entry.get("prev_hash", "")
+        return prev if isinstance(prev, str) else ""
+    if errors:
+        raise errors[0]
+    return None
 
 
 def _week_of(name: str, prefix: str) -> str:

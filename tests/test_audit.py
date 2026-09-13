@@ -6195,7 +6195,7 @@ class TestFixDiffRound6WriterReaderConsistency:
         generates.
 
         ⛔ MUTATION-CHECKED: revert to the blacklist form (drop the
-        ``_SEALED_FILENAME_RE`` check) and this fails — an unrelated
+        ``_is_sealed_filename`` check) and this fails — an unrelated
         existing file is accepted as a sealed audit file instead of
         being rejected.
         """
@@ -6278,3 +6278,151 @@ class TestFixDiffRound6WriterReaderConsistency:
     # test_cmd_audit_survives_a_file_removed_mid_iteration lives in
     # tests/test_cli.py::TestCmdAudit — it needs that file's fixtures
     # and imports cmd_audit directly.
+
+
+class TestFixDiffRound7OneFilenameLanguage:
+    """complement + glm + codex L3, round 7 (input_id acb99206c42693f8),
+    2026-09-13 — the round-6 filename regex was a DIFFERENT language from
+    what rotation and orphan adoption write, so a writer could put a name
+    into the manifest that the next read rejected, and the fresh-manifest
+    fallback then wiped history. Both reproduced by running them before
+    any seat reported them.
+    """
+
+    @staticmethod
+    def _rotate(trail, week):
+        trail._last_week = week
+        trail.log("after_rotation", {"week": week})
+
+    def test_dot_prefixed_database_rotates_without_losing_manifest_history(self, tmp_path):
+        """HIGH. ``.vault.db`` generates ``.vault.audit.<week>.jsonl.gz``;
+        round 6's regex refused a leading dot, so every read rejected the
+        manifest, ``verify()`` said "Corrupt manifest" forever, and each
+        rotation rewrote the manifest holding only its newest record.
+
+        ⛔ MUTATION-CHECKED: make ``_is_sealed_filename`` refuse a leading
+        ``.`` and this fails — one manifest record survives, not two, and
+        verify is invalid.
+        """
+        db = tmp_path / ".vault.db"
+        trail = AuditTrail(db)
+        trail.log("first", {"i": 0})
+        self._rotate(trail, "1999-W01")
+        self._rotate(trail, "1999-W02")
+
+        names = [f["filename"] for f in trail._load_manifest()["files"]]
+        assert names == [
+            ".vault.audit.1999-W01.jsonl.gz",
+            ".vault.audit.1999-W02.jsonl.gz",
+        ]
+        result = AuditTrail.verify(db)
+        assert result.valid is True, result.error
+        assert result.total_entries == 3
+
+    def test_a_stray_file_matching_the_orphan_glob_is_not_adopted(self, tmp_path):
+        """HIGH. Adoption globbed ``<stem>.audit.*.jsonl`` — wider than the
+        parser's language — so one stray copy got written into the
+        manifest, the next read rejected the manifest whole, and a rotation
+        replaced it with a fresh one missing the real sealed records.
+
+        ⛔ MUTATION-CHECKED: drop the ``_is_sealed_filename`` condition from
+        ``_adopt_orphaned_files`` and this fails — the stray is adopted and
+        the sealed record is lost.
+        """
+        import gzip
+
+        db = tmp_path / "memory.db"
+        trail = AuditTrail(db)
+        trail.log("first", {"i": 0})
+        self._rotate(trail, "1999-W01")
+        sealed = tmp_path / "memory.audit.1999-W01.jsonl.gz"
+        stray = tmp_path / "memory.audit.1999-W01 copy.jsonl"
+        stray.write_bytes(gzip.decompress(sealed.read_bytes()))
+
+        reopened = AuditTrail(db)
+        reopened.log("after_reopen", {})
+        self._rotate(reopened, "1999-W02")
+
+        names = [f["filename"] for f in reopened._load_manifest()["files"]]
+        assert stray.name not in names
+        assert "memory.audit.1999-W01.jsonl.gz" in names
+        assert AuditTrail.verify(db).valid is True
+
+    def test_a_manifest_cannot_reference_another_databases_sealed_file(self, tmp_path):
+        """HIGH, codex. The round-6 check was not bound to the database:
+        ``a``'s manifest naming ``b``'s sealed file verified ``b``'s records
+        as ``a``'s trail.
+
+        ⛔ MUTATION-CHECKED: ignore ``stem`` in ``_is_sealed_filename`` and
+        this fails — ``verify("a.db")`` returns valid over b's history.
+        """
+        b = AuditTrail(tmp_path / "b.db")
+        b.log("first", {"i": 0})
+        self._rotate(b, "1999-W01")
+        (tmp_path / "a.audit.manifest.json").write_text(
+            '{"files": [{"filename": "b.audit.1999-W01.jsonl.gz"}]}',
+            encoding="utf-8",
+        )
+
+        result = AuditTrail.verify(tmp_path / "a.db")
+
+        assert result.valid is False
+        assert result.error is not None and "Corrupt manifest" in result.error
+
+    def test_a_trailing_newline_is_not_a_sealed_filename(self):
+        """``re.match`` with ``$`` accepts a name ending in ``\\n``.
+
+        ⛔ MUTATION-CHECKED: use ``re.match(... + "$")`` instead of
+        ``fullmatch`` and this fails.
+        """
+        from anneal_memory.audit import _is_sealed_filename
+
+        assert _is_sealed_filename("x.audit.2026-W01.jsonl.gz", "x")
+        assert not _is_sealed_filename("x.audit.2026-W01.jsonl\n", "x")
+
+    def test_verify_reports_a_truncated_sealed_gzip_instead_of_raising(self, tmp_path):
+        """HIGH, codex. A truncated gzip stream raises ``EOFError`` (not an
+        ``OSError``), which escaped ``verify()``.
+
+        ⛔ MUTATION-CHECKED: remove the ``EOFError``/``zlib.error``
+        normalization from ``_iter_lines`` and this raises ``EOFError``.
+        """
+        db = tmp_path / "memory.db"
+        trail = AuditTrail(db)
+        for i in range(50):
+            trail.log("before", {"i": i, "pad": "x" * 200})
+        self._rotate(trail, "1999-W01")
+        sealed = tmp_path / "memory.audit.1999-W01.jsonl.gz"
+        raw = sealed.read_bytes()
+        sealed.write_bytes(raw[: len(raw) // 2])
+
+        result = AuditTrail.verify(db)  # must NOT raise
+
+        assert result.valid is False
+        assert result.error is not None and "Unreadable audit file" in result.error
+        assert result.chain_break_file == sealed.name
+
+    def test_verify_reports_a_file_that_vanishes_mid_read(self, tmp_path, monkeypatch):
+        """HIGH, complement + glm consensus. Round 6 guarded ``cmd_audit``'s
+        per-file read against a concurrent rotation/cleanup but not
+        ``verify()``'s.
+
+        ⛔ MUTATION-CHECKED: iterate ``_iter_lines`` directly in ``verify()``
+        (no ``_guarded_lines``) and this raises ``FileNotFoundError``.
+        """
+        import anneal_memory.audit as audit_mod
+
+        db = tmp_path / "memory.db"
+        trail = AuditTrail(db)
+        trail.log("first", {"i": 0})
+
+        def vanished(path):
+            raise FileNotFoundError(2, "No such file", str(path))
+            yield  # pragma: no cover — makes this a generator
+
+        monkeypatch.setattr(audit_mod, "_iter_lines", vanished)
+
+        result = AuditTrail.verify(db)  # must NOT raise
+
+        assert result.valid is False
+        assert result.error is not None and "Unreadable audit file" in result.error

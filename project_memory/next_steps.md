@@ -262,7 +262,7 @@ decode-and-type-validate) routed to Phill rather than fixed under this window's 
 first draft tested the wrong function). Full suite: `1927 passed` (was 1923), 0 failed. mypy
 clean. ruff: 63, unchanged.**
 
-### FIFTH RE-PASS (against `e62102f`, 2026-09-13) — 5 REAL, STRUCTURAL SHAPE PER FAN-IN
+### SIXTH RE-PASS (against `e62102f`, 2026-09-13; this heading said FIFTH, one short) — 5 REAL, STRUCTURAL SHAPE PER FAN-IN
 
 Sixth round. The fan-in read codex's body directly and named the shape rather than letting this
 seat patch piecemeal again: two of codex's HIGHs were "the same class not converging" (a filename
@@ -276,8 +276,9 @@ structural, not incremental.
    requirement.** `""`, `"."`, `".."` closed three cases one at a time; codex named the general
    one — any basename matching an EXISTING file that isn't a legitimate sealed audit file (a
    subdirectory, a FIFO, or an unrelated regular file `is_file()` alone cannot distinguish from a
-   real one). Replaced the blacklist with `_SEALED_FILENAME_RE`, matching the shape
-   `_rotate_if_needed` is the only thing that generates. `verify()`'s and `cmd_audit`'s file checks
+   real one). Replaced the blacklist with a regex, `_SEALED_FILENAME_RE`. ⚠ **That regex was itself
+   wrong, and round 7 replaced it** (see the next section): it refused a leading dot and was not the
+   language rotation and adoption actually write. `verify()`'s and `cmd_audit`'s file checks
    also changed `exists()` → `is_file()`, closing the subdirectory/FIFO case at the point of use
    too, in case a future manifest source ever bypasses the regex.
 3. **FIXED — MED (codex), duplicate filenames in `"files"` were never rejected.** A manifest
@@ -301,6 +302,83 @@ subdirectory target was ALSO caught by the `is_file()` fix from item 2, so it di
 regex's marginal value — switched to an existing unrelated regular file, which `is_file()` alone
 cannot distinguish from a real sealed file). Full suite: `1932 passed` (was 1927), 0 failed. mypy
 clean. ruff: 63, unchanged.**
+
+### SEVENTH RE-PASS (against `5dd6fcc`, seat `0913+29`, 2026-09-13) — A REAL HIGH IN ROUND 6'S OWN FIX, REPRODUCED BEFORE ANY SEAT REPORTED IT
+
+Review rows: input_id `acb99206c42693f8` (complement, glm-5.2 primary, codex). Before the review
+returned, this seat ran the brief's three probes against BOTH commits with one script (a
+`git archive 5dd6fcc` copy vs the working tree). Every finding below marked [run] was executed, not
+reasoned.
+
+⛔ **THE SHAPE, because it will recur: a validator stricter than a writer is not a safety net here, it
+is a deletion.** `_load_manifest` returns a FRESH manifest when an existing one fails validation, and
+the next rotation or adoption saves it over the old one. So every time a reader's accepted language is
+narrower than what a writer writes, the result is history loss rather than a refusal.
+
+1. **FIXED — HIGH [run] (codex #7 as MED, #3), the round-6 regex refused names rotation writes.**
+   `.vault.db` rotates `.vault.audit.<week>.jsonl.gz`; the regex's first character class refused a
+   leading dot. Measured on the same probe: at `5dd6fcc`, 3 rotations → 3 manifest records and
+   `verify()` valid; at `09e6cac` → 1 record (each rotation rewrote the manifest keeping only its
+   newest) and `verify()` "Corrupt manifest" permanently. codex also showed the regex was not bound
+   to the database (`a`'s manifest naming `b`'s sealed file verified `b` as `a`). Replaced by ONE
+   language: `_sealed_filename(stem, week)` (what rotation writes) and `_is_sealed_filename(name,
+   stem)` (what the parser AND adoption accept), `fullmatch` on `re.escape(stem)`. The stem is now a
+   required argument of `_parse_manifest_bytes` at every reader (`grep -rn "manifest_bytes(" anneal_memory/`). This also closes a trailing
+   `\n` passing `re.match(...$)`, measured.
+2. **FIXED — HIGH [run] (complement MED, codex #8), adoption wrote names the parser refused.** Adoption
+   globbed `<stem>.audit.*.jsonl`; a stray `memory.audit.2026-W30 copy.jsonl` was adopted, the next
+   read rejected the manifest, and a rotation wiped the real W30 record (at `5dd6fcc` the record
+   survived). Adoption now filters through `_is_sealed_filename`.
+3. **FIXED — HIGH [run] (complement + glm consensus; codex #6), round 6 guarded `cmd_audit`'s per-file
+   read and not `verify()`'s, and neither caught gzip.** A truncated sealed `.gz` raised `EOFError`
+   out of `verify()`, measured; `zlib.error` is the same shape, and neither is an `OSError`, so round
+   6's own `cmd_audit` handler missed it too. `_iter_lines` now converts both to `OSError` in one
+   place; `verify()` reads through `_guarded_lines` and returns `valid=False`, "Unreadable audit
+   file", instead of raising.
+4. **FIXED (prose) — `log()`'s docstring said `event` was "Not enforced"**, false since round 6. It now
+   states the `TypeError`, and the CHANGELOG records the public-API change. Probe: every internal
+   emit passes a string-literal event and a dict payload, so only external `AuditTrail.log` callers
+   see it — and at `5dd6fcc` those calls silently broke the chain (`verify()` invalid, measured), so
+   raising is the fix.
+5. **REFUTED — codex #4 (HIGH), "the shared validator does not make writer and reader equivalent."**
+   Round 6's invariant is one-directional and holds: everything `log()` writes, every reader accepts
+   (writer-valid ⊆ reader-valid), because `log()` calls the readers' own validator. That readers ALSO
+   accept shapes `log()` never writes (no `v`/`seq`/`actor`) is a schema-completeness question, and
+   requiring fields could reject historical entries — routed below, not a defect in the fix.
+6. **Probe 3 (duplicate-filename rejection).** Reachable only when the clock goes backwards into a week
+   that is already sealed. In that case rotation's `.gz` replace has ALREADY overwritten that week's
+   sealed file (an older, separate defect), and the now-unreadable manifest then hits the amplifier.
+   Routed with it.
+
+**▶ ROUTED — the precondition first, per the fan-in (`0913+26`), and no release until item A is ruled on.**
+- **A. ⛔ PRECONDITION FOR ADDING ANY FURTHER VALIDATOR: `_load_manifest`'s fresh-manifest fallback.**
+  An existing manifest that fails validation is returned as a new empty one and later saved over the
+  original. Options:
+  (i) **FAIL CLOSED** — writers raise instead of rebuilding; the audit sink then refuses writes until an
+  operator repairs the manifest. Cost: one corrupt byte stops all auditing (the store's after-commit
+  path swallows and counts drops), and it needs a repair command.
+  (ii) **PRESERVE** — move the unreadable manifest aside (`.corrupt-<ts>`) before writing a fresh one,
+  and reconstruct `files` from disk with the sealed-filename predicate. Cost: new reconciliation
+  machinery (it overlaps item C's chronological-reconstruction work), and `chain_anchor` cannot be
+  recovered from disk after retention.
+  (iii) **Status quo** — cost: any validator stricter than any writer deletes history, as rounds 6 and
+  7 both demonstrated.
+- **B. Manifest/rotation snapshot atomicity (codex #1, #2).** `verify()` and `cmd_audit` read the
+  manifest and the active file non-atomically; a rotation between the two reads can drop a newly sealed
+  segment while still reporting `valid=True`. Needs a lock or a retry-on-generation-change.
+- **C. (carried, `bb4fac91fc8aee52`) `_cleanup` per-record schema** — codex #5 strengthens the repro: a
+  `"last_ts": 0` record crashes a retention-enabled rotation at `0 < cutoff_str` AFTER rotation state
+  has been saved. **Chronological reconstruction on a missing `"files"` key** and **referential
+  integrity for deleted-but-referenced sealed files** (`cmd_audit` still skips them silently) also stay
+  routed.
+- **D. Entry schema completeness (codex #4).** Whether readers should require `v`/`seq`/`ts`/`event`/`actor`,
+  a string `actor`, and a validated `dropped_before`. Blocked on A: a stricter reader is exactly what A
+  turns into data loss.
+
+**Verification: 7 new tests (6 `TestFixDiffRound7OneFilenameLanguage`, 1 `TestCmdAudit`); each killed by
+its own mutant via `mutate_r7.py` (the mutated file is restored byte-identical afterwards), and all pass
+unmutated. Receipt at commit time, 2026-09-13: full suite `1939 passed` (was 1932), 0 failed; mypy
+clean; ruff 63, unchanged. Re-derive with `.venv/bin/python3 -m pytest -q`.**
 
 ## ✅ CLOSED AFTER 2026-09-08 — READ THIS FIRST, IT IS WHAT THE NEXT SEAT ACTS ON
 

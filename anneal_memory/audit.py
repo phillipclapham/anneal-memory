@@ -336,6 +336,9 @@ class AuditTrail:
         self._seq: int = 0
         self._prev_hash: str = GENESIS_HASH
         self._last_week: str = ""
+        # A refusal is logged once, and a successful rotation re-arms it, so a
+        # later refusal in a long-lived process is logged again (L1 re-pass of
+        # round 10b, LOW).
         self._rotation_refusal_logged = False
         # Writes a caller swallowed since the last entry that landed. Rides
         # into the next successful entry as ``dropped_before`` so a gap becomes
@@ -1029,6 +1032,11 @@ class AuditTrail:
         trail; any other listing failure is invalid.
         """
         audit_dir = db_path.parent
+        # ⛔ THE MANIFEST IS STATTED BEFORE THE LISTING (codex, L3 of round 10b,
+        # reproduced). Statted after it, a first rotation landing in between
+        # left a stable signature on a manifest the listing never showed: the
+        # pass skipped the sealed week and called an empty active file valid.
+        manifest_signature = _stat_signature(audit_dir / f"{db_path.stem}.audit.manifest.json")
         try:
             names = {p.name for p in audit_dir.iterdir()}
         except (FileNotFoundError, NotADirectoryError):
@@ -1038,11 +1046,20 @@ class AuditTrail:
                 valid=False, total_entries=0, files_verified=0,
                 error=f"Cannot list audit directory: {e}",
             ), False
-        return cls._verify_listed(db_path, names), _rotation_in_flight(db_path, names)
+        return (
+            cls._verify_listed(db_path, names, manifest_signature),
+            _rotation_in_flight(db_path, names),
+        )
 
     @classmethod
-    def _verify_listed(cls, db_path: Path, names: set[str]) -> AuditVerifyResult:
-        """The pass itself, against one directory listing (``names``)."""
+    def _verify_listed(
+        cls,
+        db_path: Path,
+        names: set[str],
+        manifest_signature: tuple[int, int, int] | None,
+    ) -> AuditVerifyResult:
+        """The pass itself, against one directory listing (``names``) and the
+        manifest's signature taken before that listing."""
         stem = db_path.stem
         audit_dir = db_path.parent
         manifest_path = audit_dir / f"{stem}.audit.manifest.json"
@@ -1053,13 +1070,12 @@ class AuditTrail:
         chain_anchor = GENESIS_HASH
         missing_files: list[str] = []
 
-        # ⛔ STAT THE MANIFEST BEFORE READING IT, AND AGAIN BEFORE CALLING THE
-        # PASS VALID (L2, round 10, reproduced). A whole rotation can land
-        # after this read: the pass then walks the old file list, reads an
-        # empty new active file, and returned valid=True without the week it
-        # never walked. Rotation and retention replace the manifest, so a
-        # changed signature means this pass was not a snapshot.
-        manifest_signature = _stat_signature(manifest_path)
+        # ⛔ THE MANIFEST'S SIGNATURE, TAKEN BEFORE THE LISTING, IS CHECKED AGAIN
+        # BEFORE THE PASS IS CALLED VALID (L2, round 10, reproduced). A whole
+        # rotation can land during the pass: it then walks the old file list,
+        # reads an empty new active file, and returned valid=True without the
+        # week it never walked. Rotation and retention replace the manifest,
+        # so a changed signature means this pass was not a snapshot.
         if manifest_path.name in names:
             try:
                 manifest = _parse_manifest_bytes(manifest_path.read_bytes(), stem)
@@ -1449,10 +1465,14 @@ class AuditTrail:
         - the manifest already names a copy → another copy holding the same
           bytes is an unfinished cleanup and is set aside; a different one
           stays on its name, where ``verify()`` reports it;
-        - both copies read and hold the same bytes → the ``.gz`` is the copy;
+        - both copies read and hold the same bytes → the ``.gz`` is the copy,
+          and the ``.jsonl`` is set aside;
         - both read and differ → the ``.jsonl`` is, because rotation writes
-          the ``.gz`` from it;
-        - only one reads → that one is;
+          the ``.gz`` from it, and the ``.gz`` stays on its name, where
+          ``verify()`` reports it;
+        - only one reads → that one is, and the unreadable copy stays on its
+          name. (codex, L3 of round 10b, reproduced: setting a differing or
+          unread copy aside hid entries only it held behind a valid verify.)
         - neither reads → nothing is set aside or adopted, ``verify()``
           reports the week, and writes continue.
 
@@ -1463,7 +1483,7 @@ class AuditTrail:
         built from a transient read error. So an orphan's first entry must
         link to the sealed chain's tip (the last manifested file, else
         ``chain_anchor``, else genesis), each adopted week moves the tip, and
-        a non-empty active file must link to the last week adopted; weeks
+        an active file holding a valid entry must link to the last week adopted; weeks
         after that one are left. A week that does not chain stays on its
         name, unadopted, and ``verify()`` reports it: loud, and not shaped
         like tampering.
@@ -1513,6 +1533,7 @@ class AuditTrail:
                 )
 
         chain: list[tuple[str, Path, _SealedScan, list[Path]]] = []
+        all_scans: dict[Path, _SealedScan] = {}
         for week, paths in sorted(orphans_by_week.items()):
             if week in listed_by_week:
                 listed = self._scan_sealed(listed_by_week[week])
@@ -1534,6 +1555,7 @@ class AuditTrail:
                 continue
 
             scans = {path: self._scan_sealed(path) for path in paths}
+            all_scans.update(scans)
             readable = [path for path in paths if scans[path].error is None]
             if not readable:
                 # ⛔ LEFT ON DISK, UNADOPTED, AND NOT RAISED (complement, round
@@ -1577,6 +1599,11 @@ class AuditTrail:
                 active_prev = _first_prev_hash(self._active_path)
             except OSError:
                 active_prev = ""  # unreadable: no week can be shown to lead into it
+            # An active file with no valid entry (None) has nothing to contradict,
+            # and _initialize seeds it from the manifest tip anyway, so every week
+            # that chains is adopted and there is one chain. An unreadable one ("")
+            # cannot be inspected: no week can be shown to lead into it, so none is
+            # adopted (L1 re-pass of round 10b, MED; the docstring said "non-empty").
             if active_prev is not None:
                 links = [
                     i for i, (_, _, linked, _) in enumerate(chain)
@@ -1593,8 +1620,18 @@ class AuditTrail:
 
         for week, keep, scan, paths in chain:
             for path in paths:
-                if path != keep:
+                if path == keep:
+                    continue
+                other = all_scans[path]
+                if other.error is None and other.digest == scan.digest:
                     _set_aside(path, "dup")
+                else:
+                    logger.warning(
+                        "Leaving %s on its name: it is not a readable, "
+                        "byte-identical copy of the adopted %s (verify() "
+                        "reports it)",
+                        path.name, keep.name,
+                    )
             manifest["files"].append({
                 "filename": keep.name,
                 "period": week,
@@ -1723,7 +1760,11 @@ class AuditTrail:
         # the duplicate manifest record then made every read reject the
         # manifest. A leftover temp of that week may be the last trace of it.
         # Refused: appending continues in the active file, and ``_last_week``
-        # is left so a later call retries.
+        # moves to the current week, so the next boundary seals under a label
+        # that is not on disk. Leaving it made one refusal permanent for the
+        # process: every later call re-derived the same sealed name, and
+        # neither rotation nor retention ran again (codex + complement, L3 of
+        # round 10b, reproduced).
         if sealed_path.exists() or sealed_gz_path.exists() or tmp_gz_path.exists():
             if not self._rotation_refusal_logged:
                 logger.warning(
@@ -1732,6 +1773,7 @@ class AuditTrail:
                     self._last_week,
                 )
                 self._rotation_refusal_logged = True
+            self._last_week = current_week
             return
 
         # ⛔ THIS ORDER IS WHAT LETS verify() IN ANOTHER PROCESS TELL A ROTATION
@@ -1757,37 +1799,41 @@ class AuditTrail:
         last_ts = ""
 
         try:
-            with gzip.open(tmp_gz_path, "wb") as f_out:
-                active.rename(sealed_path)
-                _fsync_dir(sealed_path.parent)
-                with open(sealed_path, "rb") as f_in:
-                    for line in f_in:
-                        file_hash.update(line)
-                        f_out.write(line)
-                        if line.strip():
-                            entry_count += 1
-                            try:
-                                # Decode strictly, then parse — both guarded
-                                # (same class complement L3 found at the
-                                # ``verify()`` entry loop, 2026-09-13: the old
-                                # unguarded ``line.decode("utf-8")`` outside
-                                # this try raised ``UnicodeDecodeError``
-                                # uncaught for a torn tail inside the sealed
-                                # file the rotation is writing).
-                                e = _require_entry_dict(
-                                    json.loads(line.decode("utf-8").strip())
-                                )
-                                ts = e.get("ts", "")
-                                if not first_ts:
-                                    first_ts = ts
-                                last_ts = ts
-                            except _UNPARSEABLE_JSON:
-                                pass
-            fd = os.open(tmp_gz_path, os.O_RDONLY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+            with open(tmp_gz_path, "wb") as raw:
+                with gzip.GzipFile(fileobj=raw, mode="wb") as f_out:
+                    active.rename(sealed_path)
+                    _fsync_dir(sealed_path.parent)
+                    with open(sealed_path, "rb") as f_in:
+                        for line in f_in:
+                            file_hash.update(line)
+                            f_out.write(line)
+                            if line.strip():
+                                entry_count += 1
+                                try:
+                                    # Decode strictly, then parse — both guarded
+                                    # (same class complement L3 found at the
+                                    # ``verify()`` entry loop, 2026-09-13: the old
+                                    # unguarded ``line.decode("utf-8")`` outside
+                                    # this try raised ``UnicodeDecodeError``
+                                    # uncaught for a torn tail inside the sealed
+                                    # file the rotation is writing).
+                                    e = _require_entry_dict(
+                                        json.loads(line.decode("utf-8").strip())
+                                    )
+                                    ts = e.get("ts", "")
+                                    if not first_ts:
+                                        first_ts = ts
+                                    last_ts = ts
+                                except _UNPARSEABLE_JSON:
+                                    pass
+                # ⛔ FSYNC THROUGH THE HANDLE THAT WROTE THE TEMP (complement, L3 of
+                # round 10b; reasoned from documents, not run, since nothing here
+                # runs Windows). There os.fsync is _commit, which calls
+                # FlushFileBuffers, and that needs a handle with GENERIC_WRITE: the
+                # read-only reopen this replaced would have failed every rotation.
+                # Closing the GzipFile writes the trailer and leaves ``raw`` open.
+                raw.flush()
+                os.fsync(raw.fileno())
         except BaseException:
             # The temp was created before the rename. If the rename never
             # happened it holds no audit data, and left behind it would read
@@ -1825,6 +1871,7 @@ class AuditTrail:
         sealed_path.unlink()
 
         self._last_week = current_week
+        self._rotation_refusal_logged = False
 
         # Auto-cleanup old files
         if self._retention_days is not None:
@@ -2034,7 +2081,7 @@ def _rotation_in_flight(db_path: Path, names: set[str]) -> bool:
     """Whether a directory listing shows a rotation between its first and last
     step, in the order ``_rotate_if_needed`` documents: a sealed gzip temp
     exists, or a week's ``.gz`` sits beside its ``.jsonl`` while the manifest
-    does not name the ``.gz``. A pair whose ``.gz`` IS named is not in flight:
+    does not name the ``.gz``. A pair with either file named is not in flight:
     it is cleanup ``verify()`` ignores or a different copy it reports, and
     counting it would make every verify of that trail wait out the cap.
     """
@@ -2057,7 +2104,11 @@ def _rotation_in_flight(db_path: Path, names: set[str]) -> bool:
         return True
     except _CORRUPT_MANIFEST:
         return False
-    return bool(pairs - {f["filename"] for f in manifest["files"]})
+    named = {f["filename"] for f in manifest["files"]}
+    # A .gz beside a manifested .jsonl of its week is a differing copy that
+    # adoption leaves on its name (codex, L3 of round 10b), not a rotation:
+    # rotation names neither file of a week until it names the .gz.
+    return any(p not in named and p.removesuffix(".gz") not in named for p in pairs)
 
 
 def _stat_signature(path: Path) -> tuple[int, int, int] | None:

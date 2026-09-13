@@ -1606,7 +1606,7 @@ def cmd_audit(args: argparse.Namespace) -> None:
                 fpath = audit_dir / f["filename"]
                 if fpath.exists():
                     files_to_read.append(fpath)
-        except (json.JSONDecodeError, UnicodeDecodeError, TypeError, KeyError):
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError, KeyError, OSError):
             # codex (L3, round 3): silently degrading to "active file
             # only" presented an INCOMPLETE audit history as if it were
             # complete, with nothing telling the operator sealed history
@@ -1614,6 +1614,11 @@ def cmd_audit(args: argparse.Namespace) -> None:
             # degrade-and-keep-working policy every other reader in this
             # module uses) so the JSON/text output shape is unchanged
             # but the omission is no longer silent.
+            # ⚠ OSError added round 4 (codex): the warning's own text
+            # said "or unreadable" but nothing caught a read failure
+            # (PermissionError, I/O error) — this reporting command
+            # should degrade the same way a corrupt manifest does, not
+            # traceback on a disk error it cannot fix.
             print(
                 f"Warning: manifest {manifest_path} is corrupt or "
                 "unreadable; sealed audit history is omitted, showing "

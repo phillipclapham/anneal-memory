@@ -1630,6 +1630,104 @@ class TestCmdAudit:
         data = json.loads(captured.out)
         assert all(isinstance(e, dict) for e in data["entries"])
 
+    def test_audit_survives_an_unreadable_manifest(
+        self, base_args_with_data, capsys, monkeypatch
+    ):
+        """MED, codex, round 4. The warning's own text said "corrupt OR
+        UNREADABLE", but ``OSError`` was absent from the catch tuple —
+        a real read failure (permission error, I/O error) still
+        tracebacked instead of degrading to the active file alone like
+        every other failure mode this command handles.
+
+        ⛔ MUTATION-CHECKED: drop ``OSError`` from the except tuple and
+        this raises ``PermissionError`` instead of returning a result.
+        """
+        db_path = Path(base_args_with_data.db)
+        manifest_path = db_path.parent / f"{db_path.stem}.audit.manifest.json"
+        manifest_path.write_text('{"files": []}', encoding="utf-8")
+
+        real_read_bytes = Path.read_bytes
+
+        def sick_read_bytes(self):
+            if self == manifest_path:
+                raise PermissionError(13, "Permission denied")
+            return real_read_bytes(self)
+
+        monkeypatch.setattr(Path, "read_bytes", sick_read_bytes)
+
+        base_args_with_data.json = True
+        base_args_with_data.since = None
+        base_args_with_data.event = None
+        base_args_with_data.limit = 50
+        cmd_audit(base_args_with_data)  # must NOT raise
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["total"] > 0
+        assert "manifest" in captured.err.lower()
+
+    def test_audit_text_mode_survives_a_non_dict_data_field(
+        self, base_args_with_data, capsys
+    ):
+        """MED, codex, round 4 — in the TEXT (non-``--json``) rendering
+        path, missed by every earlier test because they all used
+        ``--json``. ``entry.get("data", {})`` was never type-checked
+        before ``data.get('episode_id', ...)`` in the ``event ==
+        "record"`` branch — ``{"data": []}`` crashed with an uncaught
+        ``AttributeError``.
+
+        ⛔ MUTATION-CHECKED: drop the ``data`` check from
+        ``_require_audit_entry_dict`` (imported from ``.audit``) and
+        this raises instead of printing the trail with the malformed
+        line silently skipped.
+        """
+        db_path = Path(base_args_with_data.db)
+        active_path = db_path.parent / f"{db_path.stem}.audit.jsonl"
+        active_path.write_bytes(
+            active_path.read_bytes()
+            + b'{"v":1,"seq":99,"ts":"2026-01-01T00:00:00.0000Z",'
+            b'"event":"record","actor":"a",'
+            b'"prev_hash":"sha256:GENESIS","data":[]}\n'
+        )
+
+        base_args_with_data.json = False
+        base_args_with_data.since = None
+        base_args_with_data.event = None
+        base_args_with_data.limit = 50
+        cmd_audit(base_args_with_data)  # must NOT raise
+
+        captured = capsys.readouterr()
+        assert "Audit trail:" in captured.out
+
+    def test_audit_text_mode_survives_a_non_string_event_field(
+        self, base_args_with_data, capsys
+    ):
+        """MED, codex, round 4 — same text-render path.
+        ``entry.get("event", "?")`` fed directly into the
+        ``f"{event:<24}"`` format spec, so ``{"event": []}`` crashed
+        with an uncaught ``TypeError``.
+
+        ⛔ MUTATION-CHECKED: drop the ``event`` check from
+        ``_require_audit_entry_dict`` and this raises instead of
+        printing the trail with the malformed line silently skipped.
+        """
+        db_path = Path(base_args_with_data.db)
+        active_path = db_path.parent / f"{db_path.stem}.audit.jsonl"
+        active_path.write_bytes(
+            active_path.read_bytes()
+            + b'{"v":1,"seq":99,"ts":"2026-01-01T00:00:00.0000Z",'
+            b'"event":[],"actor":"a","prev_hash":"sha256:GENESIS"}\n'
+        )
+
+        base_args_with_data.json = False
+        base_args_with_data.since = None
+        base_args_with_data.event = None
+        base_args_with_data.limit = 50
+        cmd_audit(base_args_with_data)  # must NOT raise
+
+        captured = capsys.readouterr()
+        assert "Audit trail:" in captured.out
+
 
 # -- cmd_diff tests --
 

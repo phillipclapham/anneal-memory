@@ -7693,6 +7693,29 @@ class TestHybridL3Fixes:
         assert result.repaired is False and "save" in (result.error or "")
         assert audit_module._quarantine_markers(tmp_path, "m") == [marker]
 
+    def test_repair_does_not_relist_after_quarantining(self, tmp_path, monkeypatch):
+        """codex MED (input a927e791ce5df4eb), reproduced by INJECTION: repair
+        quarantined the manifest, then a failed listing made it report
+        "nothing was written" with the marker already on disk. Listings: repair's
+        own, the one inside _load_manifest, then the re-list this removes.
+        """
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        real = audit_module._quarantine_markers
+        calls = []
+
+        def third_listing_fails(audit_dir, stem):
+            calls.append(stem)
+            if len(calls) == 3:
+                raise PermissionError(13, "third listing")
+            return real(audit_dir, stem)
+
+        monkeypatch.setattr(audit_module, "_quarantine_markers", third_listing_fails)
+        result = AuditTrail.repair_manifest(db)
+
+        assert result.repaired is True, result.error
+        assert AuditTrail.verify(db).valid
+
     def test_verify_reads_markers_from_its_one_listing(self, tmp_path, monkeypatch):
         """complement + codex, reproduced by INJECTION: a second listing that
         failed inside the pass raised out of verify().

@@ -3920,3 +3920,57 @@ class TestHybridL3AuditCli:
 
         assert result.returncode == 1
         assert "Traceback" not in result.stderr and "Cannot list" in result.stderr
+
+
+class TestHybridFixDiffAuditCliTrust:
+    """Re-pass of the hybrid fix-diff (input a927e791ce5df4eb: codex HIGH,
+    complement + glm MED). ``audit --json`` reported ``anchor_trusted: true``
+    in each of these; 0913+35 ran all three on 1870ad8 before they were
+    written. ``anchor_trusted`` may only move from true to false."""
+
+    _two_sealed_weeks = staticmethod(TestHybridAuditCli._two_sealed_weeks)
+    _run = staticmethod(TestHybridAuditCli._run)
+    _MARKER = "m.audit.manifest.json.corrupt-20260913T000000000000Z"
+
+    def test_a_detected_marker_is_untrusted(self, tmp_path):
+        """complement MED: the unambiguous case read weaker than the ambiguous one."""
+        from anneal_memory.audit import AuditTrail
+
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        AuditTrail(db).log("quarantines", {})
+
+        result = self._run("--db", str(db), "audit", "--json")
+
+        assert "quarantined" in result.stderr
+        assert json.loads(result.stdout)["anchor_trusted"] is False
+
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads a mode-000 file")
+    def test_an_unreadable_manifest_is_untrusted(self, tmp_path):
+        """glm MED: the corrupt-or-unreadable branch left the default true."""
+        db = self._two_sealed_weeks(tmp_path)
+        manifest = tmp_path / "m.audit.manifest.json"
+        manifest.chmod(0o000)
+        try:
+            result = self._run("--db", str(db), "audit", "--json")
+        finally:
+            manifest.chmod(0o600)
+
+        assert "corrupt or unreadable" in result.stderr
+        assert json.loads(result.stdout)["anchor_trusted"] is False
+
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root lists a mode-300 directory")
+    def test_a_listing_error_is_untrusted_even_with_a_readable_manifest(self, tmp_path):
+        """codex HIGH: a repair that saved the manifest but left its marker,
+        then an unlistable directory. The warning was skipped because the
+        manifest existed, and parsing it reset the flag to true."""
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / self._MARKER).write_bytes(b"{not json")
+        tmp_path.chmod(0o300)
+        try:
+            result = self._run("--db", str(db), "audit", "--json")
+        finally:
+            tmp_path.chmod(0o700)
+
+        assert "cannot be listed" in result.stderr
+        assert json.loads(result.stdout)["anchor_trusted"] is False

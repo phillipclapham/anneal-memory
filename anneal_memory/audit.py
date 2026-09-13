@@ -141,7 +141,16 @@ class _ManifestUnavailable(OSError):
 
 
 class _ManifestQuarantined(_ManifestUnavailable):
-    """The manifest was invalid and is quarantined; only audit-repair clears it."""
+    """The manifest was invalid and is quarantined; only audit-repair clears it.
+
+    ``marker`` names the marker file when the raiser knows it (``_load_manifest``
+    always does), so a caller never has to list the directory again to find
+    one this process just created.
+    """
+
+    def __init__(self, message: str, marker: str | None = None) -> None:
+        super().__init__(message)
+        self.marker = marker
 
 
 def _fsync_dir(path: Path) -> None:
@@ -1449,14 +1458,13 @@ class AuditTrail:
         if not markers and trail._manifest_path.exists():
             try:
                 trail._load_manifest()
-            except _ManifestQuarantined:
-                try:
-                    markers = _quarantine_markers(audit_dir, stem)  # quarantined just now
-                except OSError as e:
-                    return AuditRepairResult(
-                        repaired=False,
-                        error=f"Cannot list the audit directory: {e}; nothing was written.",
-                    )
+            except _ManifestQuarantined as e:
+                # The marker _load_manifest just created. Listing again here
+                # could fail after the rename and report "nothing was written"
+                # (codex, re-pass a927e791ce5df4eb).
+                if e.marker is None:
+                    return AuditRepairResult(repaired=False, error=str(e))
+                markers = [e.marker]
             except _ManifestUnavailable as e:
                 return AuditRepairResult(repaired=False, error=str(e))
             else:
@@ -2299,7 +2307,8 @@ class AuditTrail:
         if markers:
             raise _ManifestQuarantined(
                 f"the audit manifest is quarantined as {markers[-1]}; "
-                "run `anneal-memory audit-repair`"
+                "run `anneal-memory audit-repair`",
+                markers[-1],
             )
         try:
             raw = self._manifest_path.read_bytes()
@@ -2318,7 +2327,8 @@ class AuditTrail:
             marker = self._quarantine_manifest()
             raise _ManifestQuarantined(
                 f"the audit manifest is invalid ({e}) and was quarantined as {marker}; "
-                "run `anneal-memory audit-repair`"
+                "run `anneal-memory audit-repair`",
+                marker,
             ) from e
 
     def _quarantine_manifest(self) -> str:

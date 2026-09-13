@@ -7464,3 +7464,176 @@ class TestRound10bL3Fixes:
         result = AuditTrail._verify_listed(db, set(), None)
 
         assert result.valid is False and "appeared" in (result.error or "")
+
+
+class TestHybridManifestQuarantine:
+    """The hybrid manifest quarantine, ruled by Phill 2026-09-13 (via desk
+    0913+31). Each case here was first run end to end against real
+    subprocesses by 0913+35 on 2026-09-13; these pin what those runs showed.
+    """
+
+    @staticmethod
+    def _two_sealed_weeks(tmp_path):
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("pre", {"i": i})
+        trail._last_week = "1999-W01"
+        trail.log("rot1", {})
+        trail.log("mid", {})
+        trail._last_week = "1999-W02"
+        trail.log("rot2", {})
+        return db
+
+    @staticmethod
+    def _sealed_names(tmp_path):
+        return sorted(p.name for p in tmp_path.glob("m.audit.1999-*"))
+
+    def test_an_invalid_manifest_is_quarantined_not_replaced(self, tmp_path):
+        db = self._two_sealed_weeks(tmp_path)
+        manifest = tmp_path / "m.audit.manifest.json"
+        manifest.write_bytes(b"{not json")
+
+        AuditTrail(db).log("after", {})
+        AuditTrail(db).log("again", {})
+
+        markers = audit_module._quarantine_markers(tmp_path, "m")
+        assert len(markers) == 1
+        assert (tmp_path / markers[0]).read_bytes() == b"{not json"
+        assert not manifest.exists(), "no fresh manifest may be written over the quarantine"
+        events = [json.loads(l)["event"] for l in (tmp_path / "m.audit.jsonl").read_text().splitlines()]
+        assert events[-2:] == ["after", "again"], "appending continues"
+        result = AuditTrail.verify(db)
+        assert result.valid is False and "quarantined" in (result.error or "")
+
+    def test_rotation_and_retention_pause_while_quarantined(self, tmp_path):
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        trail = AuditTrail(db)
+        trail.log("quarantines", {})
+        sealed = self._sealed_names(tmp_path)
+
+        trail._last_week = "1999-W03"
+        trail.log("would-rotate", {})
+
+        assert self._sealed_names(tmp_path) == sealed
+        assert trail._last_week == "1999-W03", "left for a later log() to retry"
+        last = (tmp_path / "m.audit.jsonl").read_text().splitlines()[-1]
+        assert json.loads(last)["event"] == "would-rotate"
+        trail._retention_days = 0
+        assert trail._cleanup() == 0
+        assert self._sealed_names(tmp_path) == sealed
+
+    def test_an_empty_active_file_seeds_from_the_newest_sealed_tail(self, tmp_path):
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        (tmp_path / "m.audit.jsonl").unlink()
+        raw = gzip.decompress((tmp_path / "m.audit.1999-W02.jsonl.gz").read_bytes())
+        tail = [l for l in raw.splitlines() if l.strip()][-1].decode("utf-8")
+
+        AuditTrail(db).log("seeded", {})
+
+        first = json.loads((tmp_path / "m.audit.jsonl").read_text().splitlines()[0])
+        assert first["event"] == "seeded" and first["seq"] == 0
+        assert first["prev_hash"] == AuditTrail._compute_hash(tail)
+
+    def test_seeding_refuses_without_a_sealed_tail(self, tmp_path):
+        db = tmp_path / "m.db"
+        AuditTrail(db).log("first", {})
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        (tmp_path / "m.audit.jsonl").unlink()
+
+        with pytest.raises(audit_module._ManifestQuarantined):
+            AuditTrail(db).log("second", {})
+
+        assert not (tmp_path / "m.audit.jsonl").exists(), "no chain guessed from genesis"
+
+    @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root reads a mode-000 file")
+    def test_a_transient_manifest_read_error_neither_quarantines_nor_overwrites(self, tmp_path):
+        db = self._two_sealed_weeks(tmp_path)
+        manifest = tmp_path / "m.audit.manifest.json"
+        original = manifest.read_bytes()
+        trail = AuditTrail(db)
+        trail.log("init", {})
+        manifest.chmod(0)
+        try:
+            with pytest.raises(audit_module._ManifestUnavailable) as caught:
+                trail._load_manifest()
+            assert not isinstance(caught.value, audit_module._ManifestQuarantined)
+            trail._last_week = "1999-W03"
+            trail.log("during", {})
+        finally:
+            manifest.chmod(0o600)
+
+        assert audit_module._quarantine_markers(tmp_path, "m") == []
+        assert manifest.read_bytes() == original
+        assert not (tmp_path / "m.audit.1999-W03.jsonl.gz").exists()
+
+    def test_repair_rebuilds_in_order_and_releases_the_marker(self, tmp_path):
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        AuditTrail(db).log("after", {})
+        [marker] = audit_module._quarantine_markers(tmp_path, "m")
+
+        result = AuditTrail.repair_manifest(db)
+
+        assert result.repaired is True and result.chain_anchor_recovered is False, result.error
+        assert result.files == ["m.audit.1999-W01.jsonl.gz", "m.audit.1999-W02.jsonl.gz"]
+        manifest = json.loads((tmp_path / "m.audit.manifest.json").read_text())
+        assert [f["filename"] for f in manifest["files"]] == result.files
+        assert all(f["sha256_file"] == "" for f in manifest["files"]), "never recomputed"
+        assert audit_module._quarantine_markers(tmp_path, "m") == []
+        assert (tmp_path / f"{marker}.repaired").read_bytes() == b"{not json"
+        verdict = AuditTrail.verify(db)
+        assert verdict.valid is True and verdict.anchor_trusted is True, verdict.error
+
+    def test_repair_after_retention_reports_an_untrusted_anchor(self, tmp_path):
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / "m.audit.1999-W01.jsonl.gz").unlink()  # the shape retention leaves
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+
+        result = AuditTrail.repair_manifest(db)
+
+        assert result.repaired is True and result.chain_anchor_recovered is True, result.error
+        verdict = AuditTrail.verify(db)
+        assert verdict.valid is True, verdict.error
+        assert verdict.anchor_trusted is False
+
+    def test_repair_refuses_a_corrupt_week_and_writes_nothing(self, tmp_path):
+        db = self._two_sealed_weeks(tmp_path)
+        week = tmp_path / "m.audit.1999-W01.jsonl.gz"
+        week.write_bytes(week.read_bytes()[:25])
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        AuditTrail(db).log("after", {})
+        before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+
+        result = AuditTrail.repair_manifest(db)
+
+        assert result.repaired is False and "1999-W01" in (result.error or "")
+        assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+    def test_repair_refuses_weeks_that_do_not_chain(self, tmp_path):
+        db = self._two_sealed_weeks(tmp_path)
+        week = tmp_path / "m.audit.1999-W02.jsonl.gz"
+        lines = gzip.decompress(week.read_bytes()).splitlines(keepends=True)
+        first = json.loads(lines[0])
+        first["prev_hash"] = "sha256:" + "0" * 64
+        lines[0] = (json.dumps(first, separators=(",", ":"), sort_keys=True) + "\n").encode()
+        week.write_bytes(gzip.compress(b"".join(lines)))
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+
+        result = AuditTrail.repair_manifest(db)
+
+        assert result.repaired is False and "does not chain" in (result.error or "")
+        assert not (tmp_path / "m.audit.manifest.json").exists()
+        assert len(audit_module._quarantine_markers(tmp_path, "m")) == 1
+
+    def test_repair_refuses_a_valid_manifest(self, tmp_path):
+        db = self._two_sealed_weeks(tmp_path)
+        manifest = tmp_path / "m.audit.manifest.json"
+        original = manifest.read_bytes()
+
+        result = AuditTrail.repair_manifest(db)
+
+        assert result.repaired is False and "nothing to repair" in (result.error or "")
+        assert manifest.read_bytes() == original

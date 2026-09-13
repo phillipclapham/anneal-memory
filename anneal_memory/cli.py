@@ -57,6 +57,7 @@ from .audit import (
     _UNPARSEABLE_JSON as _UNPARSEABLE_AUDIT_JSON,
     _iter_lines as _iter_audit_lines,
     _parse_manifest_bytes as _parse_audit_manifest_bytes,
+    _quarantine_markers as _quarantine_audit_markers,
     _require_entry_dict as _require_audit_entry_dict,
 )
 from .continuity import (
@@ -902,11 +903,20 @@ def cmd_verify(args: argparse.Namespace) -> None:
             "chain_break_file": result.chain_break_file,
             "skipped_lines": result.skipped_lines,
             "error": result.error,
+            "anchor_trusted": result.anchor_trusted,
         })
         return
 
     if result.valid:
-        print(f"Audit trail valid: {result.total_entries} entries across {result.files_verified} file(s)")
+        # Ruled by Phill 2026-09-13: a recovered anchor is reported beside
+        # ``valid``, on the summary line itself, never folded into it.
+        anchor_note = "" if result.anchor_trusted else (
+            " (chain anchor recovered by audit-repair; entries before it cannot be verified)"
+        )
+        print(
+            f"Audit trail valid: {result.total_entries} entries across "
+            f"{result.files_verified} file(s){anchor_note}"
+        )
         if result.skipped_lines > 0:
             print(f"  ({result.skipped_lines} malformed lines skipped)")
     else:
@@ -926,6 +936,39 @@ def cmd_verify(args: argparse.Namespace) -> None:
                 f"unreadable, not verified)",
                 file=sys.stderr,
             )
+        sys.exit(1)
+
+
+def cmd_audit_repair(args: argparse.Namespace) -> None:
+    """Rebuild a quarantined audit manifest from the sealed files on disk.
+
+    Thin adapter over :meth:`AuditTrail.repair_manifest`, the only way out of
+    quarantine. Exits 1 when the repair refuses, having written nothing.
+    """
+    db_path = Path(args.db).expanduser()
+    result = AuditTrail.repair_manifest(db_path)
+
+    if args.json:
+        _print_json({
+            "repaired": result.repaired,
+            "files": result.files,
+            "chain_anchor_recovered": result.chain_anchor_recovered,
+            "untracked": result.untracked,
+            "error": result.error,
+        })
+    elif result.repaired:
+        print(f"Audit manifest rebuilt from {len(result.files)} sealed file(s)")
+        if result.chain_anchor_recovered:
+            print(
+                "  Chain anchor RECOVERED from the first sealed file: verify reports "
+                "anchor_trusted=False, and entries before it cannot be verified"
+            )
+        if result.untracked:
+            print(f"  Left on disk, not in the manifest: {', '.join(result.untracked)}")
+    else:
+        print(f"Audit repair refused: {result.error}", file=sys.stderr)
+
+    if not result.repaired:
         sys.exit(1)
 
 
@@ -1596,6 +1639,20 @@ def cmd_audit(args: argparse.Namespace) -> None:
 
     # Collect all audit files in chronological order
     files_to_read: list[Path] = []
+    anchor_trusted = True
+    # A quarantined manifest has been renamed away, so without this check the
+    # command below showed the active file only, silently (hybrid, 2026-09-13).
+    try:
+        markers = _quarantine_audit_markers(audit_dir, stem)
+    except OSError:
+        markers = []
+    if markers:
+        print(
+            f"Warning: the audit manifest is quarantined as {markers[-1]}; "
+            "sealed audit history is omitted, showing the active file only. "
+            "Run `anneal-memory audit-repair` to rebuild it.",
+            file=sys.stderr,
+        )
     if manifest_path.exists():
         try:
             # A FOURTH manifest reader, missed by all three prior fix
@@ -1604,6 +1661,7 @@ def cmd_audit(args: argparse.Namespace) -> None:
             # a torn multibyte or wrong-shaped manifest tracebacked out
             # of this command instead of degrading to "no files."
             manifest = _parse_audit_manifest_bytes(manifest_path.read_bytes(), stem)
+            anchor_trusted = manifest.get("chain_anchor_recovered") is not True
             for f in manifest.get("files", []):
                 fpath = audit_dir / f["filename"]
                 # is_file(), not exists() (codex, round 6): a filename
@@ -1635,7 +1693,7 @@ def cmd_audit(args: argparse.Namespace) -> None:
 
     if not files_to_read:
         if args.json:
-            _print_json({"entries": [], "total": 0})
+            _print_json({"entries": [], "total": 0, "anchor_trusted": anchor_trusted})
         else:
             print("No audit trail files found.")
         return
@@ -1693,7 +1751,7 @@ def cmd_audit(args: argparse.Namespace) -> None:
         entries = entries[-args.limit:]
 
     if args.json:
-        _print_json({"entries": entries, "total": total})
+        _print_json({"entries": entries, "total": total, "anchor_trusted": anchor_trusted})
         return
 
     if not entries:
@@ -2994,6 +3052,14 @@ def build_parser() -> argparse.ArgumentParser:
     # -- verify --
     sub = subparsers.add_parser("verify", help="Verify audit trail hash chain integrity", parents=[json_parent])
     sub.set_defaults(func=cmd_verify)
+
+    # -- audit-repair --
+    sub = subparsers.add_parser(
+        "audit-repair",
+        help="Rebuild a quarantined audit manifest from the sealed files",
+        parents=[json_parent],
+    )
+    sub.set_defaults(func=cmd_audit_repair)
 
     # -- prepare-wrap --
     sub = subparsers.add_parser(

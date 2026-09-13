@@ -29,6 +29,35 @@ return `valid=True` with no entries.
 already on disk, every later week boundary retried the same name, so neither rotation nor retention ran
 again until a restart. The refusal now moves on to the current week.
 
+### Added — a corrupt audit manifest is quarantined, never replaced, and `anneal-memory audit-repair` rebuilds it
+
+**An invalid manifest used to be replaced by a fresh one**, and the next save wrote it over the
+original, so every manifest a validator rejected became lost sealed history. It is now renamed to
+`<stem>.audit.manifest.json.corrupt-<UTC stamp>` and never overwritten. While that marker is on disk,
+appending continues; rotation, orphan adoption and retention cleanup pause; `verify()` reports
+`valid=False` naming the marker; and `anneal-memory audit` warns that sealed history is omitted. A
+manifest that cannot be read right now (a permission or I/O error) is neither quarantined nor
+overwritten, and an absent manifest in a directory that cannot be listed is refused rather than
+replaced, because a marker there cannot be ruled out.
+
+**With an empty active file, a quarantined trail seeds from the newest sealed file's last entry**, and
+refuses when there is none, instead of restarting the chain at genesis.
+
+**`AuditTrail.repair_manifest()` and `anneal-memory audit-repair [--json]`** rebuild the manifest from
+the sealed files in period order. They refuse, writing nothing and exiting 1, on an unreadable week,
+on weeks that do not hash-chain, and on a valid manifest. `sha256_file` is left empty rather than
+recomputed, and the markers are renamed `.repaired` only after the rebuilt manifest is saved.
+`AuditRepairResult` is exported.
+
+**A recovered chain anchor is reported beside `valid`, never folded into it.** When the first sealed
+file does not start at genesis, repair records its starting hash as `chain_anchor` with
+`chain_anchor_recovered: true`, and `AuditVerifyResult.anchor_trusted` is `False`. It appears in
+`anneal-memory verify --json`, the `verify` summary line, `server.py --verify-audit`'s summary and
+`anneal-memory audit --json`.
+
+⚠ An absent manifest with no marker still takes the old path (a fresh manifest and automatic orphan
+adoption); the ruling covers an invalid one.
+
 ### Fixed — one sealed-filename language for writers and readers, and an unreadable file is a result, not a traceback
 
 **The manifest's sealed-filename check refused names this library writes itself.** A database whose

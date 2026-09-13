@@ -1246,9 +1246,13 @@ def main() -> None:
         from .audit import AuditTrail as _AT
         result = _AT.verify(args.db)
         if result.valid:
+            anchor_note = "" if result.anchor_trusted else (
+                " (chain anchor recovered by audit-repair; entries before it "
+                "cannot be verified)"
+            )
             print(
                 f"Audit trail valid: {result.total_entries} entries "
-                f"across {result.files_verified} file(s)",
+                f"across {result.files_verified} file(s){anchor_note}",
                 file=sys.stderr,
             )
         else:

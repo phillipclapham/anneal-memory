@@ -4,6 +4,25 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — one sealed-filename language for writers and readers, and an unreadable file is a result, not a traceback
+
+**The manifest's sealed-filename check refused names this library writes itself.** A database whose
+name starts with a dot (`.vault.db`) rotates `.vault.audit.<week>.jsonl.gz`, and the check refused a
+leading dot. Every read then rejected the manifest, `verify()` reported "Corrupt manifest" for good,
+and each later rotation rewrote the manifest keeping only its newest record. Orphan adoption had the
+same mismatch from the other side: it adopted any `<stem>.audit.*.jsonl`, so one stray copy in the
+directory made the manifest unreadable. Rotation, adoption and every manifest reader now use one
+predicate, bound to the database's own name, so a manifest also cannot name another database's
+sealed files.
+
+**A truncated sealed `.gz` crashed `verify()` and `anneal-memory audit`**, because gzip raises
+`EOFError`/`zlib.error`, not `OSError`. A file that is unreadable or disappears while `verify()` reads
+it now yields `valid=False` with an "Unreadable audit file" error.
+
+**`AuditTrail.log()` now raises `TypeError` for a non-`str` `event` or a non-`dict` `data`**, before
+writing anything. Such an entry used to be written and then treated as invalid on recovery, which
+reset the chain and made `verify()` fail.
+
 ### Fixed — recovery seeds from genesis, a manifest that cannot be read is not one that is absent, and the rollback's last window is closed
 
 Found by the frontier code seat reviewing the previous round's own fixes.

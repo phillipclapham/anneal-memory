@@ -1765,6 +1765,37 @@ class TestCmdAudit:
         captured = capsys.readouterr()
         assert "incomplete" in captured.err.lower()
 
+    def test_audit_survives_a_truncated_sealed_gzip(self, tmp_path, capsys):
+        """HIGH, codex, round 7 (input_id acb99206c42693f8). A truncated
+        gzip stream raises ``EOFError``, not ``OSError``, so round 6's own
+        per-file handler in ``cmd_audit`` did not cover it.
+
+        ⛔ MUTATION-CHECKED: remove the ``EOFError``/``zlib.error``
+        normalization from ``audit._iter_lines`` and this raises
+        ``EOFError``.
+        """
+        import argparse
+
+        from anneal_memory.audit import AuditTrail
+
+        db = tmp_path / "memory.db"
+        trail = AuditTrail(db)
+        for i in range(50):
+            trail.log("before", {"i": i, "pad": "x" * 200})
+        trail._last_week = "1999-W01"
+        trail.log("after_rotation", {})
+        sealed = tmp_path / "memory.audit.1999-W01.jsonl.gz"
+        raw = sealed.read_bytes()
+        sealed.write_bytes(raw[: len(raw) // 2])
+
+        args = argparse.Namespace(
+            db=str(db), json=True, event=None, since=None, limit=50
+        )
+        cmd_audit(args)  # must NOT raise
+
+        captured = capsys.readouterr()
+        assert "incomplete" in captured.err.lower()
+
 
 # -- cmd_diff tests --
 

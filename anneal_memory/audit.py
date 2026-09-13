@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -44,13 +45,28 @@ GENESIS_HASH = "sha256:GENESIS"
 # Schema version for JSONL entries
 _ENTRY_VERSION = 1
 
-# A sealed audit file's name is always ``<stem>.audit.<ISO-week>.jsonl``,
-# optionally gzipped — generated only by ``_rotate_if_needed``. A manifest
-# ``"files"`` entry is structurally rejected if its filename doesn't match
-# this shape (codex, round 6: "archive", ".", "..", or any other basename
-# that happens to exist all passed the prior nonempty/no-separator check
-# and then crashed on ``open()``/``IsADirectoryError`` further down).
-_SEALED_FILENAME_RE = re.compile(r"^[^./\\][^/\\]*\.audit\.\d{4}-W\d{2}\.jsonl(\.gz)?$")
+# ⛔ ONE FILENAME LANGUAGE, SHARED BY EVERY WRITER AND EVERY READER.
+# ``_sealed_filename`` is what rotation writes; ``_is_sealed_filename`` is
+# what the manifest parser AND orphan adoption accept. Round 6 used a
+# stem-agnostic regex whose first character class excluded ``.``, so a
+# database named ``.vault.db`` rotated files the parser then refused, and
+# orphan adoption globbed a wider language than the parser accepted — in
+# both cases the writer put a name into the manifest that the next read
+# rejected, and ``_load_manifest``'s fresh-manifest fallback then WIPED the
+# manifest's history on the following rotation (measured 2026-09-13, round
+# 7). Binding the check to the exact stem also means a manifest cannot
+# reference another database's sealed files (codex round 7).
+_SEALED_SUFFIX_PATTERN = r"\.audit\.\d{4}-W\d{2}\.jsonl(?:\.gz)?"
+
+
+def _sealed_filename(stem: str, week: str) -> str:
+    """The uncompressed sealed-file name rotation writes (``.gz`` is appended)."""
+    return f"{stem}.audit.{week}.jsonl"
+
+
+def _is_sealed_filename(name: str, stem: str) -> bool:
+    """True iff ``name`` is a sealed audit file of the database ``stem``."""
+    return re.fullmatch(re.escape(stem) + _SEALED_SUFFIX_PATTERN, name) is not None
 
 
 def _fsync_dir(path: Path) -> None:
@@ -81,7 +97,7 @@ def _fsync_dir(path: Path) -> None:
         os.close(dir_fd)
 
 
-def _parse_manifest_bytes(raw: bytes) -> dict[str, Any]:
+def _parse_manifest_bytes(raw: bytes, stem: str) -> dict[str, Any]:
     """Parse manifest bytes into a mapping, or raise trying.
 
     codex (L3, 2026-09-13) found two ways a manifest could parse
@@ -133,8 +149,9 @@ def _parse_manifest_bytes(raw: bytes) -> dict[str, Any]:
     exist and isn't a regular file (a subdirectory, a FIFO) passes a
     nonempty/no-separator/not-dot check the same way. Replaced the
     growing blacklist with a positive requirement: the filename must
-    match ``_SEALED_FILENAME_RE`` — the shape ``_rotate_if_needed`` is
-    the only thing that ever generates. codex also found a duplicated
+    be a sealed file of THIS database's ``stem`` (``_is_sealed_filename``,
+    the same predicate orphan adoption uses, matching what
+    ``_sealed_filename`` generates). codex also found a duplicated
     filename entry passed every per-record check and made every reader
     walk that file twice; rejected as a set-uniqueness check below.
 
@@ -163,7 +180,7 @@ def _parse_manifest_bytes(raw: bytes) -> dict[str, Any]:
     if not isinstance(files, list) or not all(
         isinstance(f, dict)
         and isinstance(f.get("filename"), str)
-        and _SEALED_FILENAME_RE.match(f["filename"])
+        and _is_sealed_filename(f["filename"], stem)
         for f in files
     ):
         raise TypeError("manifest field 'files' is not a list of file records")
@@ -323,8 +340,11 @@ class AuditTrail:
         """Append a hash-chained entry to the audit trail.
 
         Args:
-            event: Event type. Not enforced (``event`` is a bare ``str``),
-                   but the emitted vocabulary is closed. Keep this list in
+            event: Event type. Must be a ``str`` — a non-str ``event`` or a
+                   non-dict ``data`` raises ``TypeError`` before anything is
+                   written (the readers' own entry validator, so a written
+                   entry is always one recovery accepts). The VOCABULARY is
+                   not enforced, but it is closed. Keep this list in
                    sync when adding a raise site — it is the only inventory
                    of event types that exists.
 
@@ -919,7 +939,7 @@ class AuditTrail:
 
         if manifest_path.exists():
             try:
-                manifest = _parse_manifest_bytes(manifest_path.read_bytes())
+                manifest = _parse_manifest_bytes(manifest_path.read_bytes(), stem)
                 # Chain anchor from retention cleanup — trust point for
                 # chains that no longer start from GENESIS
                 anchor = manifest.get("chain_anchor", "")
@@ -985,7 +1005,12 @@ class AuditTrail:
             # gap from a skipped torn line does not itself become a false
             # tampering verdict.
             last_seq: int | None = None
-            for line in _iter_lines(fpath):
+            # A file can vanish or fail to read after the is_file() check
+            # above — a concurrent rotation/cleanup, a truncated gzip
+            # stream (complement + glm + codex, round 7). That is an
+            # unreadable trail, reported as a result, never a traceback.
+            read_error: list[OSError] = []
+            for line in _guarded_lines(fpath, read_error):
                 line = line.strip()
                 if not line:
                     continue
@@ -1064,6 +1089,15 @@ class AuditTrail:
                 expected_hash = cls._compute_hash(line)
                 total_entries += 1
 
+            if read_error:
+                return AuditVerifyResult(
+                    valid=False,
+                    total_entries=total_entries,
+                    files_verified=files_verified,
+                    skipped_lines=skipped,
+                    chain_break_file=fpath.name,
+                    error=f"Unreadable audit file {fpath.name}: {read_error[0]}",
+                )
             files_verified += 1
 
         return AuditVerifyResult(
@@ -1213,7 +1247,7 @@ class AuditTrail:
             # L3, 2026-09-13 — ``json.loads(bytes)`` tolerates that via
             # ``surrogatepass`` and would NOT have raised), or a
             # syntactically valid non-object root.
-            manifest = _parse_manifest_bytes(raw)
+            manifest = _parse_manifest_bytes(raw, self._db_path.stem)
         except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
             logger.warning(
                 "Manifest %s is not valid JSON; anchoring on genesis",
@@ -1261,7 +1295,11 @@ class AuditTrail:
             for path in sorted(audit_dir.glob(pattern)):
                 if path.name == active_name:
                     continue  # Skip the active file
-                if path.name not in known_files:
+                # Adopt only names the manifest parser will accept back
+                # (round 7): the glob is wider than the sealed-file
+                # language, and a stray ``<stem>.audit.<x>.jsonl`` written
+                # into the manifest made the next read reject it whole.
+                if path.name not in known_files and _is_sealed_filename(path.name, stem):
                     # Extract period from filename
                     period = path.name.removeprefix(prefix)
                     period = period.removesuffix(".jsonl.gz").removesuffix(".jsonl")
@@ -1387,7 +1425,7 @@ class AuditTrail:
             return
 
         # Seal the active file with the old week label
-        sealed_name = f"{self._db_path.stem}.audit.{self._last_week}.jsonl"
+        sealed_name = _sealed_filename(self._db_path.stem, self._last_week)
         sealed_path = active.parent / sealed_name
         sealed_gz_path = sealed_path.with_suffix(".jsonl.gz")
 
@@ -1510,7 +1548,9 @@ class AuditTrail:
         """Load or create the manifest index."""
         if self._manifest_path.exists():
             try:
-                return _parse_manifest_bytes(self._manifest_path.read_bytes())
+                return _parse_manifest_bytes(
+                    self._manifest_path.read_bytes(), self._db_path.stem
+                )
             except (json.JSONDecodeError, UnicodeDecodeError, TypeError, OSError):
                 pass
 
@@ -1643,8 +1683,25 @@ def _iter_lines(path: Path):
     on the resulting text, inside the same try.
     """
     if path.name.endswith(".gz"):
-        with gzip.open(path, "rb") as f:
-            yield from f
+        # A truncated or corrupt gzip stream raises ``EOFError`` or
+        # ``zlib.error``, neither an ``OSError`` (codex, round 7: both
+        # escaped ``verify()`` and ``cmd_audit``'s OSError handler).
+        # Normalized here, once, so every consumer's OSError path covers it.
+        try:
+            with gzip.open(path, "rb") as f:
+                yield from f
+        except (EOFError, zlib.error) as e:
+            raise OSError(f"corrupt compressed stream: {e!r}") from e
     else:
         with open(path, "rb") as f:
             yield from f
+
+
+def _guarded_lines(path: Path, errors: list[OSError]):
+    """``_iter_lines``, but a read failure stops iteration and is appended
+    to ``errors`` instead of raising — for callers that must turn an
+    unreadable file into a result rather than a traceback."""
+    try:
+        yield from _iter_lines(path)
+    except OSError as e:
+        errors.append(e)

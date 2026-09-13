@@ -1601,7 +1601,7 @@ def cmd_audit(args: argparse.Namespace) -> None:
             # as ``verify()``/``_seed_from_manifest``/``_load_manifest``:
             # a torn multibyte or wrong-shaped manifest tracebacked out
             # of this command instead of degrading to "no files."
-            manifest = _parse_audit_manifest_bytes(manifest_path.read_bytes())
+            manifest = _parse_audit_manifest_bytes(manifest_path.read_bytes(), stem)
             for f in manifest.get("files", []):
                 fpath = audit_dir / f["filename"]
                 # is_file(), not exists() (codex, round 6): a filename

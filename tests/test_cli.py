@@ -3798,3 +3798,82 @@ class TestWrapCancelOwnershipParityOnTheCLI:
         assert "already" not in err.lower(), (
             "reported a half-written store as an already-finished wrap: " + err
         )
+
+
+class TestHybridAuditCli:
+    """``audit-repair`` and ``anchor_trusted`` on the CLI and server output
+    paths (hybrid, ruled by Phill 2026-09-13: ``anchor_trusted`` must appear
+    in ``verify --json``, the verify summary line, ``server.py
+    --verify-audit`` and ``audit --json``). Run end to end as subprocesses by
+    0913+35 on 2026-09-13 before these were written.
+    """
+
+    @staticmethod
+    def _two_sealed_weeks(tmp_path):
+        from anneal_memory.audit import AuditTrail
+
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("pre", {"i": i})
+        trail._last_week = "1999-W01"
+        trail.log("rot1", {})
+        trail.log("mid", {})
+        trail._last_week = "1999-W02"
+        trail.log("rot2", {})
+        return db
+
+    @staticmethod
+    def _run(*argv, module="anneal_memory.cli"):
+        return subprocess.run(
+            [sys.executable, "-m", module, *argv], capture_output=True, text=True
+        )
+
+    def _recovered_anchor(self, tmp_path):
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / "m.audit.1999-W01.jsonl.gz").unlink()  # the shape retention leaves
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        repaired = self._run("--db", str(db), "audit-repair", "--json")
+        assert repaired.returncode == 0, repaired.stderr
+        assert json.loads(repaired.stdout)["chain_anchor_recovered"] is True
+        return db
+
+    def test_anchor_trusted_reaches_all_four_output_paths(self, tmp_path):
+        db = self._recovered_anchor(tmp_path)
+        note = "chain anchor recovered by audit-repair"
+
+        verify_json = self._run("--db", str(db), "verify", "--json")
+        assert json.loads(verify_json.stdout)["anchor_trusted"] is False
+        verify_text = self._run("--db", str(db), "verify")
+        assert verify_text.returncode == 0 and note in verify_text.stdout
+        server = self._run("--db", str(db), "--verify-audit", module="anneal_memory.server")
+        assert server.returncode == 0 and note in server.stderr
+        audit_json = self._run("--db", str(db), "audit", "--json")
+        assert json.loads(audit_json.stdout)["anchor_trusted"] is False
+
+    def test_a_trusted_anchor_reads_true_and_prints_no_note(self, tmp_path):
+        db = self._two_sealed_weeks(tmp_path)
+
+        assert json.loads(self._run("--db", str(db), "verify", "--json").stdout)["anchor_trusted"] is True
+        assert "recovered" not in self._run("--db", str(db), "verify").stdout
+        assert json.loads(self._run("--db", str(db), "audit", "--json").stdout)["anchor_trusted"] is True
+
+    def test_audit_warns_while_quarantined(self, tmp_path):
+        from anneal_memory.audit import AuditTrail
+
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        AuditTrail(db).log("after", {})
+
+        result = self._run("--db", str(db), "audit", "--json")
+
+        assert result.returncode == 0
+        assert "quarantined" in result.stderr and "audit-repair" in result.stderr
+
+    def test_audit_repair_exits_1_on_refusal(self, tmp_path):
+        db = self._two_sealed_weeks(tmp_path)
+
+        text = self._run("--db", str(db), "audit-repair")
+        assert text.returncode == 1 and "nothing to repair" in text.stderr
+        as_json = self._run("--db", str(db), "audit-repair", "--json")
+        assert as_json.returncode == 1 and json.loads(as_json.stdout)["repaired"] is False

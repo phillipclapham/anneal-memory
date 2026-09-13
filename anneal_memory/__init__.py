@@ -33,7 +33,7 @@ from .types import (
     WrapRecord,
     WrapResult,
 )
-from .audit import AuditTrail, AuditVerifyResult
+from .audit import AuditRepairResult, AuditTrail, AuditVerifyResult
 from .schema import (
     DEFAULT_GRADUATING,
     DEFAULT_SCHEMA,
@@ -123,6 +123,7 @@ __all__ = [
     "WrapOwnershipError",
     "continuity_lock",
     "Server",
+    "AuditRepairResult",
     "AuditTrail",
     "AuditVerifyResult",
     "AffectiveState",

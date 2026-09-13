@@ -759,7 +759,7 @@ class AuditTrail:
 
         if manifest_path.exists():
             try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest = json.loads(manifest_path.read_bytes())
                 # Chain anchor from retention cleanup — trust point for
                 # chains that no longer start from GENESIS
                 anchor = manifest.get("chain_anchor", "")
@@ -771,7 +771,7 @@ class AuditTrail:
                         files_to_verify.append(fpath)
                     else:
                         missing_files.append(f["filename"])
-            except (json.JSONDecodeError, KeyError) as e:
+            except (json.JSONDecodeError, UnicodeDecodeError, KeyError) as e:
                 return AuditVerifyResult(
                     valid=False, total_entries=0, files_verified=0,
                     error=f"Corrupt manifest: {e}",
@@ -796,15 +796,18 @@ class AuditTrail:
         files_verified = 0
 
         for fpath in files_to_verify:
-            # ⛔ SEQ MONOTONICITY, WITHIN EACH FILE, RESET AT EVERY FILE
-            # BOUNDARY (rotation always restarts ``_seq`` at 0 for a new
-            # file — see ``_rotate_if_needed``). ``prev_hash`` linkage alone
-            # cannot see a duplicated entry whose chain is otherwise
-            # continuous: a retry that chains correctly off an entry still
-            # on disk reuses that entry's ``seq``, and the hash check above
-            # has nothing to say about it. Strictly increasing (not
-            # ``== last_seq + 1``) so a legitimate gap from a skipped torn
-            # line does not itself become a false tampering verdict.
+            # ⛔ SEQ MONOTONICITY, WITHIN EACH FILE ONLY (rotation MAY
+            # restart ``_seq`` at 0 for a new file on the sealing path —
+            # see ``_rotate_if_needed`` — but its early-return orphan-
+            # adoption path does not touch ``_seq`` at all, so seq is only
+            # ever comparable within a single file, never across the
+            # boundary). ``prev_hash`` linkage alone cannot see a duplicated
+            # entry whose chain is otherwise continuous: a retry that chains
+            # correctly off an entry still on disk reuses that entry's
+            # ``seq``, and the hash check above has nothing to say about it.
+            # Strictly increasing (not ``== last_seq + 1``) so a legitimate
+            # gap from a skipped torn line does not itself become a false
+            # tampering verdict.
             last_seq: int | None = None
             for line in _iter_lines(fpath):
                 line = line.strip()
@@ -1001,24 +1004,28 @@ class AuditTrail:
         the same commit that made read errors PROPAGATE out of
         ``_read_last_valid_entry`` twenty lines away.** Two opposite
         decisions about the same class, in one commit.
-        ▶ Absent is ``FileNotFoundError`` and nothing else undecodable-JSON:
-        a manifest that does not PARSE is not a disk that will recover, so
-        it degrades to genesis (matching :meth:`_load_manifest`'s existing
-        policy for the same file) rather than retrying forever. ``OSError``
-        still propagates, leaving ``_initialized`` False so the next
-        ``log()`` retries rather than writing from a guessed anchor.
+        ▶ Absent is ``FileNotFoundError`` or a manifest that does not parse
+        or decode, and nothing else: a manifest that does not PARSE (or does
+        not DECODE as UTF-8) is not a disk that will recover, so it degrades
+        to genesis (matching :meth:`_load_manifest`'s existing policy for
+        the same file) rather than retrying forever. ``OSError`` still
+        propagates, leaving ``_initialized`` False so the next ``log()``
+        retries rather than writing from a guessed anchor.
         """
         # Reset FIRST: this can run on an instance whose cached chain state
         # is stale, and genesis is the only defensible starting anchor.
         self._prev_hash = GENESIS_HASH
         self._seq = 0
         try:
-            raw = self._manifest_path.read_text(encoding="utf-8")
+            raw = self._manifest_path.read_bytes()
         except FileNotFoundError:
             return
         try:
+            # bytes, not text: json.loads raises UnicodeDecodeError alongside
+            # JSONDecodeError from one call, so a torn multibyte manifest
+            # degrades to genesis the same way an unparseable one does.
             manifest = json.loads(raw)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             logger.warning(
                 "Manifest %s is not valid JSON; anchoring on genesis",
                 self._manifest_path,
@@ -1307,10 +1314,8 @@ class AuditTrail:
         """Load or create the manifest index."""
         if self._manifest_path.exists():
             try:
-                return json.loads(
-                    self._manifest_path.read_text(encoding="utf-8")
-                )
-            except (json.JSONDecodeError, OSError):
+                return json.loads(self._manifest_path.read_bytes())
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
                 pass
 
         return {
@@ -1400,11 +1405,12 @@ def _read_last_valid_entry(path: Path) -> str:
     # ⛔ BUT PROPAGATION WAS SCOPED BY EXCEPTION TYPE, NOT BY WHAT FAILED
     # (diogenes, 2026-09-08): opening in text mode means the file's own
     # line-splitting has to decode first, so a torn multibyte character
-    # anywhere in the file raised ``UnicodeDecodeError`` out of the ``for
-    # line in f`` before a single line ever reached the JSON check below —
-    # a TORN LINE, not a failed read, treated as the latter. Reading raw
-    # bytes and decoding per line puts the tear back where the rest of this
-    # loop already handles it: skipped, like a partial ``json.loads``.
+    # raised ``UnicodeDecodeError`` out of the ``for line in f`` as soon as
+    # the decoder reached the tear — discarding every valid line already
+    # scanned before it, not merely failing fast on none of them — a TORN
+    # LINE, not a failed read, treated as the latter. Reading raw bytes and
+    # decoding per line puts the tear back where the rest of this loop
+    # already handles it: skipped, like a partial ``json.loads``.
     with open(path, "rb") as f:
         for raw in f:
             try:

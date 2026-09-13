@@ -23,10 +23,62 @@
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
 
+## ✅ CLOSED 2026-09-13 (seat `0913+22`) — ALL 9 `diogenes_20260909.md` STILL-OPEN ITEMS
+DISPOSITIONED @ HEAD `304f242` (no code changed `43cea97..304f242`; `git diff --stat` empty).
+**READ THIS FIRST, IT SUPERSEDES the 09-08 block below for the two items it names as still
+uncounted there.** Re-derive, do not trust this as an answer:
+`git log --oneline -3` · `.venv/bin/python3 -m pytest -q` (`1907 passed, 0 failed`) ·
+`.venv/bin/python3 -m mypy anneal_memory` (clean) · `.venv/bin/python3 -m ruff check anneal_memory tests`
+(63 errors, unchanged from baseline — verify via `git stash`).
+
+1. **FIXED — HIGH `audit.py:1016` (three manifest readers scoped by exception type, one
+   `anneal-memory verify` traceback).** `verify()`, `_seed_from_manifest`, `_load_manifest` now
+   all read the manifest as bytes and catch `UnicodeDecodeError` alongside `JSONDecodeError` (the
+   `_iter_lines` shape from 09-08, applied to the file that didn't get it). 1 test, mutation-checked
+   (revert to `read_text`/narrower except → `UnicodeDecodeError` escapes `verify()`).
+2. **FIXED — carried MEDIUM `audit.py:946` + MEDIUM `next_steps.md:48` (genesis reset ungraded /
+   coverage claim asserted not run).** One test discharges both: reaches `_seed_from_manifest`
+   with an unparseable manifest from a DIRTY (non-genesis) instance, asserts the reset. Mutation-
+   checked (delete either reset line → red).
+3. **FIXED — MEDIUM `audit.py:800` (tamper-guard scope justified by a false "always resets to 0"
+   claim; the early-return orphan-adoption rotation branch doesn't touch `_seq`).** Comment
+   corrected at both homes (`audit.py`, this file's `verify()` reference). 1 test pinning the true
+   invariant, mutation-checked (add a reset to the early-return branch → red).
+4. **FIXED (prose) — MEDIUM `next_steps.md:27` (false top-of-file all-clear).** Correction block
+   added directly below the false claim, naming closures by source rather than a recount.
+5. **FIXED (prose) — LOW `next_steps.md:42` (dead coordinate, `audit.py:952` moved to `:1020` in
+   the same commit that wrote it).** Replaced with the symbol reference.
+6. **FIXED (prose) — LOW `audit.py:1004` (half-applied docstring edit, the ▶ summary line
+   unreadable).** Corrected to name both `FileNotFoundError` and a manifest that doesn't parse or
+   decode.
+7. **FIXED (prose) — LOW `audit.py:1404`** *(now `:1406`, moved by this window's own edits)* **(comment
+   claimed the old text-mode failure discarded zero lines; measured 200).** Corrected to "discarding
+   every valid line already scanned" — no line count claimed, so it can't rot the same way again.
+8. **FIXED (prose) — DRIFT `tests/test_store.py:415` (comment quotes a heading verbatim; the
+   heading changed, the quote didn't).** Stopped quoting the heading — the sentence needs no quote
+   to make its point, and the quote was the only part that could go stale.
+
+**Verification budget: 3 tests for 1 HIGH + 2 real-code MEDIUMs (`audit.py:800`, `:946`), all 3
+mutation-checked in both directions. Record/comment/docstring-only fixes (items 4-8) added 0 tests
+by design.** New class `tests/test_audit.py::TestDiogenes20260909StillOpen`.
+
 ## ✅ CLOSED AFTER 2026-09-08 — READ THIS FIRST, IT IS WHAT THE NEXT SEAT ACTS ON
 
+⛔ **CORRECTED 2026-09-13 (diogenes MEDIUM, filed 09-09, re-derived and closed).** The line below
+was false: `diogenes_20260908.md` filed 2 HIGH + **4** MEDIUM (its own generated header states it —
+"Severity: HIGH 2 · MEDIUM 4"), not 5, and the closed list below mixes two different-provenance
+sets without naming either. As a named-by-source list, not a recount (a recount rots on the next
+night's findings): **closed from `diogenes_20260908.md`** — 2 HIGH (seat `0908+4`) + 3 MEDIUM (seat
+`0908+11`: the roster wrong-helper name, the two false docstring mutant/count claims) · **closed
+from the repo's own 09-07 open list, not Diogenes' and not counted in its total** — directory
+fsync, the duplicate-seq check (seat `0908+11`) · **carried, NOT closed this window, re-measured
+2026-09-09 and again 2026-09-13** — `_seed_from_manifest`'s genesis reset was ungraded
+(`audit.py:946`; test added 2026-09-13, see below) and `graduation.py:99`'s deliberate regex
+asymmetry (still ruled deliberate, untouched).
+
 **All 7 `diogenes_20260908.md` findings are CLOSED** (2 HIGH by seat `0908+4`, then the 5 MEDIUM
-by seat `0908+11` — see that block below). Nothing open from this window.
+by seat `0908+11` — see that block below). Nothing open from this window. **↑ FALSE, see the
+correction directly above — kept verbatim as the record of what the false claim said.**
 Re-derive, do not trust this as an answer:
 `git log --oneline -3` (HEAD should be `bbc79f4` or later) ·
 `.venv/bin/python3 -m pytest -q` (was `1902 passed, 0 failed` at close) ·
@@ -39,13 +91,20 @@ commit) · `.venv/bin/python3 -m pytest -q` (`1904 passed, 0 failed` at close) �
 `.venv/bin/python3 -m mypy anneal_memory` · `.venv/bin/python3 -m ruff check anneal_memory tests`
 (63 errors, unchanged from the 09-06 baseline — none in the touched files: 16 before, 16 after).
 
-**The manifest-parse policy split (`audit.py:952`, MEDIUM).** `_seed_from_manifest` and
-`_load_manifest` read the SAME manifest file and disagreed on a corrupt one: one propagated
-`json.JSONDecodeError` forever (wedging `log()` on every retry), the other degraded to defaults.
-Fixed by matching the existing tolerant policy: `OSError` still propagates (the transient case the
-original change was written for), `json.JSONDecodeError` now degrades to genesis with a
-`logger.warning`. No new test — the split closes by deleting the disagreement, not by adding a
-behavior; the existing manifest-corruption fixtures cover the parse-failure path.
+**The manifest-parse policy split (`_seed_from_manifest`'s manifest parse, MEDIUM — coordinate
+was `audit.py:952` at filing, dead by the same commit that wrote it; use the symbol, not the
+line).** `_seed_from_manifest` and `_load_manifest` read the SAME manifest file and disagreed on
+a corrupt one: one propagated `json.JSONDecodeError` forever (wedging `log()` on every retry), the
+other degraded to defaults. Fixed by matching the existing tolerant policy: `OSError` still
+propagates (the transient case the original change was written for), `json.JSONDecodeError` now
+degrades to genesis with a `logger.warning`.
+⛔ **CORRECTED 2026-09-13 (diogenes MEDIUM, re-derived and closed):** the claim just above —
+"the existing manifest-corruption fixtures cover the parse-failure path" — was asserted, not run.
+Mutant deleting the degradation: `172 passed, exit 0, zero red`. Now covered by
+`tests/test_audit.py::TestDiogenes20260909StillOpen::test_seed_from_manifest_resets_to_genesis_on_an_unparseable_manifest`,
+mutation-checked (delete either genesis-reset line at the top of `_seed_from_manifest` → red).
+That same test also closes the sibling carried MEDIUM (the genesis reset itself was ungraded,
+`audit.py:946`).
 
 **The `_batch()` docstring roster naming the wrong helper (`store.py:5645`, MEDIUM).** Diogenes'
 AST census found all ten batch-aware methods call `_audit_log_after_commit`, zero call

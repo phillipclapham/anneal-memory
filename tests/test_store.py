@@ -412,9 +412,11 @@ class TestANewerSchemaIsRefusedTheWayTheSidecarsRefuseIt:
         )
         _, _, batch_section = head.partition("**Batch-aware methods**")
         # BULLET LINES ONLY. The section HEADING also carries a ``:meth:``
-        # reference — "route audit events through :meth:`_audit_log`" — which
-        # is prose about the mechanism, not a roster entry. This test caught
-        # that on its first run, which is the behaviour it exists for.
+        # reference, which is prose about the mechanism, not a roster entry
+        # (not quoted here — the reference's own text changed once already,
+        # and a quote is the only part of this comment that can go stale).
+        # This test caught that on its first run, which is the behaviour it
+        # exists for.
         documented_batch_aware = {
             name
             for line in batch_section.splitlines()

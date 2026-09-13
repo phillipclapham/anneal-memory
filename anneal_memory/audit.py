@@ -143,14 +143,15 @@ class _ManifestUnavailable(OSError):
 class _ManifestQuarantined(_ManifestUnavailable):
     """The manifest was invalid and is quarantined; only audit-repair clears it.
 
-    ``marker`` names the marker file when the raiser knows it (``_load_manifest``
-    always does), so a caller never has to list the directory again to find
-    one this process just created.
+    ``markers`` names every marker the raiser saw, oldest first, when it knows
+    them (``_load_manifest`` always does), so a caller never has to list the
+    directory again, and never releases fewer markers than there are (glm,
+    re-pass 598cd40ffcfcbc18, reproduced by injection).
     """
 
-    def __init__(self, message: str, marker: str | None = None) -> None:
+    def __init__(self, message: str, markers: list[str] | None = None) -> None:
         super().__init__(message)
-        self.marker = marker
+        self.markers = list(markers or [])
 
 
 def _fsync_dir(path: Path) -> None:
@@ -1445,6 +1446,9 @@ class AuditTrail:
         stem = db_path.stem
         audit_dir = db_path.parent
         trail = cls(db_path)
+        # Every refusal ends with this. Once repair has quarantined the manifest
+        # itself, "nothing was written" is false (codex, re-pass 598cd40ffcfcbc18).
+        nothing = "nothing was written."
         # A listing error is a refusal, not a traceback (complement + codex, L3
         # of the hybrid, reproduced at mode 0o300).
         try:
@@ -1459,12 +1463,16 @@ class AuditTrail:
             try:
                 trail._load_manifest()
             except _ManifestQuarantined as e:
-                # The marker _load_manifest just created. Listing again here
-                # could fail after the rename and report "nothing was written"
-                # (codex, re-pass a927e791ce5df4eb).
-                if e.marker is None:
+                # The markers _load_manifest saw or just created. Listing again
+                # here could fail after the rename and report "nothing was
+                # written" (codex, re-pass a927e791ce5df4eb).
+                if not e.markers:
                     return AuditRepairResult(repaired=False, error=str(e))
-                markers = [e.marker]
+                markers = e.markers
+                nothing = (
+                    f"the invalid manifest was quarantined as {', '.join(markers)}; "
+                    "nothing else was written."
+                )
             except _ManifestUnavailable as e:
                 return AuditRepairResult(repaired=False, error=str(e))
             else:
@@ -1500,10 +1508,10 @@ class AuditTrail:
                         repaired=False,
                         error=(
                             f"{broken[0][0].name} does not hash-chain internally at seq "
-                            f"{broken[0][1]['chain_break_seq']}; nothing was written."
+                            f"{broken[0][1]['chain_break_seq']}; {nothing}"
                             if broken else
                             f"No readable entry in the sealed file(s) for {period} "
-                            f"({names}); nothing was written."
+                            f"({names}); {nothing}"
                         ),
                     )
                 path, info = usable[0]
@@ -1511,7 +1519,7 @@ class AuditTrail:
                 records.append({"path": path, "period": period, **info})
         except OSError as e:
             return AuditRepairResult(
-                repaired=False, error=f"Could not read the sealed files: {e}; nothing was written."
+                repaired=False, error=f"Could not read the sealed files: {e}; {nothing}"
             )
 
         for prev, cur in zip(records, records[1:]):
@@ -1520,7 +1528,7 @@ class AuditTrail:
                     repaired=False,
                     error=(
                         f"{cur['path'].name} does not chain from {prev['path'].name}; "
-                        "nothing was written."
+                        f"{nothing}"
                     ),
                 )
 
@@ -1557,7 +1565,7 @@ class AuditTrail:
             except OSError as e:
                 return AuditRepairResult(
                     repaired=False,
-                    error=f"Could not read the active audit file: {e}; nothing was written.",
+                    error=f"Could not read the active audit file: {e}; {nothing}",
                 )
         recovered = anchor != GENESIS_HASH
         if recovered:
@@ -2308,7 +2316,7 @@ class AuditTrail:
             raise _ManifestQuarantined(
                 f"the audit manifest is quarantined as {markers[-1]}; "
                 "run `anneal-memory audit-repair`",
-                markers[-1],
+                markers,
             )
         try:
             raw = self._manifest_path.read_bytes()
@@ -2328,7 +2336,7 @@ class AuditTrail:
             raise _ManifestQuarantined(
                 f"the audit manifest is invalid ({e}) and was quarantined as {marker}; "
                 "run `anneal-memory audit-repair`",
-                marker,
+                [marker],
             ) from e
 
     def _quarantine_manifest(self) -> str:

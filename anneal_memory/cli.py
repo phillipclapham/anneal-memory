@@ -56,6 +56,7 @@ from .audit import (
     _CORRUPT_MANIFEST as _CORRUPT_AUDIT_MANIFEST,
     _UNPARSEABLE_JSON as _UNPARSEABLE_AUDIT_JSON,
     _iter_lines as _iter_audit_lines,
+    _markers_in as _markers_in_audit,
     _parse_manifest_bytes as _parse_audit_manifest_bytes,
     _quarantine_markers as _quarantine_audit_markers,
     _require_entry_dict as _require_audit_entry_dict,
@@ -1640,13 +1641,20 @@ def cmd_audit(args: argparse.Namespace) -> None:
     # Collect all audit files in chronological order
     files_to_read: list[Path] = []
     anchor_trusted = True
-    # A quarantined manifest has been renamed away, so without this check the
-    # command below showed the active file only, silently (hybrid, 2026-09-13).
+    # ⛔ ONE LISTING DECIDES MARKERS AND WHICH FILES EXIST (codex, re-pass
+    # 598cd40ffcfcbc18). Separate probes let a quarantine land between the
+    # marker check and the manifest check, showing the active file as trusted
+    # history with no warning, and an unguarded exists() tracebacked in a
+    # mode-000 directory (reproduced).
     marker_list_error: OSError | None = None
+    names: set[str] | None
     try:
-        markers = _quarantine_audit_markers(audit_dir, stem)
+        names = {p.name for p in audit_dir.iterdir()}
+    except FileNotFoundError:
+        names = set()
     except OSError as e:
-        markers, marker_list_error = [], e
+        names, marker_list_error = None, e
+    markers = _markers_in_audit(names, stem) if names is not None else []
     # ⛔ anchor_trusted only ever moves from True to False below (re-pass of the
     # hybrid fix-diff, input a927e791ce5df4eb): a later branch that assigned
     # True back reported a quarantined, unreadable or unlistable trail as trusted.
@@ -1671,7 +1679,11 @@ def cmd_audit(args: argparse.Namespace) -> None:
             "may be omitted, showing the active file only.",
             file=sys.stderr,
         )
-    if manifest_path.exists():
+    # With a marker on disk the manifest is not read, even when one exists: a
+    # repair can save it and then fail to release the marker, and reading it
+    # contradicted the warning above (codex, re-pass 598cd40ffcfcbc18). With
+    # no listing, the read itself is the probe, under the guard below.
+    if not markers and (names is None or manifest_path.name in names):
         try:
             # A FOURTH manifest reader, missed by all three prior fix
             # rounds (complement L3, 2026-09-13, round 3) — same class
@@ -1687,6 +1699,17 @@ def cmd_audit(args: argparse.Namespace) -> None:
                 # crashes the reader further down.
                 if fpath.is_file():
                     files_to_read.append(fpath)
+        except FileNotFoundError:
+            if names is not None:
+                # Listed, then gone: a quarantine renamed it during this command.
+                anchor_trusted = False
+                files_to_read = []
+                print(
+                    f"Warning: manifest {manifest_path} disappeared while it was being "
+                    "read (it may have just been quarantined); sealed audit history is "
+                    "omitted, showing the active file only.",
+                    file=sys.stderr,
+                )
         except _CORRUPT_AUDIT_MANIFEST:
             # codex (L3, round 3): silently degrading to "active file
             # only" presented an INCOMPLETE audit history as if it were
@@ -1701,14 +1724,22 @@ def cmd_audit(args: argparse.Namespace) -> None:
             # should degrade the same way a corrupt manifest does, not
             # traceback on a disk error it cannot fix.
             anchor_trusted = False
+            files_to_read = []
             print(
                 f"Warning: manifest {manifest_path} is corrupt or "
                 "unreadable; sealed audit history is omitted, showing "
                 "the active file only.",
                 file=sys.stderr,
             )
-    if active_path.exists():
-        files_to_read.append(active_path)
+    if names is not None:
+        if active_path.name in names:
+            files_to_read.append(active_path)
+    else:
+        try:
+            if active_path.is_file():
+                files_to_read.append(active_path)
+        except OSError:
+            pass
 
     if not files_to_read:
         if args.json:

@@ -3974,3 +3974,70 @@ class TestHybridFixDiffAuditCliTrust:
 
         assert "cannot be listed" in result.stderr
         assert json.loads(result.stdout)["anchor_trusted"] is False
+
+
+class TestHybridSnapshotAuditCli:
+    """Re-pass 598cd40ffcfcbc18 (codex): cmd_audit probed the directory, the
+    manifest and the active file separately. Each reproduced on a6ea0c1 first."""
+
+    _two_sealed_weeks = staticmethod(TestHybridAuditCli._two_sealed_weeks)
+    _run = staticmethod(TestHybridAuditCli._run)
+    _MARKER = "m.audit.manifest.json.corrupt-20260913T000000000000Z"
+
+    def test_a_quarantine_landing_mid_read_is_untrusted(self, tmp_path, monkeypatch, capsys):
+        """codex HIGH (a rename between the marker listing and the manifest probe
+        showed the active file as trusted history, no warning). NOT reproduced
+        as filed: this injects the rename during the manifest READ, which
+        a6ea0c1 already reported as untrusted under the corrupt-or-unreadable
+        warning. It guards the snapshot path that replaced the probe: a manifest
+        the listing saw but the read cannot find is a quarantine landing."""
+        import argparse
+        from pathlib import Path
+
+        from anneal_memory import cli
+
+        db = self._two_sealed_weeks(tmp_path)
+        manifest = tmp_path / "m.audit.manifest.json"
+        marker = tmp_path / self._MARKER
+        real_read = Path.read_bytes
+
+        def quarantined_meanwhile(path):
+            if path == manifest:
+                manifest.rename(marker)
+            return real_read(path)
+
+        monkeypatch.setattr(Path, "read_bytes", quarantined_meanwhile)
+        cli.cmd_audit(argparse.Namespace(db=str(db), json=True, since=None, event=None, limit=None))
+        out = capsys.readouterr()
+
+        assert json.loads(out.out)["anchor_trusted"] is False
+        assert "disappeared" in out.err
+
+    def test_a_marker_beside_a_saved_manifest_omits_sealed_history(self, tmp_path):
+        """codex MED: the warning said sealed history was omitted while the
+        manifest branch still read every sealed file."""
+        db = self._two_sealed_weeks(tmp_path)
+        active_entries = len((tmp_path / "m.audit.jsonl").read_text().splitlines())
+        (tmp_path / self._MARKER).write_bytes(b"{not json")
+
+        result = self._run("--db", str(db), "audit", "--json")
+        payload = json.loads(result.stdout)
+
+        assert "quarantined" in result.stderr
+        assert payload["anchor_trusted"] is False
+        assert payload["total"] == active_entries
+
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads a mode-000 directory")
+    def test_an_unsearchable_directory_prints_json_not_a_traceback(self, tmp_path):
+        """codex MED, reproduced on a6ea0c1 (Python 3.13): manifest_path.exists()
+        raised PermissionError after the listing error was caught."""
+        db = self._two_sealed_weeks(tmp_path)
+        tmp_path.chmod(0o000)
+        try:
+            result = self._run("--db", str(db), "audit", "--json")
+        finally:
+            tmp_path.chmod(0o700)
+
+        assert result.returncode == 0, result.stderr
+        assert "Traceback" not in result.stderr
+        assert json.loads(result.stdout)["anchor_trusted"] is False

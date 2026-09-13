@@ -71,6 +71,18 @@ is in the commit messages: `git log --format=%B 2ed7579..origin/audit-r10b`.
 CODEX REQUEST for `deep_review.py --diff 2ed7579 --paths anneal_memory/audit.py tests/test_audit.py CHANGELOG.md --seats
 complement,codex,glm` at HEAD `397e4a3` was with the desk. Find its rows by input_id in verdicts.jsonl. Check every quoted
 line against `git show <reviewed-commit>:anneal_memory/audit.py` before believing it.
+**L1 re-pass on `93895d8..397e4a3` (sonnet), triaged by 0913+32 — no HIGH, APPROVE WITH NOTES:**
+- MED [run by L1]: a NON-EMPTY active file holding NO valid entry (all torn) makes `_first_prev_hash` return None, so
+  the active-link restriction is skipped and the orphan chain is adopted, the same as no active file at all; an
+  UNREADABLE active file (OSError) refuses every orphan. ⚖ Ruling (0913+32, design layer): the CODE is right and the
+  DOCSTRING is wrong. A file with no valid entry has nothing the orphan could contradict, and `_initialize` already
+  seeds from the manifest tip in that case, so adopting keeps one chain; refusing would fork it. An unreadable file
+  cannot be inspected, so refusing there is the conservative choice. ▶ Fix is prose only: in
+  `_adopt_orphaned_files`'s docstring, "a non-empty active file" → "an active file holding a valid entry", plus one
+  line at the `active_prev is not None` branch saying why torn and unreadable differ. Land it with codex's fix-diff,
+  not on its own.
+- LOW: `_rotation_refusal_logged` is per instance, so a second collision later in a long-lived process is not logged
+  again. A one-line comment is enough.
 **Residue no instrument here holds (spore-938):** that the tmp fsync makes a power loss safe (reasoned from L2, not
 testable here); a real second PROCESS verifying during a real rotation (the tests use threads and injected stalls);
 macOS `fsync` without F_FULLFSYNC.

@@ -19,12 +19,28 @@ sealed files.
 `EOFError`/`zlib.error`, not `OSError`. A file that is unreadable or disappears while `verify()` reads
 it now yields `valid=False` with an "Unreadable audit file" error.
 
-**A corrupt orphaned sealed file no longer blocks writes, and no longer disappears silently.** It used
-to make every later `log()` call raise. It is now left on disk, unadopted, and `verify()` reports any
-sealed file the manifest does not cover as `valid=False`. A transient read error during recovery is
-raised so the next call retries. When both a `.gz` and a `.jsonl` copy of one week exist, the `.gz` is
-used only if it reads clean, and the other copy is deleted only after the manifest is saved; previously
-an intact `.jsonl` could be deleted in favour of a truncated `.gz`.
+**An orphaned sealed file that cannot be read no longer blocks writes, and no longer disappears
+silently.** A corrupt or permanently unreadable orphan used to make every later `log()` call raise. A
+read error is now retried a bounded number of times within the call; if it persists, the file is left
+on disk, unadopted, and writes continue. `verify()` reports any sealed file the manifest does not cover
+as `valid=False`.
+
+**Crash recovery no longer deletes audit files.** When a week has both a `.gz` and a `.jsonl` copy,
+recovery adopts one and renames the other to `<name>.dup-<UTC timestamp>`; a stale gzip temp file is
+renamed to `<name>.stale-<UTC timestamp>`. The `.gz` is adopted only when both copies hold the same
+bytes, otherwise the copy that reads. A copy left behind for a week the manifest already lists is
+renamed aside rather than adopted as a second segment. Previously recovery deleted the other copy, which
+could destroy the only complete one, and a crash before that deletion made `verify()` report a hash
+mismatch on an intact trail.
+
+**`verify()` no longer reports a healthy rotation as a broken trail.** A rotation running in another
+process passes through states that look broken — the sealed week is on disk before the manifest names
+it — and `verify()` returned `valid=False` for them. An invalid result is now re-checked before it is
+returned, for as long as a rotation is visibly compressing (at most 5 seconds). A trail that stays
+broken still fails, and the error for an unlisted, missing or vanished file says a re-run may clear it.
+
+**`verify()` on an audit directory it cannot search returns `valid=False`** instead of raising
+`PermissionError`. A directory that does not exist is still an empty, valid trail.
 
 **An audit line or manifest containing a JSON integer over Python's 4,300-digit limit, or deeply
 nested JSON, is now treated as unreadable.** Either one used to raise out of `log()` on every call, and

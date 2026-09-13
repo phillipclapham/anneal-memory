@@ -1140,6 +1140,19 @@ class AuditTrail:
         if active_path.name in names:
             files_to_verify.append(active_path)
 
+        # ⛔ MISSING FILES ARE CHECKED BEFORE THE EMPTY-TRAIL VERDICT (complement,
+        # codex and glm, L3 re-pass of round 10b, reproduced here and on main):
+        # with the sealed and active files both deleted, the empty-trail return
+        # came first and reported total loss as a valid, empty trail.
+        if missing_files:
+            return AuditVerifyResult(
+                valid=False, total_entries=0, files_verified=0,
+                error=(
+                    "Missing sealed files referenced in manifest: "
+                    f"{missing_files}{_RERUN_HINT}"
+                ),
+            )
+
         if not files_to_verify:
             # ⛔ THE EMPTY-TRAIL VALID RETURN RE-CHECKS THE MANIFEST TOO (codex,
             # L3 re-pass of round 10b, reproduced with a simulated empty
@@ -1151,16 +1164,27 @@ class AuditTrail:
                     valid=False, total_entries=0, files_verified=0,
                     error=f"The manifest changed during verification{_RERUN_HINT}",
                 )
-            return AuditVerifyResult(valid=True, total_entries=0, files_verified=0)
-
-        if missing_files:
-            return AuditVerifyResult(
-                valid=False, total_entries=0, files_verified=0,
-                error=(
-                    "Missing sealed files referenced in manifest: "
-                    f"{missing_files}{_RERUN_HINT}"
-                ),
+            # ⛔ AND A FRESH LISTING MUST SHOW NO AUDIT FILE THE PASS DID NOT SEE
+            # (codex, same re-pass, reproduced with a simulated listing): an
+            # enumeration that missed a crashed first rotation's sealed file, with
+            # no manifest yet, called that history an empty valid trail.
+            try:
+                fresh = {p.name for p in audit_dir.iterdir()}
+            except OSError as e:
+                return AuditVerifyResult(
+                    valid=False, total_entries=0, files_verified=0,
+                    error=f"Cannot list audit directory: {e}",
+                )
+            appeared = sorted(
+                n for n in fresh - names
+                if n in (active_path.name, manifest_path.name) or _is_sealed_filename(n, stem)
             )
+            if appeared:
+                return AuditVerifyResult(
+                    valid=False, total_entries=0, files_verified=0,
+                    error=f"Audit files appeared during verification: {appeared}{_RERUN_HINT}",
+                )
+            return AuditVerifyResult(valid=True, total_entries=0, files_verified=0)
 
         # Walk all files, verify chain
         total_entries = 0

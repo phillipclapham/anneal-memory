@@ -19,7 +19,11 @@ name, where `verify()` reports it.
 **`verify()` could call a trail valid with its first sealed week missing.** The manifest was statted
 after the directory listing, so a first rotation landing between the two, followed by an empty active
 file, passed as valid with no entries. The manifest is now statted before the listing, and every valid
-verdict, including the one for an empty trail, re-checks it.
+verdict, including the one for an empty trail, re-checks it. An empty-trail verdict is also refused when
+the manifest names files that are missing, which used to report total loss as a valid empty trail, or
+when a fresh listing shows an audit file the pass did not see. ⚠ The first of these is in the published 0.9.9 (reproduced on tag
+`v0.9.9`): deleting the sealed file the manifest names together with the active file makes its `verify()`
+return `valid=True` with no entries.
 
 **One refused rotation stopped rotation for the rest of the process.** After refusing to seal a week
 already on disk, every later week boundary retried the same name, so neither rotation nor retention ran

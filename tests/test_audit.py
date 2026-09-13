@@ -5956,3 +5956,153 @@ class TestFixDiffRound3EntryLineTypeSweep:
 
         sealed = active.parent / "seal_non_object.audit.1999-W01.jsonl.gz"
         assert sealed.exists()
+
+
+class TestFixDiffRound4FieldTypeCompleteness:
+    """complement + codex L3, round 4, 2026-09-13 — the sweep's own
+    validators had gaps: a bool where an int was expected, a filename
+    resolving to the audit directory, a missing (not merely wrong-typed)
+    ``"files"`` key crashing the two writer call sites, and entry-line
+    field types (``prev_hash``/``seq``/``ts``) never checked past the
+    root.
+    """
+
+    def test_active_last_seq_rejects_a_bool(self, tmp_path):
+        """MED, codex. ``bool`` is an ``int`` subclass in Python, so
+        ``isinstance(x, int)`` accepted ``true``/``false`` for
+        ``active_last_seq`` — ``_seed_from_manifest`` then set
+        ``self._seq = True``, and the next entry was written with
+        ``"seq": true``, which ``verify()`` also accepted as a valid int.
+
+        ⛔ MUTATION-CHECKED: drop the ``isinstance(seq, bool)`` exclusion
+        from ``_parse_manifest_bytes`` and this fails — the manifest is
+        accepted instead of degrading to genesis.
+        """
+        db = tmp_path / "bool_seq.db"
+        trail = AuditTrail(db)
+        trail.log("first", {"i": 0})
+
+        trail._manifest_path.write_text(
+            '{"active_last_hash": "sha256:GENESIS", '
+            '"active_last_seq": true, "files": []}',
+            encoding="utf-8",
+        )
+
+        trail._seed_from_manifest()
+
+        assert trail._prev_hash == GENESIS_HASH, (
+            "a boolean active_last_seq should be rejected as corrupt, "
+            "not accepted as an int"
+        )
+        assert trail._seq == 0
+        assert not isinstance(trail._seq, bool)
+
+    def test_manifest_rejects_an_empty_filename(self, tmp_path):
+        """HIGH, codex. ``{"filename": ""}`` resolved to the audit
+        DIRECTORY itself (``audit_dir / ""`` == ``audit_dir``), which
+        ``.exists()`` returns ``True`` for — so ``verify()`` then called
+        ``open(audit_dir, "rb")`` and crashed with an uncaught
+        ``IsADirectoryError`` instead of reporting "Corrupt manifest."
+
+        ⛔ MUTATION-CHECKED: drop the ``f["filename"]`` truthiness check
+        from ``_parse_manifest_bytes`` and this fails — the manifest is
+        accepted and ``verify()`` raises ``IsADirectoryError`` instead of
+        returning a result.
+        """
+        db = tmp_path / "empty_filename.db"
+        trail = AuditTrail(db)
+        trail.log("first", {"i": 0})
+
+        trail._manifest_path.write_text(
+            '{"files": [{"filename": ""}]}', encoding="utf-8"
+        )
+
+        result = AuditTrail.verify(db)  # must NOT raise
+
+        assert result.valid is False
+        assert result.error is not None and "Corrupt manifest" in result.error
+
+    def test_manifest_missing_files_key_does_not_crash_rotation(
+        self, tmp_path
+    ):
+        """HIGH, complement. ``_parse_manifest_bytes`` validated
+        ``"files"``'s type ONLY IF THE KEY WAS PRESENT, never requiring
+        it to exist — a manifest that's a valid object but omits
+        ``"files"`` entirely parsed clean, then crashed
+        ``_rotate_if_needed``'s unguarded ``manifest["files"].append(...)``
+        with a ``KeyError`` (the reader sites already used
+        ``.get("files", [])`` and were unaffected).
+
+        ⛔ MUTATION-CHECKED: revert ``_parse_manifest_bytes`` to only
+        validate ``"files"`` inside an ``if "files" in manifest:`` guard
+        (no normalization) and this fails with an uncaught ``KeyError``
+        instead of sealing the file.
+        """
+        db = tmp_path / "missing_files_key.db"
+        trail = AuditTrail(db)
+        trail.log("first", {"i": 0})
+
+        # A valid object manifest that simply omits "files".
+        trail._manifest_path.write_text(
+            '{"version": 1, "active_last_hash": "sha256:GENESIS", '
+            '"active_last_seq": 0}',
+            encoding="utf-8",
+        )
+
+        trail._last_week = "1999-W01"  # force the weekly rotation
+        trail._rotate_if_needed()  # must NOT raise
+
+        manifest = trail._load_manifest()
+        assert isinstance(manifest.get("files"), list)
+        assert len(manifest["files"]) == 1
+
+    def test_verify_rejects_a_non_string_prev_hash(self, tmp_path):
+        """HIGH, codex. ``entry.get("prev_hash", "")`` was never
+        type-checked — ``{"prev_hash": 1}`` reached
+        ``actual_prev[:20]`` in the hash-mismatch error message and
+        crashed with an uncaught ``TypeError``.
+
+        ⛔ MUTATION-CHECKED: drop the ``prev_hash`` check from
+        ``_require_entry_dict`` and this fails — the malformed entry is
+        treated as a value instead of being skipped.
+        """
+        db = tmp_path / "bad_prev_hash.db"
+        trail = AuditTrail(db)
+        trail.log("first", {"i": 0})
+
+        active = trail._active_path
+        active.write_bytes(
+            active.read_bytes()
+            + b'{"v":1,"seq":1,"ts":"x","event":"bad","actor":"a",'
+            b'"prev_hash":1}\n'
+        )
+
+        result = AuditTrail.verify(db)  # must NOT raise
+
+        assert result.valid is True, f"unexpected: {result.error}"
+        assert result.skipped_lines == 1
+
+    def test_initialize_rejects_a_non_int_seq_on_recovery(self, tmp_path):
+        """HIGH, codex. ``_initialize()``'s
+        ``last_entry.get("seq", 0) + 1`` was never type-checked — a
+        string ``seq`` crashed recovery with an uncaught ``TypeError``.
+
+        ⛔ MUTATION-CHECKED: drop the ``seq`` check from
+        ``_require_entry_dict`` and this fails.
+        """
+        db = tmp_path / "bad_seq_recovery.db"
+        active = db.parent / "bad_seq_recovery.audit.jsonl"
+        active.parent.mkdir(parents=True, exist_ok=True)
+        active.write_bytes(
+            b'{"v":1,"seq":"not-an-int","ts":"2026-01-01T00:00:00.0000Z",'
+            b'"event":"bad","actor":"a","prev_hash":"sha256:GENESIS"}\n'
+        )
+
+        trail = AuditTrail(db)
+        trail._initialize()  # must NOT raise
+
+        assert trail._initialized is True
+        assert trail._prev_hash == GENESIS_HASH, (
+            "an entry with a non-int seq should be treated as no valid "
+            "entry, not crash recovery"
+        )

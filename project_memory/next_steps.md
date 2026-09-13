@@ -167,6 +167,40 @@ shape is real too, but only when a filter is set, and this test doesn't set one)
 **Verification budget: 6 tests, all mutation-checked. Full suite: `1918 passed` (was 1912), 0
 failed. mypy clean. ruff: 63, unchanged.**
 
+### THIRD RE-PASS (fan-in-dispatched, against `ac055fb` — the CORRECT base per the fan-in's
+correction, not the sweep-only `541e99f` this seat first proposed — 2026-09-13) — 4 REAL, 0 REFUTED
+
+Fourth round of the same class, and each time narrower: this time gaps in the validators the
+sweep itself had just written, not new call sites.
+
+1. **FIXED — MED (complement), missing (not wrong-typed) `"files"` key.** `_parse_manifest_bytes`
+   validated `"files"`'s type only if the key was present, never requiring it to exist — a valid
+   object manifest omitting `"files"` entirely crashed the two WRITER sites
+   (`_adopt_orphaned_files`, `_rotate_if_needed`) at an unguarded `manifest["files"].append(...)`
+   with `KeyError`. Normalized: missing `"files"` now degrades to `[]`.
+2. **FIXED — HIGH (codex), empty filename resolves to the audit directory.** `{"filename": ""}`
+   passed the string-type check; `audit_dir / ""` is `audit_dir` itself, `.exists()` is `True`, and
+   `verify()` crashed with an uncaught `IsADirectoryError`. Filename now required nonempty with no
+   path separators (corruption threat model, not path-traversal hardening — this manifest is
+   written only by this process).
+3. **FIXED — MED (codex), `isinstance(x, int)` accepts `bool`.** `{"active_last_seq": true}`
+   passed, set `_seq = True`, wrote `"seq": true` into the chain, and `verify()` accepted the
+   boolean as a valid int too. Now excludes `bool` explicitly.
+4. **FIXED — HIGH (codex), entry-line field types never checked past the root.**
+   `_require_entry_dict` validated only that an entry was a dict; `{"prev_hash": 1}` crashed
+   `verify()`'s `actual_prev[:20]`, a string `seq` crashed `_initialize()`'s
+   `last_entry.get("seq", 0) + 1`, a numeric `ts` would crash the same method's
+   `ts.replace(...)`. Added type checks for exactly these three fields (each only if present, same
+   policy as the manifest) — not a full entry schema, since no other field is dereferenced
+   unsafely.
+5. **FIXED — HIGH (codex), `cmd_audit` silently presented incomplete history as complete.**
+   Degrading to "active file only" on a corrupt manifest is the right policy (matches every other
+   reader), but nothing told the operator sealed history was omitted — and the round-3 test
+   enshrined that silence. Added a stderr warning; JSON/text output shape unchanged.
+
+**6 new/updated tests, all mutation-checked in both directions. Full suite: `1923 passed` (was
+1918), 0 failed. mypy clean. ruff: 63, unchanged.**
+
 ## ✅ CLOSED AFTER 2026-09-08 — READ THIS FIRST, IT IS WHAT THE NEXT SEAT ACTS ON
 
 ⛔ **CORRECTED 2026-09-13 (diogenes MEDIUM, filed 09-09, re-derived and closed).** The line below

@@ -1591,6 +1591,11 @@ class TestCmdAudit:
             "a corrupt manifest should degrade to the active file alone, "
             "not lose all entries"
         )
+        assert "manifest" in captured.err.lower() and "corrupt" in captured.err.lower(), (
+            "codex L3 round 3: silently degrading presented an incomplete "
+            "audit history as complete with no indication — the omission "
+            "must be surfaced, not just survived"
+        )
 
     def test_audit_skips_a_non_object_entry_line(
         self, base_args_with_data, capsys

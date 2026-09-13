@@ -23,55 +23,64 @@
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
 
-## ▶▶ PICKUP — READ FIRST (seat `0913+29` rotated 2026-09-13 ~15:40 at a context seam). EVERY STATE LINE IS A COMMAND.
+## ▶▶ PICKUP — READ FIRST (seat `0913+32`, rotated 2026-09-13 ~17:00 at a planned context seam). EVERY STATE LINE IS A COMMAND.
 
 **Re-derive, do not trust:**
 - main: `git rev-parse --short HEAD` vs `git ls-remote origin refs/heads/main`; tree `git status --short`
-- hybrid branch: `git ls-remote origin refs/heads/audit-hybrid`; `git log --oneline main..audit-hybrid`
-- suite `.venv/bin/python3 -m pytest -q` · mypy `.venv/bin/python3 -m mypy anneal_memory` · ruff baseline 63
-- today's rounds: the SIXTH..NINTH RE-PASS sections below; review rows by input_id in `~/Briefcase/flow/state/verdicts.jsonl`
+- branches: `git ls-remote origin 'refs/heads/audit-*'`; `git log --oneline 2ed7579..origin/audit-r10b`
+- worktrees: `git worktree list`. A worktree in a job's tmp dies with that job; `git worktree prune` drops dead registrations.
+- a branch's suite: check it out in a worktree OUTSIDE the repo root, assert `anneal_memory.audit.__file__` is that
+  worktree's (spore-845), then `~/Briefcase/anneal-memory/.venv/bin/python3 -m pytest -q -p no:cacheprovider` from it
+- review rows: `~/Briefcase/flow/state/verdicts.jsonl`, by input_id
 
-### ⛔⛔ DUTY AT ~19:45 EDT TONIGHT (2026-09-13) — OWED TO THE FAN-IN DESK BEFORE 20:00
-Flow's venv installs this repo EDITABLE, so main's WORKING TREE is flow's live memory code, and flow's real trail
-(`~/.anneal-memory/memory.audit.*`) rotates W37→W38 on its first write after 20:00 EDT (Mon 00:00 UTC).
-1. The tree must be committed and clean; never mid-edit across 19:30–20:15.
-2. `cp -p ~/.anneal-memory/memory.audit.* <scratch>/preflight_real/` — a COPY; never touch the real trail.
-3. From the repo root, `PYTHONPATH=$PWD .venv/bin/python3` a script that asserts `anneal_memory.audit.__file__` is under
-   this repo, patches `_iso_week_now` to return `"2026-W38"`, opens `AuditTrail(<copy>/memory.db)`, logs once, and prints
-   manifest record count, sealed file count and `AuditTrail.verify()` before and after.
-   Receipts 2026-09-13: at `9cd52cd` and at `4d00ca7`, 15→16 records, 15→16 sealed, verify valid=True, old records kept.
-4. Delete the copy. SendMessage the desk: HEAD sha, records before→after, verify valid.
-5. If it fails or the tree cannot be committed cleanly: tell the desk BEFORE 20:00 and check out the last pre-flighted
-   commit (`4d00ca7`, else `9cd52cd`) in this tree until EOD. No unproven HEAD live across 20:00.
+### ⛔⛔ DUTY AT ~19:45 EDT TONIGHT (2026-09-13) — REPORT TO THE FAN-IN DESK BEFORE 20:00
+Flow's venv installs this repo EDITABLE, so main's working tree is flow's live memory code until the pin below exists.
+1. Main committed and clean; never mid-edit across 19:30–20:15. No audit branch is fast-forwarded into main tonight.
+2. Check the rehearsed script before running it: `shasum -a 256 ~/Briefcase/_backups/anneal-w37-duty/preflight_w38.py`
+   must print `b8b333592b53eeaf982bd2ccdeb5d5fef6b5528c3c5778f007bd59bd4c093cb4`.
+3. `cd ~/Briefcase/anneal-memory && PYTHONPATH=$PWD .venv/bin/python3 ~/Briefcase/_backups/anneal-w37-duty/preflight_w38.py`
+   It asserts the import is this tree, prints HEAD and tree state, copies `~/.anneal-memory/memory.audit.*` into
+   `preflight_real/` beside the script (never into the repo), forces a W37→W38 rotation on the copy, prints manifest
+   records / sealed files / verify before and after, deletes the copy, and ends `PREFLIGHT PASS` or `FAIL` (exit 0/1).
+   Receipt 2026-09-13 15:59 on `2ed7579` [run]: records 15→16, sealed 15→16, new `memory.audit.2026-W37.jsonl.gz`,
+   verify valid, total_entries 10674→10675.
+4. SendMessage the desk: HEAD sha, before→after, verify.
+5. On FAIL or an unclean tree: tell the desk before 20:00, check out `4d00ca7` (PASS at 15:09) in this tree until the EOD
+   capture, then return to main.
 
-### ⛔ ROUND 10 — OPEN ON MAIN. Review `110815bd496759e4` against `4d00ca7`: CLOSE CRITERION NOT MET
-glm thin (via retry, 709s, 1 file opened, no findings). All reproduced [run] on `4d00ca7` unless marked.
-1. **HIGH (complement) — `verify()` during a HEALTHY rotation reports a false invalid.** Paused inside `_save_manifest`,
-   a verify read "Unmanifested sealed audit file(s)… W02"; at `9cd52cd` the same moment was a silent valid over 5 of 12
-   entries. The window is the whole gzip, because the uncompressed sealed `.jsonl` matches `_is_sealed_filename`.
-   **Designed fix (agreed with the desk):** `_verify_once` returns (result, unmanifested names) and `verify()` wraps it.
-   Always one re-check after `_ROTATION_POLL_SECONDS` (0.1). Keep polling while an in-flight marker exists (a `.jsonl`
-   with its `.jsonl.gz.tmp`, a `.jsonl` with no `.gz`, a `.gz` whose `.jsonl` still exists), capped at
-   `_ROTATION_SETTLE_MAX_SECONDS` (5). Still unmanifested → invalid, and the error adds "if a rotation was in progress,
-   re-run verify". Tests: gzip open paused 0.4s → valid; a lone corrupt `.gz` orphan → invalid in under ~1s; a mutant
-   with a single fixed re-check fails the first test. The real fix (a lock or generation stamp) stays routed B.
-2. **HIGH (complement) — a permanently unreadable non-gzip orphan blocks every write again.** A `chmod 000` orphan
-   `.jsonl` made `log()` raise `PermissionError` 3 of 3, because round 9 infers "transient" from "not gzip-shaped".
-   Direction: a bounded per-instance retry count, then skip; round 9's unmanifested check keeps the skip loud.
-3. **HIGH (codex #1) — a crash between `_save_manifest` and the duplicate's unlink.** The next open adopted the leftover
-   `.jsonl` as a second segment; the manifest listed both `.gz` and `.jsonl` for one week, and verify reported a hash
-   mismatch at seq 0.
-4. **HIGH (codex #2, #3) [reasoned, not run] — dedup authorizes deletion on gzip readability, not on content
-   equivalence, and on a first read that adoption does not repeat.**
-   ▶ **STRUCTURAL FIX FOR 3 AND 4, ADOPTED WITH THE DESK: RECOVERY NEVER DELETES AUDIT FILES.** Rounds 7, 8 and 9
-   each lost data in a recovery path that deletes. Adopt one copy and rename the other aside to `.dup-<UTC stamp>`, a
-   name outside `_is_sealed_filename`, so it is neither re-adopted nor reported unmanifested. Adoption treats a
-   manifest-known `.gz` plus a leftover counterpart as unfinished and renames the counterpart aside. Removal happens
-   only through an explicit repair command, the same principle as Phill's hybrid.
-5. **HIGH (codex #5) — `verify()` on an audit directory without search permission.** It raised an uncaught
-   `PermissionError` from `manifest_path.exists()` (codex predicted valid=True; the run gave a traceback). Fix: stat or
-   iterdir explicitly; `FileNotFoundError` means no trail, and any other `OSError` means valid=False.
-6. codex #4 (snapshot atomicity between the directory scan and the rotation) → routed item B, unchanged.
+### ⚖ RULINGS IN FORCE (do not re-litigate)
+- **FF HOLD**, the desk's reading of Phill's `spore-1019` ruling (15:5x: *"agree, pin it after EOD, so maybe tomorrow
+  morning?"*). Tomorrow flow gets a NON-editable commit pin (flow/venv and the uv-tool CLI) at the commit tonight's
+  rotation ran on. Until that pin exists main IS flow's live code, so no audit branch merges into main tonight. After it,
+  a branch reaches main only after its review passes AND a copy-of-real-trail pre-flight on the exact merge commit.
+- Hybrid = option A, chain_anchor = option (2): the HYBRID section below. No release, no version bump.
+
+### ▶ ROUND 10 AND 10b — BUILT ON BRANCHES, IN REVIEW, NOT MERGED
+`origin/audit-r10` = the five HIGHs of review `110815bd496759e4` plus an L0 pass. `origin/audit-r10b` = r10 plus the fixes
+from r10's own L1, an L2 filesystem crash-consistency pass, and the desk's stall positive control. The reasoning for each
+is in the commit messages: `git log --format=%B 2ed7579..origin/audit-r10b`.
+**The design in one line each** (the code comments carry the why):
+- recovery never deletes: a copy it does not adopt becomes `<name>.dup-<UTC>`, a stale temp `.stale-<UTC>` (`_set_aside`)
+- adoption reads each file once (`_scan_sealed`, bounded in-call retries), picks between copies by content digest, and
+  adopts a week only if it continues the sealed chain and the active file continues from it (no splice)
+- rotation creates the temp before the rename, fsyncs it, saves the manifest before the unlink, and refuses to seal a
+  week already on disk
+- `verify()` lists the directory once, re-checks an invalid pass while `_rotation_in_flight` is true, and requires the
+  manifest's stat to hold across a valid pass
+**Review state at handoff [judged by 0913+32, ~16:25]:** an L1 re-pass (sonnet) on `93895d8..397e4a3` was running, and a
+CODEX REQUEST for `deep_review.py --diff 2ed7579 --paths anneal_memory/audit.py tests/test_audit.py CHANGELOG.md --seats
+complement,codex,glm` at HEAD `397e4a3` was with the desk. Find its rows by input_id in verdicts.jsonl. Check every quoted
+line against `git show <reviewed-commit>:anneal_memory/audit.py` before believing it.
+**Residue no instrument here holds (spore-938):** that the tmp fsync makes a power loss safe (reasoned from L2, not
+testable here); a real second PROCESS verifying during a real rotation (the tests use threads and injected stalls);
+macOS `fsync` without F_FULLFSYNC.
+**Routed, not fixed:**
+- L2 M4: retention unlinks sealed files before saving the manifest, so a crash between them leaves "Missing sealed files"
+  until the next cleanup. Needs a pending-delete record in the manifest first.
+- B (codex #4, r9): verify/rotation snapshot atomicity. r10b's listing-first read plus the manifest stat covers the
+  rotation interleavings its tests inject; retention interleavings remain.
+- A `stats()` or open in ANOTHER process sets aside a live rotation's temp and breaks its replace (L1 r10 LOW; the same
+  class the old unlink had).
 
 ### ▶ HYBRID MANIFEST QUARANTINE — RULED BY PHILL 2026-09-13, BUILDING ON BRANCH `audit-hybrid` (merge AFTER round 10)
 **Rulings (via desk `0913+31`):**
@@ -88,6 +97,12 @@ glm thin (via retry, 709s, 1 file opened, no findings). All reproduced [run] on 
   line, `server.py --verify-audit`'s summary and `anneal-memory audit --json`, each with a test.
 - No release until it is merged and reviewed.
 
+**Rebase onto `origin/audit-r10b`, not r10** [judged by 0913+32 from a trial rebase, 2026-09-13]: rebasing `9ad1b54`
+onto r10 stopped at `d311bbb` with three conflict hunks in `audit.py`, and r10b then rewrote `_rotate_if_needed` and
+`_adopt_orphaned_files` again. Keep the hybrid's manifest load BEFORE the new temp-then-rename sequence, and its
+quarantine return BEFORE adoption lists the directory. The hybrid adds a MODULE-level `_scan_sealed` and r10b a METHOD
+`AuditTrail._scan_sealed`; they return different shapes, so rename one before they meet. `repair_manifest`'s chain check
+and r10b's adoption chain rule answer the same question and should share one helper.
 **The worktree was in job scratch and is gone.** Recreate it OUTSIDE the repo root, because repo-read review seats can
 reach anything under it: `git worktree add <scratch>/anneal-hybrid audit-hybrid`. Test there with
 `PYTHONPATH=<worktree>` and assert `anneal_memory.audit.__file__` points into the worktree (spore-845). Commit and push

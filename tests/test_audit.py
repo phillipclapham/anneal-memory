@@ -5532,3 +5532,118 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
             f"the durable location of the gap — and seq 2 is ON DISK "
             f"({seqs}), so it names an entry that exists"
         )
+
+
+class TestDiogenes20260909StillOpen:
+    """diogenes, 2026-09-09 — the two real-code items from the STILL OPEN
+    (9) slot at HEAD 43cea97 that were not test-covered when filed.
+    """
+
+    def test_manifest_readers_degrade_to_genesis_on_a_torn_multibyte(
+        self, tmp_path
+    ):
+        """HIGH ``audit.py:1016`` — the window titled ``bbc79f4``
+        "read-error propagation stops being scoped by exception type" and
+        the manifest reader was still scoped by exception type: a torn
+        multibyte tail raises ``UnicodeDecodeError`` before ``json.loads``
+        is ever reached, and that matches none of the three manifest
+        readers' catch tuples. Driven through the real CLI-facing entry
+        point, ``AuditTrail.verify()`` tracebacked instead of reporting a
+        corrupt manifest.
+
+        ⛔ MUTATION-CHECKED: revert ``verify()``'s manifest read from
+        ``read_bytes()``/``(JSONDecodeError, UnicodeDecodeError, KeyError)``
+        back to ``read_text(encoding="utf-8")``/``(JSONDecodeError,
+        KeyError)`` and this raises ``UnicodeDecodeError`` instead of
+        returning a result.
+        """
+        db = tmp_path / "manifest_tear.db"
+        trail = AuditTrail(db)
+        trail.log("before", {"i": 0})
+
+        manifest_path = trail._manifest_path
+        valid_manifest = json.dumps({
+            "version": 1,
+            "db_path": db.name,
+            "active_file": trail._active_path.name,
+            "active_last_hash": GENESIS_HASH,
+            "active_last_seq": 0,
+            "files": [],
+        }).encode("utf-8")
+        # A torn multibyte tail (⛔, U+26D4) appended to otherwise-valid
+        # manifest bytes — a byte sequence that is not valid UTF-8.
+        manifest_path.write_bytes(valid_manifest + "⛔".encode("utf-8")[:-1])
+
+        result = AuditTrail.verify(db)  # must NOT raise
+
+        assert result.valid is False
+        assert result.error is not None and "Corrupt manifest" in result.error
+
+    def test_seed_from_manifest_resets_to_genesis_on_an_unparseable_manifest(
+        self, tmp_path
+    ):
+        """MEDIUM ``audit.py:946`` (carried) + MEDIUM
+        ``project_memory/next_steps.md:48`` — ``_seed_from_manifest``'s
+        genesis reset was completely ungraded: a mutant deleting
+        ``self._prev_hash = GENESIS_HASH; self._seq = 0`` passed the full
+        suite unchanged (measured 2026-09-09: 1899 passed / 5 skipped,
+        byte-identical to baseline). The record's claim that "the existing
+        manifest-corruption fixtures cover the parse-failure path" was
+        asserted, not run — a mutant deleting the JSON-decode degrade
+        left 172 passed / exit 0, zero red.
+
+        ⛔ MUTATION-CHECKED: delete either reset line at the top of
+        ``_seed_from_manifest`` and this fails — the trail is DIRTY
+        (non-genesis ``_prev_hash``/``_seq``) before the corrupt manifest
+        is read, so a missing reset leaves the dirty values standing
+        instead of anchoring on genesis.
+        """
+        db = tmp_path / "seed_reset.db"
+        trail = AuditTrail(db)
+        trail.log("first", {"i": 0})
+        assert trail._prev_hash != GENESIS_HASH
+        assert trail._seq != 0
+
+        trail._manifest_path.write_text("{not valid json", encoding="utf-8")
+
+        trail._seed_from_manifest()
+
+        assert trail._prev_hash == GENESIS_HASH, (
+            "an unparseable manifest left the dirty chain state standing "
+            "instead of resetting to genesis"
+        )
+        assert trail._seq == 0
+
+    def test_the_early_return_rotation_path_does_not_reset_seq(
+        self, tmp_path
+    ):
+        """MEDIUM ``audit.py:800`` — the seq-monotonicity comment at
+        ``verify()`` claimed rotation ALWAYS restarts ``_seq`` at 0.
+        False on ``_rotate_if_needed``'s early-return branch (active
+        file missing or zero-byte at rotation time): that branch runs
+        orphan adoption and advances ``_last_week`` without touching
+        ``self._seq`` at all — only the sealing path resets it. Pins the
+        corrected claim so a future edit that makes the branches agree
+        cannot silently re-break ``verify()``'s per-file assumption.
+
+        ⛔ MUTATION-CHECKED: add ``self._seq = 0`` to the early-return
+        branch and this fails.
+        """
+        db = tmp_path / "early_return.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("before", {"i": i})
+        assert trail._seq == 3
+
+        # what a rollback + crash before the active file is recreated
+        # leaves behind: no active file at all.
+        trail._active_path.unlink()
+        trail._last_week = "1999-W01"  # force the rotation check to fire
+
+        trail._rotate_if_needed()
+
+        assert trail._seq == 3, (
+            "the early-return rotation branch reset _seq even though it "
+            "never touches self._seq — only the sealing branch restarts "
+            "the count"
+        )

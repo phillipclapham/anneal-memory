@@ -1392,9 +1392,9 @@ It routes to `project_memory/diogenes_20260904.md` (untriaged, verbatim). The wi
 - **`flow/scripts/crystal_decision_apply.py` level cap** — ✅ **FIXED by main 2026-09-04** (`e5cbaca7`, with a test). Its anneal-side CAUSE (a contract docstring instructing consumers to guard `level in (2, 3)`) was fixed in 0.9.9.
 - **`_BARE_GRADUATION_RE` stays `[23]`** — `spore-676`, gated, on blast radius (widening puts 12+ mature carried patterns onto the bare-demotion path). ⚠ Its stated justification "the asymmetry is inert" was **measured false** and is corrected in place; the deferral stands on blast radius alone.
 
-### ▶ THE THREE LIVE CLOCKS
+### ▶ THE LIVE CLOCKS (written 2026-09-04)
 - **`spore-721` — AM-LINKGATE BLOCK, ruled BUILD, `next: 2026-09-11`.** Gate on **≥2 pair-capable** graduations (a 1-graduation wrap cannot form a pair); **fail closed with a loud escape** (it refuses a memory SAVE). Full apparatus, codex at L3.
-- **`spore-722` — Slice C step-3, `next: 2026-09-10`, KILL CRITERION REAL.** Gate is **Phill's labelling time**, not data. Answer *"what would we do with a GO?"* first; unanswered by 09-10 → shelved formally. Flow's read: probably shelve.
+- ✅ **`spore-722` — Slice C step-3 — SHELVED 2026-09-13 (composted at a sit-down with Phill): no GO worth buying without a concrete recall failure the graph hop would have caught.** Original entry: Gate is **Phill's labelling time**, not data. Answer *"what would we do with a GO?"* first; unanswered by 09-10 → shelved formally. Flow's read: probably shelve.
 - **`spore-675` step 4 only** — let `prepare_wrap`'s cold-candidate surfacing drive routing each wrap. Small, blocks nothing, consolidate-seat act. Steps 1–3 are done (measured 09-04: 29 crystals at levels 2–10, 422 pattern links, prose line gone).
 
 ### ⚠ OWED ELSEWHERE

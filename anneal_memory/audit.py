@@ -115,6 +115,12 @@ def _parse_manifest_bytes(raw: bytes) -> dict[str, Any]:
     written only by this process; the threat model is corruption, not a
     hostile author).
 
+    complement + glm (round 4, independently) found the empty-filename
+    fix incomplete: ``"."`` and ``".."`` are nonempty and contain no
+    path separator, so both passed the check above and resolve to a
+    directory the SAME way ``""`` did (``audit_dir / "."`` is
+    ``audit_dir`` itself). Rejected explicitly.
+
     complement (L3, round 3) found a third: this function validated
     ``"files"``'s type ONLY IF THE KEY WAS PRESENT, never requiring it to
     exist — so a manifest that's a valid object but omits ``"files"``
@@ -143,6 +149,7 @@ def _parse_manifest_bytes(raw: bytes) -> dict[str, Any]:
         and f["filename"]
         and "/" not in f["filename"]
         and "\\" not in f["filename"]
+        and f["filename"] not in (".", "..")
         for f in files
     ):
         raise TypeError("manifest field 'files' is not a list of file records")
@@ -165,10 +172,15 @@ def _require_entry_dict(entry: Any) -> dict[str, Any]:
     into ``actual_prev[:20]`` on an int; a string ``seq`` degrades
     ``_initialize()``'s ``last_entry.get("seq", 0) + 1``; a numeric
     ``ts`` degrades the same method's ``ts.replace("Z", "+00:00")``.
-    Only these three fields are checked (each only if present, same
-    policy as the manifest) — they are the ones this file dereferences
-    in a type-unsafe way; ``event``/``actor`` are only ever compared for
-    equality, which is safe for any type.
+
+    codex (L3, round 4) found two more, in ``cli.py``'s TEXT-rendering
+    path (below the JSON return, so missed by every earlier test that
+    only checked ``--json``): ``data`` non-dict crashes
+    ``data.get('episode_id', ...)``; ``event`` non-str crashes the
+    ``f"{event:<24}"`` format spec. Every field this file (and its
+    callers) dereferences in a type-unsafe way is now covered here in
+    one place — ``actor`` is only ever compared for equality or printed
+    bare, safe for any type.
     """
     if not isinstance(entry, dict):
         raise TypeError(f"entry line root is {type(entry).__name__}, not an object")
@@ -180,6 +192,10 @@ def _require_entry_dict(entry: Any) -> dict[str, Any]:
             raise TypeError("entry field 'seq' is not an int")
     if "ts" in entry and not isinstance(entry["ts"], str):
         raise TypeError("entry field 'ts' is not a string")
+    if "event" in entry and not isinstance(entry["event"], str):
+        raise TypeError("entry field 'event' is not a string")
+    if "data" in entry and not isinstance(entry["data"], dict):
+        raise TypeError("entry field 'data' is not an object")
     return entry
 
 

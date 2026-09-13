@@ -201,6 +201,54 @@ sweep itself had just written, not new call sites.
 **6 new/updated tests, all mutation-checked in both directions. Full suite: `1923 passed` (was
 1918), 0 failed. mypy clean. ruff: 63, unchanged.**
 
+### FOURTH RE-PASS (fan-in-dispatched, against `85265a3`, 2026-09-13) — 3 REAL, 1 REFUTED, 3 ROUTED
+
+Fifth round of the same class. complement and glm independently found the SAME finding (real
+consensus); codex found 4 more HIGH + 2 MED, of which one is a well-formed policy question this
+seat answered, and three are a genuinely different class (referential/architectural, not
+decode-and-type-validate) routed to Phill rather than fixed under this window's scope.
+
+1. **FIXED — HIGH (complement + glm, independent consensus), `.`/`..` filenames still resolve to
+   a directory.** Round 4's filename check required nonempty + no path separator, which `.` and
+   `..` both satisfy — and both resolve to a directory the same way `""` did. Rejected explicitly.
+2. **FIXED — MED (codex), `cmd_audit`'s own warning claimed "or unreadable" but never caught
+   `OSError`.** A real read failure (permission, I/O) still tracebacked. Added to the tuple.
+3. **FIXED — MED (codex), the entry field-type sweep missed the CLI's TEXT rendering path.**
+   `cmd_audit`'s non-`--json` output dereferences `data` (`.get('episode_id', ...)`) and `event`
+   (`f"{event:<24}"`) in ways every earlier round's tests never exercised (all used `--json`).
+   Added `event`/`data` type checks to `_require_entry_dict` — the same shared helper, not a new
+   one. ⚠ The first draft of these two tests went through `AuditTrail.verify()`, which never
+   touches either field, and passed for the WRONG reason (a hash mismatch from a hand-crafted
+   `prev_hash`, not the crash being tested). Corrected to go through `cmd_audit` in text mode,
+   where the vulnerable code actually runs.
+4. **REFUTED — HIGH (codex), "a corrupted final audit record receives a clean integrity verdict"
+   and my own test enshrines it.** MEASURED: a plain unparseable line (`b"not even json\n"`,
+   nothing to do with today's work) ALREADY produces `valid=True, skipped_lines=1` — this has been
+   the established policy since the 2026-09-08 torn-tail fix (a malformed/torn line degrades
+   gracefully rather than failing the whole trail). A schema-violating-but-parseable entry getting
+   the identical treatment (skip, count, stay valid) is the SAME policy extended one category, not
+   a new gap my change introduced. No change made.
+5. **ROUTED, not fixed — 3 findings that are a different class from this window's scope
+   (decode-and-type-validate a manifest/entry before dereferencing it), each requiring new
+   machinery rather than a guard:**
+   - codex HIGH: `_cleanup()` doesn't validate `last_ts`/`last_hash` on sealed-file records before
+     using them to set `chain_anchor` and delete files — would need full per-record schema
+     validation of the manifest's `files` array, not just the root fields this window covered.
+   - codex HIGH: a manifest that loses its `"files"` key but is later rotated can adopt sealed
+     files out of chronological order — would need a reconciliation algorithm (scan disk,
+     reconstruct chronological order) that doesn't exist today, not a validation guard.
+   - codex HIGH: `cmd_audit` doesn't warn when a manifest is VALID but references a sealed file
+     that's been deleted from disk (as opposed to the manifest itself being corrupt) — a
+     referential-integrity check against the filesystem, a different question from "is this JSON
+     shaped right."
+   ▶ All three are real, plausible corruption/operational scenarios, not manufactured. Left for
+   Phill's call on whether they're worth the added complexity, per this window's explicit
+   out-of-scope: no new machinery, only closing the class this seat was dispatched to close.
+
+**4 new/updated tests, all mutation-checked in both directions (2 corrected mid-round after the
+first draft tested the wrong function). Full suite: `1927 passed` (was 1923), 0 failed. mypy
+clean. ruff: 63, unchanged.**
+
 ## ✅ CLOSED AFTER 2026-09-08 — READ THIS FIRST, IT IS WHAT THE NEXT SEAT ACTS ON
 
 ⛔ **CORRECTED 2026-09-13 (diogenes MEDIUM, filed 09-09, re-derived and closed).** The line below

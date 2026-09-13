@@ -6106,3 +6106,45 @@ class TestFixDiffRound4FieldTypeCompleteness:
             "an entry with a non-int seq should be treated as no valid "
             "entry, not crash recovery"
         )
+
+
+class TestFixDiffRound5DotFilenamesAndTextRenderFields:
+    """complement + glm (consensus) + codex, round 5, 2026-09-13 — the
+    round-4 filename hardening was itself incomplete, and the entry
+    field-type sweep missed the two fields the CLI's text (non-JSON)
+    rendering path dereferences unsafely.
+    """
+
+    def test_manifest_rejects_dot_and_dotdot_filenames(self, tmp_path):
+        """HIGH, complement + glm (independent consensus). ``"."`` and
+        ``".."`` are nonempty and contain no path separator, so both
+        passed round 4's filename check — and both resolve to a
+        directory the same way an empty string did (``audit_dir / "."``
+        is ``audit_dir`` itself), reproducing the identical uncaught
+        ``IsADirectoryError`` round 4 was supposed to close.
+
+        ⛔ MUTATION-CHECKED: drop the ``not in (".", "..")`` clause from
+        ``_parse_manifest_bytes`` and this fails — ``verify()`` raises
+        ``IsADirectoryError`` instead of returning a result.
+        """
+        db = tmp_path / "dot_filename.db"
+        trail = AuditTrail(db)
+        trail.log("first", {"i": 0})
+
+        trail._manifest_path.write_text(
+            '{"files": [{"filename": ".."}]}', encoding="utf-8"
+        )
+
+        result = AuditTrail.verify(db)  # must NOT raise
+
+        assert result.valid is False
+        assert result.error is not None and "Corrupt manifest" in result.error
+
+    # ⚠ CORRECTED 2026-09-13: the ``data``/``event`` non-dict/non-str
+    # crash sites are in ``cli.py``'s TEXT (non-``--json``) rendering
+    # path, not in ``AuditTrail.verify()`` — verify() never dereferences
+    # either field. A first draft of these two tests went through
+    # ``verify()`` and passed for the WRONG reason (a hash mismatch from
+    # a hand-crafted ``prev_hash``, not the crash being tested for).
+    # Moved to ``tests/test_cli.py::TestCmdAudit`` where the vulnerable
+    # code actually runs.

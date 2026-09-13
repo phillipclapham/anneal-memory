@@ -7835,3 +7835,56 @@ class TestHybridL3Fixes:
         assert empty.valid is True and empty.anchor_trusted is False
         assert changed.valid is False and "changed" in (changed.error or "")
         assert changed.anchor_trusted is False
+
+    def test_repair_releases_every_marker_the_quarantine_saw(self, tmp_path, monkeypatch):
+        """glm HIGH (re-pass 598cd40ffcfcbc18), reproduced by INJECTION: two markers
+        that appeared between repair's listing and _load_manifest's were passed
+        on as one, so repair released only the newest and left the trail
+        quarantined behind repaired=True.
+        """
+        db = self._two_sealed_weeks(tmp_path)
+        manifest = tmp_path / "m.audit.manifest.json"
+        manifest.write_bytes(b"{not json")
+        real = audit_module._quarantine_markers
+        calls = []
+
+        def two_quarantines_land(audit_dir, stem):
+            calls.append(stem)
+            if len(calls) == 2:
+                manifest.rename(tmp_path / "m.audit.manifest.json.corrupt-20260913T000000000001Z")
+                (tmp_path / "m.audit.manifest.json.corrupt-20260913T000000000002Z").write_bytes(b"{not json")
+            return real(audit_dir, stem)
+
+        monkeypatch.setattr(audit_module, "_quarantine_markers", two_quarantines_land)
+        result = AuditTrail.repair_manifest(db)
+        monkeypatch.setattr(audit_module, "_quarantine_markers", real)
+
+        assert result.repaired is True, result.error
+        assert audit_module._quarantine_markers(tmp_path, "m") == []
+        assert AuditTrail.verify(db).valid
+
+    def test_a_refusal_after_quarantining_says_so(self, tmp_path, monkeypatch):
+        """codex MED (re-pass 598cd40ffcfcbc18), reproduced by INJECTION: repair
+        quarantined the manifest, the listing of sealed files then failed, and
+        the refusal said "nothing was written"."""
+        from pathlib import Path
+
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        real_iterdir = Path.iterdir
+        calls = []
+
+        def third_iterdir_fails(self):
+            if self == tmp_path:
+                calls.append(1)
+                if len(calls) == 3:
+                    raise PermissionError(13, "listing sealed files")
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", third_iterdir_fails)
+        result = AuditTrail.repair_manifest(db)
+        monkeypatch.setattr(Path, "iterdir", real_iterdir)
+
+        assert result.repaired is False
+        assert "quarantined as" in (result.error or "")
+        assert "nothing was written" not in (result.error or "")

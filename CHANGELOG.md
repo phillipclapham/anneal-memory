@@ -60,12 +60,16 @@ writing nothing, when the directory cannot be listed, and keeps the marker when 
 cannot be saved. It refuses a sealed week that breaks its own chain, lists every copy it did not
 choose in `untracked`, and, with no sealed file left, anchors on the active file's first entry as a
 recovered anchor. `verify()` reads quarantine markers from its one directory listing and carries
-`anchor_trusted` on every result reached after the manifest is read. `anneal-memory audit` reports
-`anchor_trusted: false` whenever it sees a quarantine marker, cannot list the directory to rule one
-out (with a warning, whether or not a manifest is present), or cannot read or parse the manifest; a
-readable manifest can lower the flag but never raise it back. Repair takes the name of a marker it
-has just created from the quarantine itself instead of listing the directory again, so a listing
-that fails after the rename can no longer report "nothing was written".
+`anchor_trusted` on every result reached after the manifest is read. `anneal-memory audit` decides
+from one directory listing which markers and files exist. It reports `anchor_trusted: false`
+whenever it sees a quarantine marker, cannot list the directory to rule one out (with a warning,
+whether or not a manifest is present), cannot read or parse the manifest, or finds a manifest the
+listing showed gone by the time it is read; a readable manifest can lower the flag but never raise
+it back. While a marker exists the manifest is not read, so the output matches the warning that
+sealed history is omitted, and a directory without search permission prints JSON instead of a
+traceback. Repair takes every marker the quarantine saw from the quarantine itself instead of
+listing the directory again, releases all of them, and once it has quarantined the manifest its
+refusals say so instead of "nothing was written".
 
 ⚠ An absent manifest with no marker still takes the old path (a fresh manifest and automatic orphan
 adoption); the ruling covers an invalid one.

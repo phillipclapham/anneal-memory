@@ -7616,10 +7616,20 @@ class TestHybridManifestQuarantine:
         db = self._two_sealed_weeks(tmp_path)
         week = tmp_path / "m.audit.1999-W02.jsonl.gz"
         lines = gzip.decompress(week.read_bytes()).splitlines(keepends=True)
-        first = json.loads(lines[0])
-        first["prev_hash"] = "sha256:" + "0" * 64
-        lines[0] = (json.dumps(first, separators=(",", ":"), sort_keys=True) + "\n").encode()
-        week.write_bytes(gzip.compress(b"".join(lines)))
+        # Re-link the rest of the week so it chains internally and only its
+        # link to the week before is broken; otherwise the internal-chain check
+        # (L3 of the hybrid) refuses first, with a different message.
+        prev_hash = "sha256:" + "0" * 64
+        relinked = []
+        for raw in lines:
+            if not raw.strip():
+                continue
+            entry = json.loads(raw)
+            entry["prev_hash"] = prev_hash
+            text = json.dumps(entry, separators=(",", ":"), sort_keys=True)
+            relinked.append((text + "\n").encode())
+            prev_hash = AuditTrail._compute_hash(text)
+        week.write_bytes(gzip.compress(b"".join(relinked)))
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
 
         result = AuditTrail.repair_manifest(db)
@@ -7637,3 +7647,142 @@ class TestHybridManifestQuarantine:
 
         assert result.repaired is False and "nothing to repair" in (result.error or "")
         assert manifest.read_bytes() == original
+
+
+class TestHybridL3Fixes:
+    """L3 of the hybrid (input 6e433954439ed92b: complement, codex, glm). Each
+    was reproduced on the hybrid rebased onto 93073b6 before it was fixed; the
+    second-listing failure only by injection in one process."""
+
+    _two_sealed_weeks = staticmethod(TestHybridManifestQuarantine._two_sealed_weeks)
+
+    def _quarantined(self, tmp_path):
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        AuditTrail(db).log("quarantines", {})
+        return db
+
+    @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root lists a mode-300 directory")
+    def test_repair_in_an_unlistable_directory_refuses_instead_of_raising(self, tmp_path):
+        """complement + codex: PermissionError out of repair_manifest.
+
+        ⛔ MUTATION-CHECKED: drop the guard on the first marker listing and this raises.
+        """
+        db = self._quarantined(tmp_path)
+        before = sorted(p.name for p in tmp_path.iterdir())
+        tmp_path.chmod(0o300)
+        try:
+            result = AuditTrail.repair_manifest(db)
+        finally:
+            tmp_path.chmod(0o700)
+
+        assert result.repaired is False and "Cannot list" in (result.error or "")
+        assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+    def test_repair_that_cannot_save_keeps_the_marker(self, tmp_path, monkeypatch):
+        """codex: a failed save escaped as a traceback."""
+        db = self._quarantined(tmp_path)
+        [marker] = audit_module._quarantine_markers(tmp_path, "m")
+
+        def disk_full(self, *args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(AuditTrail, "_save_manifest", disk_full)
+        result = AuditTrail.repair_manifest(db)
+
+        assert result.repaired is False and "save" in (result.error or "")
+        assert audit_module._quarantine_markers(tmp_path, "m") == [marker]
+
+    def test_verify_reads_markers_from_its_one_listing(self, tmp_path, monkeypatch):
+        """complement + codex, reproduced by INJECTION: a second listing that
+        failed inside the pass raised out of verify().
+
+        ⛔ MUTATION-CHECKED: call _quarantine_markers in _verify_listed and this raises.
+        """
+        db = self._quarantined(tmp_path)
+
+        def second_listing(*args, **kwargs):
+            raise PermissionError(13, "second listing")
+
+        monkeypatch.setattr(audit_module, "_quarantine_markers", second_listing)
+        result = AuditTrail.verify(db)
+
+        assert result.valid is False and "quarantined" in (result.error or "")
+
+    def test_repair_refuses_a_week_that_breaks_internally(self, tmp_path):
+        """codex: repair released the marker over a week verify() rejected.
+
+        ⛔ MUTATION-CHECKED: never set chain_break_seq and this repairs.
+        """
+        db = self._two_sealed_weeks(tmp_path)
+        week = tmp_path / "m.audit.1999-W01.jsonl.gz"
+        lines = gzip.decompress(week.read_bytes()).splitlines(keepends=True)
+        middle = json.loads(lines[1])
+        middle["prev_hash"] = "sha256:" + "1" * 64
+        lines[1] = (json.dumps(middle, separators=(",", ":"), sort_keys=True) + "\n").encode()
+        week.write_bytes(gzip.compress(b"".join(lines)))
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+
+        result = AuditTrail.repair_manifest(db)
+
+        assert result.repaired is False and "hash-chain internally" in (result.error or "")
+        assert not (tmp_path / "m.audit.manifest.json").exists()
+        assert len(audit_module._quarantine_markers(tmp_path, "m")) == 1
+
+    def test_repair_with_no_sealed_file_anchors_on_the_active_file(self, tmp_path):
+        """glm: with every sealed file gone the rebuilt manifest anchored at
+        genesis and verify() reported a hash mismatch at seq 0.
+
+        ⛔ MUTATION-CHECKED: anchor at genesis when no record survives and this fails.
+        """
+        db = self._two_sealed_weeks(tmp_path)
+        for sealed in tmp_path.glob("m.audit.1999-*"):
+            sealed.unlink()
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+
+        result = AuditTrail.repair_manifest(db)
+
+        assert result.repaired is True and result.chain_anchor_recovered is True, result.error
+        verdict = AuditTrail.verify(db)
+        assert verdict.valid is True, verdict.error
+        assert verdict.anchor_trusted is False
+
+    def test_repair_lists_an_unreadable_copy_it_did_not_choose(self, tmp_path):
+        """codex: a truncated .gz scanned before a readable .jsonl was dropped
+        from ``untracked``.
+
+        ⛔ MUTATION-CHECKED: leave unreadable copies out of ``untracked`` and this fails.
+        """
+        db = self._two_sealed_weeks(tmp_path)
+        packed = tmp_path / "m.audit.1999-W02.jsonl.gz"
+        (tmp_path / "m.audit.1999-W02.jsonl").write_bytes(gzip.decompress(packed.read_bytes()))
+        packed.write_bytes(packed.read_bytes()[:25])
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+
+        result = AuditTrail.repair_manifest(db)
+
+        assert result.repaired is True, result.error
+        assert "m.audit.1999-W02.jsonl" in result.files
+        assert "m.audit.1999-W02.jsonl.gz" in result.untracked
+
+    def test_anchor_trusted_survives_a_damaged_trail(self, tmp_path):
+        """codex: after a recovered-anchor repair, the unmanifested and missing
+        file verdicts reported anchor_trusted=True.
+
+        ⛔ MUTATION-CHECKED: drop anchor_trusted from the unmanifested return and this fails.
+        """
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / "m.audit.1999-W01.jsonl.gz").unlink()
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        assert AuditTrail.repair_manifest(db).chain_anchor_recovered is True
+        packed = tmp_path / "m.audit.1999-W02.jsonl.gz"
+        stray = tmp_path / "m.audit.1999-W09.jsonl.gz"
+        stray.write_bytes(packed.read_bytes())
+
+        unmanifested = AuditTrail.verify(db)
+        stray.unlink()
+        packed.rename(tmp_path / "gone.bak")
+        missing = AuditTrail.verify(db)
+
+        assert unmanifested.valid is False and unmanifested.anchor_trusted is False
+        assert missing.valid is False and missing.anchor_trusted is False

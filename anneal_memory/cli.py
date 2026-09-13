@@ -1642,15 +1642,27 @@ def cmd_audit(args: argparse.Namespace) -> None:
     anchor_trusted = True
     # A quarantined manifest has been renamed away, so without this check the
     # command below showed the active file only, silently (hybrid, 2026-09-13).
+    marker_list_error: OSError | None = None
     try:
         markers = _quarantine_audit_markers(audit_dir, stem)
-    except OSError:
-        markers = []
+    except OSError as e:
+        markers, marker_list_error = [], e
     if markers:
         print(
             f"Warning: the audit manifest is quarantined as {markers[-1]}; "
             "sealed audit history is omitted, showing the active file only. "
             "Run `anneal-memory audit-repair` to rebuild it.",
+            file=sys.stderr,
+        )
+    elif marker_list_error is not None and not manifest_path.exists():
+        # codex, L3 of the hybrid, reproduced at mode 0o300: an unlistable
+        # directory read as "no marker", so a quarantined trail printed its
+        # active file as the whole history with anchor_trusted true.
+        anchor_trusted = False
+        print(
+            f"Warning: the audit directory cannot be listed ({marker_list_error}), "
+            "so a quarantined manifest cannot be ruled out; sealed audit history "
+            "may be omitted, showing the active file only.",
             file=sys.stderr,
         )
     if manifest_path.exists():

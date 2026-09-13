@@ -7809,3 +7809,29 @@ class TestHybridL3Fixes:
 
         assert unmanifested.valid is False and unmanifested.anchor_trusted is False
         assert missing.valid is False and missing.anchor_trusted is False
+
+    def test_anchor_trusted_survives_the_empty_trail_returns(self, tmp_path, monkeypatch):
+        """The rebase onto round 10b 01b2ed8 moved the empty-trail verdict below
+        the missing-files check and added a signature re-check before it; H7's
+        anchor_trusted had to be carried onto both. A recovered anchor with no
+        file left reached the valid return reporting anchor_trusted=True.
+        """
+        manifest = {
+            "version": 1, "db_path": "m.db", "active_file": "m.audit.jsonl",
+            "active_last_hash": audit_module.GENESIS_HASH, "active_last_seq": 0,
+            "files": [], "chain_anchor": "a" * 64, "chain_anchor_recovered": True,
+        }
+        (tmp_path / "m.audit.manifest.json").write_text(json.dumps(manifest))
+        db = tmp_path / "m.db"
+
+        empty = AuditTrail.verify(db)
+        # A different signature on every stat: the one taken before the listing
+        # never matches the re-check, so every pass sees a changed manifest.
+        ticks = iter(range(1000))
+        monkeypatch.setattr(audit_module, "_stat_signature", lambda path: (next(ticks), 0, 0))
+        monkeypatch.setattr(audit_module, "_ROTATION_POLL_SECONDS", 0)
+        changed = AuditTrail.verify(db)
+
+        assert empty.valid is True and empty.anchor_trusted is False
+        assert changed.valid is False and "changed" in (changed.error or "")
+        assert changed.anchor_trusted is False

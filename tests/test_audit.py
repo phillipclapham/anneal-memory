@@ -5536,8 +5536,75 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
 
 class TestDiogenes20260909StillOpen:
     """diogenes, 2026-09-09 — the two real-code items from the STILL OPEN
-    (9) slot at HEAD 43cea97 that were not test-covered when filed.
+    (9) slot at HEAD 43cea97 that were not test-covered when filed, plus
+    two real HIGH/MED findings codex (L3) raised against this window's
+    own fix on 2026-09-13.
     """
+
+    def test_manifest_readers_reject_a_non_object_root(self, tmp_path):
+        """HIGH, codex L3 2026-09-13 against ``audit.py:762``. A
+        syntactically valid JSON document whose root isn't an object
+        (``null``, a list, a bare number) parsed fine under every
+        manifest reader's exception tuple and then crashed with
+        ``AttributeError``/``TypeError`` at the first ``.get()`` —
+        uncaught, because the tuples only expected parse/decode
+        failures. Measured: ``json.loads(b"null")`` then ``.get(...)``
+        raises ``AttributeError``.
+
+        ⛔ MUTATION-CHECKED: replace ``_parse_manifest_bytes``'s
+        ``isinstance(manifest, dict)`` check with a bare ``return
+        manifest`` and this fails with an uncaught ``AttributeError``
+        instead of a clean ``AuditVerifyResult``.
+        """
+        db = tmp_path / "non_object_root.db"
+        trail = AuditTrail(db)
+        trail.log("before", {"i": 0})
+        trail._manifest_path.write_bytes(b"null")
+
+        result = AuditTrail.verify(db)  # must NOT raise
+
+        assert result.valid is False
+        assert result.error is not None and "Corrupt manifest" in result.error
+
+    def test_seed_from_manifest_degrades_on_invalid_utf8_that_json_loads_bytes_tolerates(
+        self, tmp_path
+    ):
+        """MED, codex L3 2026-09-13 against ``audit.py:1020``.
+        ``json.loads(bytes)`` decodes via ``surrogatepass``, which does
+        NOT raise on a byte sequence that is invalid strict UTF-8 but
+        happens to be a valid lone-surrogate encoding — so the
+        2026-09-09 fix's own premise ("bytes, not text: json.loads
+        raises UnicodeDecodeError alongside JSONDecodeError from one
+        call") was false for this shape. Measured:
+        ``json.loads(b'{"active_last_hash":"\\xed\\xa0\\x80",...}')``
+        parses without raising, producing ``'\\ud800'`` in the field.
+
+        ⛔ MUTATION-CHECKED: change ``_parse_manifest_bytes`` back to
+        ``json.loads(raw)`` (bytes, not ``raw.decode("utf-8")`` first)
+        and this fails — the corrupt anchor is silently accepted instead
+        of degrading to genesis.
+        """
+        db = tmp_path / "surrogate.db"
+        trail = AuditTrail(db)
+        trail.log("first", {"i": 0})
+        assert trail._prev_hash != GENESIS_HASH
+
+        # A byte sequence that is invalid strict UTF-8 (an unpaired
+        # UTF-8-encoded surrogate) but that json.loads(bytes) accepts
+        # via surrogatepass without raising.
+        trail._manifest_path.write_bytes(
+            b'{"active_last_hash":"\xed\xa0\x80","active_last_seq":7,'
+            b'"files":[]}'
+        )
+
+        trail._seed_from_manifest()
+
+        assert trail._prev_hash == GENESIS_HASH, (
+            "a manifest field containing an invalid-UTF-8-derived lone "
+            "surrogate was silently accepted as the chain anchor instead "
+            "of being treated as corrupt"
+        )
+        assert trail._seq == 0
 
     def test_manifest_readers_degrade_to_genesis_on_a_torn_multibyte(
         self, tmp_path
@@ -5620,11 +5687,22 @@ class TestDiogenes20260909StillOpen:
         """MEDIUM ``audit.py:800`` — the seq-monotonicity comment at
         ``verify()`` claimed rotation ALWAYS restarts ``_seq`` at 0.
         False on ``_rotate_if_needed``'s early-return branch (active
-        file missing or zero-byte at rotation time): that branch runs
-        orphan adoption and advances ``_last_week`` without touching
-        ``self._seq`` at all — only the sealing path resets it. Pins the
-        corrected claim so a future edit that makes the branches agree
-        cannot silently re-break ``verify()``'s per-file assumption.
+        file missing at rotation time): that branch runs orphan adoption
+        and advances ``_last_week`` without touching ``self._seq`` at
+        all — only the sealing path resets it. Pins the corrected claim
+        so a future edit that makes the branches agree cannot silently
+        re-break ``verify()``'s per-file assumption.
+
+        ⚠ CORRECTED 2026-09-13 (codex L3 MED, against the first draft of
+        this test): the original fixture bare-``unlink()``ed the active
+        file, which destroys the three entries with no orphan left for
+        ``_adopt_orphaned_files()`` to find — not the crash shape the
+        early-return branch's own docstring describes (:1153: rename
+        succeeded, gzip/manifest update did not). Fixed to rename the
+        active file to the sealed name first, matching that documented
+        shape, and to close with an actual ``log()`` + ``verify()`` so
+        the fixture proves the chain stays valid, not merely that one
+        attribute was untouched.
 
         ⛔ MUTATION-CHECKED: add ``self._seq = 0`` to the early-return
         branch and this fails.
@@ -5635,9 +5713,12 @@ class TestDiogenes20260909StillOpen:
             trail.log("before", {"i": i})
         assert trail._seq == 3
 
-        # what a rollback + crash before the active file is recreated
-        # leaves behind: no active file at all.
-        trail._active_path.unlink()
+        # The documented crash shape (audit.py:1153): rename() succeeded,
+        # the process died before gzip + manifest update, so a sealed
+        # orphan sits on disk and the active file is genuinely gone.
+        real_period = trail._last_week
+        sealed_name = f"early_return.audit.{real_period}.jsonl"
+        trail._active_path.rename(trail._active_path.parent / sealed_name)
         trail._last_week = "1999-W01"  # force the rotation check to fire
 
         trail._rotate_if_needed()
@@ -5647,3 +5728,7 @@ class TestDiogenes20260909StillOpen:
             "never touches self._seq — only the sealing branch restarts "
             "the count"
         )
+
+        trail.log("next", {})
+        result = AuditTrail.verify(db)
+        assert result.valid, f"false tampering verdict: {result.error}"

@@ -7381,3 +7381,44 @@ class TestRound10bL3Fixes:
 
         assert fired
         assert result.valid is True and result.total_entries == 3, result
+
+    def test_deleting_the_sealed_and_active_files_is_not_a_valid_empty_trail(self, tmp_path):
+        """complement, codex and glm, L3 re-pass of round 10b (input
+        1bd0c678e89d3b87), reproduced on this branch and on main 2ed7579: with
+        the manifest's sealed file and the active file both deleted, verify()
+        returned valid=True with 0 entries.
+
+        ⛔ MUTATION-CHECKED: check missing files after the empty-trail return
+        and this fails.
+        """
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("pre", {"i": i})
+        trail._last_week = "1999-W01"
+        trail.log("rot", {})
+        (tmp_path / "m.audit.1999-W01.jsonl.gz").unlink()
+        (tmp_path / "m.audit.jsonl").unlink()
+
+        result = AuditTrail.verify(db)
+
+        assert result.valid is False
+        assert "Missing sealed files" in (result.error or "")
+
+    def test_an_audit_file_the_listing_missed_is_not_a_valid_empty_trail(self, tmp_path):
+        """codex, same re-pass, reproduced with a SIMULATED listing: a crashed
+        first rotation left a sealed file and no manifest; a pass whose listing
+        missed it called the trail valid and empty.
+
+        ⛔ MUTATION-CHECKED: drop the fresh listing before the empty-trail
+        return and this fails.
+        """
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("pre", {"i": i})
+        (tmp_path / "m.audit.jsonl").rename(tmp_path / "m.audit.1999-W01.jsonl")
+
+        result = AuditTrail._verify_listed(db, set(), None)
+
+        assert result.valid is False and "appeared" in (result.error or "")

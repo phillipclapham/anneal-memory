@@ -6,6 +6,14 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ### Fixed — from the review of round 10b: a Windows rotation fsync, a hidden differing copy, a short valid verdict, and a stuck rotation
 
+**`anneal-memory audit` could omit a whole sealed week and still report the trail trusted.** It read
+the manifest and the active file at different moments; a rotation between the two sealed a week the
+manifest it had read did not list, so that week's entries were missing from the output with
+`anchor_trusted: true` and no warning. The read is now retried when the manifest changed during it,
+and after three changed attempts the output is marked untrusted with a warning. ⚠ This is older than
+the quarantine work and is in the published 0.9.9: reproduced on tag `v0.9.9`, where `audit --json`
+returned 6 of 8 entries after a rotation injected between its manifest read and its active-file read.
+
 **Rotation fsynced its gzip temp through a second, read-only handle.** On Windows `os.fsync` is
 `_commit`, which calls `FlushFileBuffers`, and that needs write access, so every weekly rotation there
 would have raised. The temp is now fsynced through the handle that wrote it. This is reasoned from the
@@ -71,8 +79,20 @@ traceback. Repair takes every marker the quarantine saw from the quarantine itse
 listing the directory again, releases all of them, and once it has quarantined the manifest its
 refusals say so instead of "nothing was written".
 
-⚠ An absent manifest with no marker still takes the old path (a fresh manifest and automatic orphan
-adoption); the ruling covers an invalid one.
+**Repair no longer reports success over a quarantine that landed while it ran.** A process that had
+read the old invalid manifest could quarantine the one repair had just saved; repair released the
+markers it had seen, returned `repaired=True`, and `verify()` rejected the trail as quarantined. Repair
+now checks that the rebuilt manifest is unchanged after releasing the markers, and otherwise refuses
+and asks to be run again.
+
+**Known behaviour in 0.9.10: an ABSENT manifest with no quarantine marker still takes the old path**
+(a fresh manifest and automatic orphan adoption). Quarantine covers an invalid manifest, not a missing
+one.
+
+**Do not mix 0.9.9 and 0.9.10 writers on one store.** 0.9.9 does not know the quarantine marker: a
+0.9.9 write on a store 0.9.10 quarantined writes a fresh manifest, adopts the sealed weeks, and 0.9.9's
+`verify()` reports the trail valid, while 0.9.10 still reports it quarantined. After a quarantine,
+only 0.9.10's `anneal-memory audit-repair` clears it.
 
 ### Fixed — one sealed-filename language for writers and readers, and an unreadable file is a result, not a traceback
 

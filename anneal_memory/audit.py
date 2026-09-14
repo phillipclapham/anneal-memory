@@ -25,6 +25,7 @@ Zero dependencies beyond Python stdlib.
 
 from __future__ import annotations
 
+import errno
 import gzip
 import hashlib
 import json
@@ -635,7 +636,7 @@ class AuditTrail:
         # taken above, so a failed append rolls the boundary byte back too.
         needs_boundary = False
         if resume_at:
-            with open(active, "rb") as f_probe:
+            with _open_regular(active) as f_probe:
                 f_probe.seek(-1, os.SEEK_END)
                 needs_boundary = f_probe.read(1) != b"\n"
         # ``_compute_hash`` is a staticmethod, pure in ``json_line``, so
@@ -1174,7 +1175,7 @@ class AuditTrail:
         # so a changed signature means this pass was not a snapshot.
         if manifest_path.name in names:
             try:
-                manifest = _parse_manifest_bytes(manifest_path.read_bytes(), stem)
+                manifest = _parse_manifest_bytes(_read_regular_bytes(manifest_path), stem)
                 # Chain anchor from retention cleanup — trust point for
                 # chains that no longer start from GENESIS
                 anchor = manifest.get("chain_anchor", "")
@@ -2180,7 +2181,7 @@ class AuditTrail:
                 with gzip.GzipFile(fileobj=raw, mode="wb") as f_out:
                     active.rename(sealed_path)
                     _fsync_dir(sealed_path.parent)
-                    with open(sealed_path, "rb") as f_in:
+                    with _open_regular(sealed_path) as f_in:
                         for line in f_in:
                             file_hash.update(line)
                             f_out.write(line)
@@ -2339,7 +2340,7 @@ class AuditTrail:
                 markers,
             )
         try:
-            raw = self._manifest_path.read_bytes()
+            raw = _read_regular_bytes(self._manifest_path)
         except FileNotFoundError:
             if list_error is not None:
                 raise _ManifestUnavailable(
@@ -2474,7 +2475,7 @@ def _read_last_valid_entry(path: Path) -> str:
     # LINE, not a failed read, treated as the latter. Reading raw bytes and
     # decoding per line puts the tear back where the rest of this loop
     # already handles it: skipped, like a partial ``json.loads``.
-    with open(path, "rb") as f:
+    with _open_regular(path) as f:
         for raw in f:
             try:
                 stripped = raw.decode("utf-8").strip()
@@ -2488,6 +2489,46 @@ def _read_last_valid_entry(path: Path) -> str:
             except _UNPARSEABLE_JSON:
                 pass  # Partial write, or valid JSON that isn't an entry — skip
     return last_valid
+
+
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
+
+def _open_regular(path: Path):
+    """Open an audit file for binary reading, and refuse anything that is not a
+    regular file — the ONE way this module reads an audit file.
+
+    ⛔ Checking the name first and opening second was the defect twice: an active
+    file that was a FIFO was opened by name and blocked ``verify()`` and
+    ``anneal-memory audit`` forever (complement HIGH, re-pass f0b24290a7232c06,
+    reproduced), and a regular file swapped for a FIFO between an ``lstat`` and
+    the open did the same (codex MED, same re-pass, reproduced). So the open is
+    non-blocking (a FIFO with no writer returns at once instead of waiting), the
+    check is ``fstat`` on the DESCRIPTOR that will be read (nothing can be
+    swapped in between), and anything but a regular file raises ``OSError`` —
+    which every reader already turns into an unreadable, untrusted result.
+
+    On a regular file the descriptor is switched back to blocking before it is
+    read: O_NONBLOCK is not meaningful for regular files on POSIX, and clearing
+    it means no reader depends on that. Where the platform has no O_NONBLOCK
+    (Windows) there are no FIFOs to open, and the fstat check still applies.
+    """
+    fd = os.open(path, os.O_RDONLY | _O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", str(path))
+        if _O_NONBLOCK:
+            os.set_blocking(fd, True)
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _read_regular_bytes(path: Path) -> bytes:
+    """All bytes of an audit file, read through :func:`_open_regular`."""
+    with _open_regular(path) as f:
+        return f.read()
 
 
 def _iter_lines(path: Path):
@@ -2516,13 +2557,14 @@ def _iter_lines(path: Path):
         # Normalized here, once. ⚠ That only helps a consumer that HAS an
         # OSError path — read through ``_guarded_lines`` where a raise
         # must not escape (round 8 found adoption had none).
-        try:
-            with gzip.open(path, "rb") as f:
-                yield from f
-        except (EOFError, zlib.error, gzip.BadGzipFile) as e:
-            raise _CorruptAuditFile(f"corrupt compressed stream: {e!r}") from e
+        with _open_regular(path) as raw:
+            try:
+                with gzip.GzipFile(fileobj=raw, mode="rb") as f:
+                    yield from f
+            except (EOFError, zlib.error, gzip.BadGzipFile) as e:
+                raise _CorruptAuditFile(f"corrupt compressed stream: {e!r}") from e
     else:
-        with open(path, "rb") as f:
+        with _open_regular(path) as f:
             yield from f
 
 
@@ -2548,7 +2590,7 @@ def _rotation_in_flight(db_path: Path, names: set[str]) -> bool:
         return False
     manifest_path = db_path.parent / f"{stem}.audit.manifest.json"
     try:
-        manifest = _parse_manifest_bytes(manifest_path.read_bytes(), stem)
+        manifest = _parse_manifest_bytes(_read_regular_bytes(manifest_path), stem)
     except FileNotFoundError:
         return True
     except _CORRUPT_MANIFEST:

@@ -4,6 +4,109 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — from the review of round 10b: a Windows rotation fsync, a hidden differing copy, a short valid verdict, and a stuck rotation
+
+**`verify()` and `anneal-memory audit` could block indefinitely on a FIFO or device named like a
+sealed audit file** beside its manifested `.gz`: they opened it to compare bytes. A non-regular file is
+now reported as not covered by the manifest and never opened.
+
+**`anneal-memory audit` could omit a whole sealed week and still report the trail trusted.** It read
+the manifest and the active file at different moments; a rotation between the two sealed a week the
+manifest it had read did not list, so that week's entries were missing from the output with
+`anchor_trusted: true` and no warning. Review found three more writers landing inside the same read: a
+rotation that had not yet saved its manifest, a retention cleanup that had unlinked a manifested week,
+and a file renamed between the listing and its open. `audit` now keeps a read only when the manifest
+and the audit files on disk are unchanged across it and the read itself saw no missing manifested file,
+no sealed file the manifest does not cover and no read error. Otherwise it reads again, and after three
+attempts the output is marked `anchor_trusted: false` with a warning saying what it saw. ⚠ This is older than
+the quarantine work and is in the published 0.9.9: reproduced on tag `v0.9.9`, where `audit --json`
+returned 6 of 8 entries after a rotation injected between its manifest read and its active-file read.
+
+**Rotation fsynced its gzip temp through a second, read-only handle.** On Windows `os.fsync` is
+`_commit`, which calls `FlushFileBuffers`, and that needs write access, so every weekly rotation there
+would have raised. The temp is now fsynced through the handle that wrote it. This is reasoned from the
+CPython, UCRT and Win32 documentation; nothing in this project's CI runs Windows.
+
+**A differing or unreadable copy of an orphaned week was set aside.** Recovery adopted the `.jsonl`,
+renamed the other copy out of the sealed-file names, and `verify()` returned valid without the entries
+only that copy held. Only a readable, byte-identical copy is set aside now; any other stays on its
+name, where `verify()` reports it.
+
+**`verify()` could call a trail valid with its first sealed week missing.** The manifest was statted
+after the directory listing, so a first rotation landing between the two, followed by an empty active
+file, passed as valid with no entries. The manifest is now statted before the listing, and every valid
+verdict, including the one for an empty trail, re-checks it. An empty-trail verdict is also refused when
+the manifest names files that are missing, which used to report total loss as a valid empty trail, or
+when a fresh listing shows an audit file the pass did not see. ⚠ The first of these is in the published 0.9.9 (reproduced on tag
+`v0.9.9`): deleting the sealed file the manifest names together with the active file makes its `verify()`
+return `valid=True` with no entries.
+
+**One refused rotation stopped rotation for the rest of the process.** After refusing to seal a week
+already on disk, every later week boundary retried the same name, so neither rotation nor retention ran
+again until a restart. The refusal now moves on to the current week.
+
+### Added — a corrupt audit manifest is quarantined, never replaced, and `anneal-memory audit-repair` rebuilds it
+
+**An invalid manifest used to be replaced by a fresh one**, and the next save wrote it over the
+original, so every manifest a validator rejected became lost sealed history. It is now renamed to
+`<stem>.audit.manifest.json.corrupt-<UTC stamp>` and never overwritten. While that marker is on disk,
+appending continues; rotation, orphan adoption and retention cleanup pause; `verify()` reports
+`valid=False` naming the marker; and `anneal-memory audit` warns that sealed history is omitted. A
+manifest that cannot be read right now (a permission or I/O error) is neither quarantined nor
+overwritten, and an absent manifest in a directory that cannot be listed is refused rather than
+replaced, because a marker there cannot be ruled out.
+
+**With an empty active file, a quarantined trail seeds from the newest sealed file's last entry**, and
+refuses when there is none, instead of restarting the chain at genesis.
+
+**`AuditTrail.repair_manifest()` and `anneal-memory audit-repair [--json]`** rebuild the manifest from
+the sealed files in period order. They refuse, writing nothing and exiting 1, on an unreadable week,
+on weeks that do not hash-chain, and on a valid manifest. `sha256_file` is left empty rather than
+recomputed, and the markers are renamed `.repaired` only after the rebuilt manifest is saved.
+`AuditRepairResult` is exported.
+
+**A recovered chain anchor is reported beside `valid`, never folded into it.** When the first sealed
+file does not start at genesis, repair records its starting hash as `chain_anchor` with
+`chain_anchor_recovered: true`, and `AuditVerifyResult.anchor_trusted` is `False`. It appears in
+`anneal-memory verify --json`, the `verify` summary line, `server.py --verify-audit`'s summary and
+`anneal-memory audit --json`.
+
+**Repair and the readers stay loud when the directory misbehaves.** `repair_manifest()` refuses,
+writing nothing, when the directory cannot be listed, and keeps the marker when the rebuilt manifest
+cannot be saved. It refuses a sealed week that breaks its own chain, lists every copy it did not
+choose in `untracked`, and, with no sealed file left, anchors on the active file's first entry as a
+recovered anchor. `verify()` reads quarantine markers from its one directory listing and carries
+`anchor_trusted` on every result reached after the manifest is read. `anneal-memory audit` decides
+from one directory listing which markers and files exist. It reports `anchor_trusted: false`
+whenever it sees a quarantine marker, cannot list the directory to rule one out (with a warning,
+whether or not a manifest is present), cannot read or parse the manifest, or finds a manifest the
+listing showed gone by the time it is read; a readable manifest can lower the flag but never raise
+it back. While a marker exists the manifest is not read, so the output matches the warning that
+sealed history is omitted, and a directory without search permission prints JSON instead of a
+traceback. Repair takes every marker the quarantine saw from the quarantine itself instead of
+listing the directory again, releases all of them, and once it has quarantined the manifest its
+refusals say so instead of "nothing was written".
+
+**Repair no longer reports success over a quarantine that landed while it ran.** A process that had
+read the old invalid manifest could quarantine the one repair had just saved; repair released the
+markers it had seen, returned `repaired=True`, and `verify()` rejected the trail as quarantined. Repair
+now checks that the rebuilt manifest is unchanged after releasing the markers, and otherwise refuses
+and asks to be run again.
+
+⚠ **`audit-repair` must not run while another process writes the trail.** A writer that quarantines
+the rebuilt manifest in the instant between repair's last check and its return can still leave
+`repaired=True` over a new quarantine. If that happens, `verify()` reports the quarantine and repair
+runs again. Closing that window needs a cross-process lock, which is not in this release.
+
+**Known behaviour in 0.9.10: an ABSENT manifest with no quarantine marker still takes the old path**
+(a fresh manifest and automatic orphan adoption). Quarantine covers an invalid manifest, not a missing
+one.
+
+**Do not mix 0.9.9 and 0.9.10 writers on one store.** 0.9.9 does not know the quarantine marker: a
+0.9.9 write on a store 0.9.10 quarantined writes a fresh manifest, adopts the sealed weeks, and 0.9.9's
+`verify()` reports the trail valid, while 0.9.10 still reports it quarantined. After a quarantine,
+only 0.9.10's `anneal-memory audit-repair` clears it.
+
 ### Fixed — one sealed-filename language for writers and readers, and an unreadable file is a result, not a traceback
 
 **The manifest's sealed-filename check refused names this library writes itself.** A database whose
@@ -19,12 +122,46 @@ sealed files.
 `EOFError`/`zlib.error`, not `OSError`. A file that is unreadable or disappears while `verify()` reads
 it now yields `valid=False` with an "Unreadable audit file" error.
 
-**A corrupt orphaned sealed file no longer blocks writes, and no longer disappears silently.** It used
-to make every later `log()` call raise. It is now left on disk, unadopted, and `verify()` reports any
-sealed file the manifest does not cover as `valid=False`. A transient read error during recovery is
-raised so the next call retries. When both a `.gz` and a `.jsonl` copy of one week exist, the `.gz` is
-used only if it reads clean, and the other copy is deleted only after the manifest is saved; previously
-an intact `.jsonl` could be deleted in favour of a truncated `.gz`.
+**An orphaned sealed file that cannot be read no longer blocks writes, and no longer disappears
+silently.** A corrupt or permanently unreadable orphan used to make every later `log()` call raise. A
+read error is now retried a bounded number of times within the call; if it persists, the file is left
+on disk, unadopted, and writes continue. Each process opening such a trail pays up to about 100 ms on
+its first write while the file stays unreadable. `verify()` reports any sealed file the manifest does
+not cover as `valid=False`.
+
+**Crash recovery adopts an orphaned week only where it continues the chain.** Its first entry must link
+to the last sealed week (or the retention anchor, or genesis), and a non-empty active file must link to
+the last week adopted. A week that does not fit stays on disk under its own name and `verify()` reports
+it. Previously a week skipped while unreadable was appended after newer weeks once it could be read, and
+`verify()` then reported a hash mismatch permanently.
+
+**Crash recovery no longer deletes audit files.** When a week has both a `.gz` and a `.jsonl` copy,
+recovery adopts one and renames the other to `<name>.dup-<UTC timestamp>`; a stale gzip temp file is
+renamed to `<name>.stale-<UTC timestamp>`. The `.gz` is adopted only when both copies hold the same
+bytes, otherwise the copy that reads. A copy left behind for a week the manifest already lists is
+renamed aside if it holds the same bytes and otherwise left in place for `verify()` to report; it is
+never adopted as a second segment. Set-aside copies are not removed by retention. Previously recovery
+deleted the other copy, which could destroy the only complete one, and a crash before that deletion
+made `verify()` report a hash mismatch on an intact trail.
+
+**`verify()` no longer misreads a rotation running in another process.** Rotation passes through states
+that look broken — the sealed week is on disk before the manifest names it — and `verify()` returned
+`valid=False` for them; a whole rotation landing mid-pass could also give `valid=True` without the week
+just sealed. Rotation now orders its steps so every intermediate state is recognisable on disk, and
+`verify()` re-checks an invalid result for as long as a rotation is visible, up to about 5 seconds after
+the first pass, treating a manifest that changed during the pass as a pass to re-run. A trail that stays
+broken still fails, and a genuinely invalid verdict costs at least one extra pass. A retention cleanup in
+another process is not covered and can still produce an invalid result that a re-run clears, as the
+error says. A crash between compressing a week and recording it leaves a state `verify()` waits out in
+full until the trail is next opened.
+
+**Rotation fsyncs the compressed week before replacing its temp file, and never seals a week that is
+already on disk.** After a power loss the compressed file could be empty while it was the only copy. A
+clock stepped back across a week boundary used to overwrite the earlier copy of that week and leave the
+manifest unreadable; rotation now waits and keeps appending to the active file.
+
+**`verify()` on an audit directory it cannot search returns `valid=False`** instead of raising
+`PermissionError`. A directory that does not exist is still an empty, valid trail.
 
 **An audit line or manifest containing a JSON integer over Python's 4,300-digit limit, or deeply
 nested JSON, is now treated as unreadable.** Either one used to raise out of `log()` on every call, and

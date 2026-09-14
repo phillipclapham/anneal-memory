@@ -1646,14 +1646,18 @@ class TestCmdAudit:
         manifest_path = db_path.parent / f"{db_path.stem}.audit.manifest.json"
         manifest_path.write_text('{"files": []}', encoding="utf-8")
 
-        real_read_bytes = Path.read_bytes
+        # cmd_audit reads the manifest through _read_audit_bytes since re-pass
+        # f0b24290a7232c06, so the failure is injected there.
+        import anneal_memory.cli as cli_module
 
-        def sick_read_bytes(self):
-            if self == manifest_path:
+        real_read_bytes = cli_module._read_audit_bytes
+
+        def sick_read_bytes(path):
+            if path == manifest_path:
                 raise PermissionError(13, "Permission denied")
-            return real_read_bytes(self)
+            return real_read_bytes(path)
 
-        monkeypatch.setattr(Path, "read_bytes", sick_read_bytes)
+        monkeypatch.setattr(cli_module, "_read_audit_bytes", sick_read_bytes)
 
         base_args_with_data.json = True
         base_args_with_data.since = None
@@ -1739,6 +1743,11 @@ class TestCmdAudit:
         per-file so one vanished file degrades to "incomplete" instead
         of crashing the command.
 
+        Since re-pass adde8c3bcfc957e5 an inconsistent pass is retried inside an
+        unchanged snapshot. This injection fails ONE open with nothing changed on
+        disk, so the retry reads the whole trail and no "incomplete" warning is
+        printed about a state the command read past.
+
         ⛔ MUTATION-CHECKED: remove the ``try/except OSError`` around
         the per-file iteration in ``cmd_audit`` and this raises
         ``FileNotFoundError`` instead of returning a result.
@@ -1763,7 +1772,9 @@ class TestCmdAudit:
         cli_module.cmd_audit(base_args_with_data)  # must NOT raise
 
         captured = capsys.readouterr()
-        assert "incomplete" in captured.err.lower()
+        assert calls["n"] > 1, "the failed pass was retried"
+        assert "Audit trail:" in captured.out
+        assert "incomplete" not in captured.err.lower()
 
     def test_audit_survives_a_truncated_sealed_gzip(self, tmp_path, capsys):
         """HIGH, codex, round 7 (input_id acb99206c42693f8). A truncated
@@ -1817,6 +1828,172 @@ class TestCmdAudit:
 
         assert json.loads(capsys.readouterr().out)["total"] == 1
 
+    def test_audit_retries_when_a_rotation_lands_mid_read(self, tmp_path, capsys, monkeypatch):
+        """codex HIGH (re-pass c7c73130c1022f53), reproduced on the hybrid fix
+        branch AND on main by INJECTION: a rotation between the manifest read and
+        the active-file read sealed a week the old manifest did not list, and that
+        week was omitted with anchor_trusted true and no warning (6 of 8 entries)."""
+        import argparse
+
+        import anneal_memory.cli as cli_module
+        from anneal_memory.audit import AuditTrail
+
+        db = tmp_path / "m.db"
+        t = AuditTrail(db)
+        for i in range(3):
+            t.log("pre", {"i": i})
+        t._last_week = "1999-W01"
+        t.log("rot1", {})
+        t.log("mid", {})
+        t._last_week = "1999-W02"
+        t.log("rot2", {})
+        writer = AuditTrail(db)
+        writer.log("init-writer", {})
+        real = cli_module._parse_audit_manifest_bytes
+        fired = []
+
+        def parse_then_rotation(raw, stem):
+            out = real(raw, stem)
+            if not fired:
+                fired.append(1)
+                writer._last_week = "1999-W03"
+                writer.log("rotated-in", {})
+            return out
+
+        monkeypatch.setattr(cli_module, "_parse_audit_manifest_bytes", parse_then_rotation)
+        cmd_audit(argparse.Namespace(db=str(db), json=True, event=None, since=None, limit=0))
+
+        out = json.loads(capsys.readouterr().out)
+        assert fired and len(list(tmp_path.glob("m.audit.1999-*.jsonl.gz"))) == 3
+        assert out["total"] == 8
+        assert out["anchor_trusted"] is True
+
+    def test_audit_is_untrusted_while_a_rotation_has_not_saved_its_manifest(self, tmp_path, capsys):
+        """codex HIGH (re-pass 745129a900596363), reproduced: the active file renamed
+        to its sealed name, the manifest not yet saved. audit showed 5 of 7 entries
+        with anchor_trusted true and no warning."""
+        import argparse
+
+        from anneal_memory.audit import AuditTrail
+
+        db = tmp_path / "m.db"
+        t = AuditTrail(db)
+        for i in range(3):
+            t.log("pre", {"i": i})
+        t._last_week = "1999-W01"
+        t.log("rot1", {})
+        t.log("mid", {})
+        t._last_week = "1999-W02"
+        t.log("rot2", {})
+        t.log("more", {})
+        (tmp_path / "m.audit.jsonl").rename(tmp_path / "m.audit.1999-W03.jsonl")
+
+        cmd_audit(argparse.Namespace(db=str(db), json=True, event=None, since=None, limit=0))
+
+        out = capsys.readouterr()
+        assert json.loads(out.out)["anchor_trusted"] is False
+        assert "m.audit.1999-W03.jsonl" in out.err and "not covered by the manifest" in out.err
+
+    @staticmethod
+    def _two_rotations(tmp_path):
+        from anneal_memory.audit import AuditTrail
+
+        db = tmp_path / "m.db"
+        t = AuditTrail(db)
+        for i in range(3):
+            t.log("pre", {"i": i})
+        t._last_week = "1999-W01"
+        t.log("rot1", {})
+        t.log("mid", {})
+        t._last_week = "1999-W02"
+        t.log("rot2", {})
+        t.log("more", {})
+        return db
+
+    def test_audit_is_untrusted_when_a_manifested_week_is_missing(self, tmp_path, capsys):
+        """codex HIGH (re-pass adde8c3bcfc957e5), reproduced: retention unlinked a
+        manifested week before saving the manifest; audit read 3 of 6 entries with
+        anchor_trusted true and no warning."""
+        import argparse
+
+        db = self._two_rotations(tmp_path)
+        (tmp_path / "m.audit.1999-W01.jsonl.gz").unlink()
+
+        cmd_audit(argparse.Namespace(db=str(db), json=True, event=None, since=None, limit=0))
+
+        out = capsys.readouterr()
+        assert json.loads(out.out)["anchor_trusted"] is False
+        assert "missing: m.audit.1999-W01.jsonl.gz" in out.err
+
+    def test_audit_is_untrusted_when_a_file_goes_between_listing_and_open(self, tmp_path, capsys, monkeypatch):
+        """codex HIGH (re-pass adde8c3bcfc957e5), reproduced by INJECTION: the active
+        file renamed after the listing and before its open only warned, and the
+        output stayed trusted."""
+        import argparse
+
+        import anneal_memory.cli as cli_module
+
+        db = self._two_rotations(tmp_path)
+        active = tmp_path / "m.audit.jsonl"
+        real_iter = cli_module._iter_audit_lines
+        fired = []
+
+        def rename_before_open(fpath):
+            if fpath == active and not fired:
+                fired.append(1)
+                active.rename(tmp_path / "m.audit.1999-W03.jsonl")
+            return real_iter(fpath)
+
+        monkeypatch.setattr(cli_module, "_iter_audit_lines", rename_before_open)
+        cmd_audit(argparse.Namespace(db=str(db), json=True, event=None, since=None, limit=0))
+
+        assert fired
+        assert json.loads(capsys.readouterr().out)["anchor_trusted"] is False
+
+
+    @pytest.mark.skipif(
+        not hasattr(os, "mkfifo") or not hasattr(__import__("signal"), "SIGALRM"),
+        reason="needs os.mkfifo and SIGALRM",
+    )
+    def test_a_fifo_as_the_active_file_returns_instead_of_hanging(self, tmp_path, capsys):
+        """complement HIGH (re-pass f0b24290a7232c06), reproduced: the active file
+        was added by name and opened; as a FIFO with no writer it blocked verify()
+        and cmd_audit until a 15s alarm killed them. The alarm here turns a
+        regression into a failure instead of a hung suite."""
+        import argparse
+        import signal
+
+        from anneal_memory.audit import AuditTrail
+
+        db = tmp_path / "m.db"
+        t = AuditTrail(db)
+        for i in range(3):
+            t.log("pre", {"i": i})
+        t._last_week = "1999-W01"
+        t.log("rot1", {})
+        active = tmp_path / "m.audit.jsonl"
+        active.unlink()
+        os.mkfifo(active)
+
+        class Hung(BaseException):
+            """Not an OSError or an Exception: TimeoutError is an OSError, and the
+            readers turn OSError into "unreadable", which swallowed the first
+            alarm and let a retry block with no alarm left armed."""
+
+        def hung(signum, frame):
+            raise Hung("blocked opening the FIFO")
+
+        old = signal.signal(signal.SIGALRM, hung)
+        signal.alarm(10)
+        try:
+            result = AuditTrail.verify(db)
+            cmd_audit(argparse.Namespace(db=str(db), json=True, event=None, since=None, limit=0))
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old)
+
+        assert result.valid is False
+        assert json.loads(capsys.readouterr().out)["anchor_trusted"] is False
 
 # -- cmd_diff tests --
 
@@ -3798,3 +3975,249 @@ class TestWrapCancelOwnershipParityOnTheCLI:
         assert "already" not in err.lower(), (
             "reported a half-written store as an already-finished wrap: " + err
         )
+
+
+class TestHybridAuditCli:
+    """``audit-repair`` and ``anchor_trusted`` on the CLI and server output
+    paths (hybrid, ruled by Phill 2026-09-13: ``anchor_trusted`` must appear
+    in ``verify --json``, the verify summary line, ``server.py
+    --verify-audit`` and ``audit --json``). Run end to end as subprocesses by
+    0913+35 on 2026-09-13 before these were written.
+    """
+
+    @staticmethod
+    def _two_sealed_weeks(tmp_path):
+        from anneal_memory.audit import AuditTrail
+
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("pre", {"i": i})
+        trail._last_week = "1999-W01"
+        trail.log("rot1", {})
+        trail.log("mid", {})
+        trail._last_week = "1999-W02"
+        trail.log("rot2", {})
+        return db
+
+    @staticmethod
+    def _run(*argv, module="anneal_memory.cli"):
+        return subprocess.run(
+            [sys.executable, "-m", module, *argv], capture_output=True, text=True
+        )
+
+    def _recovered_anchor(self, tmp_path):
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / "m.audit.1999-W01.jsonl.gz").unlink()  # the shape retention leaves
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        repaired = self._run("--db", str(db), "audit-repair", "--json")
+        assert repaired.returncode == 0, repaired.stderr
+        assert json.loads(repaired.stdout)["chain_anchor_recovered"] is True
+        return db
+
+    def test_anchor_trusted_reaches_all_four_output_paths(self, tmp_path):
+        db = self._recovered_anchor(tmp_path)
+        note = "chain anchor recovered by audit-repair"
+
+        verify_json = self._run("--db", str(db), "verify", "--json")
+        assert json.loads(verify_json.stdout)["anchor_trusted"] is False
+        verify_text = self._run("--db", str(db), "verify")
+        assert verify_text.returncode == 0 and note in verify_text.stdout
+        server = self._run("--db", str(db), "--verify-audit", module="anneal_memory.server")
+        assert server.returncode == 0 and note in server.stderr
+        audit_json = self._run("--db", str(db), "audit", "--json")
+        assert json.loads(audit_json.stdout)["anchor_trusted"] is False
+
+    def test_a_trusted_anchor_reads_true_and_prints_no_note(self, tmp_path):
+        db = self._two_sealed_weeks(tmp_path)
+
+        assert json.loads(self._run("--db", str(db), "verify", "--json").stdout)["anchor_trusted"] is True
+        assert "recovered" not in self._run("--db", str(db), "verify").stdout
+        assert json.loads(self._run("--db", str(db), "audit", "--json").stdout)["anchor_trusted"] is True
+
+    def test_audit_warns_while_quarantined(self, tmp_path):
+        from anneal_memory.audit import AuditTrail
+
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        AuditTrail(db).log("after", {})
+
+        result = self._run("--db", str(db), "audit", "--json")
+
+        assert result.returncode == 0
+        assert "quarantined" in result.stderr and "audit-repair" in result.stderr
+
+    def test_audit_repair_exits_1_on_refusal(self, tmp_path):
+        db = self._two_sealed_weeks(tmp_path)
+
+        text = self._run("--db", str(db), "audit-repair")
+        assert text.returncode == 1 and "nothing to repair" in text.stderr
+        as_json = self._run("--db", str(db), "audit-repair", "--json")
+        assert as_json.returncode == 1 and json.loads(as_json.stdout)["repaired"] is False
+
+
+class TestHybridL3AuditCli:
+    """CLI side of the hybrid's L3 (input 6e433954439ed92b), reproduced at mode
+    0o300 before the fixes."""
+
+    _two_sealed_weeks = staticmethod(TestHybridAuditCli._two_sealed_weeks)
+    _run = staticmethod(TestHybridAuditCli._run)
+
+    def _quarantined(self, tmp_path):
+        from anneal_memory.audit import AuditTrail
+
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        AuditTrail(db).log("quarantines", {})
+        return db
+
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root lists a mode-300 directory")
+    def test_audit_warns_when_it_cannot_rule_out_a_quarantine(self, tmp_path):
+        """codex HIGH: the active file was printed as the whole history, with
+        anchor_trusted true and no warning."""
+        db = self._quarantined(tmp_path)
+        tmp_path.chmod(0o300)
+        try:
+            result = self._run("--db", str(db), "audit", "--json")
+        finally:
+            tmp_path.chmod(0o700)
+
+        assert result.returncode == 0
+        assert "cannot be listed" in result.stderr
+        assert json.loads(result.stdout)["anchor_trusted"] is False
+
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root lists a mode-300 directory")
+    def test_audit_repair_in_an_unlistable_directory_exits_1_without_a_traceback(self, tmp_path):
+        db = self._quarantined(tmp_path)
+        tmp_path.chmod(0o300)
+        try:
+            result = self._run("--db", str(db), "audit-repair")
+        finally:
+            tmp_path.chmod(0o700)
+
+        assert result.returncode == 1
+        assert "Traceback" not in result.stderr and "Cannot list" in result.stderr
+
+
+class TestHybridFixDiffAuditCliTrust:
+    """Re-pass of the hybrid fix-diff (input a927e791ce5df4eb: codex HIGH,
+    complement + glm MED). ``audit --json`` reported ``anchor_trusted: true``
+    in each of these; 0913+35 ran all three on 1870ad8 before they were
+    written. ``anchor_trusted`` may only move from true to false."""
+
+    _two_sealed_weeks = staticmethod(TestHybridAuditCli._two_sealed_weeks)
+    _run = staticmethod(TestHybridAuditCli._run)
+    _MARKER = "m.audit.manifest.json.corrupt-20260913T000000000000Z"
+
+    def test_a_detected_marker_is_untrusted(self, tmp_path):
+        """complement MED: the unambiguous case read weaker than the ambiguous one."""
+        from anneal_memory.audit import AuditTrail
+
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        AuditTrail(db).log("quarantines", {})
+
+        result = self._run("--db", str(db), "audit", "--json")
+
+        assert "quarantined" in result.stderr
+        assert json.loads(result.stdout)["anchor_trusted"] is False
+
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads a mode-000 file")
+    def test_an_unreadable_manifest_is_untrusted(self, tmp_path):
+        """glm MED: the corrupt-or-unreadable branch left the default true."""
+        db = self._two_sealed_weeks(tmp_path)
+        manifest = tmp_path / "m.audit.manifest.json"
+        manifest.chmod(0o000)
+        try:
+            result = self._run("--db", str(db), "audit", "--json")
+        finally:
+            manifest.chmod(0o600)
+
+        assert "corrupt or unreadable" in result.stderr
+        assert json.loads(result.stdout)["anchor_trusted"] is False
+
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root lists a mode-300 directory")
+    def test_a_listing_error_is_untrusted_even_with_a_readable_manifest(self, tmp_path):
+        """codex HIGH: a repair that saved the manifest but left its marker,
+        then an unlistable directory. The warning was skipped because the
+        manifest existed, and parsing it reset the flag to true."""
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / self._MARKER).write_bytes(b"{not json")
+        tmp_path.chmod(0o300)
+        try:
+            result = self._run("--db", str(db), "audit", "--json")
+        finally:
+            tmp_path.chmod(0o700)
+
+        assert "cannot be listed" in result.stderr
+        assert json.loads(result.stdout)["anchor_trusted"] is False
+
+
+class TestHybridSnapshotAuditCli:
+    """Re-pass 598cd40ffcfcbc18 (codex): cmd_audit probed the directory, the
+    manifest and the active file separately. Each reproduced on a6ea0c1 first."""
+
+    _two_sealed_weeks = staticmethod(TestHybridAuditCli._two_sealed_weeks)
+    _run = staticmethod(TestHybridAuditCli._run)
+    _MARKER = "m.audit.manifest.json.corrupt-20260913T000000000000Z"
+
+    def test_a_quarantine_landing_mid_read_is_untrusted(self, tmp_path, monkeypatch, capsys):
+        """codex HIGH (a rename between the marker listing and the manifest probe
+        showed the active file as trusted history, no warning). NOT reproduced
+        as filed: this injects the rename during the manifest READ, which
+        a6ea0c1 already reported as untrusted under the corrupt-or-unreadable
+        warning. It guards the snapshot path that replaced the probe: a manifest
+        the listing saw but the read cannot find is a quarantine landing. Since
+        re-pass c7c73130c1022f53 the changed manifest signature makes cmd_audit
+        re-read, so the warning printed is the settled state ("quarantined"),
+        not the transient one ("disappeared")."""
+        import argparse
+        from pathlib import Path
+
+        from anneal_memory import cli
+
+        db = self._two_sealed_weeks(tmp_path)
+        manifest = tmp_path / "m.audit.manifest.json"
+        marker = tmp_path / self._MARKER
+        real_read = cli._read_audit_bytes
+
+        def quarantined_meanwhile(path):
+            if path == manifest:
+                manifest.rename(marker)
+            return real_read(path)
+
+        monkeypatch.setattr(cli, "_read_audit_bytes", quarantined_meanwhile)
+        cli.cmd_audit(argparse.Namespace(db=str(db), json=True, since=None, event=None, limit=None))
+        out = capsys.readouterr()
+
+        assert json.loads(out.out)["anchor_trusted"] is False
+        assert "quarantined as" in out.err and "disappeared" not in out.err
+
+    def test_a_marker_beside_a_saved_manifest_omits_sealed_history(self, tmp_path):
+        """codex MED: the warning said sealed history was omitted while the
+        manifest branch still read every sealed file."""
+        db = self._two_sealed_weeks(tmp_path)
+        active_entries = len((tmp_path / "m.audit.jsonl").read_text().splitlines())
+        (tmp_path / self._MARKER).write_bytes(b"{not json")
+
+        result = self._run("--db", str(db), "audit", "--json")
+        payload = json.loads(result.stdout)
+
+        assert "quarantined" in result.stderr
+        assert payload["anchor_trusted"] is False
+        assert payload["total"] == active_entries
+
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads a mode-000 directory")
+    def test_an_unsearchable_directory_prints_json_not_a_traceback(self, tmp_path):
+        """codex MED, reproduced on a6ea0c1 (Python 3.13): manifest_path.exists()
+        raised PermissionError after the listing error was caught."""
+        db = self._two_sealed_weeks(tmp_path)
+        tmp_path.chmod(0o000)
+        try:
+            result = self._run("--db", str(db), "audit", "--json")
+        finally:
+            tmp_path.chmod(0o700)
+
+        assert result.returncode == 0, result.stderr
+        assert "Traceback" not in result.stderr
+        assert json.loads(result.stdout)["anchor_trusted"] is False

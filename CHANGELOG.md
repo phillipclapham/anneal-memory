@@ -85,6 +85,11 @@ markers it had seen, returned `repaired=True`, and `verify()` rejected the trail
 now checks that the rebuilt manifest is unchanged after releasing the markers, and otherwise refuses
 and asks to be run again.
 
+⚠ **`audit-repair` must not run while another process writes the trail.** A writer that quarantines
+the rebuilt manifest in the instant between repair's last check and its return can still leave
+`repaired=True` over a new quarantine. If that happens, `verify()` reports the quarantine and repair
+runs again. Closing that window needs a cross-process lock, which is not in this release.
+
 **Known behaviour in 0.9.10: an ABSENT manifest with no quarantine marker still takes the old path**
 (a fresh manifest and automatic orphan adoption). Quarantine covers an invalid manifest, not a missing
 one.

@@ -32,8 +32,9 @@
 - review rows: `grep <input_id> ~/Briefcase/flow/state/verdicts.jsonl`. Inputs this session: `c7c73130c1022f53` (triaged: both codex HIGHs reproduced and fixed in 3fb4252) · `745129a900596363` (triaged: codex #2 reproduced and fixed, MEDs fixed, codex #1 not fixed, see below).
 - scratch reproductions for each HIGH: `~/.claude/jobs/7f2f5177/tmp/repro/` (die with the job; every one is also a test or a commit-message recipe).
 
-### ⚠ OPEN FOR PHILL, BEFORE THE 0.9.10 CUT
-- **codex #1 of `745129a900596363`**: a stale writer that renames the rebuilt manifest AFTER repair's final signature check and BEFORE it returns still yields `repaired=True` over a quarantine [reproduced only by that injection, 2026-09-14, `0914+8`]. Only a cross-process lock closes it; repair's docstring contract is "do not run it while another process is writing the trail". Proposed: a release-notes line, no lock in the patch. Routed via `0914+1 fanin`.
+### ✅ RULED — codex #1 of `745129a900596363`
+- The defect: a stale writer that renames the rebuilt manifest AFTER repair's final signature check and BEFORE it returns still yields `repaired=True` over a quarantine [reproduced only by that injection, 2026-09-14, `0914+8`]. Only a cross-process lock closes it.
+- **⚖ PHILL, 2026-09-14 ~08:3x: "agree with you, ship with release notes"** [relayed by `0914+1 fanin`, answering "ship with release-notes line vs hold for a cross-process lock"]. 0.9.10 ships with the CHANGELOG line "audit-repair must not run while another process writes the trail"; no lock in this release. The lock is routed as a spore for a later release.
 
 ### ▶ CANDIDATE, NOT WORKED (out of scope 2026-09-14)
 - Diogenes 09-14's unverified second-lineage candidate: `audit.py` `_parse_manifest_bytes` last_ts/last_hash.

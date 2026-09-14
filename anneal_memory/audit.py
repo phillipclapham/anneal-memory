@@ -1118,8 +1118,11 @@ class AuditTrail:
         except (FileNotFoundError, NotADirectoryError):
             return AuditVerifyResult(valid=True, total_entries=0, files_verified=0), False
         except OSError as e:
+            # No listing, no manifest read: nothing establishes the anchor, so it
+            # is not reported trusted (glm MED, review 9dfdcc21bc482a70).
             return AuditVerifyResult(
                 valid=False, total_entries=0, files_verified=0,
+                anchor_trusted=False,
                 error=f"Cannot list audit directory: {e}",
             ), False
         return (
@@ -1154,6 +1157,9 @@ class AuditTrail:
         if markers:
             return AuditVerifyResult(
                 valid=False, total_entries=0, files_verified=0,
+                # A quarantined manifest is not read, so its anchor is unknown
+                # (glm MED, review 9dfdcc21bc482a70, reproduced: True was reported).
+                anchor_trusted=False,
                 error=(
                     f"Manifest quarantined ({markers[-1]}): sealed history is "
                     "not covered until `anneal-memory audit-repair` rebuilds it"
@@ -1197,6 +1203,7 @@ class AuditTrail:
                 # `--verify-audit`) depends on, instead of reporting it.
                 return AuditVerifyResult(
                     valid=False, total_entries=0, files_verified=0,
+                    anchor_trusted=False,
                     error=f"Corrupt manifest: {e}",
                 )
 

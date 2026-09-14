@@ -4,6 +4,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.9.10] — 2026-09-14
+
 ### Fixed — from the review of round 10b: a Windows rotation fsync, a hidden differing copy, a short valid verdict, and a stuck rotation
 
 **`verify()` and `anneal-memory audit` could block indefinitely on a FIFO or device named like a

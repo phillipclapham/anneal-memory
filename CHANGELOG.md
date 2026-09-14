@@ -6,11 +6,19 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ### Fixed — from the review of round 10b: a Windows rotation fsync, a hidden differing copy, a short valid verdict, and a stuck rotation
 
+**`verify()` and `anneal-memory audit` could block indefinitely on a FIFO or device named like a
+sealed audit file** beside its manifested `.gz`: they opened it to compare bytes. A non-regular file is
+now reported as not covered by the manifest and never opened.
+
 **`anneal-memory audit` could omit a whole sealed week and still report the trail trusted.** It read
 the manifest and the active file at different moments; a rotation between the two sealed a week the
 manifest it had read did not list, so that week's entries were missing from the output with
-`anchor_trusted: true` and no warning. The read is now retried when the manifest changed during it,
-and after three changed attempts the output is marked untrusted with a warning. ⚠ This is older than
+`anchor_trusted: true` and no warning. Review found three more writers landing inside the same read: a
+rotation that had not yet saved its manifest, a retention cleanup that had unlinked a manifested week,
+and a file renamed between the listing and its open. `audit` now keeps a read only when the manifest
+and the audit files on disk are unchanged across it and the read itself saw no missing manifested file,
+no sealed file the manifest does not cover and no read error. Otherwise it reads again, and after three
+attempts the output is marked `anchor_trusted: false` with a warning saying what it saw. ⚠ This is older than
 the quarantine work and is in the published 0.9.9: reproduced on tag `v0.9.9`, where `audit --json`
 returned 6 of 8 entries after a rotation injected between its manifest read and its active-file read.
 

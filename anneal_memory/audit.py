@@ -2519,10 +2519,13 @@ def _open_regular(path: Path):
             raise OSError(errno.EINVAL, "not a regular file", str(path))
         if _O_NONBLOCK:
             os.set_blocking(fd, True)
-        return os.fdopen(fd, "rb")
     except BaseException:
         os.close(fd)
         raise
+    # Outside the try: ``os.fdopen`` owns the descriptor (closefd=True) and closes
+    # it itself if the reader cannot be built, so closing it again here raised
+    # EBADF over the real error (glm MED, re-pass 191bdcdd254b37be, reproduced).
+    return os.fdopen(fd, "rb")
 
 
 def _read_regular_bytes(path: Path) -> bytes:

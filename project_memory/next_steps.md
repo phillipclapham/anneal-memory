@@ -23,7 +23,23 @@
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
 
-## ▶▶ PICKUP — READ FIRST (seat `0913+41`, written 2026-09-13 ~18:05, successor to `0913+35`). EVERY STATE LINE IS A COMMAND.
+## ▶▶ PICKUP — READ FIRST (seat `0914+8`, written 2026-09-14, successor to `0913+41`). EVERY STATE LINE IS A COMMAND.
+
+**Re-derive, do not trust:**
+- flow's anneal pin (A1): `~/Briefcase/flow/venv/bin/pip show anneal-memory | grep -i editable` (no output = pinned); `cat ~/.local/share/uv/tools/anneal-memory/uv-receipt.toml`; from /tmp, `~/Briefcase/flow/venv/bin/python3 -c "import anneal_memory;print(anneal_memory.__version__, anneal_memory.__file__)"`. Pinned 2026-09-14 ~07:5x by `0914+8` from a wheel built at detached `42ae8de` (the wheel lives under that job's tmp, which dies with the job: re-pin from PyPI 0.9.10, not from that path).
+- fix branch: `git log --oneline 1e42dc9..origin/audit-hybrid-r10b3-fix`; each commit message names the review input_id it answers and the reproduction.
+- rebuilt rebase (the MERGE CANDIDATE, replaces `trial-hybrid-rebase-01b2ed8`, which is kept untouched): `git log --oneline origin/trial-hybrid-rebase-01b2ed8..origin/trial-hybrid-rebase-01b2ed8-b`
+- review rows: `grep <input_id> ~/Briefcase/flow/state/verdicts.jsonl`. Inputs this session: `c7c73130c1022f53` (triaged: both codex HIGHs reproduced and fixed in 3fb4252) · `745129a900596363` (triaged: codex #2 reproduced and fixed, MEDs fixed, codex #1 not fixed, see below).
+- scratch reproductions for each HIGH: `~/.claude/jobs/7f2f5177/tmp/repro/` (die with the job; every one is also a test or a commit-message recipe).
+
+### ⚠ OPEN FOR PHILL, BEFORE THE 0.9.10 CUT
+- **codex #1 of `745129a900596363`**: a stale writer that renames the rebuilt manifest AFTER repair's final signature check and BEFORE it returns still yields `repaired=True` over a quarantine [reproduced only by that injection, 2026-09-14, `0914+8`]. Only a cross-process lock closes it; repair's docstring contract is "do not run it while another process is writing the trail". Proposed: a release-notes line, no lock in the patch. Routed via `0914+1 fanin`.
+
+### ▶ CANDIDATE, NOT WORKED (out of scope 2026-09-14)
+- Diogenes 09-14's unverified second-lineage candidate: `audit.py` `_parse_manifest_bytes` last_ts/last_hash.
+- `_verify_listed`'s empty-trail "appeared" filter does not count quarantine-marker names; a manifest created and quarantined within one pass that began with no manifest could return an empty valid trail [reasoned, not run, `0914+8`].
+
+## ⚠ (SUPERSEDED 2026-09-14 by the block above) PICKUP (seat `0913+41`, written 2026-09-13 ~18:05). Its NEXT list was worked through step 3 on 2026-09-14.
 
 ⚖ **ANNEAL STOPPED FOR THE NIGHT ON PHILL'S RULING (~18:01, via desk `0913+42`): "stop at a breaking point tonight and pick up tomorrow".** After it: the already-granted re-pass of `1e42dc9` (rows on disk, untriaged), this session's capture, and the 19:45 W37 pre-flight. Nothing below is merged. The trial rebase has had no review at all.
 

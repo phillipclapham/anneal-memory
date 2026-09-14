@@ -1204,20 +1204,7 @@ class AuditTrail:
         # this method walked only the manifest, so it returned valid=True
         # over missing history, measured. The file on disk is the record.
         known = {p.name for p in files_to_verify} | set(missing_files)
-        unmanifested = sorted(
-            n for n in names
-            if _is_sealed_filename(n, stem) and n not in known
-            # A week's leftover .jsonl beside its manifested .gz is pending
-            # cleanup only if it holds the same bytes: rotation leaves it
-            # between saving the manifest and unlinking, and adoption sets an
-            # identical copy aside. A different copy is reported (L1, round
-            # 10: a clock regression can put another segment under that name).
-            and not (
-                n.endswith(".jsonl")
-                and n + ".gz" in known
-                and _same_uncompressed_bytes(audit_dir / n, audit_dir / (n + ".gz"))
-            )
-        )
+        unmanifested = _unmanifested_sealed_names(names, stem, known, audit_dir)
         if unmanifested:
             return AuditVerifyResult(
                 valid=False, total_entries=0, files_verified=0,
@@ -1407,7 +1394,7 @@ class AuditTrail:
                 )
             files_verified += 1
 
-        if _stat_signature(manifest_path) != manifest_signature:
+        if not _signatures_match(_stat_signature(manifest_path), manifest_signature):
             return AuditVerifyResult(
                 valid=False,
                 total_entries=total_entries,
@@ -1608,7 +1595,9 @@ class AuditTrail:
         # unchanged since the save, rules one out without another listing (a
         # listing here is what test_repair_does_not_relist_after_quarantining
         # forbids).
-        if saved_signature is None or _stat_signature(trail._manifest_path) != saved_signature:
+        if saved_signature is None or not _signatures_match(
+            _stat_signature(trail._manifest_path), saved_signature
+        ):
             return AuditRepairResult(
                 repaired=False,
                 files=[r["path"].name for r in records],
@@ -2563,6 +2552,42 @@ def _rotation_in_flight(db_path: Path, names: set[str]) -> bool:
     return any(p not in named and p.removesuffix(".gz") not in named for p in pairs)
 
 
+_STAT_ERROR = (-1, -1, -1)
+
+
+def _signatures_match(
+    a: tuple[int, int, int] | None, b: tuple[int, int, int] | None
+) -> bool:
+    """True iff two :func:`_stat_signature` results show the same file state.
+    A stat error on either side never matches: two failed stats compared equal
+    and accepted a manifest that may have changed in between (codex MED +
+    complement MED, re-pass 745129a900596363)."""
+    return a == b and a != _STAT_ERROR
+
+
+def _unmanifested_sealed_names(
+    names: set[str], stem: str, known: set[str], audit_dir: Path
+) -> list[str]:
+    """Sealed filenames among ``names`` that ``known`` does not cover — the one
+    predicate ``verify()`` and ``anneal-memory audit`` share.
+
+    A week's leftover .jsonl beside its manifested .gz is pending cleanup only
+    if it holds the same bytes: rotation leaves it between saving the manifest
+    and unlinking, and adoption sets an identical copy aside. A different copy
+    is reported (L1, round 10: a clock regression can put another segment
+    under that name).
+    """
+    return sorted(
+        n for n in names
+        if _is_sealed_filename(n, stem) and n not in known
+        and not (
+            n.endswith(".jsonl")
+            and n + ".gz" in known
+            and _same_uncompressed_bytes(audit_dir / n, audit_dir / (n + ".gz"))
+        )
+    )
+
+
 def _stat_signature(path: Path) -> tuple[int, int, int] | None:
     """``(inode, size, mtime_ns)`` of ``path``; None if it does not exist, and
     ``(-1, -1, -1)`` if it cannot be stat'ed for another reason."""
@@ -2571,7 +2596,7 @@ def _stat_signature(path: Path) -> tuple[int, int, int] | None:
     except FileNotFoundError:
         return None
     except OSError:
-        return (-1, -1, -1)
+        return _STAT_ERROR
     return (st.st_ino, st.st_size, st.st_mtime_ns)
 
 

@@ -60,6 +60,7 @@ from .audit import (
     _parse_manifest_bytes as _parse_audit_manifest_bytes,
     _quarantine_markers as _quarantine_audit_markers,
     _require_entry_dict as _require_audit_entry_dict,
+    _stat_signature as _audit_stat_signature,
 )
 from .continuity import (
     _matching_required_headings,
@@ -1630,9 +1631,12 @@ def cmd_import(args: argparse.Namespace) -> None:
             print(f"Import complete: {imported} imported, {skipped} skipped (already exist), {errors} errors")
 
 
-def cmd_audit(args: argparse.Namespace) -> None:
-    """Read and filter audit trail entries."""
-    db_path = Path(args.db).expanduser()
+def _read_audit_entries(
+    args: argparse.Namespace, db_path: Path
+) -> tuple[list[dict], bool, bool, list[str]]:
+    """One pass of ``cmd_audit``'s read: ``(entries, anchor_trusted, found,
+    warnings)``. Warnings are returned, not printed, so a retried pass does not
+    print a warning about a state it then read past."""
     stem = db_path.stem
     audit_dir = db_path.parent
     active_path = audit_dir / f"{stem}.audit.jsonl"
@@ -1640,6 +1644,7 @@ def cmd_audit(args: argparse.Namespace) -> None:
 
     # Collect all audit files in chronological order
     files_to_read: list[Path] = []
+    warnings: list[str] = []
     anchor_trusted = True
     # ⛔ ONE LISTING DECIDES MARKERS AND WHICH FILES EXIST (codex, re-pass
     # 598cd40ffcfcbc18). Separate probes let a quarantine land between the
@@ -1660,11 +1665,10 @@ def cmd_audit(args: argparse.Namespace) -> None:
     # True back reported a quarantined, unreadable or unlistable trail as trusted.
     if markers:
         anchor_trusted = False
-        print(
+        warnings.append(
             f"Warning: the audit manifest is quarantined as {markers[-1]}; "
             "sealed audit history is omitted, showing the active file only. "
-            "Run `anneal-memory audit-repair` to rebuild it.",
-            file=sys.stderr,
+            "Run `anneal-memory audit-repair` to rebuild it."
         )
     elif marker_list_error is not None:
         # codex, L3 of the hybrid, reproduced at mode 0o300: an unlistable
@@ -1673,11 +1677,10 @@ def cmd_audit(args: argparse.Namespace) -> None:
         # manifest does not rule a marker out: a repair can save the manifest
         # and then fail to release its marker.
         anchor_trusted = False
-        print(
+        warnings.append(
             f"Warning: the audit directory cannot be listed ({marker_list_error}), "
             "so a quarantined manifest cannot be ruled out; sealed audit history "
-            "may be omitted, showing the active file only.",
-            file=sys.stderr,
+            "may be omitted, showing the active file only."
         )
     # With a marker on disk the manifest is not read, even when one exists: a
     # repair can save it and then fail to release the marker, and reading it
@@ -1704,11 +1707,10 @@ def cmd_audit(args: argparse.Namespace) -> None:
                 # Listed, then gone: a quarantine renamed it during this command.
                 anchor_trusted = False
                 files_to_read = []
-                print(
+                warnings.append(
                     f"Warning: manifest {manifest_path} disappeared while it was being "
                     "read (it may have just been quarantined); sealed audit history is "
-                    "omitted, showing the active file only.",
-                    file=sys.stderr,
+                    "omitted, showing the active file only."
                 )
         except _CORRUPT_AUDIT_MANIFEST:
             # codex (L3, round 3): silently degrading to "active file
@@ -1725,11 +1727,10 @@ def cmd_audit(args: argparse.Namespace) -> None:
             # traceback on a disk error it cannot fix.
             anchor_trusted = False
             files_to_read = []
-            print(
+            warnings.append(
                 f"Warning: manifest {manifest_path} is corrupt or "
                 "unreadable; sealed audit history is omitted, showing "
-                "the active file only.",
-                file=sys.stderr,
+                "the active file only."
             )
     if names is not None:
         if active_path.name in names:
@@ -1742,11 +1743,7 @@ def cmd_audit(args: argparse.Namespace) -> None:
             pass
 
     if not files_to_read:
-        if args.json:
-            _print_json({"entries": [], "total": 0, "anchor_trusted": anchor_trusted})
-        else:
-            print("No audit trail files found.")
-        return
+        return [], anchor_trusted, False, warnings
 
     # Parse since filter
     since_ts = parse_duration(args.since) if args.since else None
@@ -1789,11 +1786,45 @@ def cmd_audit(args: argparse.Namespace) -> None:
             incomplete = True
 
     if incomplete:
-        print(
+        warnings.append(
             "Warning: one or more audit files became unavailable while "
-            "reading; output may be incomplete.",
-            file=sys.stderr,
+            "reading; output may be incomplete."
         )
+
+    return entries, anchor_trusted, True, warnings
+
+
+def cmd_audit(args: argparse.Namespace) -> None:
+    """Read and filter audit trail entries."""
+    db_path = Path(args.db).expanduser()
+    manifest_path = db_path.parent / f"{db_path.stem}.audit.manifest.json"
+    # ⛔ THE MANIFEST AND THE ACTIVE FILE ARE READ AT DIFFERENT MOMENTS (codex
+    # HIGH, re-pass c7c73130c1022f53, reproduced on this branch and on main): a
+    # rotation between them sealed a week the old manifest did not list and
+    # started a new active file, so that week was omitted with anchor_trusted
+    # true and no warning. The manifest's signature is taken before the pass and
+    # compared after it, the guard audit.py's verify path uses
+    # (`if _stat_signature(manifest_path) != manifest_signature:`); a changed one
+    # means the pass was not a snapshot, and it is retried.
+    for _attempt in range(3):
+        signature = _audit_stat_signature(manifest_path)
+        entries, anchor_trusted, found, warnings = _read_audit_entries(args, db_path)
+        if _audit_stat_signature(manifest_path) == signature:
+            break
+    else:
+        anchor_trusted = False
+        warnings.append(
+            "Warning: the audit manifest kept changing while it was being read; "
+            "output may omit or repeat entries."
+        )
+    for w in warnings:
+        print(w, file=sys.stderr)
+    if not found:
+        if args.json:
+            _print_json({"entries": [], "total": 0, "anchor_trusted": anchor_trusted})
+        else:
+            print("No audit trail files found.")
+        return
 
     # Apply limit (from the end — most recent)
     total = len(entries)

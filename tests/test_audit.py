@@ -7863,6 +7863,31 @@ class TestHybridL3Fixes:
         assert audit_module._quarantine_markers(tmp_path, "m") == []
         assert AuditTrail.verify(db).valid
 
+    def test_repair_does_not_claim_success_over_a_new_quarantine(self, tmp_path, monkeypatch):
+        """codex HIGH (re-pass c7c73130c1022f53), reproduced by INJECTION: a reader
+        that parsed the old invalid bytes quarantined the manifest repair had just
+        saved; repair released its snapshot of markers and returned repaired=True
+        while verify() rejected the trail as quarantined."""
+        db = self._two_sealed_weeks(tmp_path)
+        manifest = tmp_path / "m.audit.manifest.json"
+        manifest.write_bytes(b"{not json")
+        real = AuditTrail._save_manifest
+
+        def save_then_stale_reader_quarantines(self, m):
+            real(self, m)
+            manifest.rename(tmp_path / "m.audit.manifest.json.corrupt-20260914T000000000009Z")
+
+        monkeypatch.setattr(AuditTrail, "_save_manifest", save_then_stale_reader_quarantines)
+        result = AuditTrail.repair_manifest(db)
+        monkeypatch.setattr(AuditTrail, "_save_manifest", real)
+
+        assert result.repaired is False
+        assert "quarantined again" in result.error
+        assert not AuditTrail.verify(db).valid
+        # Re-running repair, as the error says, clears it.
+        assert AuditTrail.repair_manifest(db).repaired is True
+        assert AuditTrail.verify(db).valid
+
     def test_a_refusal_after_quarantining_says_so(self, tmp_path, monkeypatch):
         """codex MED (re-pass 598cd40ffcfcbc18), reproduced by INJECTION: repair
         quarantined the manifest, the listing of sealed files then failed, and

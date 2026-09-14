@@ -64,6 +64,18 @@ from .audit import (
     _stat_signature as _audit_stat_signature,
     _unmanifested_sealed_names as _unmanifested_audit_names,
 )
+
+
+def _audit_file_names(audit_dir: Path, stem: str) -> frozenset[str] | None:
+    """The ``<stem>.audit.*`` names in ``audit_dir`` (empty when the directory is
+    absent, None when it cannot be listed). Other files, such as the database's
+    ``-wal``/``-shm``, change during ordinary writes and are not part of the trail."""
+    try:
+        return frozenset(p.name for p in audit_dir.iterdir() if p.name.startswith(f"{stem}.audit."))
+    except FileNotFoundError:
+        return frozenset()
+    except OSError:
+        return None
 from .continuity import (
     _matching_required_headings,
     format_wrap_package_text,
@@ -1635,10 +1647,13 @@ def cmd_import(args: argparse.Namespace) -> None:
 
 def _read_audit_entries(
     args: argparse.Namespace, db_path: Path
-) -> tuple[list[dict], bool, bool, list[str]]:
+) -> tuple[list[dict], bool, bool, list[str], bool, frozenset[str] | None]:
     """One pass of ``cmd_audit``'s read: ``(entries, anchor_trusted, found,
-    warnings)``. Warnings are returned, not printed, so a retried pass does not
-    print a warning about a state it then read past."""
+    warnings, consistent, names)``. Warnings are returned, not printed, so a
+    retried pass does not print a warning about a state it then read past.
+    ``consistent`` is False when the pass itself saw a trail mid-change (a read
+    error, a manifested file missing, a sealed file the manifest does not cover);
+    ``names`` is the listing the pass was decided from."""
     stem = db_path.stem
     audit_dir = db_path.parent
     active_path = audit_dir / f"{stem}.audit.jsonl"
@@ -1651,6 +1666,7 @@ def _read_audit_entries(
     # The manifest's filenames when it was read (an empty set when the listing
     # shows none); None when it could not be read, which is already warned.
     manifest_names: set[str] | None = None
+    missing_manifested: list[str] = []
     # ⛔ ONE LISTING DECIDES MARKERS AND WHICH FILES EXIST (codex, re-pass
     # 598cd40ffcfcbc18). Separate probes let a quarantine land between the
     # marker check and the manifest check, showing the active file as trusted
@@ -1658,8 +1674,9 @@ def _read_audit_entries(
     # mode-000 directory (reproduced).
     marker_list_error: OSError | None = None
     names: set[str] | None
+    consistent = True
     try:
-        names = {p.name for p in audit_dir.iterdir()}
+        names = {p.name for p in audit_dir.iterdir() if p.name.startswith(f"{stem}.audit.")}
     except FileNotFoundError:
         names = set()
     except OSError as e:
@@ -1708,6 +1725,8 @@ def _read_audit_entries(
                 # crashes the reader further down.
                 if fpath.is_file():
                     files_to_read.append(fpath)
+                else:
+                    missing_manifested.append(f["filename"])
         except FileNotFoundError:
             if names is not None:
                 # Listed, then gone: a quarantine renamed it during this command.
@@ -1748,6 +1767,17 @@ def _read_audit_entries(
         except OSError:
             pass
 
+    # A manifested file that is not on disk is history this pass cannot show
+    # (codex HIGH, re-pass adde8c3bcfc957e5, reproduced: retention unlinked a
+    # week before saving the manifest, and 3 of 6 entries read as trusted).
+    if manifest_names is not None and not markers and missing_manifested:
+        anchor_trusted = False
+        consistent = False
+        warnings.append(
+            f"Warning: manifested audit file(s) missing: {', '.join(missing_manifested)}; "
+            "output may be incomplete."
+        )
+
     # ⛔ A SEALED FILE THE MANIFEST DOES NOT COVER MEANS THE OUTPUT IS PARTIAL
     # (codex HIGH, re-pass 745129a900596363, reproduced): a rotation that has
     # renamed the active file but not yet saved the manifest left that week out,
@@ -1760,13 +1790,14 @@ def _read_audit_entries(
             unmanifested = _unmanifested_audit_names(names, stem, manifest_names, audit_dir)
             if unmanifested:
                 anchor_trusted = False
+                consistent = False
                 warnings.append(
-                    f"Warning: sealed audit file(s) not covered by the manifest: {unmanifested} "
+                    f"Warning: sealed audit file(s) not covered by the manifest: {', '.join(unmanifested)} "
                     "(a rotation may be in progress); output may be incomplete."
                 )
 
     if not files_to_read:
-        return [], anchor_trusted, False, warnings
+        return [], anchor_trusted, False, warnings, consistent, _frozen(names)
 
     # Parse since filter
     since_ts = parse_duration(args.since) if args.since else None
@@ -1809,37 +1840,53 @@ def _read_audit_entries(
             incomplete = True
 
     if incomplete:
+        # codex HIGH, re-pass adde8c3bcfc957e5, reproduced: a file renamed or
+        # removed between the listing and its open only warned, and the output
+        # stayed trusted.
+        anchor_trusted = False
+        consistent = False
         warnings.append(
             "Warning: one or more audit files became unavailable while "
             "reading; output may be incomplete."
         )
 
-    return entries, anchor_trusted, True, warnings
+    return entries, anchor_trusted, True, warnings, consistent, _frozen(names)
+
+
+def _frozen(names: set[str] | None) -> frozenset[str] | None:
+    return None if names is None else frozenset(names)
 
 
 def cmd_audit(args: argparse.Namespace) -> None:
     """Read and filter audit trail entries."""
     db_path = Path(args.db).expanduser()
     manifest_path = db_path.parent / f"{db_path.stem}.audit.manifest.json"
-    # ⛔ THE MANIFEST AND THE ACTIVE FILE ARE READ AT DIFFERENT MOMENTS (codex
-    # HIGH, re-pass c7c73130c1022f53, reproduced on this branch and on main): a
-    # rotation between them sealed a week the old manifest did not list and
-    # started a new active file, so that week was omitted with anchor_trusted
-    # true and no warning. The manifest's signature is taken before the pass and
-    # compared after it, the guard audit.py's verify path uses
-    # (`if not _signatures_match(_stat_signature(manifest_path), manifest_signature):`);
-    # a changed one, or a failed stat, means the pass was not a snapshot, and it
-    # is retried.
+    # ⛔ OUTPUT IS TRUSTED ONLY FROM A READ BRACKETED BY AN UNCHANGED SNAPSHOT.
+    # Four review rounds each found one more writer landing inside this read
+    # (c7c73130c1022f53: a rotation between the manifest and the active file;
+    # 745129a900596363: a rotation that had not saved its manifest;
+    # adde8c3bcfc957e5: a retention unlink, a rename between listing and open).
+    # Instead of a guard per shape: the manifest signature and the audit-file
+    # listing are taken before the pass and again after it, and the pass reports
+    # whether it saw the trail mid-change. Only a consistent pass inside an
+    # unchanged snapshot is kept; anything else is retried, and after three
+    # attempts the output is marked untrusted with the last pass's warnings.
+    audit_dir = db_path.parent
+    stem = db_path.stem
     for _attempt in range(3):
         signature = _audit_stat_signature(manifest_path)
-        entries, anchor_trusted, found, warnings = _read_audit_entries(args, db_path)
-        if _audit_signatures_match(_audit_stat_signature(manifest_path), signature):
+        entries, anchor_trusted, found, warnings, consistent, names = _read_audit_entries(args, db_path)
+        if (
+            consistent
+            and _audit_signatures_match(_audit_stat_signature(manifest_path), signature)
+            and _audit_file_names(audit_dir, stem) == names
+        ):
             break
     else:
         anchor_trusted = False
         warnings.append(
-            "Warning: the audit manifest kept changing while it was being read; "
-            "output may omit or repeat entries."
+            "Warning: the audit trail could not be read as one consistent snapshot in "
+            "3 attempts (a rotation or cleanup may be in progress); output may be incomplete."
         )
     for w in warnings:
         print(w, file=sys.stderr)

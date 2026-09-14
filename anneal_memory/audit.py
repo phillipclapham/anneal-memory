@@ -1470,7 +1470,9 @@ class AuditTrail:
                     return AuditRepairResult(repaired=False, error=str(e))
                 markers = e.markers
                 nothing = (
-                    f"the invalid manifest was quarantined as {', '.join(markers)}; "
+                    # Another process may have quarantined it; this names what is
+                    # on disk, not who wrote it (complement LOW, c7c73130c1022f53).
+                    f"the manifest is quarantined as {', '.join(markers)}; "
                     "nothing else was written."
                 )
             except _ManifestUnavailable as e:
@@ -1573,12 +1575,13 @@ class AuditTrail:
             manifest["chain_anchor_recovered"] = True
         try:
             trail._save_manifest(manifest)
+            saved_signature = _stat_signature(trail._manifest_path)
         except OSError as e:
             # codex, L3 of the hybrid: a failed save escaped as a traceback.
             # The markers are untouched, so the trail stays quarantined.
             return AuditRepairResult(
                 repaired=False,
-                error=f"Could not save the rebuilt manifest: {e}; the quarantine marker is kept.",
+                error=f"Could not save the rebuilt manifest: {e}; the quarantine markers are kept.",
             )
 
         # Markers are released only AFTER the rebuilt manifest is durable: a
@@ -1596,6 +1599,26 @@ class AuditTrail:
                     error=f"Manifest rebuilt, but quarantine marker {marker} could not be released: {e}",
                 )
         _fsync_dir(audit_dir)
+
+        # ``markers`` is a snapshot from before the rebuild. A reader that parsed
+        # the old invalid bytes can quarantine the manifest just saved, and repair
+        # then returned repaired=True over a trail verify() rejected (codex HIGH,
+        # re-pass c7c73130c1022f53, reproduced by injection). A marker only ever
+        # comes from renaming the manifest, so the rebuilt manifest's signature,
+        # unchanged since the save, rules one out without another listing (a
+        # listing here is what test_repair_does_not_relist_after_quarantining
+        # forbids).
+        if saved_signature is None or _stat_signature(trail._manifest_path) != saved_signature:
+            return AuditRepairResult(
+                repaired=False,
+                files=[r["path"].name for r in records],
+                chain_anchor_recovered=recovered,
+                untracked=untracked,
+                error=(
+                    "The rebuilt manifest was changed or quarantined again while repair "
+                    "ran; run `anneal-memory audit-repair` again."
+                ),
+            )
 
         return AuditRepairResult(
             repaired=True,

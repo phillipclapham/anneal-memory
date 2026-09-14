@@ -1817,6 +1817,46 @@ class TestCmdAudit:
 
         assert json.loads(capsys.readouterr().out)["total"] == 1
 
+    def test_audit_retries_when_a_rotation_lands_mid_read(self, tmp_path, capsys, monkeypatch):
+        """codex HIGH (re-pass c7c73130c1022f53), reproduced on the hybrid fix
+        branch AND on main by INJECTION: a rotation between the manifest read and
+        the active-file read sealed a week the old manifest did not list, and that
+        week was omitted with anchor_trusted true and no warning (6 of 8 entries)."""
+        import argparse
+
+        import anneal_memory.cli as cli_module
+        from anneal_memory.audit import AuditTrail
+
+        db = tmp_path / "m.db"
+        t = AuditTrail(db)
+        for i in range(3):
+            t.log("pre", {"i": i})
+        t._last_week = "1999-W01"
+        t.log("rot1", {})
+        t.log("mid", {})
+        t._last_week = "1999-W02"
+        t.log("rot2", {})
+        writer = AuditTrail(db)
+        writer.log("init-writer", {})
+        real = cli_module._parse_audit_manifest_bytes
+        fired = []
+
+        def parse_then_rotation(raw, stem):
+            out = real(raw, stem)
+            if not fired:
+                fired.append(1)
+                writer._last_week = "1999-W03"
+                writer.log("rotated-in", {})
+            return out
+
+        monkeypatch.setattr(cli_module, "_parse_audit_manifest_bytes", parse_then_rotation)
+        cmd_audit(argparse.Namespace(db=str(db), json=True, event=None, since=None, limit=0))
+
+        out = json.loads(capsys.readouterr().out)
+        assert fired and len(list(tmp_path.glob("m.audit.1999-*.jsonl.gz"))) == 3
+        assert out["total"] == 8
+        assert out["anchor_trusted"] is True
+
 
 # -- cmd_diff tests --
 
@@ -3990,7 +4030,10 @@ class TestHybridSnapshotAuditCli:
         as filed: this injects the rename during the manifest READ, which
         a6ea0c1 already reported as untrusted under the corrupt-or-unreadable
         warning. It guards the snapshot path that replaced the probe: a manifest
-        the listing saw but the read cannot find is a quarantine landing."""
+        the listing saw but the read cannot find is a quarantine landing. Since
+        re-pass c7c73130c1022f53 the changed manifest signature makes cmd_audit
+        re-read, so the warning printed is the settled state ("quarantined"),
+        not the transient one ("disappeared")."""
         import argparse
         from pathlib import Path
 
@@ -4011,7 +4054,7 @@ class TestHybridSnapshotAuditCli:
         out = capsys.readouterr()
 
         assert json.loads(out.out)["anchor_trusted"] is False
-        assert "disappeared" in out.err
+        assert "quarantined as" in out.err and "disappeared" not in out.err
 
     def test_a_marker_beside_a_saved_manifest_omits_sealed_history(self, tmp_path):
         """codex MED: the warning said sealed history was omitted while the

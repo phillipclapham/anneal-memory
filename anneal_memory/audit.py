@@ -30,6 +30,7 @@ import hashlib
 import json
 import logging
 import os
+import stat
 import re
 import time
 import zlib
@@ -2577,15 +2578,38 @@ def _unmanifested_sealed_names(
     is reported (L1, round 10: a clock regression can put another segment
     under that name).
     """
-    return sorted(
-        n for n in names
-        if _is_sealed_filename(n, stem) and n not in known
-        and not (
-            n.endswith(".jsonl")
+    out = []
+    for n in sorted(names):
+        if not _is_sealed_filename(n, stem) or n in known:
+            continue
+        kind = _regular_or_gone(audit_dir / n)
+        if kind is None:
+            # Gone since the listing: nothing on disk is left uncovered (codex LOW,
+            # re-pass adde8c3bcfc957e5 — rotation's unlink of its leftover .jsonl).
+            continue
+        if (
+            kind
+            and n.endswith(".jsonl")
             and n + ".gz" in known
+            and _regular_or_gone(audit_dir / (n + ".gz"))
             and _same_uncompressed_bytes(audit_dir / n, audit_dir / (n + ".gz"))
-        )
-    )
+        ):
+            continue
+        out.append(n)
+    return out
+
+
+def _regular_or_gone(path: Path) -> bool | None:
+    """True for a regular file, False for anything else that exists (a FIFO or
+    device is never opened: comparing bytes through one blocked ``verify()`` and
+    ``anneal-memory audit`` indefinitely, codex MED, re-pass adde8c3bcfc957e5,
+    reproduced), None when it is gone. ``lstat``, so a symlink is not followed."""
+    try:
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return False
 
 
 def _stat_signature(path: Path) -> tuple[int, int, int] | None:

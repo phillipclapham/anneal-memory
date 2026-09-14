@@ -1739,6 +1739,11 @@ class TestCmdAudit:
         per-file so one vanished file degrades to "incomplete" instead
         of crashing the command.
 
+        Since re-pass adde8c3bcfc957e5 an inconsistent pass is retried inside an
+        unchanged snapshot. This injection fails ONE open with nothing changed on
+        disk, so the retry reads the whole trail and no "incomplete" warning is
+        printed about a state the command read past.
+
         ⛔ MUTATION-CHECKED: remove the ``try/except OSError`` around
         the per-file iteration in ``cmd_audit`` and this raises
         ``FileNotFoundError`` instead of returning a result.
@@ -1763,7 +1768,9 @@ class TestCmdAudit:
         cli_module.cmd_audit(base_args_with_data)  # must NOT raise
 
         captured = capsys.readouterr()
-        assert "incomplete" in captured.err.lower()
+        assert calls["n"] > 1, "the failed pass was retried"
+        assert "Audit trail:" in captured.out
+        assert "incomplete" not in captured.err.lower()
 
     def test_audit_survives_a_truncated_sealed_gzip(self, tmp_path, capsys):
         """HIGH, codex, round 7 (input_id acb99206c42693f8). A truncated
@@ -1882,6 +1889,62 @@ class TestCmdAudit:
         out = capsys.readouterr()
         assert json.loads(out.out)["anchor_trusted"] is False
         assert "m.audit.1999-W03.jsonl" in out.err and "not covered by the manifest" in out.err
+
+    @staticmethod
+    def _two_rotations(tmp_path):
+        from anneal_memory.audit import AuditTrail
+
+        db = tmp_path / "m.db"
+        t = AuditTrail(db)
+        for i in range(3):
+            t.log("pre", {"i": i})
+        t._last_week = "1999-W01"
+        t.log("rot1", {})
+        t.log("mid", {})
+        t._last_week = "1999-W02"
+        t.log("rot2", {})
+        t.log("more", {})
+        return db
+
+    def test_audit_is_untrusted_when_a_manifested_week_is_missing(self, tmp_path, capsys):
+        """codex HIGH (re-pass adde8c3bcfc957e5), reproduced: retention unlinked a
+        manifested week before saving the manifest; audit read 3 of 6 entries with
+        anchor_trusted true and no warning."""
+        import argparse
+
+        db = self._two_rotations(tmp_path)
+        (tmp_path / "m.audit.1999-W01.jsonl.gz").unlink()
+
+        cmd_audit(argparse.Namespace(db=str(db), json=True, event=None, since=None, limit=0))
+
+        out = capsys.readouterr()
+        assert json.loads(out.out)["anchor_trusted"] is False
+        assert "missing: m.audit.1999-W01.jsonl.gz" in out.err
+
+    def test_audit_is_untrusted_when_a_file_goes_between_listing_and_open(self, tmp_path, capsys, monkeypatch):
+        """codex HIGH (re-pass adde8c3bcfc957e5), reproduced by INJECTION: the active
+        file renamed after the listing and before its open only warned, and the
+        output stayed trusted."""
+        import argparse
+
+        import anneal_memory.cli as cli_module
+
+        db = self._two_rotations(tmp_path)
+        active = tmp_path / "m.audit.jsonl"
+        real_iter = cli_module._iter_audit_lines
+        fired = []
+
+        def rename_before_open(fpath):
+            if fpath == active and not fired:
+                fired.append(1)
+                active.rename(tmp_path / "m.audit.1999-W03.jsonl")
+            return real_iter(fpath)
+
+        monkeypatch.setattr(cli_module, "_iter_audit_lines", rename_before_open)
+        cmd_audit(argparse.Namespace(db=str(db), json=True, event=None, since=None, limit=0))
+
+        assert fired
+        assert json.loads(capsys.readouterr().out)["anchor_trusted"] is False
 
 
 # -- cmd_diff tests --

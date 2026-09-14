@@ -7888,6 +7888,24 @@ class TestHybridL3Fixes:
         assert AuditTrail.repair_manifest(db).repaired is True
         assert AuditTrail.verify(db).valid
 
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs os.mkfifo")
+    def test_a_fifo_named_like_a_sealed_file_is_reported_not_opened(self, tmp_path, monkeypatch):
+        """codex MED (re-pass adde8c3bcfc957e5), reproduced: a FIFO named
+        ``<stem>.audit.<week>.jsonl`` beside its manifested .gz was opened to compare
+        bytes, and verify() and ``anneal-memory audit`` both blocked until killed."""
+        db = self._two_sealed_weeks(tmp_path)
+        fifo = tmp_path / "m.audit.1999-W01.jsonl"
+        os.mkfifo(fifo)
+
+        def must_not_open(a, b):
+            raise AssertionError(f"opened {a.name} / {b.name} to compare bytes")
+
+        monkeypatch.setattr(audit_module, "_same_uncompressed_bytes", must_not_open)
+        result = AuditTrail.verify(db)
+
+        assert result.valid is False
+        assert fifo.name in (result.error or "")
+
     def test_a_refusal_after_quarantining_says_so(self, tmp_path, monkeypatch):
         """codex MED (re-pass 598cd40ffcfcbc18), reproduced by INJECTION: repair
         quarantined the manifest, the listing of sealed files then failed, and

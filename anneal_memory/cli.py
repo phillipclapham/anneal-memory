@@ -60,7 +60,9 @@ from .audit import (
     _parse_manifest_bytes as _parse_audit_manifest_bytes,
     _quarantine_markers as _quarantine_audit_markers,
     _require_entry_dict as _require_audit_entry_dict,
+    _signatures_match as _audit_signatures_match,
     _stat_signature as _audit_stat_signature,
+    _unmanifested_sealed_names as _unmanifested_audit_names,
 )
 from .continuity import (
     _matching_required_headings,
@@ -1646,6 +1648,9 @@ def _read_audit_entries(
     files_to_read: list[Path] = []
     warnings: list[str] = []
     anchor_trusted = True
+    # The manifest's filenames when it was read (an empty set when the listing
+    # shows none); None when it could not be read, which is already warned.
+    manifest_names: set[str] | None = None
     # ⛔ ONE LISTING DECIDES MARKERS AND WHICH FILES EXIST (codex, re-pass
     # 598cd40ffcfcbc18). Separate probes let a quarantine land between the
     # marker check and the manifest check, showing the active file as trusted
@@ -1694,6 +1699,7 @@ def _read_audit_entries(
             # a torn multibyte or wrong-shaped manifest tracebacked out
             # of this command instead of degrading to "no files."
             manifest = _parse_audit_manifest_bytes(manifest_path.read_bytes(), stem)
+            manifest_names = {f["filename"] for f in manifest.get("files", [])}
             anchor_trusted = anchor_trusted and manifest.get("chain_anchor_recovered") is not True
             for f in manifest.get("files", []):
                 fpath = audit_dir / f["filename"]
@@ -1741,6 +1747,23 @@ def _read_audit_entries(
                 files_to_read.append(active_path)
         except OSError:
             pass
+
+    # ⛔ A SEALED FILE THE MANIFEST DOES NOT COVER MEANS THE OUTPUT IS PARTIAL
+    # (codex HIGH, re-pass 745129a900596363, reproduced): a rotation that has
+    # renamed the active file but not yet saved the manifest left that week out,
+    # with anchor_trusted true and no warning. verify() reports the same state
+    # as invalid, through the same predicate.
+    if names is not None and not markers:
+        if manifest_path.name not in names:
+            manifest_names = set()
+        if manifest_names is not None:
+            unmanifested = _unmanifested_audit_names(names, stem, manifest_names, audit_dir)
+            if unmanifested:
+                anchor_trusted = False
+                warnings.append(
+                    f"Warning: sealed audit file(s) not covered by the manifest: {unmanifested} "
+                    "(a rotation may be in progress); output may be incomplete."
+                )
 
     if not files_to_read:
         return [], anchor_trusted, False, warnings
@@ -1804,12 +1827,13 @@ def cmd_audit(args: argparse.Namespace) -> None:
     # started a new active file, so that week was omitted with anchor_trusted
     # true and no warning. The manifest's signature is taken before the pass and
     # compared after it, the guard audit.py's verify path uses
-    # (`if _stat_signature(manifest_path) != manifest_signature:`); a changed one
-    # means the pass was not a snapshot, and it is retried.
+    # (`if not _signatures_match(_stat_signature(manifest_path), manifest_signature):`);
+    # a changed one, or a failed stat, means the pass was not a snapshot, and it
+    # is retried.
     for _attempt in range(3):
         signature = _audit_stat_signature(manifest_path)
         entries, anchor_trusted, found, warnings = _read_audit_entries(args, db_path)
-        if _audit_stat_signature(manifest_path) == signature:
+        if _audit_signatures_match(_audit_stat_signature(manifest_path), signature):
             break
     else:
         anchor_trusted = False

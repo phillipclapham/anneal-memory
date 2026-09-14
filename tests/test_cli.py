@@ -1857,6 +1857,32 @@ class TestCmdAudit:
         assert out["total"] == 8
         assert out["anchor_trusted"] is True
 
+    def test_audit_is_untrusted_while_a_rotation_has_not_saved_its_manifest(self, tmp_path, capsys):
+        """codex HIGH (re-pass 745129a900596363), reproduced: the active file renamed
+        to its sealed name, the manifest not yet saved. audit showed 5 of 7 entries
+        with anchor_trusted true and no warning."""
+        import argparse
+
+        from anneal_memory.audit import AuditTrail
+
+        db = tmp_path / "m.db"
+        t = AuditTrail(db)
+        for i in range(3):
+            t.log("pre", {"i": i})
+        t._last_week = "1999-W01"
+        t.log("rot1", {})
+        t.log("mid", {})
+        t._last_week = "1999-W02"
+        t.log("rot2", {})
+        t.log("more", {})
+        (tmp_path / "m.audit.jsonl").rename(tmp_path / "m.audit.1999-W03.jsonl")
+
+        cmd_audit(argparse.Namespace(db=str(db), json=True, event=None, since=None, limit=0))
+
+        out = capsys.readouterr()
+        assert json.loads(out.out)["anchor_trusted"] is False
+        assert "m.audit.1999-W03.jsonl" in out.err and "not covered by the manifest" in out.err
+
 
 # -- cmd_diff tests --
 

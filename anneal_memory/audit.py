@@ -1238,7 +1238,7 @@ class AuditTrail:
             # listing): a listing that saw nothing while a first rotation
             # landed returned valid=True with 0 entries. Every valid=True
             # return goes through the signature check.
-            if _stat_signature(manifest_path) != manifest_signature:
+            if not _signatures_match(_stat_signature(manifest_path), manifest_signature):
                 return AuditVerifyResult(
                     valid=False, total_entries=0, files_verified=0,
                     anchor_trusted=anchor_trusted,

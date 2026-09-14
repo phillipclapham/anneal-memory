@@ -25,6 +25,14 @@
 
 ## ▶▶ PICKUP — READ FIRST (seat `0914+8`, written 2026-09-14, successor to `0913+41`). EVERY STATE LINE IS A COMMAND.
 
+### ✅ 0.9.10 RELEASED 2026-09-14 by `0914+8` (merge GO from `0914+12 fanin`) — re-derive, do not trust
+- Published version: `curl -s https://pypi.org/simple/anneal-memory/ | grep -o 'anneal_memory-0\.9\.10[^"<]*'` (the simple index; the JSON API can lag). Upload sha256 recorded in the tag's release: wheel `2c0fcada…`, sdist `a6ae89e9…` [receipts, 2026-09-14].
+- Tag is the release commit: `git rev-list -n1 v0.9.10` vs `git log --format=%H -1 --grep='^anneal 0.9.10'`.
+- main moved on: `grep __version__ anneal_memory/__init__.py` must read a `.devN` (spore-710).
+- flow's pin (A1, second half, now on PyPI 0.9.10): `~/Briefcase/flow/venv/bin/pip show anneal-memory | grep -iE "^version|editable"` and `cat ~/.local/share/uv/tools/anneal-memory/uv-receipt.toml`.
+- The merge candidate branches (`trial-hybrid-rebase-01b2ed8-b`, `release-0.9.10`, `audit-hybrid-r10b3-fix`, `audit-r10b`) are superseded by main; deleting them is not done and is a separate decision.
+- ⚠ RESIDUE (a), the REAL `~/.anneal-memory` store's first open under 0.9.10: check after main's next capture — `python3 -c "import json;print(len(json.load(open('$HOME/.anneal-memory/memory.audit.manifest.json'))['files']))"` and `~/Briefcase/flow/venv/bin/python3 -c "from anneal_memory.audit import AuditTrail as A;import pathlib;r=A.verify(pathlib.Path.home()/'.anneal-memory/memory.db');print(r.valid,r.total_entries,r.anchor_trusted,r.error)"`.
+
 **Re-derive, do not trust:**
 - flow's anneal pin (A1): `~/Briefcase/flow/venv/bin/pip show anneal-memory | grep -i editable` (no output = pinned); `cat ~/.local/share/uv/tools/anneal-memory/uv-receipt.toml`; from /tmp, `~/Briefcase/flow/venv/bin/python3 -c "import anneal_memory;print(anneal_memory.__version__, anneal_memory.__file__)"`. Pinned 2026-09-14 ~07:5x by `0914+8` from a wheel built at detached `42ae8de` (the wheel lives under that job's tmp, which dies with the job: re-pin from PyPI 0.9.10, not from that path).
 - fix branch: `git log --oneline 1e42dc9..origin/audit-hybrid-r10b3-fix`; each commit message names the review input_id it answers and the reproduction.

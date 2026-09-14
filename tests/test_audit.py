@@ -7956,6 +7956,24 @@ class TestHybridL3Fixes:
         assert result.valid is False
         assert leftover.name in (result.error or "")
 
+    def test_a_failed_fdopen_surfaces_its_own_error_not_ebadf(self, tmp_path, monkeypatch):
+        """glm MED (re-pass 191bdcdd254b37be), reproduced by INJECTION: ``os.fdopen``
+        closes the descriptor itself when the reader cannot be built, and
+        ``_open_regular`` closed it again, so ``OSError [Errno 9] Bad file
+        descriptor`` replaced the real error (and could close an fd another thread
+        had just been given the same number)."""
+        path = tmp_path / "x.audit.jsonl"
+        path.write_bytes(b"{}\n")
+
+        def fdopen_closes_then_fails(fd, *args, **kwargs):
+            os.close(fd)
+            raise ValueError("reader construction failed")
+
+        monkeypatch.setattr(os, "fdopen", fdopen_closes_then_fails)
+
+        with pytest.raises(ValueError, match="reader construction failed"):
+            audit_module._open_regular(path)
+
     def test_a_refusal_after_quarantining_says_so(self, tmp_path, monkeypatch):
         """codex MED (re-pass 598cd40ffcfcbc18), reproduced by INJECTION: repair
         quarantined the manifest, the listing of sealed files then failed, and

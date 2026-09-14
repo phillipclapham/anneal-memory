@@ -1646,14 +1646,18 @@ class TestCmdAudit:
         manifest_path = db_path.parent / f"{db_path.stem}.audit.manifest.json"
         manifest_path.write_text('{"files": []}', encoding="utf-8")
 
-        real_read_bytes = Path.read_bytes
+        # cmd_audit reads the manifest through _read_audit_bytes since re-pass
+        # f0b24290a7232c06, so the failure is injected there.
+        import anneal_memory.cli as cli_module
 
-        def sick_read_bytes(self):
-            if self == manifest_path:
+        real_read_bytes = cli_module._read_audit_bytes
+
+        def sick_read_bytes(path):
+            if path == manifest_path:
                 raise PermissionError(13, "Permission denied")
-            return real_read_bytes(self)
+            return real_read_bytes(path)
 
-        monkeypatch.setattr(Path, "read_bytes", sick_read_bytes)
+        monkeypatch.setattr(cli_module, "_read_audit_bytes", sick_read_bytes)
 
         base_args_with_data.json = True
         base_args_with_data.since = None
@@ -1946,6 +1950,50 @@ class TestCmdAudit:
         assert fired
         assert json.loads(capsys.readouterr().out)["anchor_trusted"] is False
 
+
+    @pytest.mark.skipif(
+        not hasattr(os, "mkfifo") or not hasattr(__import__("signal"), "SIGALRM"),
+        reason="needs os.mkfifo and SIGALRM",
+    )
+    def test_a_fifo_as_the_active_file_returns_instead_of_hanging(self, tmp_path, capsys):
+        """complement HIGH (re-pass f0b24290a7232c06), reproduced: the active file
+        was added by name and opened; as a FIFO with no writer it blocked verify()
+        and cmd_audit until a 15s alarm killed them. The alarm here turns a
+        regression into a failure instead of a hung suite."""
+        import argparse
+        import signal
+
+        from anneal_memory.audit import AuditTrail
+
+        db = tmp_path / "m.db"
+        t = AuditTrail(db)
+        for i in range(3):
+            t.log("pre", {"i": i})
+        t._last_week = "1999-W01"
+        t.log("rot1", {})
+        active = tmp_path / "m.audit.jsonl"
+        active.unlink()
+        os.mkfifo(active)
+
+        class Hung(BaseException):
+            """Not an OSError or an Exception: TimeoutError is an OSError, and the
+            readers turn OSError into "unreadable", which swallowed the first
+            alarm and let a retry block with no alarm left armed."""
+
+        def hung(signum, frame):
+            raise Hung("blocked opening the FIFO")
+
+        old = signal.signal(signal.SIGALRM, hung)
+        signal.alarm(10)
+        try:
+            result = AuditTrail.verify(db)
+            cmd_audit(argparse.Namespace(db=str(db), json=True, event=None, since=None, limit=0))
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old)
+
+        assert result.valid is False
+        assert json.loads(capsys.readouterr().out)["anchor_trusted"] is False
 
 # -- cmd_diff tests --
 
@@ -4131,14 +4179,14 @@ class TestHybridSnapshotAuditCli:
         db = self._two_sealed_weeks(tmp_path)
         manifest = tmp_path / "m.audit.manifest.json"
         marker = tmp_path / self._MARKER
-        real_read = Path.read_bytes
+        real_read = cli._read_audit_bytes
 
         def quarantined_meanwhile(path):
             if path == manifest:
                 manifest.rename(marker)
             return real_read(path)
 
-        monkeypatch.setattr(Path, "read_bytes", quarantined_meanwhile)
+        monkeypatch.setattr(cli, "_read_audit_bytes", quarantined_meanwhile)
         cli.cmd_audit(argparse.Namespace(db=str(db), json=True, since=None, event=None, limit=None))
         out = capsys.readouterr()
 

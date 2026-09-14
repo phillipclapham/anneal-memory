@@ -5316,7 +5316,9 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
             trail.log("entry", {"i": i})
         active = db.parent / "eio.audit.jsonl"
 
-        real_open = open
+        # The scan opens the active file through _open_regular since re-pass
+        # f0b24290a7232c06, so the dying reader is injected there.
+        real_open_regular = audit_module._open_regular
         state = {"armed": True}
 
         class _DyingReader:
@@ -5348,12 +5350,12 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
             def __exit__(self, *a):
                 return self._f.__exit__(*a)
 
-        def dying_open(path, mode="r", *a, **kw):
-            if state["armed"] and str(path) == str(active) and mode == "rb":
-                return _Ctx(real_open(path, mode, *a, **kw))
-            return real_open(path, mode, *a, **kw)
+        def dying_open(path):
+            if state["armed"] and str(path) == str(active):
+                return _Ctx(real_open_regular(path))
+            return real_open_regular(path)
 
-        monkeypatch.setattr("builtins.open", dying_open)
+        monkeypatch.setattr(audit_module, "_open_regular", dying_open)
         fresh = AuditTrail(db)
         with pytest.raises(type(exc)):
             fresh._initialize()
@@ -6200,14 +6202,16 @@ class TestFixDiffRound6WriterReaderConsistency:
 
         manifest_path = trail._manifest_path
         manifest_path.write_text('{"files": []}', encoding="utf-8")
-        real_read_bytes = Path.read_bytes
+        # Every audit-file read goes through _read_regular_bytes / _open_regular
+        # since re-pass f0b24290a7232c06, so the failure is injected there.
+        real_read_bytes = audit_module._read_regular_bytes
 
-        def sick_read_bytes(self):
-            if self == manifest_path:
+        def sick_read_bytes(path):
+            if path == manifest_path:
                 raise PermissionError(13, "Permission denied")
-            return real_read_bytes(self)
+            return real_read_bytes(path)
 
-        monkeypatch.setattr(Path, "read_bytes", sick_read_bytes)
+        monkeypatch.setattr(audit_module, "_read_regular_bytes", sick_read_bytes)
 
         result = AuditTrail.verify(db)  # must NOT raise
 
@@ -7905,6 +7909,52 @@ class TestHybridL3Fixes:
 
         assert result.valid is False
         assert fifo.name in (result.error or "")
+
+    @pytest.mark.skipif(
+        not hasattr(os, "mkfifo") or not hasattr(__import__("signal"), "SIGALRM"),
+        reason="needs os.mkfifo and SIGALRM",
+    )
+    def test_a_file_swapped_for_a_fifo_after_it_was_checked_is_not_waited_on(self, tmp_path, monkeypatch):
+        """codex MED (re-pass f0b24290a7232c06), reproduced by INJECTION: a leftover
+        .jsonl passed the regular-file check, was swapped for a FIFO before the byte
+        comparison opened it, and verify() blocked until a 15s alarm killed it."""
+        import gzip
+        import signal
+
+        db = self._two_sealed_weeks(tmp_path)
+        gz = tmp_path / "m.audit.1999-W01.jsonl.gz"
+        leftover = tmp_path / "m.audit.1999-W01.jsonl"
+        with gzip.open(gz, "rb") as src:
+            leftover.write_bytes(src.read())
+        real = audit_module._regular_or_gone
+
+        def regular_then_swapped(path):
+            out = real(path)
+            if path == leftover and out:
+                path.unlink()
+                os.mkfifo(path)
+            return out
+
+        monkeypatch.setattr(audit_module, "_regular_or_gone", regular_then_swapped)
+
+        class Hung(BaseException):
+            """Not an OSError or an Exception: TimeoutError is an OSError, and the
+            readers turn OSError into "unreadable", which swallowed the first
+            alarm and let a retry block with no alarm left armed."""
+
+        def hung(signum, frame):
+            raise Hung("blocked opening the swapped-in FIFO")
+
+        old = signal.signal(signal.SIGALRM, hung)
+        signal.alarm(10)
+        try:
+            result = AuditTrail.verify(db)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old)
+
+        assert result.valid is False
+        assert leftover.name in (result.error or "")
 
     def test_a_refusal_after_quarantining_says_so(self, tmp_path, monkeypatch):
         """codex MED (re-pass 598cd40ffcfcbc18), reproduced by INJECTION: repair

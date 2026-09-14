@@ -58,6 +58,7 @@ from .audit import (
     _iter_lines as _iter_audit_lines,
     _markers_in as _markers_in_audit,
     _parse_manifest_bytes as _parse_audit_manifest_bytes,
+    _read_regular_bytes as _read_audit_bytes,
     _quarantine_markers as _quarantine_audit_markers,
     _require_entry_dict as _require_audit_entry_dict,
     _signatures_match as _audit_signatures_match,
@@ -1715,7 +1716,7 @@ def _read_audit_entries(
             # as ``verify()``/``_seed_from_manifest``/``_load_manifest``:
             # a torn multibyte or wrong-shaped manifest tracebacked out
             # of this command instead of degrading to "no files."
-            manifest = _parse_audit_manifest_bytes(manifest_path.read_bytes(), stem)
+            manifest = _parse_audit_manifest_bytes(_read_audit_bytes(manifest_path), stem)
             manifest_names = {f["filename"] for f in manifest.get("files", [])}
             anchor_trusted = anchor_trusted and manifest.get("chain_anchor_recovered") is not True
             for f in manifest.get("files", []):

@@ -132,7 +132,7 @@ Re-derive: `git log --oneline origin/main..origin/am-linkgate-block` · `git ls-
   - Test: `test_citation_spread_counts_distinct_cited_episodes`. Mutants "total citations" and "graduation count" each fail its same-episode case [run].
   - Suite 2028 passed, exit 0; mypy clean; ruff 75.
   - L1, L2 and the gauge's scoped codex pass were not yet run when this was written.
-  - L4 transports [run, `~/.claude/jobs/d2ca39dd/tmp/l4_gauge.py`, two lines on different episodes]: CLI text `Citation spread: 2 distinct episode(s) cited across 2 validated graduation(s)`; CLI `--json` `citation_spread=2`; MCP the same line.
+  - L4 transports [run, `~/.claude/jobs/d2ca39dd/tmp/l4_gauge.py`, two lines on different episodes]: `citation_spread=2` on all three. The display line printed here at `4b36989` was superseded twice (by `b799b68`, then `704e383`). At `704e383` both CLI text and MCP print `Citation spread: 2 distinct episode(s) cited on today's 2x-and-up graduation lines (counted before grounding checks)`, and CLI `--json` gives `citation_spread=2` [re-run by `0915+3`, 2026-09-15 ~09:0x].
   - L4 wording check (re-derive with `git grep -n -i -A3 -B3 "citation[_ ]spread" -- anneal_memory CHANGELOG.md README.md skill`):
     - `types.py` and CHANGELOG state the demoted-lines inclusion ("citation spread, not grounded spread"); README and SKILL.md say "distinct episodes cited". All accurate.
     - ⚠ The CLI/MCP display line "N distinct episode(s) cited across M validated graduation(s)" pairs N (which includes demoted lines) with the validated count, so it reads as spread over validated graduations, and N can exceed M. To be reworded after L1/L2 land [found by `0915+3` and the desk, 2026-09-15].

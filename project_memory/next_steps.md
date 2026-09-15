@@ -30,6 +30,7 @@
   - gauge g1=1 / g3=2 / g5=1;
   - CLI text, `--json` and MCP print the final line.
 - ⛔ Flow does NOT re-pin to 0.9.11 until `spore-1042` (dualwrite `--allow-unlinked` passthrough + gauge display) lands AND the (c) graph baseline is captured on a copy of the pre-0.9.11 store (see DEFERRED — (c) below).
+- Why publishing now passes the harness: the first upload was denied by the Claude Code auto-mode classifier ("[Create Public Surface]"). On Phill's instruction, 2026-09-15, `~/.claude/settings.json` gained an `autoMode.allow` rule, keeping `$defaults`, that authorizes PyPI publishing and release-tag pushes for anneal-memory and levain. All Bash was already allowed. Check it with `python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/.claude/settings.json'))).get('autoMode'))"`.
 - Not this release: the deferred (c) linking measurement; CLI-parse and MCP strict-boolean tests for `--allow-unlinked`; glm's cut-off residual on gauge pass `8c271d265c42fb81`.
 
 ## (SUPERSEDED — released, see above) ▶▶ HANDOFF — 0.9.11 RELEASE IN FLIGHT (seat `0915+3`, staged 2026-09-15 ~08:5x).

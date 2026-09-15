@@ -21,6 +21,44 @@
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
 
+## ▶▶ HANDOFF — 0.9.11 RELEASE IN FLIGHT (seat `0915+3`, staged 2026-09-15 ~08:5x). EVERY STATE LINE IS A COMMAND.
+- Desk: `0915+14 fanin` (all requests, triage, the release report and the close).
+- Branch `am-linkgate-block`, not merged. Re-derive with `git -C ~/Briefcase/anneal-memory log --oneline origin/main..origin/am-linkgate-block` and `git ls-remote origin am-linkgate-block`.
+- Commits in order: block + O_BINARY → L1/L2 fixes → the post-commit warning fix → its logging-fallback guard → the gauge → the gauge's L1/L2 fixes.
+- ⚖ Phill: "ship 721 as built with the gauge"; "yes, let's release please"; and ~08:5x, relayed verbatim by `0915+14 fanin`: "btw the seat has my permission to publish the release". THIS SEAT uploads and pushes the tag, with no further ask, once gates a–d close.
+- Before `twine upload`: `python3 ~/Briefcase/flow/scripts/spores.py list --disposition note | grep -i -A3 "pypi\|twine\|pypirc"`. Use the publish form recorded there, not `~/.pypirc`, which is FlowScript-scoped (spore-424).
+- After publishing, send the desk: the PyPI version; the sha256 of the wheel and sdist from the PyPI JSON against the local `dist/` files; the tag against `ls-remote`; and the step-4 clean-venv `pip show` plus the replay against the installed artifact. Then capture. The flow re-pin is not this seat's to do.
+- GATES: **(a) CLOSED.** codex HIGHs `ef6129349fe4bfe2` and `fcf7898398164324` were both fixed; the scoped pass `8650a2415f9b6ebb` returned no HIGH.
+  - **(b) CLOSED, NO HIGH:** the gauge's scoped pass `8c271d265c42fb81` at `b799b68`, triaged by `0915+3` ~09:0x.
+    - codex: complete, no findings. Static only (no tmpdir); it AST-parsed and ran `git diff --check`.
+    - complement: complete, no HIGH/MED. It flagged the cosmetic omission of "2x-and-up" from the printed line.
+    - ⚠ glm: `complete=False`, CUT OFF after 3 files. Named a RESIDUAL per the desk and not re-run; deep_review exit 1 is that coverage flag. Before the cut it filed 2 LOWs on the same wording point.
+    - The consensus LOW is taken as a string-only change in both transports: "cited on today's 2x-and-up graduation lines (counted before grounding checks)".
+  - **(c) L4:** transports run and docs quoted (below). The SKILL.md rewording is in the working tree, to be committed after (b) is triaged.
+  - **(d) the desk's merge GO:** Phill's side is CLEARED. ⚖ Phill, ~08:5x, relayed verbatim by `0915+14 fanin`: "go with (a) and do the measurement first for (c)". 0.9.11 ships with no graph-linking change. (c) is deferred; see "DEFERRED — (c)" below. What remains: gauge-pass triage, then the desk's GO.
+- AFTER MERGE, release steps (spore-424 is the publish note):
+  1. Bump `pyproject.toml`, `anneal_memory/__init__.py` and `server.json` (x2) to 0.9.11. Regenerate both `tool-integrity.json` files. CHANGELOG `[Unreleased]` becomes `[0.9.11] — <date>`. Tag `v0.9.11` locally. Run the suite.
+  2. `.venv/bin/python -m build --outdir dist`, then twine >= 7 in a throwaway venv, then check.
+  3. Upload with `PYPI_API_TOKEN3` as a one-shot env var, naming the two files. Push the tag only after the upload succeeds.
+  4. Verify: the simple index `https://pypi.org/simple/anneal-memory/`; then a clean venv `pip install anneal-memory==0.9.11 --no-cache-dir` and `pip show anneal-memory` (0.9.11, non-editable); then replay the store-copy residue and the L4 transports against that install. Results go to the desk.
+  5. Commit main to 0.9.12.dev0 (spore-710).
+- ⛔ Flow does not re-pin to 0.9.11 until `spore-1042` (the dualwrite `--allow-unlinked` passthrough) lands AND the (c) baseline below is captured.
+- Close: CAPTURE only (the capture skill), never consolidate.
+
+### ⏸ DEFERRED — (c) "stop linking co-cited ids that do not individually ground" — MEASUREMENT FIRST (⚖ Phill, 2026-09-15 ~08:5x)
+- THE QUESTION: the validated path links ALL co-cited valid ids (`graduation.py` "link_ids = valid_cited"), while grounding passes on ANY one id ("pass if ANY has content overlap"). So padding a line with an unrelated episode forms a false association, and `citation_spread` now shows a number that padding raises. L2 found this on 2026-09-15; the path predates the gauge.
+- ▶ MEASUREMENT, read-only, on a COPY of `~/.anneal-memory` (never the live store):
+  1. Count existing direct co-citation links whose two episodes do NOT each individually pass `check_explanation_overlap` against the explanation of the line(s) that cited them.
+  2. Separately, count links formed on DEMOTED lines, which (c) would delete wholesale.
+  3. Report both as counts and as shares of all links.
+  4. Re-measure after 0.9.11's first few real wraps. Near-zero and flat means no padding, and (c) waits. Growing is evidence for (c), with the paraphrased-link loss quantified.
+- ⛔ SEQUENCING: capture the baseline BEFORE flow re-pins to 0.9.11. Otherwise the first 0.9.11 wraps contaminate "before". The desk adds this as a precondition on the flow re-pin gate, next to `spore-1042`.
+- THE TRADE (c) carries:
+  - The demoted path's linking is deliberate ("a real but paraphrased co-citation keeps its link"), so (c) deletes paraphrased links too.
+  - The precedent is codex L3 F2: `graduation.py` already filters `link_ids` to individually-grounding ids, but only on preservation-exempt lines (`if preservation_exempted_overlap and node_content_map is not None`).
+  - The weakness: `check_explanation_overlap` passes at 2 shared meaningful words, so padding with an episode that shares 2 common words still links even under (c).
+- Not built in seat `0915+3` (context budget, desk ruling). No (c) code without a ruling that follows the measurement.
+
 ## ▶ TRIAGE 2026-09-15 — seat `0915+3`, branch `am-linkgate-block` (NOT MERGED; merge only on the desk's GO)
 
 Re-derive: `git log --oneline origin/main..origin/am-linkgate-block` · `git ls-remote origin am-linkgate-block`.
@@ -52,12 +90,33 @@ Re-derive: `git log --oneline origin/main..origin/am-linkgate-block` · `git ls-
   - ⚡ The store fixed this class on 09-03 and the save's own warnings kept the defect; a guard scoped to the reported site missed its sibling.
   - Test: `test_a_post_commit_warning_under_an_error_filter_does_not_fail_a_committed_save`. It runs Signal C under an error filter, then asserts the save returns, the continuity is written, the snapshot is cleared and the message is logged. It then checks that a second wrap still emits the warning under `pytest.warns`.
   - The four TestAmWarn silence tests moved from `simplefilter("error")` to recorded warnings, because an error filter no longer detects an emitted warning.
+- **Scoped re-pass over `b2066d0`, input_id `fcf7898398164324`, TRIAGED by `0915+3` ~08:3x.** All seats complete, errored False, no drift.
+  - complement: 1 LOW, no fix. Error filter plus suppressed logging can drop a signal entirely; that is the trade `Store._audit_log_after_commit` makes too.
+  - glm: 1 LOW, cosmetic; its own verdict is no fix.
+  - codex: 1 HIGH in two halves.
+    - Half 1, REPRODUCED [run]: `_warn_after_commit`'s fallback `_log.warning` was unguarded. A handler raising `OSError` under an error filter gave `RAISED OSError logging sink broken`, snapshot None, continuity saved True. Fixed: the log call has its own `try/except Exception`, and the regression test gained the raising-handler case.
+    - Half 2, REFUTED by precedent: widen to `BaseException`. The store's guard lets `SystemExit` through per codex L3 MED 2026-09-06 (swallowing a termination request is a fail-open), and the save is committed before these warnings, so propagation loses nothing.
+  - The desk (`0915+14`) ruled one more scoped pass. The guard fix is `78740cf`, committed by pathspec with only the 2 files.
+- **Scoped pass over `78740cf`, input_id `8650a2415f9b6ebb`, TRIAGED by `0915+3` ~08:4x: NO HIGH.** Gate (a) is closed.
+  - complement: no findings. Static only; it could not run pytest.
+  - codex: "No HIGH findings". 473 chars, a verdict rather than a quota message. Static only.
+  - glm: `{"findings": []}` in 28 chars after opening 2 files, which is THIN.
+  - Execution evidence is this seat's own: the suite at the commit's tree passed 2025 (exit 0), and mutant "log fallback unguarded" fails the raising-handler case.
 - Sibling census on the save path, re-derive with `grep -n "warnings.warn(" anneal_memory/store.py anneal_memory/continuity.py anneal_memory/cli.py anneal_memory/server.py`:
   - `continuity.py`: one raw `warnings.warn` remains, inside the helper; the four post-commit sites call it.
   - The save's Phase 4 audit call sits inside `try/except Exception: pass`.
   - `store.py` has 4 raw `warnings.warn` sites: the orphan-detection warning at open, guarded by try/except; the section-schema warning; `_audit_log_after_commit`'s, guarded; and `_warn_orphan_tmp_files`, called only from `Store.__init__`.
   - `cli.py` and `server.py` save handlers have no warn or log calls.
   - [judged by `0915+3` against those reads, 2026-09-15]
+
+### ⚖ PHILL APPROVED THE 0.9.11 RELEASE, 2026-09-15, relayed verbatim by `0915+1 fanin`: "yes, let's release please"
+- The upload and the tag push are authorised once ALL of these clear. Phill does not need to be asked again.
+  - (a) the scoped re-pass over `b2066d0` returns no HIGH;
+  - (b) the `citation_spread` gauge is built, and its own scoped pass over `continuity.py`, `test_continuity.py`, `cli.py`, `server.py` and `types.py` returns no HIGH;
+  - (c) L4 is done on the gauge's public text: the field names in CHANGELOG and README match the code, and the "includes demoted lines' citations" wording is present;
+  - (d) the desk gives the merge GO.
+- After the upload, before replaying the residue against the installed artifact: `pip show` from a clean venv, proving 0.9.11 is installed non-editable. Results go to the desk.
+- ⚠ Desk address: `0915+14 fanin`, live from ~08:2x per `0915+1 fanin`'s handoff message. All requests, triage, the release report and the close go there.
 
 ### ⚖ PHILL, 2026-09-15 ~08:0x, relayed verbatim by `0915+1 fanin`: "agreed, ship 721 as built with the gauge"
 - The block ships AS BUILT (insurance for the write path), and the Signal C WARN stays. The discipline half is a GAUGE, not a refusal: a citation-spread number on every save result, with no refusal and no warning threshold.
@@ -68,7 +127,48 @@ Re-derive: `git log --oneline origin/main..origin/am-linkgate-block` · `git ls-
   - verification is 1 test;
   - L1 and L2, then a CODEX REQUEST scoped to that diff.
 - ▶ Release: the desk reads "ship" as merge + cut 0.9.11 once L3 is clean over block + gauge and L4 is done. The release plan goes to the desk BEFORE any upload, and the Keep note on PyPI publishing gets read first. ⛔ Flow does not re-pin to 0.9.11 until `spore-1042` (flow's `anneal_dualwrite.py` `--allow-unlinked` passthrough plus the gauge display) lands.
-- Gauge design [chosen by `0915+3`, 2026-09-15, not built yet]: `len(grad_result.citation_counts)`.
+- **Gauge BUILT [by `0915+3`, 2026-09-15 ~08:5x]; re-derive with `git log --oneline 78740cf..origin/am-linkgate-block`.**
+  - Store-copy run (`~/.claude/jobs/d2ca39dd/tmp/residue_gauge.py`, which dies with the job; the output is the record): g1 one line/one episode `citation_spread=1 graduations_validated=1`; g3 two lines/different episodes `citation_spread=2 graduations_validated=2 associations_formed=1`; g5 two lines/SAME episode `citation_spread=1 graduations_validated=2 associations_formed=0`.
+  - Test: `test_citation_spread_counts_distinct_cited_episodes`. Mutants "total citations" and "graduation count" each fail its same-episode case [run].
+  - Suite 2028 passed, exit 0; mypy clean; ruff 75.
+  - L1, L2 and the gauge's scoped codex pass were not yet run when this was written.
+  - L4 transports [run, `~/.claude/jobs/d2ca39dd/tmp/l4_gauge.py`, two lines on different episodes]: CLI text `Citation spread: 2 distinct episode(s) cited across 2 validated graduation(s)`; CLI `--json` `citation_spread=2`; MCP the same line.
+  - L4 wording check (re-derive with `git grep -n -i -A3 -B3 "citation[_ ]spread" -- anneal_memory CHANGELOG.md README.md skill`):
+    - `types.py` and CHANGELOG state the demoted-lines inclusion ("citation spread, not grounded spread"); README and SKILL.md say "distinct episodes cited". All accurate.
+    - ⚠ The CLI/MCP display line "N distinct episode(s) cited across M validated graduation(s)" pairs N (which includes demoted lines) with the validated count, so it reads as spread over validated graduations, and N can exceed M. To be reworded after L1/L2 land [found by `0915+3` and the desk, 2026-09-15].
+  - **L1 over the gauge (2026-09-15, no HIGH), to be fixed in one batch with L2:**
+    - MED: "resolving to this store" (types.py, CHANGELOG) is wrong. `valid_ids` is this wrap's prepare snapshot (`continuity.py` "valid_ids = {ep.id[:8].lower() for ep in episodes}"), so an older episode that still exists counts 0.
+    - MED: the display line contradicts itself. All-demoted lines print "3 … cited across 0 validated graduation(s)". Adopt L1's wording, which drops the M clause.
+    - MED: "includes demoted lines" has no test. Add parametrised cases: a grounding-demoted line (expect 1, demoted >= 1), an unresolved id (0), a non-today date (0), and a 1x line (0).
+    - LOW: say "distinct 8-char ids" and "2x-and-up lines" in the docs.
+    - LOW, not taken: no CLI/MCP transport test; the L4 run covers the transports once.
+    - L1 confirmed: the fill happens only in graduating sections, on today-dated `_GRADUATION_RE` (2x+) lines, before every check; `grad_result` is always bound; the only exact key-set check is updated.
+  - **L2 over the gauge (2026-09-15, no HIGH).** It agreed with L1's "this store" and display-line MEDs.
+    - MED: the Returns docstring omitted `citation_spread`, `linkgate_overridden` and `skipped_non_today`. Added.
+    - LOW, not taken: transport tests; renaming to `distinct_cited_episodes`.
+    - ⚖ ROUTED to `0915+14 fanin`, not decided: **PADDING IS FREE AND POISONS THE GRAPH.** The validated path links ALL co-cited ids (`link_ids = valid_cited`), while grounding passes on any one id, so padding a line with an unrelated episode raises `citation_spread` and forms a false association. `detect_citation_gaming` sees only reuse.
+    - That path predates the gauge; the gauge adds an incentive. Counting only individually-grounding ids would drop the demoted lines the desk ruled to count.
+    - Shipped mitigation: SKILL.md and CHANGELOG say padding forms a false link. The options (keep / grounding-only count / stop linking non-grounding co-cited ids) await a ruling.
+    - Desk, 2026-09-15 ~09:0x: verified on disk and ROUTED TO PHILL. Gate (d), the merge GO, waits on his answer to one question: does (c) "stop linking non-grounding co-cited ids" go into 0.9.11, or ship (a) now with (c) as its own item?
+      - The desk's measured trade: `graduation.py` filters `link_ids` to individually-grounding ids only when `preservation_exempted_overlap` (codex L3 F2). The demoted path's linking is deliberate ("a real but paraphrased co-citation keeps its link"), so (c) also cuts paraphrased links.
+      - If he says later, write (c) here as a deferred design item carrying that trade and the F2 precedent. No (c) code unless he rules it in.
+  - **Gauge fix batch [by `0915+3`, 2026-09-15].** Commit subject "gauge: L1+L2 fixes"; re-derive with `git log --oneline 78740cf..origin/am-linkgate-block`.
+    - Final display line in both transports: "Citation spread: N distinct episode(s) cited on today's graduation lines (counted before grounding checks)".
+    - An intermediate wording containing "demoted" failed `test_server.py::test_1x_pattern_needs_no_citation` (it asserts "demoted" is absent from a no-demotion save), so the always-printed line avoids that word.
+    - Mutants, each failing [run]: M11 total citations; M12 validated count; M13 ids on linked lines only (fails demoted-line-still-counts).
+    - Suite 2032 passed, exit 0. mypy clean. ruff 75.
+    - L4 transports with the final wording [run]: CLI text and MCP print the line with N=2; `--json` gives `citation_spread=2`.
+  - **Gate (c) L4, public text against the computation [read by `0915+3` at `b799b68`, 2026-09-15].** No L3 seat reads CHANGELOG, README or SKILL.md (they are outside the codex `--paths`), so this record is their only check.
+    - Computation at HEAD, quoted strings:
+      - `continuity.py` "citation_spread=len(grad_result.citation_counts),"
+      - `graduation.py` "if date_str != today:" (skips non-today lines before counting)
+      - "cid.strip().lower()[:8]" (8-char ids)
+      - "for cid in cited_ids & valid_ids:" (the fill, ahead of the grounding check). A second loop with the same text is the grounding check's "pass if ANY has content overlap" and only reads.
+      - `continuity.py` "valid_ids = {ep.id[:8].lower() for ep in episodes}" (this wrap's snapshot).
+    - CHANGELOG: "the number of distinct episode ids (compared as 8-character prefixes) cited on the wrap's today-dated 2x-and-up graduation lines that belong to this wrap's episodes; an episode from an earlier session is not counted. It includes citations on lines that were later demoted". MATCHES.
+    - README: "the number of distinct episodes from this wrap that its graduation lines cited (demoted lines included)". MATCHES; it omits the 8-char and 2x+ detail, which the CHANGELOG carries.
+    - SKILL.md at `b799b68`: "the number of distinct episodes your graduations cited". LOOSE: it names neither this wrap's episodes nor demoted lines, so an agent could read it as grounded spread. Reworded in the working tree to "the number of distinct episodes from this session that today's graduation lines cited, including lines later demoted, so it is not a count of grounded evidence". Not committed yet: it lands after the gauge pass is triaged, so HEAD does not move under the review.
+- Gauge design [chosen by `0915+3`, 2026-09-15]: `len(grad_result.citation_counts)`.
   - Rationale: `validate_graduations` fills `citation_counts` from `cited_ids & valid_ids` on every today-dated graduation line, BEFORE the grounding and cross-session checks. So it counts every distinct resolved episode id cited this wrap, including on lines that are later demoted, and it needs no new computation and no schema change.
   - Unresolved (foreign-namespace) ids are not counted; that case is Signal A's.
   - Reported next to `graduations_validated`.

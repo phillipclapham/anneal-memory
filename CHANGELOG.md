@@ -18,6 +18,16 @@ emits an `AM-LINKGATE override` warning and returns `linkgate_overridden: true`,
 `--json`) and the MCP tool result both print. The MCP tool-integrity manifests are regenerated.
 (`spore-721`.)
 
+### Added — the citation-spread gauge on every save result
+
+`validated_save_continuity` returns `citation_spread`: the number of distinct episodes, resolving to this
+store, cited across the wrap's today-dated graduation lines. It includes citations on lines that were
+later demoted, so it measures how widely a wrap cited, not how widely it grounded. The CLI (text and
+`--json`) and the MCP tool result print it next to the validated-graduation count. It is a report only:
+nothing refuses or warns on it, and nothing is stored. Paired with the AM-LINKGATE block above, it makes
+the single-episode citation habit visible without refusing the one-pattern wraps where one episode
+really is the evidence. (`spore-721`.)
+
 ### Fixed — a committed save no longer reports failure under an error warnings-filter
 
 In 0.9.10 and earlier, `validated_save_continuity` emitted its save warnings (the AM-WARN/AM-LINKGATE

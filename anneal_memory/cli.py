@@ -1191,12 +1191,17 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 "associations_strengthened": result["associations_strengthened"],
                 "associations_decayed": result["associations_decayed"],
                 "linkgate_overridden": result["linkgate_overridden"],
+                "citation_spread": result["citation_spread"],
                 "sections": {name: c for name, c in sorted(sections.items())},
             })
             return
 
         print(f"Continuity saved ({chars:,} chars) to {result['path']}")
         print(f"Episodes compressed: {result['episodes_compressed']}")
+        print(
+            f"Citation spread: {result['citation_spread']} distinct episode(s) "
+            f"cited across {result['graduations_validated']} validated graduation(s)"
+        )
         if result["linkgate_overridden"]:
             print(
                 "AM-LINKGATE OVERRIDE: saved with --allow-unlinked; the "

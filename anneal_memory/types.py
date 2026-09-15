@@ -672,5 +672,12 @@ class SaveContinuityResult(TypedDict):
     # wrap the block would have refused. Structured so a transport can show it;
     # the ``UserWarning`` alone never reaches an MCP client.
     linkgate_overridden: bool
+    # AM-LINKGATE gauge (spore-721, Phill 2026-09-15 "ship 721 as built with
+    # the gauge"): the number of DISTINCT episodes cited across this wrap's
+    # today-dated graduation lines that resolve to this store. It INCLUDES
+    # citations on lines later demoted (grounding or cross-session), so it is
+    # citation spread, not grounded spread. Unresolved ids are not counted.
+    # Report only: nothing refuses or warns on it.
+    citation_spread: int
     sections: dict[str, int]  # Char count per continuity section
     wrap_result: dict[str, Any]  # WrapResult-as-dict (JSON-serializable)

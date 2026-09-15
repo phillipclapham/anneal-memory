@@ -4962,6 +4962,38 @@ def test_a_post_commit_warning_under_an_error_filter_does_not_fail_a_committed_s
         assert store.load_wrap_snapshot() is None
         assert any("AM-LINKGATE" in r.getMessage() for r in caplog.records)
 
+        # The fallback channel can fail too (codex HIGH, re-pass
+        # fcf7898398164324): a handler whose emit() raises must not turn the
+        # committed save into a reported failure either.
+        class _BrokenHandler(logging.Handler):
+            def emit(self, record):
+                raise OSError("logging sink broken")
+
+        broken = _BrokenHandler()
+        continuity_log = logging.getLogger("anneal_memory.continuity")
+        continuity_log.addHandler(broken)
+        try:
+            broken_ids = [
+                store.record(
+                    f"substrate observation about discipline rotation memory topic {i}",
+                    EpisodeType.OBSERVATION,
+                ).id
+                for i in (6, 7)
+            ]
+            token = prepare_wrap(store)["wrap_token"]
+            text_broken = text.replace(ids[0], broken_ids[0]).replace(
+                "- solo |", "- solo_broken |"
+            )
+            with _w.catch_warnings():
+                _w.simplefilter("error")
+                validated_save_continuity(
+                    store, text_broken, today="2026-06-02", wrap_token=token,
+                )
+            assert "- solo_broken |" in (store.load_continuity() or "")
+            assert store.load_wrap_snapshot() is None
+        finally:
+            continuity_log.removeHandler(broken)
+
         # Not swallowed: under a normal filter the same warning is still emitted.
         # Signal C needs >= 2 episodes in the wrap, so record two and cite one.
         new_ids = [

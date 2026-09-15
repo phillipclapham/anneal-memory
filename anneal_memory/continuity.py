@@ -1652,11 +1652,22 @@ def _warn_after_commit(message: str) -> None:
     raises is it logged instead. The catch is ``Exception``, as in
     ``Store._audit_log_after_commit``'s guard for the same class (codex L3,
     2026-09-03), because an embedder's ``showwarning`` can raise a non-Warning.
+
+    ⛔ The fallback is guarded separately: a logging handler whose ``emit()``
+    raises would otherwise carry the same false failure one channel down (codex
+    HIGH, re-pass fcf7898398164324, reproduced with a handler raising OSError).
+    A ``BaseException`` that is not an ``Exception`` still propagates: the save
+    is committed and renamed, so an explicit termination request loses nothing,
+    and swallowing it is the fail-open the store's guard refuses (codex L3 MED,
+    2026-09-06).
     """
     try:
         warnings.warn(message, UserWarning, stacklevel=3)
     except Exception:
-        _log.warning("%s", message)
+        try:
+            _log.warning("%s", message)
+        except Exception:
+            pass
 
 
 def _check_linkgate(

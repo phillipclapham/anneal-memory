@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "anneal-memory"
-version = "0.9.11"
+version = "0.9.12.dev0"
 description = "Living memory for AI agents. Episodes compress into identity."
 readme = "README.md"
 license = "MIT"

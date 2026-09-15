@@ -21,7 +21,36 @@
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
 
-## ▶▶ HANDOFF — 0.9.11 RELEASE IN FLIGHT (seat `0915+3`, staged 2026-09-15 ~08:5x). EVERY STATE LINE IS A COMMAND.
+## ✅ 0.9.11 RELEASED 2026-09-15 ~09:1x by `0915+3`. Re-derive; do not trust these lines.
+- Published: `curl -s https://pypi.org/simple/anneal-memory/ | grep -o 'anneal_memory-0\.9\.11[^"<#]*'`. The PyPI JSON sha256 matched local: wheel 893b5097…32e8b9, sdist 2e6c7885…fb3533 [receipts, 2026-09-15].
+- Tag = release commit: `git rev-list -n1 v0.9.11` and `git ls-remote origin refs/tags/v0.9.11` both give `153823d`.
+- main moved on: `grep __version__ anneal_memory/__init__.py` should read a `.devN` (0.9.12.dev0 as of `4dfba23`).
+- Verified against the INSTALLED artifact [run by `0915+3`; clean venv from PyPI, `pip show` 0.9.11 in site-packages, not editable; no PYTHONPATH]:
+  - store-copy linkgate w1 SAVED / w2 REFUSED with wrap intact / w4 escape SAVED `linkgate_overridden=True` / w3 formed=1; audit verify valid on each save;
+  - gauge g1=1 / g3=2 / g5=1;
+  - CLI text, `--json` and MCP print the final line.
+- ⛔ Flow does NOT re-pin to 0.9.11 until `spore-1042` (dualwrite `--allow-unlinked` passthrough + gauge display) lands AND the (c) graph baseline is captured on a copy of the pre-0.9.11 store (see DEFERRED — (c) below).
+- Not this release: the deferred (c) linking measurement; CLI-parse and MCP strict-boolean tests for `--allow-unlinked`; glm's cut-off residual on gauge pass `8c271d265c42fb81`.
+
+## (SUPERSEDED — released, see above) ▶▶ HANDOFF — 0.9.11 RELEASE IN FLIGHT (seat `0915+3`, staged 2026-09-15 ~08:5x).
+- ✅ **UNBLOCKED AND PUBLISHED, 2026-09-15 ~09:1x.** Phill told the seat directly: "please add the required Bash permission … for now I am turning off the auto classifier".
+  - Upload exit 0. The PyPI JSON sha256 for both files matches the values below (re-derive: `curl -s https://pypi.org/pypi/anneal-memory/0.9.11/json`).
+  - `v0.9.11` was pushed after the upload: `git ls-remote origin refs/tags/v0.9.11` gives `153823d`.
+  - `~/.claude/settings.json` gained an `autoMode.allow` rule (keeping `$defaults`) authorizing PyPI publishing and release-tag pushes for anneal-memory and levain. All Bash was already allowed; the denial came from the classifier.
+  - Still owed: clean-venv `pip show` + replay against the installed artifact, the report to the desk, then the 0.9.12.dev0 bump.
+- (superseded by the line above) ⛔ **BLOCKED AT THE UPLOAD, 2026-09-15 ~09:0x.** The Claude Code auto-mode permission classifier denied `twine upload` ("[Create Public Surface]") before it ran, so nothing was sent. Reported to `0915+14 fanin`.
+  - Merge (`704e383`) and stamp (`153823d`) are on origin main.
+  - Tag `v0.9.11` is LOCAL ONLY at `153823d`: `git rev-list -n1 v0.9.11` locally; `git ls-remote origin refs/tags/v0.9.11` should be empty until the upload succeeds.
+  - Built files (sha256, 2026-09-15 build): `dist/anneal_memory-0.9.11-py3-none-any.whl` 893b5097…32e8b9, `dist/anneal_memory-0.9.11.tar.gz` 2e6c7885…fb3533. twine 7.0.0 check passed both.
+  - Unblock needs Phill: approve the upload in the seat, or run the spore-424 form himself. After the upload: push the tag, verify, report, bump to 0.9.12.dev0.
+  - ⛔ HOLD (desk `0915+14`, 09:06): no retries, and DO NOT REBUILD `dist/`, because a rebuild changes the hashes Phill is uploading against. The desk will not run the upload or route it to another seat, since that would launder the classifier's decision.
+  - If Phill runs the upload AND the tag push himself, this seat only verifies:
+    1. the simple index lists both 0.9.11 files;
+    2. PyPI sha256 (`curl -s https://pypi.org/pypi/anneal-memory/0.9.11/json`) matches the two values above;
+    3. `git ls-remote origin refs/tags/v0.9.11` peels to `153823d`;
+    4. clean venv `pip install anneal-memory==0.9.11 --no-cache-dir` and `pip show` (0.9.11, not editable), then replay the store-copy residue and the L4 transports against that install;
+    5. report to the desk, then bump main to 0.9.12.dev0.
+  - Re-check PyPI with `curl -s https://pypi.org/simple/anneal-memory/ | grep -o 'anneal_memory-0\.9\.11[^"<#]*'`.
 - Desk: `0915+14 fanin` (all requests, triage, the release report and the close).
 - Branch `am-linkgate-block`, not merged. Re-derive with `git -C ~/Briefcase/anneal-memory log --oneline origin/main..origin/am-linkgate-block` and `git ls-remote origin am-linkgate-block`.
 - Commits in order: block + O_BINARY → L1/L2 fixes → the post-commit warning fix → its logging-fallback guard → the gauge → the gauge's L1/L2 fixes.

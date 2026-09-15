@@ -21,6 +21,51 @@
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
 
+## ▶ TRIAGE 2026-09-15 — seat `0915+3`, branch `am-linkgate-block` (NOT MERGED; merge only on the desk's GO)
+
+Re-derive: `git log --oneline origin/main..origin/am-linkgate-block` · `git ls-remote origin am-linkgate-block`.
+
+### Diogenes 2026-09-15 MEDIUM (`_open_regular` without `O_BINARY`) — FIXED on the branch
+- Fix: the flags gain `getattr(os, "O_BINARY", 0)`, read at call time. Test `test_open_regular_passes_o_binary_to_os_open`. Mutant "drop O_BINARY" fails it [run by `0915+3`].
+- ⚠ RESIDUE, UNDISCHARGED: never run on Windows. No Windows host here and none in CI (`grep -n runs-on .github/workflows/test.yml`). The test proves the flag reaches `os.open`, not that a Windows read of a sealed `.gz` succeeds.
+- Sibling census: `grep -n "os.open(" anneal_memory/*.py`. At branch creation it returned 9 hits: 1 audit-file data read (the one fixed), 5 directory descriptors opened for fsync, and 3 lock files (`O_RDWR | O_CREAT`) never read as data [classified by `0915+3`, 2026-09-15].
+
+### glm second-lineage candidates (from `diogenes_20260915.md`) — read at their sites, NOT fixed, NOT run [reasoned by `0915+3`, 2026-09-15]
+1. `_adopt_orphaned_files`, where the manifest was lost after a retention cleanup. CONFIRMED AS BEHAVIOUR, NOT A DEFECT. With no manifest, the tip is `chain_anchor or GENESIS_HASH`, so a first surviving orphan that does not chain from genesis stays on its name and verify() reports it. The docstring's own rule: "A week that does not chain stays on its name, unadopted, and ``verify()`` reports it". The absent-manifest path is Phill's ii-a ruling (2026-09-14).
+2. `_seed_from_sealed_tail`: the unguarded `audit_dir.iterdir()`. CONFIRMED AT THE SITE: a 0o300 directory raises `PermissionError`, not `_ManifestQuarantined`. Its caller `_seed_from_manifest` follows the rule "A transient read error propagates, leaving ``_initialized`` False so the next ``log()`` retries". So a propagating `OSError` is the module's designed class. By grep, not run: `grep -n "_ManifestQuarantined" anneal_memory/store.py anneal_memory/cli.py anneal_memory/server.py` returned nothing, and the Store's audit-after-commit path swallows the exception on purpose (its docstring: "Why the exception is swallowed"). So a save that hits this is not failed by it [judged by `0915+3`, 2026-09-15, against that grep and docstring].
+3. `verify()`'s second empty-trail listing, where the directory vanishes between listings. REFUTED as a defect: the second listing's `except OSError` returns `valid=False` ("Cannot list audit directory"). The differing path fails closed.
+
+### spore-721 AM-LINKGATE BLOCK — BUILT on the branch. ⚖ DATED PREMISE NOTE
+- **Ruled BUILD by Phill 2026-09-04 against the single-id UNDER-WIRING habit. As built to the ruled predicate (≥2 pair-capable graduations AND 0 associations), it guards against a MIS-WIRED association write path. Premise routed to Phill via `0915+1 fanin`, 2026-09-15.** The reasoning, re-derivable: `extract_session_co_citations` pairs ids from different lines, so ≥2 lines citing different episodes always offer a pair. `_upsert_association` returns False (counted as strengthened) for an existing pair, including one at the strength cap. So 0 formed plus 0 strengthened, with a pair offered, happens only when the write recorded nothing. A wrap that cites one real episode in total offers no pair and stays WARN-only (Signal C).
+- Escape: `allow_unlinked=True` / `--allow-unlinked` / MCP `"allow_unlinked": true` (strict boolean). A bypass warns `AM-LINKGATE override`.
+- Mutants, each failing the linkgate tests [run by `0915+3` on a copy, import asserted]: threshold `<2`→`<1` · drop the offered-pair clause · truthy escape · never refuse · no override warning. Unmutated: 3 passed.
+- **Store-copy residue, DISCHARGED [run by `0915+3`, 2026-09-15, on a `sqlite3.backup` copy of `~/.anneal-memory` under the job tmp, import asserted from the repo tree at 0.9.11.dev0; re-run ~07:4x after the L1/L2 fix pass, and the output below is that re-run].** Script `~/.claude/jobs/d2ca39dd/tmp/residue.py`, which dies with the job; the output below is the record. Wraps 2 and 4 inject `Store.record_associations -> (0, 0)`, because a mis-wire is the only way the real path reaches the refusal:
+  ```
+  WRAP 1 (one graduation line citing one episode, no injection)
+    SAVED graduations_validated=1 associations_formed=0 strengthened=0 linkgate_overridden=False + Signal C AM-LINKGATE warning
+    audit verify valid=True entries=10871 anchor_trusted=True
+  WRAP 2 (two pair-capable lines, write path forced to record nothing)
+    REFUSED -> AM-LINKGATE refused this save: 2 pattern lines cited real episodes and offered 1 co-citation pair(s), but the association write recorded 0. That is a defect in the store's association write path, NOT in the continuity text: rewording or re-saving the same text will not clear it. Nothing was saved and the wrap is still in progress. Report this to the operator. Pass allow_unlinked=True (CLI: --allow-unlinked; MCP: "allow_unlinked": true) only with the operator's approval to save with no links recorded; the save result then reports linkgate_overridden.
+    wrap still in progress=True continuity unchanged=True tmp files=[]
+  WRAP 4 (the escape, on WRAP 2's refused wrap, same token, still mis-wired)
+    SAVED graduations_validated=2 associations_formed=0 linkgate_overridden=True + warnings: Signal B "Co-citation pairs were available…" and "AM-LINKGATE override…"
+    audit verify valid=True entries=10872 anchor_trusted=True; continuity changed=True wrap cleared=True
+  WRAP 3 (two pair-capable lines, real write path)
+    SAVED graduations_validated=2 associations_formed=1 strengthened=0 association_warning=None linkgate_overridden=False
+    audit verify valid=True entries=10873 anchor_trusted=True
+  ```
+- **L1 + L2 (2026-09-15, `0915+3`): no HIGH.** Fixed in the fix-pass commit (`git log --format=%B -1 origin/am-linkgate-block`):
+  - the override was invisible over MCP and `--json`, so it is now the result field `linkgate_overridden`, printed by both transports;
+  - the refusal message offered the escape as its only move, so it now names a store defect and says the escape needs operator approval;
+  - the refusal test now seeds a link the batch would decay, and asserts its strength and the audit line count are unchanged (mutant "commit before the gate" fails it) [run];
+  - the quickstart `ValueError` sentence, a README paragraph and a SKILL.md line were added.
+- ▶ OWED, not done:
+  - no CLI-parse test for `--allow-unlinked`, and no MCP-level strict-boolean test (the strictness test calls the library);
+  - a post-commit rename failure after an override leaves no durable record of it (L1 LOW);
+  - ⚖ JUDGEMENT, not a ruling: "pair-capable" was read as "pattern line citing real episodes", which includes demoted-grounding lines, because those feed pairs too [judged by `0915+3`, 2026-09-15; L1 asked that Phill confirm the reading].
+  - flow's `anneal_dualwrite.py` has no `--allow-unlinked` passthrough, which was routed to `0915+1 fanin` because it is flow's file.
+- ⚠ NOT COVERED: the CLI and MCP transports were exercised only by the existing suite, not by a store-copy run, and flow's live consolidate is pinned to the released 0.9.10 wheel, so this gate does not reach flow until a release plus a re-pin.
+
 ## ▶▶ PICKUP — READ FIRST (seat `0914+8`, written 2026-09-14, successor to `0913+41`). EVERY STATE LINE IS A COMMAND.
 
 ### ✅ 0.9.10 RELEASED 2026-09-14 by `0914+8` (merge GO from `0914+12 fanin`) — re-derive, do not trust

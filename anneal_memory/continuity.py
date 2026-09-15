@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
+import logging
 import warnings
 from dataclasses import asdict
 from datetime import date
@@ -1635,6 +1636,29 @@ def format_wrap_package_text(result: PrepareWrapResult) -> str:
     return "\n".join(parts)
 
 
+_log = logging.getLogger(__name__)
+
+
+def _warn_after_commit(message: str) -> None:
+    """Deliver a save warning that is emitted after the save has committed.
+
+    ⛔ Once the batch has committed, the renames have run and the wrap token is
+    cleared, nothing may make the caller believe the save failed. Under an error
+    warnings-filter (``PYTHONWARNINGS=error``, or an embedder promoting
+    ``UserWarning``) ``warnings.warn`` RAISES, and before this helper that raise
+    left the call reporting failure over a committed save, so a retry got "No
+    wrap in progress" (codex HIGH, L3 ef6129349fe4bfe2, reproduced on 0.9.10).
+    The warning is still emitted under every other filter; only when delivery
+    raises is it logged instead. The catch is ``Exception``, as in
+    ``Store._audit_log_after_commit``'s guard for the same class (codex L3,
+    2026-09-03), because an embedder's ``showwarning`` can raise a non-Warning.
+    """
+    try:
+        warnings.warn(message, UserWarning, stacklevel=3)
+    except Exception:
+        _log.warning("%s", message)
+
+
 def _check_linkgate(
     grad_result: Any,
     formed: int,
@@ -2755,15 +2779,13 @@ def validated_save_continuity(
             f"fine."
         )
     if association_warning is not None:
-        warnings.warn(association_warning, UserWarning, stacklevel=2)
+        _warn_after_commit(association_warning)
     if linkgate_overridden:
-        warnings.warn(
+        _warn_after_commit(
             "AM-LINKGATE override: allow_unlinked=True saved a wrap whose "
             "graduations offered co-citation pairs while 0 Hebbian associations "
             "were formed or strengthened. The association write path recorded "
-            "nothing; check it before the next wrap.",
-            UserWarning,
-            stacklevel=2,
+            "nothing; check it before the next wrap."
         )
 
     # AM-CARRYFORWARD (v0.4.6) + AM-PROVENANCE (Slice A): assisted "ground,
@@ -2805,7 +2827,7 @@ def validated_save_continuity(
         }
     )
     if graduate_out:
-        warnings.warn(
+        _warn_after_commit(
             f"{len(graduate_out)} pattern(s) at 3x or higher were carried forward "
             f"this wrap with no resolving citation and no provenance: "
             f"{', '.join(graduate_out)}. A permanent truth held without grounding "
@@ -2813,9 +2835,7 @@ def validated_save_continuity(
             f"`[provenance: id, ...]` so the audit of why it earned its level "
             f"survives the founding episodes ageing out, (b) graduate OUT to a "
             f"stable home (e.g. partnership.md), or (c) retire — review, don't "
-            f"leave it on the citation treadmill.",
-            UserWarning,
-            stacklevel=2,
+            f"leave it on the citation treadmill."
         )
 
     # AM-PROVENANCE (Slice A, codex L3 HIGH): a today-dated graduation line carrying
@@ -2826,15 +2846,13 @@ def validated_save_continuity(
     # — fix the tag order next wrap, or use [provenance:] alone).
     if grad_result.malformed_evidence_carries:
         malformed = sorted(set(grad_result.malformed_evidence_carries))
-        warnings.warn(
+        _warn_after_commit(
             f"{len(malformed)} graduation line(s) carry an [evidence:] tag that is "
             f"NOT adjacent to the `| Nx (date)` marker (another tag — e.g. "
             f"[provenance:] — sits between them): {', '.join(malformed)}. That "
             f"evidence will NOT validate or form a Hebbian link. Move [evidence:] "
             f"immediately after the marker, OR use [provenance:] alone (never both "
-            f"on one line). The line(s) were left unchanged.",
-            UserWarning,
-            stacklevel=2,
+            f"on one line). The line(s) were left unchanged."
         )
 
     return SaveContinuityResult(

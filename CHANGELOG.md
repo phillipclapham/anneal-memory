@@ -18,6 +18,16 @@ emits an `AM-LINKGATE override` warning and returns `linkgate_overridden: true`,
 `--json`) and the MCP tool result both print. The MCP tool-integrity manifests are regenerated.
 (`spore-721`.)
 
+### Fixed — a committed save no longer reports failure under an error warnings-filter
+
+In 0.9.10 and earlier, `validated_save_continuity` emitted its save warnings (the AM-WARN/AM-LINKGATE
+association warnings, the carried-forward notice and the malformed-evidence notice) after the save had
+committed, renamed its files and cleared the wrap token. Under `python -W error`, `PYTHONWARNINGS=error`,
+or an application filter that turns `UserWarning` into an error, that warning raised: the CLI and MCP
+reported a failed save although it had succeeded, and a retry was refused with "No wrap in progress".
+Reproduced on 0.9.10 with a one-graduation wrap. The warnings are still emitted under every other filter;
+when delivering one raises, it is logged instead. Found by review.
+
 ### Fixed — audit files are opened with `O_BINARY` where the platform has it
 
 Every audit-file read goes through one open, which did not pass `O_BINARY`. On Windows the descriptor

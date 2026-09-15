@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing as mp
+import sys
 from datetime import date, datetime, timezone
 
 import pytest
@@ -387,6 +388,13 @@ class TestStoreInvariants:
 
 
 class TestConcurrency:
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="CrystalStore._transaction's own docstring discloses that the "
+        "fcntl advisory lock degrades to a no-op on non-POSIX platforms; "
+        "cross-process write serialization is a documented POSIX-only "
+        "guarantee, not a bug this test should catch on Windows",
+    )
     def test_parallel_crystallize_no_lost_updates(self, tmp_path):
         path = tmp_path / "mem.crystal.json"
         n_workers, per_worker = 4, 10

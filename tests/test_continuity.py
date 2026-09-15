@@ -1026,7 +1026,7 @@ class TestCrossTransportParity:
         cli_store.close()  # CLI commands open their own store via args.db
 
         cli_file = tmp_path / "cli_continuity.md"
-        cli_file.write_text(cli_text)
+        cli_file.write_text(cli_text, encoding="utf-8")
 
         cli_args = Namespace(
             db=cli_db,

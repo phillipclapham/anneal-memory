@@ -441,6 +441,9 @@ class TestTypedDictReturnShapes:
                 # AM-WARN (v0.4.2): dead-Hebbian-graph mis-wire warning
                 # (str) or None when the association write path is healthy.
                 "association_warning",
+                # AM-LINKGATE block (spore-721): True only when
+                # allow_unlinked=True saved a wrap the block would refuse.
+                "linkgate_overridden",
                 "sections", "wrap_result",
             }
             assert set(result.keys()) == expected
@@ -4995,8 +4998,22 @@ class TestAmLinkgateBlock:
         self, tmp_path, miswired,
     ):
         from anneal_memory import validated_save_continuity
-        store, ids, token = self._prepared(tmp_path)
+        from anneal_memory.associations import record_associations as raw_record
+        store, ids, token = self._prepared(tmp_path, n_episodes=3)
         try:
+            # A link this wrap does NOT offer, so the batch's decay would
+            # weaken it; seen unchanged afterwards only if the batch rolled back.
+            raw_record(store._conn, {(ids[1][:8].lower(), ids[2][:8].lower())},
+                       set(), "2026-06-01T00:00:00.000000Z")
+            def strengths():
+                return [tuple(row) for row in store._conn.execute(
+                    "SELECT episode_a, episode_b, strength FROM associations"
+                ).fetchall()]
+            links_before = strengths()
+            assert links_before
+            audit_file = tmp_path / "linkgate.audit.jsonl"
+            assert audit_file.exists()
+            audit_lines_before = audit_file.read_text().count("\n")
             before = store.load_continuity()
             sessions_before = store.load_meta().get("sessions_produced", 0)
             with pytest.raises(ValueError) as exc:
@@ -5008,6 +5025,8 @@ class TestAmLinkgateBlock:
             assert "allow_unlinked=True" in message
             assert "--allow-unlinked" in message
             assert '"allow_unlinked": true' in message
+            assert strengths() == links_before
+            assert audit_file.read_text().count("\n") == audit_lines_before
             assert store.load_continuity() == before
             assert store.load_meta().get("sessions_produced", 0) == sessions_before
             snapshot = store.load_wrap_snapshot()
@@ -5037,6 +5056,7 @@ class TestAmLinkgateBlock:
                     allow_unlinked=True,
                 )
             assert result["graduations_validated"] == 2
+            assert result["linkgate_overridden"] is True
             assert store.load_wrap_snapshot() is None
         finally:
             store.close()

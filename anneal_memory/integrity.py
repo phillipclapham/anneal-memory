@@ -259,10 +259,11 @@ TOOLS: list[dict[str, Any]] = [
                         "block. By default a wrap whose graduation lines "
                         "offered co-citation pairs while 0 Hebbian "
                         "associations were formed or strengthened is refused, "
-                        "nothing is saved, and the wrap stays in progress. Set "
-                        "true only to save anyway after checking why no link "
-                        "was recorded; the save then warns that the override "
-                        "was used."
+                        "nothing is saved, and the wrap stays in progress. "
+                        "That refusal means the store's association write "
+                        "path is broken, not your text. Set true ONLY with "
+                        "the operator's approval; the save result then "
+                        "reports the override."
                     ),
                 },
             },

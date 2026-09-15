@@ -2512,8 +2512,15 @@ def _open_regular(path: Path):
     read: O_NONBLOCK is not meaningful for regular files on POSIX, and clearing
     it means no reader depends on that. Where the platform has no O_NONBLOCK
     (Windows) there are no FIFOs to open, and the fstat check still applies.
+
+    ``O_BINARY`` (Windows only; ``getattr`` gives 0 elsewhere): without it the
+    CRT opens the descriptor in text mode, which rewrites CR LF to LF and stops a
+    read at 0x1A — bytes a sealed ``.gz`` holds — and ``os.fdopen(fd, "rb")``
+    does not undo that (Diogenes MEDIUM 2026-09-15, reasoned from the Python
+    ``os`` and Microsoft ``_read`` documentation, never run on Windows). It is
+    read at call time so a test can supply it on a platform that lacks it.
     """
-    fd = os.open(path, os.O_RDONLY | _O_NONBLOCK)
+    fd = os.open(path, os.O_RDONLY | _O_NONBLOCK | getattr(os, "O_BINARY", 0))
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError(errno.EINVAL, "not a regular file", str(path))

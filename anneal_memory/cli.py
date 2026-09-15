@@ -1200,7 +1200,7 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
         print(f"Episodes compressed: {result['episodes_compressed']}")
         print(
             f"Citation spread: {result['citation_spread']} distinct episode(s) "
-            f"cited on today's graduation lines (counted before grounding checks)"
+            f"cited on today's 2x-and-up graduation lines (counted before grounding checks)"
         )
         if result["linkgate_overridden"]:
             print(

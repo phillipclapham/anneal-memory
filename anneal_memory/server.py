@@ -556,7 +556,7 @@ class Server:
         lines.append(f"Episodes compressed: {result['episodes_compressed']}")
         lines.append(
             f"Citation spread: {result['citation_spread']} distinct episode(s) "
-            f"cited on today's graduation lines (counted before grounding checks)"
+            f"cited on today's 2x-and-up graduation lines (counted before grounding checks)"
         )
 
         if result["graduations_validated"]:

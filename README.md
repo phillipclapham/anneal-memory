@@ -24,6 +24,14 @@ Four cognitive layers — episodic store, compressed continuity, Hebbian associa
 pip install anneal-memory
 ```
 
+### Windows
+
+anneal-memory runs on Windows, with two disclosed limits:
+
+- **Cross-process write locking is advisory POSIX `fcntl` and degrades to no lock on Windows**, at three sites: `store.py`'s continuity lock, `crystal.py`'s `CrystalStore._transaction`, and `spores.py`'s `SporeStore._transaction`. Concurrent multi-process writers to one store on Windows can race or lose updates; single-process use is unaffected (the unique-tmp + atomic-replace write still protects it).
+- **CLI output is UTF-8 on every platform, including piped, redirected, and subprocess consumption** — unreleased as of `v0.9.11`, first shipping in the next release.
+- Windows CI runs a real but reduced subset of the suite: tests that simulate an unreadable/unlistable file or directory via POSIX `chmod` are skipped there, since Windows/NTFS doesn't restrict access the same way. See `project_memory/next_steps.md`'s Windows Limitations section for the full list and reasoning.
+
 ### Python Library
 
 The library is the core product. Import it, use it in any framework or script.

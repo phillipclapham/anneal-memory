@@ -108,7 +108,12 @@ EXPECTED_SDIST_TOP_LEVEL = {
 
 class TestSdistShipsOnlyThePublishableSurface:
     def test_top_level_entries_are_exactly_the_declared_set(self):
-        top_level = {p.split("/")[0] for p in _sdist_distribution_paths()}
+        # hatchling's own distribution_path uses os.sep, so on Windows it
+        # returns backslash-separated paths. Normalize before splitting: the
+        # actual sdist/wheel archive always uses "/" internally per the
+        # zip/tar spec regardless of host OS, so this is a check-portability
+        # fix, not a statement about the published artifact.
+        top_level = {p.replace("\\", "/").split("/")[0] for p in _sdist_distribution_paths()}
 
         leaked = top_level - EXPECTED_SDIST_TOP_LEVEL
         assert not leaked, (
@@ -159,8 +164,10 @@ class TestWheelSurfaceIsUnchanged:
             reason="hatchling is a build dependency; not present under CI's build isolation",
         )
         builder = wheel.WheelBuilder(str(REPO_ROOT))
+        # See test_top_level_entries_are_exactly_the_declared_set: hatchling's
+        # distribution_path uses os.sep, so normalize before splitting.
         top_level = {
-            f.distribution_path.split("/")[0]
+            f.distribution_path.replace("\\", "/").split("/")[0]
             for f in builder.recurse_included_files()
         }
         assert top_level == {"anneal_memory"}, (

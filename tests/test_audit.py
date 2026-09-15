@@ -4,6 +4,7 @@ import gzip
 import json
 import logging
 import os
+import sys
 import tempfile
 import uuid
 import warnings
@@ -2292,7 +2293,7 @@ class TestNoBareAuditEmitSites:
     def _bare_sites(self, module_path):
         import ast
 
-        source = module_path.read_text()
+        source = module_path.read_text(encoding="utf-8")
         tree = ast.parse(source)
         # Map every node to its enclosing function name.
         enclosing: dict[int, str] = {}
@@ -6830,6 +6831,12 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         assert missing == [], f"recovery removed {len(missing)} file(s) of bytes"
 
     @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root reads a mode-000 file")
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="chmod on Windows/NTFS toggles only the read-only attribute, "
+        "not POSIX-style access bits; a mode-000 file stays readable there, "
+        "so this simulation never reaches the code path under test",
+    )
     def test_a_permanently_unreadable_orphan_does_not_block_writes(self, tmp_path, monkeypatch):
         """HIGH, complement, reproduced 3 of 3. Round 9 raised any read error
         that was not corrupt gzip, on the theory that it was transient; a
@@ -7001,6 +7008,13 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         assert elapsed < 1.0
 
     @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root lists a mode-000 directory")
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="chmod on Windows/NTFS does not restrict directory listing "
+        "(no POSIX permission bits, and CI runs as an admin account that "
+        "bypasses ACL restrictions anyway); the unsearchable-directory "
+        "condition never occurs",
+    )
     @pytest.mark.parametrize("mode", [0o000, 0o600])
     def test_verify_on_an_unsearchable_audit_directory_is_a_result(self, tmp_path, mode):
         """HIGH, codex #5, reproduced as a traceback: ``verify()`` on an audit
@@ -7064,6 +7078,12 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         assert result.valid is True, result.error
 
     @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root reads a mode-000 file")
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="chmod on Windows/NTFS toggles only the read-only attribute, "
+        "not POSIX-style access bits; a mode-000 file stays readable there, "
+        "so this simulation never reaches the code path under test",
+    )
     @pytest.mark.parametrize("rotated_past", [False, True])
     def test_an_orphan_skipped_while_unreadable_is_never_spliced_in_later(
         self, tmp_path, monkeypatch, rotated_past
@@ -7553,6 +7573,12 @@ class TestHybridManifestQuarantine:
         assert not (tmp_path / "m.audit.jsonl").exists(), "no chain guessed from genesis"
 
     @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root reads a mode-000 file")
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="chmod on Windows/NTFS toggles only the read-only attribute, "
+        "not POSIX-style access bits; a mode-000 file stays readable there, "
+        "so this simulation never reaches the code path under test",
+    )
     def test_a_transient_manifest_read_error_neither_quarantines_nor_overwrites(self, tmp_path):
         db = self._two_sealed_weeks(tmp_path)
         manifest = tmp_path / "m.audit.manifest.json"
@@ -7667,6 +7693,13 @@ class TestHybridL3Fixes:
         return db
 
     @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root lists a mode-300 directory")
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="chmod on Windows/NTFS does not restrict directory listing "
+        "(no POSIX permission bits, and CI runs as an admin account that "
+        "bypasses ACL restrictions anyway); the unlistable-directory "
+        "condition never occurs",
+    )
     def test_repair_in_an_unlistable_directory_refuses_instead_of_raising(self, tmp_path):
         """complement + codex: PermissionError out of repair_manifest.
 
@@ -7996,6 +8029,29 @@ class TestHybridL3Fixes:
             assert gzip.decompress(f.read()) == b'{"a": 1}\r\n\x1a\n'
 
         assert flags_seen and all(flags & fake_o_binary for flags in flags_seen)
+
+    def test_open_regular_round_trips_crlf_and_ctrl_z_bytes_on_a_real_file(self, tmp_path):
+        """Real-file companion to test_open_regular_passes_o_binary_to_os_open:
+        that test proves the flag REACHES ``os.open`` via a monkeypatched
+        recorder; this one proves the actual byte-level round trip on real
+        disk I/O, with no mocking of ``os.open`` or ``O_BINARY``.
+
+        ``\\r\\n`` and ``\\x1a`` (Ctrl-Z) are exactly the two byte sequences a
+        Windows CRT text-mode handle mangles without ``O_BINARY``: CRLF is
+        rewritten to LF, and a read stops at the first ``\\x1a`` as if it were
+        EOF. On POSIX this test passes unconditionally (``O_BINARY`` is 0
+        there via ``getattr``); on Windows it is the real defect Diogenes
+        found — this is the test that actually exercises it, not a recorder.
+
+        ⛔ MUTATION-CHECKED ON WINDOWS: removing ``getattr(os, "O_BINARY", 0)``
+        from the ``os.open`` flags in ``_open_regular`` turns this red on a
+        real Windows runner (kept as a CI run URL, not reproduced locally —
+        no non-POSIX host here).
+        """
+        path = tmp_path / "x.audit.2026-W01.jsonl"
+        payload = b'{"a": 1}\r\n\x1a{"b": 2}\r\n'
+        path.write_bytes(payload)
+        assert audit_module._read_regular_bytes(path) == payload
 
     def test_a_refusal_after_quarantining_says_so(self, tmp_path, monkeypatch):
         """codex MED (re-pass 598cd40ffcfcbc18), reproduced by INJECTION: repair

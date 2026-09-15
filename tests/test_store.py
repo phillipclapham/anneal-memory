@@ -4112,7 +4112,13 @@ class TestRecoveryOracle:
             text = "committed body\n"
             self._committed_wrap(store, "aaaaaaaaaaaa-11111111", text)
             tmp = store._continuity_tmp_path("aaaaaaaaaaaa-11111111")
-            tmp.write_text(text, encoding="utf-8")
+            # newline="" mirrors _prepare_continuity_write (store.py:6399): the
+            # real write path disables newline translation so the recorded
+            # content_hash (computed on the LF string) matches the on-disk
+            # bytes on every platform. Without it, Windows' default LF-to-
+            # CRLF translation makes a genuinely-committed orphan misread as
+            # a hash mismatch (test-only gap, not the production path).
+            tmp.write_text(text, encoding="utf-8", newline="")
             assert store._orphan_recovery_verdict(
                 "aaaaaaaaaaaa-11111111", tmp
             ) == ("committed_verified", 1)
@@ -4121,7 +4127,7 @@ class TestRecoveryOracle:
         with Store(str(tmp_path / "m.db"), project_name="M") as store:
             self._committed_wrap(store, "aaaaaaaaaaaa-11111111", "real body\n")
             tmp = store._continuity_tmp_path("aaaaaaaaaaaa-11111111")
-            tmp.write_text("TORN truncated\n", encoding="utf-8")  # different hash
+            tmp.write_text("TORN truncated\n", encoding="utf-8", newline="")  # different hash
             assert store._orphan_recovery_verdict(
                 "aaaaaaaaaaaa-11111111", tmp
             ) == ("committed_hash_mismatch", 1)
@@ -4139,7 +4145,7 @@ class TestRecoveryOracle:
             # a committed wrap exists, but under a DIFFERENT pair id
             self._committed_wrap(store, "aaaaaaaaaaaa-11111111", "body\n")
             tmp = store._continuity_tmp_path("bbbbbbbbbbbb-22222222")
-            tmp.write_text("loser\n", encoding="utf-8")
+            tmp.write_text("loser\n", encoding="utf-8", newline="")
             assert store._orphan_recovery_verdict(
                 "bbbbbbbbbbbb-22222222", tmp
             ) == ("debris", None)
@@ -4147,7 +4153,7 @@ class TestRecoveryOracle:
     def test_verdict_inconclusive_legacy_format(self, tmp_path):
         with Store(str(tmp_path / "i.db"), project_name="I") as store:
             tmp = store._continuity_tmp_path("cccccccccccc")  # legacy 12hex, no '-'
-            tmp.write_text("legacy\n", encoding="utf-8")
+            tmp.write_text("legacy\n", encoding="utf-8", newline="")
             assert store._orphan_recovery_verdict("cccccccccccc", tmp) == (
                 "inconclusive",
                 None,
@@ -4251,7 +4257,9 @@ class TestRecoveryOracle:
         text = "the committed body\n"
         self._committed_wrap(store, "dddddddddddd-99999999", text)
         tmp = store._continuity_tmp_path("dddddddddddd-99999999")
-        tmp.write_text(text, encoding="utf-8")
+        # newline="" mirrors _prepare_continuity_write (store.py:6399) — see
+        # test_verdict_committed_verified for why this matters cross-platform.
+        tmp.write_text(text, encoding="utf-8", newline="")
         store.close()
         with warnings.catch_warnings(record=True) as rec:
             warnings.simplefilter("always")
@@ -4275,7 +4283,7 @@ class TestRecoveryOracle:
         store = Store(db, project_name="Debris")
         self._committed_wrap(store, "aaaaaaaaaaaa-11111111", "real\n")
         tmp = store._continuity_tmp_path("bbbbbbbbbbbb-22222222")
-        tmp.write_text("loser\n", encoding="utf-8")
+        tmp.write_text("loser\n", encoding="utf-8", newline="")
         store.close()
         with warnings.catch_warnings(record=True) as rec:
             warnings.simplefilter("always")

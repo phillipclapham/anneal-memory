@@ -3605,6 +3605,33 @@ def main() -> None:
     existing MCP host configs (``anneal-memory --db /path --no-audit``) work
     unchanged — the server's parser handles all server-specific flags.
     """
+    # Force UTF-8 on stdio — mirrors server.py's start_server (locale encoding
+    # can corrupt non-ASCII memories), done at the very top of main() so it
+    # covers argparse's own --help/error output too: build_parser() and
+    # parse_known_args() below can print and exit before any subcommand
+    # dispatch (codex, 2026-09-15).
+    #
+    # stdin is included because two subcommands read piped content via "-"
+    # (cmd_record, cmd_save_continuity): without it, non-ASCII stdin is
+    # decoded on the process locale and silently mis-decoded into corrupted
+    # store content under a non-UTF-8 locale — not just a crash (complement +
+    # codex, 2026-09-15). stderr keeps its own default "backslashreplace"
+    # error handler explicitly: reconfigure(encoding=...) with no errors=
+    # resets errors to "strict" per CPython's documented contract, which
+    # would turn a benign undecodable-filename error message into a crash in
+    # the one stream that's supposed to degrade gracefully instead (complement
+    # HIGH, 2026-09-15). The hasattr guard covers a detached/no-console
+    # process (stdio can be None) and any non-TextIOWrapper stream, such as
+    # io.StringIO under a test harness that redirects stdio in-process —
+    # neither needs or supports reconfigure() (glm + codex, 2026-09-15).
+    for _stream, _errors in (
+        (sys.stdin, "strict"),
+        (sys.stdout, "strict"),
+        (sys.stderr, "backslashreplace"),
+    ):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors=_errors)
+
     # Detect whether a CLI subcommand is present.
     # Use parse_known_args so server-specific flags (--no-audit, --skip-integrity)
     # don't cause errors when no subcommand is given.
@@ -3614,7 +3641,8 @@ def main() -> None:
     if args.command is None:
         # No subcommand — full backward compat: delegate to server.main().
         # server.main() has its own complete argparse and handles all
-        # server-specific flags (--no-audit, --skip-integrity, etc.).
+        # server-specific flags (--no-audit, --skip-integrity, etc.). Its own
+        # stdin/stdout reconfigure above is now a harmless no-op re-assertion.
         from .server import main as server_main
         server_main()
         return
@@ -3622,16 +3650,6 @@ def main() -> None:
     # CLI subcommand present — reject any unrecognized arguments
     if remaining:
         parser.error(f"unrecognized arguments: {' '.join(remaining)}")
-
-    # Force UTF-8 on stdio — mirrors server.py's start_server (locale encoding
-    # can corrupt non-ASCII memories). The server path reconfigures its own
-    # stdio; this subcommand path never got the sibling fix, so commands that
-    # print our own glyphs (prepare-wrap's text output, spore list's markers)
-    # raised UnicodeEncodeError under a non-UTF-8 locale encoding — piped,
-    # redirected or subprocess output on Windows, where the console codepage
-    # is not UTF-8 by default (Diogenes census 2026-09-15, reproduced).
-    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
-    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
 
     # Dispatch to subcommand handler, behind the ONE contention boundary.
     #

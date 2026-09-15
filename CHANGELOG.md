@@ -4,6 +4,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.9.11] — 2026-09-15
+
 ### Added — AM-LINKGATE block: a save refuses a wrap whose offered Hebbian pairs recorded nothing
 
 `validated_save_continuity` raises `ValueError` when two or more pattern lines cited real episodes

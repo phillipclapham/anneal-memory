@@ -35,8 +35,54 @@ Re-derive: `git log --oneline origin/main..origin/am-linkgate-block` · `git ls-
 2. `_seed_from_sealed_tail`: the unguarded `audit_dir.iterdir()`. CONFIRMED AT THE SITE: a 0o300 directory raises `PermissionError`, not `_ManifestQuarantined`. Its caller `_seed_from_manifest` follows the rule "A transient read error propagates, leaving ``_initialized`` False so the next ``log()`` retries". So a propagating `OSError` is the module's designed class. By grep, not run: `grep -n "_ManifestQuarantined" anneal_memory/store.py anneal_memory/cli.py anneal_memory/server.py` returned nothing, and the Store's audit-after-commit path swallows the exception on purpose (its docstring: "Why the exception is swallowed"). So a save that hits this is not failed by it [judged by `0915+3`, 2026-09-15, against that grep and docstring].
 3. `verify()`'s second empty-trail listing, where the directory vanishes between listings. REFUTED as a defect: the second listing's `except OSError` returns `valid=False` ("Cannot list audit directory"). The differing path fails closed.
 
+### L3 over the block, input_id `ef6129349fe4bfe2` — TRIAGED by `0915+3`, 2026-09-15 ~08:1x
+- Seats: all complete, errored False, no drift.
+  - complement: no findings.
+  - glm: `{"findings": []}`, 32 chars after opening 3 files. THIN, not clean.
+  - codex: 1 HIGH.
+- Re-derive: `grep ef6129349fe4bfe2 ~/Briefcase/flow/state/verdicts.jsonl`.
+- **codex HIGH, REPRODUCED and PRE-EXISTING [run].** `validated_save_continuity` commits, renames and clears the wrap token, and only then calls `warnings.warn`. Under an error filter that raises after a successful save: the caller sees a failure, and a retry gets "No wrap in progress".
+  - Reproduction script: `~/.claude/jobs/d2ca39dd/tmp/repro_warn.py` (dies with the job). Output:
+    - at `d6c017c`, mis-wired + `allow_unlinked=True`: `RAISED UserWarning Co-citation pairs were available…`, snapshot None, continuity saved True;
+    - on `origin/main` `b2b80ae`, a 1-graduation Signal C wrap: `RAISED UserWarning AM-LINKGATE: 1 graduation(s)…`, snapshot None, continuity saved True.
+  - So published 0.9.10 carries it.
+- Decision, recorded before any second round: fix the class on this branch (post-commit warnings emitted without ever propagating), add 1 regression test, then one codex re-pass scoped to the fix diff.
+- **Fix [by `0915+3`, 2026-09-15, not yet committed when written]:**
+  - The save's post-commit `warnings.warn` calls now go through `_warn_after_commit` in `continuity.py`, which emits normally and logs when delivery raises (`except Exception`, the same guard `Store._audit_log_after_commit` has carried since codex L3 2026-09-03).
+  - ⚡ The store fixed this class on 09-03 and the save's own warnings kept the defect; a guard scoped to the reported site missed its sibling.
+  - Test: `test_a_post_commit_warning_under_an_error_filter_does_not_fail_a_committed_save`. It runs Signal C under an error filter, then asserts the save returns, the continuity is written, the snapshot is cleared and the message is logged. It then checks that a second wrap still emits the warning under `pytest.warns`.
+  - The four TestAmWarn silence tests moved from `simplefilter("error")` to recorded warnings, because an error filter no longer detects an emitted warning.
+- Sibling census on the save path, re-derive with `grep -n "warnings.warn(" anneal_memory/store.py anneal_memory/continuity.py anneal_memory/cli.py anneal_memory/server.py`:
+  - `continuity.py`: one raw `warnings.warn` remains, inside the helper; the four post-commit sites call it.
+  - The save's Phase 4 audit call sits inside `try/except Exception: pass`.
+  - `store.py` has 4 raw `warnings.warn` sites: the orphan-detection warning at open, guarded by try/except; the section-schema warning; `_audit_log_after_commit`'s, guarded; and `_warn_orphan_tmp_files`, called only from `Store.__init__`.
+  - `cli.py` and `server.py` save handlers have no warn or log calls.
+  - [judged by `0915+3` against those reads, 2026-09-15]
+
+### ⚖ PHILL, 2026-09-15 ~08:0x, relayed verbatim by `0915+1 fanin`: "agreed, ship 721 as built with the gauge"
+- The block ships AS BUILT (insurance for the write path), and the Signal C WARN stays. The discipline half is a GAUGE, not a refusal: a citation-spread number on every save result, with no refusal and no warning threshold.
+- ▶ The desk's plan addendum, same branch, after L3 over the block is triaged:
+  - the count of distinct episode ids cited across the graduating lines, next to the graduation count, on the library result, CLI text and `--json`, and MCP;
+  - ⛔ no schema change and no `_SCHEMA_VERSION` bump (spore-846);
+  - residue is a store-copy run showing the number on w1, on w3, and on a wrap whose lines all cite one episode;
+  - verification is 1 test;
+  - L1 and L2, then a CODEX REQUEST scoped to that diff.
+- ▶ Release: the desk reads "ship" as merge + cut 0.9.11 once L3 is clean over block + gauge and L4 is done. The release plan goes to the desk BEFORE any upload, and the Keep note on PyPI publishing gets read first. ⛔ Flow does not re-pin to 0.9.11 until `spore-1042` (flow's `anneal_dualwrite.py` `--allow-unlinked` passthrough plus the gauge display) lands.
+- Gauge design [chosen by `0915+3`, 2026-09-15, not built yet]: `len(grad_result.citation_counts)`.
+  - Rationale: `validate_graduations` fills `citation_counts` from `cited_ids & valid_ids` on every today-dated graduation line, BEFORE the grounding and cross-session checks. So it counts every distinct resolved episode id cited this wrap, including on lines that are later demoted, and it needs no new computation and no schema change.
+  - Unresolved (foreign-namespace) ids are not counted; that case is Signal A's.
+  - Reported next to `graduations_validated`.
+
 ### spore-721 AM-LINKGATE BLOCK — BUILT on the branch. ⚖ DATED PREMISE NOTE
 - **Ruled BUILD by Phill 2026-09-04 against the single-id UNDER-WIRING habit. As built to the ruled predicate (≥2 pair-capable graduations AND 0 associations), it guards against a MIS-WIRED association write path. Premise routed to Phill via `0915+1 fanin`, 2026-09-15.** The reasoning, re-derivable: `extract_session_co_citations` pairs ids from different lines, so ≥2 lines citing different episodes always offer a pair. `_upsert_association` returns False (counted as strengthened) for an existing pair, including one at the strength cap. So 0 formed plus 0 strengthened, with a pair offered, happens only when the write recorded nothing. A wrap that cites one real episode in total offers no pair and stays WARN-only (Signal C).
+- **Real-store history [measured by `0915+1 fanin`, read-only against `~/.anneal-memory/memory.db`, 2026-09-15 07:59; relayed, not re-run here].**
+  - The wraps table holds 164 wraps (2026-05-31 to 09-15); 122 had ≥1 validated graduation. 11 of those formed 0 and strengthened 0, and 10 of the 11 had exactly 1 graduation.
+  - ONE wrap had ≥2 validated graduations and 0 associations: id 76, 2026-06-19. ⚠ That count is graduations, not pair-capable lines; whether id 76 offered a pair (and so whether this block would have refused it) is NOT established.
+  - In the last 30 days: 27 graduating wraps, 1 zero-association wrap (id 159, 09-09, 1 graduation).
+  - ⚠ **`associations_strengthened` is 0 on all 164 wraps.** The associations table agrees: 239 pairs, max `co_citations` 1, `last_strengthened` never differing from `first_linked`.
+  - So "an existing pair counts as strengthened" is read from `_upsert_association` and has NEVER RUN on the real store, because every wrap cites fresh episodes. `pattern_associations` does strengthen, but that is a different table.
+  - Nothing in the real history shows a false-positive refusal through the strengthened counter. The store-copy w1-w4 runs below exercise the gate's mixed cases, formed and refused; the strengthened path was not observed there either.
+  - Re-derive: `sqlite3 ~/.anneal-memory/memory.db "select count(*), sum(associations_strengthened) from wraps"`.
 - Escape: `allow_unlinked=True` / `--allow-unlinked` / MCP `"allow_unlinked": true` (strict boolean). A bypass warns `AM-LINKGATE override`.
 - Mutants, each failing the linkgate tests [run by `0915+3` on a copy, import asserted]: threshold `<2`→`<1` · drop the offered-pair clause · truthy escape · never refuse · no override warning. Unmutated: 3 passed.
 - **Store-copy residue, DISCHARGED [run by `0915+3`, 2026-09-15, on a `sqlite3.backup` copy of `~/.anneal-memory` under the job tmp, import asserted from the repo tree at 0.9.11.dev0; re-run ~07:4x after the L1/L2 fix pass, and the output below is that re-run].** Script `~/.claude/jobs/d2ca39dd/tmp/residue.py`, which dies with the job; the output below is the record. Wraps 2 and 4 inject `Store.record_associations -> (0, 0)`, because a mis-wire is the only way the real path reaches the refusal:
@@ -60,11 +106,22 @@ Re-derive: `git log --oneline origin/main..origin/am-linkgate-block` · `git ls-
   - the refusal test now seeds a link the batch would decay, and asserts its strength and the audit line count are unchanged (mutant "commit before the gate" fails it) [run];
   - the quickstart `ValueError` sentence, a README paragraph and a SKILL.md line were added.
 - ▶ OWED, not done:
-  - no CLI-parse test for `--allow-unlinked`, and no MCP-level strict-boolean test (the strictness test calls the library);
+  - no CLI-parse test for `--allow-unlinked`, and no MCP-level strict-boolean test: the strictness test calls the library. Both paths were RUN once in the L4 block above, which is evidence that they work today and not a guard that will catch a regression;
   - a post-commit rename failure after an override leaves no durable record of it (L1 LOW);
   - ⚖ JUDGEMENT, not a ruling: "pair-capable" was read as "pattern line citing real episodes", which includes demoted-grounding lines, because those feed pairs too [judged by `0915+3`, 2026-09-15; L1 asked that Phill confirm the reading].
   - flow's `anneal_dualwrite.py` has no `--allow-unlinked` passthrough, which was routed to `0915+1 fanin` because it is flow's file.
-- ⚠ NOT COVERED: the CLI and MCP transports were exercised only by the existing suite, not by a store-copy run, and flow's live consolidate is pinned to the released 0.9.10 wheel, so this gate does not reach flow until a release plus a re-pin.
+- **L4 transports, RUN [by `0915+3`, 2026-09-15 ~07:5x, fresh store copies, in-process `anneal_memory.cli.main()` and `Server._tool_save_continuity`, same mis-wire injection].** Script `~/.claude/jobs/d2ca39dd/tmp/l4.py` (dies with the job; the output below is the record):
+  ```
+  CLI text   refusal exit=1, stderr "Error: AM-LINKGATE refused this save: 2 pattern lines cited real episodes and offered 1 co-citation pair(s), but the association write recorded 0. That is a defect in the store's association write path, NOT in the continuity text: ..."
+             --allow-unlinked on the same wrap: exit=0, "AM-LINKGATE OVERRIDE: saved with --allow-unlinked; the association write recorded 0 of the pairs offered."
+  CLI --json --allow-unlinked: exit=0 saved=True linkgate_overridden=True
+  MCP        "allow_unlinked": "true" (string) -> isError=True, "Error: AM-LINKGATE refused this save: ..."
+             "allow_unlinked": true (bool)     -> isError=False, "AM-LINKGATE OVERRIDE: saved with allow_unlinked; the association write recorded 0 of the pairs offered."
+  ```
+- **L4 manifests and public claims [run by `0915+3`, 2026-09-15 ~07:5x, at `d6c017c`].**
+  - Manifests: `generate_integrity_file` into a temp path is byte-identical (`filecmp`, shallow=False) to both `anneal_memory/tool-integrity.json` and the root copy, and `tests/test_integrity.py` returned 44 passed. Re-check with the same regeneration plus `cmp`.
+  - Docs: in the lines this branch adds to CHANGELOG, README, `docs/library-quickstart.md` and SKILL.md, the surface names (`allow_unlinked=True` / `--allow-unlinked` / `"allow_unlinked": true` / `linkgate_overridden`) and the predicate wording match `_check_linkgate`. The only discipline/habit wording is the README saying a single-id habit is NOT refused. Re-derive with `git diff origin/main -- CHANGELOG.md README.md docs/library-quickstart.md skill/anneal-memory/SKILL.md | grep '^+' | grep -iE 'disciplin|habit|under-?wir|enforc'`.
+- ⚠ NOT COVERED: flow's live consolidate is pinned to the released 0.9.10 wheel, so this gate does not reach flow until a release and a re-pin (`~/Briefcase/flow/venv/bin/pip show anneal-memory | grep -i version`).
 
 ## ▶▶ PICKUP — READ FIRST (seat `0914+8`, written 2026-09-14, successor to `0913+41`). EVERY STATE LINE IS A COMMAND.
 

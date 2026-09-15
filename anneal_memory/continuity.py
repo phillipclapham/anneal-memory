@@ -1645,14 +1645,24 @@ def _check_linkgate(
     """AM-LINKGATE block (spore-721): refuse a save whose graduations offered
     Hebbian pairs that the association write recorded none of.
 
-    Fires only when ALL hold: at least two graduation lines cited real episodes
-    of this wrap (the ruling exempts a single-graduation wrap), those lines
-    offered at least one formable pair (two lines citing the SAME lone episode
-    cannot form one, so they pass), and ``formed + strengthened == 0``.
+    Fires only when ALL hold: at least two pattern lines cited real episodes of
+    this wrap (``all_validated_ids`` entries, which include demoted-grounding
+    and carried lines, since those feed pairs too), those lines offered at
+    least one formable pair (lines that all cite the SAME lone episode offer
+    none, so they pass), and ``formed + strengthened == 0``.
+
+    What it can and cannot see: it re-derives the offered pairs from the same
+    ``grad_result`` the association write reads, so it catches a write that
+    recorded NOTHING it was handed, not a partial loss and not ids that never
+    reached ``all_validated_ids`` (Signal A's job). The one-line exemption is
+    the ruling's (spore-721: a single-graduation wrap never refuses); a single
+    line citing 2+ ids over a dead write path passes here and is warned only
+    by Signal B.
 
     Fail-closed with a loud escape: only a literal ``allow_unlinked is True``
-    bypasses, and the caller warns when it did. A save-path gate with no
-    override would make one bad write path an unwritable store.
+    bypasses, the caller warns, and the result carries
+    ``linkgate_overridden``. A save-path gate with no override would make one
+    bad write path an unwritable store.
 
     Returns True when the escape bypassed a refusal, False when the gate did
     not apply. Raises ValueError when it refuses.
@@ -1676,13 +1686,15 @@ def _check_linkgate(
     if allow_unlinked is True:
         return True
     raise ValueError(
-        f"AM-LINKGATE refused this save: {pair_capable} graduation lines cited "
-        f"real episodes and offered {len(offered)} co-citation pair(s), but 0 "
-        f"Hebbian associations were formed or strengthened, so the association "
-        f"write recorded nothing it was handed. Nothing was saved and the wrap "
-        f"is still in progress. To save anyway, pass allow_unlinked=True "
-        f"(CLI: --allow-unlinked; MCP: \"allow_unlinked\": true); the saved "
-        f"wrap then carries an AM-LINKGATE override warning."
+        f"AM-LINKGATE refused this save: {pair_capable} pattern lines cited "
+        f"real episodes and offered {len(offered)} co-citation pair(s), but the "
+        f"association write recorded 0. That is a defect in the store's "
+        f"association write path, NOT in the continuity text: rewording or "
+        f"re-saving the same text will not clear it. Nothing was saved and the "
+        f"wrap is still in progress. Report this to the operator. Pass "
+        f"allow_unlinked=True (CLI: --allow-unlinked; MCP: \"allow_unlinked\": "
+        f"true) only with the operator's approval to save with no links "
+        f"recorded; the save result then reports linkgate_overridden."
     )
 
 
@@ -2844,6 +2856,7 @@ def validated_save_continuity(
         associations_strengthened=assoc_strengthened,
         associations_decayed=assoc_decayed,
         association_warning=association_warning,
+        linkgate_overridden=linkgate_overridden,
         sections=sections,
         # asdict() makes the full return value JSON-serializable
         # top-to-bottom. Library users who want the typed object can

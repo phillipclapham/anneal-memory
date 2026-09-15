@@ -668,5 +668,9 @@ class SaveContinuityResult(TypedDict):
     # emitted as a ``UserWarning`` at save time. (Return shape unchanged from
     # 0.4.2 — only the set of conditions that populate it expanded.)
     association_warning: str | None
+    # AM-LINKGATE block (spore-721): True when ``allow_unlinked=True`` saved a
+    # wrap the block would have refused. Structured so a transport can show it;
+    # the ``UserWarning`` alone never reaches an MCP client.
+    linkgate_overridden: bool
     sections: dict[str, int]  # Char count per continuity section
     wrap_result: dict[str, Any]  # WrapResult-as-dict (JSON-serializable)

@@ -585,6 +585,11 @@ class Server:
             )
         if result["associations_decayed"]:
             lines.append(f"Associations decayed: {result['associations_decayed']}")
+        if result["linkgate_overridden"]:
+            lines.append(
+                "AM-LINKGATE OVERRIDE: saved with allow_unlinked; the "
+                "association write recorded 0 of the pairs offered."
+            )
 
         lines.append("\nSection sizes:")
         for name, chars in sorted(result["sections"].items()):

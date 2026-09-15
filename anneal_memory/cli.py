@@ -1190,12 +1190,18 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 "associations_formed": result["associations_formed"],
                 "associations_strengthened": result["associations_strengthened"],
                 "associations_decayed": result["associations_decayed"],
+                "linkgate_overridden": result["linkgate_overridden"],
                 "sections": {name: c for name, c in sorted(sections.items())},
             })
             return
 
         print(f"Continuity saved ({chars:,} chars) to {result['path']}")
         print(f"Episodes compressed: {result['episodes_compressed']}")
+        if result["linkgate_overridden"]:
+            print(
+                "AM-LINKGATE OVERRIDE: saved with --allow-unlinked; the "
+                "association write recorded 0 of the pairs offered."
+            )
 
         if result["graduations_validated"]:
             print(f"Citations validated: {result['graduations_validated']}")
@@ -3276,8 +3282,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Override the AM-LINKGATE block. By default a wrap whose "
             "graduation lines offered co-citation pairs while 0 Hebbian "
             "associations were formed or strengthened is refused, with "
-            "nothing saved and the wrap left in progress. Pass this to save "
-            "anyway; the save then warns that the override was used."
+            "nothing saved and the wrap left in progress: the association "
+            "write path is broken, not the text. Pass this only to save "
+            "anyway with no links recorded; the output reports the override."
         ),
     )
     sub.add_argument(

@@ -20,11 +20,13 @@ emits an `AM-LINKGATE override` warning and returns `linkgate_overridden: true`,
 
 ### Added — the citation-spread gauge on every save result
 
-`validated_save_continuity` returns `citation_spread`: the number of distinct episodes, resolving to this
-store, cited across the wrap's today-dated graduation lines. It includes citations on lines that were
-later demoted, so it measures how widely a wrap cited, not how widely it grounded. The CLI (text and
-`--json`) and the MCP tool result print it next to the validated-graduation count. It is a report only:
-nothing refuses or warns on it, and nothing is stored. Paired with the AM-LINKGATE block above, it makes
+`validated_save_continuity` returns `citation_spread`: the number of distinct episode ids (compared as
+8-character prefixes) cited on the wrap's today-dated 2x-and-up graduation lines that belong to this
+wrap's episodes; an episode from an earlier session is not counted. It includes citations on lines that
+were later demoted, so it measures how widely a wrap cited, not how widely it grounded. The CLI (text and
+`--json`) and the MCP tool result print it. It is a report only: nothing refuses or warns on it, and
+nothing is stored. Citing an unrelated episode raises it and also forms a false association link, so it
+is not a number to raise. Paired with the AM-LINKGATE block above, it makes
 the single-episode citation habit visible without refusing the one-pattern wraps where one episode
 really is the evidence. (`spore-721`.)
 

@@ -1886,6 +1886,13 @@ def validated_save_continuity(
           - ``associations_formed`` (int)
           - ``associations_strengthened`` (int)
           - ``associations_decayed`` (int)
+          - ``skipped_non_today`` (int): graduation-format lines whose date
+            is not today, which validation skipped
+          - ``linkgate_overridden`` (bool): True when ``allow_unlinked=True``
+            saved a wrap the AM-LINKGATE block would have refused
+          - ``citation_spread`` (int): distinct episode ids (8-char) cited on
+            today's 2x-and-up graduation lines that belong to this wrap's
+            episodes, INCLUDING lines later demoted. A report, not a check.
           - ``sections`` (dict[str, int]): char count per continuity section
           - ``wrap_result`` (dict[str, Any]): the store-level wrap
             record as a plain dict (``dataclasses.asdict`` of the

@@ -1292,9 +1292,12 @@ class TestEnvVars:
         sys.platform == "win32",
         reason="Path.home() falls back to the pwd database on POSIX even "
         "with HOME unset, but Windows has no such fallback and needs "
-        "USERPROFILE (or HOMEDRIVE+HOMEPATH); clearing os.environ entirely "
-        "simulates a state a real Windows install never reaches (Windows "
-        "always sets USERPROFILE)",
+        "USERPROFILE (or HOMEDRIVE+HOMEPATH); this test's specific "
+        "technique — clearing os.environ ENTIRELY — is not how a real "
+        "Windows caller reaches a missing USERPROFILE (a sanitized/minimal "
+        "launcher environment can still lack it; see next_steps.md's "
+        "Windows Limitations section for the reachable, unfixed startup "
+        "crash this skip does not paper over)",
     )
     def test_default_db_without_env(self):
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -3317,13 +3320,14 @@ class TestSporeCLI:
     """
 
     @staticmethod
-    def _run(*args, check=True, env=None, encoding=None):
+    def _run(*args, check=True, env=None, encoding=None, input=None):
         result = subprocess.run(
             [sys.executable, "-m", "anneal_memory.cli", *args],
             capture_output=True,
             text=True,
             env=env,
             encoding=encoding,
+            input=input,
         )
         if check and result.returncode != 0:
             raise AssertionError(
@@ -3372,6 +3376,28 @@ class TestSporeCLI:
                   env=env, encoding="utf-8")
         r = self._run("--db", tmp_db, "spore", "list", env=env, encoding="utf-8")
         assert "▸" in r.stdout
+
+    def test_record_from_stdin_survives_a_non_utf8_locale_encoding(self, tmp_db):
+        """complement MED / codex HIGH, 2026-09-15: main()'s utf-8 reconfigure
+        originally covered only stdout/stderr, leaving ``record -`` and
+        ``save-continuity -`` (the two subcommands that read piped content)
+        on the process locale's stdin encoding. Under a non-UTF-8 locale this
+        either raises ``UnicodeDecodeError`` or — worse — silently mis-decodes
+        multi-byte UTF-8 into different valid characters, writing corrupted
+        content into the store with no error at all. This pipes real non-ASCII
+        content (café, an em dash, ⚠) through stdin under the hostile
+        cp1252/PYTHONUTF8=0 env and asserts it round-trips byte-for-byte
+        through record -> get, not merely that the process exits 0.
+        """
+        env = {**os.environ, "PYTHONIOENCODING": "cp1252", "PYTHONUTF8": "0"}
+        content = "café — memory ⚠ test"
+        self._run("--db", tmp_db, "init")
+        r = self._run("--db", tmp_db, "record", "-", "--type", "observation", "--json",
+                      env=env, encoding="utf-8", input=content)
+        episode_id = json.loads(r.stdout)["id"]
+        body = json.loads(self._run("--db", tmp_db, "get", episode_id, "--json",
+                                     env=env, encoding="utf-8").stdout)
+        assert body["content"] == content
 
     def test_spore_store_is_sibling_of_db(self, tmp_db):
         self._run("--db", tmp_db, "spore", "add", "--type", "task", "--text", "x")

@@ -28,7 +28,7 @@ pip install anneal-memory
 
 anneal-memory runs on Windows, with two disclosed limits:
 
-- **Cross-process write locking is advisory POSIX `fcntl` and degrades to no lock on Windows**, at three sites: `store.py`'s continuity lock, `crystal.py`'s `CrystalStore._transaction`, and `spores.py`'s `SporeStore._transaction`. Concurrent multi-process writers to one store on Windows can race or lose updates; single-process use is unaffected (the unique-tmp + atomic-replace write still protects it).
+- **Write locking is advisory POSIX `fcntl` and degrades to no lock at all on Windows**, at three sites: `store.py`'s continuity lock, `crystal.py`'s `CrystalStore._transaction`, and `spores.py`'s `SporeStore._transaction`. On Windows, concurrent writers to one store — whether separate processes or threads within one process — can race or lose updates, since there is no lock of any kind to serialize them there. A single writer (one process, one thread) is unaffected: the unique-tmp + atomic-replace write still prevents a torn file.
 - **CLI output is UTF-8 on every platform, including piped, redirected, and subprocess consumption** — unreleased as of `v0.9.11`, first shipping in the next release.
 - Windows CI runs a real but reduced subset of the suite: tests that simulate an unreadable/unlistable file or directory via POSIX `chmod` are skipped there, since Windows/NTFS doesn't restrict access the same way. See `project_memory/next_steps.md`'s Windows Limitations section for the full list and reasoning.
 

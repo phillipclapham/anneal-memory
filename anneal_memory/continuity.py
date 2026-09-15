@@ -2886,6 +2886,11 @@ def validated_save_continuity(
         associations_decayed=assoc_decayed,
         association_warning=association_warning,
         linkgate_overridden=linkgate_overridden,
+        # AM-LINKGATE gauge (spore-721). ``citation_counts`` is filled from
+        # ``cited_ids & valid_ids`` on every today-dated graduation line BEFORE
+        # the grounding and cross-session checks, so this counts distinct
+        # resolved episodes cited, including on lines later demoted.
+        citation_spread=len(grad_result.citation_counts),
         sections=sections,
         # asdict() makes the full return value JSON-serializable
         # top-to-bottom. Library users who want the typed object can

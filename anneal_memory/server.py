@@ -554,6 +554,10 @@ class Server:
             f"Continuity saved ({result['chars']} chars) to {result['path']}"
         ]
         lines.append(f"Episodes compressed: {result['episodes_compressed']}")
+        lines.append(
+            f"Citation spread: {result['citation_spread']} distinct episode(s) "
+            f"cited across {result['graduations_validated']} validated graduation(s)"
+        )
 
         if result["graduations_validated"]:
             lines.append(f"Citations validated: {result['graduations_validated']}")

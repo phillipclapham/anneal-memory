@@ -444,6 +444,9 @@ class TestTypedDictReturnShapes:
                 # AM-LINKGATE block (spore-721): True only when
                 # allow_unlinked=True saved a wrap the block would refuse.
                 "linkgate_overridden",
+                # AM-LINKGATE gauge (spore-721): distinct resolved episodes
+                # cited across today's graduation lines. Report only.
+                "citation_spread",
                 "sections", "wrap_result",
             }
             assert set(result.keys()) == expected
@@ -5009,6 +5012,54 @@ def test_a_post_commit_warning_under_an_error_filter_does_not_fail_a_committed_s
             validated_save_continuity(
                 store, text2, today="2026-06-02", wrap_token=token,
             )
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "lines,expected",
+    [
+        (["- solo | 2x (2026-06-02) [evidence: {ep0} "
+          '"single substrate observation discipline rotation citation"]'], 1),
+        (["- pattern_a | 2x (2026-06-02) [evidence: {ep0} "
+          '"first discipline rotation substrate observation"]',
+          "- pattern_b | 2x (2026-06-02) [evidence: {ep1} "
+          '"second discipline rotation substrate observation"]'], 2),
+        (["- pattern_a | 2x (2026-06-02) [evidence: {ep0} "
+          '"first discipline rotation substrate observation"]',
+          "- pattern_b | 2x (2026-06-02) [evidence: {ep0} "
+          '"second discipline rotation substrate observation"]'], 1),
+    ],
+    ids=["one-line", "two-lines-different-episodes", "two-lines-same-episode"],
+)
+def test_citation_spread_counts_distinct_cited_episodes(tmp_path, lines, expected):
+    """AM-LINKGATE gauge (spore-721, Phill 2026-09-15): the save result reports
+    the number of DISTINCT resolved episodes cited across today's graduation
+    lines. Two lines citing the same episode count once."""
+    import warnings as _w
+    from anneal_memory import prepare_wrap, validated_save_continuity
+
+    store = Store(tmp_path / "spread.db", project_name="Spread")
+    try:
+        ids = [
+            store.record(
+                f"substrate observation about discipline rotation memory topic {i}",
+                EpisodeType.OBSERVATION,
+            ).id
+            for i in range(2)
+        ]
+        token = prepare_wrap(store)["wrap_token"]
+        body = "\n".join(lines).replace("{ep0}", ids[0]).replace("{ep1}", ids[1])
+        text = (
+            "## State\nactive.\n\n## Patterns\n" + body
+            + "\n\n## Decisions\n- d.\n\n## Context\n- c.\n"
+        )
+        with _w.catch_warnings():
+            _w.simplefilter("ignore")
+            result = validated_save_continuity(
+                store, text, today="2026-06-02", wrap_token=token,
+            )
+        assert result["citation_spread"] == expected
     finally:
         store.close()
 

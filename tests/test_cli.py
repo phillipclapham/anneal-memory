@@ -3317,12 +3317,13 @@ class TestSporeCLI:
     """
 
     @staticmethod
-    def _run(*args, check=True, env=None):
+    def _run(*args, check=True, env=None, encoding=None):
         result = subprocess.run(
             [sys.executable, "-m", "anneal_memory.cli", *args],
             capture_output=True,
             text=True,
             env=env,
+            encoding=encoding,
         )
         if check and result.returncode != 0:
             raise AssertionError(
@@ -3354,11 +3355,22 @@ class TestSporeCLI:
         this stays red on Ubuntu too if ``main()``'s ``sys.stdout.reconfigure``
         / ``sys.stderr.reconfigure`` (cli.py, mirroring server.py's
         ``start_server``) is ever removed.
+
+        ⚠ ``encoding="utf-8"`` on ``_run`` is load-bearing here, not
+        cosmetic: ``subprocess.run(text=True)`` with no explicit
+        ``encoding`` decodes the CHILD's stdout bytes using the PARENT
+        process's own locale-preferred encoding — the child's env vars
+        don't reach that decode, since it happens on this side of the
+        pipe. On the Windows CI runner the parent's own locale is
+        cp1252, so without this the correctly-UTF-8-encoded ``▸`` bytes
+        get silently mis-decoded into three wrong characters instead of
+        raising — a false pass waiting to happen (reproduced: this test
+        failed on windows-latest without it, run 34978856850).
         """
         env = {**os.environ, "PYTHONIOENCODING": "cp1252", "PYTHONUTF8": "0"}
         self._run("--db", tmp_db, "spore", "add", "--type", "task", "--text", "ship CLI",
-                  env=env)
-        r = self._run("--db", tmp_db, "spore", "list", env=env)
+                  env=env, encoding="utf-8")
+        r = self._run("--db", tmp_db, "spore", "list", env=env, encoding="utf-8")
         assert "▸" in r.stdout
 
     def test_spore_store_is_sibling_of_db(self, tmp_db):

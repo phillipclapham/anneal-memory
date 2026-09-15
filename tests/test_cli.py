@@ -1288,6 +1288,14 @@ class TestEnvVars:
             from anneal_memory.cli import _default_db
             assert _default_db() == "/tmp/custom.db"
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Path.home() falls back to the pwd database on POSIX even "
+        "with HOME unset, but Windows has no such fallback and needs "
+        "USERPROFILE (or HOMEDRIVE+HOMEPATH); clearing os.environ entirely "
+        "simulates a state a real Windows install never reaches (Windows "
+        "always sets USERPROFILE)",
+    )
     def test_default_db_without_env(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             from anneal_memory.cli import _default_db
@@ -2568,7 +2576,7 @@ class TestCmdSaveContinuity:
 
         # Write continuity to a temp file
         cont_file = tmp_path / "continuity.md"
-        cont_file.write_text(self._valid_continuity())
+        cont_file.write_text(self._valid_continuity(), encoding="utf-8")
 
         base_args_with_data.file = str(cont_file)
         base_args_with_data.affect_tag = None
@@ -2599,7 +2607,7 @@ class TestCmdSaveContinuity:
         capsys.readouterr()
 
         cont_file = tmp_path / "continuity.md"
-        cont_file.write_text(self._valid_continuity())
+        cont_file.write_text(self._valid_continuity(), encoding="utf-8")
 
         base_args_with_data.json = True
         base_args_with_data.file = str(cont_file)
@@ -2619,7 +2627,7 @@ class TestCmdSaveContinuity:
         capsys.readouterr()
 
         cont_file = tmp_path / "continuity.md"
-        cont_file.write_text(self._valid_continuity())
+        cont_file.write_text(self._valid_continuity(), encoding="utf-8")
 
         base_args_with_data.file = str(cont_file)
         base_args_with_data.affect_tag = "engaged"
@@ -2635,7 +2643,7 @@ class TestCmdSaveContinuity:
         capsys.readouterr()
 
         cont_file = tmp_path / "bad.md"
-        cont_file.write_text("# No sections here\nJust text.")
+        cont_file.write_text("# No sections here\nJust text.", encoding="utf-8")
 
         base_args_with_data.file = str(cont_file)
         base_args_with_data.affect_tag = None
@@ -2650,7 +2658,7 @@ class TestCmdSaveContinuity:
         surfaces the library's ValueError and exits non-zero.
         """
         cont_file = tmp_path / "continuity.md"
-        cont_file.write_text(self._valid_continuity())
+        cont_file.write_text(self._valid_continuity(), encoding="utf-8")
 
         base_args_with_data.file = str(cont_file)
         base_args_with_data.affect_tag = None
@@ -2668,7 +2676,7 @@ class TestCmdSaveContinuity:
         capsys.readouterr()
 
         cont_file = tmp_path / "continuity.md"
-        cont_file.write_text(self._valid_continuity())
+        cont_file.write_text(self._valid_continuity(), encoding="utf-8")
 
         base_args_with_data.file = str(cont_file)
         base_args_with_data.affect_tag = None
@@ -3309,11 +3317,12 @@ class TestSporeCLI:
     """
 
     @staticmethod
-    def _run(*args, check=True):
+    def _run(*args, check=True, env=None):
         result = subprocess.run(
             [sys.executable, "-m", "anneal_memory.cli", *args],
             capture_output=True,
             text=True,
+            env=env,
         )
         if check and result.returncode != 0:
             raise AssertionError(
@@ -3331,6 +3340,26 @@ class TestSporeCLI:
         assert body["id"] == "spore-001"
         assert body["tier"] == "hot"
         assert body["salience"] == 2
+
+    def test_glyph_output_survives_a_non_utf8_locale_encoding(self, tmp_db):
+        """Diogenes census 2026-09-15, run on the ci-windows branch, HEAD
+        09bd778: piped/redirected/subprocess CLI output crashed with
+        UnicodeEncodeError under a non-UTF-8 stdio encoding — the real
+        conditions of a Windows console codepage (cp1252) or an agent
+        piping the CLI's output on any platform. ``spore list``'s
+        ``▸`` (U+25B8, the "task" type glyph) is the reproducer.
+
+        Runs on every platform: ``PYTHONIOENCODING``/``PYTHONUTF8`` force
+        the child's default stdio encoding regardless of host locale, so
+        this stays red on Ubuntu too if ``main()``'s ``sys.stdout.reconfigure``
+        / ``sys.stderr.reconfigure`` (cli.py, mirroring server.py's
+        ``start_server``) is ever removed.
+        """
+        env = {**os.environ, "PYTHONIOENCODING": "cp1252", "PYTHONUTF8": "0"}
+        self._run("--db", tmp_db, "spore", "add", "--type", "task", "--text", "ship CLI",
+                  env=env)
+        r = self._run("--db", tmp_db, "spore", "list", env=env)
+        assert "▸" in r.stdout
 
     def test_spore_store_is_sibling_of_db(self, tmp_db):
         self._run("--db", tmp_db, "spore", "add", "--type", "task", "--text", "x")
@@ -4072,6 +4101,13 @@ class TestHybridL3AuditCli:
         return db
 
     @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root lists a mode-300 directory")
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="chmod on Windows/NTFS does not restrict directory listing "
+        "(no POSIX permission bits, and CI runs as an admin account that "
+        "bypasses ACL restrictions anyway); the unlistable-directory "
+        "condition never occurs",
+    )
     def test_audit_warns_when_it_cannot_rule_out_a_quarantine(self, tmp_path):
         """codex HIGH: the active file was printed as the whole history, with
         anchor_trusted true and no warning."""
@@ -4087,6 +4123,13 @@ class TestHybridL3AuditCli:
         assert json.loads(result.stdout)["anchor_trusted"] is False
 
     @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root lists a mode-300 directory")
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="chmod on Windows/NTFS does not restrict directory listing "
+        "(no POSIX permission bits, and CI runs as an admin account that "
+        "bypasses ACL restrictions anyway); the unlistable-directory "
+        "condition never occurs",
+    )
     def test_audit_repair_in_an_unlistable_directory_exits_1_without_a_traceback(self, tmp_path):
         db = self._quarantined(tmp_path)
         tmp_path.chmod(0o300)
@@ -4123,6 +4166,12 @@ class TestHybridFixDiffAuditCliTrust:
         assert json.loads(result.stdout)["anchor_trusted"] is False
 
     @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads a mode-000 file")
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="chmod on Windows/NTFS toggles only the read-only attribute, "
+        "not POSIX-style access bits; a mode-000 file stays readable there, "
+        "so this simulation never reaches the code path under test",
+    )
     def test_an_unreadable_manifest_is_untrusted(self, tmp_path):
         """glm MED: the corrupt-or-unreadable branch left the default true."""
         db = self._two_sealed_weeks(tmp_path)
@@ -4137,6 +4186,13 @@ class TestHybridFixDiffAuditCliTrust:
         assert json.loads(result.stdout)["anchor_trusted"] is False
 
     @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root lists a mode-300 directory")
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="chmod on Windows/NTFS does not restrict directory listing "
+        "(no POSIX permission bits, and CI runs as an admin account that "
+        "bypasses ACL restrictions anyway); the unlistable-directory "
+        "condition never occurs",
+    )
     def test_a_listing_error_is_untrusted_even_with_a_readable_manifest(self, tmp_path):
         """codex HIGH: a repair that saved the manifest but left its marker,
         then an unlistable directory. The warning was skipped because the
@@ -4208,6 +4264,13 @@ class TestHybridSnapshotAuditCli:
         assert payload["total"] == active_entries
 
     @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads a mode-000 directory")
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="chmod on Windows/NTFS does not restrict directory listing "
+        "(no POSIX permission bits, and CI runs as an admin account that "
+        "bypasses ACL restrictions anyway); the unsearchable-directory "
+        "condition never occurs",
+    )
     def test_an_unsearchable_directory_prints_json_not_a_traceback(self, tmp_path):
         """codex MED, reproduced on a6ea0c1 (Python 3.13): manifest_path.exists()
         raised PermissionError after the listing error was caught."""

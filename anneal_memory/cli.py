@@ -3623,6 +3623,16 @@ def main() -> None:
     if remaining:
         parser.error(f"unrecognized arguments: {' '.join(remaining)}")
 
+    # Force UTF-8 on stdio — mirrors server.py's start_server (locale encoding
+    # can corrupt non-ASCII memories). The server path reconfigures its own
+    # stdio; this subcommand path never got the sibling fix, so commands that
+    # print our own glyphs (prepare-wrap's text output, spore list's markers)
+    # raised UnicodeEncodeError under a non-UTF-8 locale encoding — piped,
+    # redirected or subprocess output on Windows, where the console codepage
+    # is not UTF-8 by default (Diogenes census 2026-09-15, reproduced).
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+
     # Dispatch to subcommand handler, behind the ONE contention boundary.
     #
     # ⚠ SCOPED WRONG AT FIRST — the translation lived only around `Store(...)`

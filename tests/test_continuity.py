@@ -4723,9 +4723,12 @@ class TestAmWarn:
             "## Context\n- first session.\n"
         )
         import warnings as _w
-        with _w.catch_warnings():
-            _w.simplefilter("error")  # any UserWarning would raise
+        # Recorded, not "error": post-commit warnings never propagate (codex
+        # HIGH ef6129349fe4bfe2), so an error filter would detect nothing here.
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter("always")
             result = self._save(tmp_path, text)
+        assert not [w for w in caught if issubclass(w.category, UserWarning)]
         assert result["association_warning"] is None
 
     def test_silent_on_healthy_co_citation(self, tmp_path):
@@ -4755,9 +4758,10 @@ class TestAmWarn:
             "## Context\n- c.\n"
         )
         import warnings as _w
-        with _w.catch_warnings():
-            _w.simplefilter("error")
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter("always")
             result = self._save(tmp_path, text, n_episodes=1)
+        assert not [w for w in caught if issubclass(w.category, UserWarning)]
         assert result["association_warning"] is None
         assert result["associations_formed"] == 0
 
@@ -4854,12 +4858,13 @@ class TestAmWarn:
                 f'- recurring | 3x (2026-06-02) [evidence: {ep2.id} "{VOCAB}"]\n\n'
                 "## Decisions\n- d.\n\n## Context\n- c.\n"
             )
-            with _w.catch_warnings():
-                # A false namespace warning would raise here (the regression).
-                _w.simplefilter("error")
+            with _w.catch_warnings(record=True) as caught:
+                # A false namespace warning would be recorded here (the regression).
+                _w.simplefilter("always")
                 r2 = validated_save_continuity(
                     store, text2, today="2026-06-02", wrap_token=p2["wrap_token"],
                 )
+            assert not [w for w in caught if "resolved to ZERO" in str(w.message)]
             # Self-validate the immune gate actually fired (not a vacuous pass).
             assert r2["demoted"] >= 1
             assert r2["graduations_validated"] == 0
@@ -4912,11 +4917,68 @@ class TestAmWarn:
             "## Decisions\n- d.\n\n## Context\n- c.\n"
         )
         import warnings as _w
-        with _w.catch_warnings():
-            _w.simplefilter("error")  # any AM-WARN/AM-LINKGATE warning would raise
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter("always")  # any AM-WARN/AM-LINKGATE warning is recorded
             result = self._save(tmp_path, text, n_episodes=2)
+        assert not [w for w in caught if issubclass(w.category, UserWarning)]
         assert result["association_warning"] is None
         assert result["associations_formed"] >= 1
+
+
+def test_a_post_commit_warning_under_an_error_filter_does_not_fail_a_committed_save(
+    tmp_path, caplog,
+):
+    """codex HIGH (L3 ef6129349fe4bfe2), reproduced on origin/main b2b80ae: the
+    save committed and cleared the wrap, then ``warnings.warn`` raised under an
+    error filter, so the caller saw a failure and a retry got "No wrap in
+    progress". A post-commit warning must be delivered without propagating."""
+    import logging
+    import warnings as _w
+    from anneal_memory import prepare_wrap, validated_save_continuity
+
+    store = Store(tmp_path / "errfilter.db", project_name="ErrFilter")
+    try:
+        ids = [
+            store.record(
+                f"substrate observation about discipline rotation memory topic {i}",
+                EpisodeType.OBSERVATION,
+            ).id
+            for i in range(2)
+        ]
+        token = prepare_wrap(store)["wrap_token"]
+        text = (
+            "## State\nactive.\n\n## Patterns\n"
+            f'- solo | 2x (2026-06-02) [evidence: {ids[0]} '
+            '"single substrate observation discipline rotation citation"]\n\n'
+            "## Decisions\n- d.\n\n## Context\n- c.\n"
+        )
+        with caplog.at_level(logging.WARNING), _w.catch_warnings():
+            _w.simplefilter("error")
+            result = validated_save_continuity(
+                store, text, today="2026-06-02", wrap_token=token,
+            )
+        assert result["association_warning"] is not None  # Signal C fired
+        assert "- solo |" in (store.load_continuity() or "")
+        assert store.load_wrap_snapshot() is None
+        assert any("AM-LINKGATE" in r.getMessage() for r in caplog.records)
+
+        # Not swallowed: under a normal filter the same warning is still emitted.
+        # Signal C needs >= 2 episodes in the wrap, so record two and cite one.
+        new_ids = [
+            store.record(
+                f"substrate observation about discipline rotation memory topic {i}",
+                EpisodeType.OBSERVATION,
+            ).id
+            for i in (8, 9)
+        ]
+        token = prepare_wrap(store)["wrap_token"]
+        text2 = text.replace(ids[0], new_ids[0]).replace("- solo |", "- solo_two |")
+        with pytest.warns(UserWarning, match="AM-LINKGATE"):
+            validated_save_continuity(
+                store, text2, today="2026-06-02", wrap_token=token,
+            )
+    finally:
+        store.close()
 
 
 class TestAmLinkgateBlock:

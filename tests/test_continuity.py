@@ -5017,25 +5017,44 @@ def test_a_post_commit_warning_under_an_error_filter_does_not_fail_a_committed_s
 
 
 @pytest.mark.parametrize(
-    "lines,expected",
+    "lines,expected,demoted_at_least",
     [
         (["- solo | 2x (2026-06-02) [evidence: {ep0} "
-          '"single substrate observation discipline rotation citation"]'], 1),
+          '"single substrate observation discipline rotation citation"]'], 1, 0),
         (["- pattern_a | 2x (2026-06-02) [evidence: {ep0} "
           '"first discipline rotation substrate observation"]',
           "- pattern_b | 2x (2026-06-02) [evidence: {ep1} "
-          '"second discipline rotation substrate observation"]'], 2),
+          '"second discipline rotation substrate observation"]'], 2, 0),
         (["- pattern_a | 2x (2026-06-02) [evidence: {ep0} "
           '"first discipline rotation substrate observation"]',
           "- pattern_b | 2x (2026-06-02) [evidence: {ep0} "
-          '"second discipline rotation substrate observation"]'], 1),
+          '"second discipline rotation substrate observation"]'], 1, 0),
+        # Grounding fails (the explanation shares no words with the episode),
+        # so the line is demoted, and its citation still counts.
+        (["- ungrounded | 2x (2026-06-02) [evidence: {ep0} "
+          '"zebra quartz nebula lantern harbor"]'], 1, 1),
+        # An id that is not one of this wrap's episodes is not counted.
+        (["- foreign | 2x (2026-06-02) [evidence: deadbeef "
+          '"single substrate observation discipline rotation citation"]'], 0, 0),
+        # A line not dated today is skipped before counting.
+        (["- old | 2x (2026-06-01) [evidence: {ep0} "
+          '"single substrate observation discipline rotation citation"]'], 0, 0),
+        # A 1x line is not a graduation line for this count.
+        (["- young | 1x (2026-06-02) [evidence: {ep0} "
+          '"single substrate observation discipline rotation citation"]'], 0, 0),
     ],
-    ids=["one-line", "two-lines-different-episodes", "two-lines-same-episode"],
+    ids=[
+        "one-line", "two-lines-different-episodes", "two-lines-same-episode",
+        "demoted-line-still-counts", "id-not-in-this-wrap", "not-today", "one-x",
+    ],
 )
-def test_citation_spread_counts_distinct_cited_episodes(tmp_path, lines, expected):
+def test_citation_spread_counts_distinct_cited_episodes(
+    tmp_path, lines, expected, demoted_at_least,
+):
     """AM-LINKGATE gauge (spore-721, Phill 2026-09-15): the save result reports
-    the number of DISTINCT resolved episodes cited across today's graduation
-    lines. Two lines citing the same episode count once."""
+    the number of DISTINCT episode ids from this wrap cited on today's 2x-and-up
+    graduation lines, demoted lines included. Two lines citing the same
+    episode count once."""
     import warnings as _w
     from anneal_memory import prepare_wrap, validated_save_continuity
 
@@ -5060,6 +5079,7 @@ def test_citation_spread_counts_distinct_cited_episodes(tmp_path, lines, expecte
                 store, text, today="2026-06-02", wrap_token=token,
             )
         assert result["citation_spread"] == expected
+        assert result["demoted"] >= demoted_at_least
     finally:
         store.close()
 

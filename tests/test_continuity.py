@@ -4672,7 +4672,7 @@ class TestAmWarn:
 
     TODAY = "2026-06-02"
 
-    def _save(self, tmp_path, template, n_episodes=2):
+    def _save(self, tmp_path, template, n_episodes=2, **save_kwargs):
         """Record n real episodes, substitute {epN} with their ids, save."""
         from anneal_memory import prepare_wrap, validated_save_continuity
         store = Store(tmp_path / "amwarn.db", project_name="AmWarn")
@@ -4689,6 +4689,7 @@ class TestAmWarn:
             rendered = rendered.replace(f"{{ep{i}}}", ep_id)
         result = validated_save_continuity(
             store, rendered, today=self.TODAY, wrap_token=res["wrap_token"],
+            **save_kwargs,
         )
         store.close()
         return result
@@ -4870,7 +4871,10 @@ class TestAmWarn:
         each citing one different real episode. Pre-fix, cocitation_available
         only saw same-line multi-id sets, so a dead write path on the session
         pair was invisible. Simulate the mis-wire (record_associations forms
-        nothing) and assert Signal B now fires."""
+        nothing) and assert Signal B now fires.
+
+        Two lines is exactly the shape the AM-LINKGATE block refuses, so the
+        save passes the escape to reach the warning this test is about."""
         monkeypatch.setattr(Store, "record_associations",
                             lambda self, *a, **k: (0, 0))
         text = (
@@ -4882,7 +4886,7 @@ class TestAmWarn:
             "## Decisions\n- d.\n\n## Context\n- c.\n"
         )
         with pytest.warns(UserWarning, match="Co-citation pairs were available"):
-            result = self._save(tmp_path, text, n_episodes=2)
+            result = self._save(tmp_path, text, n_episodes=2, allow_unlinked=True)
         assert result["association_warning"] is not None
         assert "mis-wired" in result["association_warning"]
         assert result["associations_formed"] == 0
@@ -4910,6 +4914,132 @@ class TestAmWarn:
             result = self._save(tmp_path, text, n_episodes=2)
         assert result["association_warning"] is None
         assert result["associations_formed"] >= 1
+
+
+class TestAmLinkgateBlock:
+    """AM-LINKGATE block (spore-721, ruled BUILD by Phill 2026-09-04): a save
+    refuses when >= 2 graduation lines cited real episodes, offered a pair, and
+    0 associations were formed or strengthened; ``allow_unlinked`` saves anyway.
+    Zero associations with a pair offered is only reachable through a write path
+    that recorded nothing, so every refusal here injects that mis-wire."""
+
+    TODAY = "2026-06-02"
+    TWO_LINES = (
+        "## State\nactive.\n\n## Patterns\n"
+        '- pattern_a | 2x (2026-06-02) [evidence: {ep0} '
+        '"first discipline rotation substrate observation"]\n'
+        '- pattern_b | 2x (2026-06-02) [evidence: {ep1} '
+        '"second discipline rotation substrate observation"]\n\n'
+        "## Decisions\n- d.\n\n## Context\n- c.\n"
+    )
+
+    def _prepared(self, tmp_path, n_episodes=2):
+        from anneal_memory import prepare_wrap
+        store = Store(tmp_path / "linkgate.db", project_name="Linkgate")
+        ids = [
+            store.record(
+                f"substrate observation about discipline rotation memory topic {i}",
+                EpisodeType.OBSERVATION,
+            ).id
+            for i in range(n_episodes)
+        ]
+        return store, ids, prepare_wrap(store)["wrap_token"]
+
+    @staticmethod
+    def _render(template, ids):
+        for i, ep_id in enumerate(ids):
+            template = template.replace(f"{{ep{i}}}", ep_id)
+        return template
+
+    @pytest.fixture
+    def miswired(self, monkeypatch):
+        monkeypatch.setattr(Store, "record_associations",
+                            lambda self, *a, **k: (0, 0))
+
+    def test_predicate_boundary_one_line_passes_two_lines_refuse(
+        self, tmp_path, miswired,
+    ):
+        from anneal_memory import validated_save_continuity
+        import warnings as _w
+        one_line = (
+            "## State\nactive.\n\n## Patterns\n"
+            '- pattern_a | 2x (2026-06-02) [evidence: {ep0}, {ep1} '
+            '"first discipline rotation substrate observation"]\n\n'
+            "## Decisions\n- d.\n\n## Context\n- c.\n"
+        )
+        same_lone_episode = self.TWO_LINES.replace("{ep1}", "{ep0}")
+        for name, template in (("one", one_line), ("same", same_lone_episode)):
+            store, ids, token = self._prepared(tmp_path / name)
+            try:
+                with _w.catch_warnings():
+                    _w.simplefilter("ignore")
+                    result = validated_save_continuity(
+                        store, self._render(template, ids),
+                        today=self.TODAY, wrap_token=token,
+                    )
+                assert result["associations_formed"] == 0, name
+            finally:
+                store.close()
+
+        store, ids, token = self._prepared(tmp_path / "two")
+        try:
+            with pytest.raises(ValueError, match="AM-LINKGATE refused"):
+                validated_save_continuity(
+                    store, self._render(self.TWO_LINES, ids),
+                    today=self.TODAY, wrap_token=token,
+                )
+        finally:
+            store.close()
+
+    def test_refusal_saves_nothing_and_leaves_the_wrap_in_progress(
+        self, tmp_path, miswired,
+    ):
+        from anneal_memory import validated_save_continuity
+        store, ids, token = self._prepared(tmp_path)
+        try:
+            before = store.load_continuity()
+            sessions_before = store.load_meta().get("sessions_produced", 0)
+            with pytest.raises(ValueError) as exc:
+                validated_save_continuity(
+                    store, self._render(self.TWO_LINES, ids),
+                    today=self.TODAY, wrap_token=token,
+                )
+            message = str(exc.value)
+            assert "allow_unlinked=True" in message
+            assert "--allow-unlinked" in message
+            assert '"allow_unlinked": true' in message
+            assert store.load_continuity() == before
+            assert store.load_meta().get("sessions_produced", 0) == sessions_before
+            snapshot = store.load_wrap_snapshot()
+            assert snapshot is not None and snapshot["token"] == token
+            assert not list(tmp_path.glob("*.tmp*"))
+        finally:
+            store.close()
+
+    def test_escape_saves_the_refused_wrap_and_warns(self, tmp_path, miswired):
+        from anneal_memory import validated_save_continuity
+        store, ids, token = self._prepared(tmp_path)
+        text = self._render(self.TWO_LINES, ids)
+        try:
+            with pytest.raises(ValueError, match="AM-LINKGATE refused"):
+                validated_save_continuity(
+                    store, text, today=self.TODAY, wrap_token=token,
+                )
+            for not_true in ("true", 1):
+                with pytest.raises(ValueError, match="AM-LINKGATE refused"):
+                    validated_save_continuity(
+                        store, text, today=self.TODAY, wrap_token=token,
+                        allow_unlinked=not_true,
+                    )
+            with pytest.warns(UserWarning, match="AM-LINKGATE override"):
+                result = validated_save_continuity(
+                    store, text, today=self.TODAY, wrap_token=token,
+                    allow_unlinked=True,
+                )
+            assert result["graduations_validated"] == 2
+            assert store.load_wrap_snapshot() is None
+        finally:
+            store.close()
 
 
 class TestBulletlessUpsertIntegration:

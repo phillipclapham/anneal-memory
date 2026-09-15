@@ -1635,6 +1635,57 @@ def format_wrap_package_text(result: PrepareWrapResult) -> str:
     return "\n".join(parts)
 
 
+def _check_linkgate(
+    grad_result: Any,
+    formed: int,
+    strengthened: int,
+    *,
+    allow_unlinked: bool,
+) -> bool:
+    """AM-LINKGATE block (spore-721): refuse a save whose graduations offered
+    Hebbian pairs that the association write recorded none of.
+
+    Fires only when ALL hold: at least two graduation lines cited real episodes
+    of this wrap (the ruling exempts a single-graduation wrap), those lines
+    offered at least one formable pair (two lines citing the SAME lone episode
+    cannot form one, so they pass), and ``formed + strengthened == 0``.
+
+    Fail-closed with a loud escape: only a literal ``allow_unlinked is True``
+    bypasses, and the caller warns when it did. A save-path gate with no
+    override would make one bad write path an unwritable store.
+
+    Returns True when the escape bypassed a refusal, False when the gate did
+    not apply. Raises ValueError when it refuses.
+    """
+    from .associations import canonical_pair
+    from .graduation import extract_session_co_citations
+
+    pair_capable = sum(1 for ids in grad_result.all_validated_ids if ids)
+    if pair_capable < 2 or formed + strengthened > 0:
+        return False
+    offered = {
+        cp
+        for pair in (
+            set(grad_result.direct_co_citations)
+            | extract_session_co_citations(grad_result.all_validated_ids)
+        )
+        if (cp := canonical_pair(*pair)) is not None
+    }
+    if not offered:
+        return False
+    if allow_unlinked is True:
+        return True
+    raise ValueError(
+        f"AM-LINKGATE refused this save: {pair_capable} graduation lines cited "
+        f"real episodes and offered {len(offered)} co-citation pair(s), but 0 "
+        f"Hebbian associations were formed or strengthened, so the association "
+        f"write recorded nothing it was handed. Nothing was saved and the wrap "
+        f"is still in progress. To save anyway, pass allow_unlinked=True "
+        f"(CLI: --allow-unlinked; MCP: \"allow_unlinked\": true); the saved "
+        f"wrap then carries an AM-LINKGATE override warning."
+    )
+
+
 def validated_save_continuity(
     store: Store,
     text: str,
@@ -1643,6 +1694,7 @@ def validated_save_continuity(
     today: str | None = None,
     wrap_token: str | None = None,
     allow_shrink: bool = False,
+    allow_unlinked: bool = False,
     carryforward_cold_days: int | None = 7,
     crystal_store: CrystalStore | None = None,
 ) -> SaveContinuityResult:
@@ -1753,6 +1805,13 @@ def validated_save_continuity(
             intentionally shrinks the neocortex); the override is
             surfaced on the CLI as ``--allow-shrink`` and on the MCP
             ``save_continuity`` tool as ``"allow_shrink": true``.
+        allow_unlinked: Override for the AM-LINKGATE block (spore-721). A
+            wrap in which two or more graduation lines cited real episodes
+            and offered a co-citation pair, yet 0 associations were formed
+            or strengthened, raises ``ValueError`` with nothing saved and
+            the wrap left in progress. Only a literal ``True`` bypasses it,
+            and a bypass emits an ``AM-LINKGATE override`` ``UserWarning``.
+            CLI ``--allow-unlinked``; MCP ``"allow_unlinked": true``.
 
     Returns:
         :class:`SaveContinuityResult` — a :class:`TypedDict` with the
@@ -1793,7 +1852,8 @@ def validated_save_continuity(
             session already wrapped), a passed ``wrap_token`` does
             not match the in-progress wrap, or the wrap catastrophically
             collapses a protected memory layer and ``allow_shrink`` is
-            not set.
+            not set, or the AM-LINKGATE block refuses (see
+            ``allow_unlinked``).
         StoreError: Raised in two distinct cases. (1) **Integrity
             failure.** The wrap-state precondition runs
             :meth:`Store.load_wrap_snapshot` first (before any payload
@@ -2105,12 +2165,23 @@ def validated_save_continuity(
     # state awaiting externalization. Cleaning them up would destroy
     # the new content permanently (L1 HIGH + L2 M2 data-loss path).
     db_committed = False
+    linkgate_overridden = False
 
     try:
         # Phase 2: batched DB DML.
         with store._batch():
             assoc_formed, assoc_strengthened, assoc_decayed = \
                 process_wrap_associations(store, grad_result, affective_state)
+
+            # AM-LINKGATE block. It runs HERE, inside the batch, because the
+            # counts it reads exist only after the association DML; raising
+            # before the batch commits rolls that DML back, and the outer
+            # except removes the continuity tmp, so a refusal leaves the store
+            # as prepare_wrap left it (asserted by the refusal test).
+            linkgate_overridden = _check_linkgate(
+                grad_result, assoc_formed, assoc_strengthened,
+                allow_unlinked=allow_unlinked,
+            )
 
             if grad_result.validated > 0 or grad_result.citation_counts:
                 meta["citations_seen"] = True
@@ -2673,6 +2744,15 @@ def validated_save_continuity(
         )
     if association_warning is not None:
         warnings.warn(association_warning, UserWarning, stacklevel=2)
+    if linkgate_overridden:
+        warnings.warn(
+            "AM-LINKGATE override: allow_unlinked=True saved a wrap whose "
+            "graduations offered co-citation pairs while 0 Hebbian associations "
+            "were formed or strengthened. The association write path recorded "
+            "nothing; check it before the next wrap.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     # AM-CARRYFORWARD (v0.4.6) + AM-PROVENANCE (Slice A): assisted "ground,
     # graduate OUT, or retire" surface for TOP-tier patterns held this wrap.

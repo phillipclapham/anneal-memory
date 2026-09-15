@@ -4,6 +4,25 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added — AM-LINKGATE block: a save refuses a wrap whose offered Hebbian pairs recorded nothing
+
+`validated_save_continuity` raises `ValueError` when two or more graduation lines cited real episodes
+of the wrap, those lines offered at least one co-citation pair, and 0 associations were formed or
+strengthened. The check runs inside the save's batch, so a refusal saves nothing and leaves the wrap in
+progress. A wrap with one such line, or whose lines all cite the same lone episode, is not refused: it
+cannot form the cross-line pair this targets, and the existing AM-LINKGATE warnings still cover it.
+The escape is `allow_unlinked=True` (CLI `save-continuity --allow-unlinked`; MCP `"allow_unlinked": true`,
+strict boolean), and a save that uses it emits an `AM-LINKGATE override` warning. The MCP
+tool-integrity manifests are regenerated. (`spore-721`.)
+
+### Fixed — audit files are opened with `O_BINARY` where the platform has it
+
+Every audit-file read goes through one open, which did not pass `O_BINARY`. On Windows the descriptor
+would then be in text mode, which rewrites CR LF and stops at 0x1A, so sealed `.gz` weeks would read as
+corrupt. The flag is now passed (0 on other platforms). This touches only the read path; rotation and
+every other write are unchanged. Reasoned from the Python and Microsoft documentation, not run on
+Windows: nothing in this project's CI runs Windows.
+
 ## [0.9.10] — 2026-09-14
 
 ### Fixed — from the review of round 10b: a Windows rotation fsync, a hidden differing copy, a short valid verdict, and a stuck rotation

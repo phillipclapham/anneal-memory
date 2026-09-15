@@ -7974,6 +7974,29 @@ class TestHybridL3Fixes:
         with pytest.raises(ValueError, match="reader construction failed"):
             audit_module._open_regular(path)
 
+    def test_open_regular_passes_o_binary_to_os_open(self, tmp_path, monkeypatch):
+        """Diogenes MEDIUM 2026-09-15: without ``O_BINARY`` a Windows descriptor
+        is in CRT text mode and a sealed ``.gz`` reads as corrupt. CI has no
+        Windows, so this asserts the flag reaches ``os.open``: the platform value
+        is supplied where the platform lacks one, and stripped before the real
+        open so the read still runs."""
+        path = tmp_path / "x.audit.2026-W01.jsonl.gz"
+        path.write_bytes(gzip.compress(b'{"a": 1}\r\n\x1a\n'))
+        fake_o_binary = 0x40000000
+        monkeypatch.setattr(os, "O_BINARY", fake_o_binary, raising=False)
+        real_open = os.open
+        flags_seen = []
+
+        def recording_open(p, flags, *args, **kwargs):
+            flags_seen.append(flags)
+            return real_open(p, flags & ~fake_o_binary, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", recording_open)
+        with audit_module._open_regular(path) as f:
+            assert gzip.decompress(f.read()) == b'{"a": 1}\r\n\x1a\n'
+
+        assert flags_seen and all(flags & fake_o_binary for flags in flags_seen)
+
     def test_a_refusal_after_quarantining_says_so(self, tmp_path, monkeypatch):
         """codex MED (re-pass 598cd40ffcfcbc18), reproduced by INJECTION: repair
         quarantined the manifest, the listing of sealed files then failed, and

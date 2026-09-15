@@ -1144,6 +1144,7 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 affective_state=affective_state,
                 wrap_token=wrap_token,
                 allow_shrink=getattr(args, "allow_shrink", False),
+                allow_unlinked=getattr(args, "allow_unlinked", False),
                 # AM-CRYSTAL-MIGRATE + AM-CRYSTAL-OPTIN: pass the crystal store so the
                 # shrink gate CREDITS patterns that crystallized OUT this wrap — but
                 # only when opted in (file exists or --crystal); else None ⇒ no credit
@@ -3266,6 +3267,17 @@ def build_parser() -> argparse.ArgumentParser:
             "the graduating identity section, or the whole continuity) is "
             "refused as a likely recency-trap/stateless-reset failure. Pass "
             "this only for a deliberate diet / migration recompression."
+        ),
+    )
+    sub.add_argument(
+        "--allow-unlinked",
+        action="store_true",
+        help=(
+            "Override the AM-LINKGATE block. By default a wrap whose "
+            "graduation lines offered co-citation pairs while 0 Hebbian "
+            "associations were formed or strengthened is refused, with "
+            "nothing saved and the wrap left in progress. Pass this to save "
+            "anyway; the save then warns that the override was used."
         ),
     )
     sub.add_argument(

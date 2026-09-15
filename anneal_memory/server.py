@@ -523,6 +523,8 @@ class Server:
         # must NOT silently disable the gate, so anything that is not
         # literally ``True`` leaves it enabled.
         allow_shrink = args.get("allow_shrink", False) is True
+        # AM-LINKGATE override, same strict-boolean rule as allow_shrink.
+        allow_unlinked = args.get("allow_unlinked", False) is True
 
         try:
             result = _lib_validated_save_continuity(
@@ -531,6 +533,7 @@ class Server:
                 affective_state=affective_state,
                 wrap_token=wrap_token,
                 allow_shrink=allow_shrink,
+                allow_unlinked=allow_unlinked,
                 # AM-CRYSTAL-OPTIN: opt-in gate — pass the store only when it exists.
                 crystal_store=self._crystal_store_for_wrap(),
             )

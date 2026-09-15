@@ -59,11 +59,16 @@ jobs:
       - name: Run pytest
         run: pytest -q
 
-  test-windows-census:
-    # MEASUREMENT ONLY — not the final Windows job. Runs the full suite
-    # as-is on windows-latest to build a failure census before any
-    # skipif is added. Remove or replace once the census is triaged.
-    name: pytest (Windows census, Python 3.13)
+  test-windows:
+    # Windows-latest, single Python version — the failures a Windows user
+    # actually hits are platform-specific, not version-specific, so one
+    # version is enough coverage for the cost. Runs the SAME suite as the
+    # Ubuntu matrix; tests whose simulation technique doesn't reproduce on
+    # Windows (POSIX chmod-based permission checks, crystal.py's documented
+    # POSIX-only cross-process lock guarantee, an env simulation Windows
+    # never reaches) are skipif(win32) at the site with a specific reason —
+    # see project_memory/next_steps.md's Windows Limitations section.
+    name: pytest (Windows, Python 3.13)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
@@ -83,7 +88,6 @@ jobs:
 
       - name: Run pytest
         run: pytest -q
-        continue-on-error: true
 
   typecheck:
     name: mypy

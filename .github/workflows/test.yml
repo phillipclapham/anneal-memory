@@ -1,11 +1,11 @@
 name: test
 
-# Minimal CI for anneal-memory — runs the full pytest suite on every
-# push and PR across the supported Python versions, plus a mypy gate.
+# CI for anneal-memory — on every push and PR: the full pytest suite on
+# Ubuntu across the supported Python versions, the same suite on Windows
+# (one Python version; see the test-windows job for why), and a mypy gate.
 #
 # anneal-memory is zero-dep (stdlib only), so no dependency install
-# is needed beyond the package itself and the dev tooling. This
-# workflow is deliberately small: test matrix, lint gate, done.
+# is needed beyond the package itself and the dev tooling.
 
 on:
   push:

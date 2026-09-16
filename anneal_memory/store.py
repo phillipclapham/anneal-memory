@@ -3172,6 +3172,10 @@ class Store:
                 operation still SUCCEEDED — the audit trail is missing
                 this event. Also counted on ``status().audit_write_failures``
                 and logged; see :meth:`_audit_log_after_commit`.
+            UserWarning: if the auto-prune (``retention_days`` set) failed
+                after the wrap committed. The wrap is still recorded and
+                ``pruned_count`` is reported as 0. Logged instead when the
+                warning itself raises.
         """
         if (
             episode_ids is not None
@@ -3416,7 +3420,33 @@ class Store:
         # after the batch exits if desired.
         pruned = 0
         if self._retention_days is not None and not self._defer_commit:
-            pruned = self.prune()
+            # ⛔ The wrap above has committed, so a prune failure must not make
+            # the caller believe it failed (the same guard as the post-commit
+            # prune in ``continuity.validated_save_continuity``, which says why
+            # the message does not claim nothing was pruned; Diogenes
+            # 2026-09-16). Delivery is guarded too: under an error
+            # warnings-filter the warn itself raises, and so can ``str(exc)``.
+            try:
+                pruned = self.prune()
+            except Exception as exc:
+                detail = type(exc).__name__
+                try:
+                    detail = f"{detail}: {exc}"
+                except Exception:
+                    pass
+                message = (
+                    f"Auto-prune failed after the wrap committed; the wrap "
+                    f"is recorded, pruned_count is reported as 0 and may "
+                    f"undercount ({detail}). Retention runs again on the next "
+                    f"prune."
+                )
+                try:
+                    warnings.warn(message, UserWarning, stacklevel=2)
+                except Exception:
+                    try:
+                        _LOG.warning("%s", message)
+                    except Exception:
+                        pass
 
         return WrapResult(
             saved=True,

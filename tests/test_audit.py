@@ -8009,10 +8009,12 @@ class TestHybridL3Fixes:
 
     def test_open_regular_passes_o_binary_to_os_open(self, tmp_path, monkeypatch):
         """Diogenes MEDIUM 2026-09-15: without ``O_BINARY`` a Windows descriptor
-        is in CRT text mode and a sealed ``.gz`` reads as corrupt. CI has no
-        Windows, so this asserts the flag reaches ``os.open``: the platform value
-        is supplied where the platform lacks one, and stripped before the real
-        open so the read still runs."""
+        is in CRT text mode and a sealed ``.gz`` reads as corrupt. This asserts
+        the flag reaches ``os.open`` on every platform, including those without
+        the constant: the platform value is supplied where the platform lacks
+        one, and stripped before the real open so the read still runs. The real
+        Windows read is exercised by the Windows CI job (e.g.
+        ``test_multi_rotation_verify_and_recovery`` verifies a sealed ``.gz``)."""
         path = tmp_path / "x.audit.2026-W01.jsonl.gz"
         path.write_bytes(gzip.compress(b'{"a": 1}\r\n\x1a\n'))
         fake_o_binary = 0x40000000

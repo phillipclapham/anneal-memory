@@ -8,11 +8,11 @@
 > Git history was NOT carried across the repo boundary (a cross-repo move cannot); flow's history
 > retains it up to this commit.
 
-> ### 🔬 DIOGENES — NEWEST: `diogenes_20260915.md` · **STILL OPEN: 1** @ `4080eb8`
-> 4 episode(s) — MEDIUM 1 — 1 of 4 episode(s) carry a severity; the other 3 are COVERAGE 1 · COVERAGE-OPEN 1 · STILL OPEN 1. Routed UNTRIAGED by `route_diogenes.py`; the count above is Diogenes' own slot, not the ritual's.
+> ### 🔬 DIOGENES — NEWEST: `diogenes_20260916.md` · **STILL OPEN: 5** @ `baeaa1e`
+> 8 episode(s) — LOW 2 · MEDIUM 3 — 5 of 8 episode(s) carry a severity; the other 3 are COVERAGE 1 · COVERAGE-OPEN 1 · STILL OPEN 1. Routed UNTRIAGED by `route_diogenes.py`; the count above is Diogenes' own slot, not the ritual's.
 > ▶ 26 human commit(s) in the last 24h — the count could move in either direction this window.
-> ⚙ COORDINATES: 0/1 confirmed at HEAD 4080eb8. ⚠ 1 could NOT be confirmed — look, do not assume the reviewer was wrong (a remediated finding reads the same as a bad coordinate): anneal_memory/audit.py:2526 -> quoted text is at :2528 (+2)
-> *(Pointer written 2026-09-15 by route_diogenes.py. `spore-473`: a routed report with no reader is a disposal chute.)*
+> ⚙ COORDINATES: 0 of 5 finding(s) carried quoted text, so NONE could be checked. This is not a clean result.
+> *(Pointer written 2026-09-16 by route_diogenes.py. `spore-473`: a routed report with no reader is a disposal chute.)*
 
 > ⬇ **TRIAGE BELOW THIS LINE — the block above is a DISPOSABLE SPAN.** `route_diogenes.py`
 > regenerates that block every night, so anything written inside it is deleted by the next
@@ -20,6 +20,20 @@
 > the fix, the refutation and the date here. *(Written once; `spore-473` — a routed report
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
+
+### ⚡ 2026-09-16 MORNING TRIAGE (identity head, BROAD ritual) — the one code finding is CONFIRMED IN THE PUBLISHED TAG, and flow runs it
+
+· ✅ **MEDIUM `anneal_memory/continuity.py:2633` — CONFIRMED by reading, present at tag `v0.9.11`**
+  (`git show v0.9.11:anneal_memory/continuity.py` → `2633: pruned = store.prune()`), and flow's venv is
+  0.9.11 (`pip show`). A bare post-commit `store.prune()`, while the audit flush directly above it is
+  wrapped with exactly the rationale that applies here ("an audit log failure must not cause the pipeline to
+  report failure to the caller"). The diagnosis is Diogenes' scratch reproduction; the fix is reasoned. **0.9.12
+  scope, next to the two AM-LINKGATE items.** ⚠ The flow-side exposure is a consolidate that REPORTS failure
+  after it has committed — so on an EOD, a save that errors must be checked with `load_wrap_snapshot()` and the
+  store before anyone re-runs it.
+· Routed, not checked this morning: MEDIUM the three "nothing in CI runs Windows" sites (CHANGELOG.md:51 already
+  shipped in the 0.9.11 sdist, so that one is fixable only forward) · MEDIUM `[Unreleased]` empty while README:32
+  promises the stdio UTF-8 change "in the next release" · LOW ×2 (README:32 limit wording, workflow header).
 
 ## ✅ WINDOWS CI MERGED TO MAIN 2026-09-15 ~10:5x by `0915+18 anneal-memory-seat`. Re-derive; do not trust these lines.
 - `main` fast-forwarded from `941750d` to `58c9f55` (`git log --oneline -10` on main; `git ls-remote origin refs/heads/main` should read `58c9f55` until the next commit lands). The `ci-windows` branch is DELETED, both locally and on origin (`git ls-remote origin refs/heads/ci-windows` returns nothing) — it is not a live branch to check out or continue on.

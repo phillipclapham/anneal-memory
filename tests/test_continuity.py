@@ -2642,6 +2642,52 @@ class TestPostReviewFixes:
         finally:
             store.close()
 
+    def test_post_commit_prune_db_failure_does_not_fail_committed_save(
+        self, tmp_path, monkeypatch
+    ):
+        """A SQLite error inside the post-commit auto-prune must not make a
+        committed save report failure. Before the guard, ``StoreDatabaseError``
+        (operation ``prune``) propagated over a wrap that had already
+        committed and renamed, and the operator's retry got "No wrap in
+        progress" (Diogenes 2026-09-16, the DB-channel twin of the codex HIGH
+        that ``_warn_after_commit`` closed on the warning channel).
+        """
+        import sqlite3
+        from anneal_memory import validated_save_continuity
+
+        db_path = str(tmp_path / "prune_fail.db")
+        store, text, stale_id = self._prime_store_with_retention(
+            db_path, retention_days=7
+        )
+
+        def failing_prune(self, older_than_days=None):
+            # Raised inside prune's own boundary, so it surfaces exactly as a
+            # real disk-full inside prune's SQL would.
+            with self._db_boundary("prune"):
+                raise sqlite3.OperationalError("database or disk is full")
+
+        monkeypatch.setattr(Store, "prune", failing_prune)
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                result = validated_save_continuity(store, text)
+
+            assert result["wrap_result"]["pruned_count"] == 0
+            assert store.load_wrap_snapshot() is None
+            assert len(store.get_wrap_history()) == 1
+            assert "Cited" in (store.load_continuity() or "")
+            # The failed prune deleted nothing, and the caller is told so.
+            row = store._conn.execute(
+                "SELECT id FROM episodes WHERE id = ?", (stale_id,)
+            ).fetchone()
+            assert row is not None
+            assert any(
+                "prune" in str(w.message) and "committed" in str(w.message)
+                for w in caught
+            ), [str(w.message) for w in caught]
+        finally:
+            store.close()
+
     # -- L2 M2: audit-flush failure must not propagate --
 
     def test_audit_flush_failure_does_not_propagate(

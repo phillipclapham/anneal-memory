@@ -2630,11 +2630,33 @@ def validated_save_continuity(
                 operation="save_continuity",
                 path=path,
             )
-        pruned = store.prune()
-        # Attach pruned count to the wrap_result so the return value
-        # reflects the actual post-wrap store state. WrapResult is a
-        # regular (non-frozen) dataclass so direct mutation is safe.
-        wrap_result.pruned_count = pruned
+        # ⛔ Guarded under the ``_warn_after_commit`` invariant: the wrap has
+        # committed and renamed, so a prune failure (a ``StoreDatabaseError``
+        # from disk full or a locked DB) must not make the caller believe the
+        # save failed. Retention is housekeeping. The message does not claim
+        # nothing was pruned: ``Store._db_boundary`` rolls a SQLite failure
+        # back, but a failed rollback or an overriding ``prune`` leaves the
+        # outcome unknown (codex L3, 2026-09-16). The detail is rendered
+        # inside its own guard because an exception's ``__str__`` can raise.
+        # Diogenes 2026-09-16, reproduced on 0.9.11.
+        try:
+            pruned = store.prune()
+        except Exception as exc:
+            detail = type(exc).__name__
+            try:
+                detail = f"{detail}: {exc}"
+            except Exception:
+                pass
+            _warn_after_commit(
+                f"Auto-prune failed after the wrap committed; the save "
+                f"succeeded, pruned_count is reported as 0 and may undercount "
+                f"({detail}). Retention runs again on the next prune."
+            )
+        else:
+            # Attach pruned count to the wrap_result so the return value
+            # reflects the actual post-wrap store state. WrapResult is a
+            # regular (non-frozen) dataclass so direct mutation is safe.
+            wrap_result.pruned_count = pruned
 
     # Render omitted_patterns to plain dicts so the entire return
     # value stays JSON-serializable (mirrors the asdict() treatment of

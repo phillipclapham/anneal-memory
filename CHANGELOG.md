@@ -4,6 +4,36 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — a failing auto-prune no longer reports a committed save as failed
+
+With `retention_days` configured, `validated_save_continuity` runs `prune()` after the wrap has
+committed and the continuity file has been renamed into place. A SQLite error inside that prune (disk
+full, a locked database) propagated as `StoreDatabaseError`, so the caller was told a save had failed
+when it had succeeded, and a retry was refused with "No wrap in progress". The same prune in a direct
+`Store.wrap_completed` call had the same defect. Both now catch the failure and return success with a
+`UserWarning` (logged instead when the warning itself raises) saying the wrap committed. `pruned_count`
+is reported as 0: a SQLite failure inside `prune()` is rolled back, so nothing was pruned in that case,
+but the warning does not promise it, because a failed rollback or an overriding `prune()` can leave the
+outcome unknown. Retention runs again on the next prune. Found by review.
+
+### Fixed — CLI stdin, stdout and stderr are UTF-8 on every platform
+
+The CLI subcommand path used the locale's encoding for its standard streams. Under a non-UTF-8 locale
+encoding (a Windows console codepage, or piped, redirected or subprocess consumption on any platform),
+the CLI's own status glyphs raised `UnicodeEncodeError`, and non-ASCII content piped to `record -` or
+`save-continuity -` could be mis-decoded into corrupted store content. `main()` now reconfigures all
+three streams to UTF-8. stderr keeps the `backslashreplace` error handler, so an undecodable name in an
+error message still degrades instead of crashing. The server path already did this and is unchanged.
+
+### Added — Windows CI
+
+CI now runs the test suite on `windows-latest` (Python 3.13) as a required job next to the Ubuntu
+matrix. Tests that simulate unreadable files with POSIX `chmod`, and a few other POSIX-only checks, are
+skipped there with a reason at each site. This job also runs the 0.9.11 `O_BINARY` change below on
+Windows for the first time, including a verify that reads a sealed `.gz` week. The README now documents
+the Windows limits that remain: advisory locking does nothing on Windows, and startup crashes when
+`ANNEAL_MEMORY_DB` is unset and the environment has no home directory.
+
 ## [0.9.11] — 2026-09-15
 
 ### Added — AM-LINKGATE block: a save refuses a wrap whose offered Hebbian pairs recorded nothing
@@ -48,7 +78,8 @@ Every audit-file read goes through one open, which did not pass `O_BINARY`. On W
 would then be in text mode, which rewrites CR LF and stops at 0x1A, so sealed `.gz` weeks would read as
 corrupt. The flag is now passed (0 on other platforms). This touches only the read path; rotation and
 every other write are unchanged. Reasoned from the Python and Microsoft documentation, not run on
-Windows: nothing in this project's CI runs Windows.
+Windows at release time: this project had no Windows CI then. Windows CI landed the same day, after the
+release (see [Unreleased]).
 
 ## [0.9.10] — 2026-09-14
 

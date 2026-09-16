@@ -21,6 +21,8 @@
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
 
+> ⚠ SUPERSEDED the same morning: every item in this triage was fixed on main in `c3873d3`. See the ✅ 2026-09-16 block directly below.
+
 ### ⚡ 2026-09-16 MORNING TRIAGE (identity head, BROAD ritual) — the one code finding is CONFIRMED IN THE PUBLISHED TAG, and flow runs it
 
 · ✅ **MEDIUM `anneal_memory/continuity.py:2633` — CONFIRMED by reading, present at tag `v0.9.11`**

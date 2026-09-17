@@ -397,6 +397,30 @@ class TestToolStatus:
         finally:
             s.close()
 
+    def test_status_surfaces_prune_failures_on_the_held_store_instance(
+        self, tmp_path
+    ):
+        """The MCP server holds ONE long-lived Store, so a prune failure
+        recorded on it must reach ``_tool_status`` (Diogenes 2026-09-17, wired
+        after codex L3 found the new field reached no transport)."""
+        db_path = str(tmp_path / "prune_fail_mcp.db")
+        s = Store(path=db_path, project_name="PruneFailMCP")
+        try:
+            s._record_prune_failure("wrap_completed: OperationalError: full")
+            srv = Server(s)
+            result = srv._tool_status({})
+            text = _text_from_result(result)
+            assert "1 post-commit auto-prune failure" in text
+            assert "wrap_completed" in text
+        finally:
+            s.close()
+
+    def test_status_omits_prune_failure_line_when_none_recorded(self, server):
+        """No prune failure recorded — the line must not appear at all."""
+        result = server._tool_status({})
+        text = _text_from_result(result)
+        assert "auto-prune failure" not in text
+
 
 # -- Tool: prepare_wrap --
 

@@ -153,6 +153,19 @@ class StoreStatus:
     # Defaulted, so every existing constructor call keeps working.
     audit_write_failures: int = 0
     audit_last_failure: str | None = None
+    # Post-commit auto-prune health (Diogenes 2026-09-17). Same motivation as
+    # ``audit_write_failures`` above — the only other channel is a
+    # ``warnings.warn`` that Python's default filter dedups per (message,
+    # category, lineno), so a persistent prune failure otherwise warns once
+    # and then goes silent. UNLIKE ``audit_write_failures``, this is THIS
+    # STORE INSTANCE LOCAL ONLY (codex L3, 2026-09-17): it has no
+    # metadata-table flush point, so it resets on restart AND does not
+    # converge across two Store instances open on the same database. Wired
+    # only into the MCP server's status tool, which holds one long-lived
+    # instance — not into the CLI, a fresh process per invocation that would
+    # structurally always read 0. See ``Store._record_prune_failure``.
+    prune_failures: int = 0
+    prune_last_failure: str | None = None
 
 
 @dataclass(frozen=True)

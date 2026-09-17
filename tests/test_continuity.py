@@ -2676,7 +2676,7 @@ class TestPostReviewFixes:
             assert store.load_wrap_snapshot() is None
             assert len(store.get_wrap_history()) == 1
             assert "Cited" in (store.load_continuity() or "")
-            # The failed prune deleted nothing, and the caller is told so.
+            # The failed prune deleted nothing; the warning says the wrap committed.
             row = store._conn.execute(
                 "SELECT id FROM episodes WHERE id = ?", (stale_id,)
             ).fetchone()
@@ -2685,6 +2685,94 @@ class TestPostReviewFixes:
                 "prune" in str(w.message) and "committed" in str(w.message)
                 for w in caught
             ), [str(w.message) for w in caught]
+        finally:
+            store.close()
+
+    def test_post_commit_prune_failure_counted_across_two_saves(
+        self, tmp_path, monkeypatch
+    ):
+        """A persistent post-commit prune failure warns once (default
+        ``warnings`` dedup) but must keep counting on
+        ``status().prune_failures`` (Diogenes 2026-09-17: "no status()
+        attribute containing 'prune' exists to move" — an operator polling
+        status() is the only channel that survives the dedup).
+        """
+        import sqlite3
+        from anneal_memory import prepare_wrap, validated_save_continuity
+
+        db_path = str(tmp_path / "prune_fail_twice.db")
+        store, text, _stale_id = self._prime_store_with_retention(
+            db_path, retention_days=7
+        )
+        try:
+
+            def failing_prune(self, older_than_days=None):
+                with self._db_boundary("prune"):
+                    raise sqlite3.OperationalError("database or disk is full")
+
+            monkeypatch.setattr(Store, "prune", failing_prune)
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                validated_save_continuity(store, text)
+            assert store.status().prune_failures == 1
+
+            # A second wrap over the same failing prune.
+            second_ep = store.record(
+                "second live observation", EpisodeType.OBSERVATION
+            )
+            prepare_wrap(store)
+            second_text = self._make_continuity("Retention", second_ep.id)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                validated_save_continuity(store, second_text)
+
+            status = store.status()
+            assert status.prune_failures == 2
+            assert status.prune_last_failure is not None
+            assert "validated_save_continuity" in status.prune_last_failure
+        finally:
+            store.close()
+
+    def test_wrap_completed_post_commit_prune_failure_does_not_fail_wrap(
+        self, tmp_path, monkeypatch
+    ):
+        """The standalone ``Store.wrap_completed`` guard (store.py:3422,
+        outside ``_batch``) has its own post-commit prune try/except,
+        distinct from the one ``validated_save_continuity`` exercises
+        through ``_batch``. Diogenes 2026-09-17 LOW: this path had no test —
+        the only test went through ``validated_save_continuity``, where
+        ``not self._defer_commit`` is false and this branch never runs.
+        """
+        import sqlite3
+
+        db_path = str(tmp_path / "wrap_completed_prune_fail.db")
+        store = Store(db_path, project_name="StandaloneWrap", retention_days=7)
+        try:
+
+            def failing_prune(self, older_than_days=None):
+                with self._db_boundary("prune"):
+                    raise sqlite3.OperationalError("database or disk is full")
+
+            monkeypatch.setattr(Store, "prune", failing_prune)
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                result = store.wrap_completed(
+                    episodes_compressed=1, continuity_chars=10
+                )
+
+            assert result.saved is True
+            assert result.pruned_count == 0
+            assert len(store.get_wrap_history()) == 1
+            assert any(
+                "prune" in str(w.message) and "committed" in str(w.message)
+                for w in caught
+            ), [str(w.message) for w in caught]
+            status = store.status()
+            assert status.prune_failures == 1
+            assert status.prune_last_failure is not None
+            assert "wrap_completed" in status.prune_last_failure
         finally:
             store.close()
 

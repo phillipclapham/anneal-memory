@@ -851,6 +851,30 @@ class Server:
         else:
             lines.append("Audit: disabled")
 
+        # Post-commit auto-prune health (Diogenes 2026-09-17, codex L3
+        # 2026-09-17 MED — wiring this in was the finding: a field on
+        # ``StoreStatus`` is not a surface, per the audit precedent this
+        # section is a copy of). Wired HERE ONLY, not into the CLI ``status``
+        # command: ``status.prune_failures`` is instance-local on
+        # ``self._store`` with no metadata-table flush point (unlike
+        # ``audit_write_failures``), and the MCP server holds ONE Store
+        # instance for its whole lifetime — the exact "long-running process"
+        # this counter was built for. A CLI invocation opens a fresh Store
+        # per command, so it would structurally always print 0 there, which
+        # reads as "retention is healthy" and is not (the audit field made
+        # this same mistake before it was made durable — see
+        # tests/test_audit.py::TestDegradedAuditHealthReachesEveryTransport).
+        # Full durability, so the CLI can carry this too, is 0.9.12+ scope
+        # (next_steps.md).
+        if status.prune_failures:
+            prune_line = (
+                f"⚠ {status.prune_failures} post-commit auto-prune "
+                f"failure(s) this session — retention may be behind"
+            )
+            if status.prune_last_failure:
+                prune_line += f", last: {status.prune_last_failure}"
+            lines.append(prune_line)
+
         return _tool_result("\n".join(lines))
 
     # -- Crystallized-pattern tools (AM-CRYSTAL — the on-demand graduated tier) --

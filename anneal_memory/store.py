@@ -1503,6 +1503,21 @@ class Store:
         # (a caller's open transaction, a full disk) keeps the count alive for
         # the next attempt instead of losing it. See _persist_audit_health.
         self._audit_failures_unpersisted: int = 0
+        # Post-commit auto-prune health (Diogenes 2026-09-17). THIS
+        # ``Store`` INSTANCE local only, unlike ``_audit_write_failures``
+        # above — a prune failure has no metadata-table flush point, so this
+        # does not survive a restart AND does not converge across two Store
+        # instances open on the same database (codex L3, 2026-09-17). It
+        # exists so an MCP server holding ONE long-lived Store instance can
+        # poll ``status()`` instead of relying on catching a
+        # ``warnings.warn`` that the default filter dedups per (message,
+        # category, lineno) — repeated failures at the same call site stop
+        # being delivered after the first, but this counter keeps counting.
+        # Deliberately NOT wired into the CLI (server.py's ``_tool_status``
+        # only) — a fresh-per-invocation CLI process would structurally
+        # always print 0, which reads as healthy retention and is not.
+        self._prune_failures: int = 0
+        self._prune_last_failure: str | None = None
         self._audit: AuditTrail | None = None
         if audit and not read_only:
             self._audit = AuditTrail(
@@ -2360,6 +2375,8 @@ class Store:
             audit_retention_days=audit_retention_days,
             audit_write_failures=self._current_audit_failures(),
             audit_last_failure=self._current_audit_last_failure(),
+            prune_failures=self._prune_failures,
+            prune_last_failure=self._prune_last_failure,
         )
 
     # -- Wrap lifecycle --
@@ -3440,6 +3457,7 @@ class Store:
                     f"undercount ({detail}). Retention runs again on the next "
                     f"prune."
                 )
+                self._record_prune_failure(f"wrap_completed: {detail}")
                 try:
                     warnings.warn(message, UserWarning, stacklevel=2)
                 except Exception:
@@ -4751,6 +4769,31 @@ class Store:
                 operation="schema_init",
                 path=str(self._path),
             )
+
+    def _record_prune_failure(self, detail: str) -> None:
+        """Count a post-commit auto-prune failure so ``status()`` can see it.
+
+        Called from every catch site that swallows a ``prune()`` exception
+        after a wrap has already committed (``wrap_completed`` here and
+        ``validated_save_continuity``'s Phase 5 in ``continuity.py``) — both
+        paths call ``self.prune()`` / ``store.prune()`` themselves rather than
+        through a shared wrapper, so the increment happens at the catch, not
+        inside ``prune()``. This exists because the only other channel,
+        ``warnings.warn``, is deduplicated per (message, category, lineno) by
+        Python's default filter, so repeated failures at the same call site
+        stop being delivered after the first. THIS INSTANCE local, unlike
+        ``_audit_write_failures`` — no metadata-table flush point, so this
+        does not survive a restart or converge across two Store instances
+        open on the same database.
+        """
+        try:
+            self._prune_failures += 1
+            self._prune_last_failure = (
+                f"{detail} at "
+                f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')}"
+            )
+        except Exception:
+            pass
 
     def _seed_audit_health(self) -> None:
         """Load the durable degraded-audit counters from ``metadata``.

@@ -14,7 +14,12 @@ when it had succeeded, and a retry was refused with "No wrap in progress". The s
 `UserWarning` (logged instead when the warning itself raises) saying the wrap committed. `pruned_count`
 is reported as 0: a SQLite failure inside `prune()` is rolled back, so nothing was pruned in that case,
 but the warning does not promise it, because a failed rollback or an overriding `prune()` can leave the
-outcome unknown. Retention runs again on the next prune. Found by review.
+outcome unknown. Retention runs again on the next prune. A persistent failure warns only once under
+Python's default `warnings` dedup, so `status()` now also reports `prune_failures` and
+`prune_last_failure`, and the MCP `status` tool surfaces them — this Store-instance only, unlike
+`audit_write_failures`: it does not survive a restart or converge across two instances on the same
+database, so it is not yet in the CLI's `status`, which opens a fresh instance per invocation. Found
+by review.
 
 ### Fixed — CLI stdin, stdout and stderr are UTF-8 on every platform
 
@@ -27,8 +32,9 @@ error message still degrades instead of crashing. The server path already did th
 
 ### Added — Windows CI
 
-CI now runs the test suite on `windows-latest` (Python 3.13) as a required job next to the Ubuntu
-matrix. Tests that simulate unreadable files with POSIX `chmod`, and a few other POSIX-only checks, are
+CI now runs the test suite on `windows-latest` (Python 3.13) next to the Ubuntu matrix, with no
+`continue-on-error`, so a Windows failure fails the run. Tests that simulate unreadable files with
+POSIX `chmod`, and a few other POSIX-only checks, are
 skipped there with a reason at each site. This job also runs the 0.9.11 `O_BINARY` change below on
 Windows for the first time, including a verify that reads a sealed `.gz` week. The README now documents
 the Windows limits that remain: advisory locking does nothing on Windows, and startup crashes when

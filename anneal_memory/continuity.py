@@ -2647,6 +2647,7 @@ def validated_save_continuity(
                 detail = f"{detail}: {exc}"
             except Exception:
                 pass
+            store._record_prune_failure(f"validated_save_continuity: {detail}")
             _warn_after_commit(
                 f"Auto-prune failed after the wrap committed; the save "
                 f"succeeded, pruned_count is reported as 0 and may undercount "

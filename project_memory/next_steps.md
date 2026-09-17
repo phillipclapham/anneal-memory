@@ -8,11 +8,13 @@
 > Git history was NOT carried across the repo boundary (a cross-repo move cannot); flow's history
 > retains it up to this commit.
 
-> ### 🔬 DIOGENES — NEWEST: `diogenes_20260916.md` · **STILL OPEN: 5** @ `baeaa1e`
-> 8 episode(s) — LOW 2 · MEDIUM 3 — 5 of 8 episode(s) carry a severity; the other 3 are COVERAGE 1 · COVERAGE-OPEN 1 · STILL OPEN 1. Routed UNTRIAGED by `route_diogenes.py`; the count above is Diogenes' own slot, not the ritual's.
-> ▶ 26 human commit(s) in the last 24h — the count could move in either direction this window.
-> ⚙ COORDINATES: 0 of 5 finding(s) carried quoted text, so NONE could be checked. This is not a clean result.
-> *(Pointer written 2026-09-16 by route_diogenes.py. `spore-473`: a routed report with no reader is a disposal chute.)*
+> ### 🔬 DIOGENES — NEWEST: `diogenes_20260917.md` · **STILL OPEN: 4** @ `2e3ba86`
+> 7 episode(s) — LOW 3 · MEDIUM 1 — 4 of 7 episode(s) carry a severity; the other 3 are COVERAGE 1 · SELF 1 · STILL OPEN 1. Routed UNTRIAGED by `route_diogenes.py`; the count above is Diogenes' own slot, not the ritual's.
+> ▶ 3 human commit(s) in the last 24h — the count could move in either direction this window.
+> ⚡ **1 finding(s) carry `[prescription: run]`** — candidates for `seat_run.py`, but only with an executable acceptance test.
+> *(Counted by each finding's OWN trailing tag — a quoted tag is not a verdict — and a tag withdrawn by a later SELF-CORRECTION does not count at all. If this number moved while the report did not, that rule changed: see flow `scripts/prescription.py`.)*
+> ⚙ COORDINATES: 4/4 confirmed at HEAD 2e3ba86. All confirmed.
+> *(Pointer written 2026-09-17 by route_diogenes.py. `spore-473`: a routed report with no reader is a disposal chute.)*
 
 > ⬇ **TRIAGE BELOW THIS LINE — the block above is a DISPOSABLE SPAN.** `route_diogenes.py`
 > regenerates that block every night, so anything written inside it is deleted by the next

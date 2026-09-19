@@ -869,7 +869,12 @@ class Server:
         if status.prune_failures:
             prune_line = (
                 f"⚠ {status.prune_failures} post-commit auto-prune "
-                f"failure(s) this session — retention may be behind"
+                f"failure(s) this session — "
+                + (
+                    "retention may be behind"
+                    if status.prune_behind
+                    else "a later prune completed, retention has caught up"
+                )
             )
             if status.prune_last_failure:
                 prune_line += f", last: {status.prune_last_failure}"

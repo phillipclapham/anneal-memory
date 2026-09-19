@@ -7,6 +7,7 @@ Transport layer tests (_read_message) use mocked stdin/stdout.
 import io
 import json
 import uuid
+import warnings
 
 import pytest
 from pathlib import Path
@@ -412,6 +413,41 @@ class TestToolStatus:
             text = _text_from_result(result)
             assert "1 post-commit auto-prune failure" in text
             assert "wrap_completed" in text
+        finally:
+            s.close()
+
+    def test_status_prune_line_clears_after_a_later_prune_completes(
+        self, tmp_path, monkeypatch
+    ):
+        """Diogenes 2026-09-18 LOW: the line said "may be behind" for the
+        whole process life even after retention caught up. Fail, recover,
+        and the line must stop claiming retention is behind."""
+        import sqlite3
+
+        db_path = str(tmp_path / "prune_recover_mcp.db")
+        s = Store(path=db_path, project_name="PruneRecoverMCP", retention_days=7)
+        try:
+            real_prune = Store.prune
+
+            def failing_prune(self, older_than_days=None):
+                with self._db_boundary("prune"):
+                    raise sqlite3.OperationalError("database or disk is full")
+
+            monkeypatch.setattr(Store, "prune", failing_prune)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                s.wrap_completed(episodes_compressed=1, continuity_chars=10)
+            srv = Server(s)
+            assert "retention may be behind" in _text_from_result(
+                srv._tool_status({})
+            )
+
+            monkeypatch.setattr(Store, "prune", real_prune)
+            s.wrap_completed(episodes_compressed=1, continuity_chars=10)
+            text = _text_from_result(srv._tool_status({}))
+            assert "1 post-commit auto-prune failure" in text
+            assert "retention may be behind" not in text
+            assert "caught up" in text
         finally:
             s.close()
 

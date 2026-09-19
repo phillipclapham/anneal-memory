@@ -4182,6 +4182,13 @@ class Store:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ"
         )
+        # Only a prune at least as aggressive as the configured retention can
+        # say retention has caught up; a wider override leaves 7..N-day-old
+        # episodes in place (complement+codex+glm, 2026-09-19).
+        covers_retention = (
+            older_than_days is None
+            or (self._retention_days is not None and days <= self._retention_days)
+        )
 
         with self._db_boundary("prune"):
             # Find episodes to prune
@@ -4190,7 +4197,8 @@ class Store:
             ).fetchall()
 
             if not rows:
-                self._prune_behind = False
+                if covers_retention:
+                    self._prune_behind = False
                 return 0
 
             pruned = 0
@@ -4212,7 +4220,8 @@ class Store:
 
             self._conn.commit()
 
-        self._prune_behind = False
+        if covers_retention:
+            self._prune_behind = False
         if pruned > 0:
             # ⛔ POST-COMMIT: the episodes are already DELETED. A bare emit here
             # raised a raw OSError with the rows gone (measured 2026-09-04),

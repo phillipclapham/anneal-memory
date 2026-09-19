@@ -2737,8 +2737,8 @@ class TestPostReviewFixes:
     def test_wrap_completed_post_commit_prune_failure_does_not_fail_wrap(
         self, tmp_path, monkeypatch
     ):
-        """The standalone ``Store.wrap_completed`` guard (store.py:3422,
-        outside ``_batch``) has its own post-commit prune try/except,
+        """The standalone ``Store.wrap_completed`` post-commit prune
+        guard (outside ``_batch``) has its own post-commit prune try/except,
         distinct from the one ``validated_save_continuity`` exercises
         through ``_batch``. Diogenes 2026-09-17 LOW: this path had no test —
         the only test went through ``validated_save_continuity``, where

@@ -1518,6 +1518,10 @@ class Store:
         # always print 0, which reads as healthy retention and is not.
         self._prune_failures: int = 0
         self._prune_last_failure: str | None = None
+        # True from a recorded post-commit prune failure until the next
+        # prune() that completes; lets status() tell "still behind" from
+        # "failed once, retention has since caught up" (Diogenes 2026-09-18).
+        self._prune_behind: bool = False
         self._audit: AuditTrail | None = None
         if audit and not read_only:
             self._audit = AuditTrail(
@@ -2377,6 +2381,7 @@ class Store:
             audit_last_failure=self._current_audit_last_failure(),
             prune_failures=self._prune_failures,
             prune_last_failure=self._prune_last_failure,
+            prune_behind=self._prune_behind,
         )
 
     # -- Wrap lifecycle --
@@ -4185,6 +4190,7 @@ class Store:
             ).fetchall()
 
             if not rows:
+                self._prune_behind = False
                 return 0
 
             pruned = 0
@@ -4206,6 +4212,7 @@ class Store:
 
             self._conn.commit()
 
+        self._prune_behind = False
         if pruned > 0:
             # ⛔ POST-COMMIT: the episodes are already DELETED. A bare emit here
             # raised a raw OSError with the rows gone (measured 2026-09-04),
@@ -4788,6 +4795,7 @@ class Store:
         """
         try:
             self._prune_failures += 1
+            self._prune_behind = True
             self._prune_last_failure = (
                 f"{detail} at "
                 f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')}"

@@ -166,6 +166,9 @@ class StoreStatus:
     # structurally always read 0. See ``Store._record_prune_failure``.
     prune_failures: int = 0
     prune_last_failure: str | None = None
+    # True while the latest post-commit prune failure has not been followed by
+    # a prune() that completed; False once retention has caught up.
+    prune_behind: bool = False
 
 
 @dataclass(frozen=True)

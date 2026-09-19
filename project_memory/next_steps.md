@@ -14,6 +14,8 @@
 > ⚙ COORDINATES: 1/2 confirmed at HEAD 48acdbe. ⚠ 1 could NOT be confirmed — look, do not assume the reviewer was wrong (a remediated finding reads the same as a bad coordinate): anneal_memory/server.py:869 -> quoted text is at :872 (+3)
 > *(Pointer written 2026-09-18 by route_diogenes.py. `spore-473`: a routed report with no reader is a disposal chute.)*
 
+> ✅ **2026-09-19 (0919+21 maint-seat): both `diogenes_20260918.md` LOWs CLOSED on main** (`b66d5fb`, `4504dea`, `35553ed`; triage in that file; unreleased, 0.9.12 still pending). The count above is Diogenes' snapshot, not current.
+
 > ⬇ **TRIAGE BELOW THIS LINE — the block above is a DISPOSABLE SPAN.** `route_diogenes.py`
 > regenerates that block every night, so anything written inside it is deleted by the next
 > run. This line and everything beneath it are never touched by that script. Put the verdict,

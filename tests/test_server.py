@@ -451,6 +451,28 @@ class TestToolStatus:
         finally:
             s.close()
 
+    def test_wider_override_prune_does_not_clear_the_behind_flag(
+        self, tmp_path
+    ):
+        """A prune(older_than_days=365) completing must not claim a 7-day
+        retention has caught up while a 30-day-old episode is still there."""
+        db_path = str(tmp_path / "prune_override.db")
+        s = Store(path=db_path, project_name="PruneOverride", retention_days=7)
+        try:
+            s.record("old", episode_type="observation")
+            s._conn.execute(
+                "UPDATE episodes SET timestamp = "
+                "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 days')"
+            )
+            s._conn.commit()
+            s._record_prune_failure("wrap_completed: OperationalError: full")
+            assert s.prune(older_than_days=365) == 0
+            assert s.status().prune_behind is True
+            assert s.prune() == 1
+            assert s.status().prune_behind is False
+        finally:
+            s.close()
+
     def test_status_omits_prune_failure_line_when_none_recorded(self, server):
         """No prune failure recorded — the line must not appear at all."""
         result = server._tool_status({})

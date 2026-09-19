@@ -473,6 +473,38 @@ class TestToolStatus:
         finally:
             s.close()
 
+    def test_override_prune_clears_flag_only_when_it_covers_retention(
+        self, tmp_path
+    ):
+        """Boundary of covers_retention: a wider override that DOES delete a
+        row leaves the flag set; an override equal to retention clears it."""
+        s = Store(
+            path=str(tmp_path / "prune_cover.db"),
+            project_name="PruneCover",
+            retention_days=7,
+        )
+        try:
+            s.record("ancient", episode_type="observation")
+            s.record("stale", episode_type="observation")
+            s._conn.execute(
+                "UPDATE episodes SET timestamp = "
+                "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-400 days') "
+                "WHERE content = 'ancient'"
+            )
+            s._conn.execute(
+                "UPDATE episodes SET timestamp = "
+                "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 days') "
+                "WHERE content = 'stale'"
+            )
+            s._conn.commit()
+            s._record_prune_failure("wrap_completed: OperationalError: full")
+            assert s.prune(older_than_days=365) == 1
+            assert s.status().prune_behind is True
+            assert s.prune(older_than_days=7) == 1
+            assert s.status().prune_behind is False
+        finally:
+            s.close()
+
     def test_status_omits_prune_failure_line_when_none_recorded(self, server):
         """No prune failure recorded — the line must not appear at all."""
         result = server._tool_status({})

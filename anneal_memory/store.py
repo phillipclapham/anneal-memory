@@ -4184,7 +4184,7 @@ class Store:
         )
         # Only a prune at least as aggressive as the configured retention can
         # say retention has caught up; a wider override leaves 7..N-day-old
-        # episodes in place (complement+codex+glm, 2026-09-19).
+        # episodes in place.
         covers_retention = (
             older_than_days is None
             or (self._retention_days is not None and days <= self._retention_days)

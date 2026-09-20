@@ -8,11 +8,11 @@
 > Git history was NOT carried across the repo boundary (a cross-repo move cannot); flow's history
 > retains it up to this commit.
 
-> ### 🔬 DIOGENES — NEWEST: `diogenes_20260918.md` · **STILL OPEN: 2** @ `48acdbe`
-> 5 episode(s) — LOW 2 — 2 of 5 episode(s) carry a severity; the other 3 are COVERAGE 1 · SELF 1 · STILL OPEN 1. Routed UNTRIAGED by `route_diogenes.py`; the count above is Diogenes' own slot, not the ritual's.
-> ⛔ **ZERO human commits in the last 24h — THIS COUNT CANNOT HAVE FALLEN, BY CONSTRUCTION.** Nothing changed, so nothing could close and no new defect could be introduced. A rise here is Diogenes reading further into a static codebase, NOT the code getting worse. Do not read it as a defect rate, and do not treat the rise as work you caused.
-> ⚙ COORDINATES: 1/2 confirmed at HEAD 48acdbe. ⚠ 1 could NOT be confirmed — look, do not assume the reviewer was wrong (a remediated finding reads the same as a bad coordinate): anneal_memory/server.py:869 -> quoted text is at :872 (+3)
-> *(Pointer written 2026-09-18 by route_diogenes.py. `spore-473`: a routed report with no reader is a disposal chute.)*
+> ### 🔬 DIOGENES — NEWEST: `diogenes_20260920.md` · **STILL OPEN: 2** @ `d70678b`
+> 5 episode(s) — LOW 2 — 2 of 5 episode(s) carry a severity; the other 3 are COVERAGE 1 · COVERAGE-OPEN 1 · STILL OPEN 1. Routed UNTRIAGED by `route_diogenes.py`; the count above is Diogenes' own slot, not the ritual's.
+> ▶ 4 human commit(s) in the last 24h — the count could move in either direction this window.
+> ⚙ COORDINATES: 0 of 2 finding(s) carried quoted text, so NONE could be checked. This is not a clean result.
+> *(Pointer written 2026-09-20 by route_diogenes.py. `spore-473`: a routed report with no reader is a disposal chute.)*
 
 > ✅ **2026-09-19 (0919+21 maint-seat): both `diogenes_20260918.md` LOWs CLOSED on main** (`b66d5fb`, `4504dea`, `35553ed`; triage in that file; unreleased, 0.9.12 still pending). The count above is Diogenes' snapshot, not current.
 

@@ -888,39 +888,6 @@ def test_a_policy_flip_during_a_tokenless_save_rolls_it_back(store, tmp_path, mo
     assert store.status().wrap_in_progress
 
 
-def test_no_hardlink_fallback_is_still_create_only(cp, monkeypatch):
-    # L3 round 2 (codex + glm + complement): os.link failing for want of hard links must not
-    # fall back to a silent overwrite. Simulate EPERM, no flock, and a racer landing first.
-    import errno as _errno
-
-    _no_lock(monkeypatch)
-
-    def no_link(src, dst):
-        raise OSError(_errno.EPERM, "no hard links here")
-
-    monkeypatch.setattr(sessions.os, "link", no_link)
-    first = sessions.claim_baton(cp, "s1")  # unheld: the O_EXCL create path
-    assert first["previous_holder"] is None and sessions.holds_baton(cp, "s1")
-    with pytest.raises(sessions.BatonHeldError):
-        sessions.claim_baton(cp, "s2")
-    # a racer that wins between our read and our create: O_EXCL refuses, we re-read, refuse
-    sessions.release_baton(cp, "s1")
-    real_read = sessions._read_baton
-
-    def read_then_race(path):
-        data = real_read(path)
-        if data is None and not sessions._baton_path(cp).exists():
-            monkeypatch.setattr(sessions, "_read_baton", real_read)
-            sessions.claim_baton(cp, "racer")
-        return data
-
-    monkeypatch.setattr(sessions, "_read_baton", read_then_race)
-    with pytest.raises(sessions.BatonHeldError) as ei:
-        sessions.claim_baton(cp, "s2")
-    assert ei.value.holder == "racer" and sessions.holds_baton(cp, "racer")
-    leftovers = [q.name for q in cp.parent.iterdir() if q.name.startswith(".")]
-    assert leftovers == []
-
 
 def test_an_unexpected_link_error_is_not_swallowed(cp, monkeypatch):
     import errno as _errno
@@ -951,30 +918,6 @@ def test_close_session_warns_when_the_release_fails(cp, monkeypatch):
 # -- L3 round-3 fixes --
 
 
-def test_a_failed_exclusive_write_leaves_no_wedged_baton(cp, monkeypatch):
-    # codex + complement MED: the O_EXCL fallback published the file before writing it, so a
-    # failure mid-write left an empty baton that failed every later claim closed.
-    import errno as _errno
-
-    _no_lock(monkeypatch)
-    monkeypatch.setattr(sessions.os, "link",
-                        lambda s, d: (_ for _ in ()).throw(OSError(_errno.EPERM, "no links")))
-    real_dump = sessions.json.dump
-    calls = []
-
-    def dump_fails_on_the_final_file(obj, fh, *a, **k):
-        calls.append(fh.name)
-        if len(calls) == 2:  # 1st: the tmp; 2nd: the O_EXCL-created baton
-            raise OSError(_errno.ENOSPC, "disk full")
-        return real_dump(obj, fh, *a, **k)
-
-    monkeypatch.setattr(sessions.json, "dump", dump_fails_on_the_final_file)
-    with pytest.raises(OSError):
-        sessions.claim_baton(cp, "s1")
-    assert not sessions._baton_path(cp).exists()
-    monkeypatch.setattr(sessions.json, "dump", real_dump)
-    assert sessions.claim_baton(cp, "s1")["previous_holder"] is None  # not wedged
-
 
 def test_close_session_releases_even_when_the_unlink_fails(cp, monkeypatch):
     sessions.register_session(cp, "me")
@@ -1001,3 +944,42 @@ def test_close_session_warning_cannot_raise(cp, monkeypatch):
     with _w.catch_warnings():
         _w.simplefilter("error")
         sessions.close_session(cp, "me")  # -W error: must not raise
+
+
+def test_no_flock_no_hardlinks_fails_closed_and_take_still_works(cp, monkeypatch):
+    # L3 rounds 2-4: the O_EXCL fallback kept producing HIGHs (racer deletion, wedged baton).
+    # Withdrawn: without flock and hard links an unheld claim fails closed, nothing written.
+    import errno as _errno
+
+    _no_lock(monkeypatch)
+    monkeypatch.setattr(sessions.os, "link",
+                        lambda s, d: (_ for _ in ()).throw(OSError(_errno.EPERM, "no links")))
+    with pytest.raises(OSError, match="neither flock nor hard links"):
+        sessions.claim_baton(cp, "s1")
+    assert not sessions._baton_path(cp).exists()
+    assert [q.name for q in cp.parent.iterdir() if q.name.startswith(".")] == []
+    assert sessions.claim_baton(cp, "s1", take=True)["previous_holder"] is None
+    assert sessions.holds_baton(cp, "s1")
+
+
+def test_close_session_survives_a_broken_log_handler(cp, monkeypatch):
+    import logging as _logging
+    import warnings as _w
+
+    class Broken(_logging.Handler):
+        def emit(self, record):
+            raise OSError("handler down")
+
+    logger = _logging.getLogger("anneal_memory.sessions")
+    handler = Broken()
+    logger.addHandler(handler)
+    monkeypatch.setattr(logger, "propagate", False)
+    monkeypatch.setattr(_logging, "raiseExceptions", False, raising=False)
+    try:
+        monkeypatch.setattr(sessions, "release_baton",
+                            lambda *a, **k: (_ for _ in ()).throw(PermissionError("x")))
+        with _w.catch_warnings():
+            _w.simplefilter("error")
+            sessions.close_session(cp, "me")
+    finally:
+        logger.removeHandler(handler)

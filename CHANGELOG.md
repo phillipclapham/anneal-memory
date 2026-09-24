@@ -24,7 +24,9 @@ Severs each named pattern (`sever_pattern_concept`: its pattern-graph edges dele
 bumped) inside the same transaction as the wrap, so a save that fails to commit severs nothing. The
 result gains a `composted` key (name to edges severed) only when `compost` is passed; the default path
 is unchanged. A composted name is not re-seeded by the same save's co-graduation step, and a name that
-also graduated in the saved text raises a `UserWarning`. Library-only; no CLI or MCP surface.
+also graduated in the saved text raises a `UserWarning` once the save has fully committed (logged
+instead if the warning itself raises). Names must be non-empty strings with no surrounding whitespace
+(`TypeError` otherwise), checked after the wrap-state preconditions. Library-only; no CLI or MCP surface.
 
 ### Fixed — a failing auto-prune no longer reports a committed save as failed
 

@@ -6164,11 +6164,16 @@ class TestCompostSever:
                 + f'\n## Decisions\n[decided(rationale: "x", on: "{today}")] ok\n\n'
                 "## Context\nWorking.\n"
             )
-            with pytest.warns(UserWarning, match="also graduated"):
+            # L3 consensus HIGH (complement + codex): the overlap warning ran
+            # after the commit and before the renames, so an error filter
+            # reported a committed wrap as failed. It must still save.
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
                 result = validated_save_continuity(
                     store, text, wrap_token=token, compost=["alpha"]
                 )
             assert result["composted"] == {"alpha": 0}
+            assert store.continuity_path.read_text(encoding="utf-8") == text
             names = store._conn.execute(
                 "SELECT name_a, name_b FROM pattern_associations"
             ).fetchall()

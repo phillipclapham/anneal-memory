@@ -636,13 +636,17 @@ def test_status_markers_are_never_a_patterns_explanation():
         # L1 HIGH on the first fix: anneal's own stance markers, which carry spaces.
         "- !! stance_only | 3x (2026-09-23) [contradicts: x] (carried-forward) "
         "[provenance: flow]\n"
+        # codex L3 MED: a marker-only quoted why is not meaning either.
+        '- !! quoted_marker | 3x (2026-09-23) [evidence: a1 "[no-contradicts]"]\n'
         "\n```crystal-decisions\n"
         "invisible_infrastructure_failure | crystallize | timeless | just-in-time\n"
         "the_device_is_the_oracle | crystallize | timeless | just-in-time\n"
-        "stance_only | crystallize | timeless | just-in-time\n```"
+        "stance_only | crystallize | timeless | just-in-time\n"
+        "quoted_marker | crystallize | timeless | just-in-time\n```"
     )
-    carried, oracle, stance = parse_crystal_decisions(wrap)
+    carried, oracle, stance, quoted = parse_crystal_decisions(wrap)
     assert stance.explanation == ""
+    assert quoted.explanation == ""
     assert carried.level == 5
     assert carried.explanation == ""
     assert oracle.evidence_ids == ["24535293", "6b573c87"]

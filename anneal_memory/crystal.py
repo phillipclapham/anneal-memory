@@ -1078,7 +1078,7 @@ def _extract_pattern_meta(wrap_text: str, name: str) -> tuple[int | None, str, l
     if dash != -1:
         explanation = _meaningful(detail[dash + 1:])
     if not explanation:
-        explanation = quoted_why
+        explanation = _meaningful(quoted_why)
     if not explanation:
         explanation = _meaningful(detail if dash == -1 else detail[:dash])
     return best_level, explanation, evidence_ids
@@ -1088,19 +1088,35 @@ def _extract_pattern_meta(wrap_text: str, name: str) -> tuple[int | None, str, l
 # (``[contradicts: …]``, ``[provenance: …]``, ``[no-contradicts]``, …) and the
 # immune-state parentheticals (``(carried-forward)``, …). A closed vocabulary, so
 # bracketed prose (``[edge cases]``, ``(v2)``, ``[[sibling]]``) is never a marker.
-_MARKER_RUN = rf"(?:[ \t—|-]*(?:{_SCAFFOLD_TAG_RE.pattern}|{_STATE_PAREN_RE.pattern}))+"
-_LEADING_MARKERS_RE = re.compile(rf"^{_MARKER_RUN}", re.IGNORECASE)
-_TRAILING_MARKERS_RE = re.compile(rf"{_MARKER_RUN}[ \t]*$", re.IGNORECASE)
+_ONE_MARKER_RE = re.compile(
+    rf"{_SCAFFOLD_TAG_RE.pattern}|{_STATE_PAREN_RE.pattern}", re.IGNORECASE
+)
+_SEPARATORS = " \t—-|"
 
 
 def _meaningful(text: str) -> str:
-    """``text`` with marker runs removed from its START and END only (a marker
+    """``text`` with markers removed from its START and END only (a marker
     mid-sentence is left alone: deleting words from prose that is then stored as a
     pattern's meaning is worse than keeping them), separator debris stripped;
-    ``""`` when nothing but markers was there."""
-    text = _LEADING_MARKERS_RE.sub("", text)
-    text = _TRAILING_MARKERS_RE.sub("", text)
-    return text.strip(" \t—-|")
+    ``""`` when nothing but markers was there.
+
+    One marker per step, each matched at a known offset (the start, or the last
+    ``[`` / ``(``). A repeated-group regex anchored at ``$`` instead retries from
+    every start position, which was quadratic on a long separator run (L3)."""
+    text = text.strip(_SEPARATORS)
+    while text:
+        m = _ONE_MARKER_RE.match(text)
+        if m:
+            text = text[m.end():].strip(_SEPARATORS)
+            continue
+        for opener in "[(":
+            i = text.rfind(opener)
+            if i != -1 and _ONE_MARKER_RE.fullmatch(text, i):
+                text = text[:i].strip(_SEPARATORS)
+                break
+        else:
+            break
+    return text
 
 
 def _structural_dash(text: str) -> int:

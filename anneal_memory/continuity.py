@@ -1943,22 +1943,6 @@ def validated_save_continuity(
     """
     from .associations import process_wrap_associations
 
-    # Caller misuse, refused before anything is read or written. A bare string
-    # would otherwise iterate as single characters and sever the wrong names.
-    # Materialized first: validating a one-shot iterator would exhaust it.
-    compost_names: list[str] | None = None
-    if compost is not None:
-        if isinstance(compost, (str, bytes)):
-            raise TypeError(
-                "compost must be a list of non-empty pattern-name strings"
-            )
-        compost = list(compost)
-        if not all(isinstance(n, str) and n.strip() for n in compost):
-            raise TypeError(
-                "compost must be a list of non-empty pattern-name strings"
-            )
-        compost_names = list(dict.fromkeys(n.strip() for n in compost))
-
     # --- Wrap-state preconditions, checked BEFORE payload validation ---
     #
     # Ordering is deliberate: a save with no wrap to commit to is
@@ -2022,7 +2006,26 @@ def validated_save_continuity(
                 f"fresh token."
             )
 
-    # --- Payload validation: the continuity text itself ---
+    # --- Payload validation: compost, then the continuity text itself ---
+    # Materialized first: validating a one-shot iterator would exhaust it. A
+    # padded name is refused rather than stripped, so the ``composted`` result
+    # is keyed by exactly the strings the caller passed.
+    compost_names: list[str] | None = None
+    if compost is not None:
+        if isinstance(compost, (str, bytes)):
+            raise TypeError(
+                "compost must be a list of non-empty pattern-name strings"
+            )
+        compost = list(compost)
+        if not all(
+            isinstance(n, str) and n and n == n.strip() for n in compost
+        ):
+            raise TypeError(
+                "compost must be a list of non-empty pattern-name strings "
+                "without leading or trailing whitespace"
+            )
+        compost_names = list(dict.fromkeys(compost))
+
     if not text or not text.strip():
         raise ValueError("Continuity text cannot be empty")
 
@@ -2248,6 +2251,7 @@ def validated_save_continuity(
     db_committed = False
     linkgate_overridden = False
     composted: dict[str, int] = {}
+    still_graduating: list[str] = []
 
     try:
         # Phase 2: batched DB DML.
@@ -2435,17 +2439,10 @@ def validated_save_continuity(
                 store.seed_pattern_co_graduation(seed_names, today=today_str)
         except Exception:
             pass
+        # Warned only after Phase 3, through _warn_after_commit.
         still_graduating = sorted(
             set(composted) & set(grad_result.graduated_names)
         )
-        if still_graduating:
-            warnings.warn(
-                f"compost: {still_graduating} also graduated in this wrap's "
-                f"text. Their edges were severed and not re-seeded; if the "
-                f"pattern is still live, it should not have been composted.",
-                UserWarning,
-                stacklevel=2,
-            )
 
         # Phase 3: DB commit succeeded — externalize files.
         # At this point cont_tmp is still the Path returned from
@@ -2875,6 +2872,12 @@ def validated_save_continuity(
             "graduations offered co-citation pairs while 0 Hebbian associations "
             "were formed or strengthened. The association write path recorded "
             "nothing; check it before the next wrap."
+        )
+    if still_graduating:
+        _warn_after_commit(
+            f"compost: {still_graduating} also graduated in this wrap's text. "
+            f"Their edges were severed and not re-seeded; if the pattern is "
+            f"still live, it should not have been composted."
         )
 
     # AM-CARRYFORWARD (v0.4.6) + AM-PROVENANCE (Slice A): assisted "ground,

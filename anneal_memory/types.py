@@ -531,8 +531,9 @@ class PrepareWrapResult(TypedDict):
     ``assoc_context`` are ``None``), ``"ready"`` (package built, wrap
     marked in progress on the store), or ``"downgraded"`` (the
     consolidate-efferent gate auto-downgraded this session to
-    capture-only — a parallel session that is neither the sole live
-    session nor the baton-holder; ``package``/``wrap_token`` ``None``,
+    capture-only — a session that does not hold the consolidate baton
+    (or, under ``allow_sole_live``, is neither the sole live session nor
+    the baton-holder); ``package``/``wrap_token`` ``None``,
     the human-readable reason is in ``message``, the store left
     untouched). The ``Literal`` discriminant
     gives type checkers a switchable tag and lets IDE autocomplete

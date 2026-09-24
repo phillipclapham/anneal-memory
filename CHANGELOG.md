@@ -2,6 +2,47 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed (BREAKING for callers that pass `session_id`) — every consolidate needs the baton
+
+⚖ Ruled by the operator on 2026-09-24 (flow spore-1105 (b), spore-1169). `consolidate_authorized` and
+`prepare_wrap(session_id=...)` no longer authorize a session just because no other registered session
+is live. Without the baton they now downgrade with the new reason `downgraded-no-baton`. The reason:
+"no other session is live" is judged from a registry snapshot that a resumed session or a TTL crossing
+can race, and the gate exists so that growing automation cannot recompose the felt layer unbidden. The
+old rule survives as an explicit keyword, `allow_sole_live=True`, on both functions. Callers that pass
+no `session_id` are unaffected: the gate stays inert for them.
+
+**Migration:** a single-session caller that relied on the sole-live grant calls
+`sessions.claim_baton(store.continuity_path, session_id)` once, or passes `allow_sole_live=True`.
+
+### Changed (BREAKING) — taking the baton from another session needs `take=True`
+
+`claim_baton(continuity_path, session_id, *, take=False)` no longer does last-claim-wins. If another
+session holds the baton, or the baton file is unreadable, it raises the new `BatonHeldError`
+(an `AnnealMemoryError`, exported at the top level, carrying `holder` and `unreadable`) unless
+`take=True`. A claim by the current holder is a no-op success: nothing is written, and the original
+`claimed_at` comes back with `previous_holder` equal to the caller. Claiming an unheld baton now
+creates the file exclusively (`os.link`), so of two sessions racing for it exactly one wins and the
+other gets `BatonHeldError` instead of silently overwriting.
+
+**Migration:** a caller that has already decided to take the baton, as flow's `baton claim --take`
+does, passes `take=True`. Without that change the take path raises.
+
+### Fixed — a wrong-shape baton or session file no longer crashes the gate and wedges recovery
+
+A baton file holding valid JSON of the wrong shape (`[]`, `null`, a string, an object with no usable
+`session_id`) or non-UTF-8 bytes made `baton_holder` raise `AttributeError` or `UnicodeDecodeError`.
+No caller caught those, so `claim_baton` crashed instead of recovering (wedging the documented recovery
+path), `release_baton` and `close_session` crashed, and `prepare_wrap` raised instead of downgrading.
+Reproduced against 0.9.12 for `[]`, `null`, a string and `\xff`. Such files now raise the new
+`sessions.CorruptSidecarError`, a `json.JSONDecodeError` subclass, so every caller that fails closed on
+`(OSError, JSONDecodeError)` covers them: the gate downgrades with `downgraded-registry-error`, release
+returns `False` and leaves the file alone, and `claim_baton(..., take=True)` replaces it atomically.
+A fresh session file of the wrong shape, or one with no usable `session_id`, fails closed the same way.
+It used to be skipped, which under-counted a live peer.
+
 ## [0.9.12] — 2026-09-24
 
 ### Fixed — a crystal decision no longer takes status markers as a pattern's meaning

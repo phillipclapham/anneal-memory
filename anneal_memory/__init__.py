@@ -58,6 +58,7 @@ from .continuity import (
     validated_save_continuity,
 )
 from . import sessions
+from .sessions import BatonHeldError
 from .graduation import (
     CrossSessionCollision,
     OmittedPattern,
@@ -163,6 +164,7 @@ __all__ = [
     "format_wrap_package_text",
     "validated_save_continuity",
     "sessions",
+    "BatonHeldError",
     "validate_graduations",
     "check_explanation_overlap",
     "detect_stale_patterns",

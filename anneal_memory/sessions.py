@@ -79,6 +79,7 @@ import math
 import os
 import tempfile
 import time
+import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -104,6 +105,13 @@ DEFAULT_TTL_SECONDS = 5400
 _SESSIONS_SUFFIX = ".sessions"
 _BATON_SUFFIX = ".baton"
 _BATON_LOCK_SUFFIX = ".baton.lock"
+# os.link failures that mean "this filesystem has no hard links", not "something is wrong".
+_NO_HARDLINK_ERRNOS = frozenset(
+    e for e in (
+        getattr(errno, "EPERM", None), getattr(errno, "ENOTSUP", None),
+        getattr(errno, "EOPNOTSUPP", None), getattr(errno, "ENOSYS", None),
+    ) if e is not None
+)
 _SESSION_FILE_SUFFIX = ".session"
 
 PathLike = str | os.PathLike[str]
@@ -274,11 +282,19 @@ def _atomic_write_json(
                 os.link(tmp, path)  # FileExistsError when another creator already won
             except FileExistsError:
                 raise
-            except OSError:
-                # No hard links here (FAT/exFAT, some FUSE/SMB mounts): there is no atomic
-                # create-only primitive left, so fall back to a plain replace.
-                os.replace(tmp, path)
-                return
+            except OSError as exc:
+                if exc.errno not in _NO_HARDLINK_ERRNOS:
+                    raise
+                # No hard links here (FAT/exFAT, some FUSE/SMB mounts). Still create-only:
+                # O_EXCL fails with FileExistsError if a racer created it first. The content
+                # lands after the create, so a reader can briefly see an empty file; that
+                # reads as corrupt and fails closed, never as "unheld". Never os.replace:
+                # that would silently overwrite a racer's claim (L3 round 2, three seats).
+                fd2 = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd2, "w", encoding="utf-8") as out:
+                    json.dump(payload, out)
+                    out.flush()
+                    os.fsync(out.fileno())
         else:
             os.replace(tmp, path)
     except BaseException:
@@ -343,8 +359,14 @@ def close_session(continuity_path: PathLike, session_id: str) -> None:
         pass
     try:
         release_baton(continuity_path, session_id)
-    except OSError:
-        pass  # best-effort teardown: a lock-file fault must not fail closing a session
+    except OSError as exc:
+        # Best-effort teardown must not fail closing a session, but a baton this session may
+        # still hold is exactly the phantom designation described above: say so.
+        warnings.warn(
+            f"close_session: could not release the baton for {session_id!r} "
+            f"({type(exc).__name__}: {exc}); if this session held it, it is still held.",
+            stacklevel=2,
+        )
 
 
 def live_sessions(
@@ -575,8 +597,11 @@ def release_baton(continuity_path: PathLike, session_id: str) -> bool:
     between them and be deleted, which would leave the baton unheld and claimable by anyone.
     Where the lock is unavailable that window remains (see :func:`_baton_lock`).
     """
-    if not _baton_path(continuity_path).exists():
-        return False  # nothing to release; no lock, and no lock file created
+    try:
+        if not _baton_path(continuity_path).exists():
+            return False  # nothing to release; no lock, and no lock file created
+    except OSError:
+        return False  # cannot even stat it: ownership unconfirmable
     with _baton_lock(continuity_path):
         try:
             held = holds_baton(continuity_path, session_id)

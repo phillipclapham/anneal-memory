@@ -816,42 +816,6 @@ def _lock_is_held_elsewhere(cp) -> bool:
         os.close(fd)
 
 
-def test_save_holds_the_baton_lock_through_the_commit(store, monkeypatch):
-    # codex HIGH / complement MED: the save's baton check must not be a one-shot TOCTOU. A take
-    # (which needs this lock) cannot land between the check and wrap_completed.
-    store.record("obs", EpisodeType.OBSERVATION)
-    cp = store.continuity_path
-    sessions.claim_baton(cp, "A")
-    prep = prepare_wrap(store, session_id="A")
-    real = store.wrap_completed
-    seen = []
-
-    def probe(*a, **k):
-        seen.append(_lock_is_held_elsewhere(cp))
-        return real(*a, **k)
-
-    monkeypatch.setattr(store, "wrap_completed", probe)
-    validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"], session_id="A")
-    assert seen == [True]
-    assert not _lock_is_held_elsewhere(cp)  # released after the commit
-
-
-def test_policy_setter_takes_the_baton_lock(store, monkeypatch):
-    # codex HIGH: turning the policy on must serialize against an in-flight save's commit.
-    import contextlib
-
-    entered = []
-    real = sessions._baton_lock
-
-    @contextlib.contextmanager
-    def recording(cp):
-        with real(cp) as locked:
-            entered.append(locked)
-            yield locked
-
-    monkeypatch.setattr(sessions, "_baton_lock", recording)
-    store.set_consolidate_requires_baton(True)
-    assert entered == [True]
 
 
 def test_non_bool_take_and_allow_sole_live_are_refused(store):
@@ -865,6 +829,8 @@ def test_non_bool_take_and_allow_sole_live_are_refused(store):
     store.record("obs", EpisodeType.OBSERVATION)
     with pytest.raises(TypeError):
         prepare_wrap(store, session_id="B", allow_sole_live="false")  # type: ignore[arg-type]
+    with pytest.raises(TypeError):  # checked at entry, on every path
+        prepare_wrap(store, allow_sole_live="false")  # type: ignore[arg-type]
     assert not store.status().wrap_in_progress
 
 
@@ -874,17 +840,109 @@ def test_release_without_a_baton_touches_no_lock_file(cp):
     assert not any(p.name.endswith(".baton.lock") for p in cp.parent.iterdir())
 
 
-def test_protected_store_without_flock_fails_closed_unprotected_proceeds(store, monkeypatch):
+def test_a_take_during_the_save_rolls_the_commit_back(store, monkeypatch):
+    # codex L3 HIGH (round 1): the early baton check was a one-shot TOCTOU. The authoritative
+    # re-check runs inside the batch, after wrap_completed, and a failure rolls the batch back.
     store.record("obs", EpisodeType.OBSERVATION)
     cp = store.continuity_path
     sessions.claim_baton(cp, "A")
     prep = prepare_wrap(store, session_id="A")
-    _no_lock(monkeypatch)
-    store.set_consolidate_requires_baton(True)
-    with pytest.raises(ValueError, match="lock is unavailable"):
+    real = store.wrap_completed
+
+    def take_then_complete(*a, **k):
+        sessions.claim_baton(cp, "B", take=True)  # lands after the early check
+        return real(*a, **k)
+
+    monkeypatch.setattr(store, "wrap_completed", take_then_complete)
+    before = store.continuity_path.read_text() if store.continuity_path.exists() else None
+    with pytest.raises(ValueError, match="does not hold the consolidate baton"):
         validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"],
                                   session_id="A")
+    assert store.get_wrap_history() == []
+    assert store.status().wrap_in_progress  # rolled back to what prepare left
+    after = store.continuity_path.read_text() if store.continuity_path.exists() else None
+    assert after == before
+    leftovers = [q.name for q in store.continuity_path.parent.iterdir() if ".tmp" in q.name]
+    assert leftovers == []
+
+
+def test_a_policy_flip_during_a_tokenless_save_rolls_it_back(store, tmp_path, monkeypatch):
+    # codex L3 HIGH (round 1): the policy could be switched on between a save's read and its
+    # commit. A second connection flips it mid-save; the in-transaction re-read catches it.
+    # Flipped in the gap after the early check and before the batch (the tmp staging step).
+    # Inside the batch the other connection cannot write at all: this save holds the lock.
+    store.record("obs", EpisodeType.OBSERVATION)
+    prepare_wrap(store)
+    real = store._prepare_continuity_write
+
+    def flip_then_stage(*a, **k):
+        other = Store(str(store.path))
+        other.set_consolidate_requires_baton(True)
+        other.close()
+        return real(*a, **k)
+
+    monkeypatch.setattr(store, "_prepare_continuity_write", flip_then_stage)
+    with pytest.raises(ValueError, match="baton-protected"):
+        validated_save_continuity(store, _WRAP_TEXT)
+    assert store.get_wrap_history() == []
     assert store.status().wrap_in_progress
-    store.set_consolidate_requires_baton(False)
-    validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"], session_id="A")
-    assert len(store.get_wrap_history()) == 1
+
+
+def test_no_hardlink_fallback_is_still_create_only(cp, monkeypatch):
+    # L3 round 2 (codex + glm + complement): os.link failing for want of hard links must not
+    # fall back to a silent overwrite. Simulate EPERM, no flock, and a racer landing first.
+    import errno as _errno
+
+    _no_lock(monkeypatch)
+
+    def no_link(src, dst):
+        raise OSError(_errno.EPERM, "no hard links here")
+
+    monkeypatch.setattr(sessions.os, "link", no_link)
+    first = sessions.claim_baton(cp, "s1")  # unheld: the O_EXCL create path
+    assert first["previous_holder"] is None and sessions.holds_baton(cp, "s1")
+    with pytest.raises(sessions.BatonHeldError):
+        sessions.claim_baton(cp, "s2")
+    # a racer that wins between our read and our create: O_EXCL refuses, we re-read, refuse
+    sessions.release_baton(cp, "s1")
+    real_read = sessions._read_baton
+
+    def read_then_race(path):
+        data = real_read(path)
+        if data is None and not sessions._baton_path(cp).exists():
+            monkeypatch.setattr(sessions, "_read_baton", real_read)
+            sessions.claim_baton(cp, "racer")
+        return data
+
+    monkeypatch.setattr(sessions, "_read_baton", read_then_race)
+    with pytest.raises(sessions.BatonHeldError) as ei:
+        sessions.claim_baton(cp, "s2")
+    assert ei.value.holder == "racer" and sessions.holds_baton(cp, "racer")
+    leftovers = [q.name for q in cp.parent.iterdir() if q.name.startswith(".")]
+    assert leftovers == []
+
+
+def test_an_unexpected_link_error_is_not_swallowed(cp, monkeypatch):
+    import errno as _errno
+
+    _no_lock(monkeypatch)
+
+    def broken(src, dst):
+        raise OSError(_errno.EIO, "io error")
+
+    monkeypatch.setattr(sessions.os, "link", broken)
+    with pytest.raises(OSError) as ei:
+        sessions.claim_baton(cp, "s1")
+    assert ei.value.errno == _errno.EIO
+    assert not sessions._baton_path(cp).exists()
+
+
+def test_close_session_warns_when_the_release_fails(cp, monkeypatch):
+    sessions.claim_baton(cp, "me")
+
+    def boom(*a, **k):
+        raise PermissionError("lock file not ours")
+
+    monkeypatch.setattr(sessions, "release_baton", boom)
+    with pytest.warns(UserWarning, match="could not release the baton"):
+        sessions.close_session(cp, "me")

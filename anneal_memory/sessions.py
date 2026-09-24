@@ -532,7 +532,9 @@ def claim_baton(
     The decision and the write happen under :func:`_baton_lock`, so a concurrent claim or
     release cannot interleave. Where the lock is unavailable, an unheld baton is created
     exclusively instead (of two racing claimers exactly one wins), retried a bounded number of
-    times if the baton keeps changing underneath.
+    times if the baton keeps changing underneath. That create needs hard links: on a filesystem
+    with neither ``flock`` nor hard links it raises the underlying ``OSError`` with nothing
+    written, and ``take=True`` claims by deliberate overwrite instead.
 
     ⚠ This function cannot tell a human designation from an agent calling it: anyone who calls
     it while the baton is unheld gets it. Keeping the baton away from automation is the
@@ -565,22 +567,12 @@ def claim_baton(
                 "claimed_at": claimed_at,
                 "previous_holder": previous,
             }
-            exclusive = not (locked or take)
             try:
                 # An unheld baton without the lock: create-only, so a racing claimer loses
                 # loudly instead of being silently overwritten.
-                _atomic_write_json(path, payload, exclusive=exclusive)
+                _atomic_write_json(path, payload, exclusive=not (locked or take))
             except FileExistsError:
                 continue  # someone claimed it since our read: decide again against theirs
-            except OSError as exc:
-                if not exclusive:
-                    raise
-                raise OSError(
-                    exc.errno,
-                    "claim_baton: this filesystem offers neither flock nor hard links, so an "
-                    "unheld baton cannot be claimed exclusively. Nothing was written. "
-                    "take=True claims it by overwrite, deliberately.",
-                ) from exc
             return BatonClaim(
                 session_id=session_id, claimed_at=claimed_at, previous_holder=previous
             )

@@ -954,8 +954,9 @@ def test_no_flock_no_hardlinks_fails_closed_and_take_still_works(cp, monkeypatch
     _no_lock(monkeypatch)
     monkeypatch.setattr(sessions.os, "link",
                         lambda s, d: (_ for _ in ()).throw(OSError(_errno.EPERM, "no links")))
-    with pytest.raises(OSError, match="neither flock nor hard links"):
+    with pytest.raises(OSError) as ei:
         sessions.claim_baton(cp, "s1")
+    assert ei.value.errno == _errno.EPERM  # the real cause, not a relabel
     assert not sessions._baton_path(cp).exists()
     assert [q.name for q in cp.parent.iterdir() if q.name.startswith(".")] == []
     assert sessions.claim_baton(cp, "s1", take=True)["previous_holder"] is None

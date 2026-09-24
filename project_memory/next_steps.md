@@ -23,6 +23,44 @@
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
 
+## 🟡 0.9.13 = flow spore-1169 (the consolidate-baton gate), on main, `0924+15 anneal-memory-seat`, 2026-09-24. Re-derive; do not trust these lines.
+- **Is it published?** `curl -s https://pypi.org/simple/anneal-memory/ | grep -o 'anneal_memory-0\.9\.13[^<]*'`. If it is empty, 0.9.13 is not out. Publishing needed Phill's word through the desk, because L3 round 4 was not clean.
+- **What it contains:** `git log --oneline d074ab3..HEAD -- anneal_memory`, with CHANGELOG `[Unreleased]` or `[0.9.13]` as the prose.
+  - ⚖ Phill's 09-24 rulings are enforced in anneal: every consolidate needs the baton (`allow_sole_live=False` by default, reason `downgraded-no-baton`), and `claim_baton(take=False)` refuses another holder or an unreadable baton (`BatonHeldError`).
+  - Wrong-shape or unparseable sidecars fail closed (`CorruptSidecarError`).
+  - Claim and release are serialized by a flock on `<continuity>.baton.lock`.
+  - `validated_save_continuity(session_id=)` re-checks the baton inside the save's DB transaction, as the batch's last statement.
+  - There is an opt-in store policy `Store.set_consolidate_requires_baton`, shown by `status`.
+- **Documented residual:** a baton take (a sidecar write) that lands between the save's in-transaction check and its commit is not seen. A lock held across the commit was tried and withdrawn in L3 (commit-then-unlock data loss; audit-callback deadlock).
+- **Withdrawn in L3:** the O_EXCL no-hardlink fallback, which produced HIGHs in rounds 2 through 4. Without flock and hard links, an unheld claim raises the real `OSError`; `take=True` overwrites.
+- **L3 record** (verdict rows are in flow `state/verdicts.jsonl`):
+  - r1: 2 HIGH (save TOCTOU; policy flip).
+  - r2: 5 HIGH, all from the lock across the commit, so it was withdrawn and redesigned.
+  - r3: no HIGH.
+  - r4: 2 HIGH, all in the fallback, so it was deleted.
+  - r5 (deletion delta): no HIGH.
+- **Compat gate, re-derivable:**
+  - Export flow read-only: `git -C ~/Briefcase/flow archive <flow-main> scripts tests | tar -x -C $T/flow`.
+  - Install the wheel in a clean venv.
+  - From `$T/flow`, run `python -m pytest tests/test_dualwrite_session_reconcile.py tests/test_dualwrite_crystal_decisions.py tests/test_consolidate_refuses_foreign_lineage.py tests/test_peer_roster_reconciliation.py -q -p no:cacheprovider`.
+  - [run 2026-09-24] flow 7aa8d530: candidate 114 passed; PyPI 0.9.12 111 passed + 3 skipped.
+  - Unadapted flow (before 40ba2756) fails 11 on this version: its `baton claim --take` raises. The adaptation is flow 40ba2756; the patch is kept at `project_memory/flow_adaptation_0913.patch`.
+- ⛔ **ORDERING, for whoever protects a store:**
+  1. The consumer's save passes `session_id`.
+  2. THEN `Store(db).set_consolidate_requires_baton(True)`.
+  - On a protected store, a save without `session_id` + `wrap_token` is refused [run on a store copy with flow's current save: refused, nothing written]. Levain additionally needs `session_id` at prepare, plus a baton claim step, or every Levain wrap downgrades.
+- **REMAINING (not done):**
+  - flow: pass `session_id` to the save, then set the policy on the neocortex.
+  - Levain: session_id + baton at prepare/save, before any policy.
+  - ⚖ FOR PHILL (L2 M1): claiming an UNHELD baton needs no deliberate act, so automation that calls `claim_baton` while the baton is released self-authorizes. Options: require `take`/`designate` for any claim on a protected store, or keep the baton held.
+  - On no-flock platforms (Windows), take/release still race (msvcrt locking would close it).
+  - `wrap_cancel` and the empty-window path in prepare are ungated on a protected store: they can discard the holder's in-flight wrap, but not write.
+  - The JSON export drops the policy; anneal ≤0.9.12 ignores it.
+  - CLI `prepare-wrap` exits 0 on a downgrade.
+  - Link debris if a crash lands between `os.link` and the tmp unlink (LOW).
+  - Carried: (c) compare-and-crystallize on CrystalStore (codex MED-4, not started) · the compost `TypeError` test (LOW) · `_structural_dash` parens (LOW) · `prune_failures` persistence and CLI wiring.
+  - ⚖ OPEN AT PUBLISH: 0.9.13 or 0.10.0 (L2 argued for a minor bump; the seat kept a patch bump on 0.9.11 precedent).
+
 ## ✅ 0.9.12 RELEASED 2026-09-24 by `0924+11 anneal-memory-seat` on Phill's go ("yes publish anneal", relayed by the desk). Re-derive; do not trust these lines.
 - **What's in it:** spore-1163. `_extract_pattern_meta` never returns anneal's markers as a pattern's meaning; the order is after-dash prose → quoted evidence why → remaining text, with the marker vocabulary reused from `graduation.py`, stripped at the ends only; marker-only → `""` so crystallize refuses. Plus `validated_save_continuity(compost=[...])`, which severs inside the Phase-2 batch atomically with `wrap_completed`, is not re-seeded, and has a `composted` key only when passed. CHANGELOG `[0.9.12]` has the prose.
 - **Published:** `curl -s https://pypi.org/simple/anneal-memory/ | grep -o 'anneal_memory-0\.9\.12[^<]*'`. At upload time the sha256 matched local: whl `c202b64e…c8fc`, sdist `bf009f32…4a32`.

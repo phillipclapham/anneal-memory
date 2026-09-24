@@ -4,6 +4,28 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — a crystal decision no longer takes status markers as a pattern's meaning
+
+`parse_crystal_decisions` grounds each row on its pattern line and pulls an explanation from it. When
+the line had no prose after its em-dash, the explanation fell back to whatever was left, so a line such
+as `name | 5x (date) (carried-forward) [no-contradicts]` produced the markers themselves as the
+explanation, and a line with a quoted evidence "why" followed by `[no-contradicts]` produced the marker
+instead of the why. The order is now: prose after the em-dash, then the quoted evidence "why", then the
+remaining text. Anneal's own markers (`[contradicts: …]`, `[provenance: …]`, `[no-contradicts]`,
+`(carried-forward)` and the other immune-state tags, the same vocabulary the recall summary already
+strips) are removed only at the start and end of that text, never mid-sentence, and a line that holds
+nothing else yields `""`, which `CrystalStore.crystallize` refuses. An em-dash inside an evidence tag
+whose quote does not close is no longer taken as the separator; such a line yields `""` rather than
+the broken tag's text. Found by flow while landing its crystal-decisions consumer.
+
+### Added — `validated_save_continuity(compost=[...])`
+
+Severs each named pattern (`sever_pattern_concept`: its pattern-graph edges deleted, its generation
+bumped) inside the same transaction as the wrap, so a save that fails to commit severs nothing. The
+result gains a `composted` key (name to edges severed) only when `compost` is passed; the default path
+is unchanged. A composted name is not re-seeded by the same save's co-graduation step, and a name that
+also graduated in the saved text raises a `UserWarning`. Library-only; no CLI or MCP surface.
+
 ### Fixed — a failing auto-prune no longer reports a committed save as failed
 
 With `retention_days` configured, `validated_save_continuity` runs `prune()` after the wrap has

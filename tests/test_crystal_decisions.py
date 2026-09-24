@@ -621,3 +621,43 @@ def test_emphasis_on_pattern_line_name_is_a_safe_miss():
     assert d.route == "crystallize"  # the decision still parses
     assert d.level is None  # grounding safely failed (no corruption)
     assert d.explanation == ""
+
+
+def test_status_markers_are_never_a_patterns_explanation():
+    # spore-1163, reproduced 2026-09-24 on HEAD 3cccf4f: the 09-23 carried line has no
+    # prose and no evidence, and the parser returned its markers as the meaning
+    # ('(carried-forward) [no-contradicts]'); a line WITH a quoted why plus a trailing
+    # marker returned '[no-contradicts]' over the why. Empty is the refusal signal.
+    wrap = (
+        "- !! invisible_infrastructure_failure | 5x (2026-09-16) (carried-forward) "
+        "[no-contradicts]\n"
+        '- !! the_device_is_the_oracle | 20x (2026-09-23) [evidence: 24535293, '
+        '6b573c87 "his card read 458 ms again"] [no-contradicts]\n'
+        # L1 HIGH on the first fix: anneal's own stance markers, which carry spaces.
+        "- !! stance_only | 3x (2026-09-23) [contradicts: x] (carried-forward) "
+        "[provenance: flow]\n"
+        "\n```crystal-decisions\n"
+        "invisible_infrastructure_failure | crystallize | timeless | just-in-time\n"
+        "the_device_is_the_oracle | crystallize | timeless | just-in-time\n"
+        "stance_only | crystallize | timeless | just-in-time\n```"
+    )
+    carried, oracle, stance = parse_crystal_decisions(wrap)
+    assert stance.explanation == ""
+    assert carried.level == 5
+    assert carried.explanation == ""
+    assert oracle.evidence_ids == ["24535293", "6b573c87"]
+    assert oracle.explanation == "his card read 458 ms again"
+
+
+def test_em_dash_inside_an_unparsed_evidence_quote_is_not_the_separator():
+    # spore-1163 second half, reproduced 2026-09-24 on HEAD 3cccf4f: an inch mark
+    # unbalances the quote, the evidence tag fails to parse, and the whole-tail split
+    # fired on the em-dash INSIDE the why, returning 'clipped"] [no-contradicts]'.
+    wrap = (
+        '- !! p | 3x (2026-09-23) [evidence: a1 "the 6.1" screen — clipped"] '
+        "[no-contradicts]\n"
+        "\n```crystal-decisions\np | crystallize | timeless | just-in-time\n```"
+    )
+    (d,) = parse_crystal_decisions(wrap)
+    assert d.level == 3
+    assert d.explanation == ""

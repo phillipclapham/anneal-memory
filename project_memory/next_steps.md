@@ -23,19 +23,25 @@
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
 
-## ▶▶ 2026-09-24 — `0924+11 anneal-memory-seat`: 0.9.12 STAMPED, BUILT, PUSHED — NOT PUBLISHED (Phill's go via the desk). Re-derive; do not trust these lines.
+## ✅ 0.9.12 RELEASED 2026-09-24 by `0924+11 anneal-memory-seat` on Phill's go ("yes publish anneal", relayed by the desk). Re-derive; do not trust these lines.
 - **What's in it:** spore-1163. `_extract_pattern_meta` never returns anneal's markers as a pattern's meaning; the order is after-dash prose → quoted evidence why → remaining text, with the marker vocabulary reused from `graduation.py`, stripped at the ends only; marker-only → `""` so crystallize refuses. Plus `validated_save_continuity(compost=[...])`, which severs inside the Phase-2 batch atomically with `wrap_completed`, is not re-seeded, and has a `composted` key only when passed. CHANGELOG `[0.9.12]` has the prose.
-- **Is it published?** `curl -s https://pypi.org/simple/anneal-memory/ | grep -o 'anneal_memory-0\.9\.12[^"<#]*'`. Empty means not yet. The tag `v0.9.12` does NOT exist until the upload: `git tag --list v0.9.12`.
-- **Artifacts built 2026-09-24:** `dist/anneal_memory-0.9.12-py3-none-any.whl` sha256 c202b64e…c8fc and `dist/anneal_memory-0.9.12.tar.gz` bf009f32…4a32. twine 7.0.0 check passed both. Re-derive: `shasum -a 256 dist/anneal_memory-0.9.12*`. ⛔ Do not rebuild before the upload, because the hashes above are what was verified.
-- **Verified against the built wheel** in a clean venv (not the source tree) [run 2026-09-24]: the 09-23 carried line returns `""`, an evidence+marker line returns its quoted why, and the compost e2e severs beta's 2 edges with alpha–gamma kept, a generation tombstone and a valid audit chain (15 entries).
-- **Publish form:** spore-424 (TOKEN3, twine ≥ 7). After the upload: tag `v0.9.12` at `5e5b136` (the stamp commit, the tree the artifacts were built from; NOT HEAD if later doc-only commits landed: `git log --oneline 5e5b136..HEAD -- anneal_memory pyproject.toml server.json` should be empty), push the tag, bump to `0.9.13.dev0` at every stamp site (`git grep -n '0\.9\.12"'`), then do spore-424's three-step verify.
+- **Published:** `curl -s https://pypi.org/simple/anneal-memory/ | grep -o 'anneal_memory-0\.9\.12[^<]*'`. At upload time the sha256 matched local: whl `c202b64e…c8fc`, sdist `bf009f32…4a32`.
+- **Tag = what shipped:** `git ls-remote origin 'refs/tags/v0.9.12^{}'` should peel to `5e5b136` (the stamp commit the artifacts were built from). main moved on: `grep __version__ anneal_memory/__init__.py` should read a `.devN`.
+- **Verified against the artifact installed from PyPI** [run 2026-09-24] in a clean venv with `--no-cache-dir`: `pip show` 0.9.12 in site-packages; the 09-23 carried line returns `""`; an evidence+marker line returns its quoted why; the compost e2e severs beta's 2 edges with alpha–gamma kept and a valid audit chain (15 entries).
+- ⛔ **RELEASE ORDER THIS REPO REQUIRES (learned on this cut):**
+  1. Upload.
+  2. Create the tag LOCALLY at the stamp commit.
+  3. COMMIT the `.devN` bump.
+  4. ONLY THEN push main plus the tag.
+
+  Once the tag exists locally, the pre-push gate (`tests/test_integrity.py::TestReleaseStampIsNotAPublishedVersion`) refuses ANY push while the committed HEAD still carries the released number. A tag-first push was refused, and nothing was pushed. Do NOT use `--no-verify`. The gate's text also says "regenerate both tool-integrity.json manifests". That only changes anything when a tool description changed: on this cut, `generate_integrity_file` rewrote both byte-identically.
 - **L3:** three rounds with complement + codex, and no HIGH remaining. Round 1 had a consensus HIGH, a post-commit `warnings.warn`, fixed via `_warn_after_commit`. Rounds 2 and 3 each found a defect inside the previous round's fix (the fix carried the class), and both are fixed and pinned. Verdict rows are in flow's `state/verdicts.jsonl`.
 - **Open, not done:**
   - A test for compost's `TypeError` cases (complement LOW; out of budget).
   - Real prose after an UNPARSED evidence tag is dropped. This fails closed, is deliberate, and is recorded in the CHANGELOG.
   - `_structural_dash` treats only `[…]` as opaque, so a dash inside `(…)` or a bare `"…"` still splits. Pre-existing and LOW.
   - (c) compare-and-crystallize on CrystalStore (codex MED-4) was NOT started.
-- **flow's half (not this repo's):** wiring `compost=` into flow's consolidate, then re-pinning flow's venv after the publish.
+- **flow's half (not this repo's):** re-pin flow's venv to 0.9.12 (sequenced around the EOD wrap by the desk), pass only compost-routed names to `compost=`; see flow's spore-1161 and spore-1163.
 
 ## ✅ 2026-09-17 — `0917+8 anneal-memory-seat` CLOSED ALL FOUR `diogenes_20260917.md` ITEMS ON MAIN, NOT RELEASED. Re-derive; do not trust these lines.
 - **MEDIUM `prune_failures` counter: FIXED.** `Store._record_prune_failure` (store.py) increments `self._prune_failures`/`self._prune_last_failure`, called from both post-commit catch sites (`wrap_completed` store.py, `validated_save_continuity` Phase 5 continuity.py) — unconditionally, before the dedup-prone `warnings.warn`. Surfaced on `StoreStatus.prune_failures`/`prune_last_failure` and wired into the MCP `status` tool (`server.py` `_tool_status`). Tests: `test_post_commit_prune_failure_counted_across_two_saves` (2 failing saves → counter reads 2, tests/test_continuity.py), `test_status_surfaces_prune_failures_on_the_held_store_instance` + `test_status_omits_prune_failure_line_when_none_recorded` (tests/test_server.py). [measured] all three FAILED (AttributeError / assertion) on the pre-fix code, PASSED after.

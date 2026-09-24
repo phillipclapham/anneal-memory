@@ -1,0 +1,146 @@
+--- a/scripts/anneal_dualwrite.py
++++ b/scripts/anneal_dualwrite.py
+@@ -2435,6 +2435,10 @@
+     if rec.get("complete") and holder in rec["stopped"]:
+         return "not-running", last
+     return "unknown", last
++
++
++# anneal 0.9.13 added claim_baton(..., take=) (spore-1169); older anneal is last-claim-wins.
++_CLAIM_TAKES = "take" in inspect.signature(sessions.claim_baton).parameters
+ 
+ 
+ def _baton_write(args: argparse.Namespace, anneal_db: Path, sid: str | None) -> None:
+@@ -2477,7 +2481,15 @@
+                 sys.exit(f"REFUSED: the baton is held by {holder} (state={state}). Taking it from "
+                          "another session is deliberate: re-run with `baton claim --take` if you "
+                          "know that seat should not consolidate (spore-1105).")
+-            claim = sessions.claim_baton(cp, sid)
++            # anneal >= 0.9.13 refuses a claim over another holder unless take=True. Everything
++            # above already decided: reaching here with another holder means --take or this
++            # process's own pre-/clear id. An unheld baton stays take=False, so anneal's
++            # create-only claim still refuses if someone claimed it since our read.
++            take = bool(holder) and holder != sid
++            try:
++                claim = sessions.claim_baton(cp, sid, **({"take": take} if _CLAIM_TAKES else {}))
++            except getattr(sessions, "BatonHeldError", ()) as e:
++                sys.exit(f"REFUSED: {e}")
+         finally:
+             store.close()
+     print(f"baton CLAIMED by this session ({sid}).")
+--- a/tests/test_dualwrite_session_reconcile.py
++++ b/tests/test_dualwrite_session_reconcile.py
+@@ -28,7 +28,19 @@
+ sys.path.insert(0, str(FLOW / "scripts"))
+ import anneal_dualwrite as dw  # noqa: E402
+ from anneal_memory import sessions  # noqa: E402
++import inspect  # noqa: E402
+ 
++# anneal 0.9.13 (spore-1169): a claim over another holder needs take=True, and the gate's
++# sole-live grant is opt-in. These keep the tests valid on both sides of the re-pin.
++_TAKES = "take" in inspect.signature(sessions.claim_baton).parameters
++_SOLE = ({"allow_sole_live": True}
++         if "allow_sole_live" in inspect.signature(sessions.consolidate_authorized).parameters
++         else {})
++
++
++def _claim(cp, sid):
++    return sessions.claim_baton(cp, sid, **({"take": True} if _TAKES else {}))
++
+ OWN = "own-0924-flow-seat"
+ HOLDER = "holder-9d5b10de"
+ CORPSES = ["corpse-9c118db0", "corpse-a775f90a", "corpse-c992e244"]
+@@ -59,7 +71,7 @@
+     stale = time.time() - sessions.DEFAULT_TTL_SECONDS - 60
+     holder_file = next(f for f, sid, _ in dw._registry_entries(cp) if sid == HOLDER)
+     os.utime(holder_file, (stale, stale))
+-    sessions.claim_baton(cp, HOLDER)
++    _claim(cp, HOLDER)
+     monkeypatch.setattr(dw, "CLAUDE_SESSIONS_DIR", harness)
+     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", OWN)
+     return cp
+@@ -94,7 +106,7 @@
+     assert _live(cp) == sorted([OWN, HOLDER] + CORPSES)
+     assert rec["corpses"] == sorted(CORPSES)
+     assert sessions.baton_holder(cp) == HOLDER, "reconcile never touches the baton"
+-    assert sessions.consolidate_authorized(cp, OWN)["reason"] == "downgraded-not-baton-holder"
++    assert sessions.consolidate_authorized(cp, OWN, **_SOLE)["reason"] == "downgraded-not-baton-holder"
+     assert "recorded process gone (evidence, not proof)" in out.getvalue()
+     assert "deregister" not in out.getvalue(), "no removal command exists (spore-1166)"
+     assert not hasattr(dw, "cmd_deregister")
+@@ -103,7 +115,7 @@
+ def test_status_says_so_when_the_holder_is_proven_stopped(tmp_path, monkeypatch):
+     """A holder whose recorded process is gone is the one case status may point at a claim."""
+     cp = _night_of_0920(tmp_path, monkeypatch)
+-    sessions.claim_baton(cp, CORPSES[0])
++    _claim(cp, CORPSES[0])
+     (tmp_path / "memory.db").touch()
+     store = SimpleNamespace(continuity_path=cp, close=lambda: None)
+     out = io.StringIO()
+@@ -132,7 +144,7 @@
+     sessions.heartbeat(cp, OWN)
+     sessions.heartbeat(cp, "peer-no-harness-file")
+     dw._reconcile_registry(cp, write=True)
+-    assert sessions.consolidate_authorized(cp, OWN)["reason"] == "downgraded-not-baton-holder"
++    assert sessions.consolidate_authorized(cp, OWN, **_SOLE)["reason"] == "downgraded-not-baton-holder"
+ 
+     # Even with a recorded dead pid, one torn harness file (a rewrite in flight) blocks reaping.
+     dw._harness_ids_path(cp).write_text(json.dumps(
+@@ -173,7 +185,7 @@
+     """L1 MED-1: `claude agents --json` cannot see interactive or -p sessions, so it can't confirm
+     a stop; status must not offer it as the check."""
+     cp = _night_of_0920(tmp_path, monkeypatch)
+-    sessions.claim_baton(cp, CORPSES[0])
++    _claim(cp, CORPSES[0])
+     (tmp_path / "memory.db").touch()
+     store = SimpleNamespace(continuity_path=cp, close=lambda: None)
+     out = io.StringIO()
+@@ -207,7 +219,7 @@
+ def test_revive_happens_before_the_gate_reads(tmp_path, monkeypatch):
+     """complement L3: the gate (prepare_wrap) must see the revived peer."""
+     cp = _night_of_0920(tmp_path, monkeypatch)
+-    sessions.claim_baton(cp, OWN)
++    _claim(cp, OWN)
+     seen, out = _prepare(tmp_path, monkeypatch, cp)
+     assert seen and HOLDER in seen[0], out
+ 
+@@ -223,10 +235,10 @@
+     monkeypatch.setattr(dw, "CLAUDE_SESSIONS_DIR", harness)
+     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", OWN)
+     sessions.heartbeat(cp, OWN)
+-    assert sessions.consolidate_authorized(cp, OWN)["reason"] == "sole-live-session"
++    assert sessions.consolidate_authorized(cp, OWN, **_SOLE)["reason"] == "sole-live-session"
+     seen, out = _prepare(tmp_path, monkeypatch, cp)
+     assert seen == [] and "needs the baton" in out and "baton claim" in out, out
+-    sessions.claim_baton(cp, OWN)
++    _claim(cp, OWN)
+     (harness / "2.json").write_text("{\"pid\": 12")  # a partial view does not stop the holder
+     seen, out = _prepare(tmp_path, monkeypatch, cp)
+     assert seen, out
+@@ -264,7 +276,7 @@
+ def test_prepare_never_advises_claiming_from_an_unseen_holder(tmp_path, monkeypatch):
+     """codex + complement L3 R2: absence from the snapshot is not proof of a stop."""
+     cp = _night_of_0920(tmp_path, monkeypatch)
+-    sessions.claim_baton(cp, "holder-not-in-harness")
++    _claim(cp, "holder-not-in-harness")
+     seen, out = _prepare(tmp_path, monkeypatch, cp)
+     assert "baton claim" not in out.split("DOWNGRADED", 1)[-1], out
+     assert "claim only if you know that seat is closed" in out, out
+@@ -463,7 +475,7 @@
+     bad.write_text("{not json")  # an unreadable registry file: the view is partial
+     assert dw._holder_state(cp, CORPSES[0], dw._reconcile_registry(cp, write=False))[0] == "unknown"
+     bad.write_text(good)
+-    sessions.claim_baton(cp, CORPSES[0])
++    _claim(cp, CORPSES[0])
+     (tmp_path / "memory.db").touch()
+     store = SimpleNamespace(continuity_path=cp, close=lambda: None)
+     out = io.StringIO()
+@@ -529,7 +541,7 @@
+     known = json.loads(dw._harness_ids_path(cp).read_text())
+     known["pre-clear-id"] = {"pid": os.getpid(), "procStart": start}
+     dw._harness_ids_path(cp).write_text(json.dumps(known))
+-    sessions.claim_baton(cp, "pre-clear-id")
++    _claim(cp, "pre-clear-id")
+     (tmp_path / "memory.db").touch()
+     store = SimpleNamespace(continuity_path=cp, close=lambda: None)
+     out = io.StringIO()

@@ -19,7 +19,6 @@ Zero dependencies beyond Python stdlib.
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
 import re
@@ -29,7 +28,6 @@ import warnings
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
-from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 from .graduation import (
@@ -1408,6 +1406,10 @@ def prepare_wrap(
         leaves the in-flight wrap untouched — it never reaches
         ``wrap_started``.
     """
+    if not isinstance(allow_sole_live, bool):  # "false" is truthy: never infer consent
+        raise TypeError(
+            f"prepare_wrap: allow_sole_live must be a bool, got {type(allow_sole_live).__name__}"
+        )
     episodes = store.episodes_since_wrap()
 
     if not episodes:
@@ -1741,28 +1743,6 @@ def _check_save_authority(
                 f"been taken, or the baton file is unreadable), so it may not commit this "
                 f"wrap. Nothing was written."
             )
-
-
-@contextlib.contextmanager
-def _baton_commit_guard(
-    store: Store, session_id: str | None, wrap_token: str | None
-) -> Iterator[None]:
-    """Hold the baton lock across the save's commit and re-run the authority check under it.
-
-    ``claim_baton`` / ``release_baton`` and ``Store.set_consolidate_requires_baton`` take the
-    same lock, so a take or a policy change cannot land between this check and the commit.
-    Taken on every save, not only session-aware ones, because the policy itself is re-read
-    here. Where the lock is unavailable (no ``flock``), a baton-protected store fails CLOSED;
-    an unprotected store proceeds with the unlocked check."""
-    with sessions._baton_lock(store.continuity_path) as locked:
-        if not locked and store.consolidate_requires_baton():
-            raise ValueError(
-                "This store is baton-protected, and the baton lock is unavailable on this "
-                "platform or filesystem, so the save cannot be serialized against a take. "
-                "Nothing was written."
-            )
-        _check_save_authority(store, session_id, wrap_token)
-        yield
 
 
 def _check_linkgate(
@@ -2104,7 +2084,7 @@ def validated_save_continuity(
             "validated_save_continuity: session_id must be non-empty when provided."
         )
     # An early pass, so a refused save fails before the expensive validation. It is repeated
-    # authoritatively under the baton lock around the commit (_baton_commit_guard).
+    # authoritatively inside the batch, after wrap_completed (see there).
     _check_save_authority(store, session_id, wrap_token)
 
     if wrap_token is not None:
@@ -2377,10 +2357,7 @@ def validated_save_continuity(
 
     try:
         # Phase 2: batched DB DML.
-        # flow spore-1169 (codex L3 HIGH x2): the baton lock is held from the authority
-        # re-check through the batch commit, so a take or a policy change either lands before
-        # the check or waits for the commit. It is released after the batch exits.
-        with _baton_commit_guard(store, session_id, wrap_token), store._batch():
+        with store._batch():
             assoc_formed, assoc_strengthened, assoc_decayed = \
                 process_wrap_associations(store, grad_result, affective_state)
 
@@ -2444,6 +2421,16 @@ def validated_save_continuity(
                 content_hash=content_hash,
                 pair_id=tmp_pair_id,
             )
+
+            # flow spore-1169: the authoritative consolidate-gate check. It runs HERE, after
+            # wrap_completed's DML, because this connection now holds SQLite's write lock: a
+            # policy change from any other connection has either committed already (and this
+            # re-read sees it) or must wait for this transaction to end. Raising rolls the whole
+            # batch back, like the linkgate block above. The baton itself is a sidecar file, so
+            # a take landing after this read and before the commit (milliseconds) is not seen;
+            # that residual is documented, not locked, because holding a flock across the batch
+            # nests it around the SQLite lock (see LOCK ORDERING below) and was refused in L3.
+            _check_save_authority(store, session_id, wrap_token)
 
             # Update cross-session pattern history. Scan the
             # post-validation continuity text for every named pattern

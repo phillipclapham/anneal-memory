@@ -19,6 +19,7 @@ Zero dependencies beyond Python stdlib.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
@@ -28,6 +29,7 @@ import warnings
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 from .graduation import (
@@ -1471,7 +1473,9 @@ def prepare_wrap(
         auth = sessions.consolidate_authorized(
             store.continuity_path,
             session_id,
-            allow_sole_live=allow_sole_live and not requires_baton,
+            # bool() of a non-bool would turn allow_sole_live="false" into True; pass it
+            # through so consolidate_authorized's type check refuses it.
+            allow_sole_live=False if requires_baton else allow_sole_live,
         )
         if not auth["authorized"]:
             return PrepareWrapResult(
@@ -1712,6 +1716,53 @@ def _warn_after_commit(message: str) -> None:
             _log.warning("%s", message)
         except Exception:
             pass
+
+
+def _check_save_authority(
+    store: Store, session_id: str | None, wrap_token: str | None
+) -> None:
+    """Refuse a save the consolidate gate does not authorize (flow spore-1169). On a
+    baton-protected store the caller must name itself and pass the prepare token; any caller
+    that names itself must still hold the baton. Raises ``ValueError``; writes nothing."""
+    if store.consolidate_requires_baton() and (session_id is None or wrap_token is None):
+        raise ValueError(
+            "This store is baton-protected (Store.consolidate_requires_baton): a save must "
+            "pass the session_id of the baton holder and the wrap_token its prepare_wrap "
+            "returned. Nothing was written."
+        )
+    if session_id is not None:
+        try:
+            held = sessions.holds_baton(store.continuity_path, session_id)
+        except (OSError, json.JSONDecodeError):
+            held = False  # an unreadable baton confirms no one: fail closed
+        if not held:
+            raise ValueError(
+                f"Session {session_id!r} does not hold the consolidate baton (it may have "
+                f"been taken, or the baton file is unreadable), so it may not commit this "
+                f"wrap. Nothing was written."
+            )
+
+
+@contextlib.contextmanager
+def _baton_commit_guard(
+    store: Store, session_id: str | None, wrap_token: str | None
+) -> Iterator[None]:
+    """Hold the baton lock across the save's commit and re-run the authority check under it.
+
+    ``claim_baton`` / ``release_baton`` and ``Store.set_consolidate_requires_baton`` take the
+    same lock, so a take or a policy change cannot land between this check and the commit.
+    Taken on every save, not only session-aware ones, because the policy itself is re-read
+    here. Where the lock is unavailable (no ``flock``), a baton-protected store fails CLOSED;
+    an unprotected store proceeds with the unlocked check."""
+    with sessions._baton_lock(store.continuity_path) as locked:
+        if not locked and store.consolidate_requires_baton():
+            raise ValueError(
+                "This store is baton-protected, and the baton lock is unavailable on this "
+                "platform or filesystem, so the save cannot be serialized against a take. "
+                "Nothing was written."
+            )
+        _check_save_authority(store, session_id, wrap_token)
+        yield
 
 
 def _check_linkgate(
@@ -2052,23 +2103,9 @@ def validated_save_continuity(
         raise ValueError(
             "validated_save_continuity: session_id must be non-empty when provided."
         )
-    if store.consolidate_requires_baton() and (session_id is None or wrap_token is None):
-        raise ValueError(
-            "This store is baton-protected (Store.consolidate_requires_baton): a save must "
-            "pass the session_id of the baton holder and the wrap_token its prepare_wrap "
-            "returned. Nothing was written."
-        )
-    if session_id is not None:
-        try:
-            held = sessions.holds_baton(store.continuity_path, session_id)
-        except (OSError, json.JSONDecodeError):
-            held = False  # an unreadable baton confirms no one: fail closed
-        if not held:
-            raise ValueError(
-                f"Session {session_id!r} does not hold the consolidate baton (it may have "
-                f"been taken, or the baton file is unreadable), so it may not commit this "
-                f"wrap. Nothing was written."
-            )
+    # An early pass, so a refused save fails before the expensive validation. It is repeated
+    # authoritatively under the baton lock around the commit (_baton_commit_guard).
+    _check_save_authority(store, session_id, wrap_token)
 
     if wrap_token is not None:
         # Caller opted into explicit token verification. A mismatch
@@ -2340,7 +2377,10 @@ def validated_save_continuity(
 
     try:
         # Phase 2: batched DB DML.
-        with store._batch():
+        # flow spore-1169 (codex L3 HIGH x2): the baton lock is held from the authority
+        # re-check through the batch commit, so a take or a policy change either lands before
+        # the check or waits for the commit. It is released after the batch exits.
+        with _baton_commit_guard(store, session_id, wrap_token), store._batch():
             assoc_formed, assoc_strengthened, assoc_decayed = \
                 process_wrap_associations(store, grad_result, affective_state)
 

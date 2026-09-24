@@ -2997,8 +2997,12 @@ class Store:
         ⚠ Enforced only by anneal versions that know this key; an older
         anneal opening the same store ignores it. It is not carried by the
         JSON export. Deliberate bypasses remain, by design: the raw
-        :meth:`save_continuity` file write, and a caller that passes the
-        holder's ``session_id`` as its own.
+        :meth:`save_continuity` file write, the raw wrap-lifecycle methods
+        (:meth:`wrap_started` / :meth:`wrap_completed`) called directly, a
+        caller that passes the holder's ``session_id`` as its own, and
+        :meth:`set_consolidate_requires_baton` itself (ungated, audited).
+        Where ``flock`` is unavailable a save on a protected store is
+        refused outright, since it cannot be serialized against a take.
 
         Fails CLOSED: a stored value other than ``"1"`` or ``"0"`` reads as
         required, so a corrupted policy row never silently drops the guard.
@@ -3031,7 +3035,14 @@ class Store:
                 "Cannot set_consolidate_requires_baton() while inside _batch() context",
                 operation="set_consolidate_requires_baton",
             )
-        with self._db_boundary("set_consolidate_requires_baton"):
+        # The same lock a save holds across its commit (continuity._baton_commit_guard), taken
+        # BEFORE the DB write in both places, so turning the policy on cannot land between a
+        # save's policy read and its commit (codex L3 HIGH). Imported here: sessions imports
+        # this module.
+        from .sessions import _baton_lock
+
+        with _baton_lock(self.continuity_path), \
+                self._db_boundary("set_consolidate_requires_baton"):
             was = self._get_metadata(_CONSOLIDATE_REQUIRES_BATON_KEY) not in ("", "0")
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",

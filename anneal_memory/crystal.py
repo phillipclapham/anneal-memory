@@ -1100,23 +1100,24 @@ def _meaningful(text: str) -> str:
     pattern's meaning is worse than keeping them), separator debris stripped;
     ``""`` when nothing but markers was there.
 
-    One marker per step, each matched at a known offset (the start, or the last
-    ``[`` / ``(``). A repeated-group regex anchored at ``$`` instead retries from
-    every start position, which was quadratic on a long separator run (L3)."""
-    text = text.strip(_SEPARATORS)
-    while text:
-        m = _ONE_MARKER_RE.match(text)
-        if m:
-            text = text[m.end():].strip(_SEPARATORS)
-            continue
-        for opener in "[(":
-            i = text.rfind(opener)
-            if i != -1 and _ONE_MARKER_RE.fullmatch(text, i):
-                text = text[:i].strip(_SEPARATORS)
-                break
+    One left-to-right ``finditer`` pass records every marker span; two cursors then
+    walk inward over spans that touch them, and the text is sliced once. A tag body
+    that holds a stray ``[`` (``[provenance: a [b]``) is one span, because the
+    vocabulary's tag body runs to the first ``]``."""
+    spans = {m.start(): m.end() for m in _ONE_MARKER_RE.finditer(text)}
+    by_end = {end: start for start, end in spans.items()}
+    lo, hi = 0, len(text)
+    while True:
+        while lo < hi and text[lo] in _SEPARATORS:
+            lo += 1
+        while hi > lo and text[hi - 1] in _SEPARATORS:
+            hi -= 1
+        if lo in spans and spans[lo] <= hi:
+            lo = spans[lo]
+        elif hi in by_end and by_end[hi] >= lo:
+            hi = by_end[hi]
         else:
-            break
-    return text
+            return text[lo:hi]
 
 
 def _structural_dash(text: str) -> int:

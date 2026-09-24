@@ -103,6 +103,7 @@ try:  # POSIX advisory locking; absent on Windows (see CrystalStore._transaction
 except ImportError:  # pragma: no cover - exercised only on non-POSIX platforms
     fcntl = None  # type: ignore[assignment]
 
+from .graduation import _SCAFFOLD_TAG_RE, _STATE_PAREN_RE
 from .store import AnnealMemoryError
 
 CRYSTAL_SCHEMA_VERSION = 1
@@ -1057,18 +1058,76 @@ def _extract_pattern_meta(wrap_text: str, name: str) -> tuple[int | None, str, l
             quoted_why = qm.group(1).strip()
 
     # Strip the [evidence: …] span (quote-aware) so an em-dash / ``]`` INSIDE the "why"
-    # can't hijack the split, then the felt prose is the part after the structural
-    # em-dash; fall back to the de-evidenced tail, then to the quoted "why" itself (the
-    # quoted-only form that would otherwise yield "" → ValueError in crystallize).
-    detail = (tail[: ev.start()] + tail[ev.end():]) if ev else tail
+    # can't hijack the split. When the tag is present but did NOT parse (an unbalanced
+    # quote, e.g. an inch mark inside the why), drop everything from the opener on:
+    # an em-dash inside that unparsed tag must never become the separator, and the
+    # broken tag text must never become the explanation (spore-1163).
+    if ev:
+        detail = tail[: ev.start()] + tail[ev.end():]
+    elif _ev_start != -1:
+        detail = tail[:_ev_start]
+    else:
+        detail = tail
+    # Precedence: felt prose after the structural em-dash → the quoted evidence "why"
+    # → the de-evidenced tail. Status markers such as ``(carried-forward)`` or
+    # ``[no-contradicts]`` are not meaning at ANY step (spore-1163). An empty result
+    # is the signal a consumer refuses on (crystallize raises on ""), never filled
+    # with markers.
     explanation = ""
-    if "—" in detail:
-        explanation = detail.split("—", 1)[1].strip(" \t—-|")
-    if not explanation:
-        explanation = detail.strip(" \t—-|")
+    dash = _structural_dash(detail)
+    if dash != -1:
+        explanation = _meaningful(detail[dash + 1:])
     if not explanation:
         explanation = quoted_why
+    if not explanation:
+        explanation = _meaningful(detail if dash == -1 else detail[:dash])
     return best_level, explanation, evidence_ids
+
+
+# Anneal's own marker vocabulary, from ONE home (graduation.py): the scaffold tags
+# (``[contradicts: …]``, ``[provenance: …]``, ``[no-contradicts]``, …) and the
+# immune-state parentheticals (``(carried-forward)``, …). A closed vocabulary, so
+# bracketed prose (``[edge cases]``, ``(v2)``, ``[[sibling]]``) is never a marker.
+_MARKER_RUN = rf"(?:[ \t—|-]*(?:{_SCAFFOLD_TAG_RE.pattern}|{_STATE_PAREN_RE.pattern}))+"
+_LEADING_MARKERS_RE = re.compile(rf"^{_MARKER_RUN}", re.IGNORECASE)
+_TRAILING_MARKERS_RE = re.compile(rf"{_MARKER_RUN}[ \t]*$", re.IGNORECASE)
+
+
+def _meaningful(text: str) -> str:
+    """``text`` with marker runs removed from its START and END only (a marker
+    mid-sentence is left alone: deleting words from prose that is then stored as a
+    pattern's meaning is worse than keeping them), separator debris stripped;
+    ``""`` when nothing but markers was there."""
+    text = _LEADING_MARKERS_RE.sub("", text)
+    text = _TRAILING_MARKERS_RE.sub("", text)
+    return text.strip(" \t—-|")
+
+
+def _structural_dash(text: str) -> int:
+    """Index of the first em-dash OUTSIDE any ``[…]`` span, or ``-1``.
+
+    Inside a bracket span a ``"…"`` quote is opaque (a ``]`` in it does not close
+    the span), mirroring ``_EVIDENCE_TAG_RE``. An unterminated span swallows the rest
+    of the line, so no index inside it is ever returned. Only ``[…]`` is opaque: a
+    dash inside ``(…)`` or a bare ``"…"`` outside brackets still splits."""
+    depth = 0
+    in_quote = False
+    for i, ch in enumerate(text):
+        if depth:
+            if ch == '"':
+                in_quote = not in_quote
+            elif in_quote:
+                continue
+            elif ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+        elif ch == "[":
+            depth = 1
+            in_quote = False
+        elif ch == "—":
+            return i
+    return -1
 
 
 def parse_crystal_decisions(wrap_text: str) -> list[CrystalDecision]:

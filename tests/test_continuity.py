@@ -6078,3 +6078,101 @@ class TestRecoveryOracleIntegration:
             assert saved[-1]["data"]["content_hash"] == expected_hash
         finally:
             store.close()
+
+
+class TestCompostSever:
+    """``validated_save_continuity(compost=[...])`` severs each named pattern's
+    edges inside the Phase-2 batch, atomic with ``wrap_completed``."""
+
+    @staticmethod
+    def _edges(store: Store) -> list[tuple]:
+        conn = store._conn
+        return (
+            conn.execute(
+                "SELECT * FROM pattern_associations ORDER BY name_a, name_b"
+            ).fetchall()
+            + conn.execute(
+                "SELECT * FROM pattern_aliases ORDER BY alias, generation"
+            ).fetchall()
+        )
+
+    def _primed(self, tmp_path):
+        store, text, token = _prime_simple(str(tmp_path / "c.db"), "Compost")
+        store.seed_pattern_co_graduation(["alpha", "beta", "gamma"], today="2026-09-24")
+        return store, text, token
+
+    def test_fault_after_sever_before_commit_leaves_no_edge_severed(
+        self, tmp_path, monkeypatch
+    ):
+        store, text, token = self._primed(tmp_path)
+        try:
+            before = self._edges(store)
+            assert any("alpha" in row for row in before)
+
+            def boom(*a, **k):
+                raise RuntimeError("injected after sever, before commit")
+
+            monkeypatch.setattr(store, "wrap_completed", boom)
+            with pytest.raises(RuntimeError, match="injected"):
+                validated_save_continuity(
+                    store, text, wrap_token=token, compost=["alpha"]
+                )
+            assert self._edges(store) == before
+            monkeypatch.undo()
+
+            result = validated_save_continuity(
+                store, text, wrap_token=token, compost=["alpha", "nope"]
+            )
+            assert result["composted"] == {"alpha": 2, "nope": 0}
+            assert not any(
+                "alpha" in row
+                for row in store._conn.execute(
+                    "SELECT name_a, name_b FROM pattern_associations"
+                ).fetchall()
+            )
+        finally:
+            store.close()
+
+    def test_default_path_adds_no_key_and_touches_no_edge(self, tmp_path):
+        store, text, token = self._primed(tmp_path)
+        try:
+            before = self._edges(store)
+            result = validated_save_continuity(store, text, wrap_token=token)
+            assert "composted" not in result
+            assert self._edges(store) == before
+        finally:
+            store.close()
+
+    def test_composted_name_that_graduates_this_wrap_is_not_reseeded(self, tmp_path):
+        # L1+L2 convergent MED, reproduced 2026-09-24: the post-commit
+        # co-graduation seed re-linked a name the same save had just severed.
+        from anneal_memory import prepare_wrap
+
+        store = Store(str(tmp_path / "g.db"), project_name="G")
+        try:
+            e1 = store.record("wiring guard fires late in prepare", EpisodeType.OBSERVATION)
+            e2 = store.record("wiring guard fires late on save", EpisodeType.OBSERVATION)
+            token = prepare_wrap(store)["wrap_token"]
+            today = date.today().isoformat()
+            ids = f"{e1.id[:8]}, {e2.id[:8]}"
+            lines = "".join(
+                f'- {n} | 2x ({today}) [evidence: {ids} "wiring guard fires late"] — {n}\n'
+                for n in ("alpha", "beta", "gamma")
+            )
+            text = (
+                "# G — Memory (v1)\n\n## State\nWorking.\n\n## Patterns\n" + lines
+                + f'\n## Decisions\n[decided(rationale: "x", on: "{today}")] ok\n\n'
+                "## Context\nWorking.\n"
+            )
+            with pytest.warns(UserWarning, match="also graduated"):
+                result = validated_save_continuity(
+                    store, text, wrap_token=token, compost=["alpha"]
+                )
+            assert result["composted"] == {"alpha": 0}
+            names = store._conn.execute(
+                "SELECT name_a, name_b FROM pattern_associations"
+            ).fetchall()
+            assert names  # beta-gamma still seeded
+            assert not any("alpha" in tuple(r) for r in names)
+        finally:
+            store.close()

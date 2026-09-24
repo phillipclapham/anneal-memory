@@ -1744,6 +1744,7 @@ def validated_save_continuity(
     allow_unlinked: bool = False,
     carryforward_cold_days: int | None = 7,
     crystal_store: CrystalStore | None = None,
+    compost: list[str] | None = None,
 ) -> SaveContinuityResult:
     """Save continuity with the full validation pipeline.
 
@@ -1859,6 +1860,14 @@ def validated_save_continuity(
             the wrap left in progress. Only a literal ``True`` bypasses it,
             and a bypass emits an ``AM-LINKGATE override`` ``UserWarning``.
             CLI ``--allow-unlinked``; MCP ``"allow_unlinked": true``.
+        compost: pattern names whose concept left the working set this
+            wrap. Each is severed (``sever_pattern_concept``: its pattern-graph
+            edges deleted, its generation bumped) INSIDE the same transaction
+            as ``wrap_completed``, so a wrap that fails to commit severs
+            nothing and a committed wrap cannot leave a composted pattern's
+            edges behind. A name with no edges still gets its generation
+            boundary. ``None`` (the default) skips this step and adds no key
+            to the result. Library-only; no CLI or MCP surface.
 
     Returns:
         :class:`SaveContinuityResult` — a :class:`TypedDict` with the
@@ -1893,6 +1902,8 @@ def validated_save_continuity(
           - ``citation_spread`` (int): distinct episode ids (8-char) cited on
             today's 2x-and-up graduation lines that belong to this wrap's
             episodes, INCLUDING lines later demoted. A report, not a check.
+          - ``composted`` (dict[str, int]): present ONLY when ``compost``
+            was passed — each distinct name mapped to the edges severed
           - ``sections`` (dict[str, int]): char count per continuity section
           - ``wrap_result`` (dict[str, Any]): the store-level wrap
             record as a plain dict (``dataclasses.asdict`` of the
@@ -1931,6 +1942,22 @@ def validated_save_continuity(
             and ``.path`` for clean error messages.
     """
     from .associations import process_wrap_associations
+
+    # Caller misuse, refused before anything is read or written. A bare string
+    # would otherwise iterate as single characters and sever the wrong names.
+    # Materialized first: validating a one-shot iterator would exhaust it.
+    compost_names: list[str] | None = None
+    if compost is not None:
+        if isinstance(compost, (str, bytes)):
+            raise TypeError(
+                "compost must be a list of non-empty pattern-name strings"
+            )
+        compost = list(compost)
+        if not all(isinstance(n, str) and n.strip() for n in compost):
+            raise TypeError(
+                "compost must be a list of non-empty pattern-name strings"
+            )
+        compost_names = list(dict.fromkeys(n.strip() for n in compost))
 
     # --- Wrap-state preconditions, checked BEFORE payload validation ---
     #
@@ -2220,6 +2247,7 @@ def validated_save_continuity(
     # the new content permanently (L1 HIGH + L2 M2 data-loss path).
     db_committed = False
     linkgate_overridden = False
+    composted: dict[str, int] = {}
 
     try:
         # Phase 2: batched DB DML.
@@ -2252,6 +2280,14 @@ def validated_save_continuity(
             meta_tmp = store._prepare_meta_write(
                 meta, token_hex=tmp_pair_id
             )
+
+            # Compost severance, in THIS transaction so it commits or rolls
+            # back with the wrap row below. Inside the batch the Store method
+            # defers its commit and queues its audit event until the commit.
+            for name in compost_names or ():
+                composted[name] = store.sever_pattern_concept(
+                    name, today=today_str
+                )
 
             wrap_result = store.wrap_completed(
                 episodes_compressed=len(episodes),
@@ -2391,13 +2427,25 @@ def validated_save_continuity(
         # and the wrap would still "succeed." Post-commit, the wrap's DB state is
         # already durable, so a seeding failure can only cost the (non-load-bearing,
         # self-healing) seed itself.
+        # A composted name is left out: seeding it would re-link the concept
+        # this same save just severed.
+        seed_names = [n for n in grad_result.graduated_names if n not in composted]
         try:
-            if len(grad_result.graduated_names) >= 2:
-                store.seed_pattern_co_graduation(
-                    grad_result.graduated_names, today=today_str
-                )
+            if len(seed_names) >= 2:
+                store.seed_pattern_co_graduation(seed_names, today=today_str)
         except Exception:
             pass
+        still_graduating = sorted(
+            set(composted) & set(grad_result.graduated_names)
+        )
+        if still_graduating:
+            warnings.warn(
+                f"compost: {still_graduating} also graduated in this wrap's "
+                f"text. Their edges were severed and not re-seeded; if the "
+                f"pattern is still live, it should not have been composted.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         # Phase 3: DB commit succeeded — externalize files.
         # At this point cont_tmp is still the Path returned from
@@ -2896,7 +2944,7 @@ def validated_save_continuity(
             f"on one line). The line(s) were left unchanged."
         )
 
-    return SaveContinuityResult(
+    result = SaveContinuityResult(
         path=path,
         chars=len(grad_result.text),
         episodes_compressed=len(episodes),
@@ -2928,3 +2976,6 @@ def validated_save_continuity(
         # can ``json.dumps(result)`` with no ceremony.
         wrap_result=asdict(wrap_result),
     )
+    if compost_names is not None:
+        result["composted"] = composted
+    return result

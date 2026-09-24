@@ -587,7 +587,13 @@ class PrepareWrapResult(TypedDict):
     rewarm_candidates: list[str]
 
 
-class SaveContinuityResult(TypedDict):
+class _SaveContinuityOptional(TypedDict, total=False):
+    # Present ONLY when ``compost=`` was passed, so the default return shape
+    # is unchanged. ``NotRequired`` is 3.11+; the library targets 3.10.
+    composted: dict[str, int]
+
+
+class SaveContinuityResult(_SaveContinuityOptional):
     """Return shape of ``validated_save_continuity``.
 
     Top-level convenience fields (``path``, ``chars``, etc.) mirror the

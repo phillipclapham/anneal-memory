@@ -347,6 +347,8 @@ StoreOperation = Literal[
     "wrap_started",
     "wrap_cancelled",
     "get_wrap_started_at",
+    "consolidate_requires_baton",
+    "set_consolidate_requires_baton",
     "get_wrap_history",
     "record_associations",
     "decay_associations",
@@ -1201,6 +1203,8 @@ _SQLITE_LOCKED = 6
 # audit write, which ``_seed_audit_health`` already reads as zero, and seeding
 # a "0" into every database on earth to say "nothing has gone wrong yet" is
 # storage spent on the absence of news.
+# Per-store consolidate policy (flow spore-1169); see Store.consolidate_requires_baton.
+_CONSOLIDATE_REQUIRES_BATON_KEY = "consolidate_requires_baton"
 _AUDIT_FAILURES_KEY = "audit_write_failures"
 _AUDIT_LAST_FAILURE_KEY = "audit_last_failure"
 
@@ -2976,6 +2980,62 @@ class Store:
         with self._db_boundary("get_wrap_started_at"):
             started = self._get_metadata("wrap_started_at")
         return started if started else None
+
+    def consolidate_requires_baton(self) -> bool:
+        """Does this store require the consolidate baton for EVERY consolidate?
+
+        A per-store policy, off unless someone sets it with
+        :meth:`set_consolidate_requires_baton`. When on, ``prepare_wrap``
+        downgrades a caller that passes no ``session_id`` (it cannot hold the
+        baton), ignores ``allow_sole_live``, and ``validated_save_continuity``
+        refuses a save that does not round-trip the prepare ``wrap_token``.
+        It exists so a consumer that calls the library directly, without
+        opting into the session gate, cannot recompose the felt layer of a
+        store its operator has protected (flow spore-1169).
+
+        Fails CLOSED: a stored value other than ``"1"`` or ``"0"`` reads as
+        required, so a corrupted policy row never silently drops the guard.
+        """
+        with self._db_boundary("consolidate_requires_baton"):
+            raw = self._get_metadata(_CONSOLIDATE_REQUIRES_BATON_KEY)
+        return raw not in ("", "0")
+
+    def set_consolidate_requires_baton(self, required: bool) -> None:
+        """Turn the require-baton consolidate policy on or off for this store.
+
+        See :meth:`consolidate_requires_baton` for what it enforces. The
+        change is committed immediately and audited as
+        ``consolidate_policy_set``. Refused inside ``_batch()``, where a
+        commit would publish the batch's uncommitted work.
+
+        Warns:
+            UserWarning: if the audit event could not be written. The
+                operation still SUCCEEDED — the audit trail is missing
+                this event. Also counted on ``status().audit_write_failures``
+                and logged; see :meth:`_audit_log_after_commit`.
+        """
+        if not isinstance(required, bool):
+            raise TypeError(
+                "set_consolidate_requires_baton: required must be a bool, "
+                f"got {type(required).__name__}"
+            )
+        if self._defer_commit:
+            raise StoreError(
+                "Cannot set_consolidate_requires_baton() while inside _batch() context",
+                operation="set_consolidate_requires_baton",
+            )
+        was = self.consolidate_requires_baton()
+        with self._db_boundary("set_consolidate_requires_baton"):
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                (_CONSOLIDATE_REQUIRES_BATON_KEY, "1" if required else "0"),
+            )
+            self._conn.commit()
+        self._audit_log_after_commit("consolidate_policy_set", {
+            "requires_baton": required,
+            "was": was,
+        }, method="set_consolidate_requires_baton",
+            committed="the consolidate policy change", batch_aware=False)
 
     def load_wrap_snapshot(self) -> WrapSnapshot | None:
         """Return the frozen wrap-in-progress snapshot, or None if idle.

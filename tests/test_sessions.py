@@ -521,3 +521,101 @@ def test_prepare_wrap_empty_session_id_raises_clear_error(store):
     store.record("obs", EpisodeType.OBSERVATION)
     with pytest.raises(ValueError, match="non-empty"):
         prepare_wrap(store, session_id="")
+
+
+# -- the store-level require-baton policy (flow spore-1169) --
+
+
+def test_policy_is_off_by_default_and_audited_when_set(tmp_path):
+    db = tmp_path / "p.db"
+    store = Store(str(db))
+    assert store.consolidate_requires_baton() is False
+    store.set_consolidate_requires_baton(True)
+    assert store.consolidate_requires_baton() is True
+    store.set_consolidate_requires_baton(False)
+    assert store.consolidate_requires_baton() is False
+    store.close()
+    entries = [json.loads(line) for line in
+               (tmp_path / "p.audit.jsonl").read_text(encoding="utf-8").splitlines()]
+    events = [e["data"] for e in entries if e["event"] == "consolidate_policy_set"]
+    assert events == [{"requires_baton": True, "was": False},
+                      {"requires_baton": False, "was": True}]
+    reopened = Store(str(db))
+    reopened.set_consolidate_requires_baton(True)
+    reopened.close()
+    assert Store(str(db)).consolidate_requires_baton() is True  # persisted in the store
+
+
+def test_policy_corrupt_value_reads_as_required(store):
+    store._conn.execute(
+        "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+        ("consolidate_requires_baton", "yes"),
+    )
+    store._conn.commit()
+    assert store.consolidate_requires_baton() is True
+
+
+def test_policy_setter_refuses_non_bool_and_batch(store):
+    with pytest.raises(TypeError):
+        store.set_consolidate_requires_baton(1)  # type: ignore[arg-type]
+    from anneal_memory import StoreError
+
+    with store._batch():
+        with pytest.raises(StoreError):
+            store.set_consolidate_requires_baton(True)
+    assert store.consolidate_requires_baton() is False
+
+
+def test_policy_downgrades_a_caller_with_no_session_id(store):
+    store.record("obs", EpisodeType.OBSERVATION)
+    assert prepare_wrap(store)["status"] == "ready"  # policy off: the gate is inert
+    store.wrap_cancelled()
+    store.set_consolidate_requires_baton(True)
+    result = prepare_wrap(store)
+    assert result["status"] == "downgraded"
+    assert "downgraded-baton-required" in result["message"]
+    assert result["wrap_token"] is None and result["package"] is None
+    assert not store.status().wrap_in_progress  # store untouched
+
+
+def test_policy_overrides_allow_sole_live(store):
+    store.record("obs", EpisodeType.OBSERVATION)
+    store.set_consolidate_requires_baton(True)
+    sessions.register_session(store.continuity_path, "me")
+    result = prepare_wrap(store, session_id="me", allow_sole_live=True)
+    assert result["status"] == "downgraded"
+    assert "downgraded-no-baton" in result["message"]
+
+
+def test_policy_save_needs_the_prepare_token(store):
+    store.record("obs", EpisodeType.OBSERVATION)
+    store.set_consolidate_requires_baton(True)
+    sessions.claim_baton(store.continuity_path, "me")
+    prep = prepare_wrap(store, session_id="me")
+    assert prep["status"] == "ready"
+    with pytest.raises(ValueError, match="requires the consolidate baton"):
+        validated_save_continuity(store, _WRAP_TEXT)
+    assert store.status().wrap_in_progress  # the refusal wrote nothing
+    assert store.get_wrap_history() == []
+    validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"])
+    assert not store.status().wrap_in_progress
+    assert len(store.get_wrap_history()) == 1  # the token-carrying save committed
+
+
+def test_policy_cli_prepare_wrap_json_reports_the_downgrade(tmp_path):
+    import subprocess
+    import sys
+
+    db = str(tmp_path / "cli.db")
+    s = Store(db)
+    s.record("obs", EpisodeType.OBSERVATION)
+    s.set_consolidate_requires_baton(True)
+    s.close()
+    run = subprocess.run(
+        [sys.executable, "-m", "anneal_memory.cli", "--db", db, "prepare-wrap", "--json"],
+        capture_output=True, text=True,
+    )
+    assert run.returncode == 0, run.stderr
+    payload = json.loads(run.stdout)
+    assert payload["status"] == "downgraded" and payload["wrap_token"] is None
+    assert "downgraded-baton-required" in payload["message"]

@@ -1433,6 +1433,28 @@ def prepare_wrap(
     # only on the non-empty path, and episodes_since_wrap is global (keyed off the last
     # COMPLETED wrap), so while any wrap is in flight every parallel session sees the SAME
     # non-empty window and never reaches the empty path's wrap_cancelled().
+    # flow spore-1169: a store whose operator set the require-baton policy gates EVERY
+    # caller, including one that passes no session_id (which could never hold the baton),
+    # and ignores allow_sole_live. Without the policy the gate stays opt-in, as above.
+    requires_baton = store.consolidate_requires_baton()
+    if session_id is None and requires_baton:
+        return PrepareWrapResult(
+            status="downgraded",
+            message=(
+                "Consolidate downgraded to capture-only (downgraded-baton-required): this "
+                "store requires the consolidate baton for every consolidate, and this call "
+                "passed no session_id. Capture (afferent) is unaffected; to consolidate, "
+                "pass session_id and claim the baton (anneal_memory.sessions.claim_baton)."
+            ),
+            episode_count=len(episodes),
+            package=None,
+            assoc_context=None,
+            wrap_token=None,
+            uncovered_proven_to_check=[],
+            schema_warning=None,
+            crystallization_candidates=[],
+            rewarm_candidates=[],
+        )
     if session_id is not None:
         if not session_id:
             raise ValueError(
@@ -1440,7 +1462,9 @@ def prepare_wrap(
                 "(pass session_id=None to disable the consolidate-efferent gate)."
             )
         auth = sessions.consolidate_authorized(
-            store.continuity_path, session_id, allow_sole_live=allow_sole_live
+            store.continuity_path,
+            session_id,
+            allow_sole_live=allow_sole_live and not requires_baton,
         )
         if not auth["authorized"]:
             return PrepareWrapResult(
@@ -1850,6 +1874,9 @@ def validated_save_continuity(
             their protocol (MCP ``save_continuity`` tool argument,
             CLI ``--wrap-token`` flag) should pass it for explicit
             safety; single-process library callers can omit it.
+            **Required** on a store with the require-baton policy
+            (:meth:`Store.consolidate_requires_baton`): a tokenless save
+            there raises ``ValueError`` before anything is written.
         allow_shrink: Override for the catastrophic-shrink gate
             (v0.3.5). The gate applies only to PARTNERSHIP entities —
             stores whose schema declares a ``narrative-timeless``
@@ -1999,6 +2026,17 @@ def validated_save_continuity(
             "no episodes, there is nothing to compress — skip the "
             "save). Wrap exactly once per session: prepare_wrap → "
             "compress → save_continuity."
+        )
+
+    # flow spore-1169: on a store with the require-baton policy, only a save that carries the
+    # token of a gated prepare may commit. A tokenless save CASes against whatever wrap is in
+    # flight, so without this a caller that never passed the gate could save another
+    # session's wrap.
+    if wrap_token is None and store.consolidate_requires_baton():
+        raise ValueError(
+            "This store requires the consolidate baton, so the save must pass the "
+            "wrap_token that prepare_wrap returned to the baton holder. A tokenless save "
+            "is refused here: it would commit whatever wrap is in flight, whoever started it."
         )
 
     if wrap_token is not None:

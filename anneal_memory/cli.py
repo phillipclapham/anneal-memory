@@ -1028,13 +1028,15 @@ def cmd_prepare_wrap(args: argparse.Namespace) -> None:
             sys.exit(1)
 
         if args.json:
-            if result["status"] == "empty":
-                # Emit wrap_token: null on the empty path so jq-style
-                # scrapers can uniformly access the field without a
-                # missing-key error. Shape consistency across the two
-                # status branches.
+            if result["status"] != "ready":
+                # Emit wrap_token: null on the empty and downgraded paths so
+                # jq-style scrapers can uniformly access the field without a
+                # missing-key error. "downgraded" is reachable from this
+                # command only on a store with the require-baton policy
+                # (this command passes no session_id); without this branch it
+                # printed a bare {"wrap_token": null} and dropped the reason.
                 _print_json({
-                    "status": "empty",
+                    "status": result["status"],
                     "message": result["message"],
                     "wrap_token": None,
                 })

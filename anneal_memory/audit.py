@@ -482,6 +482,8 @@ class AuditTrail:
                      wrap_started, wrap_cancelled, wrap_completed
                    Continuity:
                      continuity_saved, section_schema_set
+                   Consolidate policy:
+                     consolidate_policy_set
                    Hebbian (episode-level) associations:
                      associations_updated, associations_decayed
                    Cortical (pattern-level) association graph:

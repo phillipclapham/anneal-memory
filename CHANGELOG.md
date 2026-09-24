@@ -30,6 +30,19 @@ other gets `BatonHeldError` instead of silently overwriting.
 **Migration:** a caller that has already decided to take the baton, as flow's `baton claim --take`
 does, passes `take=True`. Without that change the take path raises.
 
+### Added — an opt-in store-level policy: every consolidate on this store needs the baton
+
+The session gate only engages for a caller that passes `session_id`. A consumer that calls
+`prepare_wrap(store)` directly, or anneal's own CLI and MCP wrap, never meets it. A store can now
+carry a policy that closes that path: `Store.set_consolidate_requires_baton(True)` (persisted in the
+store's metadata table, audited as `consolidate_policy_set`) and `Store.consolidate_requires_baton()`.
+On such a store `prepare_wrap` downgrades a caller that passes no `session_id` (reason
+`downgraded-baton-required`), ignores `allow_sole_live`, and `validated_save_continuity` refuses a save
+that does not pass the prepare `wrap_token`, because a tokenless save commits whatever wrap is in flight,
+whoever started it. A stored value other than `"1"`/`"0"` reads as required. Nothing changes for a store
+until someone sets the policy. `prepare-wrap --json` now prints `status` and `message` for any non-ready
+result; it used to print a bare `{"wrap_token": null}` for a downgrade.
+
 ### Fixed — a wrong-shape baton or session file no longer crashes the gate and wedges recovery
 
 A baton file holding valid JSON of the wrong shape (`[]`, `null`, a string, an object with no usable

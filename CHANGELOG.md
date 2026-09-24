@@ -2,7 +2,7 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.13] — 2026-09-24
 
 ### Changed (BREAKING for callers that pass `session_id`) — every consolidate needs the baton
 

@@ -20,6 +20,7 @@ Zero dependencies beyond Python stdlib.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import uuid
 import logging
@@ -1326,8 +1327,11 @@ def prepare_wrap(
             building a package or marking a wrap in progress. Before 0.9.13
             the sole live registered session was also authorized; that is
             now opt-in via ``allow_sole_live``. ``None``
-            (default) disables the gate entirely: a caller that passes no
-            ``session_id`` is unaffected. Liveness + the baton live
+            (default) disables the gate for this call, EXCEPT on a store
+            with the require-baton policy
+            (:meth:`Store.consolidate_requires_baton`), where a call with no
+            ``session_id`` downgrades (``downgraded-baton-required``).
+            Liveness + the baton live
             in sidecar files next to the continuity file; the caller
             registers/heartbeats via :mod:`anneal_memory.sessions`. A
             consolidate-efferent caller MUST also round-trip the returned
@@ -1335,7 +1339,8 @@ def prepare_wrap(
             throttles WHO starts a consolidate; the token CAS is what makes
             the SAVE safe under a mid-flight baton reclaim (a tokenless save
             CASes against the current snapshot, not the prepare token).
-        allow_sole_live: Only meaningful with ``session_id``. ``True``
+        allow_sole_live: Only meaningful with ``session_id``, and ignored
+            on a store with the require-baton policy. ``True``
             restores spore-194's rule that a session is also authorized when
             no OTHER registered session is live. Default ``False``: every
             consolidate needs the baton (⚖ Phill, 2026-09-24, flow
@@ -1348,7 +1353,8 @@ def prepare_wrap(
             ``"empty"`` = no episodes to wrap; ``"ready"`` = package
             built and wrap marked in progress on the store;
             ``"downgraded"`` = the consolidate-efferent gate (spore-194)
-            declined this session (it does not hold the baton) — see
+            declined this call (it does not hold the baton, or it passed
+            no ``session_id`` on a baton-protected store) — see
             ``message``; the store is left untouched
           - ``message`` (str): short human-readable status summary
           - ``episode_count`` (int): number of episodes in the wrap window
@@ -1442,9 +1448,10 @@ def prepare_wrap(
             status="downgraded",
             message=(
                 "Consolidate downgraded to capture-only (downgraded-baton-required): this "
-                "store requires the consolidate baton for every consolidate, and this call "
-                "passed no session_id. Capture (afferent) is unaffected; to consolidate, "
-                "pass session_id and claim the baton (anneal_memory.sessions.claim_baton)."
+                "store is baton-protected (Store.consolidate_requires_baton), so only the "
+                "session the operator has given the consolidate baton can consolidate it, "
+                "identifying itself with session_id. This call passed none, and the CLI and "
+                "MCP wrap cannot. Capture (afferent) is unaffected."
             ),
             episode_count=len(episodes),
             package=None,
@@ -1472,8 +1479,9 @@ def prepare_wrap(
                 message=(
                     f"Consolidate downgraded to capture-only ({auth['reason']}): "
                     f"{len(auth['live_session_ids'])} live session(s), baton holder = "
-                    f"{auth['baton_holder'] or 'none'}. Capture (afferent) is unaffected; "
-                    f"claim the consolidate baton to recompose the felt layer."
+                    f"{auth['baton_holder'] or 'none'}. Capture (afferent) is unaffected. "
+                    f"A consolidate needs the baton, which the operator assigns to one "
+                    f"session; a session does not claim it on its own initiative."
                 ),
                 episode_count=len(episodes),
                 package=None,
@@ -1781,6 +1789,7 @@ def validated_save_continuity(
     carryforward_cold_days: int | None = 7,
     crystal_store: CrystalStore | None = None,
     compost: list[str] | None = None,
+    session_id: str | None = None,
 ) -> SaveContinuityResult:
     """Save continuity with the full validation pipeline.
 
@@ -1875,8 +1884,8 @@ def validated_save_continuity(
             CLI ``--wrap-token`` flag) should pass it for explicit
             safety; single-process library callers can omit it.
             **Required** on a store with the require-baton policy
-            (:meth:`Store.consolidate_requires_baton`): a tokenless save
-            there raises ``ValueError`` before anything is written.
+            (:meth:`Store.consolidate_requires_baton`), together with
+            ``session_id``.
         allow_shrink: Override for the catastrophic-shrink gate
             (v0.3.5). The gate applies only to PARTNERSHIP entities —
             stores whose schema declares a ``narrative-timeless``
@@ -1907,6 +1916,13 @@ def validated_save_continuity(
             edges behind. A name with no edges still gets its generation
             boundary. ``None`` (the default) skips this step and adds no key
             to the result. Library-only; no CLI or MCP surface.
+        session_id: The consolidate-efferent session making this save
+            (flow spore-1169). When passed, the save proceeds only if that
+            session STILL holds the consolidate baton (re-checked here, so a
+            take mid-wrap revokes the old holder's commit); otherwise
+            ``ValueError`` with nothing written. Required, with
+            ``wrap_token``, on a store with the require-baton policy; ``None``
+            elsewhere skips the check. Library-only; no CLI or MCP surface.
 
     Returns:
         :class:`SaveContinuityResult` — a :class:`TypedDict` with the
@@ -2028,16 +2044,31 @@ def validated_save_continuity(
             "compress → save_continuity."
         )
 
-    # flow spore-1169: on a store with the require-baton policy, only a save that carries the
-    # token of a gated prepare may commit. A tokenless save CASes against whatever wrap is in
-    # flight, so without this a caller that never passed the gate could save another
-    # session's wrap.
-    if wrap_token is None and store.consolidate_requires_baton():
+    # flow spore-1169: the baton is re-checked at the save, not only at prepare. The wrap token
+    # is not a secret (wrap-token-current prints it), so on a baton-protected store only a
+    # caller that names itself AND still holds the baton may commit; and any caller that names
+    # itself is refused once the baton has been taken from it mid-wrap.
+    if session_id is not None and not session_id:
         raise ValueError(
-            "This store requires the consolidate baton, so the save must pass the "
-            "wrap_token that prepare_wrap returned to the baton holder. A tokenless save "
-            "is refused here: it would commit whatever wrap is in flight, whoever started it."
+            "validated_save_continuity: session_id must be non-empty when provided."
         )
+    if store.consolidate_requires_baton() and (session_id is None or wrap_token is None):
+        raise ValueError(
+            "This store is baton-protected (Store.consolidate_requires_baton): a save must "
+            "pass the session_id of the baton holder and the wrap_token its prepare_wrap "
+            "returned. Nothing was written."
+        )
+    if session_id is not None:
+        try:
+            held = sessions.holds_baton(store.continuity_path, session_id)
+        except (OSError, json.JSONDecodeError):
+            held = False  # an unreadable baton confirms no one: fail closed
+        if not held:
+            raise ValueError(
+                f"Session {session_id!r} does not hold the consolidate baton (it may have "
+                f"been taken, or the baton file is unreadable), so it may not commit this "
+                f"wrap. Nothing was written."
+            )
 
     if wrap_token is not None:
         # Caller opted into explicit token verification. A mismatch

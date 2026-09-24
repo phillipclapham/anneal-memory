@@ -169,6 +169,10 @@ class StoreStatus:
     # True while the latest post-commit prune failure has not been followed by
     # a prune() that completed; False once retention has caught up.
     prune_behind: bool = False
+    # The require-baton consolidate policy (flow spore-1169), read from the
+    # store's metadata table, so every transport can show why a wrap
+    # downgrades on a protected store. See Store.consolidate_requires_baton.
+    consolidate_requires_baton: bool = False
 
 
 @dataclass(frozen=True)

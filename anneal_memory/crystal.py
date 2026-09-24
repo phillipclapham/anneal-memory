@@ -1104,6 +1104,9 @@ def _meaningful(text: str) -> str:
     walk inward over spans that touch them, and the text is sliced once. A tag body
     that holds a stray ``[`` (``[provenance: a [b]``) is one span, because the
     vocabulary's tag body runs to the first ``]``."""
+    # Stripped BEFORE the pass: an unterminated tag runs to the end of the text,
+    # so its span must end where the cursor starts (L3 round 3).
+    text = text.strip(_SEPARATORS)
     spans = {m.start(): m.end() for m in _ONE_MARKER_RE.finditer(text)}
     by_end = {end: start for start, end in spans.items()}
     lo, hi = 0, len(text)

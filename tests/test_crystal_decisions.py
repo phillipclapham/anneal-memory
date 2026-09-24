@@ -640,14 +640,18 @@ def test_status_markers_are_never_a_patterns_explanation():
         '- !! quoted_marker | 3x (2026-09-23) [evidence: a1 "[no-contradicts]"]\n'
         # L3 round 2 (codex): a trailing tag whose body holds a stray "[".
         "- !! stray_bracket | 3x (2026-09-23) — durable rule [provenance: flow [legacy]\n"
+        # L3 round 3 (complement): an unterminated tag ending in whitespace.
+        "- !! open_tag | 3x (2026-09-23) — real prose [contradicts: x \n"
         "\n```crystal-decisions\n"
         "invisible_infrastructure_failure | crystallize | timeless | just-in-time\n"
         "the_device_is_the_oracle | crystallize | timeless | just-in-time\n"
         "stance_only | crystallize | timeless | just-in-time\n"
         "quoted_marker | crystallize | timeless | just-in-time\n"
-        "stray_bracket | crystallize | timeless | just-in-time\n```"
+        "stray_bracket | crystallize | timeless | just-in-time\n"
+        "open_tag | crystallize | timeless | just-in-time\n```"
     )
-    carried, oracle, stance, quoted, stray = parse_crystal_decisions(wrap)
+    carried, oracle, stance, quoted, stray, open_tag = parse_crystal_decisions(wrap)
+    assert open_tag.explanation == "real prose"
     assert stray.explanation == "durable rule"
     assert stance.explanation == ""
     assert quoted.explanation == ""

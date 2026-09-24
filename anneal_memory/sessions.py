@@ -106,16 +106,6 @@ DEFAULT_TTL_SECONDS = 5400
 _SESSIONS_SUFFIX = ".sessions"
 _BATON_SUFFIX = ".baton"
 _BATON_LOCK_SUFFIX = ".baton.lock"
-# os.link failures that mean "this filesystem has no hard links", not "something is wrong".
-_NO_HARDLINK_ERRNOS = frozenset(
-    e for e in (
-        getattr(errno, "EPERM", None), getattr(errno, "ENOTSUP", None),
-        getattr(errno, "EOPNOTSUPP", None), getattr(errno, "ENOSYS", None),
-        # Windows non-NTFS and some FUSE/SMB mounts. A real permission fault here also makes
-        # the O_EXCL fallback fail the same way, so widening this cannot mask one.
-        getattr(errno, "EINVAL", None), getattr(errno, "EACCES", None),
-    ) if e is not None
-)
 _SESSION_FILE_SUFFIX = ".session"
 
 PathLike = str | os.PathLike[str]
@@ -254,16 +244,6 @@ def _session_file(continuity_path: PathLike, session_id: str) -> Path:
     return _registry_dir(continuity_path) / f"{digest}{_SESSION_FILE_SUFFIX}"
 
 
-def _unlink_if_same_inode(path: Path, inode: int) -> None:
-    """Remove ``path`` only if it is still the file this process created (``inode``), so a
-    concurrent replacement by another claimer is never deleted. Best-effort."""
-    try:
-        if os.stat(path).st_ino == inode:
-            os.unlink(path)
-    except OSError:
-        pass
-
-
 def _atomic_write_json(
     path: Path, payload: dict[str, object], *, exclusive: bool = False
 ) -> None:
@@ -273,8 +253,10 @@ def _atomic_write_json(
 
     ``exclusive=True`` only creates: the tmp is published with ``os.link``, which raises
     ``FileExistsError`` if ``path`` already exists, so of two racing creators exactly one wins
-    and the other gets the error instead of silently overwriting. It needs a filesystem with
-    hard links; this module already assumes a local one (see ``DEFAULT_TTL_SECONDS``)."""
+    and the other gets the error instead of silently overwriting. It needs hard links: on a
+    filesystem without them ``os.link`` raises and the write fails closed, never falling back
+    to an overwrite (an O_EXCL fallback was tried and withdrawn in L3, rounds 2-4: every
+    version of its cleanup could delete a racer's baton or leave a wedged one)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix="." + path.name + ".")
     try:
@@ -292,36 +274,7 @@ def _atomic_write_json(
             fh.flush()
             os.fsync(fh.fileno())
         if exclusive:
-            try:
-                os.link(tmp, path)  # FileExistsError when another creator already won
-            except FileExistsError:
-                raise
-            except OSError as exc:
-                if exc.errno not in _NO_HARDLINK_ERRNOS:
-                    raise
-                # No hard links here (FAT/exFAT, some FUSE/SMB mounts). Still create-only:
-                # O_EXCL fails with FileExistsError if a racer created it first. The content
-                # lands after the create, so a reader can briefly see an empty file; that
-                # reads as corrupt and fails closed, never as "unheld". Never os.replace:
-                # that would silently overwrite a racer's claim (L3 round 2, three seats).
-                fd2 = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                created = os.fstat(fd2).st_ino
-                try:
-                    out = os.fdopen(fd2, "w", encoding="utf-8")
-                except BaseException:
-                    os.close(fd2)
-                    _unlink_if_same_inode(path, created)
-                    raise
-                try:
-                    with out:
-                        json.dump(payload, out)
-                        out.flush()
-                        os.fsync(out.fileno())
-                except BaseException:
-                    # A half-written baton would read as corrupt forever and wedge every
-                    # later claim; remove what this attempt created, and nothing else.
-                    _unlink_if_same_inode(path, created)
-                    raise
+            os.link(tmp, path)  # FileExistsError when another creator already won
         else:
             os.replace(tmp, path)
     except BaseException:
@@ -400,7 +353,10 @@ def close_session(continuity_path: PathLike, session_id: str) -> None:
             try:
                 warnings.warn(msg, stacklevel=2)
             except Exception:
-                logging.getLogger(__name__).warning(msg)
+                try:
+                    logging.getLogger(__name__).warning(msg)
+                except Exception:
+                    pass  # the teardown contract outranks the report
 
 
 def live_sessions(
@@ -609,12 +565,22 @@ def claim_baton(
                 "claimed_at": claimed_at,
                 "previous_holder": previous,
             }
+            exclusive = not (locked or take)
             try:
                 # An unheld baton without the lock: create-only, so a racing claimer loses
                 # loudly instead of being silently overwritten.
-                _atomic_write_json(path, payload, exclusive=not (locked or take))
+                _atomic_write_json(path, payload, exclusive=exclusive)
             except FileExistsError:
                 continue  # someone claimed it since our read: decide again against theirs
+            except OSError as exc:
+                if not exclusive:
+                    raise
+                raise OSError(
+                    exc.errno,
+                    "claim_baton: this filesystem offers neither flock nor hard links, so an "
+                    "unheld baton cannot be claimed exclusively. Nothing was written. "
+                    "take=True claims it by overwrite, deliberately.",
+                ) from exc
             return BatonClaim(
                 session_id=session_id, claimed_at=claimed_at, previous_holder=previous
             )

@@ -793,3 +793,98 @@ def test_status_reports_the_policy_on_every_transport(tmp_path):
         capture_output=True, text=True,
     ).stdout
     assert "Baton-protected" in text
+
+
+# -- L3 round-1 fixes (codex + complement, 2026-09-24) --
+
+
+def _lock_is_held_elsewhere(cp) -> bool:
+    fcntl = pytest.importorskip("fcntl")
+    import errno as _errno
+
+    lock = sessions._anchor(cp).with_name(sessions._anchor(cp).name + ".baton.lock")
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        assert exc.errno in (_errno.EWOULDBLOCK, _errno.EAGAIN)
+        return True
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
+def test_save_holds_the_baton_lock_through_the_commit(store, monkeypatch):
+    # codex HIGH / complement MED: the save's baton check must not be a one-shot TOCTOU. A take
+    # (which needs this lock) cannot land between the check and wrap_completed.
+    store.record("obs", EpisodeType.OBSERVATION)
+    cp = store.continuity_path
+    sessions.claim_baton(cp, "A")
+    prep = prepare_wrap(store, session_id="A")
+    real = store.wrap_completed
+    seen = []
+
+    def probe(*a, **k):
+        seen.append(_lock_is_held_elsewhere(cp))
+        return real(*a, **k)
+
+    monkeypatch.setattr(store, "wrap_completed", probe)
+    validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"], session_id="A")
+    assert seen == [True]
+    assert not _lock_is_held_elsewhere(cp)  # released after the commit
+
+
+def test_policy_setter_takes_the_baton_lock(store, monkeypatch):
+    # codex HIGH: turning the policy on must serialize against an in-flight save's commit.
+    import contextlib
+
+    entered = []
+    real = sessions._baton_lock
+
+    @contextlib.contextmanager
+    def recording(cp):
+        with real(cp) as locked:
+            entered.append(locked)
+            yield locked
+
+    monkeypatch.setattr(sessions, "_baton_lock", recording)
+    store.set_consolidate_requires_baton(True)
+    assert entered == [True]
+
+
+def test_non_bool_take_and_allow_sole_live_are_refused(store):
+    cp = store.continuity_path
+    sessions.claim_baton(cp, "A")
+    with pytest.raises(TypeError):
+        sessions.claim_baton(cp, "B", take="false")  # type: ignore[arg-type]
+    assert sessions.holds_baton(cp, "A")
+    with pytest.raises(TypeError):
+        sessions.consolidate_authorized(cp, "B", allow_sole_live="false")  # type: ignore[arg-type]
+    store.record("obs", EpisodeType.OBSERVATION)
+    with pytest.raises(TypeError):
+        prepare_wrap(store, session_id="B", allow_sole_live="false")  # type: ignore[arg-type]
+    assert not store.status().wrap_in_progress
+
+
+def test_release_without_a_baton_touches_no_lock_file(cp):
+    assert sessions.release_baton(cp, "me") is False
+    sessions.close_session(cp, "me")
+    assert not any(p.name.endswith(".baton.lock") for p in cp.parent.iterdir())
+
+
+def test_protected_store_without_flock_fails_closed_unprotected_proceeds(store, monkeypatch):
+    store.record("obs", EpisodeType.OBSERVATION)
+    cp = store.continuity_path
+    sessions.claim_baton(cp, "A")
+    prep = prepare_wrap(store, session_id="A")
+    _no_lock(monkeypatch)
+    store.set_consolidate_requires_baton(True)
+    with pytest.raises(ValueError, match="lock is unavailable"):
+        validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"],
+                                  session_id="A")
+    assert store.status().wrap_in_progress
+    store.set_consolidate_requires_baton(False)
+    validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"], session_id="A")
+    assert len(store.get_wrap_history()) == 1

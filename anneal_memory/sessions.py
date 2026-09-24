@@ -270,7 +270,15 @@ def _atomic_write_json(
             fh.flush()
             os.fsync(fh.fileno())
         if exclusive:
-            os.link(tmp, path)  # FileExistsError when another creator already won
+            try:
+                os.link(tmp, path)  # FileExistsError when another creator already won
+            except FileExistsError:
+                raise
+            except OSError:
+                # No hard links here (FAT/exFAT, some FUSE/SMB mounts): there is no atomic
+                # create-only primitive left, so fall back to a plain replace.
+                os.replace(tmp, path)
+                return
         else:
             os.replace(tmp, path)
     except BaseException:
@@ -333,7 +341,10 @@ def close_session(continuity_path: PathLike, session_id: str) -> None:
         _session_file(continuity_path, session_id).unlink()
     except FileNotFoundError:
         pass
-    release_baton(continuity_path, session_id)
+    try:
+        release_baton(continuity_path, session_id)
+    except OSError:
+        pass  # best-effort teardown: a lock-file fault must not fail closing a session
 
 
 def live_sessions(
@@ -517,6 +528,8 @@ def claim_baton(
     """
     if not session_id:
         raise ValueError("claim_baton: session_id must be non-empty")
+    if not isinstance(take, bool):  # take="false" is truthy: never infer an authority transfer
+        raise TypeError(f"claim_baton: take must be a bool, got {type(take).__name__}")
     path = _baton_path(continuity_path)
     with _baton_lock(continuity_path) as locked:
         for _attempt in range(3):
@@ -562,6 +575,8 @@ def release_baton(continuity_path: PathLike, session_id: str) -> bool:
     between them and be deleted, which would leave the baton unheld and claimable by anyone.
     Where the lock is unavailable that window remains (see :func:`_baton_lock`).
     """
+    if not _baton_path(continuity_path).exists():
+        return False  # nothing to release; no lock, and no lock file created
     with _baton_lock(continuity_path):
         try:
             held = holds_baton(continuity_path, session_id)
@@ -605,6 +620,11 @@ def consolidate_authorized(
     """
     if not session_id:
         raise ValueError("consolidate_authorized: session_id must be non-empty")
+    if not isinstance(allow_sole_live, bool):
+        raise TypeError(
+            "consolidate_authorized: allow_sole_live must be a bool, "
+            f"got {type(allow_sole_live).__name__}"
+        )
     if not allow_sole_live:
         # The default rule needs only the baton. The registry is read for the message and the
         # stale-holder distinction, and a bad peer file must not block the holder: liveness

@@ -60,6 +60,11 @@ downgrade.
 
 A caller that names itself is refused (nothing written) unless that session still holds the baton at
 save time, so taking the baton mid-wrap revokes the old holder's commit and not only its next prepare.
+Every save holds the baton lock from that check through its DB commit, and re-reads the policy under it;
+`set_consolidate_requires_baton` takes the same lock. So a take, or the policy being switched on, either
+lands before the check or waits for the commit. Where `flock` is unavailable, a save on a protected store
+is refused rather than left unserialized. `take` and `allow_sole_live` must be real bools: a truthy
+string such as `"false"` is refused with `TypeError` instead of being read as consent.
 Optional everywhere except a store with the policy above, where it is required. **A consumer that sets
 the policy on its store must pass `session_id` to the save first**, or every save it makes is refused.
 

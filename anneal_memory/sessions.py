@@ -78,6 +78,7 @@ import json
 import math
 import os
 import tempfile
+import logging
 import time
 import warnings
 from collections.abc import Iterator
@@ -110,6 +111,9 @@ _NO_HARDLINK_ERRNOS = frozenset(
     e for e in (
         getattr(errno, "EPERM", None), getattr(errno, "ENOTSUP", None),
         getattr(errno, "EOPNOTSUPP", None), getattr(errno, "ENOSYS", None),
+        # Windows non-NTFS and some FUSE/SMB mounts. A real permission fault here also makes
+        # the O_EXCL fallback fail the same way, so widening this cannot mask one.
+        getattr(errno, "EINVAL", None), getattr(errno, "EACCES", None),
     ) if e is not None
 )
 _SESSION_FILE_SUFFIX = ".session"
@@ -250,6 +254,16 @@ def _session_file(continuity_path: PathLike, session_id: str) -> Path:
     return _registry_dir(continuity_path) / f"{digest}{_SESSION_FILE_SUFFIX}"
 
 
+def _unlink_if_same_inode(path: Path, inode: int) -> None:
+    """Remove ``path`` only if it is still the file this process created (``inode``), so a
+    concurrent replacement by another claimer is never deleted. Best-effort."""
+    try:
+        if os.stat(path).st_ino == inode:
+            os.unlink(path)
+    except OSError:
+        pass
+
+
 def _atomic_write_json(
     path: Path, payload: dict[str, object], *, exclusive: bool = False
 ) -> None:
@@ -291,10 +305,23 @@ def _atomic_write_json(
                 # reads as corrupt and fails closed, never as "unheld". Never os.replace:
                 # that would silently overwrite a racer's claim (L3 round 2, three seats).
                 fd2 = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(fd2, "w", encoding="utf-8") as out:
-                    json.dump(payload, out)
-                    out.flush()
-                    os.fsync(out.fileno())
+                created = os.fstat(fd2).st_ino
+                try:
+                    out = os.fdopen(fd2, "w", encoding="utf-8")
+                except BaseException:
+                    os.close(fd2)
+                    _unlink_if_same_inode(path, created)
+                    raise
+                try:
+                    with out:
+                        json.dump(payload, out)
+                        out.flush()
+                        os.fsync(out.fileno())
+                except BaseException:
+                    # A half-written baton would read as corrupt forever and wedge every
+                    # later claim; remove what this attempt created, and nothing else.
+                    _unlink_if_same_inode(path, created)
+                    raise
         else:
             os.replace(tmp, path)
     except BaseException:
@@ -357,16 +384,23 @@ def close_session(continuity_path: PathLike, session_id: str) -> None:
         _session_file(continuity_path, session_id).unlink()
     except FileNotFoundError:
         pass
-    try:
-        release_baton(continuity_path, session_id)
-    except OSError as exc:
-        # Best-effort teardown must not fail closing a session, but a baton this session may
-        # still hold is exactly the phantom designation described above: say so.
-        warnings.warn(
-            f"close_session: could not release the baton for {session_id!r} "
-            f"({type(exc).__name__}: {exc}); if this session held it, it is still held.",
-            stacklevel=2,
-        )
+    finally:
+        # The release runs even if the unlink failed: a held baton outliving its session is
+        # the worse outcome.
+        try:
+            release_baton(continuity_path, session_id)
+        except OSError as exc:
+            # Best-effort teardown must not fail closing a session, but a baton this session
+            # may still hold is exactly the phantom designation described above: say so. The
+            # warning itself must not raise (-W error), so fall back to the logger.
+            msg = (
+                f"close_session: could not release the baton for {session_id!r} "
+                f"({type(exc).__name__}: {exc}); if this session held it, it is still held."
+            )
+            try:
+                warnings.warn(msg, stacklevel=2)
+            except Exception:
+                logging.getLogger(__name__).warning(msg)
 
 
 def live_sessions(

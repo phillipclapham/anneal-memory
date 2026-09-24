@@ -2422,15 +2422,6 @@ def validated_save_continuity(
                 pair_id=tmp_pair_id,
             )
 
-            # flow spore-1169: the authoritative consolidate-gate check. It runs HERE, after
-            # wrap_completed's DML, because this connection now holds SQLite's write lock: a
-            # policy change from any other connection has either committed already (and this
-            # re-read sees it) or must wait for this transaction to end. Raising rolls the whole
-            # batch back, like the linkgate block above. The baton itself is a sidecar file, so
-            # a take landing after this read and before the commit (milliseconds) is not seen;
-            # that residual is documented, not locked, because holding a flock across the batch
-            # nests it around the SQLite lock (see LOCK ORDERING below) and was refused in L3.
-            _check_save_authority(store, session_id, wrap_token)
 
             # Update cross-session pattern history. Scan the
             # post-validation continuity text for every named pattern
@@ -2525,6 +2516,18 @@ def validated_save_continuity(
                     # coherent on deterministic/backdated runs.
                     seen_at=today_str,
                 )
+
+            # flow spore-1169: the authoritative consolidate-gate check, deliberately the LAST
+            # statement in the batch. wrap_completed's DML above means this connection holds
+            # SQLite's write lock, so a policy change from any other connection has either
+            # committed already (and this re-read sees it) or waits for this transaction to
+            # end. Raising rolls the whole batch back, like the linkgate block. The baton is a
+            # sidecar file outside the transaction, so a take landing between this read and the
+            # commit below (the commit itself) is not seen: a documented residual. Holding the
+            # baton flock across the commit instead was tried and withdrawn in L3: a failed
+            # unlock after the commit discarded the committed tmp files, and an on_audit_event
+            # callback that touches the baton would block on the lock this process holds.
+            _check_save_authority(store, session_id, wrap_token)
             # Batch context manager commits here on successful exit.
 
         # Batch exited without raising → DB is committed. From this

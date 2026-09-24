@@ -792,6 +792,12 @@ class Server:
                 + (f" — started {started_at}" if started_at else "")
             )
 
+        if status.consolidate_requires_baton:
+            lines.append(
+                "Baton-protected store: only the session holding the consolidate baton "
+                "can consolidate; prepare_wrap from this server downgrades"
+            )
+
         if status.continuity_chars is not None:
             lines.append(f"Continuity: {status.continuity_chars} chars")
         else:

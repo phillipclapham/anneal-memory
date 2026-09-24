@@ -89,9 +89,11 @@ def test_corrupt_fresh_session_file_fails_closed(cp):
     # (not silently treat the peer as absent → a false sole-grant). [codex L3 MED-1]
     sessions.register_session(cp, "s1")
     sessions._session_file(cp, "s1").write_text("{ not json", encoding="utf-8")
-    auth = sessions.consolidate_authorized(cp, "me")
+    auth = sessions.consolidate_authorized(cp, "me", allow_sole_live=True)
     assert auth["authorized"] is False
     assert auth["reason"] == "downgraded-registry-error"
+    # by default liveness decides nothing: still no grant, for want of the baton
+    assert sessions.consolidate_authorized(cp, "me")["authorized"] is False
 
 
 def test_corrupt_stale_session_file_skipped(cp):
@@ -171,9 +173,22 @@ def test_holder_reclaim_is_a_noop_success(cp):
     assert sessions._baton_path(cp).read_bytes() == before  # nothing rewritten
 
 
-def test_unheld_claim_is_create_only(cp, monkeypatch):
+def _no_lock(monkeypatch):
+    # Simulate a platform where flock is unavailable (Windows, some NFS): _baton_lock yields
+    # False, so claim_baton falls back to an exclusive create for an unheld baton.
+    import contextlib
+
+    @contextlib.contextmanager
+    def unlocked(_cp):
+        yield False
+
+    monkeypatch.setattr(sessions, "_baton_lock", unlocked)
+
+
+def test_unheld_claim_is_create_only_without_the_lock(cp, monkeypatch):
     # Two sessions racing for an UNHELD baton: the loser must be refused, not overwrite.
     # Simulate the race by landing s1's claim between s2's read and s2's create.
+    _no_lock(monkeypatch)
     real_read = sessions._read_baton
 
     def read_then_race(path):
@@ -488,9 +503,10 @@ def test_registry_error_fails_closed(cp, monkeypatch):
         raise PermissionError("registry unreadable")
 
     monkeypatch.setattr(sessions, "live_sessions", boom)
-    auth = sessions.consolidate_authorized(cp, "me")
+    auth = sessions.consolidate_authorized(cp, "me", allow_sole_live=True)
     assert auth["authorized"] is False
     assert auth["reason"] == "downgraded-registry-error"
+    assert sessions.consolidate_authorized(cp, "me")["authorized"] is False
 
 
 def test_heartbeat_rescues_stale_session(cp):
@@ -593,11 +609,13 @@ def test_policy_save_needs_the_prepare_token(store):
     sessions.claim_baton(store.continuity_path, "me")
     prep = prepare_wrap(store, session_id="me")
     assert prep["status"] == "ready"
-    with pytest.raises(ValueError, match="requires the consolidate baton"):
+    with pytest.raises(ValueError, match="baton-protected"):
         validated_save_continuity(store, _WRAP_TEXT)
+    with pytest.raises(ValueError, match="baton-protected"):
+        validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"])
     assert store.status().wrap_in_progress  # the refusal wrote nothing
     assert store.get_wrap_history() == []
-    validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"])
+    validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"], session_id="me")
     assert not store.status().wrap_in_progress
     assert len(store.get_wrap_history()) == 1  # the token-carrying save committed
 
@@ -619,3 +637,159 @@ def test_policy_cli_prepare_wrap_json_reports_the_downgrade(tmp_path):
     payload = json.loads(run.stdout)
     assert payload["status"] == "downgraded" and payload["wrap_token"] is None
     assert "downgraded-baton-required" in payload["message"]
+
+
+# -- L1/L2 review fixes (2026-09-24) --
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"session_id": "s1", "claimed_at": ' + "9" * 5000 + "}",  # int digit limit → ValueError
+        "[" * 200000 + "]" * 200000,  # nesting → RecursionError
+    ],
+    ids=["int-digit-limit", "deep-nesting"],
+)
+def test_parser_failures_are_unreadable_not_a_crash(cp, payload):
+    # L1 MED-1: json.loads raises ValueError / RecursionError for these, which the
+    # (OSError, JSONDecodeError) catches missed, wedging take=True and crashing the gate.
+    bp = sessions._baton_path(cp)
+    bp.parent.mkdir(parents=True, exist_ok=True)
+    bp.write_text(payload, encoding="utf-8")
+    with pytest.raises(sessions.CorruptSidecarError):
+        sessions.baton_holder(cp)
+    assert sessions.consolidate_authorized(cp, "me")["reason"] == "downgraded-registry-error"
+    assert sessions.release_baton(cp, "me") is False
+    sessions.close_session(cp, "me")
+    claim = sessions.claim_baton(cp, "me", take=True)  # the recovery is not wedged
+    assert claim["previous_holder"] is None and sessions.holds_baton(cp, "me")
+    # and the same payload in a fresh peer file fails closed rather than raising
+    sessions.register_session(cp, "peer")
+    sessions._session_file(cp, "peer").write_text(payload, encoding="utf-8")
+    auth = sessions.consolidate_authorized(cp, "x", allow_sole_live=True)
+    assert auth["reason"] == "downgraded-registry-error"
+
+
+def test_oversized_numbers_coerce_instead_of_raising(cp):
+    # L1 MED-2: float() of a 400-digit int raises OverflowError.
+    big = int("9" * 400)
+    bp = sessions._baton_path(cp)
+    bp.parent.mkdir(parents=True, exist_ok=True)
+    bp.write_text(json.dumps({"session_id": "s1", "claimed_at": big}), encoding="utf-8")
+    assert sessions.claim_baton(cp, "s1")["claimed_at"] == 0.0  # holder no-op still works
+    sessions.register_session(cp, "peer")
+    sessions._session_file(cp, "peer").write_text(
+        json.dumps({"session_id": "peer", "registered_at": big, "pid": True}), encoding="utf-8"
+    )
+    [info] = sessions.live_sessions(cp)
+    assert info["registered_at"] == 0.0 and info["pid"] is None
+
+
+def test_a_bad_peer_file_does_not_block_the_holder(cp):
+    # L1 LOW-MED-5: by default liveness decides nothing, so a corrupt peer is not a reason
+    # to refuse the baton holder.
+    sessions.claim_baton(cp, "me")
+    sessions.register_session(cp, "peer")
+    sessions._session_file(cp, "peer").write_text('{"label": "x"}', encoding="utf-8")
+    auth = sessions.consolidate_authorized(cp, "me")
+    assert (auth["authorized"], auth["reason"]) == (True, "holds-baton")
+    assert auth["live_session_ids"] == []  # unknown, and said so by being empty
+    # ... but under allow_sole_live, where liveness can authorize, it still fails closed
+    other = sessions.consolidate_authorized(cp, "x", allow_sole_live=True)
+    assert other["reason"] == "downgraded-registry-error"
+
+
+def test_release_holds_the_baton_lock_across_check_and_unlink(cp, monkeypatch):
+    # L2 M2: a take landing between release's check and its unlink was deleted, leaving the
+    # baton unheld and claimable by anyone. Prove the check runs under the exclusive lock:
+    # from inside it, a non-blocking flock on the lock file must fail.
+    fcntl = pytest.importorskip("fcntl")
+    import errno as _errno
+
+    sessions.claim_baton(cp, "A")
+    real = sessions.holds_baton
+    seen = []
+
+    def probe(path, sid):
+        lock = sessions._anchor(cp).with_name(sessions._anchor(cp).name + ".baton.lock")
+        fd = os.open(lock, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            seen.append("free")
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError as exc:
+            assert exc.errno in (_errno.EWOULDBLOCK, _errno.EAGAIN)
+            seen.append("held")
+        finally:
+            os.close(fd)
+        return real(path, sid)
+
+    monkeypatch.setattr(sessions, "holds_baton", probe)
+    assert sessions.release_baton(cp, "A") is True
+    assert seen == ["held"]
+
+
+def test_exceptions_pickle_round_trip(tmp_path):
+    import pickle
+
+    e = sessions.CorruptSidecarError(tmp_path / "x.baton", "why")
+    back = pickle.loads(pickle.dumps(e))
+    assert str(back) == "x.baton: why" and back.path == e.path
+    assert isinstance(back, json.JSONDecodeError) and isinstance(back, AnnealMemoryError)
+    h = sessions.BatonHeldError("me", "other", False)
+    hb = pickle.loads(pickle.dumps(h))
+    assert (hb.session_id, hb.holder, hb.unreadable) == ("me", "other", False)
+    assert str(hb) == str(h)
+
+
+def test_save_rechecks_the_baton_when_the_session_names_itself(store):
+    # L2 M3: a take mid-wrap revokes the old holder's commit, for a caller that names itself.
+    store.record("obs", EpisodeType.OBSERVATION)
+    cp = store.continuity_path
+    sessions.claim_baton(cp, "A")
+    prep = prepare_wrap(store, session_id="A")
+    sessions.claim_baton(cp, "B", take=True)
+    with pytest.raises(ValueError, match="does not hold the consolidate baton"):
+        validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"],
+                                  session_id="A")
+    assert store.status().wrap_in_progress  # nothing written
+    validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"], session_id="B")
+    assert len(store.get_wrap_history()) == 1
+
+
+def test_policy_save_with_a_borrowed_token_is_refused(store):
+    # L2 H1: the token is not a secret (wrap-token-current prints it). On a protected store a
+    # save that does not name the baton holder is refused even with the right token.
+    store.record("obs", EpisodeType.OBSERVATION)
+    store.set_consolidate_requires_baton(True)
+    sessions.claim_baton(store.continuity_path, "A")
+    prepare_wrap(store, session_id="A")
+    token = store.load_wrap_snapshot()["token"]  # what any other process can read
+    with pytest.raises(ValueError, match="baton-protected"):
+        validated_save_continuity(store, _WRAP_TEXT, wrap_token=token)
+    with pytest.raises(ValueError, match="does not hold"):
+        validated_save_continuity(store, _WRAP_TEXT, wrap_token=token, session_id="automation")
+    assert store.get_wrap_history() == []
+
+
+def test_status_reports_the_policy_on_every_transport(tmp_path):
+    import subprocess
+    import sys
+
+    db = str(tmp_path / "st.db")
+    s = Store(db)
+    assert s.status().consolidate_requires_baton is False
+    s.set_consolidate_requires_baton(True)
+    assert s.status().consolidate_requires_baton is True
+    s.close()
+    run = subprocess.run(
+        [sys.executable, "-m", "anneal_memory.cli", "--db", db, "status", "--json"],
+        capture_output=True, text=True,
+    )
+    assert run.returncode == 0, run.stderr
+    assert json.loads(run.stdout)["consolidate_requires_baton"] is True
+    text = subprocess.run(
+        [sys.executable, "-m", "anneal_memory.cli", "--db", db, "status"],
+        capture_output=True, text=True,
+    ).stdout
+    assert "Baton-protected" in text

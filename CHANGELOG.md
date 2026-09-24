@@ -12,7 +12,10 @@ is live. Without the baton they now downgrade with the new reason `downgraded-no
 "no other session is live" is judged from a registry snapshot that a resumed session or a TTL crossing
 can race, and the gate exists so that growing automation cannot recompose the felt layer unbidden. The
 old rule survives as an explicit keyword, `allow_sole_live=True`, on both functions. Callers that pass
-no `session_id` are unaffected: the gate stays inert for them.
+no `session_id` are unaffected on a store without the new policy (below). By default the holder is
+authorized from the baton alone: the session registry is read only to describe the result, so a corrupt
+peer file no longer blocks the holder. The downgrade message no longer tells the caller to claim the
+baton itself: the operator assigns it.
 
 **Migration:** a single-session caller that relied on the sole-live grant calls
 `sessions.claim_baton(store.continuity_path, session_id)` once, or passes `allow_sole_live=True`.
@@ -23,9 +26,15 @@ no `session_id` are unaffected: the gate stays inert for them.
 session holds the baton, or the baton file is unreadable, it raises the new `BatonHeldError`
 (an `AnnealMemoryError`, exported at the top level, carrying `holder` and `unreadable`) unless
 `take=True`. A claim by the current holder is a no-op success: nothing is written, and the original
-`claimed_at` comes back with `previous_holder` equal to the caller. Claiming an unheld baton now
-creates the file exclusively (`os.link`), so of two sessions racing for it exactly one wins and the
-other gets `BatonHeldError` instead of silently overwriting.
+`claimed_at` comes back with `previous_holder` equal to the caller. Claims and releases are now
+serialized by an exclusive `flock` on `<continuity>.baton.lock`, so a release can no longer delete a baton
+that a concurrent take just wrote (which left it unheld and claimable by anyone) and two takes can no
+longer both report success. Where `flock` is unavailable (Windows, some network filesystems) an unheld
+baton is created exclusively instead, so of two racing claimers exactly one wins. `BatonHeldError` and
+the new `CorruptSidecarError` pickle cleanly.
+
+⚠ `claim_baton` cannot tell an operator's designation from an agent calling it: whoever claims an
+unheld baton gets it. Keeping it out of automation's hands is the operator's side of the protocol.
 
 **Migration:** a caller that has already decided to take the baton, as flow's `baton claim --take`
 does, passes `take=True`. Without that change the take path raises.
@@ -37,11 +46,22 @@ The session gate only engages for a caller that passes `session_id`. A consumer 
 carry a policy that closes that path: `Store.set_consolidate_requires_baton(True)` (persisted in the
 store's metadata table, audited as `consolidate_policy_set`) and `Store.consolidate_requires_baton()`.
 On such a store `prepare_wrap` downgrades a caller that passes no `session_id` (reason
-`downgraded-baton-required`), ignores `allow_sole_live`, and `validated_save_continuity` refuses a save
-that does not pass the prepare `wrap_token`, because a tokenless save commits whatever wrap is in flight,
-whoever started it. A stored value other than `"1"`/`"0"` reads as required. Nothing changes for a store
-until someone sets the policy. `prepare-wrap --json` now prints `status` and `message` for any non-ready
-result; it used to print a bare `{"wrap_token": null}` for a downgrade.
+`downgraded-baton-required`), ignores `allow_sole_live`, and `validated_save_continuity` refuses any save
+that does not pass BOTH the `session_id` of the current baton holder and the prepare `wrap_token`. The
+token alone is not enough: it is not a secret (`wrap-token-current` prints it). So on a protected store
+the CLI and MCP wrap, which pass no `session_id`, downgrade at prepare and are refused at save. A stored
+value other than `"1"`/`"0"` reads as required. The policy is shown by `status` on the library, CLI
+(text and `--json`) and MCP. Nothing changes for a store until someone sets it. It is enforced only by
+anneal versions that know it, and the JSON export does not carry it. `prepare-wrap --json` now prints
+`status` and `message` for any non-ready result; it used to print a bare `{"wrap_token": null}` for a
+downgrade.
+
+### Added — `validated_save_continuity(session_id=...)` re-checks the baton at the save
+
+A caller that names itself is refused (nothing written) unless that session still holds the baton at
+save time, so taking the baton mid-wrap revokes the old holder's commit and not only its next prepare.
+Optional everywhere except a store with the policy above, where it is required. **A consumer that sets
+the policy on its store must pass `session_id` to the save first**, or every save it makes is refused.
 
 ### Fixed — a wrong-shape baton or session file no longer crashes the gate and wedges recovery
 
@@ -53,8 +73,11 @@ Reproduced against 0.9.12 for `[]`, `null`, a string and `\xff`. Such files now 
 `sessions.CorruptSidecarError`, a `json.JSONDecodeError` subclass, so every caller that fails closed on
 `(OSError, JSONDecodeError)` covers them: the gate downgrades with `downgraded-registry-error`, release
 returns `False` and leaves the file alone, and `claim_baton(..., take=True)` replaces it atomically.
-A fresh session file of the wrong shape, or one with no usable `session_id`, fails closed the same way.
-It used to be skipped, which under-counted a live peer.
+The parse boundary itself is closed too: an integer past Python's digit limit (`ValueError`) and nesting
+past the recursion limit (`RecursionError`) raise `CorruptSidecarError`, and oversized numbers in the
+payload coerce to `0.0` instead of raising `OverflowError`. `CorruptSidecarError` is also an
+`AnnealMemoryError`. A fresh session file of the wrong shape, or one with no usable `session_id`, fails
+closed the same way. It used to be skipped, which under-counted a live peer.
 
 ## [0.9.12] — 2026-09-24
 

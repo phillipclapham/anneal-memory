@@ -467,6 +467,7 @@ def cmd_status(args: argparse.Namespace) -> None:
                 "total_wraps": status.total_wraps,
                 "last_wrap_at": status.last_wrap_at,
                 "wrap_in_progress": status.wrap_in_progress,
+                "consolidate_requires_baton": status.consolidate_requires_baton,
                 "tombstone_count": status.tombstone_count,
                 "continuity_chars": status.continuity_chars,
                 "episodes_by_type": status.episodes_by_type,
@@ -515,6 +516,9 @@ def cmd_status(args: argparse.Namespace) -> None:
         print(f"Wraps:      {status.total_wraps} total, last {_format_timestamp(status.last_wrap_at)}")
         if status.wrap_in_progress:
             print(f"  !! Wrap in progress")
+        if status.consolidate_requires_baton:
+            print("  Baton-protected: only the session holding the consolidate baton can "
+                  "consolidate; prepare-wrap here downgrades")
         if status.continuity_chars is not None:
             print(f"Continuity: {status.continuity_chars:,} chars")
         else:

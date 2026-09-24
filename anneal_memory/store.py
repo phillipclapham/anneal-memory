@@ -2386,6 +2386,7 @@ class Store:
             prune_failures=self._prune_failures,
             prune_last_failure=self._prune_last_failure,
             prune_behind=self._prune_behind,
+            consolidate_requires_baton=self.consolidate_requires_baton(),
         )
 
     # -- Wrap lifecycle --
@@ -2993,6 +2994,12 @@ class Store:
         opting into the session gate, cannot recompose the felt layer of a
         store its operator has protected (flow spore-1169).
 
+        ⚠ Enforced only by anneal versions that know this key; an older
+        anneal opening the same store ignores it. It is not carried by the
+        JSON export. Deliberate bypasses remain, by design: the raw
+        :meth:`save_continuity` file write, and a caller that passes the
+        holder's ``session_id`` as its own.
+
         Fails CLOSED: a stored value other than ``"1"`` or ``"0"`` reads as
         required, so a corrupted policy row never silently drops the guard.
         """
@@ -3024,8 +3031,8 @@ class Store:
                 "Cannot set_consolidate_requires_baton() while inside _batch() context",
                 operation="set_consolidate_requires_baton",
             )
-        was = self.consolidate_requires_baton()
         with self._db_boundary("set_consolidate_requires_baton"):
+            was = self._get_metadata(_CONSOLIDATE_REQUIRES_BATON_KEY) not in ("", "0")
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 (_CONSOLIDATE_REQUIRES_BATON_KEY, "1" if required else "0"),

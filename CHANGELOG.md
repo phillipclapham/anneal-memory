@@ -2,7 +2,7 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.12] — 2026-09-24
 
 ### Fixed — a crystal decision no longer takes status markers as a pattern's meaning
 
@@ -109,7 +109,7 @@ would then be in text mode, which rewrites CR LF and stops at 0x1A, so sealed `.
 corrupt. The flag is now passed (0 on other platforms). This touches only the read path; rotation and
 every other write are unchanged. Reasoned from the Python and Microsoft documentation, not run on
 Windows at release time: this project had no Windows CI then. Windows CI landed the same day, after the
-release (see [Unreleased]).
+release (see [0.9.12]).
 
 ## [0.9.10] — 2026-09-14
 

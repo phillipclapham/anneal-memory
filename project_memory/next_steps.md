@@ -26,6 +26,7 @@
 ## ✅ 0.9.13 RELEASED 2026-09-24 = flow spore-1169 (the consolidate-baton gate; spore RESOLVED 2026-09-24, answer = this block), `0924+15 anneal-memory-seat`, on Phill's word relayed verbatim ("yes publish anneal 0.9.13"). Re-derive; do not trust these lines.
 - **Published:** `curl -s https://pypi.org/pypi/anneal-memory/0.9.13/json` → wheel sha256 `c8489e8d…a0e04c`, sdist `5e61cd35…a8ad35` [matched the local build at upload]. Tag: `git ls-remote origin 'refs/tags/v0.9.13^{}'` peels to the stamp `f3ae58a`; main moved on to a `.devN` (`grep __version__ anneal_memory/__init__.py`).
 - **Verified against the artifact installed from PyPI** [run 2026-09-24, clean venv, `--no-cache-dir`, site-packages]: flow origin/main 7aa8d530's four suites 114 passed; E2E on a store copy with flow main's real scripts: prepare→save commits (173→174), and claim / refuse / --take / `[]` recovery / cancel / release are clean.
+- ⛔ **RESIDUE, UNDISCHARGED:** a real consolidate on the REAL neocortex under 0.9.13 has not run; every run here used temp store copies. It is NOT tonight's (2026-09-24) EOD: that save runs on flow's INSTALLED 0.9.11 [relayed by 0924+13 fanin from 0924+0 main, which checked its venv], and the re-pin to 0.9.13 is the step AFTER the save. So the first real 0.9.13 consolidate is the /eod of 2026-09-25. If that save errors, check `load_wrap_snapshot()` and the store before retrying. Tonight's only 0.9.13 exercise is main's post-pin four-file pytest. Re-derive the pin: `~/Briefcase/flow/venv/bin/pip show anneal-memory | grep Version`.
 - ⚠ The first upload attempt was DENIED by the auto-mode classifier. The settings rule needs Phill's verbatim go NAMING THE VERSION ("yes, please publish" did not name it). Relay the version-named go first next time.
 - ⚠ pip lagged the simple index by a minute right after the upload ("No matching distribution"); a retry installed it.
 - **What it contains:** `git log --oneline d074ab3..HEAD -- anneal_memory`, with CHANGELOG `[Unreleased]` or `[0.9.13]` as the prose.
@@ -62,7 +63,7 @@
   - CLI `prepare-wrap` exits 0 on a downgrade.
   - Link debris if a crash lands between `os.link` and the tmp unlink (LOW).
   - Carried: (c) compare-and-crystallize on CrystalStore (codex MED-4, not started) · the compost `TypeError` test (LOW) · `_structural_dash` parens (LOW) · `prune_failures` persistence and CLI wiring.
-  - ⚖ OPEN AT PUBLISH: 0.9.13 or 0.10.0 (L2 argued for a minor bump; the seat kept a patch bump on 0.9.11 precedent).
+  - ⚖ OPEN FOR PHILL, for FUTURE breaking releases: shipped as 0.9.13 (a patch bump, on 0.9.11 precedent); L2 argued a break like this should be a minor bump (0.10.0).
 
 ## ✅ 0.9.12 RELEASED 2026-09-24 by `0924+11 anneal-memory-seat` on Phill's go ("yes publish anneal", relayed by the desk). Re-derive; do not trust these lines.
 - **What's in it:** spore-1163. `_extract_pattern_meta` never returns anneal's markers as a pattern's meaning; the order is after-dash prose → quoted evidence why → remaining text, with the marker vocabulary reused from `graduation.py`, stripped at the ends only; marker-only → `""` so crystallize refuses. Plus `validated_save_continuity(compost=[...])`, which severs inside the Phase-2 batch atomically with `wrap_completed`, is not re-seeded, and has a `composted` key only when passed. CHANGELOG `[0.9.12]` has the prose.

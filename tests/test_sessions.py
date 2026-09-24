@@ -946,3 +946,58 @@ def test_close_session_warns_when_the_release_fails(cp, monkeypatch):
     monkeypatch.setattr(sessions, "release_baton", boom)
     with pytest.warns(UserWarning, match="could not release the baton"):
         sessions.close_session(cp, "me")
+
+
+# -- L3 round-3 fixes --
+
+
+def test_a_failed_exclusive_write_leaves_no_wedged_baton(cp, monkeypatch):
+    # codex + complement MED: the O_EXCL fallback published the file before writing it, so a
+    # failure mid-write left an empty baton that failed every later claim closed.
+    import errno as _errno
+
+    _no_lock(monkeypatch)
+    monkeypatch.setattr(sessions.os, "link",
+                        lambda s, d: (_ for _ in ()).throw(OSError(_errno.EPERM, "no links")))
+    real_dump = sessions.json.dump
+    calls = []
+
+    def dump_fails_on_the_final_file(obj, fh, *a, **k):
+        calls.append(fh.name)
+        if len(calls) == 2:  # 1st: the tmp; 2nd: the O_EXCL-created baton
+            raise OSError(_errno.ENOSPC, "disk full")
+        return real_dump(obj, fh, *a, **k)
+
+    monkeypatch.setattr(sessions.json, "dump", dump_fails_on_the_final_file)
+    with pytest.raises(OSError):
+        sessions.claim_baton(cp, "s1")
+    assert not sessions._baton_path(cp).exists()
+    monkeypatch.setattr(sessions.json, "dump", real_dump)
+    assert sessions.claim_baton(cp, "s1")["previous_holder"] is None  # not wedged
+
+
+def test_close_session_releases_even_when_the_unlink_fails(cp, monkeypatch):
+    sessions.register_session(cp, "me")
+    sessions.claim_baton(cp, "me")
+    real_unlink = sessions.Path.unlink
+
+    def no_unlink(self, *a, **k):
+        if self.suffix == ".session":
+            raise PermissionError("read-only registry")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(sessions.Path, "unlink", no_unlink)
+    with pytest.raises(PermissionError):
+        sessions.close_session(cp, "me")
+    assert sessions.baton_holder(cp) is None  # the release still ran
+
+
+def test_close_session_warning_cannot_raise(cp, monkeypatch):
+    import warnings as _w
+
+    sessions.claim_baton(cp, "me")
+    monkeypatch.setattr(sessions, "release_baton",
+                        lambda *a, **k: (_ for _ in ()).throw(PermissionError("x")))
+    with _w.catch_warnings():
+        _w.simplefilter("error")
+        sessions.close_session(cp, "me")  # -W error: must not raise

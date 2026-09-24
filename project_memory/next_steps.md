@@ -23,8 +23,11 @@
 > with no reader is a disposal chute, and a reader whose answer is deleted is the same chute
 > one step later.)*
 
-## 🟡 0.9.13 = flow spore-1169 (the consolidate-baton gate), on main, `0924+15 anneal-memory-seat`, 2026-09-24. Re-derive; do not trust these lines.
-- **Is it published?** `curl -s https://pypi.org/simple/anneal-memory/ | grep -o 'anneal_memory-0\.9\.13[^<]*'`. If it is empty, 0.9.13 is not out. Publishing needed Phill's word through the desk, because L3 round 4 was not clean.
+## ✅ 0.9.13 RELEASED 2026-09-24 = flow spore-1169 (the consolidate-baton gate), `0924+15 anneal-memory-seat`, on Phill's word relayed verbatim ("yes publish anneal 0.9.13"). Re-derive; do not trust these lines.
+- **Published:** `curl -s https://pypi.org/pypi/anneal-memory/0.9.13/json` → wheel sha256 `c8489e8d…a0e04c`, sdist `5e61cd35…a8ad35` [matched the local build at upload]. Tag: `git ls-remote origin 'refs/tags/v0.9.13^{}'` peels to the stamp `f3ae58a`; main moved on to a `.devN` (`grep __version__ anneal_memory/__init__.py`).
+- **Verified against the artifact installed from PyPI** [run 2026-09-24, clean venv, `--no-cache-dir`, site-packages]: flow origin/main 7aa8d530's four suites 114 passed; E2E on a store copy with flow main's real scripts: prepare→save commits (173→174), and claim / refuse / --take / `[]` recovery / cancel / release are clean.
+- ⚠ The first upload attempt was DENIED by the auto-mode classifier. The settings rule needs Phill's verbatim go NAMING THE VERSION ("yes, please publish" did not name it). Relay the version-named go first next time.
+- ⚠ pip lagged the simple index by a minute right after the upload ("No matching distribution"); a retry installed it.
 - **What it contains:** `git log --oneline d074ab3..HEAD -- anneal_memory`, with CHANGELOG `[Unreleased]` or `[0.9.13]` as the prose.
   - ⚖ Phill's 09-24 rulings are enforced in anneal: every consolidate needs the baton (`allow_sole_live=False` by default, reason `downgraded-no-baton`), and `claim_baton(take=False)` refuses another holder or an unreadable baton (`BatonHeldError`).
   - Wrong-shape or unparseable sidecars fail closed (`CorruptSidecarError`).

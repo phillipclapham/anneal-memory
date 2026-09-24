@@ -864,8 +864,8 @@ class Server:
         # reads as "retention is healthy" and is not (the audit field made
         # this same mistake before it was made durable — see
         # tests/test_audit.py::TestDegradedAuditHealthReachesEveryTransport).
-        # Full durability, so the CLI can carry this too, is 0.9.12+ scope
-        # (next_steps.md).
+        # Full durability, so the CLI can carry this too, was deferred on
+        # 2026-09-17 (project_memory/next_steps.md).
         if status.prune_failures:
             prune_line = (
                 f"⚠ {status.prune_failures} post-commit auto-prune "

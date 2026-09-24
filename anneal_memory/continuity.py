@@ -1257,6 +1257,7 @@ def prepare_wrap(
     staleness_days: int = 7,
     crystal_store: CrystalStore | None = None,
     session_id: str | None = None,
+    allow_sole_live: bool = False,
 ) -> PrepareWrapResult:
     """Run the full store-aware prepare_wrap pipeline.
 
@@ -1319,12 +1320,14 @@ def prepare_wrap(
         staleness_days: Days before flagging stale patterns.
         session_id: Opt-in to the consolidate-efferent gate
             (AM-CONSOLIDATE-EFFERENT, spore-194). When passed, the
-            consolidate proceeds only if this is the sole live registered
-            session OR this session holds the consolidate baton; otherwise
+            consolidate proceeds only if this session holds the consolidate
+            baton (:func:`anneal_memory.sessions.claim_baton`); otherwise
             it returns ``status == "downgraded"`` (capture-only) instead of
-            building a package or marking a wrap in progress. ``None``
-            (default) disables the gate entirely — every existing caller and
-            single-session adopter is unaffected. Liveness + the baton live
+            building a package or marking a wrap in progress. Before 0.9.13
+            the sole live registered session was also authorized; that is
+            now opt-in via ``allow_sole_live``. ``None``
+            (default) disables the gate entirely: a caller that passes no
+            ``session_id`` is unaffected. Liveness + the baton live
             in sidecar files next to the continuity file; the caller
             registers/heartbeats via :mod:`anneal_memory.sessions`. A
             consolidate-efferent caller MUST also round-trip the returned
@@ -1332,6 +1335,12 @@ def prepare_wrap(
             throttles WHO starts a consolidate; the token CAS is what makes
             the SAVE safe under a mid-flight baton reclaim (a tokenless save
             CASes against the current snapshot, not the prepare token).
+        allow_sole_live: Only meaningful with ``session_id``. ``True``
+            restores spore-194's rule that a session is also authorized when
+            no OTHER registered session is live. Default ``False``: every
+            consolidate needs the baton (⚖ Phill, 2026-09-24, flow
+            spore-1169), because sole-live is judged from a registry
+            snapshot that a resume or a TTL crossing can race.
 
     Returns:
         :class:`PrepareWrapResult` — a :class:`TypedDict` with keys:
@@ -1339,7 +1348,7 @@ def prepare_wrap(
             ``"empty"`` = no episodes to wrap; ``"ready"`` = package
             built and wrap marked in progress on the store;
             ``"downgraded"`` = the consolidate-efferent gate (spore-194)
-            declined this session (not sole, not baton-holder) — see
+            declined this session (it does not hold the baton) — see
             ``message``; the store is left untouched
           - ``message`` (str): short human-readable status summary
           - ``episode_count`` (int): number of episodes in the wrap window
@@ -1410,11 +1419,12 @@ def prepare_wrap(
 
     # AM-CONSOLIDATE-EFFERENT (spore-194): the efferent gate. Capture is afferent
     # (ungated, append-only, parallel-safe); CONSOLIDATE mutates the shared felt/identity
-    # layer, so it is gated by human authority — proceed iff this is the sole live session
-    # OR this session holds the consolidate baton, else AUTO-DOWNGRADE to capture-only
+    # layer, so it is gated by human authority — proceed iff this session holds the
+    # consolidate baton (or, opted in via allow_sole_live, is the sole live session), else
+    # AUTO-DOWNGRADE to capture-only
     # (drift becomes safe, not a failure). OPT-IN: engaged only when the caller passes
-    # session_id; every existing caller + every single-session adopter is untouched
-    # (registry never consulted, gate inert). Placed BEFORE AM-PREPARE-GUARD so a
+    # session_id; a caller that passes none is untouched (registry never consulted, gate
+    # inert). Placed BEFORE AM-PREPARE-GUARD so a
     # downgraded session returns cleanly without raising (it is not clobbering an in-flight
     # wrap, it is declining to start one) and BEFORE wrap_started so nothing is stranded;
     # the store is left UNTOUCHED on a downgrade (we must not clear another live session's
@@ -1429,7 +1439,9 @@ def prepare_wrap(
                 "prepare_wrap: session_id must be non-empty when provided "
                 "(pass session_id=None to disable the consolidate-efferent gate)."
             )
-        auth = sessions.consolidate_authorized(store.continuity_path, session_id)
+        auth = sessions.consolidate_authorized(
+            store.continuity_path, session_id, allow_sole_live=allow_sole_live
+        )
         if not auth["authorized"]:
             return PrepareWrapResult(
                 status="downgraded",

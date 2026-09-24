@@ -16,6 +16,7 @@ import time
 import pytest
 
 from anneal_memory import (
+    AnnealMemoryError,
     Store,
     felt_currency,
     prepare_wrap,
@@ -100,9 +101,11 @@ def test_corrupt_stale_session_file_skipped(cp):
     f.write_text("{ not json", encoding="utf-8")
     os.utime(f, (time.time() - 10_000, time.time() - 10_000))
     assert sessions.live_sessions(cp) == []
-    auth = sessions.consolidate_authorized(cp, "me")
+    auth = sessions.consolidate_authorized(cp, "me", allow_sole_live=True)
     assert auth["authorized"] is True  # me is sole; the dead corrupt peer is ignored
     assert auth["reason"] == "sole-live-session"
+    # and by default it is the missing baton that downgrades, not a registry error
+    assert sessions.consolidate_authorized(cp, "me")["reason"] == "downgraded-no-baton"
 
 
 def test_live_sessions_coerces_untrusted_field_types(cp):
@@ -141,11 +144,52 @@ def test_baton_claim_holds_release(cp):
     assert sessions.baton_holder(cp) is None
 
 
-def test_baton_reclaim_records_previous_holder(cp):
+def test_baton_take_records_previous_holder(cp):
     sessions.claim_baton(cp, "s1")
-    claim = sessions.claim_baton(cp, "s2")
+    claim = sessions.claim_baton(cp, "s2", take=True)
     assert claim["previous_holder"] == "s1"
     assert sessions.holds_baton(cp, "s2")
+
+
+def test_claim_over_another_holder_needs_take(cp):
+    # ⚖ Phill 2026-09-24 (flow spore-1169): taking another session's baton is deliberate.
+    first = sessions.claim_baton(cp, "s1")
+    with pytest.raises(sessions.BatonHeldError) as ei:
+        sessions.claim_baton(cp, "s2")
+    assert ei.value.holder == "s1" and ei.value.unreadable is False
+    assert isinstance(ei.value, AnnealMemoryError)
+    assert sessions.holds_baton(cp, "s1")  # the refusal changed nothing
+    assert json.loads(sessions._baton_path(cp).read_text())["claimed_at"] == first["claimed_at"]
+
+
+def test_holder_reclaim_is_a_noop_success(cp):
+    first = sessions.claim_baton(cp, "s1")
+    before = sessions._baton_path(cp).read_bytes()
+    again = sessions.claim_baton(cp, "s1")
+    assert again["previous_holder"] == "s1"
+    assert again["claimed_at"] == first["claimed_at"]
+    assert sessions._baton_path(cp).read_bytes() == before  # nothing rewritten
+
+
+def test_unheld_claim_is_create_only(cp, monkeypatch):
+    # Two sessions racing for an UNHELD baton: the loser must be refused, not overwrite.
+    # Simulate the race by landing s1's claim between s2's read and s2's create.
+    real_read = sessions._read_baton
+
+    def read_then_race(path):
+        data = real_read(path)
+        if data is None and not sessions._baton_path(cp).exists():
+            monkeypatch.setattr(sessions, "_read_baton", real_read)
+            sessions.claim_baton(cp, "s1")
+        return data
+
+    monkeypatch.setattr(sessions, "_read_baton", read_then_race)
+    with pytest.raises(sessions.BatonHeldError) as ei:
+        sessions.claim_baton(cp, "s2")
+    assert ei.value.holder == "s1"
+    assert sessions.holds_baton(cp, "s1")
+    leftovers = [q.name for q in cp.parent.iterdir() if q.name.startswith(".")]
+    assert leftovers == []  # the loser's tmp file was cleaned up
 
 
 def test_release_only_by_holder(cp):
@@ -172,31 +216,79 @@ def test_corrupt_baton_fails_closed(cp):
     auth = sessions.consolidate_authorized(cp, "me")
     assert auth["authorized"] is False
     assert auth["reason"] == "downgraded-registry-error"
-    # but a fresh claim still works over a corrupt baton (the previous-holder read is defensive)
-    claim = sessions.claim_baton(cp, "newhead")
+    # a claim over it is refused without take (whether someone holds it is unknown) ...
+    with pytest.raises(sessions.BatonHeldError) as ei:
+        sessions.claim_baton(cp, "newhead")
+    assert ei.value.unreadable is True and ei.value.holder is None
+    # ... and replaces it atomically with take
+    claim = sessions.claim_baton(cp, "newhead", take=True)
     assert claim["previous_holder"] is None
     assert sessions.holds_baton(cp, "newhead")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [b"[]", b"null", b'"a string"', b"42", b"{}", b'{"session_id": ""}',
+     b'{"session_id": 7}', b"\xff\xfe not utf-8"],
+    ids=["list", "null", "string", "number", "empty-object", "empty-id", "int-id", "not-utf8"],
+)
+def test_wrong_shape_baton_is_unreadable_not_a_crash(cp, payload):
+    # flow spore-1169 item 2: valid JSON of the wrong shape raised AttributeError, which no
+    # caller caught, so claim_baton --take recovery was wedged and the gate crashed.
+    bp = sessions._baton_path(cp)
+    bp.parent.mkdir(parents=True, exist_ok=True)
+    bp.write_bytes(payload)
+    with pytest.raises(json.JSONDecodeError):  # CorruptSidecarError is one
+        sessions.baton_holder(cp)
+    auth = sessions.consolidate_authorized(cp, "me", allow_sole_live=True)
+    assert (auth["authorized"], auth["reason"]) == (False, "downgraded-registry-error")
+    assert sessions.release_baton(cp, "me") is False  # unowned: left for a deliberate take
+    assert bp.read_bytes() == payload
+    sessions.close_session(cp, "me")  # the release inside must not raise either
+    with pytest.raises(sessions.BatonHeldError):
+        sessions.claim_baton(cp, "me")
+    claim = sessions.claim_baton(cp, "me", take=True)
+    assert claim["previous_holder"] is None and sessions.holds_baton(cp, "me")
+
+
+@pytest.mark.parametrize("payload", [b"[]", b"null", b'"s"', b'{"label": "x"}', b"\xff"])
+def test_wrong_shape_fresh_session_file_fails_closed(cp, payload):
+    # The same class in the registry: a fresh peer file of the wrong shape is an unknown peer.
+    sessions.register_session(cp, "s1")
+    sessions._session_file(cp, "s1").write_bytes(payload)
+    auth = sessions.consolidate_authorized(cp, "me", allow_sole_live=True)
+    assert (auth["authorized"], auth["reason"]) == (False, "downgraded-registry-error")
 
 
 # -- the efferent decision (consolidate_authorized) --
 
 
-def test_authorized_when_sole(cp):
+def test_sole_session_without_baton_downgrades_by_default(cp):
+    # ⚖ Phill 2026-09-24 (flow spore-1105 (b), spore-1169): every consolidate needs the baton.
     sessions.register_session(cp, "me")
     auth = sessions.consolidate_authorized(cp, "me")
+    assert (auth["authorized"], auth["reason"]) == (False, "downgraded-no-baton")
+    assert auth["live_session_ids"] == ["me"] and auth["baton_holder"] is None
+
+
+def test_authorized_when_sole_only_if_opted_in(cp):
+    sessions.register_session(cp, "me")
+    auth = sessions.consolidate_authorized(cp, "me", allow_sole_live=True)
     assert auth["authorized"] is True
     assert auth["reason"] == "sole-live-session"
 
 
-def test_authorized_when_no_sessions_registered(cp):
-    auth = sessions.consolidate_authorized(cp, "me")  # me not even registered
+def test_authorized_when_no_sessions_registered_only_if_opted_in(cp):
+    assert sessions.consolidate_authorized(cp, "me")["reason"] == "downgraded-no-baton"
+    auth = sessions.consolidate_authorized(cp, "me", allow_sole_live=True)  # me not registered
     assert auth["authorized"] is True  # no OTHER live session
     assert auth["reason"] == "sole-live-session"
 
 
 def test_downgrade_when_another_session_live(cp):
     sessions.register_session(cp, "other")
-    auth = sessions.consolidate_authorized(cp, "me")
+    assert sessions.consolidate_authorized(cp, "me")["reason"] == "downgraded-no-baton"
+    auth = sessions.consolidate_authorized(cp, "me", allow_sole_live=True)
     assert auth["authorized"] is False
     assert auth["reason"] == "downgraded-not-baton-holder"
     assert "other" in auth["live_session_ids"]
@@ -226,10 +318,19 @@ def test_gate_inert_without_session_id(store):
     assert result["status"] == "ready"
 
 
-def test_gate_sole_session_ready(store):
+def test_gate_sole_session_without_baton_downgrades(store):
     store.record("obs", EpisodeType.OBSERVATION)
     sessions.register_session(store.continuity_path, "me")
     result = prepare_wrap(store, session_id="me")
+    assert result["status"] == "downgraded"
+    assert "downgraded-no-baton" in result["message"]
+    assert not store.status().wrap_in_progress
+
+
+def test_gate_sole_session_ready_when_opted_in(store):
+    store.record("obs", EpisodeType.OBSERVATION)
+    sessions.register_session(store.continuity_path, "me")
+    result = prepare_wrap(store, session_id="me", allow_sole_live=True)
     assert result["status"] == "ready"
     assert store.status().wrap_in_progress
 
@@ -259,15 +360,16 @@ def test_downgrade_does_not_strand_a_later_consolidate(store):
     store.record("obs", EpisodeType.OBSERVATION)
     sessions.register_session(store.continuity_path, "other")
     assert prepare_wrap(store, session_id="me")["status"] == "downgraded"
-    # other closes → me is now sole → a fresh prepare must succeed (nothing stranded)
-    sessions.close_session(store.continuity_path, "other")
+    # me claims the baton → a fresh prepare must succeed (nothing stranded)
+    sessions.claim_baton(store.continuity_path, "me")
     assert prepare_wrap(store, session_id="me")["status"] == "ready"
 
 
 def test_downgrade_does_not_clear_another_sessions_inflight_wrap(store):
     store.record("obs", EpisodeType.OBSERVATION)
-    # A (sole at the time) legitimately starts a wrap
+    # A (holding the baton) legitimately starts a wrap
     sessions.register_session(store.continuity_path, "A")
+    sessions.claim_baton(store.continuity_path, "A")
     assert prepare_wrap(store, session_id="A")["status"] == "ready"
     assert store.status().wrap_in_progress
     # B comes online (parallel); its prepare downgrades and must NOT clear A's in-flight wrap
@@ -356,10 +458,10 @@ def test_stale_baton_holder_blocks_effectively_sole_session(cp):
     assert auth["baton_holder"] == "head"
 
 
-def test_no_baton_sole_still_authorized(cp):
-    # The fix must NOT block the legitimate sole-no-baton case (the common single-session day).
+def test_no_baton_sole_authorized_only_when_opted_in(cp):
+    # The stale-holder fix must not block the sole-no-baton case for a caller that opted in.
     sessions.register_session(cp, "me")
-    auth = sessions.consolidate_authorized(cp, "me")
+    auth = sessions.consolidate_authorized(cp, "me", allow_sole_live=True)
     assert auth["authorized"] is True
     assert auth["reason"] == "sole-live-session"
 
@@ -371,7 +473,9 @@ def test_stale_baton_recovered_by_reclaim(cp):
     past = time.time() - 10_000
     os.utime(f, (past, past))  # head dead/idle
     sessions.register_session(cp, "lane")
-    sessions.claim_baton(cp, "lane")  # the human re-designates → recovery
+    with pytest.raises(sessions.BatonHeldError):
+        sessions.claim_baton(cp, "lane")  # a stale holder is still a holder
+    sessions.claim_baton(cp, "lane", take=True)  # the human re-designates → recovery
     auth = sessions.consolidate_authorized(cp, "lane")
     assert auth["authorized"] is True
     assert auth["reason"] == "holds-baton"
@@ -405,8 +509,10 @@ def test_two_unregistered_callers_both_authorized_cooperative_gap(cp):
     # the hard backstop on the COMMIT; the gate is a throttle, not the corruption guard.
     # Integration (flow) closes this by registering BEFORE prepare on every consolidate-capable
     # conversation.
-    assert sessions.consolidate_authorized(cp, "A")["authorized"] is True
-    assert sessions.consolidate_authorized(cp, "B")["authorized"] is True
+    # Under allow_sole_live only: by default neither is authorized without the baton.
+    assert sessions.consolidate_authorized(cp, "A", allow_sole_live=True)["authorized"] is True
+    assert sessions.consolidate_authorized(cp, "B", allow_sole_live=True)["authorized"] is True
+    assert sessions.consolidate_authorized(cp, "A")["authorized"] is False
 
 
 def test_prepare_wrap_empty_session_id_raises_clear_error(store):

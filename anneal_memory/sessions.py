@@ -22,13 +22,20 @@ parallel-safe; every session does it. CONSOLIDATE (recomposing the felt continui
 EFFERENT — it mutates shared identity state, so it is gated by human authority, structurally,
 default-absent (the same membrane an autonomic system puts on its efferent edge). The invariant:
 
-    a consolidate proceeds IFF  (this is the sole live session)  OR  (this session holds the
-    consolidate baton);  otherwise it AUTO-DOWNGRADES to capture-only + a flag.
+    a consolidate proceeds IFF  this session holds the consolidate baton;  otherwise it
+    AUTO-DOWNGRADES to capture-only + a flag.
 
 So drift becomes SAFE (a downgrade + a visible flag) rather than a silent identity-thrash.
-``sole-live-session → auto-authorized`` means a single-session operator (the common case) needs
-ZERO change and never sees the gate; only genuinely-parallel operators ever hit it, and they
-designate ONE session as the baton-holder (the integrator / consolidate seat).
+The baton is claimed by the human designating ONE session as the consolidate seat, and taking
+it from another session needs an explicit ``take=True``.
+
+⚖ HISTORY (0.9.13, flow spore-1169). spore-194 also authorized a session when no OTHER session
+was live (``sole-live-session``), so a single-session operator never saw the gate. Phill ruled
+on 2026-09-24 that every consolidate requires the baton: sole-live is judged from a registry
+snapshot that a resume or a TTL crossing can race, and the guard exists so growing automation
+cannot recompose the felt layer unbidden. The old rule survives only as an explicit
+``allow_sole_live=True`` on :func:`consolidate_authorized` / ``prepare_wrap``. The same day,
+last-claim-wins on the baton was replaced by refuse-unless-``take``.
 
 WHERE IT LIVES — a SIDECAR layer, not the DB. This extends anneal's lock-sidecar idiom (the
 ``.lock`` file ``continuity_lock`` uses), NOT the store's SQLite schema. Session liveness and the
@@ -53,8 +60,9 @@ baton file).
 calls for one store AND the ``prepare_wrap`` gate MUST pass the SAME path: use
 ``store.continuity_path`` everywhere. A caller that registers under a DIFFERENT spelling that
 ``.resolve()``s elsewhere lands its session files under a different ``.sessions`` dir → the gate
-reads an empty registry → every opted-in caller is wrongly ``sole-live-session`` → SILENT
-no-gating. (``.resolve()`` makes symlink/relative spellings of the SAME file safe; it cannot
+reads an empty registry and a baton claimed under one spelling is invisible under the other.
+Under the default rule that costs a spurious downgrade; under ``allow_sole_live`` every
+opted-in caller is wrongly ``sole-live-session`` → SILENT no-gating. (``.resolve()`` makes symlink/relative spellings of the SAME file safe; it cannot
 rescue two genuinely different paths.) The integration (flow's ``anneal_dualwrite``) registers /
 heartbeats / claims against ``store.continuity_path`` unconditionally on every
 consolidate-capable conversation — without that discipline the registry is blind and the gate
@@ -69,7 +77,9 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
+
+from .store import AnnealMemoryError
 
 # 90 minutes. Generous enough that an idle-but-still-open conversation is not falsely reaped
 # between sparse anneal calls; bounded enough that yesterday's closed conversation is long gone
@@ -78,12 +88,12 @@ from typing import TypedDict
 # never a silent unbidden consolidate, which is the harm the whole layer exists to prevent.
 #
 # SINGLE-MACHINE / LOCAL FS assumption: liveness is wall-clock TTL over sidecar mtimes and the
-# atomicity rests on os.replace — both assume one machine, a coherent local filesystem, and a
+# atomicity rests on os.replace / os.link — both assume one machine, a coherent local filesystem, and a
 # shared clock. On a networked mount (NFS/SMB) os.replace may not be atomic and each machine
 # gets its OWN .sessions namespace (every session reads as sole). The store is laptop-sovereign
 # by design, so this holds. The one wall-clock edge is a forward clock jump > TTL (it could
-# falsely reap a live peer into a sole-grant); the baton is the structural mitigation on
-# parallel days — a claimed baton overrides the TTL inference regardless of the clock.
+# falsely reap a live peer into a sole-grant under ``allow_sole_live``); by default no
+# sole-grant exists, and a claimed baton overrides the TTL inference regardless of the clock.
 DEFAULT_TTL_SECONDS = 5400
 
 _SESSIONS_SUFFIX = ".sessions"
@@ -91,6 +101,44 @@ _BATON_SUFFIX = ".baton"
 _SESSION_FILE_SUFFIX = ".session"
 
 PathLike = str | os.PathLike[str]
+
+
+class CorruptSidecarError(json.JSONDecodeError):
+    """A baton or session sidecar was read but does not hold a valid payload: it decoded to
+    the wrong JSON shape (``[]``, ``null``, a string, a dict with no usable ``session_id``) or
+    its bytes are not UTF-8.
+
+    Subclasses :class:`json.JSONDecodeError` on purpose. The documented contract of
+    :func:`baton_holder` and :func:`live_sessions` is that an unreadable sidecar raises
+    ``OSError`` or ``JSONDecodeError``, and callers already catch exactly those two to fail
+    closed. Before this class existed a wrong-shape baton raised ``AttributeError``
+    (``data.get`` on a list), which no caller caught, so ``claim_baton`` crashed instead of
+    recovering and ``prepare_wrap`` crashed instead of downgrading (flow spore-1169)."""
+
+    def __init__(self, path: Path, why: str) -> None:
+        super().__init__(f"{path.name}: {why}", "", 0)
+        self.path = path
+
+
+class BatonHeldError(AnnealMemoryError):
+    """:func:`claim_baton` refused: another session holds the baton, or the baton file is
+    unreadable, and the caller did not pass ``take=True``.
+
+    ``holder`` is the other session's id, or ``None`` when ``unreadable`` is true. Taking the
+    baton from another session is a deliberate act (⚖ Phill, 2026-09-24, flow spore-1169), so
+    automation can never take it by accident."""
+
+    def __init__(self, session_id: str, holder: str | None, *, unreadable: bool) -> None:
+        self.session_id = session_id
+        self.holder = holder
+        self.unreadable = unreadable
+        if unreadable:
+            msg = ("claim_baton: the baton file is unreadable, so whether another session "
+                   "holds it is unknown; pass take=True only if you know no session does")
+        else:
+            msg = (f"claim_baton: the baton is held by {holder!r}; pass take=True to take it "
+                   "from that session deliberately")
+        super().__init__(msg)
 
 
 class SessionInfo(TypedDict):
@@ -117,12 +165,14 @@ class BatonClaim(TypedDict):
 
 class ConsolidateAuth(TypedDict):
     """The efferent-gate decision (see :func:`consolidate_authorized`). ``reason`` is one of:
-    ``"sole-live-session"`` / ``"holds-baton"`` (authorized) · ``"downgraded-not-baton-holder"``
-    (a LIVE baton-holder is someone else, or other sessions are live and no baton is claimed) ·
+    ``"holds-baton"`` (authorized) · ``"sole-live-session"`` (authorized, only when the caller
+    passed ``allow_sole_live=True``) · ``"downgraded-no-baton"`` (no baton is claimed; claim it
+    to consolidate) · ``"downgraded-not-baton-holder"`` (a LIVE baton-holder is someone else,
+    or, under ``allow_sole_live``, other sessions are live and no baton is claimed) ·
     ``"downgraded-stale-baton-holder"`` (a baton was claimed by a session no longer live — the
     designated head went quiet; release or re-claim the baton) · ``"downgraded-registry-error"``
-    (the registry was unreadable — fail closed). All three ``downgraded-*`` → auto-downgrade to
-    capture-only. ``live_session_ids`` and ``baton_holder`` are carried so the caller can
+    (the registry or baton was unreadable — fail closed). Every ``downgraded-*`` reason →
+    auto-downgrade to capture-only. ``live_session_ids`` and ``baton_holder`` are carried so the caller can
     surface an actionable flag on a downgrade."""
 
     authorized: bool
@@ -162,10 +212,16 @@ def _session_file(continuity_path: PathLike, session_id: str) -> Path:
     return _registry_dir(continuity_path) / f"{digest}{_SESSION_FILE_SUFFIX}"
 
 
-def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
+def _atomic_write_json(
+    path: Path, payload: dict[str, object], *, exclusive: bool = False
+) -> None:
     """Create-or-replace ``path`` with ``payload`` atomically (tmp in the same dir → fsync →
     ``os.replace``), so a concurrent reader never sees a half-written file and a crash leaves
-    either the old file or the new, never a torn one."""
+    either the old file or the new, never a torn one.
+
+    ``exclusive=True`` only creates: the tmp is published with ``os.link``, which raises
+    ``FileExistsError`` if ``path`` already exists, so of two racing creators exactly one wins
+    and the other gets the error instead of silently overwriting."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix="." + path.name + ".")
     try:
@@ -182,13 +238,21 @@ def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
             json.dump(payload, fh)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        if exclusive:
+            os.link(tmp, path)  # FileExistsError when another creator already won
+        else:
+            os.replace(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)
         except OSError:  # a cleanup failure must not mask the original write/replace error
             pass
         raise
+    if exclusive:
+        try:
+            os.unlink(tmp)  # the link published it; the tmp name is now only debris
+        except OSError:
+            pass
 
 
 # -- session registry --
@@ -232,8 +296,8 @@ def close_session(continuity_path: PathLike, session_id: str) -> None:
     liveness (it never expires on its own), so a held baton outliving its session leaves a
     phantom designation that downgrades every parallel non-holder (the
     ``downgraded-stale-baton-holder`` path) until a human re-claims. Releasing on graceful exit
-    avoids that; an unclean death (no close) leaves the phantom, recovered by the next
-    claim_baton (last-wins)."""
+    avoids that; an unclean death (no close) leaves the phantom, recovered by a deliberate
+    ``claim_baton(..., take=True)``."""
     try:
         _session_file(continuity_path, session_id).unlink()
     except FileNotFoundError:
@@ -276,13 +340,14 @@ def live_sessions(
         # dead session's corruption is irrelevant). Atomic writes mean a fresh corrupt file
         # does not arise from our own writes.
         try:
-            raw = f.read_text(encoding="utf-8")
+            data = _read_json_object(f)  # JSONDecodeError + non-ENOENT OSError propagate
         except FileNotFoundError:
             continue
-        data = json.loads(raw)  # JSONDecodeError + non-ENOENT OSError propagate (fail-closed)
         sid = data.get("session_id")
         if not isinstance(sid, str) or not sid:
-            continue
+            # A fresh file with no usable id is an unknown peer, the same as a corrupt one:
+            # skipping it would under-count live others into a false sole-grant.
+            raise CorruptSidecarError(f, "no usable session_id")
         # Coerce the non-key fields from untrusted JSON to their declared types — a malformed
         # file must not hand a downstream consumer a wrong-typed pid/label/registered_at.
         label = data.get("label")
@@ -307,19 +372,45 @@ def live_sessions(
 # -- the consolidate baton --
 
 
-def baton_holder(continuity_path: PathLike) -> str | None:
-    """The session id currently holding the baton, or ``None`` if no baton is claimed. An
-    ABSENT baton (``FileNotFoundError``) reads as ``None``; an UNREADABLE/corrupt baton file
-    RAISES (``OSError`` / ``JSONDecodeError``) so :func:`consolidate_authorized` fails CLOSED
-    rather than silently erasing a designation into a false sole-grant — absent and unreadable
-    are different (the no-data≠no-event distinction, at the collector)."""
+def _read_json_object(path: Path) -> dict[str, Any]:
+    """Read ``path`` as a JSON object. ``FileNotFoundError`` and other ``OSError`` propagate;
+    malformed JSON raises ``JSONDecodeError``; non-UTF-8 bytes or a non-object value raise
+    :class:`CorruptSidecarError` (itself a ``JSONDecodeError``), so every caller that already
+    fails closed on ``(OSError, JSONDecodeError)`` covers the wrong-shape case too."""
     try:
-        raw = _baton_path(continuity_path).read_text(encoding="utf-8")
+        raw = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise CorruptSidecarError(path, "not UTF-8") from exc
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise CorruptSidecarError(path, f"decoded to {type(data).__name__}, not an object")
+    return data
+
+
+def _read_baton(continuity_path: PathLike) -> dict[str, Any] | None:
+    """The validated baton payload, or ``None`` if no baton file exists. Raises ``OSError`` /
+    ``JSONDecodeError`` (including :class:`CorruptSidecarError`) when the file is unreadable or
+    does not name a holder: a baton file with no usable ``session_id`` is corrupt, not absent."""
+    path = _baton_path(continuity_path)
+    try:
+        data = _read_json_object(path)
     except FileNotFoundError:
         return None
-    data = json.loads(raw)  # JSONDecodeError + non-ENOENT OSError propagate (fail-closed)
     sid = data.get("session_id")
-    return sid if isinstance(sid, str) and sid else None
+    if not isinstance(sid, str) or not sid:
+        raise CorruptSidecarError(path, "no usable session_id")
+    return data
+
+
+def baton_holder(continuity_path: PathLike) -> str | None:
+    """The session id currently holding the baton, or ``None`` if no baton is claimed. An
+    ABSENT baton (``FileNotFoundError``) reads as ``None``; an UNREADABLE or corrupt baton
+    file RAISES (``OSError`` / ``JSONDecodeError``; a wrong-shape payload raises
+    :class:`CorruptSidecarError`, a ``JSONDecodeError`` subclass) so :func:`consolidate_authorized`
+    fails CLOSED rather than silently erasing a designation into a false sole-grant. Absent
+    and unreadable are different (the no-data≠no-event distinction, at the collector)."""
+    data = _read_baton(continuity_path)
+    return None if data is None else str(data["session_id"])
 
 
 def holds_baton(continuity_path: PathLike, session_id: str) -> bool:
@@ -327,24 +418,65 @@ def holds_baton(continuity_path: PathLike, session_id: str) -> bool:
     return baton_holder(continuity_path) == session_id
 
 
-def claim_baton(continuity_path: PathLike, session_id: str) -> BatonClaim:
+def claim_baton(
+    continuity_path: PathLike, session_id: str, *, take: bool = False
+) -> BatonClaim:
     """Claim the consolidate baton for ``session_id`` (the human designating the integrator /
-    consolidate seat — govern-not-trust: the human assigns authority). Last-claim-wins by
-    design; the previous holder (if any) is returned so a re-designation is visible. Idempotent
-    for the same holder."""
+    consolidate seat — govern-not-trust: the human assigns authority).
+
+    - No baton claimed: claim it. The file is created exclusively, so of two sessions racing
+      for an unheld baton exactly one wins; the other gets :class:`BatonHeldError`.
+    - Already held by ``session_id``: a no-op success. Nothing is written, and the original
+      ``claimed_at`` is returned with ``previous_holder == session_id``.
+    - Held by ANOTHER session, or the baton file is unreadable: refused with
+      :class:`BatonHeldError` unless ``take=True``. ⚖ Phill, 2026-09-24 (flow spore-1169):
+      taking the baton from another session must be deliberate, so automation cannot take it
+      by accident. This replaces spore-194's last-claim-wins. With ``take=True`` the baton is
+      replaced atomically; an unreadable one is replaced too, which is the recovery path for
+      a corrupt baton file, and ``previous_holder`` is then ``None``.
+    """
     if not session_id:
         raise ValueError("claim_baton: session_id must be non-empty")
     try:
-        previous = baton_holder(continuity_path)
+        current = _read_baton(continuity_path)
+        unreadable = False
     except (OSError, json.JSONDecodeError):
-        # An unreadable prior baton is being overwritten anyway; previous_holder is
-        # informational (visibility in BatonClaim) — never load-bearing for correctness.
-        previous = None
+        current, unreadable = None, True
+    previous = None if current is None else str(current["session_id"])
+    if previous == session_id:
+        claimed_at = current.get("claimed_at") if current is not None else None
+        return BatonClaim(
+            session_id=session_id,
+            claimed_at=(
+                float(claimed_at)
+                if isinstance(claimed_at, (int, float)) and not isinstance(claimed_at, bool)
+                else 0.0
+            ),
+            previous_holder=session_id,
+        )
+    if (unreadable or previous is not None) and not take:
+        raise BatonHeldError(session_id, previous, unreadable=unreadable)
     claimed_at = time.time()
-    _atomic_write_json(
-        _baton_path(continuity_path),
-        {"session_id": session_id, "claimed_at": claimed_at, "previous_holder": previous},
-    )
+    payload: dict[str, object] = {
+        "session_id": session_id,
+        "claimed_at": claimed_at,
+        "previous_holder": previous,
+    }
+    if take:
+        _atomic_write_json(_baton_path(continuity_path), payload)
+    else:
+        try:
+            _atomic_write_json(_baton_path(continuity_path), payload, exclusive=True)
+        except FileExistsError:
+            # Another session claimed between our read and our create. Report whoever holds
+            # it now; if that happens to be us (a concurrent claim for the same id), succeed.
+            try:
+                winner = baton_holder(continuity_path)
+            except (OSError, json.JSONDecodeError):
+                raise BatonHeldError(session_id, None, unreadable=True) from None
+            if winner == session_id:
+                return claim_baton(continuity_path, session_id)
+            raise BatonHeldError(session_id, winner, unreadable=False) from None
     return BatonClaim(
         session_id=session_id, claimed_at=claimed_at, previous_holder=previous
     )
@@ -353,14 +485,16 @@ def claim_baton(continuity_path: PathLike, session_id: str) -> BatonClaim:
 def release_baton(continuity_path: PathLike, session_id: str) -> bool:
     """Release the baton iff ``session_id`` holds it. Returns whether it was released. A
     session never steals another's release — only the holder (or :func:`close_session`) drops
-    it.
+    it. An unreadable or wrong-shape baton returns ``False`` without raising: ownership cannot
+    be confirmed, so it is left for a deliberate ``claim_baton(..., take=True)``.
 
     Narrow read-then-unlink window: if a concurrent :func:`claim_baton` lands a NEW holder
     between the ``holds_baton`` check and the ``unlink``, this deletes the new holder's baton
     file. The blast radius is bounded + fail-SAFE — the worst outcome is a spurious downgrade of
     the just-designated session (recoverable by re-claim); it can NEVER authorize a second
-    consolidator (an unheld baton only ever grants via the sole-path, which depends on real
-    session liveness, not the baton). Not worth lock machinery for advisory coordination state.
+    consolidator (an unheld baton grants nothing unless the caller opted into
+    ``allow_sole_live``, and then only via real session liveness, not the baton). Not worth
+    lock machinery for advisory coordination state.
     """
     try:
         held = holds_baton(continuity_path, session_id)
@@ -379,14 +513,24 @@ def release_baton(continuity_path: PathLike, session_id: str) -> bool:
 
 
 def consolidate_authorized(
-    continuity_path: PathLike, session_id: str, *, ttl: int = DEFAULT_TTL_SECONDS
+    continuity_path: PathLike,
+    session_id: str,
+    *,
+    ttl: int = DEFAULT_TTL_SECONDS,
+    allow_sole_live: bool = False,
 ) -> ConsolidateAuth:
     """The efferent-gate decision for ``session_id``: may it CONSOLIDATE (recompose the felt
     layer), or must it auto-downgrade to capture-only?
 
-    Authorized iff this session HOLDS the baton, OR no OTHER session is live (sole). Otherwise
-    a downgrade. A registry read error fails CLOSED (downgrade) — never perform the efferent act
-    under authorization uncertainty; only opted-in (session_id-passing) callers can reach this.
+    Authorized iff this session HOLDS the baton. Otherwise a downgrade. A registry read error
+    fails CLOSED (downgrade) — never perform the efferent act under authorization uncertainty.
+
+    ⚖ Phill, 2026-09-24 (flow spore-1105 (b), spore-1169): every consolidate requires the
+    baton. Before 0.9.13 a session was also authorized when no OTHER session was live
+    (``"sole-live-session"``). That judgement rests on a registry snapshot a resume or a TTL
+    crossing can race, and the guard exists so that growing automation cannot recompose the
+    felt layer unbidden. ``allow_sole_live=True`` restores the old rule; it is an explicit
+    opt-in for a caller that knows it is the only writer, never a default.
     """
     if not session_id:
         raise ValueError("consolidate_authorized: session_id must be non-empty")
@@ -416,8 +560,8 @@ def consolidate_authorized(
         # exists to prevent. If the holder is itself TTL-stale we STILL downgrade (the safe,
         # efferent-default direction: we cannot distinguish an idle-alive head from a crashed
         # one), but flag it distinctly so the operator release/re-claims rather than silently
-        # losing the human designation. A genuinely-dead holder is recovered by claim_baton
-        # (last-wins) or close_session (releases on graceful exit).
+        # losing the human designation. A genuinely-dead holder is recovered by a deliberate
+        # claim_baton(..., take=True) or close_session (releases on graceful exit).
         holder_live = holder in live_ids
         reason = (
             "downgraded-not-baton-holder"
@@ -425,9 +569,14 @@ def consolidate_authorized(
             else "downgraded-stale-baton-holder"
         )
         authorized = False
+    elif not allow_sole_live:
+        # No baton claimed, and the caller did not opt into the sole-live rule → downgrade,
+        # however many sessions are live. Claiming the baton is the way in.
+        reason = "downgraded-no-baton"
+        authorized = False
     elif not others:
-        # No baton designated anywhere AND I am the sole live session → auto-authorized (the
-        # single-session common case; this branch is never reached once any baton is claimed).
+        # Opted in, no baton designated anywhere, and I am the sole live session → authorized
+        # (spore-194's single-session rule; never reached once any baton is claimed).
         reason = "sole-live-session"
         authorized = True
     else:

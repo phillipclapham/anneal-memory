@@ -1919,6 +1919,10 @@ def validated_save_continuity(
             collapses a protected memory layer and ``allow_shrink`` is
             not set, or the AM-LINKGATE block refuses (see
             ``allow_unlinked``).
+        TypeError: If ``compost`` is a bare string, or holds anything
+            but non-empty names without surrounding whitespace. Checked
+            after the wrap-state preconditions, so with no wrap in
+            progress the ``ValueError`` above wins.
         StoreError: Raised in two distinct cases. (1) **Integrity
             failure.** The wrap-state precondition runs
             :meth:`Store.load_wrap_snapshot` first (before any payload

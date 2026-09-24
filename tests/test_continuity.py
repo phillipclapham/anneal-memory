@@ -6143,7 +6143,9 @@ class TestCompostSever:
         finally:
             store.close()
 
-    def test_composted_name_that_graduates_this_wrap_is_not_reseeded(self, tmp_path):
+    def test_composted_name_that_graduates_this_wrap_is_not_reseeded(
+        self, tmp_path, caplog
+    ):
         # L1+L2 convergent MED, reproduced 2026-09-24: the post-commit
         # co-graduation seed re-linked a name the same save had just severed.
         from anneal_memory import prepare_wrap
@@ -6174,6 +6176,7 @@ class TestCompostSever:
                 )
             assert result["composted"] == {"alpha": 0}
             assert store.continuity_path.read_text(encoding="utf-8") == text
+            assert "also graduated" in caplog.text  # delivered, as a log line
             names = store._conn.execute(
                 "SELECT name_a, name_b FROM pattern_associations"
             ).fetchall()

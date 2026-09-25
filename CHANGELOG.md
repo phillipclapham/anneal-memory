@@ -10,7 +10,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   empty-window path, whose `wrap_cancelled()` clears the open wrap, before it consulted the gate. An
   open wrap whose window is later emptied (a prune or `delete`) could be cancelled by a session with
   no baton, or with no `session_id` on a require-baton store. The gate now runs first; a downgraded
-  caller leaves the store untouched. The holder's own recovery of an emptied wrap is unchanged.
+  caller leaves the store untouched, so a non-holder that used to get `empty` plus a stale-flag clear
+  now gets `downgraded`. A caller that names no `session_id` on a store without the policy is likewise
+  refused the empty-path cancel of a wrap that was prepared under the gate. The holder's own recovery
+  of an emptied wrap is unchanged.
 - **A save that omitted `session_id` skipped the baton re-check on a wrap that was prepared under the
   gate.** The token identifies a wrap, not who may commit it. The wrap now records the session that
   prepared it (new `Store.wrap_gated_session()`; `Store.wrap_started(gated_session_id=)`), and

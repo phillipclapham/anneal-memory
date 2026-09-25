@@ -1440,9 +1440,13 @@ def prepare_wrap(
             ``"empty"`` = no episodes to wrap; ``"ready"`` = package
             built and wrap marked in progress on the store;
             ``"downgraded"`` = the consolidate-efferent gate (spore-194)
-            declined this call (it does not hold the baton, or it passed
-            no ``session_id`` on a baton-protected store) — see
-            ``message``; the store is left untouched
+            declined this call (it does not hold the baton, it passed
+            no ``session_id`` on a baton-protected store, or its empty
+            window found a wrap prepared under the gate that it may not
+            cancel) — see ``message``. Also returned, and transient
+            (retry), when another session replaced the wrap this call had
+            observed while deciding (``downgraded-wrap-replaced``). The
+            store is left untouched in every case
           - ``message`` (str): short human-readable status summary
           - ``episode_count`` (int): number of episodes in the wrap window
           - ``package`` (:class:`WrapPackageDict` | None): the
@@ -1546,6 +1550,8 @@ def prepare_wrap(
                 f"Consolidate downgraded to capture-only (downgraded-gated-wrap-open): "
                 f"a wrap prepared under the consolidate gate by session {gated_by!r} is "
                 f"in progress, and a call that names no session_id cannot cancel it. "
+                f"Finish it from that session, or abandon it with wrap-cancel (CLI) / "
+                f"wrap_cancel (MCP), which discards the compression. "
                 f"Capture (afferent) is unaffected."
             )
         try:

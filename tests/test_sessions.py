@@ -1231,3 +1231,21 @@ def test_policy_change_audit_records_the_real_previous_value(store):
     store.set_consolidate_requires_baton(False)
     evs = [e["data"] for e in _audit_events(store) if e["event"] == "consolidate_policy_set"]
     assert evs[-2:] == [{"requires_baton": True, "was": False}, {"requires_baton": False, "was": True}]
+
+
+def test_cli_wrap_status_shows_the_preparing_session(tmp_path):
+    import subprocess
+    import sys
+
+    db = str(tmp_path / "ws.db")
+    s = Store(db)
+    s.record("obs", EpisodeType.OBSERVATION)
+    sessions.claim_baton(s.continuity_path, "A")
+    prepare_wrap(s, session_id="A")
+    s.close()
+    run = subprocess.run(
+        [sys.executable, "-m", "anneal_memory.cli", "--db", db, "wrap-status", "--json"],
+        capture_output=True, text=True,
+    )
+    assert run.returncode == 0, run.stderr
+    assert json.loads(run.stdout)["wrap_gated_session"] == "A"

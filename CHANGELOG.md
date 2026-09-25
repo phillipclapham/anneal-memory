@@ -22,7 +22,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   `Store.wrap_started(gated_session_id=)`), and `validated_save_continuity` refuses a save whose
   `session_id` is not exactly that session. **This is a strict match:** a new baton holder cannot
   commit the previous holder's compression either; it abandons the wrap (`wrap-cancel` / `wrap_cancel`)
-  and prepares its own. A wrap prepared with no `session_id` (the CLI, MCP, and any caller not opting
+  and prepares its own. ⚠ **Behaviour change for callers that pass `session_id`:** a flow that prepared
+  as one session and saved as another after a baton take (which 0.9.14 accepted) is now refused; cancel
+  and re-prepare from the session that will save. `anneal-memory wrap-status` now shows the preparing
+  session. A wrap prepared with no `session_id` (the CLI, MCP, and any caller not opting
   in) saves as before, and a wrap already in flight across the upgrade reads as ungated.
 - **The gate was checked before the package build but not after it.** `prepare_wrap` now re-checks
   just before `wrap_started`, so a baton taken during the build no longer starts a wrap.

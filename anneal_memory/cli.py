@@ -1312,11 +1312,16 @@ def cmd_wrap_status(args: argparse.Namespace) -> None:
                 "wrap_token": snapshot["token"],
                 "wrap_episode_count": len(snapshot["episode_ids"]),
                 "wrap_episode_ids": snapshot["episode_ids"],
+                "wrap_gated_session": store.wrap_gated_session(),
             })
             return
 
         print(f"wrap in progress since {started_at or '(unknown)'}")
         print(f"  token:    {snapshot['token']}")
+        gated_by = store.wrap_gated_session()
+        if gated_by is not None:
+            print(f"  prepared under the consolidate gate by session {gated_by!r}: only that")
+            print("  session can complete it (library save_continuity with that session_id)")
         print(f"  episodes: {len(snapshot['episode_ids'])}")
         print()
         print(

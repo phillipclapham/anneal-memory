@@ -1040,9 +1040,24 @@ def test_policy_store_ignores_allow_sole_live_at_save(store):
     store.set_consolidate_requires_baton(True)
     sessions.release_baton(store.continuity_path, "me")
     sessions.register_session(store.continuity_path, "me")  # sole live, no baton
-    with pytest.raises(ValueError, match="does not hold the consolidate baton"):
+    with pytest.raises(ValueError, match="does not hold the consolidate baton") as exc:
         validated_save_continuity(
             store, _WRAP_TEXT, wrap_token=prep["wrap_token"], session_id="me",
             allow_sole_live=True,
+        )
+    assert "baton-protected" in str(exc.value)
+    assert "must pass allow_sole_live=True" not in str(exc.value)  # false advice here
+    assert store.status().wrap_in_progress
+
+
+@pytest.mark.parametrize("bad", ["false", 1, None])
+def test_save_refuses_a_non_bool_allow_sole_live(store, bad):
+    store.record("obs", EpisodeType.OBSERVATION)
+    sessions.register_session(store.continuity_path, "me")
+    prep = prepare_wrap(store, session_id="me", allow_sole_live=True)
+    with pytest.raises(TypeError, match="allow_sole_live must be a bool"):
+        validated_save_continuity(
+            store, _WRAP_TEXT, wrap_token=prep["wrap_token"], session_id="me",
+            allow_sole_live=bad,
         )
     assert store.status().wrap_in_progress

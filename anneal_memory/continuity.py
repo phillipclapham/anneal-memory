@@ -1733,6 +1733,10 @@ def _check_save_authority(
     ignores it) re-runs the same ``consolidate_authorized`` decision ``prepare_wrap`` made, so
     a sole live session that prepared without a baton can also save. Raises ``ValueError``;
     writes nothing."""
+    if not isinstance(allow_sole_live, bool):  # "false" is truthy: never infer consent
+        raise TypeError(
+            f"allow_sole_live must be a bool, got {type(allow_sole_live).__name__}"
+        )
     requires_baton = store.consolidate_requires_baton()
     if requires_baton and (session_id is None or wrap_token is None):
         raise ValueError(
@@ -1763,7 +1767,9 @@ def _check_save_authority(
         ) from None
     if holder == session_id:
         return
-    if holder is None:
+    if holder is None and requires_baton:
+        cause = "this store is baton-protected, which ignores allow_sole_live, and no baton is claimed"
+    elif holder is None:
         cause = (
             "no baton is claimed (it was never claimed, or was released); a session that "
             "prepared as the sole live session must pass allow_sole_live=True here too"
@@ -1983,8 +1989,8 @@ def validated_save_continuity(
             (flow spore-1169). When passed, the save proceeds only if that
             session is STILL authorized (re-checked here, so a take mid-wrap
             revokes the old holder's commit): it holds the consolidate baton
-            or, under ``allow_sole_live``, is the sole live session;
-            otherwise ``ValueError`` with nothing written. Required, with
+            or, under ``allow_sole_live``, is the sole live session and no other
+            session holds a baton; otherwise ``ValueError`` with nothing written. Required, with
             ``wrap_token``, on a store with the require-baton policy; ``None``
             elsewhere skips the check. Library-only; no CLI or MCP surface.
         allow_sole_live: Only meaningful with ``session_id``, and ignored on a

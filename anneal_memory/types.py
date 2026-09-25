@@ -540,7 +540,9 @@ class PrepareWrapResult(TypedDict):
     consolidate-efferent gate auto-downgraded this session to
     capture-only — a session that does not hold the consolidate baton
     (or, under ``allow_sole_live``, is neither the sole live session nor
-    the baton-holder); ``package``/``wrap_token`` ``None``,
+    the baton-holder; or an empty-window call that may not cancel a
+    wrap prepared under the gate; or, transiently, one that lost a race to
+    another session's new wrap: retry); ``package``/``wrap_token`` ``None``,
     the human-readable reason is in ``message``, the store left
     untouched). The ``Literal`` discriminant
     gives type checkers a switchable tag and lets IDE autocomplete

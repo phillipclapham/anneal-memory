@@ -1336,3 +1336,21 @@ def test_wrap_cancelled_stays_ungated_for_a_gated_wrap(store):
     _ready_wrap_for(store, "A")
     receipt = store.wrap_cancelled()
     assert receipt.token and not store.status().wrap_in_progress
+
+
+def test_a_gated_wrap_cannot_be_saved_without_its_token(store):
+    _, prep = _ready_wrap_for(store, "A")
+    with pytest.raises(anneal_memory.SaveAuthorityError, match="wrap_token"):
+        validated_save_continuity(store, _WRAP_TEXT, session_id="A")
+    assert store.status().wrap_in_progress
+    validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"], session_id="A")
+
+
+def test_a_partial_lifecycle_with_a_gated_key_still_recovers_via_the_empty_path(store):
+    from anneal_memory.store import StoreError  # noqa: F401
+
+    for k, v in (("wrap_started_at", "2026-09-25T00:00:00Z"), ("wrap_gated_session", "A")):
+        store._conn.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)", (k, v))
+    store._conn.commit()
+    result = prepare_wrap(store)  # sessionless, default store: recovery, not a gated-wrap block
+    assert result["status"] == "empty" and not store.status().wrap_in_progress

@@ -753,7 +753,13 @@ def test_save_rechecks_the_baton_when_the_session_names_itself(store):
         validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"],
                                   session_id="A")
     assert store.status().wrap_in_progress  # nothing written
-    validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"], session_id="B")
+    # Strict match (0.9.15): the new holder may not commit the revoked holder's wrap either;
+    # it abandons it and prepares its own.
+    with pytest.raises(ValueError, match="only that session may commit it"):
+        validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"], session_id="B")
+    store.wrap_cancelled()
+    prep_b = prepare_wrap(store, session_id="B")
+    validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep_b["wrap_token"], session_id="B")
     assert len(store.get_wrap_history()) == 1
 
 
@@ -1162,3 +1168,66 @@ def test_sessionless_caller_cannot_cancel_a_gated_wrap_via_the_empty_path(store)
     assert "downgraded-gated-wrap-open" in result["message"]
     assert store.status().wrap_in_progress
     assert store.load_wrap_snapshot()["token"] == prep["wrap_token"]
+
+
+# -- 0.9.15 residue: strict match, empty-path CAS, audit records --
+
+
+def _audit_events(store):
+    path = store.path.with_suffix(".audit.jsonl")
+    return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+
+def test_strict_match_a_new_holder_cannot_commit_the_previous_holders_wrap(store):
+    _, prep = _ready_wrap_for(store, "A")
+    sessions.claim_baton(store.continuity_path, "B", take=True)
+    with pytest.raises(ValueError, match="only that session may commit it") as exc:
+        validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"], session_id="B")
+    assert "prepare_wrap again" in str(exc.value)
+    assert store.status().wrap_in_progress and store.get_wrap_history() == []
+
+
+def test_empty_path_leaves_a_wrap_replaced_mid_decision_alone(store, monkeypatch):
+    ep, prep = _ready_wrap_for(store, "holder")
+    assert store.delete(ep.id)
+    real = store.load_wrap_snapshot
+    replaced = {}
+
+    def observe_then_a_peer_replaces_the_wrap():
+        snap = real()  # what the empty path observed
+        store.wrap_cancelled()
+        ep2 = store.record("fresh", EpisodeType.OBSERVATION)
+        replaced["token"] = "f" * 32
+        store.wrap_started(token=replaced["token"], episode_ids=[ep2.id])
+        return snap
+
+    monkeypatch.setattr(store, "load_wrap_snapshot", observe_then_a_peer_replaces_the_wrap)
+    result = prepare_wrap(store, session_id="holder")
+    monkeypatch.undo()
+    assert result["status"] == "downgraded" and "downgraded-wrap-replaced" in result["message"]
+    assert store.load_wrap_snapshot()["token"] == replaced["token"]  # the peer's wrap survived
+
+
+def test_empty_prepare_on_an_idle_store_writes_nothing(store):
+    assert prepare_wrap(store)["status"] == "empty"
+    assert not store.status().wrap_in_progress
+
+
+def test_cancel_audit_records_the_gated_session(store):
+    _ready_wrap_for(store, "A")
+    store.wrap_cancelled()
+    ev = [e for e in _audit_events(store) if e["event"] == "wrap_cancelled"][-1]
+    assert ev["data"]["wrap_gated_session"] == "A"
+
+
+def test_zero_edge_compost_is_audited(store):
+    assert store.sever_pattern_concept("ghost") == 0
+    ev = [e for e in _audit_events(store) if e["event"] == "pattern_concept_severed"]
+    assert ev and ev[-1]["data"] == {"name": "ghost", "severed": 0}
+
+
+def test_policy_change_audit_records_the_real_previous_value(store):
+    store.set_consolidate_requires_baton(True)
+    store.set_consolidate_requires_baton(False)
+    evs = [e["data"] for e in _audit_events(store) if e["event"] == "consolidate_policy_set"]
+    assert evs[-2:] == [{"requires_baton": True, "was": False}, {"requires_baton": False, "was": True}]

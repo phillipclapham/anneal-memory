@@ -1547,7 +1547,10 @@ def prepare_wrap(
         # valid wrap to protect, so it is cleared unconditionally: the recovery this path
         # exists for. (Lifecycle keys left behind with wrap_started_at empty are inert: the
         # next wrap_started overwrites them, and wrap_gated_session() ignores them.)
-        gated_by = observed_gated_by if session_id is None else None
+        # A partial (corrupt) lifecycle has no valid wrap to protect, so it never blocks recovery.
+        gated_by = (
+            observed_gated_by if session_id is None and not observed_partial else None
+        )
         if gated_by is not None:
             # An ungated caller is authorized by omission, but a wrap prepared under the
             # gate is not its to cancel: the save side refuses a session-less commit of it
@@ -1566,11 +1569,11 @@ def prepare_wrap(
             elif observed_partial:
                 store.wrap_cancelled()
         except WrapOwnershipError as exc:
-            if exc.actual is not None:
+            if exc.actual is not None or exc.partial_state:
                 return _downgraded_empty(
                     "Consolidate downgraded to capture-only (downgraded-wrap-replaced): "
-                    "another session replaced the wrap this call observed while it was "
-                    "deciding, so it left it alone. Retry. Capture (afferent) is unaffected."
+                    "the wrap this call observed was replaced or changed while it was deciding, so it "
+                    "left it alone. Retry. Capture (afferent) is unaffected."
                 )
             # The observed wrap finished or was cancelled meanwhile: idle, nothing to clear.
         return PrepareWrapResult(
@@ -2235,6 +2238,15 @@ def validated_save_continuity(
     # baton's previous holder was revoked from: it prepares its own. Read before the batch:
     # wrap_completed clears the key.
     gated_by = store.wrap_gated_session()
+    if gated_by is not None and wrap_token is None:
+        # A gated wrap's save must round-trip its token: without one, a delayed save from the
+        # right session would load whatever wrap is CURRENT (a later prepare's) and commit
+        # stale text against it. Checked first so the refusal names the cheapest fix.
+        raise SaveAuthorityError(
+            f"This wrap was prepared under the consolidate gate by session {gated_by!r}, so "
+            f"its save must pass the wrap_token that prepare_wrap returned (and that session_id). "
+            f"Nothing was written."
+        )
     if gated_by is not None and session_id != gated_by:
         if session_id is None:
             raise SaveAuthorityError(

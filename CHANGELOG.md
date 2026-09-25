@@ -28,7 +28,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   as one session and saved as another after a baton take (which 0.9.14 accepted) is now refused; cancel
   and re-prepare from the session that will save. `anneal-memory wrap-status` now shows the preparing
   session. A wrap prepared with no `session_id` (the CLI, MCP, and any caller not opting
-  in) saves as before, and a wrap already in flight across the upgrade reads as ungated.
+  in) saves as before, and a wrap already in flight across the upgrade reads as ungated. A gated wrap's save must also
+  pass its `wrap_token` (`SaveAuthorityError` otherwise): a delayed save from the right session would
+  otherwise commit stale text against a later prepare's wrap.
 - **The gate was checked before the package build but not after it.** `prepare_wrap` now re-checks
   just before `wrap_started`, so a baton taken during the build no longer starts a wrap.
 - **The wrap-cancel audit event now records the gated session** it abandoned. `sever_pattern_concept`
@@ -57,7 +59,11 @@ transaction, so two windows of milliseconds remain: a baton take that lands betw
 final authorization check and `wrap_started`, and one that lands between the save's final in-transaction
 check and its commit. Neither is seen. The consequence is bounded: the first leaves a wrap in progress
 that the new holder must `wrap-cancel`; the second commits a wrap the previous holder was revoked from
-in that instant, and the take applies to the next wrap. Closing them means holding the baton lock
+in that instant, and the take applies to the next wrap. Three smaller windows are likewise left, each needing a concurrent operator action on the same store
+within milliseconds: the require-baton policy being switched on between a sessionless `prepare_wrap`'s
+final check and `wrap_started`; the unconditional clear of a store whose lifecycle metadata was already
+corrupt racing a peer that repairs it first; and two simultaneous policy changes auditing in the reverse
+of their commit order (the stored value is right). Closing them means holding the baton lock
 across the commit, which was tried in 0.9.13 and withdrawn (a failed unlock after the commit discarded
 committed files, and an audit callback that touches the baton would deadlock), or moving the baton into
 the store.

@@ -8,11 +8,11 @@
 > Git history was NOT carried across the repo boundary (a cross-repo move cannot); flow's history
 > retains it up to this commit.
 
-> ### 🔬 DIOGENES — NEWEST: `diogenes_20260920.md` · **STILL OPEN: 2** @ `d70678b`
-> 5 episode(s) — LOW 2 — 2 of 5 episode(s) carry a severity; the other 3 are COVERAGE 1 · COVERAGE-OPEN 1 · STILL OPEN 1. Routed UNTRIAGED by `route_diogenes.py`; the count above is Diogenes' own slot, not the ritual's.
-> ▶ 4 human commit(s) in the last 24h — the count could move in either direction this window.
-> ⚙ COORDINATES: 0 of 2 finding(s) carried quoted text, so NONE could be checked. This is not a clean result.
-> *(Pointer written 2026-09-20 by route_diogenes.py. `spore-473`: a routed report with no reader is a disposal chute.)*
+> ### 🔬 DIOGENES — NEWEST: `diogenes_20260925.md` · **STILL OPEN: 4** @ `395d420`
+> 7 episode(s) — LOW 1 · MEDIUM 1 — 2 of 7 episode(s) carry a severity; the other 5 are COVERAGE 1 · COVERAGE-OPEN 1 · SELF 2 · STILL OPEN 1. Routed UNTRIAGED by `route_diogenes.py`; the count above is Diogenes' own slot, not the ritual's.
+> ▶ 24 human commit(s) in the last 24h — the count could move in either direction this window.
+> ⚙ COORDINATES: 0/2 confirmed at HEAD 395d420 (1 carried no quote, unchecked). ⚠ 2 could NOT be confirmed — look, do not assume the reviewer was wrong (a remediated finding reads the same as a bad coordinate): anneal_memory/continuity.py:1736 -> quoted text is at :1737 (+1) · anneal_memory/types.py:543 -> quoted text is at :544 (+1), 1/2 fragments matched
+> *(Pointer written 2026-09-25 by route_diogenes.py. `spore-473`: a routed report with no reader is a disposal chute.)*
 
 > ✅ **2026-09-19 (0919+21 maint-seat): both `diogenes_20260918.md` LOWs CLOSED on main** (`b66d5fb`, `4504dea`, `35553ed`; triage in that file; unreleased, 0.9.12 still pending). The count above is Diogenes' snapshot, not current.
 

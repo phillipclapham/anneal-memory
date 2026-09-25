@@ -348,6 +348,7 @@ StoreOperation = Literal[
     "wrap_cancelled",
     "get_wrap_started_at",
     "consolidate_requires_baton",
+    "wrap_gated_session",
     "set_consolidate_requires_baton",
     "get_wrap_history",
     "record_associations",
@@ -1259,6 +1260,12 @@ _DEFAULT_METADATA = {
     # the live schema) during a wrap so prepare and save agree even if the live
     # schema is changed mid-wrap; an active wrap missing it fails closed.
     "wrap_section_schema": "",
+    # The session_id that prepared the current wrap under the consolidate gate,
+    # or empty (idle, or an ungated prepare). Additive lifecycle key like
+    # wrap_section_schema: cleared on every terminal path, and a store that
+    # predates it reads "" (ungated), so an in-flight wrap across an upgrade
+    # keeps the old behaviour.
+    "wrap_gated_session": "",
 }
 
 
@@ -2399,6 +2406,7 @@ class Store:
         episode_ids: list[str],
         section_schema: list[SectionSpec] | None = None,
         allow_restart: bool = False,
+        gated_session_id: str | None = None,
     ) -> None:
         """Mark that a wrap has been initiated (prepare_wrap called).
 
@@ -2637,6 +2645,10 @@ class Store:
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_section_schema", frozen_schema_json),
             )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_gated_session", gated_session_id or ""),
+            )
             self._conn.commit()
 
         if self._audit is not None:
@@ -2868,6 +2880,10 @@ class Store:
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_episode_ids", ""),
             )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_gated_session", ""),
+            )
             # AM-SCHEMASNAPSHOT: clear the frozen schema alongside the rest of
             # the wrap-in-progress state so section_schema_for_wrap() falls back
             # to the live schema once the wrap is abandoned.
@@ -2982,6 +2998,15 @@ class Store:
         with self._db_boundary("get_wrap_started_at"):
             started = self._get_metadata("wrap_started_at")
         return started if started else None
+
+    def wrap_gated_session(self) -> str | None:
+        """The ``session_id`` that prepared the wrap in progress under the consolidate
+        gate, or ``None`` when no wrap is in progress or it was prepared ungated (no
+        ``session_id``). ``validated_save_continuity`` uses it to refuse a save that
+        omits ``session_id`` from a wrap that was gated, which would otherwise skip
+        the baton re-check entirely."""
+        with self._db_boundary("wrap_gated_session"):
+            return self._get_metadata("wrap_gated_session") or None
 
     def consolidate_requires_baton(self) -> bool:
         """Does this store require the consolidate baton for EVERY consolidate?
@@ -3458,6 +3483,10 @@ class Store:
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_episode_ids", ""),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_gated_session", ""),
             )
             # AM-SCHEMASNAPSHOT: clear the frozen wrap schema in the same
             # transaction as the other wrap-in-progress clears, so a completed

@@ -1061,3 +1061,87 @@ def test_save_refuses_a_non_bool_allow_sole_live(store, bad):
             allow_sole_live=bad,
         )
     assert store.status().wrap_in_progress
+
+
+# -- three L3 findings on 0.9.14 (codex + complement, 2026-09-25) --
+
+
+def _ready_wrap_for(store, sid):
+    ep = store.record("obs", EpisodeType.OBSERVATION)
+    sessions.claim_baton(store.continuity_path, sid)
+    prep = prepare_wrap(store, session_id=sid)
+    assert prep["status"] == "ready"
+    return ep, prep
+
+
+def test_unauthorized_caller_cannot_cancel_the_holders_wrap_via_the_empty_path(store):
+    ep, prep = _ready_wrap_for(store, "holder")
+    assert store.delete(ep.id)  # the window is now empty while the wrap is open
+    sessions.register_session(store.continuity_path, "intruder")
+    result = prepare_wrap(store, session_id="intruder")
+    assert result["status"] == "downgraded"
+    assert store.status().wrap_in_progress  # NOT cancelled
+    assert store.load_wrap_snapshot()["token"] == prep["wrap_token"]
+
+
+def test_policy_store_sessionless_caller_cannot_cancel_via_the_empty_path(store):
+    ep, prep = _ready_wrap_for(store, "holder")
+    store.set_consolidate_requires_baton(True)
+    assert store.delete(ep.id)
+    result = prepare_wrap(store)  # no session_id
+    assert result["status"] == "downgraded"
+    assert store.status().wrap_in_progress
+
+
+def test_the_holder_still_recovers_an_emptied_wrap_via_the_empty_path(store):
+    ep, _ = _ready_wrap_for(store, "holder")
+    assert store.delete(ep.id)
+    assert prepare_wrap(store, session_id="holder")["status"] == "empty"
+    assert not store.status().wrap_in_progress  # authorized recovery unchanged
+
+
+def test_save_omitting_session_id_is_refused_when_prepare_was_gated(store):
+    _, prep = _ready_wrap_for(store, "A")
+    sessions.claim_baton(store.continuity_path, "B", take=True)  # A's baton is revoked
+    with pytest.raises(ValueError, match="must pass session_id"):
+        validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"])
+    assert store.status().wrap_in_progress and store.get_wrap_history() == []
+    assert store.wrap_gated_session() == "A"
+
+
+def test_an_ungated_wrap_still_saves_without_session_id(store):
+    store.record("obs", EpisodeType.OBSERVATION)
+    prep = prepare_wrap(store)  # no session_id, no policy: the opt-in gate stays off
+    assert store.wrap_gated_session() is None
+    validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"])
+    assert len(store.get_wrap_history()) == 1
+
+
+def test_gated_session_key_clears_on_complete_and_cancel(store):
+    _, prep = _ready_wrap_for(store, "A")
+    assert store.wrap_gated_session() == "A"
+    validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"], session_id="A")
+    assert store.wrap_gated_session() is None
+    store.record("obs2", EpisodeType.OBSERVATION)
+    prepare_wrap(store, session_id="A")
+    assert store.wrap_gated_session() == "A"
+    store.wrap_cancelled()
+    assert store.wrap_gated_session() is None
+
+
+def test_a_baton_taken_during_the_package_build_does_not_start_a_wrap(store, monkeypatch):
+    from anneal_memory import continuity
+
+    store.record("obs", EpisodeType.OBSERVATION)
+    sessions.claim_baton(store.continuity_path, "A")
+    real = continuity._build_wrap_package
+
+    def build_then_lose_the_baton(*a, **kw):
+        out = real(*a, **kw)
+        sessions.claim_baton(store.continuity_path, "B", take=True)
+        return out
+
+    monkeypatch.setattr(continuity, "_build_wrap_package", build_then_lose_the_baton)
+    result = prepare_wrap(store, session_id="A")
+    assert result["status"] == "downgraded" and result["wrap_token"] is None
+    assert not store.status().wrap_in_progress  # wrap_started never ran

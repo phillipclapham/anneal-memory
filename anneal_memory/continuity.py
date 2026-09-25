@@ -1251,6 +1251,76 @@ def _crystallization_block(
     return "\n".join(parts).rstrip()
 
 
+def _consolidate_gate(
+    store: Store,
+    session_id: str | None,
+    allow_sole_live: bool,
+    episode_count: int,
+) -> PrepareWrapResult | None:
+    """The AM-CONSOLIDATE-EFFERENT gate (spore-194, flow spore-1169) as ONE decision, run
+    at every point ``prepare_wrap`` is about to touch the wrap lifecycle (the empty-window
+    cancel, and again just before ``wrap_started``). Returns the ``"downgraded"`` result
+    when the caller is not authorized (the store untouched), else ``None``.
+
+    Opt-in: a caller that passes no ``session_id`` on a store without the require-baton
+    policy is never gated. On a policy store every caller is, and ``allow_sole_live`` is
+    ignored."""
+    requires_baton = store.consolidate_requires_baton()
+    if session_id is None and requires_baton:
+        return PrepareWrapResult(
+            status="downgraded",
+            message=(
+                "Consolidate downgraded to capture-only (downgraded-baton-required): this "
+                "store is baton-protected (Store.consolidate_requires_baton), so only the "
+                "session the operator has given the consolidate baton can consolidate it, "
+                "identifying itself with session_id. This call passed none, and the CLI and "
+                "MCP wrap cannot. Capture (afferent) is unaffected."
+            ),
+            episode_count=episode_count,
+            package=None,
+            assoc_context=None,
+            wrap_token=None,
+            uncovered_proven_to_check=[],
+            schema_warning=None,
+            crystallization_candidates=[],
+            rewarm_candidates=[],
+        )
+    if session_id is None:
+        return None
+    if not session_id:
+        raise ValueError(
+            "prepare_wrap: session_id must be non-empty when provided "
+            "(pass session_id=None to disable the consolidate-efferent gate)."
+        )
+    auth = sessions.consolidate_authorized(
+        store.continuity_path,
+        session_id,
+        # bool() of a non-bool would turn allow_sole_live="false" into True; pass it
+        # through so consolidate_authorized's type check refuses it.
+        allow_sole_live=False if requires_baton else allow_sole_live,
+    )
+    if auth["authorized"]:
+        return None
+    return PrepareWrapResult(
+        status="downgraded",
+        message=(
+            f"Consolidate downgraded to capture-only ({auth['reason']}): "
+            f"{len(auth['live_session_ids'])} live session(s), baton holder = "
+            f"{auth['baton_holder'] or 'none'}. Capture (afferent) is unaffected. "
+            f"A consolidate needs the baton, which the operator assigns to one "
+            f"session; a session does not claim it on its own initiative."
+        ),
+        episode_count=episode_count,
+        package=None,
+        assoc_context=None,
+        wrap_token=None,
+        uncovered_proven_to_check=[],
+        schema_warning=None,
+        crystallization_candidates=[],
+        rewarm_candidates=[],
+    )
+
+
 def prepare_wrap(
     store: Store,
     *,
@@ -1397,8 +1467,11 @@ def prepare_wrap(
             ``status == "empty"``, preserving stuck-wrap auto-recovery.
 
     Note:
-        On ``status == "empty"`` the function calls ``wrap_cancelled()``
-        on the store to clear any stale in-progress flag. On
+        A caller the consolidate gate does not authorize is downgraded BEFORE
+        anything else, including the empty path below, so it can never cancel
+        another session's in-flight wrap. On ``status == "empty"`` an
+        authorized (or ungated) caller's ``wrap_cancelled()`` clears any stale
+        in-progress flag. On
         ``status == "ready"`` it calls ``wrap_started(token=...,
         episode_ids=...)`` so the frozen snapshot is persisted in one
         transaction. Either way, the store's wrap lifecycle state is
@@ -1411,6 +1484,25 @@ def prepare_wrap(
             f"prepare_wrap: allow_sole_live must be a bool, got {type(allow_sole_live).__name__}"
         )
     episodes = store.episodes_since_wrap()
+
+    # AM-CONSOLIDATE-EFFERENT (spore-194): the efferent gate. Capture is afferent
+    # (ungated, append-only, parallel-safe); CONSOLIDATE mutates the shared felt/identity
+    # layer, so it is gated by human authority — proceed iff this session holds the
+    # consolidate baton (or, opted in via allow_sole_live, is the sole live session), else
+    # AUTO-DOWNGRADE to capture-only (drift becomes safe, not a failure). OPT-IN: engaged
+    # only when the caller passes session_id (or the store carries the require-baton
+    # policy); a caller that passes none is untouched. The gate runs FIRST, before the
+    # empty-window path below, because that path's wrap_cancelled() clears the in-flight
+    # wrap of whoever holds the baton: an empty window is reachable while another session's
+    # wrap is open (prune/delete emptied it), so an unauthorized caller must be downgraded
+    # before it can cancel anything. A downgrade leaves the store UNTOUCHED (no
+    # wrap_cancelled, no wrap_started). It is re-run just before wrap_started, after the
+    # slow package build, so a baton taken during the build is seen; the residue is a take
+    # landing in the milliseconds between that re-check and wrap_started (the baton is a
+    # sidecar file, outside the store's transaction).
+    downgraded = _consolidate_gate(store, session_id, allow_sole_live, len(episodes))
+    if downgraded is not None:
+        return downgraded
 
     if not episodes:
         store.wrap_cancelled()
@@ -1426,78 +1518,6 @@ def prepare_wrap(
             crystallization_candidates=[],
             rewarm_candidates=[],
         )
-
-    # AM-CONSOLIDATE-EFFERENT (spore-194): the efferent gate. Capture is afferent
-    # (ungated, append-only, parallel-safe); CONSOLIDATE mutates the shared felt/identity
-    # layer, so it is gated by human authority — proceed iff this session holds the
-    # consolidate baton (or, opted in via allow_sole_live, is the sole live session), else
-    # AUTO-DOWNGRADE to capture-only
-    # (drift becomes safe, not a failure). OPT-IN: engaged only when the caller passes
-    # session_id; a caller that passes none is untouched (registry never consulted, gate
-    # inert). Placed BEFORE AM-PREPARE-GUARD so a
-    # downgraded session returns cleanly without raising (it is not clobbering an in-flight
-    # wrap, it is declining to start one) and BEFORE wrap_started so nothing is stranded;
-    # the store is left UNTOUCHED on a downgrade (we must not clear another live session's
-    # in-progress wrap — no wrap_cancelled here, unlike the empty path). The empty path above
-    # cannot be weaponized to clear another session's wrap either: a real in-flight wrap is set
-    # only on the non-empty path, and episodes_since_wrap is global (keyed off the last
-    # COMPLETED wrap), so while any wrap is in flight every parallel session sees the SAME
-    # non-empty window and never reaches the empty path's wrap_cancelled().
-    # flow spore-1169: a store whose operator set the require-baton policy gates EVERY
-    # caller, including one that passes no session_id (which could never hold the baton),
-    # and ignores allow_sole_live. Without the policy the gate stays opt-in, as above.
-    requires_baton = store.consolidate_requires_baton()
-    if session_id is None and requires_baton:
-        return PrepareWrapResult(
-            status="downgraded",
-            message=(
-                "Consolidate downgraded to capture-only (downgraded-baton-required): this "
-                "store is baton-protected (Store.consolidate_requires_baton), so only the "
-                "session the operator has given the consolidate baton can consolidate it, "
-                "identifying itself with session_id. This call passed none, and the CLI and "
-                "MCP wrap cannot. Capture (afferent) is unaffected."
-            ),
-            episode_count=len(episodes),
-            package=None,
-            assoc_context=None,
-            wrap_token=None,
-            uncovered_proven_to_check=[],
-            schema_warning=None,
-            crystallization_candidates=[],
-            rewarm_candidates=[],
-        )
-    if session_id is not None:
-        if not session_id:
-            raise ValueError(
-                "prepare_wrap: session_id must be non-empty when provided "
-                "(pass session_id=None to disable the consolidate-efferent gate)."
-            )
-        auth = sessions.consolidate_authorized(
-            store.continuity_path,
-            session_id,
-            # bool() of a non-bool would turn allow_sole_live="false" into True; pass it
-            # through so consolidate_authorized's type check refuses it.
-            allow_sole_live=False if requires_baton else allow_sole_live,
-        )
-        if not auth["authorized"]:
-            return PrepareWrapResult(
-                status="downgraded",
-                message=(
-                    f"Consolidate downgraded to capture-only ({auth['reason']}): "
-                    f"{len(auth['live_session_ids'])} live session(s), baton holder = "
-                    f"{auth['baton_holder'] or 'none'}. Capture (afferent) is unaffected. "
-                    f"A consolidate needs the baton, which the operator assigns to one "
-                    f"session; a session does not claim it on its own initiative."
-                ),
-                episode_count=len(episodes),
-                package=None,
-                assoc_context=None,
-                wrap_token=None,
-                uncovered_proven_to_check=[],
-                schema_warning=None,
-                crystallization_candidates=[],
-                rewarm_candidates=[],
-            )
 
     # AM-PREPARE-GUARD (0.4.2): real episodes to compress AND a wrap
     # already in progress = a clobber. The consolidate is single-writer
@@ -1561,6 +1581,11 @@ def prepare_wrap(
     # minting happens LAST, after every upstream read and package
     # build succeeded, so a failure anywhere above leaves the store
     # in a clean no-wrap-in-progress state.
+    # Re-run the gate now that the slow reads and the package build are done: a baton
+    # taken (or a second session gone live) during them must not still start a wrap.
+    downgraded = _consolidate_gate(store, session_id, allow_sole_live, len(episodes))
+    if downgraded is not None:
+        return downgraded
     wrap_token = uuid.uuid4().hex
     # AM-SCHEMASNAPSHOT: freeze the EXACT schema we read above (line ~884) into
     # the wrap snapshot, so validated_save_continuity reads back this same schema
@@ -1568,7 +1593,10 @@ def prepare_wrap(
     # the already-read `schema` (not letting wrap_started re-read live) closes the
     # read→wrap_started micro-window airtight.
     store.wrap_started(
-        token=wrap_token, episode_ids=episode_ids, section_schema=schema
+        token=wrap_token,
+        episode_ids=episode_ids,
+        section_schema=schema,
+        gated_session_id=session_id,
     )
 
     # Move #4 library layer (v0.3.2): surface the list of existing
@@ -1992,7 +2020,9 @@ def validated_save_continuity(
             or, under ``allow_sole_live``, is the sole live session and no other
             session holds a baton; otherwise ``ValueError`` with nothing written. Required, with
             ``wrap_token``, on a store with the require-baton policy; ``None``
-            elsewhere skips the check. Library-only; no CLI or MCP surface.
+            elsewhere skips the check, EXCEPT that a wrap prepared with a
+            ``session_id`` refuses a save that omits it. Library-only; no CLI or
+            MCP surface.
         allow_sole_live: Only meaningful with ``session_id``, and ignored on a
             store with the require-baton policy, as in ``prepare_wrap``. Pass
             the same value the wrap's ``prepare_wrap`` got: a sole live
@@ -2130,6 +2160,17 @@ def validated_save_continuity(
     # An early pass, so a refused save fails before the expensive validation. It is repeated
     # authoritatively inside the batch, after wrap_completed (see there).
     _check_save_authority(store, session_id, wrap_token, allow_sole_live)
+    # A wrap prepared under the consolidate gate names the session that prepared it. A save
+    # that omits session_id would skip every baton check above (a token identifies the wrap,
+    # not the actor), so it is refused here rather than trusted. Read before the batch:
+    # wrap_completed clears the key.
+    gated_by = store.wrap_gated_session() if session_id is None else None
+    if gated_by is not None:
+        raise ValueError(
+            f"This wrap was prepared under the consolidate gate by session {gated_by!r}, so "
+            f"the save must pass session_id: without it the baton is never re-checked. "
+            f"Nothing was written."
+        )
 
     if wrap_token is not None:
         # Caller opted into explicit token verification. A mismatch

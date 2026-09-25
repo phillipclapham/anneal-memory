@@ -55,6 +55,7 @@ from .schema import (
 from .crystal import CrystalError, CrystalStore
 from .store import (
     AnnealMemoryError,
+    SaveAuthorityError,
     StoreError,
     WrapInProgressError,
     WrapOwnershipError,
@@ -1833,7 +1834,7 @@ def _check_save_authority(
         )
     requires_baton = store.consolidate_requires_baton()
     if requires_baton and (session_id is None or wrap_token is None):
-        raise ValueError(
+        raise SaveAuthorityError(
             "This store is baton-protected (Store.consolidate_requires_baton): a save must "
             "pass the session_id of the baton holder and the wrap_token its prepare_wrap "
             "returned. Nothing was written."
@@ -1845,7 +1846,7 @@ def _check_save_authority(
             store.continuity_path, session_id, allow_sole_live=True
         )
         if not auth["authorized"]:
-            raise ValueError(
+            raise SaveAuthorityError(
                 f"Session {session_id!r} is no longer authorized to commit this wrap "
                 f"({auth['reason']}; baton holder = {auth['baton_holder'] or 'none'}, "
                 f"{len(auth['live_session_ids'])} live session(s)). Nothing was written."
@@ -1854,7 +1855,7 @@ def _check_save_authority(
     try:
         holder = sessions.baton_holder(store.continuity_path)
     except (OSError, json.JSONDecodeError):
-        raise ValueError(
+        raise SaveAuthorityError(
             f"Session {session_id!r} cannot be confirmed as the consolidate baton holder "
             f"(the baton file is unreadable), so it may not commit this wrap. Nothing was "
             f"written."
@@ -1870,7 +1871,7 @@ def _check_save_authority(
         )
     else:
         cause = f"the baton is held by {holder!r}"
-    raise ValueError(
+    raise SaveAuthorityError(
         f"Session {session_id!r} does not hold the consolidate baton: {cause}, so it may not "
         f"commit this wrap. Nothing was written."
     )
@@ -2236,14 +2237,14 @@ def validated_save_continuity(
     gated_by = store.wrap_gated_session()
     if gated_by is not None and session_id != gated_by:
         if session_id is None:
-            raise ValueError(
+            raise SaveAuthorityError(
                 f"This wrap was prepared under the consolidate gate by session {gated_by!r}, "
                 f"so the save must come from that session, naming its session_id: without one the "
                 f"baton is never re-checked. Finish it from the library with that session_id, or "
                 f"abandon it with wrap-cancel (CLI) / wrap_cancel (MCP), which discards the "
                 f"compression. Nothing was written."
             )
-        raise ValueError(
+        raise SaveAuthorityError(
             f"This wrap was prepared by session {gated_by!r}, and only that session may "
             f"commit it; {session_id!r} cannot, even as the current baton holder. Abandon it "
             f"(wrap-cancel / wrap_cancel, which discards the compression) and prepare_wrap "

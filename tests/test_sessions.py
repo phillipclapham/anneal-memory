@@ -1277,3 +1277,62 @@ def test_cli_wrap_status_shows_the_preparing_session(tmp_path):
     )
     assert run.returncode == 0, run.stderr
     assert json.loads(run.stdout)["wrap_gated_session"] == "A"
+
+
+# -- SaveAuthorityError: one type for every save-authority refusal --
+
+
+def test_save_authority_error_is_public_and_a_value_error():
+    import anneal_memory
+
+    assert anneal_memory.SaveAuthorityError.__mro__[1] is ValueError
+    assert "SaveAuthorityError" in anneal_memory.__all__
+
+
+def _refused(store, **kw):
+    with pytest.raises(anneal_memory.SaveAuthorityError) as exc:
+        validated_save_continuity(store, _WRAP_TEXT, **kw)
+    assert store.status().wrap_in_progress  # nothing written, wrap left open
+    return str(exc.value)
+
+
+import anneal_memory  # noqa: E402  (used by the tests below)
+
+
+def test_every_save_authority_refusal_raises_the_one_type(store):
+    # 1. baton-protected, no session_id/token
+    _, prep = _ready_wrap_for(store, "A")
+    store.set_consolidate_requires_baton(True)
+    assert "baton-protected" in _refused(store)
+    store.set_consolidate_requires_baton(False)
+    # 2. sessionless save of a gated wrap
+    assert "must come from that session" in _refused(store, wrap_token=prep["wrap_token"])
+    # 3. strict-match mismatch (B is the current holder)
+    sessions.claim_baton(store.continuity_path, "B", take=True)
+    assert "only that session may commit it" in _refused(
+        store, wrap_token=prep["wrap_token"], session_id="B")
+    # 4. baton not held (A's own id, baton taken)
+    assert "does not hold the consolidate baton" in _refused(
+        store, wrap_token=prep["wrap_token"], session_id="A")
+    # 5. unreadable baton
+    bp = sessions._baton_path(store.continuity_path)
+    bp.write_text("[", encoding="utf-8")
+    assert "cannot be confirmed" in _refused(
+        store, wrap_token=prep["wrap_token"], session_id="A")
+
+
+def test_sole_live_no_longer_authorized_raises_the_one_type(store):
+    store.record("obs", EpisodeType.OBSERVATION)
+    sessions.register_session(store.continuity_path, "me")
+    prep = prepare_wrap(store, session_id="me", allow_sole_live=True)
+    sessions.register_session(store.continuity_path, "peer")
+    assert "no longer authorized" in _refused(
+        store, wrap_token=prep["wrap_token"], session_id="me", allow_sole_live=True)
+
+
+def test_wrap_cancelled_stays_ungated_for_a_gated_wrap(store):
+    # flow's `cancel` (and CLI wrap-cancel / MCP wrap_cancel) is the operator override: it
+    # must keep working on a wrap another session prepared under the gate.
+    _ready_wrap_for(store, "A")
+    receipt = store.wrap_cancelled()
+    assert receipt.token and not store.status().wrap_in_progress

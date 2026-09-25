@@ -5,6 +5,7 @@ __version__ = "0.9.15"
 from .store import (
     AnnealMemoryError,
     ContinuityLockUnavailable,
+    SaveAuthorityError,
     Store,
     StoreDatabaseError,
     StoreError,
@@ -117,6 +118,7 @@ __all__ = [
     "AnnealMemoryError",
     "ContinuityLockUnavailable",
     "Store",
+    "SaveAuthorityError",
     "StoreDatabaseError",
     "StoreError",
     "StoreOperation",

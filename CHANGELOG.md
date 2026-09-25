@@ -4,7 +4,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [0.9.15] — 2026-09-25
 
-### Fixed — the consolidate gate had three holes (found by review of 0.9.14)
+### Fixed — the consolidate gate had holes (found by review of 0.9.14)
 
 - **An unauthorized session could cancel the holder's in-flight wrap.** `prepare_wrap` ran its
   empty-window path, whose `wrap_cancelled()` clears the open wrap, before it consulted the gate. An
@@ -13,17 +13,33 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   caller leaves the store untouched, so a non-holder that used to get `empty` plus a stale-flag clear
   now gets `downgraded`. A caller that names no `session_id` on a store without the policy is likewise
   refused the empty-path cancel of a wrap that was prepared under the gate. The holder's own recovery
-  of an emptied wrap is unchanged.
-- **A save that omitted `session_id` skipped the baton re-check on a wrap that was prepared under the
-  gate.** The token identifies a wrap, not who may commit it. The wrap now records the session that
-  prepared it (new `Store.wrap_gated_session()`; `Store.wrap_started(gated_session_id=)`), and
-  `validated_save_continuity` refuses a save without `session_id` from such a wrap. A wrap prepared
-  with no `session_id` (the CLI, MCP, and any caller not opting in) saves as before, and a wrap
-  already in flight across the upgrade reads as ungated.
+  of an emptied wrap is unchanged. The cancel is also now a compare-and-swap on the wrap it observed
+  (`wrap_cancelled(expect_token=)`), so a wrap another session starts while the call is deciding is
+  left alone (`downgraded-wrap-replaced`, retry), and an idle store is no longer written to at all.
+- **A wrap prepared under the gate is committed only by the session that prepared it.** The token
+  identifies a wrap, not who may commit it, so a save that omitted `session_id` skipped the baton
+  re-check entirely. The wrap now records its preparer (new `Store.wrap_gated_session()`;
+  `Store.wrap_started(gated_session_id=)`), and `validated_save_continuity` refuses a save whose
+  `session_id` is not exactly that session. **This is a strict match:** a new baton holder cannot
+  commit the previous holder's compression either; it abandons the wrap (`wrap-cancel` / `wrap_cancel`)
+  and prepares its own. A wrap prepared with no `session_id` (the CLI, MCP, and any caller not opting
+  in) saves as before, and a wrap already in flight across the upgrade reads as ungated.
 - **The gate was checked before the package build but not after it.** `prepare_wrap` now re-checks
-  just before `wrap_started`, so a baton taken during the build no longer starts a wrap. A take in the
-  milliseconds between that re-check and `wrap_started` is not seen (the baton is a sidecar file
-  outside the store's transaction); the save-time re-check still covers it.
+  just before `wrap_started`, so a baton taken during the build no longer starts a wrap.
+- **The wrap-cancel audit event now records the gated session** it abandoned. `sever_pattern_concept`
+  now audits a compost of a name with no edges (it still creates a generation boundary, which is a
+  durable change). `set_consolidate_requires_baton` now takes the store's write lock before reading
+  the previous value, so two concurrent changes cannot audit a real change as a no-op.
+
+**Residual, bounded and stated exactly.** The baton is a sidecar file outside the store's SQLite
+transaction, so two windows of milliseconds remain: a baton take that lands between `prepare_wrap`'s
+final authorization check and `wrap_started`, and one that lands between the save's final in-transaction
+check and its commit. Neither is seen. The consequence is bounded: the first leaves a wrap in progress
+that the new holder must `wrap-cancel`; the second commits a wrap the previous holder was revoked from
+in that instant, and the take applies to the next wrap. Closing them means holding the baton lock
+across the commit, which was tried in 0.9.13 and withdrawn (a failed unlock after the commit discarded
+committed files, and an audit callback that touches the baton would deadlock), or moving the baton into
+the store.
 
 ## [0.9.14] — 2026-09-25
 

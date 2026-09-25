@@ -57,6 +57,7 @@ from .store import (
     AnnealMemoryError,
     StoreError,
     WrapInProgressError,
+    WrapOwnershipError,
     _fsync_dir,
     _safe_unlink,
 )
@@ -1251,6 +1252,22 @@ def _crystallization_block(
     return "\n".join(parts).rstrip()
 
 
+def _downgraded_empty(message: str) -> PrepareWrapResult:
+    """A ``downgraded`` result for the empty-window path (no episodes, store untouched)."""
+    return PrepareWrapResult(
+        status="downgraded",
+        message=message,
+        episode_count=0,
+        package=None,
+        assoc_context=None,
+        wrap_token=None,
+        uncovered_proven_to_check=[],
+        schema_warning=None,
+        crystallization_candidates=[],
+        rewarm_candidates=[],
+    )
+
+
 def _consolidate_gate(
     store: Store,
     session_id: str | None,
@@ -1507,29 +1524,41 @@ def prepare_wrap(
         return downgraded
 
     if not episodes:
+        # Decide from ONE observed wrap and cancel only that wrap. The snapshot is read
+        # first and the cancel is a compare-and-swap on its token (inside the store's
+        # write lock), so a session that starts a wrap between this read and the cancel
+        # is never the wrap that gets destroyed. Idle stores are not cancelled at all (there
+        # is nothing to clear, and an unconditional clear is exactly what could land on a
+        # peer's fresh wrap). A store whose lifecycle metadata is partial cannot yield a
+        # snapshot; that corrupt state has no valid wrap to protect, so it is cleared
+        # unconditionally, which is the recovery this path exists for.
+        try:
+            observed = store.load_wrap_snapshot()
+            partial = False
+        except StoreError:
+            observed, partial = None, True
         gated_by = store.wrap_gated_session() if session_id is None else None
         if gated_by is not None:
             # An ungated caller is authorized by omission, but a wrap prepared under the
             # gate is not its to cancel: the save side refuses a session-less commit of it
             # for the same reason.
-            return PrepareWrapResult(
-                status="downgraded",
-                message=(
-                    f"Consolidate downgraded to capture-only (downgraded-gated-wrap-open): "
-                    f"a wrap prepared under the consolidate gate by session {gated_by!r} is "
-                    f"in progress, and a call that names no session_id cannot cancel it. "
-                    f"Capture (afferent) is unaffected."
-                ),
-                episode_count=0,
-                package=None,
-                assoc_context=None,
-                wrap_token=None,
-                uncovered_proven_to_check=[],
-                schema_warning=None,
-                crystallization_candidates=[],
-                rewarm_candidates=[],
+            return _downgraded_empty(
+                f"Consolidate downgraded to capture-only (downgraded-gated-wrap-open): "
+                f"a wrap prepared under the consolidate gate by session {gated_by!r} is "
+                f"in progress, and a call that names no session_id cannot cancel it. "
+                f"Capture (afferent) is unaffected."
             )
-        store.wrap_cancelled()
+        try:
+            if observed is not None:
+                store.wrap_cancelled(expect_token=observed["token"])
+            elif partial:
+                store.wrap_cancelled()
+        except WrapOwnershipError:
+            return _downgraded_empty(
+                "Consolidate downgraded to capture-only (downgraded-wrap-replaced): another "
+                "session replaced the wrap this call observed while it was deciding, so it "
+                "left it alone. Retry. Capture (afferent) is unaffected."
+            )
         return PrepareWrapResult(
             status="empty",
             message="No episodes since last wrap. Nothing to compress.",
@@ -2045,7 +2074,8 @@ def validated_save_continuity(
             session holds a baton; otherwise ``ValueError`` with nothing written. Required, with
             ``wrap_token``, on a store with the require-baton policy; ``None``
             elsewhere skips the check, EXCEPT that a wrap prepared with a
-            ``session_id`` refuses a save that omits it. Library-only; no CLI or
+            ``session_id`` is committed only by that same ``session_id`` (a save that
+            omits it, or names another session, is refused). Library-only; no CLI or
             MCP surface.
         allow_sole_live: Only meaningful with ``session_id``, and ignored on a
             store with the require-baton policy, as in ``prepare_wrap``. Pass
@@ -2184,18 +2214,27 @@ def validated_save_continuity(
     # An early pass, so a refused save fails before the expensive validation. It is repeated
     # authoritatively inside the batch, after wrap_completed (see there).
     _check_save_authority(store, session_id, wrap_token, allow_sole_live)
-    # A wrap prepared under the consolidate gate names the session that prepared it. A save
-    # that omits session_id would skip every baton check above (a token identifies the wrap,
-    # not the actor), so it is refused here rather than trusted. Read before the batch:
+    # A wrap prepared under the consolidate gate names the session that prepared it, and only
+    # that session may commit it (strict match). A save that omits session_id would skip every
+    # baton check above (a token identifies the wrap, not the actor), and a different session,
+    # even the current baton holder, is committing a compression it did not make and that the
+    # baton's previous holder was revoked from: it prepares its own. Read before the batch:
     # wrap_completed clears the key.
-    gated_by = store.wrap_gated_session() if session_id is None else None
-    if gated_by is not None:
+    gated_by = store.wrap_gated_session()
+    if gated_by is not None and session_id != gated_by:
+        if session_id is None:
+            raise ValueError(
+                f"This wrap was prepared under the consolidate gate by session {gated_by!r}, "
+                f"so the save must pass session_id={gated_by!r}: without it the baton is "
+                f"never re-checked. Finish it from the library with that session_id, or "
+                f"abandon it with wrap-cancel (CLI) / wrap_cancel (MCP), which discards the "
+                f"compression. Nothing was written."
+            )
         raise ValueError(
-            f"This wrap was prepared under the consolidate gate by session {gated_by!r}, so "
-            f"the save must pass session_id: without it the baton is never re-checked. "
-            f"Finish it from the library with that session_id, or abandon it with "
-            f"wrap-cancel (CLI) / wrap_cancel (MCP), which discards the compression. "
-            f"Nothing was written."
+            f"This wrap was prepared by session {gated_by!r}, and only that session may "
+            f"commit it; {session_id!r} cannot, even as the current baton holder. Abandon it "
+            f"(wrap-cancel / wrap_cancel, which discards the compression) and prepare_wrap "
+            f"again from {session_id!r}. Nothing was written."
         )
 
     if wrap_token is not None:

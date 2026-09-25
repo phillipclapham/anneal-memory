@@ -2815,6 +2815,7 @@ class Store:
             cancelled_token = self._get_metadata("wrap_token")
             cancelled_ids_raw = self._get_metadata("wrap_episode_ids")
             cancelled_schema_raw = self._get_metadata("wrap_section_schema")
+            cancelled_gated_raw = self._get_metadata("wrap_gated_session")
 
             # ⚠ PARSE AND CLASSIFY BEFORE THE COMMIT, NOT AFTER. This ran
             # after the clear at first, and codex reproduced the consequence:
@@ -2847,6 +2848,7 @@ class Store:
                 or cancelled_token
                 or cancelled_ids_raw
                 or cancelled_schema_raw
+                or cancelled_gated_raw
             )
             complete = bool(
                 cancelled_started_at and cancelled_token and episode_ids is not None
@@ -2916,7 +2918,7 @@ class Store:
         # SHAPE (e.g. ``[1, 2]``) is partial too. It was "healthy" to the old
         # raw-string test purely because the string was non-empty, and a list
         # the receipt refuses to hand back is not a readable episode list.
-        # ⚠ FOUR lifecycle keys are cleared here, so all four count as "there was
+        # ⚠ Every lifecycle key cleared here counts as "there was
         # state". ``wrap_section_schema`` was omitted, so a store holding only a
         # stray frozen schema reported "no wrap was in progress" and emitted NO
         # audit event — state discarded with no record. It is deliberately NOT
@@ -2931,7 +2933,7 @@ class Store:
             #    ``partial_state: true`` marker so auditors can
             #    distinguish "operator cleaned up a broken store"
             #    from "operator abandoned a healthy wrap."
-            # 3. Clean store — none of the FOUR keys was set. No
+            # 3. Clean store — none of the lifecycle keys was set. No
             #    audit event (there was nothing to cancel).
             #    ⚠ Said "three" until 2026-09-04 while ``had_any`` above
             #    checked four: a comment disagreeing with correct code.
@@ -2962,6 +2964,10 @@ class Store:
                 # not the place for it. (glm L3, 2026-09-04, confirmed on disk.)
                 if cancelled_schema_raw:
                     payload["wrap_section_schema_cleared"] = True
+                # Who prepared the wrap under the consolidate gate, when it was gated:
+                # the chain of custody for whose compression was abandoned.
+                if cancelled_gated_raw:
+                    payload["wrap_gated_session"] = cancelled_gated_raw
                 # ⛔ POST-COMMIT: the metadata clear above is COMMITTED, and the
                 # receipt below is the only correct outcome. The swallow + warn
                 # policy this site introduced on 2026-09-03 now lives in
@@ -3076,6 +3082,10 @@ class Store:
         # write transaction, after its own DML, so this write lands before that read or waits
         # for the save to finish (continuity._check_save_authority).
         with self._db_boundary("set_consolidate_requires_baton"):
+            # BEGIN IMMEDIATE before the read: two connections changing the policy must
+            # serialize, or both read the same ``was`` and one audits a no-op for a real
+            # change. _db_boundary rolls back on failure, releasing the lock.
+            self._conn.execute("BEGIN IMMEDIATE")
             was = self._get_metadata(_CONSOLIDATE_REQUIRES_BATON_KEY) not in ("", "0")
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
@@ -4251,10 +4261,12 @@ class Store:
             severed = _sever_pattern_concept(
                 self._conn, name, day, commit=not self._defer_commit
             )
-        if severed:
-            self._audit_log_after_commit(
-                "pattern_concept_severed", {"name": name, "severed": severed},
-                method="sever_pattern_concept", committed="the severance")
+        # Emitted even at ``severed == 0``: a name with no edges still gets a new
+        # generation boundary, a durable change to the concept's lineage that a later
+        # reuse of the name observes, so it needs a record.
+        self._audit_log_after_commit(
+            "pattern_concept_severed", {"name": name, "severed": severed},
+            method="sever_pattern_concept", committed="the severance")
         return severed
 
     def pattern_graph_projection_meta(self) -> PatternGraphProjectionMeta:

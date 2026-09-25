@@ -167,7 +167,10 @@ class StoreStatus:
     prune_failures: int = 0
     prune_last_failure: str | None = None
     # True while the latest post-commit prune failure has not been followed by
-    # a prune() that completed; False once retention has caught up.
+    # a prune() that completed AND covered the configured retention_days; a
+    # wider override (prune(older_than_days=365) against retention_days=7)
+    # completes without clearing it. False once retention has caught up.
+    # Added in 0.9.12.
     prune_behind: bool = False
     # The require-baton consolidate policy (flow spore-1169), read from the
     # store's metadata table, so every transport can show why a wrap
@@ -541,7 +544,7 @@ class PrepareWrapResult(TypedDict):
     the human-readable reason is in ``message``, the store left
     untouched). The ``Literal`` discriminant
     gives type checkers a switchable tag and lets IDE autocomplete
-    offer the two valid status values; callers typoing
+    offer the valid status values; callers typoing
     ``result["statuz"]`` or ``result["status"] == "reday"`` get a
     mypy/pyright error instead of silent runtime coercion.
 

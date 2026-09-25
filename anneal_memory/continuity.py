@@ -1636,8 +1636,8 @@ def format_wrap_package_text(result: PrepareWrapResult) -> str:
         The formatted text. For an empty result, returns the status
         message unchanged.
     """
-    # PrepareWrapResult.status is Literal["empty", "ready"]; on
-    # "empty" the package is None and we just return the message.
+    # PrepareWrapResult.status is a Literal (see types.py); on
+    # any non-"ready" status the package is None and we just return the message.
     # Adding a new status value is a deliberate API expansion — the
     # Literal in types.py is the single source of truth and any new
     # branch must land there first.
@@ -1721,28 +1721,59 @@ def _warn_after_commit(message: str) -> None:
 
 
 def _check_save_authority(
-    store: Store, session_id: str | None, wrap_token: str | None
+    store: Store,
+    session_id: str | None,
+    wrap_token: str | None,
+    allow_sole_live: bool = False,
 ) -> None:
     """Refuse a save the consolidate gate does not authorize (flow spore-1169). On a
     baton-protected store the caller must name itself and pass the prepare token; any caller
-    that names itself must still hold the baton. Raises ``ValueError``; writes nothing."""
-    if store.consolidate_requires_baton() and (session_id is None or wrap_token is None):
+    that names itself must still be authorized. By default that means holding the baton;
+    ``allow_sole_live=True`` (ignored on a baton-protected store, exactly as ``prepare_wrap``
+    ignores it) re-runs the same ``consolidate_authorized`` decision ``prepare_wrap`` made, so
+    a sole live session that prepared without a baton can also save. Raises ``ValueError``;
+    writes nothing."""
+    requires_baton = store.consolidate_requires_baton()
+    if requires_baton and (session_id is None or wrap_token is None):
         raise ValueError(
             "This store is baton-protected (Store.consolidate_requires_baton): a save must "
             "pass the session_id of the baton holder and the wrap_token its prepare_wrap "
             "returned. Nothing was written."
         )
-    if session_id is not None:
-        try:
-            held = sessions.holds_baton(store.continuity_path, session_id)
-        except (OSError, json.JSONDecodeError):
-            held = False  # an unreadable baton confirms no one: fail closed
-        if not held:
+    if session_id is None:
+        return
+    if allow_sole_live and not requires_baton:
+        auth = sessions.consolidate_authorized(
+            store.continuity_path, session_id, allow_sole_live=True
+        )
+        if not auth["authorized"]:
             raise ValueError(
-                f"Session {session_id!r} does not hold the consolidate baton (it may have "
-                f"been taken, or the baton file is unreadable), so it may not commit this "
-                f"wrap. Nothing was written."
+                f"Session {session_id!r} is no longer authorized to commit this wrap "
+                f"({auth['reason']}; baton holder = {auth['baton_holder'] or 'none'}, "
+                f"{len(auth['live_session_ids'])} live session(s)). Nothing was written."
             )
+        return
+    try:
+        holder = sessions.baton_holder(store.continuity_path)
+    except (OSError, json.JSONDecodeError):
+        raise ValueError(
+            f"Session {session_id!r} cannot be confirmed as the consolidate baton holder "
+            f"(the baton file is unreadable), so it may not commit this wrap. Nothing was "
+            f"written."
+        ) from None
+    if holder == session_id:
+        return
+    if holder is None:
+        cause = (
+            "no baton is claimed (it was never claimed, or was released); a session that "
+            "prepared as the sole live session must pass allow_sole_live=True here too"
+        )
+    else:
+        cause = f"the baton is held by {holder!r}"
+    raise ValueError(
+        f"Session {session_id!r} does not hold the consolidate baton: {cause}, so it may not "
+        f"commit this wrap. Nothing was written."
+    )
 
 
 def _check_linkgate(
@@ -1821,6 +1852,7 @@ def validated_save_continuity(
     crystal_store: CrystalStore | None = None,
     compost: list[str] | None = None,
     session_id: str | None = None,
+    allow_sole_live: bool = False,
 ) -> SaveContinuityResult:
     """Save continuity with the full validation pipeline.
 
@@ -1949,11 +1981,17 @@ def validated_save_continuity(
             to the result. Library-only; no CLI or MCP surface.
         session_id: The consolidate-efferent session making this save
             (flow spore-1169). When passed, the save proceeds only if that
-            session STILL holds the consolidate baton (re-checked here, so a
-            take mid-wrap revokes the old holder's commit); otherwise
-            ``ValueError`` with nothing written. Required, with
+            session is STILL authorized (re-checked here, so a take mid-wrap
+            revokes the old holder's commit): it holds the consolidate baton
+            or, under ``allow_sole_live``, is the sole live session;
+            otherwise ``ValueError`` with nothing written. Required, with
             ``wrap_token``, on a store with the require-baton policy; ``None``
             elsewhere skips the check. Library-only; no CLI or MCP surface.
+        allow_sole_live: Only meaningful with ``session_id``, and ignored on a
+            store with the require-baton policy, as in ``prepare_wrap``. Pass
+            the same value the wrap's ``prepare_wrap`` got: a sole live
+            session that prepared with ``allow_sole_live=True`` and holds no
+            baton is refused at the save without it. Default ``False``.
 
     Returns:
         :class:`SaveContinuityResult` — a :class:`TypedDict` with the
@@ -2085,7 +2123,7 @@ def validated_save_continuity(
         )
     # An early pass, so a refused save fails before the expensive validation. It is repeated
     # authoritatively inside the batch, after wrap_completed (see there).
-    _check_save_authority(store, session_id, wrap_token)
+    _check_save_authority(store, session_id, wrap_token, allow_sole_live)
 
     if wrap_token is not None:
         # Caller opted into explicit token verification. A mismatch
@@ -2527,7 +2565,7 @@ def validated_save_continuity(
             # baton flock across the commit instead was tried and withdrawn in L3: a failed
             # unlock after the commit discarded the committed tmp files, and an on_audit_event
             # callback that touches the baton would block on the lock this process holds.
-            _check_save_authority(store, session_id, wrap_token)
+            _check_save_authority(store, session_id, wrap_token, allow_sole_live)
             # Batch context manager commits here on successful exit.
 
         # Batch exited without raising → DB is committed. From this

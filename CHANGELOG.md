@@ -2,6 +2,29 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed — a sole-live wrap could be prepared but not saved
+
+`prepare_wrap(session_id=X, allow_sole_live=True)` authorizes a sole live session with no baton (the
+0.9.13 migration path), but `validated_save_continuity(session_id=X)` required the baton
+unconditionally, so the save was refused, the wrap was left in progress, and the refusal blamed a
+baton that had never been held. `validated_save_continuity` now takes the same `allow_sole_live`
+keyword (default `False`; ignored on a require-baton policy store, as in `prepare_wrap`) and re-runs
+the same authorization decision at save time, so a second session going live between prepare and save
+still refuses the save. Pass the value you gave `prepare_wrap`. The refusal now says whether no baton
+is claimed, another session holds it, or the baton file is unreadable. Library-only, as `session_id`
+already is. Found by review.
+
+### Documented — `StoreStatus.prune_behind` (added in 0.9.12, missing from its notes)
+
+The public `StoreStatus.prune_behind` field shipped in 0.9.12 without a changelog line. It is `True`
+after a post-commit prune failure and clears on the next `prune()` that completes and covers the
+configured `retention_days`; a wider `older_than_days` override completes without clearing it. The MCP
+`status` tool says "retention may be behind" only while it is set. Two comments that said any
+completed `prune()` clears it are corrected. Also corrected: two comments that gave a fixed count of
+`PrepareWrapResult.status` values (the type lists three, including `"downgraded"`).
+
 ## [0.9.13] — 2026-09-24
 
 ### Changed (BREAKING for callers that pass `session_id`) — every consolidate needs the baton

@@ -984,3 +984,65 @@ def test_close_session_survives_a_broken_log_handler(cp, monkeypatch):
             sessions.close_session(cp, "me")
     finally:
         logger.removeHandler(handler)
+
+
+# -- sole-live prepare -> save (Diogenes 2026-09-25) --
+
+
+def test_sole_live_prepare_then_save_succeeds(store):
+    store.record("obs", EpisodeType.OBSERVATION)
+    sessions.register_session(store.continuity_path, "me")  # no baton claimed
+    prep = prepare_wrap(store, session_id="me", allow_sole_live=True)
+    assert prep["status"] == "ready"
+    validated_save_continuity(
+        store, _WRAP_TEXT, wrap_token=prep["wrap_token"], session_id="me", allow_sole_live=True
+    )
+    assert not store.status().wrap_in_progress
+    assert len(store.get_wrap_history()) == 1
+
+
+def test_sole_live_save_without_the_flag_names_the_never_held_cause(store):
+    store.record("obs", EpisodeType.OBSERVATION)
+    sessions.register_session(store.continuity_path, "me")
+    prep = prepare_wrap(store, session_id="me", allow_sole_live=True)
+    with pytest.raises(ValueError, match="no baton is claimed") as exc:
+        validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"], session_id="me")
+    assert "unreadable" not in str(exc.value) and "taken" not in str(exc.value)
+    assert store.status().wrap_in_progress and store.get_wrap_history() == []
+
+
+def test_sole_live_save_refused_when_a_second_session_goes_live(store):
+    store.record("obs", EpisodeType.OBSERVATION)
+    sessions.register_session(store.continuity_path, "me")
+    prep = prepare_wrap(store, session_id="me", allow_sole_live=True)
+    sessions.register_session(store.continuity_path, "peer")
+    with pytest.raises(ValueError, match="no longer authorized"):
+        validated_save_continuity(
+            store, _WRAP_TEXT, wrap_token=prep["wrap_token"], session_id="me",
+            allow_sole_live=True,
+        )
+    assert store.status().wrap_in_progress and store.get_wrap_history() == []
+
+
+def test_save_names_the_current_holder_when_the_baton_was_taken(store):
+    store.record("obs", EpisodeType.OBSERVATION)
+    sessions.claim_baton(store.continuity_path, "me")
+    prep = prepare_wrap(store, session_id="me")
+    sessions.claim_baton(store.continuity_path, "other", take=True)
+    with pytest.raises(ValueError, match="held by 'other'"):
+        validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"], session_id="me")
+
+
+def test_policy_store_ignores_allow_sole_live_at_save(store):
+    store.record("obs", EpisodeType.OBSERVATION)
+    sessions.claim_baton(store.continuity_path, "me")
+    prep = prepare_wrap(store, session_id="me")
+    store.set_consolidate_requires_baton(True)
+    sessions.release_baton(store.continuity_path, "me")
+    sessions.register_session(store.continuity_path, "me")  # sole live, no baton
+    with pytest.raises(ValueError, match="does not hold the consolidate baton"):
+        validated_save_continuity(
+            store, _WRAP_TEXT, wrap_token=prep["wrap_token"], session_id="me",
+            allow_sole_live=True,
+        )
+    assert store.status().wrap_in_progress

@@ -1523,7 +1523,8 @@ class Store:
         self._prune_failures: int = 0
         self._prune_last_failure: str | None = None
         # True from a recorded post-commit prune failure until the next
-        # prune() that completes; lets status() tell "still behind" from
+        # prune() that completes AND covers the configured retention_days (a
+        # wider older_than_days override does not clear it); lets status() tell "still behind" from
         # "failed once, retention has since caught up" (Diogenes 2026-09-18).
         self._prune_behind: bool = False
         self._audit: AuditTrail | None = None

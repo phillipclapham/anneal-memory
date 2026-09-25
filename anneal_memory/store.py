@@ -2452,7 +2452,7 @@ class Store:
         exactly the frozen list, and validate/graduate against the same
         schema ``prepare_wrap`` built the package with.
 
-        The four metadata writes happen inside a single SQL transaction
+        The wrap-lifecycle metadata writes happen inside a single SQL transaction
         (one ``INSERT OR REPLACE`` per key, one commit at the end) so a
         crash mid-write cannot leave the store with a timestamp but no
         token, a token but no episode list, or episodes but no schema.
@@ -2542,6 +2542,13 @@ class Store:
         # consistent on the same in-memory snapshot — even if a
         # future refactor accidentally accepts a generator at the
         # signature, both code paths see the same materialized list.
+        if gated_session_id is not None and (
+            not isinstance(gated_session_id, str) or not gated_session_id
+        ):
+            raise ValueError(
+                "wrap_started: gated_session_id must be None or a non-empty str, "
+                f"got {gated_session_id!r}."
+            )
         ids_list = list(episode_ids)
         ids_json = json.dumps(ids_list)
         # AM-SCHEMASNAPSHOT: freeze the section schema for the wrap's duration.
@@ -2558,7 +2565,7 @@ class Store:
             else self._load_section_schema(strict=True)
         )
         frozen_schema_json = json.dumps(frozen_schema)
-        # Batch the four metadata writes into a single commit so a
+        # Batch the wrap-lifecycle metadata writes into a single commit so a
         # crash mid-write cannot leave the store with a partial
         # snapshot (e.g. timestamp set but token blank, which would
         # look like legacy skipped_prepare state and silently bypass
@@ -2672,7 +2679,7 @@ class Store:
             # from "audit entry from a legacy version that didn't
             # log these fields." Always-on logging restores that
             # discrimination.
-            # ⛔ POST-COMMIT: the four metadata writes above are COMMITTED.
+            # ⛔ POST-COMMIT: the wrap-lifecycle metadata writes above are COMMITTED.
             # Routed through the after-commit helper, which owns the swallow +
             # warn policy. Before 2026-09-04 this was a bare ``self._audit.log``
             # OUTSIDE ``_db_boundary``: a sink failure escaped as a raw OSError
@@ -2692,6 +2699,9 @@ class Store:
                     # chain-of-custody for which schema this wrap froze. (codex
                     # L3 LOW-2.)
                     "wrap_section_schema": frozen_schema,
+                    # Who prepared the wrap under the consolidate gate (None when
+                    # ungated): the chain of custody for who may commit it.
+                    "wrap_gated_session": gated_session_id,
                 },
                 method="wrap_started",
                 committed="the wrap start",
@@ -2710,8 +2720,8 @@ class Store:
         failure with fallback). Prevents stale-wrap detection from false-firing.
 
         Clears the wrap-in-progress metadata keys (``wrap_started_at``,
-        ``wrap_token``, ``wrap_episode_ids``, and the frozen
-        ``wrap_section_schema``) in a single SQL transaction, matching
+        ``wrap_token``, ``wrap_episode_ids``, the frozen
+        ``wrap_section_schema`` and ``wrap_gated_session``) in a single SQL transaction, matching
         the batched-write invariant :meth:`wrap_started` establishes.
 
         Args:

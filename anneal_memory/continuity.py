@@ -1469,7 +1469,9 @@ def prepare_wrap(
     Note:
         A caller the consolidate gate does not authorize is downgraded BEFORE
         anything else, including the empty path below, so it can never cancel
-        another session's in-flight wrap. On ``status == "empty"`` an
+        another session's in-flight wrap; a caller that names no ``session_id``
+        (authorized by omission) is likewise refused the empty-path cancel of a
+        wrap that was prepared under the gate. On ``status == "empty"`` an
         authorized (or ungated) caller's ``wrap_cancelled()`` clears any stale
         in-progress flag. On
         ``status == "ready"`` it calls ``wrap_started(token=...,
@@ -1505,6 +1507,28 @@ def prepare_wrap(
         return downgraded
 
     if not episodes:
+        gated_by = store.wrap_gated_session() if session_id is None else None
+        if gated_by is not None:
+            # An ungated caller is authorized by omission, but a wrap prepared under the
+            # gate is not its to cancel: the save side refuses a session-less commit of it
+            # for the same reason.
+            return PrepareWrapResult(
+                status="downgraded",
+                message=(
+                    f"Consolidate downgraded to capture-only (downgraded-gated-wrap-open): "
+                    f"a wrap prepared under the consolidate gate by session {gated_by!r} is "
+                    f"in progress, and a call that names no session_id cannot cancel it. "
+                    f"Capture (afferent) is unaffected."
+                ),
+                episode_count=0,
+                package=None,
+                assoc_context=None,
+                wrap_token=None,
+                uncovered_proven_to_check=[],
+                schema_warning=None,
+                crystallization_candidates=[],
+                rewarm_candidates=[],
+            )
         store.wrap_cancelled()
         return PrepareWrapResult(
             status="empty",
@@ -2169,6 +2193,8 @@ def validated_save_continuity(
         raise ValueError(
             f"This wrap was prepared under the consolidate gate by session {gated_by!r}, so "
             f"the save must pass session_id: without it the baton is never re-checked. "
+            f"Finish it from the library with that session_id, or abandon it with "
+            f"wrap-cancel (CLI) / wrap_cancel (MCP), which discards the compression. "
             f"Nothing was written."
         )
 

@@ -1145,3 +1145,20 @@ def test_a_baton_taken_during_the_package_build_does_not_start_a_wrap(store, mon
     result = prepare_wrap(store, session_id="A")
     assert result["status"] == "downgraded" and result["wrap_token"] is None
     assert not store.status().wrap_in_progress  # wrap_started never ran
+
+
+@pytest.mark.parametrize("bad", ["", 123])
+def test_wrap_started_validates_gated_session_id(store, bad):
+    with pytest.raises(ValueError, match="gated_session_id"):
+        store.wrap_started(token="t" * 32, episode_ids=[], gated_session_id=bad)
+    assert not store.status().wrap_in_progress
+
+
+def test_sessionless_caller_cannot_cancel_a_gated_wrap_via_the_empty_path(store):
+    ep, prep = _ready_wrap_for(store, "holder")
+    assert store.delete(ep.id)
+    result = prepare_wrap(store)  # default store, no session_id: ungated by omission
+    assert result["status"] == "downgraded"
+    assert "downgraded-gated-wrap-open" in result["message"]
+    assert store.status().wrap_in_progress
+    assert store.load_wrap_snapshot()["token"] == prep["wrap_token"]

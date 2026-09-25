@@ -11,9 +11,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 unconditionally, so the save was refused, the wrap was left in progress, and the refusal blamed a
 baton that had never been held. `validated_save_continuity` now takes the same `allow_sole_live`
 keyword (default `False`; ignored on a require-baton policy store, as in `prepare_wrap`) and re-runs
-the same authorization decision at save time, so a second session going live between prepare and save
-still refuses the save. Pass the value you gave `prepare_wrap`. The refusal now says whether no baton
-is claimed, another session holds it, or the baton file is unreadable. Library-only, as `session_id`
+the same authorization decision at save time (the session must be the sole live one with no other baton claimed), so a second session going live between prepare and save
+still refuses the save. Pass the value you gave `prepare_wrap`. The refusal now names its actual cause
+(no baton claimed, another session holds it, an unreadable baton file, or a baton-protected store). Library-only, as `session_id`
 already is. Found by review.
 
 ### Documented — `StoreStatus.prune_behind` (added in 0.9.12, missing from its notes)

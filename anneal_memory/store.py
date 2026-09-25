@@ -3018,10 +3018,12 @@ class Store:
     def wrap_gated_session(self) -> str | None:
         """The ``session_id`` that prepared the wrap in progress under the consolidate
         gate, or ``None`` when no wrap is in progress or it was prepared ungated (no
-        ``session_id``). ``validated_save_continuity`` uses it to refuse a save that
-        omits ``session_id`` from a wrap that was gated, which would otherwise skip
-        the baton re-check entirely."""
+        ``session_id``). ``validated_save_continuity`` commits a gated wrap only for
+        exactly that session. A key left behind with no wrap in progress (an older
+        binary's cancel, hand editing) reads as ``None``."""
         with self._db_boundary("wrap_gated_session"):
+            if not self._get_metadata("wrap_started_at"):
+                return None
             return self._get_metadata("wrap_gated_session") or None
 
     def consolidate_requires_baton(self) -> bool:

@@ -841,10 +841,12 @@ class TestWrapCancelReceiptIsRaceFree:
         def spy():
             calls.append("load_wrap_snapshot")
             return real()
-        store.load_wrap_snapshot = spy  # type: ignore[method-assign]
 
         server._tool_record({"content": "One", "episode_type": "observation"})
         server._tool_prepare_wrap({})
+        # Installed AFTER prepare: prepare_wrap itself observes the snapshot (0.9.15) and
+        # this test is about the wrap_cancel handler only.
+        store.load_wrap_snapshot = spy  # type: ignore[method-assign]
         server._handle_tools_call({"name": "wrap_cancel", "arguments": {}})
         assert calls == [], (
             "wrap_cancel read the snapshot before clearing — that is the "

@@ -36,6 +36,22 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   durable change). `set_consolidate_requires_baton` now takes the store's write lock before reading
   the previous value, so two concurrent changes cannot audit a real change as a no-op.
 
+### Added — `SaveAuthorityError`, and the downgrade reason codes
+
+- **`anneal_memory.SaveAuthorityError`** (a `ValueError` subclass, exported at the top level and from
+  `anneal_memory.store`). Every save-authority refusal in `validated_save_continuity` now raises it:
+  baton not held (including no baton claimed, held by another session, unreadable baton file), a
+  baton-protected store saved without the holder's `session_id` and the prepare `wrap_token`, a
+  sole-live session no longer authorized under `allow_sole_live`, a session-less save of a gated wrap,
+  and a strict-match mismatch. Callers that catch `ValueError` are unchanged. Test with `isinstance`,
+  not the message text. A refusal writes nothing and leaves the wrap in progress.
+- `prepare_wrap` `downgraded` results carry their reason in the message as `(downgraded-...)`:
+  `downgraded-baton-required`, `downgraded-no-baton`, `downgraded-not-baton-holder`,
+  `downgraded-stale-baton-holder`, `downgraded-registry-error` (all unchanged), plus two new ones:
+  `downgraded-gated-wrap-open` and `downgraded-wrap-replaced` (transient: retry).
+- `wrap_cancelled()` (and the CLI `wrap-cancel`, MCP `wrap_cancel`) remains an ungated operator
+  override: it may cancel a wrap another session prepared under the gate.
+
 **Residual, bounded and stated exactly.** The baton is a sidecar file outside the store's SQLite
 transaction, so two windows of milliseconds remain: a baton take that lands between `prepare_wrap`'s
 final authorization check and `wrap_started`, and one that lands between the save's final in-transaction

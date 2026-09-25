@@ -808,6 +808,18 @@ def _reconstruct_wrap_ownership_error(
     )
 
 
+class SaveAuthorityError(ValueError):
+    """Raised by ``validated_save_continuity`` when the consolidate gate refuses a save: the
+    baton is not held, the store is baton-protected and the save did not name the holder and
+    the prepare token, the wrap was prepared by a different session (strict match), or a
+    sessionless save was attempted on a wrap prepared under the gate. Nothing is written and
+    the wrap stays in progress.
+
+    A ``ValueError`` subclass so callers that catch ``ValueError`` are unchanged; test with
+    ``isinstance`` rather than matching the message text.
+    """
+
+
 class WrapOwnershipError(AnnealMemoryError):
     """Raised when ``wrap_cancelled(expect_token=...)`` is called and the store's
     current wrap token is not the one the caller claims to own.

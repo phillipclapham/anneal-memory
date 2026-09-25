@@ -1109,7 +1109,7 @@ def test_the_holder_still_recovers_an_emptied_wrap_via_the_empty_path(store):
 def test_save_omitting_session_id_is_refused_when_prepare_was_gated(store):
     _, prep = _ready_wrap_for(store, "A")
     sessions.claim_baton(store.continuity_path, "B", take=True)  # A's baton is revoked
-    with pytest.raises(ValueError, match="must pass session_id"):
+    with pytest.raises(ValueError, match="must come from that session"):
         validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"])
     assert store.status().wrap_in_progress and store.get_wrap_history() == []
     assert store.wrap_gated_session() == "A"
@@ -1187,30 +1187,48 @@ def test_strict_match_a_new_holder_cannot_commit_the_previous_holders_wrap(store
     assert store.status().wrap_in_progress and store.get_wrap_history() == []
 
 
-def test_empty_path_leaves_a_wrap_replaced_mid_decision_alone(store, monkeypatch):
-    ep, prep = _ready_wrap_for(store, "holder")
-    assert store.delete(ep.id)
-    real = store.load_wrap_snapshot
-    replaced = {}
+def test_empty_prepare_on_an_idle_store_writes_nothing(store, monkeypatch):
+    def never(*a, **kw):
+        raise AssertionError("an idle store must not be cancelled")
 
-    def observe_then_a_peer_replaces_the_wrap():
-        snap = real()  # what the empty path observed
+    monkeypatch.setattr(store, "wrap_cancelled", never)
+    assert prepare_wrap(store)["status"] == "empty"
+    assert prepare_wrap(store, session_id="anyone")["status"] in ("empty", "downgraded")
+
+
+def test_empty_path_does_not_cancel_a_wrap_started_after_the_window_was_read(store, monkeypatch):
+    # L1: the peer's wrap starts AFTER the empty-window read; the snapshot was observed first,
+    # so the cancel is a CAS on the OLD observation and cannot destroy the peer's wrap.
+    from anneal_memory import continuity
+
+    ep, _ = _ready_wrap_for(store, "holder")
+    assert store.delete(ep.id)
+    real = store.episodes_since_wrap
+    peer = {}
+
+    def window_then_a_peer_starts_a_wrap():
+        out = real()
+        assert out == []
         store.wrap_cancelled()
         ep2 = store.record("fresh", EpisodeType.OBSERVATION)
-        replaced["token"] = "f" * 32
-        store.wrap_started(token=replaced["token"], episode_ids=[ep2.id])
-        return snap
+        peer["token"] = "e" * 32
+        store.wrap_started(token=peer["token"], episode_ids=[ep2.id])
+        return out
 
-    monkeypatch.setattr(store, "load_wrap_snapshot", observe_then_a_peer_replaces_the_wrap)
+    monkeypatch.setattr(store, "episodes_since_wrap", window_then_a_peer_starts_a_wrap)
     result = prepare_wrap(store, session_id="holder")
     monkeypatch.undo()
-    assert result["status"] == "downgraded" and "downgraded-wrap-replaced" in result["message"]
-    assert store.load_wrap_snapshot()["token"] == replaced["token"]  # the peer's wrap survived
+    assert result["status"] == "downgraded"
+    assert store.load_wrap_snapshot()["token"] == peer["token"]
 
 
-def test_empty_prepare_on_an_idle_store_writes_nothing(store):
-    assert prepare_wrap(store)["status"] == "empty"
-    assert not store.status().wrap_in_progress
+def test_a_stale_gated_key_with_no_wrap_is_inert(store):
+    store._conn.execute(
+        "INSERT OR REPLACE INTO metadata (key, value) VALUES ('wrap_gated_session', 'ghost')"
+    )
+    store._conn.commit()
+    assert store.wrap_gated_session() is None
+    assert prepare_wrap(store)["status"] == "empty"  # not a phantom gated-wrap downgrade
 
 
 def test_cancel_audit_records_the_gated_session(store):
@@ -1224,6 +1242,16 @@ def test_zero_edge_compost_is_audited(store):
     assert store.sever_pattern_concept("ghost") == 0
     ev = [e for e in _audit_events(store) if e["event"] == "pattern_concept_severed"]
     assert ev and ev[-1]["data"] == {"name": "ghost", "severed": 0}
+
+
+def test_policy_change_takes_the_write_lock_before_reading_the_previous_value(store):
+    stmts = []
+    store._conn.set_trace_callback(stmts.append)
+    store.set_consolidate_requires_baton(True)
+    store._conn.set_trace_callback(None)
+    begin = next(i for i, x in enumerate(stmts) if x.strip().upper().startswith("BEGIN IMMEDIATE"))
+    read = next(i for i, x in enumerate(stmts) if "SELECT" in x.upper() and "consolidate_requires_baton" in x)
+    assert begin < read
 
 
 def test_policy_change_audit_records_the_real_previous_value(store):

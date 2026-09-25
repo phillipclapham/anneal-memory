@@ -1493,8 +1493,8 @@ def prepare_wrap(
         another session's in-flight wrap; a caller that names no ``session_id``
         (authorized by omission) is likewise refused the empty-path cancel of a
         wrap that was prepared under the gate. On ``status == "empty"`` an
-        authorized (or ungated) caller's ``wrap_cancelled()`` clears any stale
-        in-progress flag. On
+        authorized (or ungated) caller cancels the wrap it observed (a
+        compare-and-swap on its token; an idle store is not written to). On
         ``status == "ready"`` it calls ``wrap_started(token=...,
         episode_ids=...)`` so the frozen snapshot is persisted in one
         transaction. Either way, the store's wrap lifecycle state is
@@ -1506,6 +1506,17 @@ def prepare_wrap(
         raise TypeError(
             f"prepare_wrap: allow_sole_live must be a bool, got {type(allow_sole_live).__name__}"
         )
+    # Observe the wrap in progress (if any) BEFORE reading the episode window. The empty-window
+    # path below cancels only the wrap observed here, by compare-and-swap on its token, so a
+    # wrap another session starts after this point has a different token (or, if it finished
+    # before the window read, is not the one being judged) and can never be the one destroyed.
+    # Reading the snapshot after the window would let that peer's wrap be the observed one.
+    try:
+        observed = store.load_wrap_snapshot()
+        observed_partial = False
+    except StoreError:
+        observed, observed_partial = None, True
+    observed_gated_by = store.wrap_gated_session()
     episodes = store.episodes_since_wrap()
 
     # AM-CONSOLIDATE-EFFERENT (spore-194): the efferent gate. Capture is afferent
@@ -1528,20 +1539,14 @@ def prepare_wrap(
         return downgraded
 
     if not episodes:
-        # Decide from ONE observed wrap and cancel only that wrap. The snapshot is read
-        # first and the cancel is a compare-and-swap on its token (inside the store's
-        # write lock), so a session that starts a wrap between this read and the cancel
-        # is never the wrap that gets destroyed. Idle stores are not cancelled at all (there
-        # is nothing to clear, and an unconditional clear is exactly what could land on a
-        # peer's fresh wrap). A store whose lifecycle metadata is partial cannot yield a
-        # snapshot; that corrupt state has no valid wrap to protect, so it is cleared
-        # unconditionally, which is the recovery this path exists for.
-        try:
-            observed = store.load_wrap_snapshot()
-            partial = False
-        except StoreError:
-            observed, partial = None, True
-        gated_by = store.wrap_gated_session() if session_id is None else None
+        # Cancel only the wrap observed above, by compare-and-swap. An idle store is not
+        # written to at all (there is nothing to clear, and an unconditional clear is exactly
+        # what could land on a peer's fresh wrap). A store whose lifecycle metadata is
+        # partial with wrap_started_at set cannot yield a snapshot; that corrupt state has no
+        # valid wrap to protect, so it is cleared unconditionally: the recovery this path
+        # exists for. (Lifecycle keys left behind with wrap_started_at empty are inert: the
+        # next wrap_started overwrites them, and wrap_gated_session() ignores them.)
+        gated_by = observed_gated_by if session_id is None else None
         if gated_by is not None:
             # An ungated caller is authorized by omission, but a wrap prepared under the
             # gate is not its to cancel: the save side refuses a session-less commit of it
@@ -1557,14 +1562,16 @@ def prepare_wrap(
         try:
             if observed is not None:
                 store.wrap_cancelled(expect_token=observed["token"])
-            elif partial:
+            elif observed_partial:
                 store.wrap_cancelled()
-        except WrapOwnershipError:
-            return _downgraded_empty(
-                "Consolidate downgraded to capture-only (downgraded-wrap-replaced): another "
-                "session replaced the wrap this call observed while it was deciding, so it "
-                "left it alone. Retry. Capture (afferent) is unaffected."
-            )
+        except WrapOwnershipError as exc:
+            if exc.actual is not None:
+                return _downgraded_empty(
+                    "Consolidate downgraded to capture-only (downgraded-wrap-replaced): "
+                    "another session replaced the wrap this call observed while it was "
+                    "deciding, so it left it alone. Retry. Capture (afferent) is unaffected."
+                )
+            # The observed wrap finished or was cancelled meanwhile: idle, nothing to clear.
         return PrepareWrapResult(
             status="empty",
             message="No episodes since last wrap. Nothing to compress.",
@@ -2231,8 +2238,8 @@ def validated_save_continuity(
         if session_id is None:
             raise ValueError(
                 f"This wrap was prepared under the consolidate gate by session {gated_by!r}, "
-                f"so the save must pass session_id={gated_by!r}: without it the baton is "
-                f"never re-checked. Finish it from the library with that session_id, or "
+                f"so the save must come from that session, naming its session_id: without one the "
+                f"baton is never re-checked. Finish it from the library with that session_id, or "
                 f"abandon it with wrap-cancel (CLI) / wrap_cancel (MCP), which discards the "
                 f"compression. Nothing was written."
             )

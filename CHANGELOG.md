@@ -13,9 +13,11 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   caller leaves the store untouched, so a non-holder that used to get `empty` plus a stale-flag clear
   now gets `downgraded`. A caller that names no `session_id` on a store without the policy is likewise
   refused the empty-path cancel of a wrap that was prepared under the gate. The holder's own recovery
-  of an emptied wrap is unchanged. The cancel is also now a compare-and-swap on the wrap it observed
-  (`wrap_cancelled(expect_token=)`), so a wrap another session starts while the call is deciding is
-  left alone (`downgraded-wrap-replaced`, retry), and an idle store is no longer written to at all.
+  of an emptied wrap is unchanged. The call now observes the wrap in progress before it reads the episode window and cancels only
+  that wrap, by compare-and-swap on its token (`wrap_cancelled(expect_token=)`), so a wrap another
+  session starts afterwards is left alone (`downgraded-wrap-replaced`, retry: nothing was cancelled),
+  and an idle store is no longer written to at all. A lifecycle key left behind with no wrap in
+  progress is inert.
 - **A wrap prepared under the gate is committed only by the session that prepared it.** The token
   identifies a wrap, not who may commit it, so a save that omitted `session_id` skipped the baton
   re-check entirely. The wrap now records its preparer (new `Store.wrap_gated_session()`;

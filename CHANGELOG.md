@@ -2,6 +2,26 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed — the consolidate gate had three holes (found by review of 0.9.14)
+
+- **An unauthorized session could cancel the holder's in-flight wrap.** `prepare_wrap` ran its
+  empty-window path, whose `wrap_cancelled()` clears the open wrap, before it consulted the gate. An
+  open wrap whose window is later emptied (a prune or `delete`) could be cancelled by a session with
+  no baton, or with no `session_id` on a require-baton store. The gate now runs first; a downgraded
+  caller leaves the store untouched. The holder's own recovery of an emptied wrap is unchanged.
+- **A save that omitted `session_id` skipped the baton re-check on a wrap that was prepared under the
+  gate.** The token identifies a wrap, not who may commit it. The wrap now records the session that
+  prepared it (new `Store.wrap_gated_session()`; `Store.wrap_started(gated_session_id=)`), and
+  `validated_save_continuity` refuses a save without `session_id` from such a wrap. A wrap prepared
+  with no `session_id` (the CLI, MCP, and any caller not opting in) saves as before, and a wrap
+  already in flight across the upgrade reads as ungated.
+- **The gate was checked before the package build but not after it.** `prepare_wrap` now re-checks
+  just before `wrap_started`, so a baton taken during the build no longer starts a wrap. A take in the
+  milliseconds between that re-check and `wrap_started` is not seen (the baton is a sidecar file
+  outside the store's transaction); the save-time re-check still covers it.
+
 ## [0.9.14] — 2026-09-25
 
 ### Fixed — a sole-live wrap could be prepared but not saved

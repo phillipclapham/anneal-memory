@@ -3014,3 +3014,36 @@ needed.** Round 1 changed five things at once and three were defective. **Round 
 things at once. The correct response is to stop editing this file today**, not to run a fourth pass
 against a sixth set of edits. ▶ WHAT WOULD CHANGE MY MIND: someone touching `audit.py` again before
 a clean round lands — then it needs a review, because the count of unreviewed changes would restart.
+
+
+## Carried in from the spore store — 2026-09-26 spore audit (governance rule S2: a project fact lives in its project's memory, not the Keep/Tray)
+Each item below is the full spore text plus its notes, moved here verbatim. **Where a NOTES section contains a correction, the note overrides the text above it.** The spore itself is resolved.
+
+### From spore-774 (created 2026-09-04)
+
+⚠ ANNEAL — THE DEGRADED-AUDIT COUNT IS BEST-EFFORT, NOT DURABLE, AND THE WORDING NOW SAYS SO (codex L3 HIGH, 2026-09-04, ACCEPTED AS A BOUND rather than fixed).
+
+The audit append fails because the volume is full; the metadata write on the SAME volume fails too and is swallowed; if the process exits before a later flush lands, the next open seeds zero and reports a healthy trail over a permanently missing entry. A crash between the audit failure and the flush does the same.
+
+⚡ WHAT WAS DONE: the per-process delta is RETAINED across a failed flush, so any later successful flush in the same process recovers it. That closes swallow-then-continue and NOT swallow-then-exit.
+
+▶ Every "durable" claim in `store.py`, `types.py`, `CHANGELOG.md` and `README.md` now states the bound explicitly: **A LOSS RECORDED HERE SURVIVES THE PROCESS; NOT EVERY LOSS IS RECORDED.**
+
+▶ THE REAL FIX codex named is a transactional outbox — a pending-audit record written WITH the original mutation, in the same transaction, cleared after the audit append succeeds. That is the same shape `spore-745` holds for the chained `dropped_before` marker, and the two should be built TOGETHER if either is.
+
+⛔ Do not describe this field as "durable" without the bound. The honest word is best-effort.
+
+### From spore-846 (created 2026-09-06)
+
+⚠⚠ **ANNEAL'S SCHEMA LOCK IS OPEN-TIME, NOT LIFETIME — AND THE TRIGGER IS THE PAYLOAD: IF A SECOND `_SCHEMA_VERSION` IS EVER INTRODUCED, THIS BECOMES A RELEASE BLOCKER AND MUST SHIP *WITH* IT, NOT AFTER.** Recorded 2026-09-06 by `0906+6 anneal-memory-seat` at the close of the `spore-773` work, as a **bound it deliberately did not build.**
+
+▶ **THE BOUND:** `spore-773`'s fix makes `_init_schema` take `BEGIN IMMEDIATE` and re-run the guard under it, which closes the check-then-act race **at open time**. ⛔ **An already-open handle is never revalidated.** A process holding a live connection across a migration performed by another process keeps operating on its original assumption.
+
+▶ **WHY IT IS CORRECTLY UNBUILT TODAY:** with a single `_SCHEMA_VERSION` there is no second schema for a live handle to be wrong about, so the window has no content. **The moment a second version exists, it does.**
+
+⛔ **AND THE REASON THIS IS A SPORE RATHER THAN ONLY A DOCSTRING:** it is written into the docstring, the CHANGELOG and `next_steps.md` — **all three are read by someone already working on anneal.** The person who introduces `_SCHEMA_VERSION` 2 may be doing it for an unrelated reason, months from now, and will not be reading the lock's docstring. **A spore is the only surface still watching on that day.**
+⚠ The seat also recorded *why* the docstring wording matters: the inference *"an older binary can no longer write to a migrated store"* is **a true statement standing in for a different question** — the same shape the create-time version stamp already got wrong in this codebase.
+
+▶ **SIBLING REFUSAL, recorded the same way so a successor does not read either as an oversight:** the commit/ack race was refused at its site with three reasons — **it is the token or nothing**; moving the decrement buys an under-count, and **under-counting a degraded-audit channel is exactly the silence the apparatus exists to prevent.**
+
+⚖ Both are written at their sites **with their reasons and their flip-conditions**, which is the discipline that makes a deliberate hold distinguishable from a gap. Related: `spore-773` (closed), `spore-751`.

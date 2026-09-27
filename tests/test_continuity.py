@@ -733,6 +733,64 @@ class TestPrepareWrapGuard:
         assert second["status"] == "ready"
         assert second["wrap_token"] != first["wrap_token"]
 
+    def test_transient_db_error_on_empty_window_snapshot_read_does_not_cancel_a_gated_wrap(
+        self, wrap_store, monkeypatch
+    ):
+        """diogenes-20260926-020547-5a9dab9124e2 (LOW).
+
+        The empty-window path's ``except StoreError`` (continuity.py, just
+        above the gate) catches ``StoreDatabaseError`` too, since it is a
+        ``StoreError`` subclass — but a database error on the snapshot read
+        (locked DB, disk I/O) is a TRANSIENT failure, not the genuine
+        partial/corrupt lifecycle state that branch exists to recover from.
+        Treating it as corruption sets ``observed_partial=True``, which
+        forces ``gated_by`` to ``None`` (the protection only applies when
+        ``not observed_partial``) — so a sessionless caller on the empty
+        window can unconditionally cancel ANOTHER session's healthy gated
+        wrap, the exact outcome the consolidate gate exists to prevent.
+        """
+        from anneal_memory import StoreDatabaseError
+
+        episode = wrap_store.record("Observation", EpisodeType.OBSERVATION)
+        # allow_sole_live=True: no baton claimed anywhere and no other live
+        # session in this fresh store's registry -> authorized as sole-live,
+        # so the wrap starts gated to "holder" without a real baton claim.
+        prepare_wrap(wrap_store, session_id="holder", allow_sole_live=True)
+        assert wrap_store.wrap_gated_session() == "holder"
+        # episodes_since_wrap() reads the episodes table directly (no wrap
+        # has COMPLETED yet, so the one just recorded still counts as "in
+        # the window") -- delete it so the second call below actually hits
+        # the empty-window path rather than AM-PREPARE-GUARD's
+        # already-real-episodes refusal.
+        wrap_store.delete(episode.id)
+
+        real_load_wrap_snapshot = wrap_store.load_wrap_snapshot
+        calls = {"n": 0}
+
+        def flaky_load_wrap_snapshot():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise StoreDatabaseError(
+                    "database is locked",
+                    operation="load_wrap_snapshot",
+                    path=str(wrap_store.path),
+                )
+            return real_load_wrap_snapshot()
+
+        monkeypatch.setattr(
+            wrap_store, "load_wrap_snapshot", flaky_load_wrap_snapshot
+        )
+
+        # No new episodes since "holder"'s gated wrap started -> the
+        # empty-window path. A sessionless caller must not be able to
+        # destroy "holder"'s wrap just because its snapshot read hit a
+        # transient DB error.
+        with pytest.raises(StoreDatabaseError):
+            prepare_wrap(wrap_store)  # session_id=None
+
+        assert wrap_store.wrap_gated_session() == "holder"
+        assert wrap_store.status().wrap_in_progress
+
 
 # -- format_wrap_package_text (canonical display text) --
 

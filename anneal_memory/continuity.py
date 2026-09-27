@@ -56,6 +56,7 @@ from .crystal import CrystalError, CrystalStore
 from .store import (
     AnnealMemoryError,
     SaveAuthorityError,
+    StoreDatabaseError,
     StoreError,
     WrapInProgressError,
     WrapOwnershipError,
@@ -1512,9 +1513,19 @@ def prepare_wrap(
     # wrap another session starts after this point has a different token (or, if it finished
     # before the window read, is not the one being judged) and can never be the one destroyed.
     # Reading the snapshot after the window would let that peer's wrap be the observed one.
+    #
+    # StoreDatabaseError (a StoreError subclass -- locked DB, disk I/O on the SELECT) is a
+    # TRANSIENT failure, not the genuine partial/corrupt lifecycle state the `except StoreError`
+    # below exists to recover from (load_wrap_snapshot's own partial-state guard raises bare
+    # StoreError, never this subclass). Treating a transient read failure as corruption would set
+    # observed_partial=True, which forces gated_by to None below and lets a sessionless caller
+    # unconditionally cancel ANOTHER session's healthy gated wrap -- so it must be checked first
+    # and propagated, not folded into the corruption branch (diogenes-20260926-020547-5a9dab9124e2).
     try:
         observed = store.load_wrap_snapshot()
         observed_partial = False
+    except StoreDatabaseError:
+        raise
     except StoreError:
         observed, observed_partial = None, True
     observed_gated_by = store.wrap_gated_session()

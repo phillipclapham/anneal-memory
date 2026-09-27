@@ -38,3 +38,6 @@ htmlcov/
 *.continuity.md
 *.continuity.meta.json
 *.audit.jsonl
+
+# Project pickup memory (personal data — Phill 2026-09-27, spore trail in fanin_log)
+project_memory/

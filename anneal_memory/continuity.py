@@ -1392,13 +1392,6 @@ def prepare_wrap(
         Transports that don't pass a token still get frozen semantics
         because the snapshot is consulted whenever it's present.
 
-        The remaining pipeline-atomicity gap is a mid-pipeline crash
-        between continuity file write and wrap metadata commit —
-        scheduled for the 10.5c.5 two-phase-commit work. Other open
-        concerns (stuck-wrap operator surface, SQLite variable-limit
-        edge cases, store-level SQLite error wrapping) track
-        separately in ``projects/anneal_memory/next.md``.
-
     Args:
         store: A Store instance.
         max_chars: Maximum target size for the continuity file. ``None``
@@ -2161,6 +2154,11 @@ def validated_save_continuity(
             collapses a protected memory layer and ``allow_shrink`` is
             not set, or the AM-LINKGATE block refuses (see
             ``allow_unlinked``).
+        SaveAuthorityError: A ``ValueError`` subclass, raised when the
+            consolidate gate refuses the save: the caller is not
+            authorized to commit this wrap, or the call omits a
+            ``session_id`` or ``wrap_token`` the gate requires.
+            Nothing is written and the wrap stays in progress.
         TypeError: If ``compost`` is a bare string, or holds anything
             but non-empty names without surrounding whitespace. Checked
             after the wrap-state preconditions, so with no wrap in

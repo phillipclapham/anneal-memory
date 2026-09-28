@@ -306,16 +306,15 @@ class AnnealMemoryError(Exception):
 # ``StoreError`` can safely switch on them with autocomplete and
 # type-checker coverage.
 #
-# **Enforcement is compile-time only** — this is a soft contract
-# until mypy-in-CI lands (see ``projects/anneal_memory/next.md``
-# Session 10.5d+). Without a static type gate, a new raise site can
-# drift from this alias and only fail at runtime when a user tries
-# exhaustive narrowing. The convention until then: new raise sites
-# MUST add their identifier to the Literal before raising, and
-# reviewers MUST reject diffs that raise with a value not in the
-# alias. When 10.5c.6 adds SQLite-origin operations, if the growth
-# pressure makes this brittle, promote the alias to an ``Enum`` (or
-# enforce statically via mypy once 10.5d ships — either works).
+# **Enforcement is static only**: ``StoreError``'s ``operation``
+# parameter is typed with this alias, so mypy rejects a raise with a
+# value outside it, and a structural test in the suite checks the
+# alias against the raise sites in both directions; nothing checks it
+# at program runtime. This began as a
+# soft contract written before mypy ran in CI, and its convention
+# still holds for anyone not running mypy locally: new raise sites
+# MUST add their identifier to the Literal before raising. If growth
+# makes the alias brittle, promote it to an ``Enum``.
 StoreOperation = Literal[
     # File-write + integrity surfaces (10.5c.3 / 10.5c.4 / 10.5c.5)
     "save_continuity",
@@ -810,10 +809,8 @@ def _reconstruct_wrap_ownership_error(
 
 class SaveAuthorityError(ValueError):
     """Raised by ``validated_save_continuity`` when the consolidate gate refuses a save: the
-    baton is not held, the store is baton-protected and the save did not name the holder and
-    the prepare token, the wrap was prepared by a different session (strict match), or a
-    sessionless save was attempted on a wrap prepared under the gate. Nothing is written and
-    the wrap stays in progress.
+    caller is not authorized to commit this wrap, or the call omits a ``session_id`` or
+    ``wrap_token`` the gate requires. Nothing is written and the wrap stays in progress.
 
     A ``ValueError`` subclass so callers that catch ``ValueError`` are unchanged; test with
     ``isinstance`` rather than matching the message text.

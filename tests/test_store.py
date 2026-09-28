@@ -3753,7 +3753,7 @@ class TestDbBoundaryErrorWrapping:
 
     def test_store_operation_literal_has_no_drift(self):
         """10.5c.6 L2 #3 + codex L3.5 — the StoreOperation Literal
-        is a soft contract without mypy-in-CI. Codex already caught
+        was a soft contract before mypy ran in CI. Codex had caught
         one drift (prepare_continuity_write / prepare_meta_write
         raise sites missing from the Literal). This structural test
         catches future drift in BOTH directions:

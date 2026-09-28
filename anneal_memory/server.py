@@ -871,7 +871,7 @@ class Server:
         # this same mistake before it was made durable — see
         # tests/test_audit.py::TestDegradedAuditHealthReachesEveryTransport).
         # Full durability, so the CLI can carry this too, was deferred on
-        # 2026-09-17 (project_memory/next_steps.md).
+        # 2026-09-17.
         if status.prune_failures:
             prune_line = (
                 f"⚠ {status.prune_failures} post-commit auto-prune "

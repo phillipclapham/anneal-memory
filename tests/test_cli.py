@@ -1295,8 +1295,8 @@ class TestEnvVars:
         "USERPROFILE (or HOMEDRIVE+HOMEPATH); this test's specific "
         "technique — clearing os.environ ENTIRELY — is not how a real "
         "Windows caller reaches a missing USERPROFILE (a sanitized/minimal "
-        "launcher environment can still lack it; see next_steps.md's "
-        "Windows Limitations section for the reachable, unfixed startup "
+        "launcher environment can still lack it; see README.md's "
+        "Windows section for the reachable, unfixed startup "
         "crash this skip does not paper over)",
     )
     def test_default_db_without_env(self):

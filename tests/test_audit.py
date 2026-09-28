@@ -165,7 +165,7 @@ class TestHashChainVerification:
         aborted write wasn't rolled back, but the retry's `prev_hash`
         correctly points at it) reuses that entry's `seq`: every hash
         link is valid and the old code returned `valid=True`. glm-5.3,
-        filed `next_steps.md` §7, 2026-09-07.
+        filed in the project tracker 2026-09-07.
 
         MUTATION-CHECKED: delete the seq-monotonicity check in `verify()`
         and this fails — `valid` comes back `True`.
@@ -492,7 +492,7 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
             #
             # ⚖ THE GENERAL RULE, and this file already knew it one layer
             # over: scope a fault injection to the CALL SITE it names.
-            # ``next_steps.md`` records the identical defect being caught in
+            # The project tracker recorded the identical defect being caught in
             # a hand probe the same day ("my probe raised ENOSPC on *every*
             # fsync including the truncate's") — in the shipped test it went
             # unchecked.
@@ -5043,8 +5043,8 @@ class TestAFailedRollbackDoesNotRewindMemoryPastDisk:
         WHICH IS ALREADY ON THIS REPO'S OWN OPEN LIST: *if ``log()`` gains an
         earlier directory fsync inside the guarded region, that call consumes
         the fault before any line is written* — the arm then passes without
-        ever grading the complete-line ambiguity. `next_steps.md` item 2 is
-        precisely "add the ``_fsync_dir`` idiom to this module". **The latent
+        ever grading the complete-line ambiguity. The project tracker's item 2
+        was precisely "add the ``_fsync_dir`` idiom to this module". **The latent
         defect was scheduled to be activated by this repo's next filed task.**
         ▶ So the counters are not bookkeeping: ``fired`` is asserted by the
         caller, and an injection that stops reaching its intended call site
@@ -5675,8 +5675,8 @@ class TestDiogenes20260909StillOpen:
     def test_seed_from_manifest_resets_to_genesis_on_an_unparseable_manifest(
         self, tmp_path
     ):
-        """MEDIUM ``audit.py:946`` (carried) + MEDIUM
-        ``project_memory/next_steps.md:48`` — ``_seed_from_manifest``'s
+        """MEDIUM ``audit.py:946`` (carried) + a MEDIUM from the project
+        tracker — ``_seed_from_manifest``'s
         genesis reset was completely ungraded: a mutant deleting
         ``self._prev_hash = GENESIS_HASH; self._seq = 0`` passed the full
         suite unchanged (measured 2026-09-09: 1899 passed / 5 skipped,

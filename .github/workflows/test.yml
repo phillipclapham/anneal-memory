@@ -67,7 +67,7 @@ jobs:
     # Windows (POSIX chmod-based permission checks, crystal.py's documented
     # POSIX-only cross-process lock guarantee, an env simulation Windows
     # never reaches) are skipif(win32) at the site with a specific reason —
-    # see project_memory/next_steps.md's Windows Limitations section.
+    # README.md's Windows section states the limitations behind them.
     name: pytest (Windows, Python 3.13)
     runs-on: windows-latest
     steps:

@@ -412,9 +412,8 @@ class RelevantResult:
 # at type-check time. We rely on the drift-check tests
 # (``test_prepare_wrap_result_has_declared_keys``,
 # ``test_save_continuity_result_has_declared_keys`` in
-# ``tests/test_continuity.py``) as the runtime safety net until
-# mypy-in-CI lands (scheduled in ``projects/anneal_memory/next.md``
-# as a v0.2.0-release-adjacent follow-up).
+# ``tests/test_continuity.py``) as the runtime safety net; mypy is
+# the static one.
 #
 # We use the callable form anyway because it's more readable at
 # return sites (keyword arguments make the field names explicit)

@@ -987,7 +987,7 @@ def _write_trust(path: Path, stores: list[dict]) -> None:
         raise
 
 
-def _update_trust(path: Path, change) -> list[dict]:
+def _update_trust(path: Path, change, verify=None) -> list[dict]:
     """Read-modify-write the trust file under an exclusive lock on a stable
     sibling, so a concurrent allow and revoke cannot lose either update."""
     if not _SUPPORTED:
@@ -1002,6 +1002,12 @@ def _update_trust(path: Path, change) -> list[dict]:
         after = change(before)
         if after is not before:
             _write_trust(path, after)
+            # Checked while still holding the lock, and undone by restoring
+            # exactly what was there, so a concurrent caller's binding is
+            # never touched (glm-5.3 L3 round 3).
+            if verify is not None and not verify():
+                _write_trust(path, before)
+                raise ValueError(f"the binding was written to {path} but is not honoured on read")
         return before
     finally:
         os.close(lock_fd)  # releases the flock
@@ -1057,10 +1063,11 @@ def allow_store(db_path: str | os.PathLike, root: str | os.PathLike, trust_file:
         "root": root_s,
         "allowed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    _update_trust(path, lambda stores: [s for s in stores if s["db"] != key] + [entry])
-    if trusted_root(key, path) != root_s:  # never report an opt-in that does not hold
-        revoke_store(key, path)
-        raise ValueError(f"the binding was written to {path} but is not honoured on read")
+    _update_trust(
+        path,
+        lambda stores: [s for s in stores if s["db"] != key] + [entry],
+        verify=lambda: trusted_root(key, path) == root_s,  # never report an opt-in that does not hold
+    )
     return root_s
 
 

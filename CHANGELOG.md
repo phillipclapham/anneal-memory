@@ -4,6 +4,18 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.9.16] — 2026-09-30
+
+### Fixed — the wrap prompt no longer calls a just-crystallized pattern "re-warmed"
+
+- `prepare_wrap`'s Crystallization Routing text said the listed crystals were "HOT again (their
+  domain re-warmed)". Nothing calls `touch()`, so every crystal listed there is one a previous
+  wrap just routed out (crystallized inside the activation window); the old wording invited the
+  next composers to pull it straight back in. The text and `crystallize()`'s docstring now say
+  what the signal is ("activated recently: crystallized or touched within the activation window").
+  The retrieval docs no longer call the Hebbian crystal hop "live" (0 of 788 crystal exposures
+  came through it).
+
 ### Added — project memory whose State proves itself when read
 
 - **A `project` section schema** (`init --schema project`, `set-schema project`, `PROJECT_SCHEMA`):

@@ -185,6 +185,11 @@ def test_crafted_malicious_lines_are_refused(project, tmp_path):
     git_lines = [r for r in rederive_continuity(store).results if "git " in r.line]
     assert git_lines and all(r.status == "error" and "alternates" in r.detail for r in git_lines)
     alt.unlink()
+    # ...and neither does one with a metadata symlink out of the root (r3).
+    (repo / ".git" / "refs" / "heads" / "evil").symlink_to(tmp_path / "outside_ref")
+    git_lines = [r for r in rederive_continuity(store).results if "git " in r.line]
+    assert git_lines and all("symlink out of the root" in r.detail for r in git_lines)
+    (repo / ".git" / "refs" / "heads" / "evil").unlink()
 
     # An untracked secret is never read: the claim is judged stale, unread.
     Path(store.continuity_path).write_text(

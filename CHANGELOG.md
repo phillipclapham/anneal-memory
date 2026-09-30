@@ -11,7 +11,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - **A `derived-state` section role.** Every non-blank line ends with `[derive: COMMAND => EXPECTED]`,
   `[derive: COMMAND]` or `[judged: WHO, WHEN, AGAINST WHAT]`. `validated_save_continuity` refuses a
   State line with no annotation or with a command outside the allowlist; on a store opted in to
-  re-derive it also refuses a command that errors. Stale lines do not refuse: they come back in the
+  re-derive it also refuses a command that errors. Every non-blank State line needs an annotation,
+  a `###` subheading included. Stale lines do not refuse: they come back in the
   result's new optional `stale_state` list (and the MCP reply), with a warning after commit.
 - **Re-derive at load:** `anneal-memory continuity --rederive [--ref REF]` and
   `rederive_continuity(store)` run each State command and flag the line inline (`✓`, `⚠ STALE`,

@@ -174,6 +174,8 @@ loaded context.
 Inside the root, `grep` and `wc` read only files git tracks as regular files,
 matched by exact name (`GIT_LITERAL_PATHSPECS`, index mode `100644` or
 `100755`, so not a glob, a submodule or a tracked symlink): for a line that
+names a directory or anything but a regular file (a FIFO, a device) is
+refused; a line that
 names an untracked or ignored file (a `.env`, a key) nothing is read, and the
 claim is judged `⚠ STALE` (a file that left git is the most common real
 drift, and it should not block a save). A crafted line cannot turn a count
@@ -182,8 +184,11 @@ one is refused by the symlink rule above. `test` may check that any path inside 
 
 Git runs only in a plain repository: the root's `.git` must be a real
 directory (not a gitfile or symlink, so not a linked worktree), `objects` and
-`refs` must not be symlinks, and there must be no `commondir` and no object
-`alternates`. Otherwise git would follow its own metadata out of the root, and
+`refs` must not be symlinks, there must be no `commondir` and no object
+`alternates`, and no symlink anywhere under `.git` (a loose ref, `HEAD`,
+`packed-refs`) may point out of the root. The repository's config may not
+`include` another file, and git reads no global or system config
+(`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM`). Otherwise git would follow its own metadata out of the root, and
 the line is a `⚠ DERIVE ERROR`.
 
 Git cannot look above the root: `GIT_CEILING_DIRECTORIES` is set to the
@@ -235,10 +240,12 @@ continuity.
 - **A local actor who can already write inside the root.** Paths are checked,
   then the command runs: a concurrent swap to a symlink in between, or a hard
   link to a file outside the root, is not detected.
-- **Anything the repository itself holds.** `git cat-file` and `git log` read
-  every object, including history that has been rewritten but not yet garbage
-  collected. Up to one flag's worth of that content can reach the loaded text
-  per line.
+- **What the allowed git forms do print.** Commit ids, counts, tag names and
+  tracked paths from the repository, including history that has been
+  rewritten but not yet garbage collected, can reach the loaded text.
+- **A child stuck in uninterruptible I/O.** A killed process that cannot be
+  reaped within a couple of seconds (a hung network filesystem) is left
+  behind with its reader threads; the line reports an error.
 - **Repository contents the user trusts.** The allowed git forms do not run
   repository hooks, filters or diff drivers, but they do read the repository;
   opting a store in is a statement that the root is the user's own.

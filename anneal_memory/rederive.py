@@ -36,6 +36,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import threading
@@ -123,8 +124,12 @@ def strip_flag(line: str) -> str:
 # never persisted).
 _ENVELOPE = "> [anneal re-derive] "
 _HEADER_LINE = re.compile(
-    r"^> \[anneal re-derive\] (?:\d+ STATE line\(s\) in .+ grep, wc and test read "
-    r"the working tree\.|not enabled for this store; STATE lines were not checked "
+    r"^> \[anneal re-derive\] (?:"
+    r"[1-9]\d* STATE line\(s\) in [^\n]+?(?: at [0-9a-f]{40})?"
+    r"(?:: \d+ [a-z]+(?:, \d+ [a-z]+)*)?"
+    r"\. git lines read the pinned ref only where they use @REF; grep, wc and test "
+    r"read the working tree\."
+    r"|not enabled for this store; STATE lines were not checked "
     r"\(see `anneal-memory derive allow`\)\.)$"
 )
 
@@ -134,8 +139,9 @@ def strip_rederive_output(text: str, schema: list[SectionSpec]) -> str:
     blank line after it) and every flag it appended to a State line. Saving
     loaded text back must never persist a verdict that is true only at load."""
     lines = text.split("\n")
-    if lines and _HEADER_LINE.match(lines[0].rstrip("\r")):
-        lines = lines[2:] if len(lines) > 1 and not lines[1].strip() else lines[1:]
+    # Exactly what rederive_text writes: the header line, then a blank line.
+    if len(lines) > 1 and _HEADER_LINE.match(lines[0].rstrip("\r")) and not lines[1].strip():
+        lines = lines[2:]
     joined = "\n".join(lines)
     for idx, line in derived_state_lines(joined, schema):
         cr = "\r" if line.endswith("\r") else ""
@@ -364,6 +370,24 @@ def _check_repo_shape(root: str) -> str | None:
                 os.path.join("objects", "info", "http-alternates")):
         if os.path.lexists(os.path.join(git, rel)):
             return f".git/{rel} exists; git would read outside the root"
+    # The repository's config may not pull in another file.
+    try:
+        with open(os.path.join(git, "config"), encoding="utf-8", errors="replace") as f:
+            if re.search(r"^\s*\[\s*include", f.read(), re.IGNORECASE | re.MULTILINE):
+                return ".git/config includes another file; git would read outside the root"
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        return f".git/config is unreadable ({e})"
+    # Git follows a symlink anywhere in its metadata (a loose ref, HEAD,
+    # packed-refs, an objects fan-out directory): one that leaves the root
+    # is a read outside it (gpt-oss L3 round 3, reproduced).
+    root_real = os.path.realpath(root)
+    for dirpath, dirnames, filenames in os.walk(git, followlinks=False):
+        for name in dirnames + filenames:
+            full = os.path.join(dirpath, name)
+            if os.path.islink(full) and not _inside(os.path.realpath(full), root_real):
+                return f"{os.path.relpath(full, root)} is a symlink out of the root"
     return None
 
 
@@ -380,7 +404,7 @@ _MAX_PATHS = 8  # path arguments per grep/wc line
 _MAX_COMMAND_CHARS = 400
 
 
-def _require_tracked(argv: list[str], root: str, timeout: float) -> None:
+def _require_tracked(argv: list[str], root: str, timeout: float, shape: str | None) -> None:
     """grep and wc read only files git tracks, so an untracked or ignored
     file inside the root (a .env, a key) is never read. Needs a git root."""
     if argv[0] == "grep":
@@ -392,9 +416,17 @@ def _require_tracked(argv: list[str], root: str, timeout: float) -> None:
         paths = [a for a in argv[1:] if not a.startswith("-")]
     else:
         return
-    shape = _check_repo_shape(root)
     if shape:
         raise _TrackError(shape)
+    for path in paths:
+        try:
+            st = os.lstat(os.path.join(root, path))
+        except FileNotFoundError:
+            continue  # judged below: not a tracked file
+        if stat.S_ISDIR(st.st_mode):
+            raise DeriveRefused(f"path argument {path!r} is a directory; name a file")
+        if not stat.S_ISREG(st.st_mode):
+            raise DeriveRefused(f"path argument {path!r} is not a regular file")
     res = _run_bounded(
         ["git", *_GIT_HARDENING, "ls-files", "-s", "-z", "--", *paths],
         root, timeout, 256 * 1024,
@@ -488,6 +520,10 @@ def _child_env(root: str | None = None) -> dict[str, str]:
         "GIT_ALLOW_PROTOCOL": "none",
         # A path argument is a file name, never a glob or :(magic) pathspec.
         "GIT_LITERAL_PATHSPECS": "1",
+        # Only the repository's own config: no ~/.gitconfig, XDG or system
+        # file (codex L3 round 3).
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
     }
     home = os.environ.get("HOME")
     if home:
@@ -727,6 +763,7 @@ def _judge_line(
     ref_error: str | None,
     timeout: float,
     cap: int,
+    shape: str | None = None,
 ) -> LineResult:
     ann = parse_annotation(line)
     if ann is None:
@@ -736,7 +773,7 @@ def _judge_line(
     try:
         argv = validate_command(ann.command, Path(root) if root else None)
         if root is not None:
-            _require_tracked(argv, root, timeout)
+            _require_tracked(argv, root, timeout, shape)
     except DeriveRefused as e:
         return LineResult(idx, line, "refused", str(e))
     except _NotTracked as e:
@@ -744,7 +781,6 @@ def _judge_line(
     except _TrackError as e:
         return LineResult(idx, line, "error", str(e))
     if argv[0] == "git":
-        shape = _check_repo_shape(root)
         if shape:
             return LineResult(idx, line, "error", shape)
         if any(REF_TOKEN in a for a in argv):
@@ -822,8 +858,12 @@ def rederive_text(
     deadline = time.monotonic() + budget
     root_s = os.path.realpath(root)
     needs_ref = any(REF_TOKEN in (parse_annotation(l) or Annotation("judged", "")).command for _, l in targets)
+    # The repository's shape is checked once per load, before git runs at all.
+    shape = _check_repo_shape(root_s) if targets else None
     ref_sha, ref_err = (None, None)
-    if needs_ref or ref is not None:
+    if shape and (needs_ref or ref is not None):
+        ref_err = shape
+    elif needs_ref or ref is not None:
         ref_sha, ref_err = _resolve_ref(root_s, ref, timeout)
 
     results: list[LineResult] = []
@@ -842,7 +882,7 @@ def rederive_text(
             # budget's, not the command's, so do not start it.
             results.append(LineResult(idx, line, "skipped", f"load budget {budget:g}s"))
             continue
-        r = _judge_line(idx, line, root_s, ref_sha, ref_err, timeout, output_cap)
+        r = _judge_line(idx, line, root_s, ref_sha, ref_err, timeout, output_cap, shape)
         if is_cmd:  # refused lines count too, so the cap bounds the work
             ran += 1
         results.append(r)
@@ -855,7 +895,7 @@ def rederive_text(
     counts = {s: sum(1 for r in results if r.status == s) for s in _FLAGS}
     summary = ", ".join(f"{n} {s}" for s, n in counts.items() if n)
     header = (
-        f"{_ENVELOPE}{len(results)} STATE line(s) in {root_s}"
+        f"{_ENVELOPE}{len(results)} STATE line(s) in {' '.join(root_s.split())}"
         + (f" at {ref_sha}" if ref_sha else "")
         + (f": {summary}" if summary else "")
         + ". git lines read the pinned ref only where they use @REF; grep, wc "
@@ -1019,6 +1059,7 @@ def allow_store(db_path: str | os.PathLike, root: str | os.PathLike, trust_file:
     }
     _update_trust(path, lambda stores: [s for s in stores if s["db"] != key] + [entry])
     if trusted_root(key, path) != root_s:  # never report an opt-in that does not hold
+        revoke_store(key, path)
         raise ValueError(f"the binding was written to {path} but is not honoured on read")
     return root_s
 

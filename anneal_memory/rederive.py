@@ -116,9 +116,17 @@ def strip_flag(line: str) -> str:
     return line[: m.start()] if m else line
 
 
-# Every text rederive_text returns starts with this tag, and only such text is
-# ever stripped at save: an authored line can never be mistaken for a flag.
+# Every text rederive_text returns starts with this tag. At save the header is
+# removed only when the whole line matches what rederive_text writes, so an
+# authored note is never deleted; flags are removed from State lines always,
+# since nothing may follow an annotation's closing "]" (a forged "  ✓" is
+# never persisted).
 _ENVELOPE = "> [anneal re-derive] "
+_HEADER_LINE = re.compile(
+    r"^> \[anneal re-derive\] (?:\d+ STATE line\(s\) in .+ grep, wc and test read "
+    r"the working tree\.|not enabled for this store; STATE lines were not checked "
+    r"\(see `anneal-memory derive allow`\)\.)$"
+)
 
 
 def strip_rederive_output(text: str, schema: list[SectionSpec]) -> str:
@@ -126,9 +134,8 @@ def strip_rederive_output(text: str, schema: list[SectionSpec]) -> str:
     blank line after it) and every flag it appended to a State line. Saving
     loaded text back must never persist a verdict that is true only at load."""
     lines = text.split("\n")
-    if not lines or not lines[0].startswith(_ENVELOPE):
-        return text  # not re-derive output: untouched
-    lines = lines[2:] if len(lines) > 1 and not lines[1].strip() else lines[1:]
+    if lines and _HEADER_LINE.match(lines[0].rstrip("\r")):
+        lines = lines[2:] if len(lines) > 1 and not lines[1].strip() else lines[1:]
     joined = "\n".join(lines)
     for idx, line in derived_state_lines(joined, schema):
         cr = "\r" if line.endswith("\r") else ""
@@ -142,6 +149,8 @@ def parse_annotation(line: str) -> Annotation | None:
     The annotation is the LAST ``[derive:`` / ``[judged:`` on the line and must
     close with the line's final ``]`` (after any re-derive flag is removed).
     """
+    if line.endswith("\r"):
+        line = line[:-1]
     stripped = strip_flag(line)
     if not stripped.endswith("]"):
         return None
@@ -180,6 +189,13 @@ class _GitForm:
     digit_count: bool = False  # accepts -<N> (e.g. log -1)
 
 
+# Only forms whose output is an exit status, a commit id, a count, a tag
+# name or a tracked path: nothing git prints here can carry file or commit
+# content, whatever the repository's configuration says. log, cat-file -p,
+# ls-tree and for-each-ref were removed after review twice found a new way
+# for repository config or metadata to reach past the root through them
+# (format.pretty, mailmap, alternates); the construct shrinks rather than
+# growing another filter (spore-813).
 _GIT_FORMS: dict[str, _GitForm] = {
     "rev-parse": _GitForm(
         bare=frozenset({"--verify", "-q", "--quiet", "--short", "--abbrev-ref", "--symbolic-full-name"}),
@@ -190,33 +206,13 @@ _GIT_FORMS: dict[str, _GitForm] = {
         valued=frozenset({"--abbrev", "--match", "--exclude"}),
     ),
     "rev-list": _GitForm(
-        bare=frozenset({"--count", "--first-parent", "--merges", "--no-merges", "--reverse"}),
+        bare=frozenset({"--count", "--first-parent", "--merges", "--no-merges"}),
         valued=frozenset({"--max-count", "--since", "--until", "--author", "--grep"}),
         digit_count=True,
     ),
     "merge-base": _GitForm(bare=frozenset({"--is-ancestor"})),
-    "log": _GitForm(
-        bare=frozenset({
-            "--oneline", "--first-parent", "--merges", "--no-merges", "--reverse",
-            "-i", "--regexp-ignore-case", "-F", "--fixed-strings", "-E",
-            "--extended-regexp", "--all-match", "--invert-grep", "--no-decorate",
-            "--no-color",
-        }),
-        # No --format / --pretty / --date: a format string from a STATE line
-        # reached git configuration twice (signature verification, mailmap
-        # files outside the root), so the construct takes none (spore-813).
-        valued=frozenset({
-            "--max-count", "--skip", "--grep", "--since",
-            "--until", "--after", "--before", "--author",
-        }),
-        digit_count=True,
-    ),
-    "cat-file": _GitForm(bare=frozenset({"-p", "-t", "-s", "-e"})),
+    "cat-file": _GitForm(bare=frozenset({"-e"})),
     "ls-files": _GitForm(bare=frozenset({"--error-unmatch", "--cached"})),
-    "ls-tree": _GitForm(bare=frozenset({"-r", "-d", "-t", "--name-only", "--full-tree"})),
-    "for-each-ref": _GitForm(
-        valued=frozenset({"--count", "--points-at", "--contains", "--merged", "--no-merged"}),
-    ),
 }
 
 GIT_SUBCOMMANDS: frozenset[str] = frozenset(_GIT_FORMS)
@@ -296,6 +292,8 @@ def _validate_git(args: list[str]) -> None:
         # A positional (revision, object or path). Git keeps it inside the repo.
     if sub == "merge-base" and "--is-ancestor" not in rest:
         raise DeriveRefused("git merge-base is allowed only with --is-ancestor")
+    if sub == "cat-file" and "-e" not in rest:
+        raise DeriveRefused("git cat-file is allowed only with -e")
 
 
 def _validate_short_flags(prog: str, flag: str, allowed: set[str]) -> None:
@@ -351,6 +349,24 @@ _VALIDATORS = {
 PROGRAMS: frozenset[str] = frozenset(_VALIDATORS)
 
 
+def _check_repo_shape(root: str) -> str | None:
+    """Why ``root`` is not a plain repository, or ``None``. Git follows
+    repository metadata wherever it points (a gitfile, commondir, a symlinked
+    object store, alternates), so git runs only where all of it is a real
+    directory tree inside the root (codex L3 round 2)."""
+    git = os.path.join(root, ".git")
+    if os.path.islink(git) or not os.path.isdir(git):
+        return "the root's .git is not a plain directory (a worktree or gitfile?)"
+    for rel in ("objects", "refs"):
+        if os.path.islink(os.path.join(git, rel)):
+            return f".git/{rel} is a symlink"
+    for rel in ("commondir", os.path.join("objects", "info", "alternates"),
+                os.path.join("objects", "info", "http-alternates")):
+        if os.path.lexists(os.path.join(git, rel)):
+            return f".git/{rel} exists; git would read outside the root"
+    return None
+
+
 class _TrackError(Exception):
     """The tracked check itself failed (no git, no repository, timeout)."""
 
@@ -376,15 +392,29 @@ def _require_tracked(argv: list[str], root: str, timeout: float) -> None:
         paths = [a for a in argv[1:] if not a.startswith("-")]
     else:
         return
+    shape = _check_repo_shape(root)
+    if shape:
+        raise _TrackError(shape)
     res = _run_bounded(
-        ["git", *_GIT_HARDENING, "ls-files", "--error-unmatch", "--", *paths],
-        root, timeout, 64 * 1024,
+        ["git", *_GIT_HARDENING, "ls-files", "-s", "-z", "--", *paths],
+        root, timeout, 256 * 1024,
     )
-    if res.spawn_error or res.timed_out or res.overflowed or res.returncode not in (0, 1):
+    if res.spawn_error or res.timed_out or res.overflowed or res.returncode != 0:
         why = res.spawn_error or ("timed out" if res.timed_out else f"exit {res.returncode}")
         raise _TrackError(f"cannot check that the paths are tracked ({why})")
-    if res.returncode != 0:
-        raise _NotTracked("a path is not a file git tracks in the root")
+    # Exact names only, as regular files: a gitlink (160000), a tracked
+    # symlink (120000) or a directory prefix match is not "tracked".
+    regular: set[str] = set()
+    for entry in res.stdout.split(b"\0"):
+        if not entry:
+            continue
+        meta, _, name = entry.partition(b"\t")
+        mode = meta.split(b" ", 1)[0]
+        if mode in (b"100644", b"100755"):
+            regular.add(name.decode("utf-8", "surrogateescape"))
+    for path in paths:
+        if os.path.normpath(path) not in regular:
+            raise _NotTracked("a path is not a regular file git tracks in the root")
 
 
 def validate_command(command: str, root: Path | None = None) -> list[str]:
@@ -456,11 +486,20 @@ def _child_env(root: str | None = None) -> dict[str, str]:
         # Overrides repo-level protocol.<name>.allow, which -c protocol.allow
         # does not (L1, measured 2026-09-30).
         "GIT_ALLOW_PROTOCOL": "none",
+        # A path argument is a file name, never a glob or :(magic) pathspec.
+        "GIT_LITERAL_PATHSPECS": "1",
     }
     home = os.environ.get("HOME")
     if home:
         env["HOME"] = home
     if root is not None:
+        # No PATH entry inside the root: git's own helpers (gpg, ...) are
+        # found through PATH too, and must never be repository files.
+        root_real = os.path.realpath(root)
+        env["PATH"] = os.pathsep.join(
+            p for p in env["PATH"].split(os.pathsep)
+            if not _inside(os.path.realpath(p), root_real)
+        )
         # git must not discover a repository above the root (a parent repo,
         # a dotfiles repo in $HOME): the root is the boundary.
         env["GIT_CEILING_DIRECTORIES"] = os.path.dirname(root)
@@ -543,9 +582,7 @@ def _run_bounded(argv: list[str], cwd: str, timeout: float, cap: int) -> _RunOut
                 break
             buf += chunk
             if len(buf) > cap:
-                overflow.set()
-                if proc.poll() is None:  # never signal a reaped (reusable) pid
-                    _kill(proc)
+                overflow.set()  # the main thread alone kills and reaps
                 break
 
     threads = [
@@ -555,15 +592,21 @@ def _run_bounded(argv: list[str], cwd: str, timeout: float, cap: int) -> _RunOut
     for t in threads:
         t.start()
     timed_out = False
-    try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        _kill(proc)
+    end = time.monotonic() + timeout
+    while True:  # only this thread waits, kills or reaps, so a kill never hits a reused pid
         try:
-            proc.wait(timeout=2)
+            proc.wait(timeout=0.05)
+            break
         except subprocess.TimeoutExpired:
             pass
+        if overflow.is_set() or time.monotonic() >= end:
+            timed_out = not overflow.is_set()
+            _kill(proc)
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+            break
     for t in threads:
         t.join(timeout=2)
     for s in (proc.stdout, proc.stderr):
@@ -606,8 +649,8 @@ def _derived_headings(schema: list[SectionSpec]) -> list[str]:
 def derived_state_lines(text: str, schema: list[SectionSpec]) -> list[tuple[int, str]]:
     """``(index, line)`` for every content line inside a derived-state section.
 
-    Blank lines and bare ``###``-and-deeper subheadings are structure, not
-    claims, and are skipped; a subheading carrying a digit is a claim. A section ends at the next ``## `` header.
+    Blank lines are skipped; every other line, a subheading included, is a
+    claim and needs an annotation. A section ends at the next ``## `` header.
     """
     headings = _derived_headings(schema)
     if not headings:
@@ -623,8 +666,6 @@ def derived_state_lines(text: str, schema: list[SectionSpec]) -> list[tuple[int,
             continue
         if not inside or not line.strip():
             continue
-        if line.lstrip().startswith("###") and not re.search(r"\d", line):
-            continue  # a bare subheading; one carrying a number is a claim
         out.append((i, line))
     return out
 
@@ -692,7 +733,6 @@ def _judge_line(
         return LineResult(idx, line, "unannotated", "no [derive: …] or [judged: …]")
     if ann.kind == "judged":
         return LineResult(idx, line, "judged")
-    line_deadline = time.monotonic() + timeout  # one budget for the whole line
     try:
         argv = validate_command(ann.command, Path(root) if root else None)
         if root is not None:
@@ -703,10 +743,10 @@ def _judge_line(
         return LineResult(idx, line, "stale", str(e))
     except _TrackError as e:
         return LineResult(idx, line, "error", str(e))
-    timeout = line_deadline - time.monotonic()
-    if timeout <= 0:
-        return LineResult(idx, line, "error", "timed out checking tracked paths")
     if argv[0] == "git":
+        shape = _check_repo_shape(root)
+        if shape:
+            return LineResult(idx, line, "error", shape)
         if any(REF_TOKEN in a for a in argv):
             if ref is None:
                 return LineResult(idx, line, "error", f"{REF_TOKEN} unresolved: {ref_error}")
@@ -796,9 +836,10 @@ def rederive_text(
             results.append(LineResult(idx, line, "skipped", why))
             continue
         remaining = deadline - time.monotonic()
-        if is_cmd and remaining < timeout:
-            # Less than one full command timeout left: a timeout now would be
-            # the budget's, not the command's, so do not run it at all.
+        if is_cmd and remaining < 2 * timeout:
+            # A line may spend one timeout on the tracked-path check and one on
+            # the command; with less than that left, a timeout would be the
+            # budget's, not the command's, so do not start it.
             results.append(LineResult(idx, line, "skipped", f"load budget {budget:g}s"))
             continue
         r = _judge_line(idx, line, root_s, ref_sha, ref_err, timeout, output_cap)
@@ -859,6 +900,13 @@ def _load_trust(path: Path, *, strict: bool = False) -> list[dict]:
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except FileNotFoundError:
+        if strict:  # about to create it: its directory must already be safe
+            try:
+                pst = os.stat(os.path.dirname(os.path.abspath(path)))
+            except OSError:
+                return []
+            if pst.st_uid != os.geteuid() or pst.st_mode & 0o022:
+                return untrusted("its directory is not owned by this user, or is writable by others")
         return []
     except OSError as e:
         return untrusted(f"cannot open without following links ({e})")
@@ -906,7 +954,7 @@ def _update_trust(path: Path, change) -> list[dict]:
         raise ValueError("re-derive is supported on POSIX systems only")
     import fcntl
 
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     lock_fd = os.open(str(path) + ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
@@ -970,6 +1018,8 @@ def allow_store(db_path: str | os.PathLike, root: str | os.PathLike, trust_file:
         "allowed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     _update_trust(path, lambda stores: [s for s in stores if s["db"] != key] + [entry])
+    if trusted_root(key, path) != root_s:  # never report an opt-in that does not hold
+        raise ValueError(f"the binding was written to {path} but is not honoured on read")
     return root_s
 
 

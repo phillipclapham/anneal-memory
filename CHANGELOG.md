@@ -22,7 +22,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 ⚠ This executes commands stored in a memory file. The containment (opt-in outside the store, no
 shell, an argument-level allowlist of read-only `git` / `grep` / `wc` / `test` forms, paths
 confined to the root, `grep` / `wc` on git-tracked files only and never printing content, git
-unable to look above the root, no format strings, no symlinks on a path, a locked trust file
+unable to look above the root or out of a plain repository, git limited to forms that print no
+file or commit content, no format strings, no symlinks on a path, a locked trust file
 checked on one descriptor, a scratch environment, time and output bounds; POSIX only) is designed in
 `docs/rederive.md`.
 

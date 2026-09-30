@@ -29,8 +29,10 @@ runs, and the line is flagged inline: `✓` when it agrees, `⚠ STALE` when it
 disagrees, `⚠ DERIVE ERROR` when it errors, `⛔ REFUSED` when its command is
 outside the allowlist below, and `⚠ NOT DERIVED` when the load ran out of
 budget before reaching it. Text loaded this way starts with a
-`> [anneal re-derive]` line and can be saved back as it is: the save removes
-that line and the flags, and touches nothing in text that lacks it.
+`> [anneal re-derive]` line and can be saved back as it is. The save removes
+that header only when the whole line is exactly what re-derive writes, so an
+authored note is never deleted, and it always removes a flag after a State
+line's closing `]`, so a forged `✓` is never persisted.
 Re-deriving already re-derived text gives the same result as re-deriving the
 original.
 
@@ -121,7 +123,7 @@ known to be dangerous.
 
 | Program | Allowed form |
 |---|---|
-| `git` | the subcommand must be the first argument (so `-c`, `-C`, `--exec-path`, `--git-dir` and every other global option are impossible), drawn from `rev-parse`, `describe`, `rev-list`, `merge-base`, `log`, `cat-file`, `ls-files`, `ls-tree`, `for-each-ref`, each with its own flag allowlist |
+| `git` | the subcommand must be the first argument (so `-c`, `-C`, `--exec-path`, `--git-dir` and every other global option are impossible), drawn from `rev-parse`, `describe`, `rev-list`, `merge-base --is-ancestor`, `cat-file -e`, `ls-files`, each with its own flag allowlist. Every one answers with an exit status, a commit id, a count, a tag name or a tracked path, never with file or commit content |
 | `grep` | `grep FLAGS PATTERN PATH...` with short flags only, at least one of `-c` `-q` `-l` `-L` (it answers with a count or a yes/no and never prints file content), no `-r` / `-R` / `-e` / `-f`, and at least one path |
 | `wc` | `wc [-lcwm] PATH...`, at least one path |
 | `test` | `test -e|-f|-d|-s PATH` |
@@ -136,17 +138,18 @@ Git subcommands that are **excluded on purpose**, with the reason:
   `--stat`, `-S`, `-G`): they can run textconv drivers, external diff
   programs or the fsmonitor hook from repository configuration.
 - `grep`: its `-O` / `--open-files-in-pager` flag runs a program.
-- `tag`, `branch`: their bare forms create refs. `for-each-ref` covers
-  listing.
+- `tag`, `branch`: their bare forms create refs.
+- `log`, `cat-file -p` / `-t` / `-s`, `ls-tree`, `for-each-ref`: they print
+  content, and review found repository configuration and metadata reaching
+  through them three times (a `format.pretty` that brings back
+  signature-verifying placeholders, a `mailmap.file` outside the root, an
+  object store outside the root through `alternates`). They were removed
+  rather than filtered: a guard defeated a new way each round has no bound.
 - `diff --no-index`, `grep --no-index`: they read files outside the repository.
 - `--output`, `--textconv`, `--filters`, `--ext-diff`, `--batch*`: they write
   files, run filters or read stdin.
-- **No format strings at all:** `--format`, `--pretty`, `--date` and
-  `for-each-ref --format` / `--sort` are not accepted. A format string from a
-  STATE line reached git's configuration twice in review (placeholders that
-  verify a signature run the configured gpg program; placeholders that respect
-  a mailmap read a `mailmap.file` outside the root), so the construct takes
-  none rather than filtering them. Default output is enough to state a claim.
+- **No format strings at all** (`--format`, `--pretty`, `--date`), for the
+  same reason.
 
 Git is also launched with `--no-pager` and with configuration overrides that
 switch off the fsmonitor hook, point hooks at an empty path, replace every gpg
@@ -168,12 +171,20 @@ inside the resolved root. A command is at most a few hundred characters and a
 reading `~/.ssh/id_rsa` or `/etc/passwd` and pasting the result into the
 loaded context.
 
-Inside the root, `grep` and `wc` read only files git tracks: for a line that
+Inside the root, `grep` and `wc` read only files git tracks as regular files,
+matched by exact name (`GIT_LITERAL_PATHSPECS`, index mode `100644` or
+`100755`, so not a glob, a submodule or a tracked symlink): for a line that
 names an untracked or ignored file (a `.env`, a key) nothing is read, and the
 claim is judged `⚠ STALE` (a file that left git is the most common real
 drift, and it should not block a save). A crafted line cannot turn a count
 into an oracle on a secret the repository never held; a tracked symlink to
 one is refused by the symlink rule above. `test` may check that any path inside the root exists.
+
+Git runs only in a plain repository: the root's `.git` must be a real
+directory (not a gitfile or symlink, so not a linked worktree), `objects` and
+`refs` must not be symlinks, and there must be no `commondir` and no object
+`alternates`. Otherwise git would follow its own metadata out of the root, and
+the line is a `⚠ DERIVE ERROR`.
 
 Git cannot look above the root: `GIT_CEILING_DIRECTORIES` is set to the
 root's parent, so a root that is a subdirectory of a larger repository (a
@@ -186,8 +197,9 @@ than the parent's. Bind the root to a repository's top level.
 - The child environment is built from scratch (`_child_env` in
   `anneal_memory/rederive.py` is the list). Nothing else is inherited, so
   `GIT_DIR`, `GIT_WORK_TREE`, `LD_PRELOAD` and similar never reach the child.
-- `PATH` keeps only absolute entries, and a program that resolves to a file
-  inside the root is refused, so a `grep` committed to the repository never
+- `PATH` keeps only absolute entries outside the root, and a program that
+  resolves to a file inside the root is refused, so neither git nor a helper
+  git starts (a gpg program, say) can be a repository file, and so a `grep` committed to the repository never
   runs in place of the system one. On Windows only a `.exe` runs (a `.bat` or
   `.cmd` wrapper would go through `cmd.exe`, a shell).
 - stdin is closed.
@@ -201,11 +213,11 @@ than the parent's. Bind the root to a repository's top level.
 
 Each command has a timeout and an output cap, and each load has a total time
 budget and a cap on the number of lines it derives. A command that exceeds its
-timeout or cap has its process group killed and counts as an error. One
-timeout covers a whole line, including the tracked-file check, and the load
-budget includes resolving the pinned ref. Every derive line counts toward the
-line cap, refused ones too. A line is started only while at least one full
-command timeout of the load budget is left, so running out of budget never shows up as a command's own timeout;
+timeout or cap has its process group killed and counts as an error. A line
+spends at most one timeout on the tracked-file check and one on its command,
+and the load budget includes resolving the pinned ref. Every derive line counts toward the
+line cap, refused ones too. A line is started only while at least one
+line's worth (two command timeouts) of the load budget is left, so running out of budget never shows up as a command's own timeout;
 lines not reached are flagged `⚠ NOT DERIVED` rather than silently passed. The exact limits are the `DEFAULT_*` constants in
 `anneal_memory/rederive.py`.
 

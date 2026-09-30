@@ -111,6 +111,8 @@ EVIL = [
     'git grep -O"touch {canary}" VERSION',
     "git diff --no-index /etc/passwd app.py",
     "git tag pwned",
+    "git log -1 => x",  # format.pretty in repo config reaches log (codex r2)
+    "git cat-file -p HEAD:app.py => x",  # content through alternates (codex r2)
     "git log -1 --format=%+G? => x",  # signature modifiers (L2)
     "git for-each-ref --format=%(*signature:grade) => x",
     "grep -h API .env => x",  # prints content (L2)
@@ -176,12 +178,20 @@ def test_crafted_malicious_lines_are_refused(project, tmp_path):
     )
     assert "OUTSIDE-SECRET" not in rederive_continuity(store).text
 
+    # A repository whose object store points outside the root runs no git.
+    alt = repo / ".git" / "objects" / "info" / "alternates"
+    alt.write_text(str(tmp_path / "elsewhere.git" / "objects") + "\n")
+    Path(store.continuity_path).write_text(_continuity(TRUE_STATE))
+    git_lines = [r for r in rederive_continuity(store).results if "git " in r.line]
+    assert git_lines and all(r.status == "error" and "alternates" in r.detail for r in git_lines)
+    alt.unlink()
+
     # An untracked secret is never read: the claim is judged stale, unread.
     Path(store.continuity_path).write_text(
         _continuity(TRUE_STATE + ["- key [derive: grep -c API .env => 1]"])
     )
     untracked = rederive_continuity(store).results[-1]
-    assert (untracked.status, untracked.detail) == ("stale", "a path is not a file git tracks in the root")
+    assert (untracked.status, untracked.detail) == ("stale", "a path is not a regular file git tracks in the root")
 
     # A root inside a larger repo: git must not discover the parent (L1, L2).
     (repo / "sub").mkdir()
@@ -191,6 +201,6 @@ def test_crafted_malicious_lines_are_refused(project, tmp_path):
     prepare_wrap(inner)
     with pytest.raises(ValueError, match="derive commands failed"):
         validated_save_continuity(
-            inner, _continuity(["- parent read [derive: git cat-file -p HEAD:app.py => x]"])
+            inner, _continuity(["- parent read [derive: git cat-file -e HEAD:app.py]"])
         )
     inner.close()

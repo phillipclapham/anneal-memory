@@ -110,11 +110,15 @@ _APPENDED_FLAG = re.compile(r"  (?:✓|⚠ [A-Z][A-Z ]*[A-Z]|⛔ REFUSED)(?: \(.
 
 
 def strip_flag(line: str) -> str:
-    """``line`` without a flag :func:`rederive_text` appended to it."""
-    return _APPENDED_FLAG.sub("", line.rstrip())
+    """``line`` without a flag :func:`rederive_text` appended to it; any other
+    line comes back byte for byte."""
+    m = _APPENDED_FLAG.search(line)
+    return line[: m.start()] if m else line
 
 
-_HEADER_PREFIXES = ("> re-derived ", "> re-derive is not enabled for this store")
+# Every text rederive_text returns starts with this tag, and only such text is
+# ever stripped at save: an authored line can never be mistaken for a flag.
+_ENVELOPE = "> [anneal re-derive] "
 
 
 def strip_rederive_output(text: str, schema: list[SectionSpec]) -> str:
@@ -122,12 +126,13 @@ def strip_rederive_output(text: str, schema: list[SectionSpec]) -> str:
     blank line after it) and every flag it appended to a State line. Saving
     loaded text back must never persist a verdict that is true only at load."""
     lines = text.split("\n")
-    if lines and lines[0].startswith(_HEADER_PREFIXES):
-        lines = lines[2:] if len(lines) > 1 and not lines[1].strip() else lines[1:]
+    if not lines or not lines[0].startswith(_ENVELOPE):
+        return text  # not re-derive output: untouched
+    lines = lines[2:] if len(lines) > 1 and not lines[1].strip() else lines[1:]
     joined = "\n".join(lines)
     for idx, line in derived_state_lines(joined, schema):
         cr = "\r" if line.endswith("\r") else ""
-        lines[idx] = strip_flag(line.rstrip("\r")) + cr
+        lines[idx] = strip_flag(line[:-1] if cr else line) + cr
     return "\n".join(lines)
 
 
@@ -152,7 +157,7 @@ def parse_annotation(line: str) -> Annotation | None:
             return None
         return Annotation(kind="judged", claim=claim, judgement=body)
     if _EXPECT_SEP in body:
-        command, expected = body.split(_EXPECT_SEP, 1)
+        command, expected = body.rsplit(_EXPECT_SEP, 1)  # a pattern may hold " => "
         return Annotation(
             kind="derive", claim=claim, command=command.strip(), expected=expected.strip()
         )
@@ -197,9 +202,12 @@ _GIT_FORMS: dict[str, _GitForm] = {
             "--extended-regexp", "--all-match", "--invert-grep", "--no-decorate",
             "--no-color",
         }),
+        # No --format / --pretty / --date: a format string from a STATE line
+        # reached git configuration twice (signature verification, mailmap
+        # files outside the root), so the construct takes none (spore-813).
         valued=frozenset({
-            "--max-count", "--skip", "--format", "--pretty", "--grep", "--since",
-            "--until", "--after", "--before", "--author", "--date",
+            "--max-count", "--skip", "--grep", "--since",
+            "--until", "--after", "--before", "--author",
         }),
         digit_count=True,
     ),
@@ -207,17 +215,11 @@ _GIT_FORMS: dict[str, _GitForm] = {
     "ls-files": _GitForm(bare=frozenset({"--error-unmatch", "--cached"})),
     "ls-tree": _GitForm(bare=frozenset({"-r", "-d", "-t", "--name-only", "--full-tree"})),
     "for-each-ref": _GitForm(
-        valued=frozenset({"--format", "--sort", "--count", "--points-at", "--contains", "--merged", "--no-merged"}),
+        valued=frozenset({"--count", "--points-at", "--contains", "--merged", "--no-merged"}),
     ),
 }
 
 GIT_SUBCOMMANDS: frozenset[str] = frozenset(_GIT_FORMS)
-
-# Format placeholders that make git verify a signature, i.e. run gpg.program:
-# %G? and friends, with or without a %+ / %- / %<space> modifier, and any
-# ref-filter signature atom (%(signature…), %(*signature…)).
-_GIT_SIGNATURE_FORMAT = re.compile(r"%[-+ ]?G")
-_GIT_SIGNATURE_ATOM = re.compile(r"signature", re.IGNORECASE)
 
 # grep may only answer with a count or a yes/no, never print file content:
 # one of the answer flags is required, and the rest only shape the match.
@@ -236,7 +238,7 @@ def _check_path(arg: str, root: Path | None) -> None:
         raise DeriveRefused(f"path argument {arg!r} must be relative to the root")
     if ".." in p.parts:
         raise DeriveRefused(f"path argument {arg!r} must not contain '..'")
-    if ".git" in p.parts:
+    if any(part.casefold() == ".git" for part in p.parts):
         raise DeriveRefused(f"path argument {arg!r} must not be inside .git")
     if p.drive or p.root:
         raise DeriveRefused(f"path argument {arg!r} must be relative to the root")
@@ -249,6 +251,14 @@ def _check_path(arg: str, root: Path | None) -> None:
             inside = False
         if not inside:
             raise DeriveRefused(f"path argument {arg!r} resolves outside the root")
+        # No symlink anywhere on the path: a TRACKED symlink (link -> .env,
+        # link -> .git/config) resolves inside the root and passes the tracked
+        # check, yet opens a file the rules promise is unreadable (L3).
+        walk = root_real
+        for part in p.parts:
+            walk = os.path.join(walk, part)
+            if os.path.islink(walk):
+                raise DeriveRefused(f"path argument {arg!r} passes through a symlink")
 
 
 def _validate_git(args: list[str]) -> None:
@@ -279,8 +289,6 @@ def _validate_git(args: list[str]) -> None:
                 name, value = a.split("=", 1)
                 if name not in form.valued:
                     raise DeriveRefused(f"git {sub} flag {name!r}= is not allowed")
-                if _GIT_SIGNATURE_FORMAT.search(value) or _GIT_SIGNATURE_ATOM.search(value):
-                    raise DeriveRefused("signature-verifying format placeholders are not allowed")
                 continue
             if a not in form.bare:
                 raise DeriveRefused(f"git {sub} flag {a!r} is not allowed")
@@ -307,6 +315,8 @@ def _validate_grep(args: list[str], root: Path | None) -> None:
     rest = args[i:]
     if len(rest) < 2:
         raise DeriveRefused("grep needs a PATTERN and at least one PATH")
+    if len(rest) - 1 > _MAX_PATHS:
+        raise DeriveRefused(f"grep takes at most {_MAX_PATHS} paths")
     for path in rest[1:]:
         _check_path(path, root)
 
@@ -318,6 +328,8 @@ def _validate_wc(args: list[str], root: Path | None) -> None:
         i += 1
     if i == len(args):
         raise DeriveRefused("wc needs at least one PATH")
+    if len(args) - i > _MAX_PATHS:
+        raise DeriveRefused(f"wc takes at most {_MAX_PATHS} paths")
     for path in args[i:]:
         _check_path(path, root)
 
@@ -339,7 +351,20 @@ _VALIDATORS = {
 PROGRAMS: frozenset[str] = frozenset(_VALIDATORS)
 
 
-def _require_tracked(argv: list[str], root: str) -> None:
+class _TrackError(Exception):
+    """The tracked check itself failed (no git, no repository, timeout)."""
+
+
+class _NotTracked(Exception):
+    """A lexically allowed path that git does not track: the claim is judged
+    stale (the file left git, or never entered it), and nothing is read."""
+
+
+_MAX_PATHS = 8  # path arguments per grep/wc line
+_MAX_COMMAND_CHARS = 400
+
+
+def _require_tracked(argv: list[str], root: str, timeout: float) -> None:
     """grep and wc read only files git tracks, so an untracked or ignored
     file inside the root (a .env, a key) is never read. Needs a git root."""
     if argv[0] == "grep":
@@ -351,13 +376,15 @@ def _require_tracked(argv: list[str], root: str) -> None:
         paths = [a for a in argv[1:] if not a.startswith("-")]
     else:
         return
-    for path in paths:
-        res = _run_bounded(
-            ["git", *_GIT_HARDENING, "ls-files", "--error-unmatch", "--", path],
-            root, DEFAULT_COMMAND_TIMEOUT, 4096,
-        )
-        if res.returncode != 0:
-            raise DeriveRefused(f"path argument {path!r} is not a file git tracks in the root")
+    res = _run_bounded(
+        ["git", *_GIT_HARDENING, "ls-files", "--error-unmatch", "--", *paths],
+        root, timeout, 64 * 1024,
+    )
+    if res.spawn_error or res.timed_out or res.overflowed or res.returncode not in (0, 1):
+        why = res.spawn_error or ("timed out" if res.timed_out else f"exit {res.returncode}")
+        raise _TrackError(f"cannot check that the paths are tracked ({why})")
+    if res.returncode != 0:
+        raise _NotTracked("a path is not a file git tracks in the root")
 
 
 def validate_command(command: str, root: Path | None = None) -> list[str]:
@@ -369,6 +396,8 @@ def validate_command(command: str, root: Path | None = None) -> list[str]:
     """
     if not command or not command.strip():
         raise DeriveRefused("empty derive command")
+    if len(command) > _MAX_COMMAND_CHARS:
+        raise DeriveRefused(f"command longer than {_MAX_COMMAND_CHARS} characters")
     bad = sorted({c for c in command if c in _FORBIDDEN_CHARS or (ord(c) < 32) or ord(c) == 127})
     if bad:
         raise DeriveRefused(
@@ -401,6 +430,9 @@ _GIT_HARDENING = [
     "-c", "core.hooksPath=/dev/null",
     "-c", "protocol.allow=never",
     "-c", "log.showSignature=false",
+    "-c", "log.mailmap=false",
+    "-c", "mailmap.file=",
+    "-c", "mailmap.blob=",
     "-c", "gpg.program=false",
     "-c", "gpg.ssh.program=false",
     "-c", "gpg.x509.program=false",
@@ -493,8 +525,15 @@ def _run_bounded(argv: list[str], cwd: str, timeout: float, cap: int) -> _RunOut
     out, err = bytearray(), bytearray()
     overflow = threading.Event()
 
-    def pump(stream, buf: bytearray) -> None:
-        fd = stream.fileno()
+    def pump(fd: int, buf: bytearray) -> None:
+        # ``fd`` is this thread's own dup, closed here, so closing the Popen
+        # stream below can never leave this read on a recycled descriptor.
+        try:
+            _pump(fd, buf)
+        finally:
+            os.close(fd)
+
+    def _pump(fd: int, buf: bytearray) -> None:
         while True:
             try:
                 chunk = os.read(fd, 65536)
@@ -510,8 +549,8 @@ def _run_bounded(argv: list[str], cwd: str, timeout: float, cap: int) -> _RunOut
                 break
 
     threads = [
-        threading.Thread(target=pump, args=(proc.stdout, out), daemon=True),
-        threading.Thread(target=pump, args=(proc.stderr, err), daemon=True),
+        threading.Thread(target=pump, args=(os.dup(proc.stdout.fileno()), out), daemon=True),
+        threading.Thread(target=pump, args=(os.dup(proc.stderr.fileno()), err), daemon=True),
     ]
     for t in threads:
         t.start()
@@ -567,8 +606,8 @@ def _derived_headings(schema: list[SectionSpec]) -> list[str]:
 def derived_state_lines(text: str, schema: list[SectionSpec]) -> list[tuple[int, str]]:
     """``(index, line)`` for every content line inside a derived-state section.
 
-    Blank lines and ``###``-and-deeper subheadings are structure, not claims,
-    and are skipped. A section ends at the next ``## `` header.
+    Blank lines and bare ``###``-and-deeper subheadings are structure, not
+    claims, and are skipped; a subheading carrying a digit is a claim. A section ends at the next ``## `` header.
     """
     headings = _derived_headings(schema)
     if not headings:
@@ -582,8 +621,10 @@ def derived_state_lines(text: str, schema: list[SectionSpec]) -> list[tuple[int,
                 re.search(rf"(?<!\w){re.escape(h)}(?!\w)", low) for h in headings
             )
             continue
-        if not inside or not line.strip() or line.lstrip().startswith("###"):
+        if not inside or not line.strip():
             continue
+        if line.lstrip().startswith("###") and not re.search(r"\d", line):
+            continue  # a bare subheading; one carrying a number is a claim
         out.append((i, line))
     return out
 
@@ -633,7 +674,8 @@ class RederiveReport:
 
     @property
     def clean(self) -> bool:
-        return all(r.status in ("ok", "judged") for r in self.results)
+        """Every State line was checked and holds. False when nothing ran."""
+        return self.enabled and all(r.status in ("ok", "judged") for r in self.results)
 
 
 def _judge_line(
@@ -650,12 +692,20 @@ def _judge_line(
         return LineResult(idx, line, "unannotated", "no [derive: …] or [judged: …]")
     if ann.kind == "judged":
         return LineResult(idx, line, "judged")
+    line_deadline = time.monotonic() + timeout  # one budget for the whole line
     try:
         argv = validate_command(ann.command, Path(root) if root else None)
         if root is not None:
-            _require_tracked(argv, root)
+            _require_tracked(argv, root, timeout)
     except DeriveRefused as e:
         return LineResult(idx, line, "refused", str(e))
+    except _NotTracked as e:
+        return LineResult(idx, line, "stale", str(e))
+    except _TrackError as e:
+        return LineResult(idx, line, "error", str(e))
+    timeout = line_deadline - time.monotonic()
+    if timeout <= 0:
+        return LineResult(idx, line, "error", "timed out checking tracked paths")
     if argv[0] == "git":
         if any(REF_TOKEN in a for a in argv):
             if ref is None:
@@ -719,22 +769,23 @@ def rederive_text(
     ``root=None`` means the store is not opted in: nothing executes, and the
     returned text carries a one-line notice instead of flags.
     """
+    text = strip_rederive_output(text, schema)  # re-deriving is idempotent
     lines = text.split("\n")
     targets = derived_state_lines(text, schema)
     if root is None:
         notice = (
-            "> re-derive is not enabled for this store; STATE lines were not "
+            f"{_ENVELOPE}not enabled for this store; STATE lines were not "
             "checked (see `anneal-memory derive allow`)."
         )
         return RederiveReport(text=notice + "\n\n" + text if targets else text, enabled=False)
 
+    deadline = time.monotonic() + budget
     root_s = os.path.realpath(root)
     needs_ref = any(REF_TOKEN in (parse_annotation(l) or Annotation("judged", "")).command for _, l in targets)
     ref_sha, ref_err = (None, None)
     if needs_ref or ref is not None:
         ref_sha, ref_err = _resolve_ref(root_s, ref, timeout)
 
-    deadline = time.monotonic() + budget
     results: list[LineResult] = []
     ran = 0
     for idx, line in targets:
@@ -751,7 +802,7 @@ def rederive_text(
             results.append(LineResult(idx, line, "skipped", f"load budget {budget:g}s"))
             continue
         r = _judge_line(idx, line, root_s, ref_sha, ref_err, timeout, output_cap)
-        if is_cmd and r.status != "refused":
+        if is_cmd:  # refused lines count too, so the cap bounds the work
             ran += 1
         results.append(r)
 
@@ -763,7 +814,7 @@ def rederive_text(
     counts = {s: sum(1 for r in results if r.status == s) for s in _FLAGS}
     summary = ", ".join(f"{n} {s}" for s, n in counts.items() if n)
     header = (
-        f"> re-derived {len(results)} STATE line(s) in {root_s}"
+        f"{_ENVELOPE}{len(results)} STATE line(s) in {root_s}"
         + (f" at {ref_sha}" if ref_sha else "")
         + (f": {summary}" if summary else "")
         + ". git lines read the pinned ref only where they use @REF; grep, wc "
@@ -787,29 +838,44 @@ def trust_file_path() -> Path:
     return Path.home() / ".anneal-memory" / "derive-trust.json"
 
 
+_SUPPORTED = os.name == "posix"  # ownership, O_NOFOLLOW, flock, killpg
+
+
 def _load_trust(path: Path, *, strict: bool = False) -> list[dict]:
     """The bindings in the trust file. A missing file is empty. A file that is
-    unreadable, not owned by this user, or writable by others trusts nothing
-    on read, and ``strict`` (the write paths) raises instead, so ``allow`` and
-    ``revoke`` never overwrite bindings they could not read."""
+    unreadable, a symlink, not owned by this user, or writable by others (or
+    whose directory is) trusts nothing on read, and ``strict`` (the write
+    paths) raises instead, so ``allow`` and ``revoke`` never overwrite
+    bindings they could not read. The checks and the read use ONE descriptor,
+    so the file cannot be swapped between them."""
 
     def untrusted(why: str) -> list[dict]:
         if strict:
             raise ValueError(f"trust file {path}: {why}; fix or remove it first")
         return []
 
+    if not _SUPPORTED:
+        return untrusted("re-derive is supported on POSIX systems only")
     try:
-        st = os.stat(path)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except FileNotFoundError:
         return []
     except OSError as e:
-        return untrusted(f"cannot stat ({e})")
-    if os.name == "posix" and (st.st_uid != os.geteuid() or st.st_mode & 0o022):
-        return untrusted("not owned by this user, or writable by others")
+        return untrusted(f"cannot open without following links ({e})")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        st = os.fstat(fd)
+        if st.st_uid != os.geteuid() or st.st_mode & 0o022:
+            return untrusted("not owned by this user, or writable by others")
+        # Whoever can write the directory can replace the file.
+        pst = os.stat(os.path.dirname(os.path.abspath(path)))
+        if pst.st_uid != os.geteuid() or pst.st_mode & 0o022:
+            return untrusted("its directory is not owned by this user, or is writable by others")
+        with os.fdopen(os.dup(fd), "r", encoding="utf-8") as f:
+            data = json.loads(f.read())
     except (OSError, ValueError):
         return untrusted("unreadable")
+    finally:
+        os.close(fd)
     stores = data.get("stores") if isinstance(data, dict) else None
     if not isinstance(stores, list):
         return untrusted("has no 'stores' list")
@@ -817,11 +883,12 @@ def _load_trust(path: Path, *, strict: bool = False) -> list[dict]:
 
 
 def _write_trust(path: Path, stores: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".derive-trust.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump({"version": 1, "stores": stores}, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     except BaseException:
@@ -830,6 +897,26 @@ def _write_trust(path: Path, stores: list[dict]) -> None:
         except OSError:
             pass
         raise
+
+
+def _update_trust(path: Path, change) -> list[dict]:
+    """Read-modify-write the trust file under an exclusive lock on a stable
+    sibling, so a concurrent allow and revoke cannot lose either update."""
+    if not _SUPPORTED:
+        raise ValueError("re-derive is supported on POSIX systems only")
+    import fcntl
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(str(path) + ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        before = _load_trust(path, strict=True)
+        after = change(before)
+        if after is not before:
+            _write_trust(path, after)
+        return before
+    finally:
+        os.close(lock_fd)  # releases the flock
 
 
 def _db_key(db_path: str | os.PathLike) -> str | None:
@@ -848,14 +935,20 @@ def trusted_root(db_path: str | os.PathLike, trust_file: Path | None = None) -> 
     for s in _load_trust(tf):
         if s["db"] == key:
             root = s["root"]
-            if not os.path.isdir(root):
+            if not os.path.isabs(root) or not os.path.isdir(root):
                 return None
             # A trust file inside a bound root could have arrived with it.
-            tf_real = os.path.realpath(tf)
-            if os.path.commonpath([tf_real, root]) == root:
+            if _inside(os.path.realpath(tf), root):
                 return None
             return root
     return None
+
+
+def _inside(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:  # different drives
+        return False
 
 
 def allow_store(db_path: str | os.PathLike, root: str | os.PathLike, trust_file: Path | None = None) -> str:
@@ -867,13 +960,16 @@ def allow_store(db_path: str | os.PathLike, root: str | os.PathLike, trust_file:
     if not os.path.isdir(root_s):
         raise ValueError(f"root {root_s!r} is not a directory")
     path = trust_file or trust_file_path()
-    stores = [s for s in _load_trust(path, strict=True) if s["db"] != key]
-    stores.append({
+    if _inside(os.path.realpath(path), root_s):
+        raise ValueError(
+            f"the trust file {path} is inside the root; a binding there would be ignored"
+        )
+    entry = {
         "db": key,
         "root": root_s,
         "allowed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    })
-    _write_trust(path, stores)
+    }
+    _update_trust(path, lambda stores: [s for s in stores if s["db"] != key] + [entry])
     return root_s
 
 
@@ -881,12 +977,13 @@ def revoke_store(db_path: str | os.PathLike, trust_file: Path | None = None) -> 
     """Remove a store's binding. Returns whether one existed."""
     key = _db_key(db_path)
     path = trust_file or trust_file_path()
-    stores = _load_trust(path, strict=True)
-    kept = [s for s in stores if s["db"] != key]
-    if len(kept) == len(stores):
-        return False
-    _write_trust(path, kept)
-    return True
+
+    def drop(stores: list[dict]) -> list[dict]:
+        kept = [s for s in stores if s["db"] != key]
+        return stores if len(kept) == len(stores) else kept
+
+    before = _update_trust(path, drop)
+    return any(s["db"] == key for s in before)
 
 
 # --------------------------------------------------------------------------

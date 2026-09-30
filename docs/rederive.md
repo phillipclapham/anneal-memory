@@ -28,8 +28,11 @@ When the continuity is loaded with re-derive (`anneal-memory continuity
 runs, and the line is flagged inline: `✓` when it agrees, `⚠ STALE` when it
 disagrees, `⚠ DERIVE ERROR` when it errors, `⛔ REFUSED` when its command is
 outside the allowlist below, and `⚠ NOT DERIVED` when the load ran out of
-budget before reaching it. Text loaded this way can be saved back as it is:
-the save ignores the flags it appended.
+budget before reaching it. Text loaded this way starts with a
+`> [anneal re-derive]` line and can be saved back as it is: the save removes
+that line and the flags, and touches nothing in text that lacks it.
+Re-deriving already re-derived text gives the same result as re-deriving the
+original.
 
 A save (`validated_save_continuity`) refuses a State section in which a line
 carries no annotation or a refused command, and, on a store that is enabled
@@ -79,8 +82,18 @@ allow` model:
   bound root (a trust file that could have arrived with the repository).
   `allow` and `revoke` refuse to rewrite a trust file they cannot read, rather
   than drop the bindings in it.
+- The trust file is opened once, without following a symlink, and ownership
+  and permissions are checked on that same descriptor before it is read, so it
+  cannot be swapped between the check and the read. `allow` and `revoke` hold
+  an exclusive lock on a sibling `.lock` file across their read-modify-write,
+  so concurrent calls cannot lose an update (a revoke cannot be undone by a
+  racing allow). `allow` refuses to write a binding the reader would ignore.
+- `revoke` and `status` work on a store whose database has gone, so a stale
+  binding can always be removed.
 - The binding is by **path**. A different store copied over a trusted path
   inherits the trust; treat an allowed path as the user's own.
+- Re-derive runs on POSIX systems only. Elsewhere the ownership checks, the
+  no-follow open and the lock cannot be made, so nothing is ever trusted.
 - `derive revoke` removes the binding.
 
 On an untrusted store, a re-derive load returns the text with a one-line
@@ -128,12 +141,17 @@ Git subcommands that are **excluded on purpose**, with the reason:
 - `diff --no-index`, `grep --no-index`: they read files outside the repository.
 - `--output`, `--textconv`, `--filters`, `--ext-diff`, `--batch*`: they write
   files, run filters or read stdin.
-- Format values that verify a signature (`%G?` with any modifier, any
-  `signature` atom) are refused: verification runs the configured gpg program.
+- **No format strings at all:** `--format`, `--pretty`, `--date` and
+  `for-each-ref --format` / `--sort` are not accepted. A format string from a
+  STATE line reached git's configuration twice in review (placeholders that
+  verify a signature run the configured gpg program; placeholders that respect
+  a mailmap read a `mailmap.file` outside the root), so the construct takes
+  none rather than filtering them. Default output is enough to state a claim.
 
 Git is also launched with `--no-pager` and with configuration overrides that
 switch off the fsmonitor hook, point hooks at an empty path, replace every gpg
-program with `false` and switch off signature display, and with environment
+program with `false`, switch off signature display and every mailmap source
+(`log.mailmap`, `mailmap.file`, `mailmap.blob`), and with environment
 variables that forbid every transport protocol (`GIT_ALLOW_PROTOCOL=none`,
 which a repository's own `protocol.*.allow` cannot override), disable lazy
 fetching in partial clones, terminal prompts and optional index locks. A read
@@ -142,15 +160,20 @@ cannot fetch, prompt, verify a signature or write.
 ### 4. File arguments stay inside the root
 
 For `grep`, `wc` and `test`, every path argument must be relative, must not
-contain `..` or pass through `.git`, and its resolved real path (after
-symlinks) must lie inside the resolved root. This stops a crafted line from
+contain `..` or pass through `.git` (in any letter case), must not pass
+through a symlink anywhere along it, and its resolved real path must lie
+inside the resolved root. A command is at most a few hundred characters and a
+`grep` / `wc` line names at most a handful of paths (`_MAX_COMMAND_CHARS`,
+`_MAX_PATHS`). This stops a crafted line from
 reading `~/.ssh/id_rsa` or `/etc/passwd` and pasting the result into the
 loaded context.
 
-Inside the root, `grep` and `wc` read only files git tracks: an untracked or
-ignored file (a `.env`, a key) is refused before anything runs, so a crafted
-line cannot turn a count into an oracle on a secret the repository never
-held. `test` may check that any path inside the root exists.
+Inside the root, `grep` and `wc` read only files git tracks: for a line that
+names an untracked or ignored file (a `.env`, a key) nothing is read, and the
+claim is judged `⚠ STALE` (a file that left git is the most common real
+drift, and it should not block a save). A crafted line cannot turn a count
+into an oracle on a secret the repository never held; a tracked symlink to
+one is refused by the symlink rule above. `test` may check that any path inside the root exists.
 
 Git cannot look above the root: `GIT_CEILING_DIRECTORIES` is set to the
 root's parent, so a root that is a subdirectory of a larger repository (a
@@ -178,9 +201,11 @@ than the parent's. Bind the root to a repository's top level.
 
 Each command has a timeout and an output cap, and each load has a total time
 budget and a cap on the number of lines it derives. A command that exceeds its
-timeout or cap has its process group killed and counts as an error. A command
-is started only while at least one full command timeout of the load budget is
-left, so running out of budget never shows up as a command's own timeout;
+timeout or cap has its process group killed and counts as an error. One
+timeout covers a whole line, including the tracked-file check, and the load
+budget includes resolving the pinned ref. Every derive line counts toward the
+line cap, refused ones too. A line is started only while at least one full
+command timeout of the load budget is left, so running out of budget never shows up as a command's own timeout;
 lines not reached are flagged `⚠ NOT DERIVED` rather than silently passed. The exact limits are the `DEFAULT_*` constants in
 `anneal_memory/rederive.py`.
 

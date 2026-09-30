@@ -651,6 +651,12 @@ def cmd_continuity(args: argparse.Namespace) -> None:
         if ref is not None and not rederive:
             print("Error: --ref needs --rederive.", file=sys.stderr)
             sys.exit(2)
+        if rederive and not any(s["role"] == "derived-state" for s in store.section_schema):
+            print(
+                "Warning: this store's schema has no derived-state section; "
+                "nothing to re-derive.",
+                file=sys.stderr,
+            )
         if rederive:
             # Executes the State section's derive commands, contained per
             # docs/rederive.md; runs nothing on a store not opted in.
@@ -690,7 +696,9 @@ def cmd_derive(args: argparse.Namespace) -> None:
         print("Usage: anneal-memory derive {allow,revoke,status}", file=sys.stderr)
         sys.exit(2)
     db_path = Path(args.db).expanduser()
-    if not db_path.exists():
+    # revoke/status work on a binding whose database has gone, so a stale
+    # binding can always be removed.
+    if action == "allow" and not db_path.exists():
         print(f"Error: database not found: {db_path}", file=sys.stderr)
         sys.exit(1)
     if action == "allow":
@@ -701,7 +709,11 @@ def cmd_derive(args: argparse.Namespace) -> None:
             sys.exit(1)
         result = {"db": os.path.realpath(db_path), "root": root, "allowed": True}
     elif action == "revoke":
-        existed = revoke_store(db_path)
+        try:
+            existed = revoke_store(db_path)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
         result = {"db": os.path.realpath(db_path), "revoked": existed}
     else:
         root = trusted_root(db_path)

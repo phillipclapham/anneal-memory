@@ -115,8 +115,9 @@ EVIL = [
     "git for-each-ref --format=%(*signature:grade) => x",
     "grep -h API .env => x",  # prints content (L2)
     "grep -c root link_out => 1",  # a symlink out of the root
-    "grep -c API .env => 1",  # untracked secret: a count oracle (L2)
+    "grep -c API env_link => 1",  # a TRACKED symlink to the untracked .env (L3)
     "grep -c url .git/config => 1",
+    "grep -c url .GIT/config => 1",  # case-insensitive filesystems
 ]
 
 
@@ -125,6 +126,9 @@ def test_crafted_malicious_lines_are_refused(project, tmp_path):
     canary = tmp_path / "pwned"
     (repo / "link_out").symlink_to("/etc/passwd")
     (repo / ".env").write_text("API_KEY=sk-live-secret\n")  # untracked
+    (repo / "env_link").symlink_to(".env")
+    subprocess.run([*_GIT, "add", "env_link"], cwd=repo, check=True)
+    subprocess.run([*_GIT, "commit", "-qm", "link"], cwd=repo, check=True)
     evil_lines = [f"- evil{i} [derive: {c.format(canary=canary)}]" for i, c in enumerate(EVIL)]
     evil_text = _continuity(TRUE_STATE + evil_lines)
 
@@ -161,6 +165,23 @@ def test_crafted_malicious_lines_are_refused(project, tmp_path):
     tags = subprocess.run(["git", "tag", "-l", "pwned"], cwd=repo, capture_output=True, text=True)
     assert tags.stdout == ""
     assert "sk-live" not in report.text
+
+    # A repository-configured mailmap outside the root is never read (codex L3):
+    # plain log output shows the recorded author, not the mapped one.
+    outside = tmp_path / "outside.mailmap"
+    outside.write_text("OUTSIDE-SECRET <out@x> <t@t>\n")
+    subprocess.run(["git", "config", "mailmap.file", str(outside)], cwd=repo, check=True)
+    Path(store.continuity_path).write_text(
+        _continuity(TRUE_STATE + ["- author [derive: git log -1 => nope]"])
+    )
+    assert "OUTSIDE-SECRET" not in rederive_continuity(store).text
+
+    # An untracked secret is never read: the claim is judged stale, unread.
+    Path(store.continuity_path).write_text(
+        _continuity(TRUE_STATE + ["- key [derive: grep -c API .env => 1]"])
+    )
+    untracked = rederive_continuity(store).results[-1]
+    assert (untracked.status, untracked.detail) == ("stale", "a path is not a file git tracks in the root")
 
     # A root inside a larger repo: git must not discover the parent (L1, L2).
     (repo / "sub").mkdir()

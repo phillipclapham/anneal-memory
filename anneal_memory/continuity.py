@@ -1245,8 +1245,9 @@ def _crystallization_block(
         ]
     if in_list:
         parts += [
-            "These crystallized patterns are HOT again (their domain re-warmed) — "
-            "consider pulling them back INTO `## Patterns` if currently load-bearing:",
+            "These crystallized patterns were activated recently (crystallized or "
+            "touched within the activation window) — consider pulling them back "
+            "INTO `## Patterns` only if currently load-bearing:",
             "",
             in_list,
             "",

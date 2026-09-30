@@ -23,7 +23,7 @@ bears on the query. Injecting noise would dilute the exact salience on-demand
 recall exists to protect. Hence: a minimum distinctive-keyword count, a per-item
 ≥2-keyword-hit floor, and a weighted-overlap threshold.
 
-RETRIEVAL BACKEND — keyword PLUS associative (Hebbian), LIVE. The episode tier is
+RETRIEVAL BACKEND — keyword PLUS associative (Hebbian). The episode tier is
 weighted keyword overlap and is reliable (episodes carry rich, varied vocabulary).
 The crystallized PATTERN tier is not: a graduated pattern is compressed to a sparse
 name + clause, so its relevance to a query is usually SEMANTIC, not lexical — and

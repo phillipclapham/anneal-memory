@@ -540,8 +540,9 @@ class CrystalStore:
         ``last_activated_on`` to ``today`` (you just engaged the pattern to file/refile
         it). So a freshly-crystallized pattern starts ``hot`` and settles over the
         activation window; :meth:`surface_rewarm_candidates` will surface it until it
-        cools, which is benign (re-warm is propose-not-auto — the composer that just
-        crystallized it won't re-add it). Returns the stored record."""
+        cools; the composer sees it listed although a wrap just routed it out of the
+        working set (re-warm is propose-not-auto, so nothing re-adds it by itself).
+        Returns the stored record."""
         name = self._validate_name(name)
         level = self._validate_level(level)
         if not isinstance(explanation, str) or not explanation.strip():

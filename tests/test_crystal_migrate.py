@@ -489,3 +489,21 @@ class TestPrepareSurfacing:
             result = prepare_wrap(store, crystal_store=crystal)
         assert result["status"] == "ready"        # the wrap is NOT broken by the fault
         assert result["rewarm_candidates"] == []  # crystal tier degraded, not fatal
+
+
+class TestRewarmTextClaim:
+    def test_composer_text_makes_no_rewarm_claim(self, tmp_path):
+        """Nothing calls touch(), so a hot crystal is one a wrap just routed out;
+        the list must not say its domain re-warmed (Diogenes MEDIUM
+        diogenes-20260930-025027-f04808687960)."""
+        store = Store(tmp_path / "mem.db", project_name="flow")
+        store.set_section_schema(FLOW_SCHEMA)
+        crystal = CrystalStore(tmp_path / "mem.crystal.json")
+        crystal.crystallize(name="hot_pattern", level=3, explanation="x",
+                            today=date.today())
+        store.record("an episode about substrate topics worth at least eighty characters here now.",
+                     "observation")
+        text = str(prepare_wrap(store, crystal_store=crystal))
+        assert "- hot_pattern" in text
+        assert "HOT again" not in text
+        assert "re-warmed" not in text

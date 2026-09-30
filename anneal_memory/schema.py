@@ -27,7 +27,7 @@ ordered list of ``(heading, role)`` pairs. Roles:
   ``derived-state``       Present-tense claims that prove themselves when read:
                           every line ends with ``[derive: …]`` or ``[judged: …]``
                           (see :mod:`anneal_memory.rederive` and
-                          ``docs/rederive.md``). Project stores only.
+                          ``docs/rederive.md``). Used by :data:`PROJECT_SCHEMA`.
 
 **Backward compatibility is the load-bearing invariant.** :data:`DEFAULT_SCHEMA`
 reproduces the exact pre-0.3.4 four-section behavior, and a store with no

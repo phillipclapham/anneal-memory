@@ -600,6 +600,10 @@ class _SaveContinuityOptional(TypedDict, total=False):
     # Present ONLY when ``compost=`` was passed, so the default return shape
     # is unchanged. ``NotRequired`` is 3.11+; the library targets 3.10.
     composted: dict[str, int]
+    # Present ONLY when a derived-state (project schema) State line did not
+    # hold at save (stale, or not derived within the load budget). The save
+    # committed; these lines are the agent's to fix next wrap.
+    stale_state: list[str]
 
 
 class SaveContinuityResult(_SaveContinuityOptional):

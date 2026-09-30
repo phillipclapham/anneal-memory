@@ -2,6 +2,33 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — project memory whose State proves itself when read
+
+- **A `project` section schema** (`init --schema project`, `set-schema project`, `PROJECT_SCHEMA`):
+  Plan / State / Decisions / Open / Lessons / History. Lessons graduate by citation, like Patterns.
+- **A `derived-state` section role.** Every non-blank line ends with `[derive: COMMAND => EXPECTED]`,
+  `[derive: COMMAND]` or `[judged: WHO, WHEN, AGAINST WHAT]`. `validated_save_continuity` refuses a
+  State line with no annotation or with a command outside the allowlist; on a store opted in to
+  re-derive it also refuses a command that errors. Stale lines do not refuse: they come back in the
+  result's new optional `stale_state` list (and the MCP reply), with a warning after commit.
+- **Re-derive at load:** `anneal-memory continuity --rederive [--ref REF]` and
+  `rederive_continuity(store)` run each State command and flag the line inline (`✓`, `⚠ STALE`,
+  `⚠ DERIVE ERROR`, `⛔ REFUSED`).
+- **`anneal-memory derive allow --root DIR | revoke | status`**, the per-user opt-in. Nothing
+  executes on a store that is not allowed.
+
+⚠ This executes commands stored in a memory file. The containment (opt-in outside the store, no
+shell, an argument-level allowlist of read-only `git` / `grep` / `wc` / `test` forms, paths
+confined to the root, `grep` / `wc` on git-tracked files only and never printing content, git
+unable to look above the root, a scratch environment, time and output bounds) is designed in
+`docs/rederive.md`.
+
+⚠ Downgrade: an older anneal-memory does not know the `derived-state` role. Measured with 0.9.15
+on a `project` store [run 2026-09-30]: display reads fall back to the default four-section schema,
+and `prepare_wrap` refuses with "Persisted section_schema is present but unreadable (corrupt)".
+
 ## [0.9.15] — 2026-09-25
 
 ### Fixed — the consolidate gate had holes (found by review of 0.9.14)

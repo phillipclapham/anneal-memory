@@ -646,11 +646,16 @@ def cmd_continuity(args: argparse.Namespace) -> None:
             sys.exit(1)
 
         report = None
-        if getattr(args, "rederive", False):
+        rederive = getattr(args, "rederive", False)
+        ref = getattr(args, "ref", None)
+        if ref is not None and not rederive:
+            print("Error: --ref needs --rederive.", file=sys.stderr)
+            sys.exit(2)
+        if rederive:
             # Executes the State section's derive commands, contained per
             # docs/rederive.md; runs nothing on a store not opted in.
             report = rederive_text(
-                text, store.section_schema, trusted_root(store.path), ref=args.ref
+                text, store.section_schema, trusted_root(store.path), ref=ref
             )
             text = report.text
 
@@ -1264,11 +1269,14 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 "linkgate_overridden": result["linkgate_overridden"],
                 "citation_spread": result["citation_spread"],
                 "sections": {name: c for name, c in sorted(sections.items())},
+                "stale_state": result.get("stale_state", []),
             })
             return
 
         print(f"Continuity saved ({chars:,} chars) to {result['path']}")
         print(f"Episodes compressed: {result['episodes_compressed']}")
+        for entry in result.get("stale_state", []):
+            print(f"State line does not hold (fix it next wrap): {entry}")
         print(
             f"Citation spread: {result['citation_spread']} distinct episode(s) "
             f"cited on today's 2x-and-up graduation lines (counted before grounding checks)"

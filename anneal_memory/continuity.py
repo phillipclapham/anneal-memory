@@ -44,7 +44,12 @@ from .graduation import (
     _is_graduating_heading,
 )
 from . import sessions
-from .rederive import GIT_SUBCOMMANDS, check_state_for_save
+from .rederive import (
+    GIT_SUBCOMMANDS,
+    PROGRAMS,
+    check_state_for_save,
+    strip_rederive_output,
+)
 from .schema import (
     DEFAULT_SCHEMA,
     SectionSpec,
@@ -846,10 +851,14 @@ def _build_wrap_instructions(
                 f"command's exit status is the claim), or `[judged: WHO, WHEN, "
                 f"AGAINST WHAT]` for a judgement no command can check. Allowed "
                 f"commands: read-only `git` ({', '.join(sorted(GIT_SUBCOMMANDS))}"
-                f"; merge-base only with --is-ancestor), `grep`, `wc`, "
-                f"`test -e|-f|-d|-s`, with paths "
+                f"), and {', '.join(f'`{p}`' for p in sorted(PROGRAMS - {'git'}))}"
+                f" in the forms docs/rederive.md describes (a refused command's "
+                f"message names what is allowed), with paths "
                 f"relative to the project root and no shell syntax. Write `@REF` "
-                f"for the commit the load pins. Counts, versions and statuses "
+                f"for the commit the load pins. For an existence claim use a form "
+                f"that exits 1 when false (`git rev-parse --verify -q REF`, "
+                f"`test -e PATH`); git exits 128 on a missing ref, which is an "
+                f"error and refuses the save. Counts, versions and statuses "
                 f"belong here as commands, never as bare numbers."
             )
 
@@ -2339,6 +2348,10 @@ def validated_save_continuity(
     # schema must refuse the save rather than silently fall back to the ops
     # DEFAULT_SCHEMA and disable the catastrophic-shrink gate below.
     section_schema = store.section_schema_for_wrap()
+    if any(s["role"] == "derived-state" for s in section_schema):
+        # Text loaded with --rederive carries load-time verdicts; they are
+        # true only at load, so they never persist (L1 round-trip finding).
+        text = strip_rederive_output(text, section_schema)
     grad_headings = graduating_headings(section_schema)
     # Reject ambiguous merged headings (e.g. "## Patterns and Understanding")
     # with a clear message before the generic all-sections check: one header
@@ -2364,18 +2377,17 @@ def validated_save_continuity(
 
     # Derived-state gate (spore-1230): a State line with no annotation or a
     # command outside the allowlist is refused; on a store opted in to
-    # re-derive, so is a command that errors. Stale lines only warn: the
-    # agent is told, the save proceeds. See docs/rederive.md.
+    # re-derive, so is a command that errors. Stale or unchecked lines do not
+    # refuse: they go into the result's ``stale_state`` and a warning after
+    # commit. See docs/rederive.md.
     _derive_report = check_state_for_save(text, section_schema, store.path)
+    stale_state: list[str] = []
     if _derive_report is not None and _derive_report.enabled:
-        _stale = [r for r in _derive_report.results if r.status in ("stale", "skipped")]
-        if _stale:
-            warnings.warn(
-                "State lines that do not hold at save: "
-                + "; ".join(f"line {r.index + 1}: {r.flag}" for r in _stale),
-                UserWarning,
-                stacklevel=2,
-            )
+        stale_state = [
+            f"line {r.index + 1}: {r.flag}"
+            for r in _derive_report.results
+            if r.status in ("stale", "skipped")
+        ]
 
     # Catastrophic-shrink gate (v0.3.5). Load the prior continuity ONCE here
     # and reuse it for the silent-omission audit further down. The gate runs
@@ -3313,4 +3325,7 @@ def validated_save_continuity(
     )
     if compost_names is not None:
         result["composted"] = composted
+    if stale_state:
+        result["stale_state"] = stale_state
+        _warn_after_commit("State lines that do not hold at save: " + "; ".join(stale_state))
     return result

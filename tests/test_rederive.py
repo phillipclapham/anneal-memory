@@ -15,7 +15,13 @@ from pathlib import Path
 import pytest
 
 from anneal_memory import Store, prepare_wrap, validated_save_continuity
-from anneal_memory.rederive import allow_store, rederive_continuity
+from anneal_memory.rederive import (
+    DeriveRefused,
+    allow_store,
+    parse_annotation,
+    rederive_continuity,
+    validate_command,
+)
 from anneal_memory.schema import PROJECT_SCHEMA
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
@@ -83,6 +89,14 @@ def test_planted_stale_line_is_flagged_inline(project):
     assert flagged == [TRUE_STATE[0] + "  ⚠ STALE (now '0', claimed '1')"]
     assert report.ref and len(report.ref) == 40  # one pinned commit per load
 
+    # The loaded text goes back through a save: the stale line is reported,
+    # not refused, and no load-time verdict is persisted.
+    store.record("another session", "observation")
+    prepare_wrap(store)
+    result = validated_save_continuity(store, report.text)
+    assert result["stale_state"] == ["line 7: ⚠ STALE (now '0', claimed '1')"]
+    assert "⚠" not in store.load_continuity() and "✓" not in store.load_continuity()
+
 
 EVIL = [
     "git log -1; touch {canary}",
@@ -97,7 +111,12 @@ EVIL = [
     'git grep -O"touch {canary}" VERSION',
     "git diff --no-index /etc/passwd app.py",
     "git tag pwned",
+    "git log -1 --format=%+G? => x",  # signature modifiers (L2)
+    "git for-each-ref --format=%(*signature:grade) => x",
+    "grep -h API .env => x",  # prints content (L2)
     "grep -c root link_out => 1",  # a symlink out of the root
+    "grep -c API .env => 1",  # untracked secret: a count oracle (L2)
+    "grep -c url .git/config => 1",
 ]
 
 
@@ -105,14 +124,31 @@ def test_crafted_malicious_lines_are_refused(project, tmp_path):
     store, repo = project
     canary = tmp_path / "pwned"
     (repo / "link_out").symlink_to("/etc/passwd")
+    (repo / ".env").write_text("API_KEY=sk-live-secret\n")  # untracked
     evil_lines = [f"- evil{i} [derive: {c.format(canary=canary)}]" for i, c in enumerate(EVIL)]
     evil_text = _continuity(TRUE_STATE + evil_lines)
 
-    # At save: refused before anything is written.
+    # At save: refused before anything is written, and every line is named.
+    # Lexically refusable lines fail the static gate; the rest (symlink,
+    # untracked file) fail when the opted-in store runs them.
+    def lexically_refused(line):
+        try:
+            validate_command(parse_annotation(line).command)
+        except DeriveRefused:
+            return True
+        return False
+
     store.record("a session episode", "observation")
     prepare_wrap(store)
-    with pytest.raises(ValueError, match="State section refused"):
-        validated_save_continuity(store, evil_text)
+    static = [l for l in evil_lines if lexically_refused(l)]
+    runtime = [l for l in evil_lines if l not in static]
+    with pytest.raises(ValueError, match="State section refused") as exc:
+        validated_save_continuity(store, _continuity(TRUE_STATE + static))
+    assert str(exc.value).count(": refused: ") == len(static)
+    assert runtime  # the symlink and untracked-file lines pass the lexical gate
+    with pytest.raises(ValueError, match="derive commands failed") as exc:
+        validated_save_continuity(store, _continuity(TRUE_STATE + runtime))
+    assert str(exc.value).count("REFUSED") == len(runtime)
     assert store.load_continuity() is None
 
     # At load: a memory file edited behind the save gate still runs nothing.
@@ -124,3 +160,16 @@ def test_crafted_malicious_lines_are_refused(project, tmp_path):
     assert not canary.exists()
     tags = subprocess.run(["git", "tag", "-l", "pwned"], cwd=repo, capture_output=True, text=True)
     assert tags.stdout == ""
+    assert "sk-live" not in report.text
+
+    # A root inside a larger repo: git must not discover the parent (L1, L2).
+    (repo / "sub").mkdir()
+    inner = Store(tmp_path / "store" / "inner.db", project_name="S", section_schema=PROJECT_SCHEMA)
+    allow_store(inner.path, repo / "sub")
+    inner.record("e", "observation")
+    prepare_wrap(inner)
+    with pytest.raises(ValueError, match="derive commands failed"):
+        validated_save_continuity(
+            inner, _continuity(["- parent read [derive: git cat-file -p HEAD:app.py => x]"])
+        )
+    inner.close()

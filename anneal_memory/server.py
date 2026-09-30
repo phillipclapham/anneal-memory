@@ -554,6 +554,11 @@ class Server:
             f"Continuity saved ({result['chars']} chars) to {result['path']}"
         ]
         lines.append(f"Episodes compressed: {result['episodes_compressed']}")
+        if result.get("stale_state"):
+            lines.append(
+                "State lines that do not hold (fix them next wrap): "
+                + "; ".join(result["stale_state"])
+            )
         lines.append(
             f"Citation spread: {result['citation_spread']} distinct episode(s) "
             f"cited on today's 2x-and-up graduation lines (counted before grounding checks)"

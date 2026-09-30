@@ -3,8 +3,9 @@
 A ``derived-state`` section (the ``project`` schema's ``## State``) holds
 present-tense claims, each ending with an annotation:
 
-    [derive: COMMAND => EXPECTED]   value claim: exit 0 and stdout == EXPECTED
+    [derive: COMMAND => EXPECTED]   value claim: stdout == EXPECTED (exit 0 or 1)
     [derive: COMMAND]               truth claim: exit 0 agrees, exit 1 disagrees
+    (any other exit is an error in both forms)
     [judged: WHO, WHEN, AGAINST]    a judgement; accepted, never executed
 
 :func:`rederive_continuity` runs each command and flags the line inline;
@@ -15,10 +16,11 @@ agent wrote, so every command is untrusted input. The containment is designed
 in ``docs/rederive.md``; the rules it enforces here are:
 
 1. nothing runs unless the store's database path is bound to a root directory
-   in the per-user trust file (outside the store, never writable over MCP);
+   in the per-user trust file (outside the store; no MCP tool writes it);
 2. no shell: ``shlex`` + ``shell=False``, and shell metacharacters are refused;
 3. an argument-by-argument allowlist of read-only command forms;
-4. file arguments must resolve inside the root;
+4. file arguments must resolve inside the root, and grep/wc read only files
+   git tracks, never their content (grep answers with a count or yes/no);
 5. a from-scratch environment, the root as cwd, stdin closed, one pinned ref;
 6. per-command timeout and output cap, per-load time budget and line cap;
 7. command output reaches the text only as a sanitised, truncated one-liner.
@@ -48,6 +50,9 @@ from .schema import SectionSpec
 __all__ = [
     "DeriveRefused",
     "GIT_SUBCOMMANDS",
+    "PROGRAMS",
+    "strip_flag",
+    "strip_rederive_output",
     "Annotation",
     "LineResult",
     "RederiveReport",
@@ -99,13 +104,40 @@ class Annotation:
     judgement: str = ""
 
 
+# The inline flag rederive_text appends ("  ✓", "  ⚠ STALE (…)", …), so text
+# loaded with --rederive and carried into a wrap still parses.
+_APPENDED_FLAG = re.compile(r"  (?:✓|⚠ [A-Z][A-Z ]*[A-Z]|⛔ REFUSED)(?: \(.*\))?$")
+
+
+def strip_flag(line: str) -> str:
+    """``line`` without a flag :func:`rederive_text` appended to it."""
+    return _APPENDED_FLAG.sub("", line.rstrip())
+
+
+_HEADER_PREFIXES = ("> re-derived ", "> re-derive is not enabled for this store")
+
+
+def strip_rederive_output(text: str, schema: list[SectionSpec]) -> str:
+    """Remove everything :func:`rederive_text` added: its header line (and the
+    blank line after it) and every flag it appended to a State line. Saving
+    loaded text back must never persist a verdict that is true only at load."""
+    lines = text.split("\n")
+    if lines and lines[0].startswith(_HEADER_PREFIXES):
+        lines = lines[2:] if len(lines) > 1 and not lines[1].strip() else lines[1:]
+    joined = "\n".join(lines)
+    for idx, line in derived_state_lines(joined, schema):
+        cr = "\r" if line.endswith("\r") else ""
+        lines[idx] = strip_flag(line.rstrip("\r")) + cr
+    return "\n".join(lines)
+
+
 def parse_annotation(line: str) -> Annotation | None:
     """Parse the trailing annotation of a State line, or ``None`` if absent.
 
     The annotation is the LAST ``[derive:`` / ``[judged:`` on the line and must
-    close with the line's final ``]``.
+    close with the line's final ``]`` (after any re-derive flag is removed).
     """
-    stripped = line.rstrip()
+    stripped = strip_flag(line)
     if not stripped.endswith("]"):
         return None
     d = stripped.rfind(_DERIVE_OPEN)
@@ -181,10 +213,16 @@ _GIT_FORMS: dict[str, _GitForm] = {
 
 GIT_SUBCOMMANDS: frozenset[str] = frozenset(_GIT_FORMS)
 
-# Format placeholders that make git verify a signature, i.e. run gpg.program.
-_GIT_SIGNATURE_FORMAT = re.compile(r"%G|%\(signature", re.IGNORECASE)
+# Format placeholders that make git verify a signature, i.e. run gpg.program:
+# %G? and friends, with or without a %+ / %- / %<space> modifier, and any
+# ref-filter signature atom (%(signature…), %(*signature…)).
+_GIT_SIGNATURE_FORMAT = re.compile(r"%[-+ ]?G")
+_GIT_SIGNATURE_ATOM = re.compile(r"signature", re.IGNORECASE)
 
-_GREP_SHORT = set("cFEiwxqlLshHrvn")
+# grep may only answer with a count or a yes/no, never print file content:
+# one of the answer flags is required, and the rest only shape the match.
+_GREP_ANSWER = set("cqlL")
+_GREP_SHORT = _GREP_ANSWER | set("FEiwxsv")
 _WC_SHORT = set("lcwm")
 _TEST_OPS = frozenset({"-e", "-f", "-d", "-s"})
 
@@ -198,10 +236,18 @@ def _check_path(arg: str, root: Path | None) -> None:
         raise DeriveRefused(f"path argument {arg!r} must be relative to the root")
     if ".." in p.parts:
         raise DeriveRefused(f"path argument {arg!r} must not contain '..'")
+    if ".git" in p.parts:
+        raise DeriveRefused(f"path argument {arg!r} must not be inside .git")
+    if p.drive or p.root:
+        raise DeriveRefused(f"path argument {arg!r} must be relative to the root")
     if root is not None:
         root_real = os.path.realpath(root)
         real = os.path.realpath(os.path.join(root_real, arg))
-        if os.path.commonpath([real, root_real]) != root_real:
+        try:
+            inside = os.path.commonpath([real, root_real]) == root_real
+        except ValueError:  # different drives on Windows
+            inside = False
+        if not inside:
             raise DeriveRefused(f"path argument {arg!r} resolves outside the root")
 
 
@@ -233,7 +279,7 @@ def _validate_git(args: list[str]) -> None:
                 name, value = a.split("=", 1)
                 if name not in form.valued:
                     raise DeriveRefused(f"git {sub} flag {name!r}= is not allowed")
-                if _GIT_SIGNATURE_FORMAT.search(value):
+                if _GIT_SIGNATURE_FORMAT.search(value) or _GIT_SIGNATURE_ATOM.search(value):
                     raise DeriveRefused("signature-verifying format placeholders are not allowed")
                 continue
             if a not in form.bare:
@@ -251,9 +297,13 @@ def _validate_short_flags(prog: str, flag: str, allowed: set[str]) -> None:
 
 def _validate_grep(args: list[str], root: Path | None) -> None:
     i = 0
+    flags: set[str] = set()
     while i < len(args) and args[i].startswith("-"):
         _validate_short_flags("grep", args[i], _GREP_SHORT)
+        flags |= set(args[i][1:])
         i += 1
+    if not flags & _GREP_ANSWER:
+        raise DeriveRefused("grep needs one of -c, -q, -l, -L (it may not print file content)")
     rest = args[i:]
     if len(rest) < 2:
         raise DeriveRefused("grep needs a PATTERN and at least one PATH")
@@ -280,6 +330,36 @@ def _validate_test(args: list[str], root: Path | None) -> None:
     _check_path(args[1], root)
 
 
+_VALIDATORS = {
+    "git": lambda args, root: _validate_git(args),
+    "grep": _validate_grep,
+    "wc": _validate_wc,
+    "test": _validate_test,
+}
+PROGRAMS: frozenset[str] = frozenset(_VALIDATORS)
+
+
+def _require_tracked(argv: list[str], root: str) -> None:
+    """grep and wc read only files git tracks, so an untracked or ignored
+    file inside the root (a .env, a key) is never read. Needs a git root."""
+    if argv[0] == "grep":
+        i = 1
+        while argv[i].startswith("-"):
+            i += 1
+        paths = argv[i + 1 :]
+    elif argv[0] == "wc":
+        paths = [a for a in argv[1:] if not a.startswith("-")]
+    else:
+        return
+    for path in paths:
+        res = _run_bounded(
+            ["git", *_GIT_HARDENING, "ls-files", "--error-unmatch", "--", path],
+            root, DEFAULT_COMMAND_TIMEOUT, 4096,
+        )
+        if res.returncode != 0:
+            raise DeriveRefused(f"path argument {path!r} is not a file git tracks in the root")
+
+
 def validate_command(command: str, root: Path | None = None) -> list[str]:
     """Return the argv for an allowed ``command``; raise :class:`DeriveRefused`.
 
@@ -302,16 +382,12 @@ def validate_command(command: str, root: Path | None = None) -> list[str]:
     if not argv:
         raise DeriveRefused("empty derive command")
     prog, args = argv[0], argv[1:]
-    if prog == "git":
-        _validate_git(args)
-    elif prog == "grep":
-        _validate_grep(args, root)
-    elif prog == "wc":
-        _validate_wc(args, root)
-    elif prog == "test":
-        _validate_test(args, root)
-    else:
-        raise DeriveRefused(f"program {prog!r} is not allowed (allowed: git, grep, test, wc)")
+    validator = _VALIDATORS.get(prog)
+    if validator is None:
+        raise DeriveRefused(
+            f"program {prog!r} is not allowed (allowed: {', '.join(sorted(_VALIDATORS))})"
+        )
+    validator(args, root)
     return argv
 
 
@@ -331,21 +407,33 @@ _GIT_HARDENING = [
 ]
 
 
-def _child_env() -> dict[str, str]:
+def _child_env(root: str | None = None) -> dict[str, str]:
+    # Absolute PATH entries only: a relative entry (".", "bin") would resolve
+    # against the root and run a program committed to the repository.
+    path = os.pathsep.join(
+        p for p in os.environ.get("PATH", os.defpath).split(os.pathsep) if os.path.isabs(p)
+    )
     env = {
-        "PATH": os.environ.get("PATH", os.defpath),
+        "PATH": path,
         "LC_ALL": "C",
         "GIT_PAGER": "cat",
         "PAGER": "cat",
         "GIT_OPTIONAL_LOCKS": "0",
         "GIT_NO_LAZY_FETCH": "1",
         "GIT_TERMINAL_PROMPT": "0",
+        # Overrides repo-level protocol.<name>.allow, which -c protocol.allow
+        # does not (L1, measured 2026-09-30).
+        "GIT_ALLOW_PROTOCOL": "none",
     }
     home = os.environ.get("HOME")
     if home:
         env["HOME"] = home
+    if root is not None:
+        # git must not discover a repository above the root (a parent repo,
+        # a dotfiles repo in $HOME): the root is the boundary.
+        env["GIT_CEILING_DIRECTORIES"] = os.path.dirname(root)
     if os.name == "nt":  # Windows needs these to start processes at all
-        for k in ("SYSTEMROOT", "COMSPEC", "PATHEXT"):
+        for k in ("SYSTEMROOT", "COMSPEC", "PATHEXT", "USERPROFILE"):
             if k in os.environ:
                 env[k] = os.environ[k]
     return env
@@ -372,15 +460,27 @@ def _kill(proc: subprocess.Popen) -> None:
 
 
 def _run_bounded(argv: list[str], cwd: str, timeout: float, cap: int) -> _RunOutcome:
-    exe = shutil.which(argv[0], path=_child_env()["PATH"])
+    env = _child_env(cwd)
+    exe = shutil.which(argv[0], path=env["PATH"])
     if exe is None:
         return _RunOutcome(None, b"", b"", spawn_error=f"{argv[0]!r} not found on PATH")
+    exe_real = os.path.realpath(exe)
+    cwd_real = os.path.realpath(cwd)
+    try:
+        exe_inside = os.path.commonpath([exe_real, cwd_real]) == cwd_real
+    except ValueError:
+        exe_inside = False
+    if exe_inside:
+        return _RunOutcome(None, b"", b"", spawn_error=f"{argv[0]!r} resolves inside the root")
+    if os.name == "nt" and not exe_real.lower().endswith(".exe"):
+        # a .bat/.cmd wrapper would run through cmd.exe, a shell
+        return _RunOutcome(None, b"", b"", spawn_error=f"{argv[0]!r} is not a .exe")
     kw: dict = dict(
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=cwd,
-        env=_child_env(),
+        env=env,
         shell=False,
     )
     if os.name == "posix":
@@ -405,7 +505,8 @@ def _run_bounded(argv: list[str], cwd: str, timeout: float, cap: int) -> _RunOut
             buf += chunk
             if len(buf) > cap:
                 overflow.set()
-                _kill(proc)
+                if proc.poll() is None:  # never signal a reaped (reusable) pid
+                    _kill(proc)
                 break
 
     threads = [
@@ -551,10 +652,10 @@ def _judge_line(
         return LineResult(idx, line, "judged")
     try:
         argv = validate_command(ann.command, Path(root) if root else None)
+        if root is not None:
+            _require_tracked(argv, root)
     except DeriveRefused as e:
         return LineResult(idx, line, "refused", str(e))
-    if root is None:
-        return LineResult(idx, line, "skipped", "re-derive not enabled")
     if argv[0] == "git":
         if any(REF_TOKEN in a for a in argv):
             if ref is None:
@@ -643,15 +744,22 @@ def rederive_text(
             why = f"line cap {max_lines}" if ran >= max_lines else f"load budget {budget:g}s"
             results.append(LineResult(idx, line, "skipped", why))
             continue
-        remaining = max(0.1, min(timeout, deadline - time.monotonic()))
-        r = _judge_line(idx, line, root_s, ref_sha, ref_err, remaining, output_cap)
+        remaining = deadline - time.monotonic()
+        if is_cmd and remaining < timeout:
+            # Less than one full command timeout left: a timeout now would be
+            # the budget's, not the command's, so do not run it at all.
+            results.append(LineResult(idx, line, "skipped", f"load budget {budget:g}s"))
+            continue
+        r = _judge_line(idx, line, root_s, ref_sha, ref_err, timeout, output_cap)
         if is_cmd and r.status != "refused":
             ran += 1
         results.append(r)
 
     for r in results:
         if r.flag:
-            lines[r.index] = f"{lines[r.index]}  {r.flag}"
+            body = strip_flag(lines[r.index].rstrip("\r"))
+            cr = "\r" if lines[r.index].endswith("\r") else ""
+            lines[r.index] = f"{body}  {r.flag}{cr}"
     counts = {s: sum(1 for r in results if r.status == s) for s in _FLAGS}
     summary = ", ".join(f"{n} {s}" for s, n in counts.items() if n)
     header = (
@@ -679,16 +787,32 @@ def trust_file_path() -> Path:
     return Path.home() / ".anneal-memory" / "derive-trust.json"
 
 
-def _load_trust(path: Path) -> list[dict]:
+def _load_trust(path: Path, *, strict: bool = False) -> list[dict]:
+    """The bindings in the trust file. A missing file is empty. A file that is
+    unreadable, not owned by this user, or writable by others trusts nothing
+    on read, and ``strict`` (the write paths) raises instead, so ``allow`` and
+    ``revoke`` never overwrite bindings they could not read."""
+
+    def untrusted(why: str) -> list[dict]:
+        if strict:
+            raise ValueError(f"trust file {path}: {why}; fix or remove it first")
+        return []
+
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        st = os.stat(path)
     except FileNotFoundError:
         return []
+    except OSError as e:
+        return untrusted(f"cannot stat ({e})")
+    if os.name == "posix" and (st.st_uid != os.geteuid() or st.st_mode & 0o022):
+        return untrusted("not owned by this user, or writable by others")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return []  # an unreadable trust file trusts nothing
+        return untrusted("unreadable")
     stores = data.get("stores") if isinstance(data, dict) else None
     if not isinstance(stores, list):
-        return []
+        return untrusted("has no 'stores' list")
     return [s for s in stores if isinstance(s, dict) and isinstance(s.get("db"), str) and isinstance(s.get("root"), str)]
 
 
@@ -720,10 +844,17 @@ def trusted_root(db_path: str | os.PathLike, trust_file: Path | None = None) -> 
     key = _db_key(db_path)
     if key is None:
         return None
-    for s in _load_trust(trust_file or trust_file_path()):
+    tf = trust_file or trust_file_path()
+    for s in _load_trust(tf):
         if s["db"] == key:
             root = s["root"]
-            return root if os.path.isdir(root) else None
+            if not os.path.isdir(root):
+                return None
+            # A trust file inside a bound root could have arrived with it.
+            tf_real = os.path.realpath(tf)
+            if os.path.commonpath([tf_real, root]) == root:
+                return None
+            return root
     return None
 
 
@@ -736,7 +867,7 @@ def allow_store(db_path: str | os.PathLike, root: str | os.PathLike, trust_file:
     if not os.path.isdir(root_s):
         raise ValueError(f"root {root_s!r} is not a directory")
     path = trust_file or trust_file_path()
-    stores = [s for s in _load_trust(path) if s["db"] != key]
+    stores = [s for s in _load_trust(path, strict=True) if s["db"] != key]
     stores.append({
         "db": key,
         "root": root_s,
@@ -750,7 +881,7 @@ def revoke_store(db_path: str | os.PathLike, trust_file: Path | None = None) -> 
     """Remove a store's binding. Returns whether one existed."""
     key = _db_key(db_path)
     path = trust_file or trust_file_path()
-    stores = _load_trust(path)
+    stores = _load_trust(path, strict=True)
     kept = [s for s in stores if s["db"] != key]
     if len(kept) == len(stores):
         return False

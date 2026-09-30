@@ -90,6 +90,13 @@ from .migration import (
     read_marker,
     write_marker,
 )
+from .rederive import (
+    allow_store,
+    rederive_text,
+    revoke_store,
+    trust_file_path,
+    trusted_root,
+)
 from .schema import (
     SCHEMA_NAMES,
     SectionSpec,
@@ -638,16 +645,74 @@ def cmd_continuity(args: argparse.Namespace) -> None:
             print("No continuity file yet. Run a wrap first.", file=sys.stderr)
             sys.exit(1)
 
+        report = None
+        if getattr(args, "rederive", False):
+            # Executes the State section's derive commands, contained per
+            # docs/rederive.md; runs nothing on a store not opted in.
+            report = rederive_text(
+                text, store.section_schema, trusted_root(store.path), ref=args.ref
+            )
+            text = report.text
+
         if args.json:
             meta = store.load_meta()
-            _print_json({
+            payload: dict[str, Any] = {
                 "text": text,
                 "chars": len(text),
                 "meta": meta,
-            })
+            }
+            if report is not None:
+                payload["rederive"] = {
+                    "enabled": report.enabled,
+                    "root": report.root,
+                    "ref": report.ref,
+                    "clean": report.clean,
+                    "lines": [
+                        {"line": r.index + 1, "status": r.status, "detail": r.detail}
+                        for r in report.results
+                    ],
+                }
+            _print_json(payload)
             return
 
         print(text)
+
+
+def cmd_derive(args: argparse.Namespace) -> None:
+    """Opt a store in to (or out of) re-derive at load. See docs/rederive.md."""
+    action = getattr(args, "derive_command", None)
+    if action is None:
+        print("Usage: anneal-memory derive {allow,revoke,status}", file=sys.stderr)
+        sys.exit(2)
+    db_path = Path(args.db).expanduser()
+    if not db_path.exists():
+        print(f"Error: database not found: {db_path}", file=sys.stderr)
+        sys.exit(1)
+    if action == "allow":
+        try:
+            root = allow_store(db_path, Path(args.root).expanduser())
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        result = {"db": os.path.realpath(db_path), "root": root, "allowed": True}
+    elif action == "revoke":
+        existed = revoke_store(db_path)
+        result = {"db": os.path.realpath(db_path), "revoked": existed}
+    else:
+        root = trusted_root(db_path)
+        result = {"db": os.path.realpath(db_path), "root": root, "allowed": root is not None}
+    result["trust_file"] = str(trust_file_path())
+    if args.json:
+        _print_json(result)
+        return
+    if action == "allow":
+        print(f"Re-derive allowed: {result['db']} -> {root}")
+        print("  STATE derive commands for this store will now run, read-only, in that directory.")
+    elif action == "revoke":
+        print("Re-derive revoked." if result["revoked"] else "This store was not allowed.")
+    else:
+        print(f"Re-derive: {'allowed in ' + root if root else 'not enabled'}")
+    print(f"  Trust file: {result['trust_file']}")
 
 
 def cmd_record(args: argparse.Namespace) -> None:
@@ -3154,7 +3219,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     # -- continuity --
     sub = subparsers.add_parser("continuity", help="Print current continuity file", parents=[json_parent])
+    sub.add_argument(
+        "--rederive",
+        action="store_true",
+        help="Run each State line's derive command and flag it inline "
+        "(only on a store opted in with 'derive allow'; see docs/rederive.md)",
+    )
+    sub.add_argument("--ref", default=None, help="Commit to pin @REF to (default: HEAD)")
     sub.set_defaults(func=cmd_continuity)
+
+    # -- derive (opt a store in to re-derive at load) --
+    derive_parser = subparsers.add_parser(
+        "derive", help="Allow, revoke or show re-derive at load for this store"
+    )
+    derive_parser.set_defaults(func=cmd_derive)
+    derive_sub = derive_parser.add_subparsers(dest="derive_command")
+    dp = derive_sub.add_parser(
+        "allow", help="Let this store's State commands run, read-only, in ROOT", parents=[json_parent]
+    )
+    dp.add_argument("--root", required=True, help="Directory the commands run in (the project repo)")
+    dp.set_defaults(func=cmd_derive)
+    dp = derive_sub.add_parser("revoke", help="Stop this store's State commands from running", parents=[json_parent])
+    dp.set_defaults(func=cmd_derive)
+    dp = derive_sub.add_parser("status", help="Show whether this store may re-derive", parents=[json_parent])
+    dp.set_defaults(func=cmd_derive)
 
     # -- record --
     sub = subparsers.add_parser("record", help="Record a new episode", parents=[json_parent])

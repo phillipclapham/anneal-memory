@@ -39,6 +39,7 @@ from .schema import (
     DEFAULT_GRADUATING,
     DEFAULT_SCHEMA,
     FLOW_SCHEMA,
+    PROJECT_SCHEMA,
     SCHEMA_NAMES,
     SectionRole,
     SectionSpec,
@@ -50,6 +51,13 @@ from .schema import (
     schema_role_warning,
     sections_by_role,
     validate_schema,
+)
+from .rederive import (
+    DeriveRefused,
+    RederiveReport,
+    allow_store,
+    rederive_continuity,
+    revoke_store,
 )
 from .continuity import (
     felt_currency,
@@ -151,6 +159,12 @@ __all__ = [
     "DEFAULT_SCHEMA",
     "FLOW_SCHEMA",
     "SCHEMA_NAMES",
+    "PROJECT_SCHEMA",
+    "DeriveRefused",
+    "RederiveReport",
+    "allow_store",
+    "revoke_store",
+    "rederive_continuity",
     "schema_by_name",
     "name_for_schema",
     "DEFAULT_GRADUATING",

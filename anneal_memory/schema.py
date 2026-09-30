@@ -24,6 +24,10 @@ ordered list of ``(heading, role)`` pairs. Roles:
                           are together"). Partnership entities only; absent for
                           ops entities, so they carry zero extra weight.
   ``frozen``              Preserved verbatim; never compressed or graduated.
+  ``derived-state``       Present-tense claims that prove themselves when read:
+                          every line ends with ``[derive: …]`` or ``[judged: …]``
+                          (see :mod:`anneal_memory.rederive` and
+                          ``docs/rederive.md``). Project stores only.
 
 **Backward compatibility is the load-bearing invariant.** :data:`DEFAULT_SCHEMA`
 reproduces the exact pre-0.3.4 four-section behavior, and a store with no
@@ -46,6 +50,7 @@ __all__ = [
     "SectionSpec",
     "DEFAULT_SCHEMA",
     "FLOW_SCHEMA",
+    "PROJECT_SCHEMA",
     "SCHEMA_NAMES",
     "schema_by_name",
     "name_for_schema",
@@ -66,6 +71,7 @@ SectionRole = Literal[
     "narrative",
     "narrative-timeless",
     "frozen",
+    "derived-state",
 ]
 
 # The roles validate_schema accepts. Kept in sync with SectionRole by the
@@ -78,6 +84,7 @@ _VALID_ROLES: frozenset[str] = frozenset(
         "narrative",
         "narrative-timeless",
         "frozen",
+        "derived-state",
     }
 )
 
@@ -113,9 +120,25 @@ FLOW_SCHEMA: list[SectionSpec] = [
     {"heading": "Understanding", "role": "narrative-timeless"},
 ]
 
+# A project's memory (spore-1230, the perception bundle's Project Memory v2).
+# Past claims cite their evidence (Lessons graduate by citation, like
+# Patterns); present claims prove themselves when read (State is
+# ``derived-state``, re-derived at load by :mod:`anneal_memory.rederive`).
+# Plan carries the ``decisions`` role because intent and milestones are
+# committed direction; Open is the volatile next-action list.
+PROJECT_SCHEMA: list[SectionSpec] = [
+    {"heading": "Plan", "role": "decisions"},
+    {"heading": "State", "role": "derived-state"},
+    {"heading": "Decisions", "role": "decisions"},
+    {"heading": "Open", "role": "live-state"},
+    {"heading": "Lessons", "role": "graduating"},
+    {"heading": "History", "role": "narrative"},
+]
 
-# AM-INITSCHEMA: named schemas for CLI / adapter selection. These two
-# names ARE the ops-vs-partnership fork (see the entity-architecture thesis):
+
+# AM-INITSCHEMA: named schemas for CLI / adapter selection. "default" and
+# "partnership" ARE the ops-vs-partnership fork (see the entity-architecture
+# thesis); "project" is a project's own memory (PROJECT_SCHEMA above):
 # "default" = the 4-section ops shape (byte-compatible with <= 0.3.3); the
 # selectable named schema "partnership" = the 6-section :data:`FLOW_SCHEMA` with
 # the timeless ``Understanding`` (``narrative-timeless``) felt layer + the
@@ -131,13 +154,14 @@ FLOW_SCHEMA: list[SectionSpec] = [
 _SCHEMAS_BY_NAME: dict[str, list[SectionSpec]] = {
     "default": DEFAULT_SCHEMA,
     "partnership": FLOW_SCHEMA,
+    "project": PROJECT_SCHEMA,
 }
 # Sorted so the surfaced CLI ``choices=`` order is stable across runs.
 SCHEMA_NAMES: tuple[str, ...] = tuple(sorted(_SCHEMAS_BY_NAME))
 
 
 def schema_by_name(name: str) -> list[SectionSpec]:
-    """Resolve a named schema (``"default"`` / ``"partnership"``) to its
+    """Resolve a named schema (one of :data:`SCHEMA_NAMES`) to its
     :class:`SectionSpec` list.
 
     Returns a fresh copy (new list, new section dicts) — this is a public
@@ -318,6 +342,7 @@ _BUDGET_EXTRA: dict[str, int] = {
     "narrative": 2500,           # additional work-narrative sections
     "narrative-timeless": 4000,  # the felt floor (Understanding) — incompressible
     "frozen": 1000,              # preserved verbatim
+    "derived-state": 1500,       # annotated State (the trailers cost chars)
 }
 
 

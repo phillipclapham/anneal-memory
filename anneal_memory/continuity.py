@@ -44,6 +44,7 @@ from .graduation import (
     _is_graduating_heading,
 )
 from . import sessions
+from .rederive import GIT_SUBCOMMANDS, check_state_for_save
 from .schema import (
     DEFAULT_SCHEMA,
     SectionSpec,
@@ -835,6 +836,21 @@ def _build_wrap_instructions(
         elif role == "frozen":
             how_lines.append(
                 f"- {h}: Preserved verbatim. Do not compress, graduate, or rewrite."
+            )
+        elif role == "derived-state":
+            how_lines.append(
+                f"- {h}: Present-tense facts about the project, each on its own "
+                f"line, and EVERY non-blank line must end with an annotation or "
+                f"the save is refused: `[derive: COMMAND => EXPECTED]` (the "
+                f"command's output must equal EXPECTED), `[derive: COMMAND]` (the "
+                f"command's exit status is the claim), or `[judged: WHO, WHEN, "
+                f"AGAINST WHAT]` for a judgement no command can check. Allowed "
+                f"commands: read-only `git` ({', '.join(sorted(GIT_SUBCOMMANDS))}"
+                f"; merge-base only with --is-ancestor), `grep`, `wc`, "
+                f"`test -e|-f|-d|-s`, with paths "
+                f"relative to the project root and no shell syntax. Write `@REF` "
+                f"for the commit the load pins. Counts, versions and statuses "
+                f"belong here as commands, never as bare numbers."
             )
 
     parts: list[str] = [
@@ -2345,6 +2361,21 @@ def validated_save_continuity(
             f"## {h}" for h in required_headings(section_schema)
         )
         raise ValueError(f"Continuity must contain all sections: {required_str}")
+
+    # Derived-state gate (spore-1230): a State line with no annotation or a
+    # command outside the allowlist is refused; on a store opted in to
+    # re-derive, so is a command that errors. Stale lines only warn: the
+    # agent is told, the save proceeds. See docs/rederive.md.
+    _derive_report = check_state_for_save(text, section_schema, store.path)
+    if _derive_report is not None and _derive_report.enabled:
+        _stale = [r for r in _derive_report.results if r.status in ("stale", "skipped")]
+        if _stale:
+            warnings.warn(
+                "State lines that do not hold at save: "
+                + "; ".join(f"line {r.index + 1}: {r.flag}" for r in _stale),
+                UserWarning,
+                stacklevel=2,
+            )
 
     # Catastrophic-shrink gate (v0.3.5). Load the prior continuity ONCE here
     # and reuse it for the silent-omission audit further down. The gate runs

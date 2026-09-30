@@ -49,9 +49,10 @@ from anneal_memory.types import EpisodeType
 class TestNamedSchemas:
     def test_registry_maps_names_to_constants(self):
         # The registry is module-private (LOW-2): selection is via schema_by_name.
-        assert SCHEMA_NAMES == ("default", "partnership")
+        assert SCHEMA_NAMES == ("default", "partnership", "project")
         assert _SCHEMAS_BY_NAME["default"] is DEFAULT_SCHEMA
         assert _SCHEMAS_BY_NAME["partnership"] is FLOW_SCHEMA
+        assert _SCHEMAS_BY_NAME["project"] is S.PROJECT_SCHEMA
 
     def test_registry_not_in_public_api(self):
         import anneal_memory

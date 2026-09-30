@@ -8,7 +8,7 @@ annotations:
 ## State
 - The working tree is at 0.9.16.dev0 [derive: grep -c "0.9.16.dev0" anneal_memory/__init__.py => 1]
 - The v0.9.15 tag is on main [derive: git merge-base --is-ancestor v0.9.15 @REF]
-- Release notes read well [judged: Phill, 2026-09-30, against the CHANGELOG draft]
+- Release notes read well [judged: maintainer, 2026-09-30, against the CHANGELOG draft]
 ```
 
 - `[derive: COMMAND => EXPECTED]` is a **value claim**. It agrees when the

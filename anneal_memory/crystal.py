@@ -245,6 +245,14 @@ def _parse_date(value: object) -> date | None:
         return None
 
 
+def _cites(text: str, name: str) -> bool:
+    """True when ``name`` occurs in ``text`` as a whole token (not flanked by
+    ``[A-Za-z0-9_]``). Used by :meth:`CrystalStore.touch_cited`."""
+    return re.search(
+        r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])", text
+    ) is not None
+
+
 def _validate_date(value: str | None, field: str) -> str | None:
     """A write-path date must be exactly ``YYYY-MM-DD``, or ``None``/``''`` (= unset).
     Fail loud (``ValueError``) so a typo can't silently strand a pattern dormant by
@@ -711,16 +719,53 @@ class CrystalStore:
 
     def touch(self, name: str, *, today: date | None = None) -> CrystalDict:
         """Record that a live pattern was activated (leaned on / re-surfaced):
-        ``last_activated_on`` → today, re-heating its activation tier. Called when a
-        crystallized pattern is cited in a wrap or pulled back by the composer — NOT
-        by the every-turn read hook (which stays lock-free; activation is a
-        wrap-time, single-writer signal). The re-heat is what makes a dormant pattern
-        a re-warm candidate again."""
+        ``last_activated_on`` → today, re-heating its activation tier. Meant for a
+        pattern that was cited in a wrap or pulled back by the composer, and NOT for
+        the every-turn read hook (which stays lock-free; activation is a wrap-time,
+        single-writer signal). This method does not detect activation itself: the
+        caller decides what counts. :meth:`touch_cited` is the batch form for "cited
+        in a wrap". The re-heat is what makes a dormant pattern a re-warm candidate
+        again."""
         now = (today or date.today()).isoformat()
         with self._transaction() as data:
             item = self._require_live(data, name)
             item["last_activated_on"] = now
             return item
+
+    def touch_cited(self, text: str, *, today: date | None = None) -> list[str]:
+        """Re-heat every live pattern whose ``name`` occurs in ``text``: the batch
+        form of :meth:`touch` for "cited in a wrap". A harness calls it with the
+        continuity text it just saved, so a crystal the consolidation leaned on
+        re-warms instead of aging toward ``dormant`` from its crystallization date.
+
+        A name counts only as a whole token: the characters on either side must not
+        be ``[A-Za-z0-9_]``, so a name embedded in a longer slug does not match.
+        Matching is case-sensitive, like every other name lookup here.
+
+        Monotonic: ``last_activated_on`` only moves forward, so a call with an
+        earlier ``today`` never cools a pattern. Nothing matched → no lock taken and
+        no write. Returns the names whose date actually advanced, sorted."""
+        if not isinstance(text, str):
+            raise TypeError(f"text must be a str, got {type(text).__name__}")
+        day = today or date.today()
+        cited = {
+            name
+            for c in self.active()
+            if (name := str(c.get("name") or "")) and _cites(text, name)
+        }
+        if not cited:
+            return []
+        advanced: list[str] = []
+        with self._transaction() as data:
+            for item in data.get("crystal", []):
+                name = item.get("name")
+                if name not in cited or item.get("status") != "crystallized":
+                    continue
+                last = _parse_date(item.get("last_activated_on"))
+                if last is None or last < day:
+                    item["last_activated_on"] = day.isoformat()
+                    advanced.append(name)
+        return sorted(advanced)
 
     def update(
         self,

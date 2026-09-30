@@ -263,6 +263,55 @@ class TestTouch:
             store.touch("p")
 
 
+class TestTouchCited:
+    OLD = date(2026, 1, 1)
+    DAY = date(2026, 6, 6)
+
+    def test_reheats_names_cited_in_text(self, store):
+        store.crystallize(name="cited_one", level=3, explanation="x", today=self.OLD)
+        store.crystallize(name="not_cited", level=3, explanation="x", today=self.OLD)
+        text = "## Patterns\n\n- !! cited_one | 4x (2026-06-06)\n"
+        assert store.touch_cited(text, today=self.DAY) == ["cited_one"]
+        assert activation_tier(store.get("cited_one"), self.DAY) == "hot"
+        assert activation_tier(store.get("not_cited"), self.DAY) == "dormant"
+
+    def test_name_inside_a_longer_slug_does_not_count(self, store):
+        store.crystallize(name="grounding", level=2, explanation="x", today=self.OLD)
+        assert store.touch_cited("without_grounding", today=self.DAY) == []  # left side
+        assert store.touch_cited("grounding_splits", today=self.DAY) == []  # right side
+        assert store.touch_cited("grounding-first design", today=self.DAY) == ["grounding"]
+
+    def test_case_sensitive(self, store):
+        store.crystallize(name="p_q", level=2, explanation="x", today=self.OLD)
+        assert store.touch_cited("P_Q", today=self.DAY) == []
+
+    def test_never_moves_a_date_backward(self, store):
+        store.crystallize(name="p", level=2, explanation="x", today=self.DAY)
+        assert store.touch_cited("p", today=self.OLD) == []
+        assert store.get("p")["last_activated_on"] == self.DAY.isoformat()
+
+    def test_returns_only_names_whose_date_advanced(self, store):
+        store.crystallize(name="fresh", level=2, explanation="x", today=self.DAY)
+        store.crystallize(name="stale", level=2, explanation="x", today=self.OLD)
+        assert store.touch_cited("fresh stale", today=self.DAY) == ["stale"]
+
+    def test_retired_name_is_not_touched(self, store):
+        store.crystallize(name="gone", level=2, explanation="x", today=self.OLD)
+        store.retire("gone", kind="obsolete", today=self.OLD)
+        assert store.touch_cited("gone", today=self.DAY) == []
+
+    def test_no_match_writes_nothing(self, store):
+        store.crystallize(name="p", level=2, explanation="x", today=self.OLD)
+        # An atomic-replace save swaps in a new inode even when the bytes match.
+        before = store.path.stat().st_ino
+        assert store.touch_cited("nothing relevant here", today=self.DAY) == []
+        assert store.path.stat().st_ino == before
+
+    def test_rejects_non_str(self, store):
+        with pytest.raises(TypeError):
+            store.touch_cited(None)  # type: ignore[arg-type]
+
+
 # -- update ----------------------------------------------------------------
 
 

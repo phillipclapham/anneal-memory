@@ -714,8 +714,9 @@ class CrystalStore:
         ``last_activated_on`` → today, re-heating its activation tier. Meant for a
         crystallized pattern that was cited in a wrap or pulled back by the composer,
         NOT for the every-turn read hook (which stays lock-free; activation is a
-        wrap-time, single-writer signal). The library does not call this itself: the
-        caller decides what counts as activation. Without a caller, the only other
+        wrap-time, single-writer signal). No library code path calls this; it runs
+        only when invoked explicitly (e.g. the ``crystal touch`` CLI subcommand), so
+        the caller decides what counts as activation. Without a caller, the only other
         write to ``last_activated_on`` is :meth:`crystallize` (new row or upsert), so
         a tier ages from the last crystallize of that name. The re-heat is what
         makes a dormant pattern a re-warm candidate again."""

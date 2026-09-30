@@ -716,8 +716,8 @@ def cmd_derive(args: argparse.Namespace) -> None:
             sys.exit(1)
         result = {"db": os.path.realpath(db_path), "revoked": existed}
     else:
-        root = trusted_root(db_path)
-        result = {"db": os.path.realpath(db_path), "root": root, "allowed": root is not None}
+        trusted = trusted_root(db_path)
+        result = {"db": os.path.realpath(db_path), "root": trusted, "allowed": trusted is not None}
     result["trust_file"] = str(trust_file_path())
     if args.json:
         _print_json(result)

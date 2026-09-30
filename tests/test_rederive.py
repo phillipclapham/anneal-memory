@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -24,7 +25,12 @@ from anneal_memory.rederive import (
 )
 from anneal_memory.schema import PROJECT_SCHEMA
 
-pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+pytestmark = [
+    pytest.mark.skipif(shutil.which("git") is None, reason="needs git"),
+    # re-derive refuses non-POSIX systems by design (rederive._SUPPORTED); the
+    # `project` fixture calls allow_store, which raises there.
+    pytest.mark.skipif(os.name != "posix", reason="re-derive is POSIX-only by design"),
+]
 
 _GIT = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
 

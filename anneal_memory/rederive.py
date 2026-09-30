@@ -599,6 +599,8 @@ def _run_bounded(argv: list[str], cwd: str, timeout: float, cap: int) -> _RunOut
 
     out, err = bytearray(), bytearray()
     overflow = threading.Event()
+    # Popen was given stdout=stderr=PIPE, so both streams exist; say so for the type checker.
+    assert proc.stdout is not None and proc.stderr is not None
 
     def pump(fd: int, buf: bytearray) -> None:
         # ``fd`` is this thread's own dup, closed here, so closing the Popen
@@ -645,9 +647,9 @@ def _run_bounded(argv: list[str], cwd: str, timeout: float, cap: int) -> _RunOut
             break
     for t in threads:
         t.join(timeout=2)
-    for s in (proc.stdout, proc.stderr):
+    for stream in (proc.stdout, proc.stderr):
         try:
-            s.close()
+            stream.close()
         except OSError:
             pass
     return _RunOutcome(
@@ -758,7 +760,7 @@ class RederiveReport:
 def _judge_line(
     idx: int,
     line: str,
-    root: str | None,
+    root: str,  # the only caller passes the resolved allowed root; a None root never executes
     ref: str | None,
     ref_error: str | None,
     timeout: float,

@@ -96,3 +96,30 @@ def test_allow_refuses_a_linked_worktree(repo, tmp_path):
     with pytest.raises(ValueError, match="not a plain directory"):
         allow_store(db, wt, trust_file=tmp_path / "trust.json")
     assert allow_store(db, repo, trust_file=tmp_path / "trust.json") == os.path.realpath(repo)
+
+
+def test_l3_shape_check_edges(repo, tmp_path):
+    from anneal_memory.rederive import rederive_text
+    from anneal_memory.schema import PROJECT_SCHEMA
+
+    config = repo / ".git" / "config"
+    plain = config.read_text()
+    # a harmless include-section key includes nothing
+    config.write_text(plain + "[include]\n\tenabled = true\n")
+    assert _check_repo_shape(str(repo)) is None
+    # a dangling in-root config link is a shape error, not a crash
+    config.unlink()
+    config.symlink_to(repo / ".git" / "missing.cfg")
+    assert "unreadable" in _check_repo_shape(str(repo))
+    config.unlink()
+    config.write_text(plain)
+
+    def state(*lines):
+        return "\n".join(["# S — Memory (v1)", "", "## State", *lines, ""])
+
+    # a test-only State needs no repository; a git line with a quoted program still does
+    (repo / ".git" / "config.worktree").write_text("")
+    r = rederive_text(state("- a [derive: test -e a.txt]"), PROJECT_SCHEMA, str(repo))
+    assert [x.status for x in r.results] == ["ok"]
+    r = rederive_text(state('- a [derive: "git" rev-parse HEAD]'), PROJECT_SCHEMA, str(repo))
+    assert (r.results[0].status, "config.worktree" in r.results[0].detail) == ("error", True)

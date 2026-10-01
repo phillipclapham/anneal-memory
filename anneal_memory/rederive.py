@@ -372,7 +372,7 @@ _VALIDATORS = {
 PROGRAMS: frozenset[str] = frozenset(_VALIDATORS)
 
 
-def _check_repo_shape(root: str) -> str | None:
+def _check_repo_shape(root: str, timeout: float | None = None) -> str | None:
     """Why ``root`` is not a plain repository, or ``None``. Git follows
     repository metadata wherever it points (a gitfile, commondir, a symlinked
     object store, alternates), so git runs only where all of it is a real
@@ -408,18 +408,23 @@ def _check_repo_shape(root: str) -> str | None:
         return ".git/config.worktree exists; its config is not checked"
     config = os.path.join(git, "config")
     if os.path.lexists(config):
-        if not stat.S_ISREG(os.stat(config).st_mode):
-            return ".git/config is not a regular file"
+        try:
+            if not stat.S_ISREG(os.stat(config).st_mode):
+                return ".git/config is not a regular file"
+        except OSError as e:  # a dangling link, or gone since lexists (L3)
+            return f".git/config is unreadable ({e})"
         out = _run_bounded(
             ["git", *_GIT_HARDENING, "config", "--file", os.path.join(git, "config"),
              "--name-only", "--list"],
-            root, _SHAPE_TIMEOUT, _SHAPE_CAP,
+            root, _SHAPE_TIMEOUT if timeout is None else min(_SHAPE_TIMEOUT, timeout), _SHAPE_CAP,
         )
         if out.returncode != 0 or out.timed_out or out.overflowed:
             why = out.spawn_error or out.stderr.decode("utf-8", "replace").strip() or "no answer"
             return f".git/config could not be parsed ({why})"
+        # Only a path key includes a file; "[include] enabled = true" does not (L3).
         for key in out.stdout.decode("utf-8", "replace").splitlines():
-            if key.lower().startswith(("include.", "includeif.")):
+            key = key.lower()
+            if key == "include.path" or (key.startswith("includeif.") and key.endswith(".path")):
                 return ".git/config includes another file; git would read outside the root"
     return None
 
@@ -921,7 +926,14 @@ def rederive_text(
     root_s = os.path.realpath(root)
     needs_ref = any(REF_TOKEN in (parse_annotation(l) or Annotation("judged", "")).command for _, l in targets)
     # The repository's shape is checked once per load, before git runs at all.
-    shape = _check_repo_shape(root_s) if targets else None
+    # It is skipped only when no line could need the repository (every one is
+    # judged, unannotated or a plain `test`), and its git call is bounded by
+    # the load budget (L3).
+    needs_repo = needs_ref or ref is not None or not all(
+        (a := parse_annotation(l)) is None or a.kind == "judged" or a.command.split()[:1] == ["test"]
+        for _, l in targets
+    )
+    shape = _check_repo_shape(root_s, timeout=max(budget, 0.1)) if needs_repo else None
     ref_sha, ref_err = (None, None)
     if shape and (needs_ref or ref is not None):
         ref_err = shape

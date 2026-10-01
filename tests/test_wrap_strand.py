@@ -8,7 +8,10 @@ two-process run (recorder vs prepare/save loop) stranded 2,517 of 3,459.
 from __future__ import annotations
 
 import datetime
+import sys
 import threading
+
+import pytest
 
 from anneal_memory import Store
 from anneal_memory.continuity import prepare_wrap, validated_save_continuity
@@ -98,6 +101,9 @@ def test_record_cannot_stamp_a_session_a_concurrent_wrap_just_closed(tmp_path):
         store.close()
 
 
+@pytest.mark.skipif(
+    sys.version_info < (3, 11), reason="sqlite3.Connection.setlimit is Python 3.11+"
+)
 def test_snapshot_at_the_variable_guard_fits_every_statement(tmp_path):
     """L1 (spore-1233 review), reproduced: the carry-over UPDATE binds three
     parameters beside the snapshot ids, so a snapshot the guard admitted could

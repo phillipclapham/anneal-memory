@@ -4,6 +4,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.9.19] — 2026-10-01
+
 ### Added — one store, several repositories (multi-root re-derive)
 
 - A State line can name the repository it is checked in: `[derive@LABEL: …]` runs in the root

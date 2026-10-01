@@ -4,6 +4,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.9.17] — 2026-09-30
+
 ### Fixed — an episode recorded while a wrap was open could be lost to every later wrap
 
 - After the first wrap, `record()` stamps an episode with the open session's id. An episode

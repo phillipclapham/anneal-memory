@@ -2073,24 +2073,39 @@ class Store:
         # try/except (they never reach the boundary); only genuine
         # errors — or a 3rd consecutive collision that exhausts
         # retries — propagate out.
+        #
+        # spore-1233: the session read and the INSERT share ONE write transaction.
+        # Read in autocommit, the session id could be stale by the time the INSERT
+        # ran: a wrap_completed committing in between closes that session, and the
+        # episode lands inside a wrap that never saw it, outside every later
+        # compression window. BEGIN IMMEDIATE takes the write lock before the read,
+        # so the read and the write see the same wraps table.
         max_retries = 3
         with self._db_boundary("record"):
-            session_id = self._current_session_id()
-            for nonce in range(max_retries):
-                ep_id = _episode_id(content, ts, nonce)
-                try:
-                    self._conn.execute(
-                        """INSERT INTO episodes (id, timestamp, type, content, source, session_id, metadata)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (ep_id, ts, episode_type.value, content, source, session_id, meta_json),
-                    )
-                    if not self._defer_commit:
-                        self._conn.commit()
-                    break
-                except sqlite3.IntegrityError:
-                    if nonce == max_retries - 1:
-                        raise
-                    continue
+            own_txn = not self._defer_commit and not self._conn.in_transaction
+            if own_txn:
+                self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                session_id = self._current_session_id()
+                for nonce in range(max_retries):
+                    ep_id = _episode_id(content, ts, nonce)
+                    try:
+                        self._conn.execute(
+                            """INSERT INTO episodes (id, timestamp, type, content, source, session_id, metadata)
+                               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                            (ep_id, ts, episode_type.value, content, source, session_id, meta_json),
+                        )
+                        if not self._defer_commit:
+                            self._conn.commit()
+                        break
+                    except sqlite3.IntegrityError:
+                        if nonce == max_retries - 1:
+                            raise
+                        continue
+            except BaseException:
+                if own_txn and self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
 
         episode = Episode(
             id=ep_id,
@@ -3459,13 +3474,37 @@ class Store:
             # Any NULL-session_id episodes recorded AFTER prepare_wrap
             # (the TOCTOU window) are NOT in the list, so they stay NULL
             # and land in the next wrap's ``episodes_since_wrap()`` result.
-            # Data loss is impossible — new episodes are preserved, just
-            # carried over to the wrap they semantically belong to.
+            # That covers only NULL (pre-first-wrap) episodes; the spore-1233
+            # carry-over UPDATE carries the session-stamped ones over the same way.
             last_wrap = self._conn.execute(
                 "SELECT id FROM wraps ORDER BY id DESC LIMIT 1"
             ).fetchone()
             if last_wrap:
                 session_id = str(last_wrap["id"])
+                if episode_ids is not None:
+                    # spore-1233: an episode recorded after the first wrap is stamped
+                    # with the open session's id (last wrap + 1), not NULL, so the
+                    # NULL-only stamp does not cover it. Once this wraps row
+                    # exists, that id counts as wrapped, and an episode the frozen
+                    # snapshot never saw would fall outside every later window.
+                    # Move each such episode to the next session in this same
+                    # transaction, so it is the next wrap's to compress.
+                    prev_row = self._conn.execute(
+                        "SELECT MAX(id) AS id FROM wraps WHERE id < ?",
+                        (last_wrap["id"],),
+                    ).fetchone()
+                    prev_id = prev_row["id"] if prev_row["id"] is not None else 0
+                    placeholders = ",".join("?" for _ in episode_ids)
+                    not_in_snapshot = (
+                        f"AND id NOT IN ({placeholders})" if episode_ids else ""
+                    )
+                    self._conn.execute(
+                        f"UPDATE episodes SET session_id = ? "
+                        f"WHERE session_id IS NOT NULL "
+                        f"AND CAST(session_id AS INTEGER) > ? "
+                        f"AND CAST(session_id AS INTEGER) <= ? {not_in_snapshot}",
+                        (str(last_wrap["id"] + 1), prev_id, last_wrap["id"], *episode_ids),
+                    )
                 if episode_ids is None:
                     # Direct wrap_completed call (episode_ids=None).
                     self._conn.execute(
@@ -4826,8 +4865,10 @@ class Store:
         SESSION ID LIFECYCLE (cross-reference — these 4 methods form a state machine):
         1. _current_session_id(): Returns str(last_wrap_id + 1) or None before first wrap.
            Called during record() to assign session_id at episode creation time.
-        2. wrap_completed(): UPDATEs episodes with session_id IS NULL to str(wrap_id).
-           Only matters for the first wrap cycle (pre-first-wrap episodes have NULL).
+        2. wrap_completed(): UPDATEs episodes with session_id IS NULL to str(wrap_id)
+           (pre-first-wrap episodes have NULL). With a frozen snapshot it also moves
+           every episode stamped with the closing session but absent from the
+           snapshot to the next session (spore-1233), so none is left behind.
         3. episodes_since_wrap(): Uses CAST(session_id AS INTEGER) > last_wrap_id.
            Finds episodes belonging to the current (unwrapped) session.
         4. _count_episodes_since_wrap(): Same query as #3 but SELECT COUNT(*).

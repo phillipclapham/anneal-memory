@@ -437,7 +437,15 @@ class StalePatternDict(TypedDict):
     days_stale: int  # Days since last validation
 
 
-class WrapPackageDict(TypedDict):
+class _WrapPackageOptional(TypedDict, total=False):
+    # Present ONLY on a derived-state (project schema) store that is opted in to
+    # re-derive and has a continuity: the State lines not confirmed when the
+    # package was built (every status but ok and judged), each written
+    # "line N: <flag>" (spore-1233).
+    stale_state: list[str]
+
+
+class WrapPackageDict(_WrapPackageOptional):
     """The agent-facing compression package built by ``_build_wrap_package``.
 
     Contains everything the agent needs to produce a compressed

@@ -651,7 +651,8 @@ def cmd_continuity(args: argparse.Namespace) -> None:
         if ref is not None and not rederive:
             print("Error: --ref needs --rederive.", file=sys.stderr)
             sys.exit(2)
-        if rederive and not any(s["role"] == "derived-state" for s in store.section_schema):
+        no_derived = not any(s["role"] == "derived-state" for s in store.section_schema)
+        if rederive and no_derived:
             print(
                 "Warning: this store's schema has no derived-state section; "
                 "nothing to re-derive.",
@@ -684,9 +685,18 @@ def cmd_continuity(args: argparse.Namespace) -> None:
                     ],
                 }
             _print_json(payload)
-            return
-
-        print(text)
+        else:
+            print(text)
+        if report is not None and (no_derived or not report.enabled):
+            # spore-1233: a re-derive that could check nothing exits 3, never like
+            # one whose every line held (0).
+            if not report.enabled:
+                print(
+                    "Re-derive not enabled for this store: no State line was checked "
+                    "(see `anneal-memory derive allow`).",
+                    file=sys.stderr,
+                )
+            sys.exit(3)
 
 
 def cmd_derive(args: argparse.Namespace) -> None:
@@ -723,12 +733,12 @@ def cmd_derive(args: argparse.Namespace) -> None:
         _print_json(result)
         return
     if action == "allow":
-        print(f"Re-derive allowed: {result['db']} -> {root}")
+        print(f"Re-derive allowed: {result['db']} -> {result['root']}")
         print("  STATE derive commands for this store will now run, read-only, in that directory.")
     elif action == "revoke":
         print("Re-derive revoked." if result["revoked"] else "This store was not allowed.")
     else:
-        print(f"Re-derive: {'allowed in ' + root if root else 'not enabled'}")
+        print(f"Re-derive: {'allowed in ' + str(result['root']) if result['root'] else 'not enabled'}")
     print(f"  Trust file: {result['trust_file']}")
 
 
@@ -1238,6 +1248,7 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 # only when opted in (file exists or --crystal); else None ⇒ no credit
                 # ⇒ byte-identical pre-crystal gate behavior. Symmetric with prepare.
                 crystal_store=_open_crystal_store_for_wrap(args),
+                require_rederive=getattr(args, "require_rederive", False),
             )
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
@@ -3419,6 +3430,13 @@ def build_parser() -> argparse.ArgumentParser:
              "auto-enabled when a crystal store already exists; pass this only "
              "to bootstrap the credit when no crystal store exists yet (normally "
              "the existing store auto-enables it).",
+    )
+    sub.add_argument(
+        "--require-rederive",
+        action="store_true",
+        help="Refuse the save unless this store is opted in to re-derive "
+             "('derive allow'), so its State lines are run at this save "
+             "(see docs/rederive.md).",
     )
     sub.set_defaults(func=cmd_save_continuity)
 

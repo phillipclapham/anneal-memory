@@ -48,7 +48,9 @@ from .rederive import (
     GIT_SUBCOMMANDS,
     PROGRAMS,
     check_state_for_save,
+    rederive_text,
     strip_rederive_output,
+    trusted_root,
 )
 from .schema import (
     DEFAULT_SCHEMA,
@@ -1668,6 +1670,30 @@ def prepare_wrap(
         schema=schema,
         crystal_store=crystal_store,
     )
+    # spore-1233: the composer sees the State section as a re-derive load would
+    # show it, flags inline (or the not-enabled notice), so it can rewrite what
+    # no longer holds. Measured 2026-09-30: without this the model cannot see
+    # which lines are stale. Commands run only on an opted-in store, under the
+    # containment in docs/rederive.md; the save strips every flag.
+    if existing is not None and any(s["role"] == "derived-state" for s in schema):
+        derive_report = rederive_text(existing, schema, trusted_root(store.path))
+        package["continuity"] = derive_report.text
+        if derive_report.enabled:
+            package["stale_state"] = [
+                f"line {r.index + 1}: {r.flag}"
+                for r in derive_report.results
+                if r.status not in ("ok", "judged")
+            ]
+            if package["stale_state"]:
+                package["instructions"] += (
+                    "\n\n**State lines that were not confirmed.** The current continuity "
+                    "below was re-derived for this wrap. A line flagged STALE no longer "
+                    "holds as written: rewrite it to what is true now, with a "
+                    "[derive: ...] that holds, or remove it. A line flagged DERIVE ERROR "
+                    "or REFUSED would refuse this save: fix or remove its command. A "
+                    "line flagged NOT DERIVED was not checked. Flags are stripped at "
+                    "save; do not copy them."
+                )
     episode_ids = [ep.id for ep in episodes]
     assoc_context = store.get_association_context(episode_ids) or None
 
@@ -1987,6 +2013,7 @@ def validated_save_continuity(
     compost: list[str] | None = None,
     session_id: str | None = None,
     allow_sole_live: bool = False,
+    require_rederive: bool = False,
 ) -> SaveContinuityResult:
     """Save continuity with the full validation pipeline.
 
@@ -2129,6 +2156,13 @@ def validated_save_continuity(
             the same value the wrap's ``prepare_wrap`` got: a sole live
             session that prepared with ``allow_sole_live=True`` and holds no
             baton is refused at the save without it. Default ``False``.
+        require_rederive: Refuse the save (``ValueError``, nothing written) unless
+            the schema has a derived-state section and the store is opted in to
+            re-derive (``derive allow``), so the State lines are actually run at
+            this save. Without it, a store that is not opted in saves after the
+            static checks alone. A caller that checks the opt-in before opening
+            the wrap passes this to cover a trust revoked before the save.
+            Default ``False``.
 
     Returns:
         :class:`SaveContinuityResult` — a :class:`TypedDict` with the
@@ -2381,6 +2415,13 @@ def validated_save_continuity(
     # refuse: they go into the result's ``stale_state`` and a warning after
     # commit. See docs/rederive.md.
     _derive_report = check_state_for_save(text, section_schema, store.path)
+    if require_rederive and (_derive_report is None or not _derive_report.enabled):
+        raise ValueError(
+            "Save refused: re-derive was required, but re-derive is not enabled "
+            "for this store"
+            + (" (its schema has no derived-state section)" if _derive_report is None else "")
+            + ", so no State line would be checked. See `anneal-memory derive allow`."
+        )
     stale_state: list[str] = []
     if _derive_report is not None and _derive_report.enabled:
         stale_state = [

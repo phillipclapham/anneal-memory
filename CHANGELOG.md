@@ -4,6 +4,32 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — an episode recorded while a wrap was open could be lost to every later wrap
+
+- After the first wrap, `record()` stamps an episode with the open session's id. An episode
+  recorded between `prepare_wrap` and the save (which capture is free to do) was not in the
+  frozen snapshot, yet the save closed its session, so it fell outside every later compression
+  window. Measured 2026-09-30 on main at 0.9.17.dev0: a recorder against a prepare/save loop lost 2,517 of
+  3,459 episodes. `wrap_completed` now moves every episode stamped with the closing session but
+  absent from the snapshot to the next session, in the same transaction.
+- `record()` reads its session id and inserts under one `BEGIN IMMEDIATE`, so a wrap that commits
+  between the two can no longer close the session the episode is about to be stamped with
+  (without this, the same run still lost about one episode per wrap).
+
+### Fixed — re-derive
+
+- `anneal-memory derive status` without `--json` raised `UnboundLocalError`.
+- `continuity --rederive` exited 0 when it checked nothing. It now exits 3 when the store is not
+  opted in (with a stderr notice) or its schema has no derived-state section.
+
+### Added — re-derive
+
+- `validated_save_continuity(require_rederive=True)` / `save-continuity --require-rederive`:
+  refuse the save unless the store is opted in, so the State lines are run at that save.
+- `prepare_wrap` re-derives the current continuity for the composer: State lines carry their flags
+  in the package (or the not-enabled header), the package gains an optional `stale_state` list,
+  and the instructions say what to do with a flagged line. The save strips the flags as before.
+
 ## [0.9.16] — 2026-09-30
 
 ### Fixed — the wrap prompt no longer calls a just-crystallized pattern "re-warmed"

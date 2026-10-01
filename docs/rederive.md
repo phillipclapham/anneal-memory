@@ -34,13 +34,26 @@ that header only when the whole line is exactly what re-derive writes, so an
 authored note is never deleted, and it always removes a flag after a State
 line's closing `]`, so a forged `✓` is never persisted.
 Re-deriving already re-derived text gives the same result as re-deriving the
-original.
+original. `continuity --rederive` exits 3, not 0, when it could check nothing:
+the store is not opted in (it also says so on stderr), or its schema has no
+derived-state section. Stale lines do not change the exit status; their flags
+are the signal.
 
 A save (`validated_save_continuity`) refuses a State section in which a line
 carries no annotation or a refused command, and, on a store that is enabled
 for re-derive, one whose command errors. Stale and not-derived lines do not
 refuse the save: they are returned in the result's `stale_state` list (and in
-the MCP tool's reply), with a warning after the save commits.
+the MCP tool's reply), with a warning after the save commits. On a store that
+is not opted in, a save runs the static checks alone; pass `require_rederive=True`
+(CLI `save-continuity --require-rederive`) to refuse such a save instead, for a
+caller that checked the opt-in before opening the wrap and must not commit
+unchecked lines if the trust was revoked meanwhile.
+
+`prepare_wrap` shows the composer the current continuity as a re-derive load
+would show it: flags inline on an opted-in store, the not-enabled header
+otherwise. The package's optional `stale_state` lists the lines that were not
+confirmed. These are the same commands under the same containment as a load;
+nothing runs on a store that is not opted in.
 
 ## Why this needs containment
 

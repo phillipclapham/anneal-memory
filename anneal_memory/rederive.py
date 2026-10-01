@@ -134,26 +134,21 @@ _HEADER_LINE = re.compile(
 )
 
 
+def drop_header(text: str) -> str:
+    """``text`` without the header line :func:`rederive_text` puts first (and
+    the blank line after it). Only that exact line in that place is removed, so
+    an authored note is never deleted."""
+    lines = text.split("\n")
+    if len(lines) > 1 and _HEADER_LINE.match(lines[0].rstrip("\r")) and not lines[1].strip():
+        return "\n".join(lines[2:])
+    return text
+
+
 def strip_rederive_output(text: str, schema: list[SectionSpec]) -> str:
     """Remove everything :func:`rederive_text` added: its header line (and the
     blank line after it) and every flag it appended to a State line. Saving
     loaded text back must never persist a verdict that is true only at load."""
-    lines = text.split("\n")
-    # Exactly what rederive_text writes: the header line, then a blank line.
-    # It is removed where re-derive puts it (the first line) or where a
-    # composer who keeps the "# " title first puts it (right under the title):
-    # prepare_wrap hands it to a composer (spore-1233). Anywhere else a
-    # matching line is authored text and is kept.
-    for at in (0, 1):
-        if at == 1 and not (lines and lines[0].startswith("# ")):
-            break
-        if (
-            len(lines) > at + 1
-            and _HEADER_LINE.match(lines[at].rstrip("\r"))
-            and not lines[at + 1].strip()
-        ):
-            del lines[at : at + 2]
-            break
+    lines = drop_header(text).split("\n")
     joined = "\n".join(lines)
     for idx, line in derived_state_lines(joined, schema):
         cr = "\r" if line.endswith("\r") else ""

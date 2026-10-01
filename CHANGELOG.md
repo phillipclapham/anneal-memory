@@ -39,8 +39,6 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   refused or failed before running, or the load budget spent), and says so on stderr.
 - `RederiveReport.clean` is now false when no check ran (it was true for a State of only
   `[judged:]` lines). `LineResult.ran` records whether a line's check actually ran and answered.
-- A re-derive header a composer copied directly under the title line was persisted by the save.
-  The save now removes it there too (with its blank line); elsewhere a matching line is kept.
 
 ### Added — re-derive
 
@@ -48,11 +46,12 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   refuse the save unless the store is opted in and at least one State command ran at that save.
   Not on the MCP `save_continuity` tool.
 - `prepare_wrap` re-derives the current continuity for the composer: State lines carry their flags
-  in the package (or the not-enabled header), the package gains an optional `unconfirmed_state`
-  list, and the instructions say the marks are stripped at save and what to do with a flagged
-  line. On an opted-in store this runs the State commands at prepare (MCP included), under the
+  in the package (never the header line, which a composer could move out of the save's reach),
+  the package gains an optional `unconfirmed_state` list, and the instructions say the flags are
+  stripped at save and what to do with a flagged line, or that the store is not opted in. On an opted-in store this runs the State commands at prepare (MCP included), under the
   same containment as a load.
-- `RederiveReport.ran`: how many State checks ran and answered.
+- `RederiveReport.ran`: how many State checks ran and answered. `rederive.drop_header()`.
+  `Store.count_episodes_since_wrap()` and `Store.last_wrap_id()`.
 
 ## [0.9.16] — 2026-09-30
 

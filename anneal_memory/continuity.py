@@ -48,6 +48,7 @@ from .rederive import (
     GIT_SUBCOMMANDS,
     PROGRAMS,
     check_state_for_save,
+    drop_header,
     rederive_text,
     strip_rederive_output,
     trusted_root,
@@ -1283,6 +1284,15 @@ def _crystallization_block(
     return "\n".join(parts).rstrip()
 
 
+def _pending_count(store: Store) -> int:
+    """Best-effort count of the open window for a retry result: the result
+    says "retry" either way, so a failed read must not replace it (L3 r2)."""
+    try:
+        return store.count_episodes_since_wrap()
+    except StoreError:
+        return 0
+
+
 def _downgraded_empty(message: str, episode_count: int = 0) -> PrepareWrapResult:
     """A ``downgraded`` result with no package (store untouched). ``episode_count``
     is what is still pending, 0 on the empty-window path."""
@@ -1676,21 +1686,23 @@ def prepare_wrap(
         schema=schema,
         crystal_store=crystal_store,
     )
-    # spore-1233: the composer sees the State section as a re-derive load would
-    # show it, flags inline (or the not-enabled notice), so it can rewrite what
-    # no longer holds. Measured 2026-09-30: without this the model cannot see
-    # which lines are stale. Commands run only on an opted-in store, under the
-    # containment in docs/rederive.md; the save strips every flag.
+    # spore-1233: the composer sees each State line with the flag a re-derive
+    # run gives it now, so it can rewrite what no longer holds. Measured
+    # 2026-09-30: without this the model cannot see which lines are stale.
+    # Commands run only on an opted-in store, under the containment in
+    # docs/rederive.md. The header line is NOT handed over: a composer can move
+    # it anywhere, and a verdict outside the State lines would outlive the save
+    # (L3 r2). Flags sit after a State line's annotation, where every save
+    # strips them.
     if existing is not None and any(s["role"] == "derived-state" for s in schema):
         derive_report = rederive_text(existing, schema, trusted_root(store.path))
-        package["continuity"] = derive_report.text
-        note = (
-            "\n\n**Re-derive marks in the current continuity.** It is shown as a "
-            "re-derive load shows it: a `> [anneal re-derive]` line above it, and "
-            "on an opted-in store a flag after each State line. They are true only "
-            "now; the save strips them, so do not copy them."
-        )
+        package["continuity"] = drop_header(derive_report.text)
         if derive_report.enabled:
+            note = (
+                "\n\n**Re-derive flags in the current continuity.** Each State line "
+                "below carries the flag a re-derive run for this wrap gave it. Flags "
+                "are true only now and the save strips them: do not copy them."
+            )
             unconfirmed = [
                 f"line {r.index + 1}: {r.flag}"
                 for r in derive_report.results
@@ -1706,7 +1718,10 @@ def prepare_wrap(
                     "NOT DERIVED was not checked."
                 )
         else:
-            note += " This store is not opted in, so no State line was checked."
+            note = (
+                "\n\n**State was not re-derived.** This store is not opted in to "
+                "re-derive, so no State line was checked for this wrap."
+            )
         package["instructions"] += note
     episode_ids = [ep.id for ep in episodes]
     assoc_context = store.get_association_context(episode_ids) or None
@@ -1746,7 +1761,7 @@ def prepare_wrap(
             "another wrap completed while this call was preparing, so its "
             "episodes and continuity are out of date and no wrap was opened. "
             "Retry. Capture (afferent) is unaffected.",
-            episode_count=len(store.episodes_since_wrap()),
+            episode_count=_pending_count(store),
         )
 
     # Move #4 library layer (v0.3.2): surface the list of existing

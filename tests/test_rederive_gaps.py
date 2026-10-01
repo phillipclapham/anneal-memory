@@ -21,7 +21,7 @@ import pytest
 
 from anneal_memory import prepare_wrap, validated_save_continuity
 from anneal_memory.continuity import format_wrap_package_text
-from anneal_memory.rederive import revoke_store
+from anneal_memory.rederive import rederive_continuity, revoke_store
 
 from .test_rederive import TRUE_STATE, _continuity, _save, project  # noqa: F401
 
@@ -114,7 +114,7 @@ def test_prepare_wrap_says_when_state_was_not_checked(project):
 
     package = prepare_wrap(store)["package"]
     assert package is not None
-    assert "not enabled for this store; STATE lines were not checked" in package["continuity"]
+    assert "[anneal re-derive]" not in package["continuity"]
     assert "unconfirmed_state" not in package
     assert "no State line was checked" in package["instructions"]
 
@@ -142,21 +142,19 @@ def test_require_rederive_refuses_a_save_where_no_command_ran(project):
         )
 
 
-def test_a_composer_copied_header_below_the_title_is_not_persisted(project):
-    """L1 (spore-1233 review): prepare_wrap now hands the composer re-derive
-    output, header included; a composer that keeps its title first and copies
-    the header under it must not persist a load-time verdict."""
-    store, _repo = project
+def test_the_composer_is_never_handed_a_header_line(project):
+    """L1 + L3 r2 (spore-1233): a header handed to the composer could be moved
+    anywhere and persist a load-time verdict, so prepare_wrap hands over only
+    the flagged State lines, opted in or not."""
+    store, repo = project
     _save(store, _continuity(TRUE_STATE))
+    (repo / "app.py").write_text('VERSION = "1.4.0"\n')
     store.record("next session", "observation")
-    package = prepare_wrap(store)["package"]
-    assert package is not None
-    header = package["continuity"].split("\n")[0]
-    assert header.startswith("> [anneal re-derive]")
-    title, rest = _continuity(TRUE_STATE).split("\n", 1)
-    composed = f"{title}\n{header}\n\n{rest}"
-    validated_save_continuity(store, composed)
-    assert "[anneal re-derive]" not in store.load_continuity()
+    on = prepare_wrap(store)
+    assert on["package"] is not None
+    assert "[anneal re-derive]" not in on["package"]["continuity"]
+    assert "⚠ STALE" in on["package"]["continuity"]
+    assert "[anneal re-derive]" not in format_wrap_package_text(on)
 
 
 def test_a_store_whose_commands_all_failed_before_running_checked_nothing(project):
@@ -180,12 +178,14 @@ def test_judged_only_state_is_not_reported_clean(project):
 
 
 def test_an_authored_preamble_line_matching_the_header_is_kept(project):
-    """codex + complement L3 r1: the strip removes the header only where re-derive
-    or a composer puts it (first line, or right under the title), with its blank."""
+    """codex + complement L3 r1/r2: the save strips the header only where
+    re-derive writes it (the first line); anywhere else it is authored text."""
     store, _repo = project
     _save(store, _continuity(TRUE_STATE))
     store.record("next session", "observation")
-    header = prepare_wrap(store)["package"]["continuity"].split("\n")[0]
+    header = rederive_continuity(store).text.split("\n")[0]
+    assert header.startswith("> [anneal re-derive]")
+    prepare_wrap(store)
     title, rest = _continuity(TRUE_STATE).split("\n", 1)
     composed = f"{title}\n\nA note quoting the header:\n{header}\n{rest}"
     validated_save_continuity(store, composed)

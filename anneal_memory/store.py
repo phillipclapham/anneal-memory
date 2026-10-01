@@ -347,6 +347,7 @@ StoreOperation = Literal[
     "wrap_cancelled",
     "get_wrap_started_at",
     "last_wrap_id",
+    "count_episodes_since_wrap",
     "consolidate_requires_baton",
     "wrap_gated_session",
     "set_consolidate_requires_baton",
@@ -4895,6 +4896,11 @@ class Store:
         """The newest wraps row id, 0 before the first wrap."""
         row = self._conn.execute("SELECT MAX(id) AS id FROM wraps").fetchone()
         return int(row["id"]) if row["id"] is not None else 0
+
+    def count_episodes_since_wrap(self) -> int:
+        """How many episodes are in the open compression window."""
+        with self._db_boundary("count_episodes_since_wrap"):
+            return self._count_episodes_since_wrap()
 
     def last_wrap_id(self) -> int:
         """Public read of :meth:`_last_wrap_id`, for ``wrap_started``'s

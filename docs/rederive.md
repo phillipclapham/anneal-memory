@@ -30,10 +30,8 @@ disagrees, `⚠ DERIVE ERROR` when it errors, `⛔ REFUSED` when its command is
 outside the allowlist below, and `⚠ NOT DERIVED` when the load ran out of
 budget before reaching it. Text loaded this way starts with a
 `> [anneal re-derive]` line and can be saved back as it is. The save removes
-that header, with the blank line after it, only where re-derive puts it (the
-first line) or where a composer keeping the `# ` title first puts it (directly
-under the title), and only when the whole line is exactly what re-derive
-writes, so an authored note is never deleted, and it always removes a flag after a State
+that header only when it is the first line and the whole line is exactly what
+re-derive writes, so an authored note is never deleted, and it always removes a flag after a State
 line's closing `]`, so a forged `✓` is never persisted.
 Re-deriving already re-derived text gives the same result as re-deriving the
 original. `continuity --rederive` exits 3, not 0, when no State check ran and
@@ -54,9 +52,10 @@ also a save in which no State command ran. It is for a caller that checked the
 opt-in before opening the wrap and must not commit unchecked lines if the trust
 was revoked meanwhile. The MCP `save_continuity` tool does not take it.
 
-`prepare_wrap` shows the composer the current continuity as a re-derive load
-would show it: flags inline on an opted-in store, the not-enabled header
-otherwise, and its instructions say the marks are stripped at save. The
+`prepare_wrap` shows the composer the current continuity with each State line
+flagged on an opted-in store; its instructions say the flags are stripped at
+save, or that the store is not opted in. The header line is never handed to
+the composer: moved anywhere but the first line, it would outlive the save. The
 package's optional `unconfirmed_state` lists every State line that was not
 confirmed (wider than the save's `stale_state`, which lists only the lines that
 do not refuse a save). These are the same commands under the same containment as a load;

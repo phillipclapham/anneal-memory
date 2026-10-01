@@ -1217,8 +1217,10 @@ def _crystallization_block(
           crystallize``, retrieved on cue, off the always-loaded budget)
         → COMPOST (phase-specific + cold — drop it; its episodes remain as the
           re-graduation safety net)
-      - hot crystallized patterns to consider pulling back IN (the work re-warmed
-        their domain — re-add to ``## Patterns`` if currently load-bearing).
+      - crystallized patterns activated recently (crystallized or touched within
+        the activation window; with no ``touch()`` caller, that means crystallized
+        recently) to consider pulling back IN — re-add to ``## Patterns`` only if
+        load-bearing now.
 
     Propose-not-auto: the library SURFACES; the composer (or operator) decides + acts
     (the no-LLM-as-judge axiom — the library cannot judge permanence vs activation-

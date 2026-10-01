@@ -48,10 +48,12 @@ leave)::
        (graduated wisdom escapes the                  obsolete — kept in the retired set
        always-loaded budget)                          for audit, never silently dropped
 
-Bidirectional working⇄crystallized via activation: a re-heating crystallized
-pattern (its domain goes hot, so it keeps being leaned on) becomes a **re-warm
-candidate** (:meth:`CrystalStore.surface_rewarm_candidates`) — the working set is a
-*cache* over this backing store, activation-driven both ways. Crystallizing is NOT
+Bidirectional working⇄crystallized via activation: a crystallized pattern whose
+``last_activated_on`` is recent becomes a **re-warm candidate**
+(:meth:`CrystalStore.surface_rewarm_candidates`). Only :meth:`CrystalStore.crystallize`
+and an explicit :meth:`CrystalStore.touch` write that date; being recalled or leaned
+on does not, so without a ``touch()`` caller a candidate is one crystallized
+recently. The working set is a *cache* over this backing store. Crystallizing is NOT
 forgetting: ``activation_aware_forgetting`` keys eviction on activation-recency, and
 episodic recall re-graduates a wrongly-composted pattern from its evidence.
 

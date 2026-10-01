@@ -107,14 +107,24 @@ class Annotation:
 
 # The inline flag rederive_text appends ("  ✓", "  ⚠ STALE (…)", …), so text
 # loaded with --rederive and carried into a wrap still parses.
-_APPENDED_FLAG = re.compile(r"  (?:✓|⚠ [A-Z][A-Z ]*[A-Z]|⛔ REFUSED)(?: \(.*\))?$")
+_APPENDED_FLAG = re.compile(r"  (?:✓|⚠ [A-Z][A-Z ]*[A-Z]|⛔ REFUSED)(?: \(.*\))?")
 
 
 def strip_flag(line: str) -> str:
     """``line`` without a flag :func:`rederive_text` appended to it; any other
-    line comes back byte for byte."""
-    m = _APPENDED_FLAG.search(line)
-    return line[: m.start()] if m else line
+    line comes back byte for byte.
+
+    A claim may itself hold a flag-shaped run ("Release gate  ⚠ BLOCKED (see
+    Open) [derive: …]"), and so may a flag's detail, so the cut is the
+    rightmost flag that follows an annotation's closing "]". Only a line with
+    no such flag (an unannotated one) falls back to the leftmost (Diogenes
+    2026-10-01)."""
+    cuts = [m.start() for m in re.finditer("  (?=[✓⚠⛔])", line)
+            if _APPENDED_FLAG.fullmatch(line, m.start())]
+    if not cuts:
+        return line
+    after_bracket = [i for i in cuts if line[:i].endswith("]")]
+    return line[: (after_bracket[-1] if after_bracket else cuts[0])]
 
 
 # Every text rederive_text returns starts with this tag. At save the header is
@@ -377,15 +387,6 @@ def _check_repo_shape(root: str) -> str | None:
                 os.path.join("objects", "info", "http-alternates")):
         if os.path.lexists(os.path.join(git, rel)):
             return f".git/{rel} exists; git would read outside the root"
-    # The repository's config may not pull in another file.
-    try:
-        with open(os.path.join(git, "config"), encoding="utf-8", errors="replace") as f:
-            if re.search(r"^\s*\[\s*include", f.read(), re.IGNORECASE | re.MULTILINE):
-                return ".git/config includes another file; git would read outside the root"
-    except FileNotFoundError:
-        pass
-    except OSError as e:
-        return f".git/config is unreadable ({e})"
     # Git follows a symlink anywhere in its metadata (a loose ref, HEAD,
     # packed-refs, an objects fan-out directory): one that leaves the root
     # is a read outside it (gpt-oss L3 round 3, reproduced).
@@ -395,7 +396,31 @@ def _check_repo_shape(root: str) -> str | None:
             full = os.path.join(dirpath, name)
             if os.path.islink(full) and not _inside(os.path.realpath(full), root_real):
                 return f"{os.path.relpath(full, root)} is a symlink out of the root"
+    # The repository's config may not pull in another file. Git's own parser
+    # decides what an include is (a regex missed "[core][include]" on one
+    # line; Diogenes 2026-10-01); --file reads that one file and follows no
+    # include. config.worktree is a second config file git reads when
+    # extensions.worktreeConfig is set, so it may not exist at all.
+    if os.path.lexists(os.path.join(git, "config.worktree")):
+        return ".git/config.worktree exists; its config is not checked"
+    if os.path.lexists(os.path.join(git, "config")):
+        out = _run_bounded(
+            ["git", *_GIT_HARDENING, "config", "--file", os.path.join(git, "config"),
+             "--name-only", "--list"],
+            root, _SHAPE_TIMEOUT, _SHAPE_CAP,
+        )
+        if out.returncode != 0 or out.timed_out or out.overflowed:
+            why = out.spawn_error or out.stderr.decode("utf-8", "replace").strip() or "no answer"
+            return f".git/config could not be parsed ({why})"
+        for key in out.stdout.decode("utf-8", "replace").splitlines():
+            if key.lower().startswith(("include.", "includeif.")):
+                return ".git/config includes another file; git would read outside the root"
     return None
+
+
+# Bounds for the one git call the shape check makes (reading .git/config).
+_SHAPE_TIMEOUT = 10.0
+_SHAPE_CAP = 1 << 20
 
 
 class _TrackError(Exception):
@@ -1080,6 +1105,17 @@ def allow_store(db_path: str | os.PathLike, root: str | os.PathLike, trust_file:
     root_s = os.path.realpath(root)
     if not os.path.isdir(root_s):
         raise ValueError(f"root {root_s!r} is not a directory")
+    # A repository root whose shape git lines refuse (a linked worktree, a
+    # gitfile, an include) would make every git, grep and wc line an error,
+    # and an opted-in store refuses every save with one (Diogenes 2026-10-01).
+    # A root with no .git at all stays allowed: its test lines run.
+    if os.path.lexists(os.path.join(root_s, ".git")):
+        shape = _check_repo_shape(root_s)
+        if shape:
+            raise ValueError(
+                f"root {root_s!r} is not a repository re-derive can run git in: {shape}. "
+                "Allow the main checkout instead."
+            )
     path = trust_file or trust_file_path()
     if _inside(os.path.realpath(path), root_s):
         raise ValueError(

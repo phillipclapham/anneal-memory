@@ -46,7 +46,7 @@ anneal maps onto the first three tiers concretely — each is a real file/mechan
 | **Crystallized** | cortical semantic store | `<stem>.crystal.json` (`CrystalStore`) | **on cue** (harness recall hook) |
 | **Constitution** | core identity / deep priors | the harness's always-load layer | **always** |
 
-The wrap is the consolidation step that moves a pattern between tiers: a cold, stable Proven crystallizes *out* of the working set into the store; a re-heating one is surfaced as a re-warm candidate to pull back *in*.
+The wrap is the consolidation step that moves a pattern between tiers: a cold, stable Proven crystallizes *out* of the working set into the store; a crystal activated recently (crystallized, or marked with `crystal touch`) is surfaced as a re-warm candidate to pull back *in*; recall alone does not activate one.
 
 **The crystallized tier is the piece that completes the architecture.** Before it, anneal had the hippocampus (episodic) and the consolidation act (the wrap) but *no cortical semantic store*. A pattern that graduated to Proven had exactly one place to live: the always-loaded continuity. That conflates working memory with long-term memory — the one thing CLS specifically does *not* do — which is why graduation was a one-way ratchet. `CrystalStore` is that missing store: a JSON sibling of the spore store (same atomic-write + `fcntl` durability, read-time activation tiering, typed lifecycle) that holds every proven-and-stable pattern *retrievably* — out of the always-loaded set, surfaced on cue. The working set shrinks to what's developing or hot; the body of graduated wisdom moves to a store and is recalled when relevant. The ratchet finally has its OUT path. The architecture revealed the gap, and the gap had a known shape.
 

@@ -207,7 +207,8 @@ directory (not a gitfile or symlink, so not a linked worktree), `objects` and
 `refs` must not be symlinks, there must be no `commondir` and no object
 `alternates`, and no symlink anywhere under `.git` (a loose ref, `HEAD`,
 `packed-refs`) may point out of the root. The repository's config may not
-`include` another file, and git reads no global or system config
+`include` another file (git's own parser decides, so git 2.25 or newer is
+needed), there may be no `.git/config.worktree`, and git reads no global or system config
 (`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM`). Otherwise git would follow its own metadata out of the root, and
 the line is a `⚠ DERIVE ERROR`.
 

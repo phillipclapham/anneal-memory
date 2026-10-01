@@ -399,7 +399,10 @@ def _check_repo_shape(root: str) -> str | None:
     # The repository's config may not pull in another file. Git's own parser
     # decides what an include is (a regex missed "[core][include]" on one
     # line; Diogenes 2026-10-01); --file reads that one file and follows no
-    # include. config.worktree is a second config file git reads when
+    # include. _GIT_HARDENING's --no-pager is load-bearing here: without it,
+    # git's pager lookup loads the repository config, includes and all,
+    # before --file applies (L2, measured on git 2.50). Needs git >= 2.25 for
+    # --name-only. config.worktree is a second config file git reads when
     # extensions.worktreeConfig is set, so it may not exist at all.
     if os.path.lexists(os.path.join(git, "config.worktree")):
         return ".git/config.worktree exists; its config is not checked"
@@ -1112,9 +1115,9 @@ def allow_store(db_path: str | os.PathLike, root: str | os.PathLike, trust_file:
     if os.path.lexists(os.path.join(root_s, ".git")):
         shape = _check_repo_shape(root_s)
         if shape:
+            hint = " Allow the main checkout instead." if "plain directory" in shape else ""
             raise ValueError(
-                f"root {root_s!r} is not a repository re-derive can run git in: {shape}. "
-                "Allow the main checkout instead."
+                f"root {root_s!r} is not a repository re-derive can run git in: {shape}.{hint}"
             )
     path = trust_file or trust_file_path()
     if _inside(os.path.realpath(path), root_s):

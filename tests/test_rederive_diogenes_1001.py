@@ -56,6 +56,13 @@ def test_include_shapes_the_regex_missed_are_refused(repo, tmp_path):
     config.write_text(plain + f'[includeIf "gitdir:/"]\n\tpath = {outside}\n')
     assert "includes another file" in _check_repo_shape(str(repo))
 
+    # The shape check must not itself read the included file: a malformed
+    # one would make it "could not be parsed" (it did without --no-pager).
+    outside.write_text("this is not config\n")
+    config.write_text(plain + f"[include]\n\tpath = {outside}\n")
+    assert "includes another file" in _check_repo_shape(str(repo))
+    outside.write_text("[core]\n\tabbrev = 20\n")
+
     config.write_text(plain + "[extensions]\n\tworktreeConfig = true\n")
     (repo / ".git" / "config.worktree").write_text(f"[include]\n\tpath = {outside}\n")
     assert "config.worktree" in _check_repo_shape(str(repo))

@@ -4,6 +4,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.9.18] — 2026-10-01
+
 ### Fixed — re-derive edge cases (Diogenes 2026-10-01 and its review)
 
 - The repository-shape check let git read a config file outside the root: an include written

@@ -227,3 +227,45 @@ def test_read_side_resolves_a_symlinked_label_root(two, tmp_path):
     data["stores"][0]["labels"]["other"]["root"] = str(link)  # a hand edit
     trust.write_text(json.dumps(data))
     assert "other" not in trusted_roots(store.path)  # it is nested in the default root
+
+
+def test_l3_parsers_and_trust_reading_fail_closed(two, tmp_path):
+    from anneal_memory.rederive import strip_flag
+
+    # strip_flag is linear on many flag-shaped fragments (was quadratic)
+    line = "- x [judged: ok]" + "]  ⚠ FOO (" * 160000 + ")"  # quadratic took 3.8s here
+    start = time.monotonic()
+    strip_flag(line)
+    assert time.monotonic() - start < 1.0
+    store, main, other, trust = two
+    allow_store(store.path, main, visibility="public")
+    allow_store(store.path, other, label="other", visibility="public")
+    (other / "inner").mkdir()
+    data = json.loads(trust.read_text())
+    L = data["stores"][0]["labels"]
+    # nesting is dropped on both sides whatever the order (was order-dependent)
+    L["inner"] = {"root": str((other / "inner").resolve()), "visibility": "public"}
+    trust.write_text(json.dumps(data))
+    assert set(trusted_roots(store.path)) == {None}
+    # a malformed entry is unusable, never a crash; allow still works over it
+    L.pop("inner")
+    L["bad"] = {"root": "/x\u0000y", "visibility": "public"}
+    L["scalar"] = "nope"
+    trust.write_text(json.dumps(data))
+    assert set(trusted_roots(store.path)) == {None, "other"}
+    allow_store(store.path, other, label="other", visibility="public")
+
+
+def test_the_cap_counts_unbound_lines_so_no_unchecked_root_runs(two, monkeypatch):
+    from anneal_memory import rederive
+
+    store, main, other, _ = two
+    allow_store(store.path, main, visibility="public")
+    allow_store(store.path, other, label="other", visibility="public")
+    checked = []
+    real = rederive._check_repo_shape
+    monkeypatch.setattr(rederive, "_check_repo_shape", lambda r, **k: checked.append(r) or real(r, **k))
+    state = ["- u [derive@nobody: test -e a.txt]"] * 2 + ["- o [derive@other: git rev-parse --verify -q HEAD]"]
+    r = rederive_text(_continuity(state), PROJECT_SCHEMA, trusted_roots(store.path), max_lines=2)
+    assert [x.status for x in r.results] == ["unbound", "unbound", "skipped"]
+    assert checked == []

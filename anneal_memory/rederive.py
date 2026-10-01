@@ -132,6 +132,21 @@ def _check_label(label: str) -> None:
 _APPENDED_FLAG = re.compile(r"  (?:✓|⚠ [A-Z][A-Z ]*[A-Z]|⛔ REFUSED)(?: \(.*\))?")
 
 
+_FLAG_BASE = re.compile(r"  (?:✓|⚠ [A-Z][A-Z ]*[A-Z]|⛔ REFUSED)")
+
+
+def _flag_at(line: str, i: int) -> bool:
+    """Whether a flag rederive_text could have appended starts at ``i`` and
+    runs to the end of the line: the same shape as ``_APPENDED_FLAG``, checked
+    without scanning the rest of the line, so a line of many flag-shaped
+    fragments costs linear time, not quadratic (codex L3 2026-10-01: 40k
+    fragments took 2.2s, doubling size quadrupled it)."""
+    m = _FLAG_BASE.match(line, i)
+    if m is None:
+        return False
+    return m.end() == len(line) or (line.startswith(" (", m.end()) and line.endswith(")"))
+
+
 def strip_flag(line: str) -> str:
     """``line`` without a flag :func:`rederive_text` appended to it; any other
     line comes back byte for byte.
@@ -141,11 +156,10 @@ def strip_flag(line: str) -> str:
     rightmost flag that follows an annotation's closing "]". Only a line with
     no such flag (an unannotated one) falls back to the leftmost (Diogenes
     2026-10-01)."""
-    cuts = [m.start() for m in re.finditer("  (?=[✓⚠⛔])", line)
-            if _APPENDED_FLAG.fullmatch(line, m.start())]
+    cuts = [m.start() for m in re.finditer("  (?=[✓⚠⛔])", line) if _flag_at(line, m.start())]
     if not cuts:
         return line
-    after_bracket = [i for i in cuts if line[:i].endswith("]")]
+    after_bracket = [i for i in cuts if i > 0 and line[i - 1] == "]"]  # an index, not a copied prefix
     return line[: (after_bracket[-1] if after_bracket else cuts[0])]
 
 
@@ -421,19 +435,29 @@ def _check_repo_shape(root: str, timeout: float | None = None) -> str | None:
     # is a read outside it (gpt-oss L3 round 3, reproduced).
     root_real = os.path.realpath(root)
     walk_deadline = None if timeout is None else time.monotonic() + timeout
+    # Bounded by the load budget, checked while each directory is read (not
+    # after os.walk has listed it whole): a .git of millions of entries would
+    # otherwise hold a load for as long as the walk takes (codex L3,
+    # spore-1233 r2 and 2026-10-01; measured: 60k entries overran a 0.05s
+    # budget by 3.6x, 200k in one directory a 0.01s one by 13x).
     seen = 0
-    for dirpath, dirnames, filenames in os.walk(git, followlinks=False):
-        for name in dirnames + filenames:
-            # Bounded by the load budget: a .git of millions of entries would
-            # otherwise hold a load for as long as the walk takes (codex L3,
-            # spore-1233 r2; measured 2026-10-01: 60k entries overran a 0.05s
-            # budget by 3.6x).
-            seen += 1
-            if walk_deadline is not None and seen % 512 == 0 and time.monotonic() > walk_deadline:
-                return ".git could not be checked within the load budget"
-            full = os.path.join(dirpath, name)
-            if os.path.islink(full) and not _inside(os.path.realpath(full), root_real):
-                return f"{os.path.relpath(full, root)} is a symlink out of the root"
+    stack = [git]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as entries:
+                for entry in entries:
+                    seen += 1
+                    if walk_deadline is not None and seen % 256 == 0 and time.monotonic() > walk_deadline:
+                        return ".git could not be checked within the load budget"
+                    if entry.is_symlink():
+                        if not _inside(os.path.realpath(entry.path), root_real):
+                            return f"{os.path.relpath(entry.path, root)} is a symlink out of the root"
+                    elif entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+        except OSError as e:
+            return f".git could not be read ({e})"
+    if walk_deadline is not None and time.monotonic() > walk_deadline:
+        return ".git could not be checked within the load budget"
     # The repository's config may not pull in another file. Git's own parser
     # decides what an include is (a regex missed "[core][include]" on one
     # line; Diogenes 2026-10-01); --file reads that one file and follows no
@@ -451,13 +475,13 @@ def _check_repo_shape(root: str, timeout: float | None = None) -> str | None:
                 return ".git/config is not a regular file"
         except OSError as e:  # a dangling link, or gone since lexists (L3)
             return f".git/config is unreadable ({e})"
+        left = _SHAPE_TIMEOUT if walk_deadline is None else min(_SHAPE_TIMEOUT, walk_deadline - time.monotonic())
+        if left <= 0:
+            return ".git could not be checked within the load budget"
         out = _run_bounded(
             ["git", *_GIT_HARDENING, "config", "--file", os.path.join(git, "config"),
              "--name-only", "--list"],
-            root,
-            _SHAPE_TIMEOUT if walk_deadline is None
-            else max(0.1, min(_SHAPE_TIMEOUT, walk_deadline - time.monotonic())),
-            _SHAPE_CAP,
+            root, left, _SHAPE_CAP,
         )
         if out.returncode != 0 or out.timed_out or out.overflowed:
             why = out.spawn_error or out.stderr.decode("utf-8", "replace").strip() or "no answer"
@@ -1001,16 +1025,27 @@ def rederive_text(
     # (default first), before git runs in it: its shape when any of its lines
     # could need the repository, and its @REF. All of it is bounded by the one
     # load budget (docs/rederive.md, multi-root).
-    used = [k for k in roots if any(key_of(a) == k for a in anns.values())]
-    if None not in used:
-        used.insert(0, None)
+    # One pass groups the lines the line cap can reach by root; a root only
+    # lines past the cap would use is never checked (codex L3 2026-10-01).
+    by_root: dict[str | None, list[Annotation]] = {None: []}
+    reachable = 0
+    for idx, _ in targets:
+        a = anns[idx]
+        if a is None or a.kind != "derive":
+            continue
+        reachable += 1
+        if reachable > max_lines:
+            break
+        if a.root is None or (a.root in roots and _LABEL.fullmatch(a.root)):
+            by_root.setdefault(a.root, []).append(a)
+    used = [k for k in roots if k in by_root]
     shapes: dict[str | None, str | None] = {}
     refs: dict[str | None, tuple[str | None, str | None]] = {}
     for k in used:
         root_k = roots[k]
-        mine = [a for a in anns.values() if key_of(a) == k]
+        mine = by_root[k]
         pin = ref if k is None else None
-        needs_ref = any(REF_TOKEN in a.command for a in mine if a is not None and a.kind == "derive")
+        needs_ref = any(REF_TOKEN in a.command for a in mine)
         needs_repo = needs_ref or pin is not None or any(_line_needs_repo(a) for a in mine)
         remaining = deadline - time.monotonic()
         if needs_repo and remaining <= 0:
@@ -1020,9 +1055,13 @@ def rederive_text(
         else:
             shapes[k] = _check_repo_shape(root_k, timeout=remaining) if needs_repo else None
         if needs_ref or pin is not None:
-            refs[k] = (None, shapes[k]) if shapes[k] else _resolve_ref(
-                root_k, pin, max(0.1, min(timeout, deadline - time.monotonic()))
-            )
+            left = min(timeout, deadline - time.monotonic())
+            if shapes[k]:
+                refs[k] = (None, shapes[k])
+            elif left <= 0:
+                refs[k] = (None, "the load budget was spent before the ref was resolved")
+            else:
+                refs[k] = _resolve_ref(root_k, pin, left)
         else:
             refs[k] = (None, None)
 
@@ -1040,6 +1079,10 @@ def rederive_text(
                 results.append(LineResult(idx, line, "refused", str(e)))
                 continue
             if label not in roots:
+                # Counted like every derive line, so the cap counts exactly the
+                # lines the preflight above grouped (an uncounted line would let
+                # a later line reach a root that was never checked).
+                ran += 1
                 results.append(LineResult(
                     idx, line, "unbound",
                     f"no root is bound to label {label!r} for this store (see `anneal-memory derive allow --label`)",
@@ -1057,6 +1100,10 @@ def rederive_text(
             results.append(LineResult(idx, line, "skipped", f"load budget {budget:g}s"))
             continue
         k = key_of(ann)
+        if is_cmd and k not in shapes:
+            # Fail-safe: a root the preflight did not check never runs a line.
+            results.append(LineResult(idx, line, "skipped", f"line cap {max_lines}"))
+            continue
         ref_sha, ref_err = refs.get(k, (None, None))
         r = _judge_line(idx, line, roots[k], ref_sha, ref_err, timeout, output_cap, shapes.get(k))
         if is_cmd:  # refused lines count too, so the cap bounds the work
@@ -1208,9 +1255,13 @@ def _usable_root(root: object, tf: Path) -> str | None:
     if not isinstance(root, str) or not os.path.isabs(root):
         return None
     # Resolved, so a hand-written symlink cannot pass the nesting and
-    # trust-file checks under another name (L2 2026-10-01, reproduced).
-    root = os.path.realpath(root)
-    if not os.path.isdir(root):
+    # trust-file checks under another name (L2 2026-10-01, reproduced). A
+    # malformed path (a NUL byte) is unusable, never a crash (codex L3).
+    try:
+        root = os.path.realpath(root)
+        if not os.path.isdir(root):
+            return None
+    except (OSError, ValueError, TypeError):
         return None
     # A trust file inside a bound root could have arrived with it.
     if _inside(os.path.realpath(tf), root):
@@ -1246,15 +1297,21 @@ def trusted_roots(db_path: str | os.PathLike, trust_file: Path | None = None) ->
         if not isinstance(labels, dict) or not labels:
             return roots
         vis = s.get("visibility")
+        found: dict[str, str] = {}
         for name, entry in labels.items():
             if not isinstance(name, str) or not _LABEL.fullmatch(name) or not isinstance(entry, dict):
                 continue
             r = _usable_root(entry.get("root"), tf)
             if r is None or vis not in VISIBILITIES or entry.get("visibility") != vis:
                 continue
-            if any(_nested(r, other) for other in roots.values()):
-                continue
-            roots[name] = r
+            found[name] = r
+        # Every root that nests with any other is dropped, whatever the order
+        # the file lists them in (codex L3 2026-10-01: dropping only the later
+        # one let JSON key order choose which root text could reach).
+        for name, r in found.items():
+            others = [default] + [o for n, o in found.items() if n != name]
+            if not any(_nested(r, o) for o in others):
+                roots[name] = r
         return roots
     return {}
 
@@ -1328,7 +1385,11 @@ def allow_store(
     def change(stores: list[dict]) -> list[dict]:
         current = next((s for s in stores if s["db"] == key), None)
         rest = [s for s in stores if s["db"] != key]
-        labels = dict(current.get("labels") or {}) if current else {}
+        raw = current.get("labels") if current else None
+        labels = {
+            n: e for n, e in (raw.items() if isinstance(raw, dict) else ())
+            if isinstance(n, str) and isinstance(e, dict) and isinstance(e.get("root"), str)
+        }
         if label is None:
             vis = visibility or (current.get("visibility") if current and current["root"] == root_s else None)
             for name, e in labels.items():
@@ -1357,13 +1418,13 @@ def allow_store(
                     f"the store's default root is declared {current['visibility']!r} and this root "
                     f"{visibility!r}: one visibility class per store"
                 )
-            for name, other in [(None, current["root"])] + [
-                (n, e.get("root", "")) for n, e in labels.items() if n != label
-            ]:
+            pairs: list[tuple[str | None, str]] = [(None, current["root"])]
+            pairs += [(n, e.get("root", "")) for n, e in labels.items() if n != label]
+            for who, other in pairs:
                 if _nested(root_s, other):
                     raise ValueError(
                         f"root {root_s!r} is nested with the "
-                        + ("default root" if name is None else f"root of label {name!r}")
+                        + ("default root" if who is None else f"root of label {who!r}")
                     )
             labels[label] = {"root": root_s, "allowed_at": now, "visibility": visibility}
             entry = {k: v for k, v in current.items() if k != "labels"}

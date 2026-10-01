@@ -37,8 +37,9 @@ outside the allowlist below, `⚠ UNBOUND` when its label names no root bound
 for this store, and `⚠ NOT DERIVED` when the load ran out of budget before
 reaching it. Text loaded this way starts with a
 `> [anneal re-derive]` line and can be saved back as it is. The save removes
-that header only when it is the first line and the whole line is exactly what
-re-derive writes, so an authored note is never deleted, and it always removes a flag after a State
+that header only when it is the first line and the whole line has the shape
+re-derive writes (its fixed opening, a count of State lines and its fixed
+closing sentence), so an authored note is not deleted, and it always removes a flag after a State
 line's closing `]`, so a forged `✓` is never persisted.
 Re-deriving already re-derived text gives the same result as re-deriving the
 original. `continuity --rederive` exits 3, not 0, when no State check ran and

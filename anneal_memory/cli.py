@@ -3280,7 +3280,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run each State line's derive command and flag it inline "
         "(only on a store opted in with 'derive allow'; see docs/rederive.md)",
     )
-    sub.add_argument("--ref", default=None, help="Commit to pin @REF to (default: HEAD)")
+    sub.add_argument("--ref", default=None, help="Commit to pin @REF to in the default root (default: HEAD; a labelled root's @REF is its own HEAD)")
     sub.set_defaults(func=cmd_continuity)
 
     # -- derive (opt a store in to re-derive at load) --

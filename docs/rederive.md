@@ -13,9 +13,11 @@ annotations:
 
 - `[derive: COMMAND => EXPECTED]` is a **value claim**. It agrees when the
   command's stdout, with whitespace collapsed, equals `EXPECTED`. Exit 0
-  compares the output, and so does exit 1 except for `wc` (`grep -c` prints
-  `0` and exits 1 when nothing matches; `wc` exits 1 when it could not read a
-  file, after printing counts for the others). Any other exit is an error.
+  compares the output. Exit 1 compares it only for `grep` (`grep -c` prints
+  `0` and exits 1 when nothing matches); for any other program exit 1 can
+  follow partial output (`wc` after the files it could read,
+  `git ls-files --error-unmatch` after the tracked names), so it is an error.
+  Any other exit is an error.
 - `[derive: COMMAND]` is a **truth claim**. Exit 0 agrees, exit 1 disagrees,
   and any other exit is an error. Write existence claims in a form that exits 1
   when false: `test -e PATH`, `grep -q`, `git merge-base --is-ancestor A B`,

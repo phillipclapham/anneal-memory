@@ -3,10 +3,11 @@
 A ``derived-state`` section (the ``project`` schema's ``## State``) holds
 present-tense claims, each ending with an annotation:
 
-    [derive: COMMAND => EXPECTED]   value claim: stdout == EXPECTED (exit 0 or 1)
+    [derive: COMMAND => EXPECTED]   value claim: stdout == EXPECTED (exit 0; grep also 1)
     [derive: COMMAND]               truth claim: exit 0 agrees, exit 1 disagrees
     (any other exit is an error in both forms)
     [judged: WHO, WHEN, AGAINST]    a judgement; accepted, never executed
+    [derive@LABEL: …]               either derive form, run in the root bound to LABEL
 
 :func:`rederive_continuity` runs each command and flags the line inline;
 :func:`check_state_for_save` is the save-time gate.
@@ -16,12 +17,14 @@ agent wrote, so every command is untrusted input. The containment is designed
 in ``docs/rederive.md``; the rules it enforces here are:
 
 1. nothing runs unless the store's database path is bound to a root directory
-   in the per-user trust file (outside the store; no MCP tool writes it);
+   in the per-user trust file (outside the store; no MCP tool writes it); a
+   line names a further root only by a label that file binds, never a path;
 2. no shell: ``shlex`` + ``shell=False``, and shell metacharacters are refused;
 3. an argument-by-argument allowlist of read-only command forms;
 4. file arguments must resolve inside the root, and grep/wc read only files
    git tracks, never their content (grep answers with a count or yes/no);
-5. a from-scratch environment, the root as cwd, stdin closed, one pinned ref;
+5. a from-scratch environment, the root as cwd, stdin closed, one pinned ref
+   per root;
 6. per-command timeout and output cap, per-load time budget and line cap;
 7. command output reaches the text only as a sanitised, truncated one-liner.
 
@@ -44,6 +47,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Literal
 
 from .schema import SectionSpec
@@ -153,9 +157,12 @@ def strip_flag(line: str) -> str:
 _ENVELOPE = "> [anneal re-derive] "
 _HEADER_LINE = re.compile(
     r"^> \[anneal re-derive\] (?:"
-    r"[1-9]\d* STATE line\(s\) in [^\n]+?(?: at [0-9a-f]{40})?"
-    r"(?:; [a-z0-9][a-z0-9-]{0,31} in [^\n]+?(?: at [0-9a-f]{40})?)*"
-    r"(?:: \d+ [a-z]+(?:, \d+ [a-z]+)*)?"
+    # One unstructured span between a fixed start and a fixed end: the
+    # per-root list made a nested repetition that backtracked exponentially on
+    # a crafted first line, on every save (L2 2026-10-01, reproduced: 20
+    # segments took 0.58s, doubling per segment). Python 3.10 has no atomic
+    # groups, so the ambiguity is removed rather than bounded.
+    r"[1-9]\d* STATE line\(s\) in [^\n]+"
     r"\. git lines read the pinned ref only where they use @REF; grep, wc and test "
     r"read the working tree\."
     r"|not enabled for this store; STATE lines were not checked "
@@ -904,12 +911,14 @@ def _judge_line(
         if rc == 1 and argv[0] != "wc":
             return LineResult(idx, line, "stale", "exit 1", ran=True)
         return LineResult(idx, line, "error", f"exit {rc}: {_one_line(res.stderr)}", ran=True)
-    # Exit 1 is "false / no match" for grep (grep -c prints 0 and exits 1), so
-    # a value claim still compares its output; 2+ is an error (git uses
-    # 128/129). wc's exit 1 means a file could not be read, after it printed
-    # counts for the others, so that output is partial (codex L3, spore-1233
-    # r2; reproduced 2026-10-01 with a tracked file gone from the tree).
-    if rc not in (0, 1) or (rc == 1 and argv[0] == "wc"):
+    # Only grep's exit 1 means "no match" with a complete answer (grep -c
+    # prints 0 and exits 1), so only grep's output is compared on exit 1. For
+    # every other program exit 1 can follow partial output: wc after counting
+    # the files it could read (codex L3, spore-1233 r2), git ls-files
+    # --error-unmatch after listing the tracked ones (L1 2026-10-01); both
+    # reproduced passing a false claim. Anything else is an error (git uses
+    # 128/129).
+    if rc not in (0, 1) or (rc == 1 and argv[0] != "grep"):
         return LineResult(idx, line, "error", f"exit {rc}: {_one_line(res.stderr)}", ran=True)
     got = _normalise(res.stdout.decode("utf-8", "replace"))
     if got == _normalise(ann.expected):
@@ -946,7 +955,7 @@ def _line_needs_repo(ann: Annotation | None) -> bool:
 def rederive_text(
     text: str,
     schema: list[SectionSpec],
-    root: str | os.PathLike | dict | None,
+    root: str | os.PathLike | Mapping | None,
     *,
     ref: str | None = None,
     timeout: float = DEFAULT_COMMAND_TIMEOUT,
@@ -968,8 +977,11 @@ def rederive_text(
     text = strip_rederive_output(text, schema)  # re-deriving is idempotent
     lines = text.split("\n")
     targets = derived_state_lines(text, schema)
-    if isinstance(root, dict):
-        roots = {k: os.path.realpath(v) for k, v in root.items()}
+    if isinstance(root, Mapping):
+        # A key that is not a valid label is never a root: its lines are refused.
+        roots = {
+            k: os.path.realpath(v) for k, v in root.items() if k is None or _LABEL.fullmatch(k)
+        }
     else:
         roots = {None: os.path.realpath(root)} if root is not None else {}
     if None not in roots:
@@ -1000,10 +1012,17 @@ def rederive_text(
         pin = ref if k is None else None
         needs_ref = any(REF_TOKEN in a.command for a in mine if a is not None and a.kind == "derive")
         needs_repo = needs_ref or pin is not None or any(_line_needs_repo(a) for a in mine)
-        remaining = max(deadline - time.monotonic(), 0.1)
-        shapes[k] = _check_repo_shape(root_k, timeout=remaining) if needs_repo else None
+        remaining = deadline - time.monotonic()
+        if needs_repo and remaining <= 0:
+            # The budget went on earlier roots: this root is not checked, so
+            # nothing runs in it (L2 2026-10-01: 40 roots overran 0.05s by 33x).
+            shapes[k] = "the load budget was spent before this root was checked"
+        else:
+            shapes[k] = _check_repo_shape(root_k, timeout=remaining) if needs_repo else None
         if needs_ref or pin is not None:
-            refs[k] = (None, shapes[k]) if shapes[k] else _resolve_ref(root_k, pin, timeout)
+            refs[k] = (None, shapes[k]) if shapes[k] else _resolve_ref(
+                root_k, pin, max(0.1, min(timeout, deadline - time.monotonic()))
+            )
         else:
             refs[k] = (None, None)
 
@@ -1186,7 +1205,12 @@ def _db_key(db_path: str | os.PathLike) -> str | None:
 
 
 def _usable_root(root: object, tf: Path) -> str | None:
-    if not isinstance(root, str) or not os.path.isabs(root) or not os.path.isdir(root):
+    if not isinstance(root, str) or not os.path.isabs(root):
+        return None
+    # Resolved, so a hand-written symlink cannot pass the nesting and
+    # trust-file checks under another name (L2 2026-10-01, reproduced).
+    root = os.path.realpath(root)
+    if not os.path.isdir(root):
         return None
     # A trust file inside a bound root could have arrived with it.
     if _inside(os.path.realpath(tf), root):

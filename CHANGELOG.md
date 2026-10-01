@@ -25,8 +25,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ### Fixed
 
-- A `wc` value claim compared partial output: `wc` exits 1 when it cannot read a file, after
-  printing counts for the others, and that output could match the claim. It is now an error.
+- A value claim compared partial output on exit 1: `wc` exits 1 when it cannot read a file,
+  after printing counts for the others, and `git ls-files --error-unmatch` after listing the
+  names that are tracked, so a false claim could match. Only `grep`'s exit 1 (no match) is
+  compared now; for any other program it is an error.
 - The repository-shape check's walk of `.git` was not bounded by the load budget. It now stops
   with an error when the budget is spent.
 

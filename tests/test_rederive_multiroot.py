@@ -9,6 +9,7 @@ showed.
 from __future__ import annotations
 
 import json
+import time
 import os
 import shutil
 import subprocess
@@ -162,8 +163,16 @@ def test_lines_run_in_their_root_and_unbound_refuses_the_save(two):
     store.wrap_cancelled()
 
 
-def test_wc_exit_1_is_an_error_not_a_count(two):
+def test_exit_1_after_partial_output_is_an_error(two):
     store, main, _, _ = two
+    state = [
+        # ls-files lists the tracked name, then exits 1 for the untracked one
+        "- both tracked [derive: git ls-files --error-unmatch a.txt nope.txt => a.txt]",
+        # grep's exit 1 is a complete answer: no match
+        "- no match [derive: grep -c zzz a.txt => 0]",
+    ]
+    r = rederive_text(_continuity(state), PROJECT_SCHEMA, str(main))
+    assert [x.status for x in r.results] == ["error", "ok"]
     (main / "b.txt").unlink()  # tracked, gone from the working tree: wc prints a.txt, exits 1
     r = rederive_text(
         _continuity(["- lines [derive: wc -l a.txt b.txt => 2 a.txt 2 total]"]), PROJECT_SCHEMA, str(main)
@@ -179,3 +188,42 @@ def test_the_git_walk_is_bounded(two):
         (d / f"f{i}").touch()
     assert _check_repo_shape(str(main)) is None
     assert "load budget" in _check_repo_shape(str(main), timeout=0)
+
+
+def test_header_regex_is_linear_on_a_crafted_first_line():
+    import time
+
+    text = "> [anneal re-derive] 1 STATE line(s) in /x" + "; a in /y" * 22 + " X\n\nbody"
+    start = time.monotonic()
+    assert drop_header(text) == text  # not a header: kept
+    assert time.monotonic() - start < 1.0  # was exponential: 20 segments took 0.58s
+
+
+def test_per_root_checks_share_the_load_budget(two, tmp_path, monkeypatch):
+    from anneal_memory import rederive
+
+    store, main, _, _ = two
+    allow_store(store.path, main, visibility="public")
+    names = [f"r{i}" for i in range(4)]
+    for n in names:
+        allow_store(store.path, _repo(tmp_path / n, "v0"), label=n, visibility="public")
+    calls = []
+    real = rederive._check_repo_shape
+    monkeypatch.setattr(rederive, "_check_repo_shape", lambda *a, **k: calls.append(a) or real(*a, **k))
+    state = [f"- {n} [derive@{n}: git rev-parse --verify -q @REF]" for n in names]
+    r = rederive_text(_continuity(state), PROJECT_SCHEMA, trusted_roots(store.path), budget=0)
+    assert calls == []  # a spent budget checks no further root, so nothing runs in one
+    assert all(x.status in ("skipped", "error") for x in r.results)
+
+
+def test_read_side_resolves_a_symlinked_label_root(two, tmp_path):
+    store, main, other, trust = two
+    allow_store(store.path, main, visibility="public")
+    allow_store(store.path, other, label="other", visibility="public")
+    (main / "sub").mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(main / "sub")
+    data = json.loads(trust.read_text())
+    data["stores"][0]["labels"]["other"]["root"] = str(link)  # a hand edit
+    trust.write_text(json.dumps(data))
+    assert "other" not in trusted_roots(store.path)  # it is nested in the default root

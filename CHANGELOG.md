@@ -30,7 +30,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   names that are tracked, so a false claim could match. Only `grep`'s exit 1 (no match) is
   compared now; for any other program it is an error.
 - The repository-shape check's walk of `.git` was not bounded by the load budget. It now stops
-  with an error when the budget is spent.
+  with an error when the budget is spent, checking while each directory is read.
+- `strip_flag` (0.9.18) was quadratic on a State line holding many flag-shaped fragments, and
+  it runs on every save; it is linear now.
 
 ## [0.9.18] — 2026-10-01
 

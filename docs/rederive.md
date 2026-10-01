@@ -30,15 +30,17 @@ disagrees, `⚠ DERIVE ERROR` when it errors, `⛔ REFUSED` when its command is
 outside the allowlist below, and `⚠ NOT DERIVED` when the load ran out of
 budget before reaching it. Text loaded this way starts with a
 `> [anneal re-derive]` line and can be saved back as it is. The save removes
-that header, anywhere before the first `## ` section heading, only when the
-whole line is exactly what re-derive writes, so an authored note is never
-deleted, and it always removes a flag after a State
+that header, with the blank line after it, only where re-derive puts it (the
+first line) or where a composer keeping the `# ` title first puts it (directly
+under the title), and only when the whole line is exactly what re-derive
+writes, so an authored note is never deleted, and it always removes a flag after a State
 line's closing `]`, so a forged `✓` is never persisted.
 Re-deriving already re-derived text gives the same result as re-deriving the
-original. `continuity --rederive` exits 3, not 0, when no State command ran:
-the store is not opted in, its schema has no derived-state section, its State
-holds only `[judged: ...]` lines, or the load budget ran out first. It says
-which on stderr. Stale lines do not change the exit status; their flags are
+original. `continuity --rederive` exits 3, not 0, when no State check ran and
+answered: the store is not opted in, its schema has no derived-state section,
+its State holds only `[judged: ...]` lines, every command was refused or failed
+before it ran (a repository shape the rules below reject, say), or the load
+budget ran out first. It says so on stderr, and the report's `clean` is false. Stale lines do not change the exit status; their flags are
 the signal.
 
 A save (`validated_save_continuity`) refuses a State section in which a line

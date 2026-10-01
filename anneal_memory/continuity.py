@@ -1283,12 +1283,13 @@ def _crystallization_block(
     return "\n".join(parts).rstrip()
 
 
-def _downgraded_empty(message: str) -> PrepareWrapResult:
-    """A ``downgraded`` result for the empty-window path (no episodes, store untouched)."""
+def _downgraded_empty(message: str, episode_count: int = 0) -> PrepareWrapResult:
+    """A ``downgraded`` result with no package (store untouched). ``episode_count``
+    is what is still pending, 0 on the empty-window path."""
     return PrepareWrapResult(
         status="downgraded",
         message=message,
-        episode_count=0,
+        episode_count=episode_count,
         package=None,
         assoc_context=None,
         wrap_token=None,
@@ -1744,7 +1745,8 @@ def prepare_wrap(
             "Consolidate downgraded to capture-only (downgraded-wrap-replaced): "
             "another wrap completed while this call was preparing, so its "
             "episodes and continuity are out of date and no wrap was opened. "
-            "Retry. Capture (afferent) is unaffected."
+            "Retry. Capture (afferent) is unaffected.",
+            episode_count=len(store.episodes_since_wrap()),
         )
 
     # Move #4 library layer (v0.3.2): surface the list of existing

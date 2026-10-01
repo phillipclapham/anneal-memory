@@ -695,7 +695,7 @@ def cmd_continuity(args: argparse.Namespace) -> None:
                 "Re-derive not enabled for this store: no State line was checked "
                 "(see `anneal-memory derive allow`)."
                 if not report.enabled
-                else "Re-derive ran no State command: nothing was checked.",
+                else "No State check ran and answered: nothing was checked.",
                 file=sys.stderr,
             )
             sys.exit(3)

@@ -157,3 +157,36 @@ def test_a_composer_copied_header_below_the_title_is_not_persisted(project):
     composed = f"{title}\n{header}\n\n{rest}"
     validated_save_continuity(store, composed)
     assert "[anneal re-derive]" not in store.load_continuity()
+
+
+def test_a_store_whose_commands_all_failed_before_running_checked_nothing(project):
+    """codex L3 r1: a line refused at the repository-shape check never spawns its
+    command, yet it counted as run, so the load exited 0."""
+    store, repo = project
+    _save(store, _continuity(TRUE_STATE[1:3]))  # the two git lines
+    alternates = repo / ".git" / "objects" / "info" / "alternates"
+    alternates.parent.mkdir(parents=True, exist_ok=True)
+    alternates.write_text("/tmp\n")  # not a plain repository any more
+    out = _cli(store, "continuity", "--rederive", "--json")
+    assert out.returncode == 3, out.stdout
+    assert json.loads(out.stdout)["rederive"]["clean"] is False
+
+
+def test_judged_only_state_is_not_reported_clean(project):
+    store, _repo = project
+    _save(store, _continuity(JUDGED_ONLY))
+    out = _cli(store, "continuity", "--rederive", "--json")
+    assert json.loads(out.stdout)["rederive"]["clean"] is False
+
+
+def test_an_authored_preamble_line_matching_the_header_is_kept(project):
+    """codex + complement L3 r1: the strip removes the header only where re-derive
+    or a composer puts it (first line, or right under the title), with its blank."""
+    store, _repo = project
+    _save(store, _continuity(TRUE_STATE))
+    store.record("next session", "observation")
+    header = prepare_wrap(store)["package"]["continuity"].split("\n")[0]
+    title, rest = _continuity(TRUE_STATE).split("\n", 1)
+    composed = f"{title}\n\nA note quoting the header:\n{header}\n{rest}"
+    validated_save_continuity(store, composed)
+    assert header in store.load_continuity()

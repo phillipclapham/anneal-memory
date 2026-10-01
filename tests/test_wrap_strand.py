@@ -77,7 +77,7 @@ def test_record_cannot_stamp_a_session_a_concurrent_wrap_just_closed(tmp_path):
         def read_then_let_the_wrap_run():
             sid = real()
             saver.start()
-            saver.join(timeout=0.5)  # fixed: the second Store() blocks on record's write lock
+            saver.join(timeout=2)  # fixed: the second Store() blocks on record's write lock
             return sid
 
         store._current_session_id = read_then_let_the_wrap_run  # type: ignore[method-assign]
@@ -143,6 +143,7 @@ def test_a_wrap_completed_during_prepare_is_not_overwritten(tmp_path):
             try:
                 b.record("late, only the other wrap sees it", "observation")
                 prep = C.prepare_wrap(b)
+                b.record("after the other wrap's snapshot", "observation")
                 C.validated_save_continuity(b, text("B"), wrap_token=prep["wrap_token"], today=TODAY)
             finally:
                 b.close()
@@ -172,6 +173,8 @@ def test_a_wrap_completed_during_prepare_is_not_overwritten(tmp_path):
             C.rederive_text = real  # type: ignore[assignment]
         assert errors == []
         assert result["status"] != "ready"  # told to retry, no wrap opened
+        # codex L3 r1: the retry result must count what is still pending, not 0.
+        assert result["episode_count"] == len(a.episodes_since_wrap()) == 1
         assert a.load_wrap_snapshot() is None
         assert "- B" in (a.load_continuity() or "")
         assert a.status().total_wraps == 2

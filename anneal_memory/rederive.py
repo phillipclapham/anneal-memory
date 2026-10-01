@@ -140,22 +140,20 @@ def strip_rederive_output(text: str, schema: list[SectionSpec]) -> str:
     loaded text back must never persist a verdict that is true only at load."""
     lines = text.split("\n")
     # Exactly what rederive_text writes: the header line, then a blank line.
-    # It is removed anywhere in the preamble (before the first "## " heading),
-    # because prepare_wrap hands it to a composer, who may keep the title line
-    # first (spore-1233). Inside a section a matching line is left alone.
-    kept: list[str] = []
-    i = 0
-    while i < len(lines):
-        bare = lines[i].rstrip("\r")
-        if bare.startswith("## "):
-            kept.extend(lines[i:])
+    # It is removed where re-derive puts it (the first line) or where a
+    # composer who keeps the "# " title first puts it (right under the title):
+    # prepare_wrap hands it to a composer (spore-1233). Anywhere else a
+    # matching line is authored text and is kept.
+    for at in (0, 1):
+        if at == 1 and not (lines and lines[0].startswith("# ")):
             break
-        if _HEADER_LINE.match(bare):
-            i += 2 if i + 1 < len(lines) and not lines[i + 1].strip() else 1
-            continue
-        kept.append(lines[i])
-        i += 1
-    lines = kept
+        if (
+            len(lines) > at + 1
+            and _HEADER_LINE.match(lines[at].rstrip("\r"))
+            and not lines[at + 1].strip()
+        ):
+            del lines[at : at + 2]
+            break
     joined = "\n".join(lines)
     for idx, line in derived_state_lines(joined, schema):
         cr = "\r" if line.endswith("\r") else ""
@@ -745,6 +743,11 @@ class LineResult:
     line: str
     status: Status
     detail: str = ""
+    # True only when a check actually ran and answered: the command exited with
+    # a status it could be judged on, or the tracked-file check found the file
+    # gone from git. A refusal, a shape or ref error, a spawn failure, a timeout
+    # or an overflow leaves it False (spore-1233).
+    ran: bool = False
 
     @property
     def flag(self) -> str:
@@ -767,14 +770,19 @@ class RederiveReport:
 
     @property
     def ran(self) -> int:
-        """Lines whose command executed and answered (ok, stale or error).
-        Zero means nothing was checked, whatever ``clean`` says (spore-1233)."""
-        return sum(1 for r in self.results if r.status in ("ok", "stale", "error"))
+        """Lines whose check actually ran and answered (``LineResult.ran``).
+        Zero means nothing was checked (spore-1233)."""
+        return sum(1 for r in self.results if r.ran)
 
     @property
     def clean(self) -> bool:
-        """Every State line was checked and holds. False when nothing ran."""
-        return self.enabled and all(r.status in ("ok", "judged") for r in self.results)
+        """At least one State check ran, and every line holds or is judged.
+        False when nothing ran."""
+        return (
+            self.enabled
+            and self.ran > 0
+            and all(r.status in ("ok", "judged") for r in self.results)
+        )
 
 
 def _judge_line(
@@ -799,7 +807,7 @@ def _judge_line(
     except DeriveRefused as e:
         return LineResult(idx, line, "refused", str(e))
     except _NotTracked as e:
-        return LineResult(idx, line, "stale", str(e))
+        return LineResult(idx, line, "stale", str(e), ran=True)
     except _TrackError as e:
         return LineResult(idx, line, "error", str(e))
     if argv[0] == "git":
@@ -820,19 +828,21 @@ def _judge_line(
     rc = res.returncode
     if ann.expected is None:
         if rc == 0:
-            return LineResult(idx, line, "ok")
+            return LineResult(idx, line, "ok", ran=True)
         if rc == 1:
-            return LineResult(idx, line, "stale", "exit 1")
-        return LineResult(idx, line, "error", f"exit {rc}: {_one_line(res.stderr)}")
+            return LineResult(idx, line, "stale", "exit 1", ran=True)
+        return LineResult(idx, line, "error", f"exit {rc}: {_one_line(res.stderr)}", ran=True)
     # Exit 1 is "false / no match" for every allowed program (grep -c prints
     # 0 and exits 1), so a value claim still compares its output; 2+ is an
     # error (git uses 128/129).
     if rc not in (0, 1):
-        return LineResult(idx, line, "error", f"exit {rc}: {_one_line(res.stderr)}")
+        return LineResult(idx, line, "error", f"exit {rc}: {_one_line(res.stderr)}", ran=True)
     got = _normalise(res.stdout.decode("utf-8", "replace"))
     if got == _normalise(ann.expected):
-        return LineResult(idx, line, "ok")
-    return LineResult(idx, line, "stale", f"now {_one_line(got)}, claimed {_one_line(ann.expected)}")
+        return LineResult(idx, line, "ok", ran=True)
+    return LineResult(
+        idx, line, "stale", f"now {_one_line(got)}, claimed {_one_line(ann.expected)}", ran=True
+    )
 
 
 def _resolve_ref(root: str, ref: str | None, timeout: float) -> tuple[str | None, str | None]:

@@ -22,7 +22,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   The new prepare-time re-derive below can take seconds, which widened the window. `prepare_wrap`
   now reads `Store.last_wrap_id()` before its window and passes it to `wrap_started`
   (`expect_last_wrap_id=`), which refuses with the new `WrapWindowMovedError` if a wrap completed
-  since; `prepare_wrap` turns that into a `downgraded-wrap-replaced` result: retry.
+  since; `prepare_wrap` turns that into a `downgraded-wrap-replaced` result whose `episode_count`
+  is what is still pending: retry.
 - `Store._MAX_SQL_VARS_IN_CLAUSE` is 996 (was 998): the carry-over UPDATE binds three parameters
   beside the snapshot ids, so a snapshot at the old guard overflowed SQLite's 999-variable build
   limit inside the save.
@@ -33,11 +34,13 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 ### Fixed — re-derive
 
 - `anneal-memory derive status` without `--json` raised `UnboundLocalError`.
-- `continuity --rederive` exited 0 when it checked nothing. It now exits 3 when no State command
-  ran (not opted in, no derived-state section, only `[judged:]` lines, or the load budget spent),
-  and says which on stderr.
-- A re-derive header a composer copied below the title line was persisted by the save. The save
-  now removes it anywhere before the first section heading.
+- `continuity --rederive` exited 0 when it checked nothing. It now exits 3 when no State check ran
+  and answered (not opted in, no derived-state section, only `[judged:]` lines, every command
+  refused or failed before running, or the load budget spent), and says so on stderr.
+- `RederiveReport.clean` is now false when no check ran (it was true for a State of only
+  `[judged:]` lines). `LineResult.ran` records whether a line's check actually ran and answered.
+- A re-derive header a composer copied directly under the title line was persisted by the save.
+  The save now removes it there too (with its blank line); elsewhere a matching line is kept.
 
 ### Added — re-derive
 
@@ -49,7 +52,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   list, and the instructions say the marks are stripped at save and what to do with a flagged
   line. On an opted-in store this runs the State commands at prepare (MCP included), under the
   same containment as a load.
-- `RederiveReport.ran`: how many State commands executed and answered.
+- `RederiveReport.ran`: how many State checks ran and answered.
 
 ## [0.9.16] — 2026-09-30
 

@@ -68,7 +68,7 @@ def test_include_shapes_the_regex_missed_are_refused(repo, tmp_path):
     assert "config.worktree" in _check_repo_shape(str(repo))
 
 
-def test_a_flag_shaped_claim_survives_strip_flag():
+def test_a_flag_shaped_claim_survives_strip_flag(repo):
     authored = "Release gate  ⚠ BLOCKED (see Open) [derive: test -e missing.txt]"
     assert parse_annotation(authored).command == "test -e missing.txt"
     for flag in ("  ⚠ STALE (exit 1)", "  ⚠ DERIVE ERROR (x  ✓ (y))", "  ✓"):
@@ -76,6 +76,14 @@ def test_a_flag_shaped_claim_survives_strip_flag():
     # an earlier annotation is never what remains
     two = "X [judged: a]  ⚠ BLOCKED (y) [derive: test -e m]"
     assert strip_flag(two + "  ⚠ STALE (exit 1)") == two
+    # a detail echoing a command token cannot forge a flag boundary (L1)
+    from anneal_memory.rederive import rederive_text
+    from anneal_memory.schema import PROJECT_SCHEMA
+    text = "\n".join(["# S — Memory (v1)", "", "## State",
+                      '- head [derive: git "x]  ⚠ FOO (y)" => 1]', ""])
+    flagged = rederive_text(text, PROJECT_SCHEMA, str(repo)).text
+    line = next(l for l in flagged.split("\n") if l.startswith("- head"))
+    assert "REFUSED" in line and strip_flag(line) == '- head [derive: git "x]  ⚠ FOO (y)" => 1]'
     # an unannotated line still loses its flag
     assert strip_flag("bare claim  ⚠ NO DERIVE") == "bare claim"
 

@@ -406,7 +406,10 @@ def _check_repo_shape(root: str) -> str | None:
     # extensions.worktreeConfig is set, so it may not exist at all.
     if os.path.lexists(os.path.join(git, "config.worktree")):
         return ".git/config.worktree exists; its config is not checked"
-    if os.path.lexists(os.path.join(git, "config")):
+    config = os.path.join(git, "config")
+    if os.path.lexists(config):
+        if not stat.S_ISREG(os.stat(config).st_mode):
+            return ".git/config is not a regular file"
         out = _run_bounded(
             ["git", *_GIT_HARDENING, "config", "--file", os.path.join(git, "config"),
              "--name-only", "--list"],
@@ -777,7 +780,11 @@ class LineResult:
         base = _FLAGS[self.status]
         if not base:
             return ""
-        return f"{base} ({self.detail})" if self.detail else base
+        # Whitespace collapsed: a detail echoing a command token could hold a
+        # two-space run, the boundary strip_flag cuts at, or a line break
+        # (L1, reproduced with a refused "x]  ⚠ FOO (y)" token).
+        detail = " ".join(self.detail.split())
+        return f"{base} ({detail})" if detail else base
 
 
 @dataclass

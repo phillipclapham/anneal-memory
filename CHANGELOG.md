@@ -4,6 +4,29 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — re-derive edge cases (Diogenes 2026-10-01 and its review)
+
+- The repository-shape check let git read a config file outside the root: an include written
+  on one line with another section header (`[core][include]`), or placed in
+  `.git/config.worktree`, got past its line-start regex. git's own parser
+  (`git config --file .git/config --name-only --list`) now decides, refusing `include.path`
+  and `includeIf.<condition>.path`; any `.git/config.worktree`, or a `.git/config` that is not
+  a regular file or cannot be read, is refused too. This needs git 2.25 or newer.
+- A State line whose claim held a flag-shaped run (`gate  ⚠ BLOCKED (see Open) [derive: …]`)
+  lost its annotation once loaded with a flag, and the save then refused it. Flags are now
+  stripped only where they follow the annotation's closing `]`, and an appended flag's detail
+  has its whitespace collapsed, so command text it echoes cannot imitate that boundary.
+- `derive allow` refuses a root whose `.git` exists but which git lines cannot run in (a linked
+  worktree, a gitfile, an include). Before, the opt-in succeeded and every later save of the
+  store was refused. A root with no `.git` can still be allowed.
+- The shape check's git call is bounded by the load budget. It is skipped only when every
+  State line is judged, unannotated or a plain `test`, and no ref has to be resolved.
+
+### Changed
+
+- Docstrings and `docs/architecture.md` no longer say a crystal re-heats by being recalled or
+  leaned on. Only `crystallize()` and `touch()` set `last_activated_on`.
+
 ## [0.9.17] — 2026-09-30
 
 ### Fixed — an episode recorded while a wrap was open could be lost to every later wrap

@@ -95,7 +95,7 @@ from .rederive import (
     rederive_text,
     revoke_store,
     trust_file_path,
-    trusted_root,
+    trusted_roots,
 )
 from .schema import (
     SCHEMA_NAMES,
@@ -662,7 +662,7 @@ def cmd_continuity(args: argparse.Namespace) -> None:
             # Executes the State section's derive commands, contained per
             # docs/rederive.md; runs nothing on a store not opted in.
             report = rederive_text(
-                text, store.section_schema, trusted_root(store.path), ref=ref
+                text, store.section_schema, trusted_roots(store.path), ref=ref
             )
             text = report.text
 
@@ -678,6 +678,8 @@ def cmd_continuity(args: argparse.Namespace) -> None:
                     "enabled": report.enabled,
                     "root": report.root,
                     "ref": report.ref,
+                    "roots": {k or "": v for k, v in report.roots.items()},
+                    "refs": {k or "": v for k, v in report.refs.items()},
                     "clean": report.clean,
                     "lines": [
                         {"line": r.index + 1, "status": r.status, "detail": r.detail}
@@ -715,32 +717,52 @@ def cmd_derive(args: argparse.Namespace) -> None:
         sys.exit(1)
     if action == "allow":
         try:
-            root = allow_store(db_path, Path(args.root).expanduser())
+            root = allow_store(
+                db_path, Path(args.root).expanduser(),
+                label=getattr(args, "label", None), visibility=getattr(args, "visibility", None),
+            )
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
-        result = {"db": os.path.realpath(db_path), "root": root, "allowed": True}
+        result = {"db": os.path.realpath(db_path), "root": root, "allowed": True,
+                  "label": getattr(args, "label", None)}
     elif action == "revoke":
         try:
-            existed = revoke_store(db_path)
+            existed = revoke_store(db_path, label=getattr(args, "label", None))
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
-        result = {"db": os.path.realpath(db_path), "revoked": existed}
+        result = {"db": os.path.realpath(db_path), "revoked": existed,
+                  "label": getattr(args, "label", None)}
     else:
-        trusted = trusted_root(db_path)
-        result = {"db": os.path.realpath(db_path), "root": trusted, "allowed": trusted is not None}
+        # Every root the store's lines can reach, as they are honoured on read
+        # (a labelled root the read rules drop is not listed).
+        roots = trusted_roots(db_path)
+        labels = {k: v for k, v in roots.items() if k is not None}
+        result = {
+            "db": os.path.realpath(db_path),
+            "root": roots.get(None),
+            "allowed": None in roots,
+            "labels": labels,
+        }
     result["trust_file"] = str(trust_file_path())
     if args.json:
         _print_json(result)
         return
     if action == "allow":
-        print(f"Re-derive allowed: {result['db']} -> {result['root']}")
-        print("  STATE derive commands for this store will now run, read-only, in that directory.")
+        if result["label"]:
+            print(f"Re-derive allowed: {result['db']} -> {result['root']} as label {result['label']!r}")
+            print(f"  [derive@{result['label']}: ...] STATE commands will now run, read-only, in that directory.")
+        else:
+            print(f"Re-derive allowed: {result['db']} -> {result['root']}")
+            print("  STATE derive commands for this store will now run, read-only, in that directory.")
     elif action == "revoke":
-        print("Re-derive revoked." if result["revoked"] else "This store was not allowed.")
+        what = f"label {result['label']!r}" if result["label"] else "this store"
+        print(f"Re-derive revoked for {what}." if result["revoked"] else f"Nothing was allowed for {what}.")
     else:
         print(f"Re-derive: {'allowed in ' + str(result['root']) if result['root'] else 'not enabled'}")
+        for name, r in labels.items():
+            print(f"  label {name}: {r}")
     print(f"  Trust file: {result['trust_file']}")
 
 
@@ -3271,8 +3293,19 @@ def build_parser() -> argparse.ArgumentParser:
         "allow", help="Let this store's State commands run, read-only, in ROOT", parents=[json_parent]
     )
     dp.add_argument("--root", required=True, help="Directory the commands run in (the project repo)")
+    dp.add_argument(
+        "--label",
+        help="Bind ROOT for [derive@LABEL: ...] lines instead of as the default root "
+        "(the store needs a default root first)",
+    )
+    dp.add_argument(
+        "--visibility", choices=["public", "private"],
+        help="Declare the root public or private; required on every root of a store with "
+        "labelled roots, and all of them must match",
+    )
     dp.set_defaults(func=cmd_derive)
     dp = derive_sub.add_parser("revoke", help="Stop this store's State commands from running", parents=[json_parent])
+    dp.add_argument("--label", help="Revoke only this labelled root; without it, every root of the store")
     dp.set_defaults(func=cmd_derive)
     dp = derive_sub.add_parser("status", help="Show whether this store may re-derive", parents=[json_parent])
     dp.set_defaults(func=cmd_derive)

@@ -4,6 +4,32 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added — one store, several repositories (multi-root re-derive)
+
+- A State line can name the repository it is checked in: `[derive@LABEL: …]` runs in the root
+  bound to `LABEL` for that store (`derive allow --root DIR --label LABEL`). `[derive: …]` keeps
+  running in the store's default root, so a store with one root is unchanged. A label is a name
+  from the trust file, never a path; a malformed one is refused, and one with no bound root is
+  flagged `⚠ UNBOUND`, which refuses an opted-in save. `@REF` pins once per root, and the load
+  header names each root and its commit.
+- One visibility class per store: every root of a store with labelled roots declares
+  `--visibility public|private`, the same on all of them, and `allow` refuses a mismatch, a
+  nested root, or a label before a default root. The same rules are applied again when the trust
+  file is read, so a hand edit cannot widen a store's reach. `derive revoke --label` drops one
+  root; `derive status` lists them. Library: `trusted_roots()`, `allow_store(…, label=,
+  visibility=)`, `revoke_store(…, label=)`; `rederive_text` accepts the mapping
+  `trusted_roots()` returns.
+- ⚠ An earlier version reads a labelled line as unannotated and refuses to save it (it never runs
+  one), and it still reads the default root correctly from a trust file this version wrote. Write
+  labelled lines only once every process that wraps a store runs this version.
+
+### Fixed
+
+- A `wc` value claim compared partial output: `wc` exits 1 when it cannot read a file, after
+  printing counts for the others, and that output could match the claim. It is now an error.
+- The repository-shape check's walk of `.git` was not bounded by the load budget. It now stops
+  with an error when the budget is spent.
+
 ## [0.9.18] — 2026-10-01
 
 ### Fixed — re-derive edge cases (Diogenes 2026-10-01 and its review)

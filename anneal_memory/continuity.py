@@ -51,7 +51,7 @@ from .rederive import (
     drop_header,
     rederive_text,
     strip_rederive_output,
-    trusted_root,
+    trusted_roots,
 )
 from .schema import (
     DEFAULT_SCHEMA,
@@ -1697,7 +1697,7 @@ def prepare_wrap(
     # (L3 r2). Flags sit after a State line's annotation, where every save
     # strips them.
     if existing is not None and any(s["role"] == "derived-state" for s in schema):
-        derive_report = rederive_text(existing, schema, trusted_root(store.path))
+        derive_report = rederive_text(existing, schema, trusted_roots(store.path))
         package["continuity"] = drop_header(derive_report.text)
         if derive_report.enabled:
             note = (
@@ -1715,8 +1715,10 @@ def prepare_wrap(
                 note += (
                     " A line flagged STALE no longer holds as written: rewrite it to "
                     "what is true now, with a [derive: ...] that holds, or remove it. "
-                    "A line flagged DERIVE ERROR, REFUSED or NO DERIVE would refuse "
-                    "this save: fix its annotation or remove the line. A line flagged "
+                    "A line flagged DERIVE ERROR, REFUSED, NO DERIVE or UNBOUND would "
+                    "refuse this save: fix its annotation or remove the line (UNBOUND "
+                    "means its [derive@LABEL: ...] names a root this store has not "
+                    "bound; only the operator can bind one). A line flagged "
                     "NOT DERIVED was not checked."
                 )
         else:

@@ -65,6 +65,8 @@ __all__ = [
     "check_state_for_save",
     "trust_file_path",
     "trusted_root",
+    "trusted_roots",
+    "VISIBILITIES",
     "allow_store",
     "revoke_store",
     "DEFAULT_COMMAND_TIMEOUT",
@@ -94,6 +96,13 @@ class DeriveRefused(ValueError):
 _DERIVE_OPEN = "[derive:"
 _JUDGED_OPEN = "[judged:"
 _EXPECT_SEP = " => "
+# An annotation opener: "[derive:", "[derive@LABEL:" or "[judged:". The label
+# is captured loosely here and checked against _LABEL by the caller, so a
+# malformed one is refused rather than read as some other opener.
+_OPENER = re.compile(r"\[(?:derive(?:@([^:\]\s]*))?|judged):")
+# A root label names a root bound in the trust file; it is never a path.
+_LABEL = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
+VISIBILITIES = ("public", "private")
 
 
 @dataclass(frozen=True)
@@ -103,6 +112,15 @@ class Annotation:
     command: str = ""
     expected: str | None = None  # None = truth claim (exit status)
     judgement: str = ""
+    root: str | None = None  # the root label of "[derive@LABEL: …]"; None = the default root
+
+
+def _check_label(label: str) -> None:
+    if not _LABEL.fullmatch(label):
+        raise DeriveRefused(
+            f"root label {label!r} is not a label (lowercase letters, digits and '-', "
+            "at most 32 characters, starting with a letter or digit)"
+        )
 
 
 # The inline flag rederive_text appends ("  ✓", "  ⚠ STALE (…)", …), so text
@@ -136,6 +154,7 @@ _ENVELOPE = "> [anneal re-derive] "
 _HEADER_LINE = re.compile(
     r"^> \[anneal re-derive\] (?:"
     r"[1-9]\d* STATE line\(s\) in [^\n]+?(?: at [0-9a-f]{40})?"
+    r"(?:; [a-z0-9][a-z0-9-]{0,31} in [^\n]+?(?: at [0-9a-f]{40})?)*"
     r"(?:: \d+ [a-z]+(?:, \d+ [a-z]+)*)?"
     r"\. git lines read the pinned ref only where they use @REF; grep, wc and test "
     r"read the working tree\."
@@ -169,31 +188,34 @@ def strip_rederive_output(text: str, schema: list[SectionSpec]) -> str:
 def parse_annotation(line: str) -> Annotation | None:
     """Parse the trailing annotation of a State line, or ``None`` if absent.
 
-    The annotation is the LAST ``[derive:`` / ``[judged:`` on the line and must
-    close with the line's final ``]`` (after any re-derive flag is removed).
+    The annotation is the LAST ``[derive:`` / ``[derive@LABEL:`` /
+    ``[judged:`` on the line and must close with the line's final ``]`` (after
+    any re-derive flag is removed). A label is returned as written; whether it
+    is a valid label is checked where the command is (:func:`_check_label`).
     """
     if line.endswith("\r"):
         line = line[:-1]
     stripped = strip_flag(line)
     if not stripped.endswith("]"):
         return None
-    d = stripped.rfind(_DERIVE_OPEN)
-    j = stripped.rfind(_JUDGED_OPEN)
-    start = max(d, j)
-    if start < 0:
+    m = None
+    for m in _OPENER.finditer(stripped):
+        pass
+    if m is None:
         return None
-    claim = stripped[:start].rstrip()
-    body = stripped[start + len(_DERIVE_OPEN if start == d else _JUDGED_OPEN) : -1].strip()
-    if start == j:
+    claim = stripped[: m.start()].rstrip()
+    body = stripped[m.end() : -1].strip()
+    if m.group(0) == _JUDGED_OPEN:
         if not body:
             return None
         return Annotation(kind="judged", claim=claim, judgement=body)
+    label = m.group(1)  # None for "[derive:"; a string (maybe empty) for "[derive@…:"
     if _EXPECT_SEP in body:
         command, expected = body.rsplit(_EXPECT_SEP, 1)  # a pattern may hold " => "
         return Annotation(
-            kind="derive", claim=claim, command=command.strip(), expected=expected.strip()
+            kind="derive", claim=claim, command=command.strip(), expected=expected.strip(), root=label
         )
-    return Annotation(kind="derive", claim=claim, command=body)
+    return Annotation(kind="derive", claim=claim, command=body, root=label)
 
 
 # --------------------------------------------------------------------------
@@ -391,8 +413,17 @@ def _check_repo_shape(root: str, timeout: float | None = None) -> str | None:
     # packed-refs, an objects fan-out directory): one that leaves the root
     # is a read outside it (gpt-oss L3 round 3, reproduced).
     root_real = os.path.realpath(root)
+    walk_deadline = None if timeout is None else time.monotonic() + timeout
+    seen = 0
     for dirpath, dirnames, filenames in os.walk(git, followlinks=False):
         for name in dirnames + filenames:
+            # Bounded by the load budget: a .git of millions of entries would
+            # otherwise hold a load for as long as the walk takes (codex L3,
+            # spore-1233 r2; measured 2026-10-01: 60k entries overran a 0.05s
+            # budget by 3.6x).
+            seen += 1
+            if walk_deadline is not None and seen % 512 == 0 and time.monotonic() > walk_deadline:
+                return ".git could not be checked within the load budget"
             full = os.path.join(dirpath, name)
             if os.path.islink(full) and not _inside(os.path.realpath(full), root_real):
                 return f"{os.path.relpath(full, root)} is a symlink out of the root"
@@ -416,7 +447,10 @@ def _check_repo_shape(root: str, timeout: float | None = None) -> str | None:
         out = _run_bounded(
             ["git", *_GIT_HARDENING, "config", "--file", os.path.join(git, "config"),
              "--name-only", "--list"],
-            root, _SHAPE_TIMEOUT if timeout is None else min(_SHAPE_TIMEOUT, timeout), _SHAPE_CAP,
+            root,
+            _SHAPE_TIMEOUT if walk_deadline is None
+            else max(0.1, min(_SHAPE_TIMEOUT, walk_deadline - time.monotonic())),
+            _SHAPE_CAP,
         )
         if out.returncode != 0 or out.timed_out or out.overflowed:
             why = out.spawn_error or out.stderr.decode("utf-8", "replace").strip() or "no answer"
@@ -755,7 +789,7 @@ def derived_state_lines(text: str, schema: list[SectionSpec]) -> list[tuple[int,
 # Results
 # --------------------------------------------------------------------------
 
-Status = Literal["ok", "stale", "error", "refused", "judged", "unannotated", "skipped"]
+Status = Literal["ok", "stale", "error", "refused", "judged", "unannotated", "skipped", "unbound"]
 
 _FLAGS: dict[str, str] = {
     "ok": "✓",
@@ -765,6 +799,7 @@ _FLAGS: dict[str, str] = {
     "judged": "",
     "unannotated": "⚠ NO DERIVE",
     "skipped": "⚠ NOT DERIVED",
+    "unbound": "⚠ UNBOUND",
 }
 
 
@@ -797,8 +832,10 @@ class RederiveReport:
     text: str  # the continuity with inline flags
     enabled: bool  # False = store not opted in; nothing ran
     ref: str | None = None  # commit id @REF resolved to
-    root: str | None = None
+    root: str | None = None  # the default root
     results: list[LineResult] = field(default_factory=list)
+    roots: dict = field(default_factory=dict)  # root label (None = default) -> root
+    refs: dict = field(default_factory=dict)  # root label -> commit id its @REF resolved to
 
     def count(self, status: str) -> int:
         return sum(1 for r in self.results if r.status == status)
@@ -864,13 +901,15 @@ def _judge_line(
     if ann.expected is None:
         if rc == 0:
             return LineResult(idx, line, "ok", ran=True)
-        if rc == 1:
+        if rc == 1 and argv[0] != "wc":
             return LineResult(idx, line, "stale", "exit 1", ran=True)
         return LineResult(idx, line, "error", f"exit {rc}: {_one_line(res.stderr)}", ran=True)
-    # Exit 1 is "false / no match" for every allowed program (grep -c prints
-    # 0 and exits 1), so a value claim still compares its output; 2+ is an
-    # error (git uses 128/129).
-    if rc not in (0, 1):
+    # Exit 1 is "false / no match" for grep (grep -c prints 0 and exits 1), so
+    # a value claim still compares its output; 2+ is an error (git uses
+    # 128/129). wc's exit 1 means a file could not be read, after it printed
+    # counts for the others, so that output is partial (codex L3, spore-1233
+    # r2; reproduced 2026-10-01 with a tracked file gone from the tree).
+    if rc not in (0, 1) or (rc == 1 and argv[0] == "wc"):
         return LineResult(idx, line, "error", f"exit {rc}: {_one_line(res.stderr)}", ran=True)
     got = _normalise(res.stdout.decode("utf-8", "replace"))
     if got == _normalise(ann.expected):
@@ -896,10 +935,18 @@ def _resolve_ref(root: str, ref: str | None, timeout: float) -> tuple[str | None
     return res.stdout.decode().strip(), None
 
 
+def _line_needs_repo(ann: Annotation | None) -> bool:
+    """Whether a line could need its root to be a plain repository: anything
+    but a judged line, an unannotated one or a plain ``test`` (fail-safe: a
+    command whose first token merely looks like another program still
+    counts, since ``"git"`` validates to git; L3 2026-10-01)."""
+    return ann is not None and ann.kind == "derive" and ann.command.split()[:1] != ["test"]
+
+
 def rederive_text(
     text: str,
     schema: list[SectionSpec],
-    root: str | os.PathLike | None,
+    root: str | os.PathLike | dict | None,
     *,
     ref: str | None = None,
     timeout: float = DEFAULT_COMMAND_TIMEOUT,
@@ -907,15 +954,25 @@ def rederive_text(
     max_lines: int = DEFAULT_MAX_LINES,
     output_cap: int = DEFAULT_OUTPUT_CAP,
 ) -> RederiveReport:
-    """Re-derive every derived-state line of ``text`` against ``root``.
+    """Re-derive every derived-state line of ``text`` against its root.
 
-    ``root=None`` means the store is not opted in: nothing executes, and the
-    returned text carries a one-line notice instead of flags.
+    ``root`` is the store's default root, or a mapping of root label to root
+    as :func:`trusted_roots` returns it (``None`` keys the default). A
+    ``[derive: …]`` line runs in the default root, a ``[derive@LABEL: …]``
+    line in that label's root, and a label with no root is ``⚠ UNBOUND``.
+    ``ref`` pins the default root only; each other root's ``@REF`` is its own
+    HEAD. ``root=None`` (or a mapping with no default) means the store is not
+    opted in: nothing executes, and the returned text carries a one-line
+    notice instead of flags.
     """
     text = strip_rederive_output(text, schema)  # re-deriving is idempotent
     lines = text.split("\n")
     targets = derived_state_lines(text, schema)
-    if root is None:
+    if isinstance(root, dict):
+        roots = {k: os.path.realpath(v) for k, v in root.items()}
+    else:
+        roots = {None: os.path.realpath(root)} if root is not None else {}
+    if None not in roots:
         notice = (
             f"{_ENVELOPE}not enabled for this store; STATE lines were not "
             "checked (see `anneal-memory derive allow`)."
@@ -923,28 +980,52 @@ def rederive_text(
         return RederiveReport(text=notice + "\n\n" + text if targets else text, enabled=False)
 
     deadline = time.monotonic() + budget
-    root_s = os.path.realpath(root)
-    needs_ref = any(REF_TOKEN in (parse_annotation(l) or Annotation("judged", "")).command for _, l in targets)
-    # The repository's shape is checked once per load, before git runs at all.
-    # It is skipped only when no line could need the repository (every one is
-    # judged, unannotated or a plain `test`), and its git call is bounded by
-    # the load budget (L3).
-    needs_repo = needs_ref or ref is not None or not all(
-        (a := parse_annotation(l)) is None or a.kind == "judged" or a.command.split()[:1] == ["test"]
-        for _, l in targets
-    )
-    shape = _check_repo_shape(root_s, timeout=max(budget, 0.1)) if needs_repo else None
-    ref_sha, ref_err = (None, None)
-    if shape and (needs_ref or ref is not None):
-        ref_err = shape
-    elif needs_ref or ref is not None:
-        ref_sha, ref_err = _resolve_ref(root_s, ref, timeout)
+    anns = {idx: parse_annotation(line) for idx, line in targets}
+
+    def key_of(ann: Annotation | None) -> str | None:
+        return ann.root if ann is not None and ann.kind == "derive" else None
+
+    # Each root used by a line is checked once per load, in a fixed order
+    # (default first), before git runs in it: its shape when any of its lines
+    # could need the repository, and its @REF. All of it is bounded by the one
+    # load budget (docs/rederive.md, multi-root).
+    used = [k for k in roots if any(key_of(a) == k for a in anns.values())]
+    if None not in used:
+        used.insert(0, None)
+    shapes: dict[str | None, str | None] = {}
+    refs: dict[str | None, tuple[str | None, str | None]] = {}
+    for k in used:
+        root_k = roots[k]
+        mine = [a for a in anns.values() if key_of(a) == k]
+        pin = ref if k is None else None
+        needs_ref = any(REF_TOKEN in a.command for a in mine if a is not None and a.kind == "derive")
+        needs_repo = needs_ref or pin is not None or any(_line_needs_repo(a) for a in mine)
+        remaining = max(deadline - time.monotonic(), 0.1)
+        shapes[k] = _check_repo_shape(root_k, timeout=remaining) if needs_repo else None
+        if needs_ref or pin is not None:
+            refs[k] = (None, shapes[k]) if shapes[k] else _resolve_ref(root_k, pin, timeout)
+        else:
+            refs[k] = (None, None)
 
     results: list[LineResult] = []
     ran = 0
     for idx, line in targets:
-        ann = parse_annotation(line)
+        ann = anns[idx]
         is_cmd = ann is not None and ann.kind == "derive"
+        label = ann.root if ann is not None and ann.kind == "derive" else None
+        if label is not None:
+            try:
+                _check_label(label)
+            except DeriveRefused as e:
+                ran += 1  # counts toward the cap like any refused line
+                results.append(LineResult(idx, line, "refused", str(e)))
+                continue
+            if label not in roots:
+                results.append(LineResult(
+                    idx, line, "unbound",
+                    f"no root is bound to label {label!r} for this store (see `anneal-memory derive allow --label`)",
+                ))
+                continue
         if is_cmd and (ran >= max_lines or time.monotonic() >= deadline):
             why = f"line cap {max_lines}" if ran >= max_lines else f"load budget {budget:g}s"
             results.append(LineResult(idx, line, "skipped", why))
@@ -956,7 +1037,9 @@ def rederive_text(
             # budget's, not the command's, so do not start it.
             results.append(LineResult(idx, line, "skipped", f"load budget {budget:g}s"))
             continue
-        r = _judge_line(idx, line, root_s, ref_sha, ref_err, timeout, output_cap, shape)
+        k = key_of(ann)
+        ref_sha, ref_err = refs.get(k, (None, None))
+        r = _judge_line(idx, line, roots[k], ref_sha, ref_err, timeout, output_cap, shapes.get(k))
         if is_cmd:  # refused lines count too, so the cap bounds the work
             ran += 1
         results.append(r)
@@ -968,9 +1051,14 @@ def rederive_text(
             lines[r.index] = f"{body}  {r.flag}{cr}"
     counts = {s: sum(1 for r in results if r.status == s) for s in _FLAGS}
     summary = ", ".join(f"{n} {s}" for s, n in counts.items() if n)
+
+    def where(k: str | None) -> str:
+        sha = refs.get(k, (None, None))[0]
+        return f"{' '.join(roots[k].split())}" + (f" at {sha}" if sha else "")
+
     header = (
-        f"{_ENVELOPE}{len(results)} STATE line(s) in {' '.join(root_s.split())}"
-        + (f" at {ref_sha}" if ref_sha else "")
+        f"{_ENVELOPE}{len(results)} STATE line(s) in {where(None)}"
+        + "".join(f"; {k} in {where(k)}" for k in used if k is not None)
         + (f": {summary}" if summary else "")
         + ". git lines read the pinned ref only where they use @REF; grep, wc "
         "and test read the working tree."
@@ -978,7 +1066,10 @@ def rederive_text(
     out = "\n".join(lines)
     if results:
         out = header + "\n\n" + out
-    return RederiveReport(text=out, enabled=True, ref=ref_sha, root=root_s, results=results)
+    return RederiveReport(
+        text=out, enabled=True, ref=refs[None][0], root=roots[None], results=results,
+        roots=dict(roots), refs={k: v[0] for k, v in refs.items()},
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1048,7 +1139,7 @@ def _write_trust(path: Path, stores: list[dict]) -> None:
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".derive-trust.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump({"version": 1, "stores": stores}, f, indent=2)
+            json.dump({"version": 2, "stores": stores}, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
         os.chmod(tmp, 0o600)
@@ -1094,22 +1185,59 @@ def _db_key(db_path: str | os.PathLike) -> str | None:
     return os.path.realpath(s)
 
 
-def trusted_root(db_path: str | os.PathLike, trust_file: Path | None = None) -> str | None:
-    """The root this store is allowed to re-derive in, or ``None``."""
+def _usable_root(root: object, tf: Path) -> str | None:
+    if not isinstance(root, str) or not os.path.isabs(root) or not os.path.isdir(root):
+        return None
+    # A trust file inside a bound root could have arrived with it.
+    if _inside(os.path.realpath(tf), root):
+        return None
+    return root
+
+
+def _nested(a: str, b: str) -> bool:
+    return _inside(a, b) or _inside(b, a)
+
+
+def trusted_roots(db_path: str | os.PathLike, trust_file: Path | None = None) -> dict[str | None, str]:
+    """Every root this store may re-derive in, keyed by label (``None`` keys
+    the default root). Empty when the store has no usable default root.
+
+    A labelled root is dropped, so its lines read ``⚠ UNBOUND``, when it is
+    not a usable directory, when it is nested in (or holds) another of the
+    store's roots, or when the store's roots do not all declare the same
+    visibility. The rules :func:`allow_store` enforces are checked again
+    here, so a hand-edited trust file cannot widen what a store reaches."""
     key = _db_key(db_path)
     if key is None:
-        return None
+        return {}
     tf = trust_file or trust_file_path()
     for s in _load_trust(tf):
-        if s["db"] == key:
-            root = s["root"]
-            if not os.path.isabs(root) or not os.path.isdir(root):
-                return None
-            # A trust file inside a bound root could have arrived with it.
-            if _inside(os.path.realpath(tf), root):
-                return None
-            return root
-    return None
+        if s["db"] != key:
+            continue
+        default = _usable_root(s["root"], tf)
+        if default is None:
+            return {}
+        roots: dict[str | None, str] = {None: default}
+        labels = s.get("labels")
+        if not isinstance(labels, dict) or not labels:
+            return roots
+        vis = s.get("visibility")
+        for name, entry in labels.items():
+            if not isinstance(name, str) or not _LABEL.fullmatch(name) or not isinstance(entry, dict):
+                continue
+            r = _usable_root(entry.get("root"), tf)
+            if r is None or vis not in VISIBILITIES or entry.get("visibility") != vis:
+                continue
+            if any(_nested(r, other) for other in roots.values()):
+                continue
+            roots[name] = r
+        return roots
+    return {}
+
+
+def trusted_root(db_path: str | os.PathLike, trust_file: Path | None = None) -> str | None:
+    """The default root this store is allowed to re-derive in, or ``None``."""
+    return trusted_roots(db_path, trust_file).get(None)
 
 
 def _inside(path: str, root: str) -> bool:
@@ -1119,12 +1247,7 @@ def _inside(path: str, root: str) -> bool:
         return False
 
 
-def allow_store(db_path: str | os.PathLike, root: str | os.PathLike, trust_file: Path | None = None) -> str:
-    """Bind a store to a root directory. Returns the resolved root."""
-    key = _db_key(db_path)
-    if key is None:
-        raise ValueError("an in-memory store cannot be allowed to re-derive")
-    root_s = os.path.realpath(root)
+def _check_root(root_s: str, path: Path) -> None:
     if not os.path.isdir(root_s):
         raise ValueError(f"root {root_s!r} is not a directory")
     # A repository root whose shape git lines refuse (a linked worktree, a
@@ -1138,35 +1261,126 @@ def allow_store(db_path: str | os.PathLike, root: str | os.PathLike, trust_file:
             raise ValueError(
                 f"root {root_s!r} is not a repository re-derive can run git in: {shape}.{hint}"
             )
-    path = trust_file or trust_file_path()
     if _inside(os.path.realpath(path), root_s):
         raise ValueError(
             f"the trust file {path} is inside the root; a binding there would be ignored"
         )
-    entry = {
-        "db": key,
-        "root": root_s,
-        "allowed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    }
+
+
+def allow_store(
+    db_path: str | os.PathLike,
+    root: str | os.PathLike,
+    trust_file: Path | None = None,
+    *,
+    label: str | None = None,
+    visibility: str | None = None,
+) -> str:
+    """Bind a store to a root directory. Returns the resolved root.
+
+    With no ``label`` this binds the store's default root (the one
+    ``[derive: …]`` lines run in), keeping any labelled roots. With a
+    ``label`` it binds a further root for ``[derive@LABEL: …]`` lines; the
+    store needs a default root first. ``visibility`` (``public`` or
+    ``private``) is the operator's declaration about the root, which anneal
+    cannot check: a store with more than one root must declare it on every
+    root, and every root must declare the same one (one visibility class per
+    store, so a public store's text never reaches a private repo's files).
+    """
+    key = _db_key(db_path)
+    if key is None:
+        raise ValueError("an in-memory store cannot be allowed to re-derive")
+    if label is not None and not _LABEL.fullmatch(label):
+        raise ValueError(
+            f"label {label!r} must be lowercase letters, digits and '-', at most 32 "
+            "characters, starting with a letter or digit"
+        )
+    if visibility is not None and visibility not in VISIBILITIES:
+        raise ValueError(f"visibility must be one of {', '.join(VISIBILITIES)}")
+    root_s = os.path.realpath(root)
+    path = trust_file or trust_file_path()
+    _check_root(root_s, path)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    def change(stores: list[dict]) -> list[dict]:
+        current = next((s for s in stores if s["db"] == key), None)
+        rest = [s for s in stores if s["db"] != key]
+        labels = dict(current.get("labels") or {}) if current else {}
+        if label is None:
+            vis = visibility or (current.get("visibility") if current and current["root"] == root_s else None)
+            for name, e in labels.items():
+                if _nested(root_s, e.get("root", "")):
+                    raise ValueError(f"root {root_s!r} is nested with the root of label {name!r}")
+                if vis is None or e.get("visibility") != vis:
+                    raise ValueError(
+                        "this store has labelled roots, so its default root needs --visibility "
+                        f"{e.get('visibility')}, matching theirs (one visibility class per store)"
+                    )
+            entry = {"db": key, "root": root_s, "allowed_at": now}
+            if vis is not None:
+                entry["visibility"] = vis
+        else:
+            if current is None:
+                raise ValueError("bind the store's default root first (allow without --label)")
+            if visibility is None:
+                raise ValueError("a labelled root needs --visibility (public or private)")
+            if current.get("visibility") is None:
+                raise ValueError(
+                    "the store's default root declares no visibility; re-allow it with "
+                    f"--visibility first (one visibility class per store, and this root is {visibility!r})"
+                )
+            if current.get("visibility") != visibility:
+                raise ValueError(
+                    f"the store's default root is declared {current['visibility']!r} and this root "
+                    f"{visibility!r}: one visibility class per store"
+                )
+            for name, other in [(None, current["root"])] + [
+                (n, e.get("root", "")) for n, e in labels.items() if n != label
+            ]:
+                if _nested(root_s, other):
+                    raise ValueError(
+                        f"root {root_s!r} is nested with the "
+                        + ("default root" if name is None else f"root of label {name!r}")
+                    )
+            labels[label] = {"root": root_s, "allowed_at": now, "visibility": visibility}
+            entry = {k: v for k, v in current.items() if k != "labels"}
+        if labels:
+            entry["labels"] = labels
+        return rest + [entry]
+
     _update_trust(
         path,
-        lambda stores: [s for s in stores if s["db"] != key] + [entry],
-        verify=lambda: trusted_root(key, path) == root_s,  # never report an opt-in that does not hold
+        change,
+        verify=lambda: trusted_roots(key, path).get(label) == root_s,  # never report an opt-in that does not hold
     )
     return root_s
 
 
-def revoke_store(db_path: str | os.PathLike, trust_file: Path | None = None) -> bool:
-    """Remove a store's binding. Returns whether one existed."""
+def revoke_store(db_path: str | os.PathLike, trust_file: Path | None = None, *, label: str | None = None) -> bool:
+    """Remove a store's binding (every root), or with ``label`` only that
+    labelled root. Returns whether one existed."""
     key = _db_key(db_path)
     path = trust_file or trust_file_path()
 
     def drop(stores: list[dict]) -> list[dict]:
-        kept = [s for s in stores if s["db"] != key]
-        return stores if len(kept) == len(stores) else kept
+        if label is None:
+            kept = [s for s in stores if s["db"] != key]
+            return stores if len(kept) == len(stores) else kept
+        out, hit = [], False
+        for s in stores:
+            labels = s.get("labels") if s["db"] == key else None
+            if isinstance(labels, dict) and label in labels:
+                hit = True
+                s = dict(s)
+                s["labels"] = {n: e for n, e in labels.items() if n != label}
+                if not s["labels"]:
+                    del s["labels"]
+            out.append(s)
+        return out if hit else stores
 
     before = _update_trust(path, drop)
-    return any(s["db"] == key for s in before)
+    if label is None:
+        return any(s["db"] == key for s in before)
+    return any(s["db"] == key and label in (s.get("labels") or {}) for s in before)
 
 
 # --------------------------------------------------------------------------
@@ -1183,8 +1397,8 @@ def rederive_continuity(store, *, ref: str | None = None, trust_file: Path | Non
     text = store.load_continuity()
     if text is None:
         return None
-    root = trusted_root(store.path, trust_file)
-    return rederive_text(text, store.section_schema, root, ref=ref, **limits)
+    roots = trusted_roots(store.path, trust_file)
+    return rederive_text(text, store.section_schema, roots, ref=ref, **limits)
 
 
 def check_state_for_save(
@@ -1196,8 +1410,8 @@ def check_state_for_save(
     """The save gate for derived-state sections.
 
     Raises ``ValueError`` (nothing is written) when a State line has no
-    annotation or a refused command, and, on an opted-in store, when a command
-    errors. Returns the report (``None`` when the schema has no derived-state
+    annotation or a refused command or label, and, on an opted-in store, when
+    a command errors or names a label with no bound root. Returns the report (``None`` when the schema has no derived-state
     section) so the caller can surface stale lines without refusing.
     """
     if not _derived_headings(schema):
@@ -1209,16 +1423,19 @@ def check_state_for_save(
             problems.append(f"line {idx + 1}: no [derive: …] or [judged: …] annotation")
         elif ann.kind == "derive":
             try:
+                if ann.root is not None:
+                    _check_label(ann.root)
                 validate_command(ann.command)
             except DeriveRefused as e:
                 problems.append(f"line {idx + 1}: refused: {e}")
     if problems:
         raise ValueError("State section refused:\n  " + "\n  ".join(problems))
-    root = trusted_root(db_path, trust_file)
-    report = rederive_text(text, schema, root)
+    report = rederive_text(text, schema, trusted_roots(db_path, trust_file))
     if not report.enabled:
         return report
-    bad = [r for r in report.results if r.status in ("error", "refused")]
+    # An unbound label is not clean: the claim names a root nobody bound, so
+    # it was not checked (absence of signal is never health).
+    bad = [r for r in report.results if r.status in ("error", "refused", "unbound")]
     if bad:
         raise ValueError(
             "State section refused, derive commands failed:\n  "

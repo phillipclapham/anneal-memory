@@ -12,9 +12,10 @@ annotations:
 ```
 
 - `[derive: COMMAND => EXPECTED]` is a **value claim**. It agrees when the
-  command's stdout, with whitespace collapsed, equals `EXPECTED`. Exit 0 and
-  exit 1 both compare the output (`grep -c` prints `0` and exits 1 when
-  nothing matches). Any other exit is an error.
+  command's stdout, with whitespace collapsed, equals `EXPECTED`. Exit 0
+  compares the output, and so does exit 1 except for `wc` (`grep -c` prints
+  `0` and exits 1 when nothing matches; `wc` exits 1 when it could not read a
+  file, after printing counts for the others). Any other exit is an error.
 - `[derive: COMMAND]` is a **truth claim**. Exit 0 agrees, exit 1 disagrees,
   and any other exit is an error. Write existence claims in a form that exits 1
   when false: `test -e PATH`, `grep -q`, `git merge-base --is-ancestor A B`,
@@ -22,13 +23,17 @@ annotations:
   which is an error, and an error refuses the save.
 - `[judged: WHO, WHEN, AGAINST WHAT]` marks a judgement that no command can
   check. It is accepted as written and never executed.
+- `[derive@LABEL: …]` is either form, run in the root bound to `LABEL` for
+  this store instead of the default root (see "Several roots for one store"
+  below).
 
 When the continuity is loaded with re-derive (`anneal-memory continuity
 --rederive`, or `rederive_continuity()` in the library), each derive command
 runs, and the line is flagged inline: `✓` when it agrees, `⚠ STALE` when it
 disagrees, `⚠ DERIVE ERROR` when it errors, `⛔ REFUSED` when its command is
-outside the allowlist below, and `⚠ NOT DERIVED` when the load ran out of
-budget before reaching it. Text loaded this way starts with a
+outside the allowlist below, `⚠ UNBOUND` when its label names no root bound
+for this store, and `⚠ NOT DERIVED` when the load ran out of budget before
+reaching it. Text loaded this way starts with a
 `> [anneal re-derive]` line and can be saved back as it is. The save removes
 that header only when it is the first line and the whole line is exactly what
 re-derive writes, so an authored note is never deleted, and it always removes a flag after a State
@@ -42,8 +47,8 @@ budget ran out first. It says so on stderr, and the report's `clean` is false. S
 the signal.
 
 A save (`validated_save_continuity`) refuses a State section in which a line
-carries no annotation or a refused command, and, on a store that is enabled
-for re-derive, one whose command errors. Stale and not-derived lines do not
+carries no annotation or a refused command or label, and, on a store that is
+enabled for re-derive, one whose command errors or whose label is unbound. Stale and not-derived lines do not
 refuse the save: they are returned in the result's `stale_state` list (and in
 the MCP tool's reply), with a warning after the save commits. On a store that
 is not opted in, a save runs the static checks alone; pass `require_rederive=True`
@@ -117,6 +122,45 @@ allow` model:
 - Re-derive runs on POSIX systems only. Elsewhere the ownership checks, the
   no-follow open and the lock cannot be made, so nothing is ever trusted.
 - `derive revoke` removes the binding.
+
+#### Several roots for one store
+
+A project can span repositories. A store binds one **default root** with
+`derive allow --root DIR`, and then any number of **labelled roots**:
+
+```sh
+anneal-memory --db PATH derive allow --root REPO_DIR --visibility public
+anneal-memory --db PATH derive allow --root OTHER_DIR --label other --visibility public
+```
+
+A `[derive@other: …]` line runs in `OTHER_DIR`; a `[derive: …]` line still
+runs in the default root, so a store with one root is unchanged.
+
+- A label is a name, never a path: lowercase letters, digits and `-`, at most
+  32 characters. The text chooses among roots the user bound and cannot name
+  one; a malformed label is refused, and a label with no bound root is
+  `⚠ UNBOUND`, which is not clean and refuses an opted-in save (a claim that
+  could not be checked never reads as one that held).
+- **One visibility class per store.** A store with labelled roots declares
+  `--visibility public` or `private` on every root, the same on all of them,
+  and `allow` refuses a mismatch. A count oracle over a private repository's
+  tracked files is thereby never reachable from a store whose roots are public.
+  The declaration is the user's: anneal cannot see where a repository is
+  published.
+- A labelled root needs a default root first, may not be nested in (or hold)
+  another root of the same store, and passes the same checks as the default
+  root (the repository shape, the trust file outside it).
+- The read side applies the same rules again, so a hand-edited trust file
+  cannot widen what a store reaches: a labelled root whose visibility does not
+  match, which is nested, or which is not a usable directory is dropped, and
+  its lines read `⚠ UNBOUND`.
+- `derive revoke --label NAME` drops one labelled root; `derive revoke` drops
+  the store's whole binding. `derive status` lists every root that is honoured.
+- The trust file keeps each store's default root where earlier versions read
+  it, so a version without labels still finds the right default root. Such a
+  version reads a `[derive@LABEL: …]` line as unannotated and refuses to save
+  it; it never runs one. Write labelled lines only once every process that
+  wraps the store understands them.
 
 On an untrusted store, a re-derive load returns the text with a one-line
 header saying re-derive is not enabled and runs nothing. A save still performs
@@ -229,10 +273,11 @@ than the parent's. Bind the root to a repository's top level.
   runs in place of the system one. On Windows only a `.exe` runs (a `.bat` or
   `.cmd` wrapper would go through `cmd.exe`, a shell).
 - stdin is closed.
-- The ref is pinned once per load: `@REF` in a git argument is replaced with
-  the full commit id that `HEAD` (or the caller's `--ref`) resolved to at the
-  start of the load, so every line in one load is judged against the same
-  commit, and the report names it. `grep`, `wc` and `test` read the working
+- The ref is pinned once per root per load: `@REF` in a git argument is
+  replaced with the full commit id that root's `HEAD` resolved to at the start
+  of the load (the caller's `--ref` pins the default root only), so every line
+  in one load is judged against the same commit of its root, and the report
+  names each. `grep`, `wc` and `test` read the working
   tree, and the report says so.
 
 ### 6. Every run is bounded
@@ -241,7 +286,9 @@ Each command has a timeout and an output cap, and each load has a total time
 budget and a cap on the number of lines it derives. A command that exceeds its
 timeout or cap has its process group killed and counts as an error. A line
 spends at most one timeout on the tracked-file check and one on its command,
-and the load budget includes resolving the pinned ref. Every derive line counts toward the
+and the load budget includes, for every root a load uses, the repository
+shape check (the walk of `.git` and the config read) and resolving the pinned
+ref. Every derive line counts toward the
 line cap, refused ones too. A line is started only while at least one
 line's worth (two command timeouts) of the load budget is left, so running out of budget never shows up as a command's own timeout;
 lines not reached are flagged `⚠ NOT DERIVED` rather than silently passed. The exact limits are the `DEFAULT_*` constants in
@@ -255,6 +302,12 @@ A command that prints `## Decisions` cannot inject a section into the loaded
 continuity.
 
 ## What this does not cover
+
+- **Reach across a store's own roots.** Any text that reaches a State section
+  can point a count at any root bound to that store. The visibility class keeps
+  public and private repositories apart; inside one class, binding a root is a
+  statement that the store's text may count over its tracked files.
+- **A false visibility declaration.** `--visibility` is taken as declared.
 
 - **A trusted user's own PATH.** The program is found through the absolute
   entries of `PATH`; a user whose `PATH` is hostile is already compromised.

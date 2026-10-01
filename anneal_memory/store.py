@@ -346,6 +346,7 @@ StoreOperation = Literal[
     "wrap_started",
     "wrap_cancelled",
     "get_wrap_started_at",
+    "last_wrap_id",
     "consolidate_requires_baton",
     "wrap_gated_session",
     "set_consolidate_requires_baton",
@@ -395,8 +396,8 @@ class StoreError(AnnealMemoryError):
     - :meth:`Store.save_meta` — atomic metadata sidecar write
     - :meth:`Store.load_wrap_snapshot` — partial-state integrity failures
     - :meth:`Store.wrap_completed` — ``episode_ids`` exceeds the SQLite
-      IN-clause variable limit (998 by default; chunking is 10.5c.5+
-      work)
+      IN-clause variable guard ``Store._MAX_SQL_VARS_IN_CLAUSE``
+      (chunking is 10.5c.5+ work)
     - :meth:`Store.close` — called inside an active :meth:`Store._batch`
       context (explicit guard; closing mid-batch would lose deferred
       writes)
@@ -815,6 +816,25 @@ class SaveAuthorityError(ValueError):
     A ``ValueError`` subclass so callers that catch ``ValueError`` are unchanged; test with
     ``isinstance`` rather than matching the message text.
     """
+
+
+class WrapWindowMovedError(AnnealMemoryError):
+    """Raised by ``wrap_started(expect_last_wrap_id=...)`` when a wrap has
+    completed since the caller read its compression window (spore-1233).
+
+    The caller's episode snapshot and continuity were read before that wrap
+    committed, so a wrap opened on them would compress episodes already
+    compressed and, at save, replace the newer continuity. Nothing is written;
+    :func:`~anneal_memory.prepare_wrap` turns it into a "retry" result.
+    """
+
+    def __init__(self, expected: int, actual: int) -> None:
+        self.expected = expected
+        self.actual = actual
+        super().__init__(
+            f"wrap_started: a wrap completed since this window was read "
+            f"(last wrap {expected} when read, {actual} now). Re-run prepare_wrap."
+        )
 
 
 class WrapOwnershipError(AnnealMemoryError):
@@ -2081,31 +2101,28 @@ class Store:
         # compression window. BEGIN IMMEDIATE takes the write lock before the read,
         # so the read and the write see the same wraps table.
         max_retries = 3
+        # Inside a _batch() the BEGIN opens the batch's transaction, which the
+        # batch's exit commits or rolls back; on any error _db_boundary rolls
+        # back what is open.
         with self._db_boundary("record"):
-            own_txn = not self._defer_commit and not self._conn.in_transaction
-            if own_txn:
+            if not self._conn.in_transaction:
                 self._conn.execute("BEGIN IMMEDIATE")
-            try:
-                session_id = self._current_session_id()
-                for nonce in range(max_retries):
-                    ep_id = _episode_id(content, ts, nonce)
-                    try:
-                        self._conn.execute(
-                            """INSERT INTO episodes (id, timestamp, type, content, source, session_id, metadata)
-                               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                            (ep_id, ts, episode_type.value, content, source, session_id, meta_json),
-                        )
-                        if not self._defer_commit:
-                            self._conn.commit()
-                        break
-                    except sqlite3.IntegrityError:
-                        if nonce == max_retries - 1:
-                            raise
-                        continue
-            except BaseException:
-                if own_txn and self._conn.in_transaction:
-                    self._conn.rollback()
-                raise
+            session_id = self._current_session_id()
+            for nonce in range(max_retries):
+                ep_id = _episode_id(content, ts, nonce)
+                try:
+                    self._conn.execute(
+                        """INSERT INTO episodes (id, timestamp, type, content, source, session_id, metadata)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (ep_id, ts, episode_type.value, content, source, session_id, meta_json),
+                    )
+                    if not self._defer_commit:
+                        self._conn.commit()
+                    break
+                except sqlite3.IntegrityError:
+                    if nonce == max_retries - 1:
+                        raise
+                    continue
 
         episode = Episode(
             id=ep_id,
@@ -2431,6 +2448,7 @@ class Store:
         section_schema: list[SectionSpec] | None = None,
         allow_restart: bool = False,
         gated_session_id: str | None = None,
+        expect_last_wrap_id: int | None = None,
     ) -> None:
         """Mark that a wrap has been initiated (prepare_wrap called).
 
@@ -2660,6 +2678,12 @@ class Store:
                 existing_started = self._get_metadata("wrap_started_at")
                 if existing_started:
                     raise WrapInProgressError(started_at=existing_started)
+            if expect_last_wrap_id is not None:
+                # spore-1233: under the same write lock, refuse a window that a
+                # wrap completed after the caller read it.
+                actual = self._last_wrap_id()
+                if actual != expect_last_wrap_id:
+                    raise WrapWindowMovedError(expect_last_wrap_id, actual)
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_started_at", _now_utc()),
@@ -3258,9 +3282,12 @@ class Store:
     # bare ``sqlite3.OperationalError: too many SQL variables`` fall
     # out through the transport. The limit is documented as a
     # compile-time constant so there's no runtime query for it; we
-    # use 998 (leave one placeholder for the ``session_id`` param).
+    # leave room for the most other parameters any statement binds beside
+    # the IDs: the spore-1233 carry-over UPDATE binds three (the new session
+    # id and two range bounds), so 999 - 3. Pinned by
+    # tests/test_wrap_strand.py::test_snapshot_at_the_variable_guard_fits_every_statement.
     # Chunking is 10.5c.5+ work if anyone ever actually hits this.
-    _MAX_SQL_VARS_IN_CLAUSE = 998
+    _MAX_SQL_VARS_IN_CLAUSE = 996
 
     def wrap_completed(
         self,
@@ -3292,7 +3319,11 @@ class Store:
                 the 10.5c.4 TOCTOU window: episodes recorded between
                 ``prepare_wrap`` and ``validated_save_continuity`` are
                 preserved for the next wrap instead of being silently
-                absorbed into this one. When ``None`` (a direct
+                absorbed into this one. An episode stamped with the
+                closing session (anything recorded after the first wrap)
+                that is NOT in the list is moved to the next session, for
+                the same reason (spore-1233); with an empty list that is
+                every episode of the closing session. When ``None`` (a direct
                 ``wrap_completed`` call not routed through the
                 canonical ``validated_save_continuity`` pipeline), the
                 UPDATE falls back to the pre-10.5c.4 behavior of
@@ -3332,7 +3363,7 @@ class Store:
 
         Raises:
             StoreError: If ``episode_ids`` exceeds the SQLite variable
-                limit for an IN clause (998 by default). This is a
+                guard ``_MAX_SQL_VARS_IN_CLAUSE``. This is a
                 hard guard, not a silent truncation — chunking is
                 10.5c.5+ work.
 
@@ -3526,13 +3557,14 @@ class Store:
                         f"WHERE session_id IS NULL AND id IN ({placeholders})",
                         (session_id, *episode_ids),
                     )
-                # If episode_ids is an empty list, skip the UPDATE entirely.
-                # An empty snapshot means "this wrap compressed nothing" —
+                # If episode_ids is an empty list, skip the NULL stamp (the
+                # carry-over above has already moved the closing session's
+                # episodes on). An empty snapshot means "this wrap compressed nothing" —
                 # the prepare_wrap empty path already calls wrap_cancelled
                 # instead of wrap_completed, so the only way to reach here
                 # with an empty list is a library user deliberately
-                # recording a no-op wrap. Do nothing rather than
-                # accidentally stamping all NULL episodes.
+                # recording a no-op wrap. Stamp nothing rather than
+                # accidentally closing all NULL episodes.
 
             # Clear the wrap-in-progress metadata keys (the three legacy
             # keys + the frozen wrap_section_schema) in the same SQL
@@ -4858,6 +4890,17 @@ class Store:
             row = self._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()
 
         return row[0]
+
+    def _last_wrap_id(self) -> int:
+        """The newest wraps row id, 0 before the first wrap."""
+        row = self._conn.execute("SELECT MAX(id) AS id FROM wraps").fetchone()
+        return int(row["id"]) if row["id"] is not None else 0
+
+    def last_wrap_id(self) -> int:
+        """Public read of :meth:`_last_wrap_id`, for ``wrap_started``'s
+        ``expect_last_wrap_id`` (read it BEFORE the window)."""
+        with self._db_boundary("last_wrap_id"):
+            return self._last_wrap_id()
 
     def _current_session_id(self) -> str | None:
         """Get current session ID (last wrap ID + 1, or None if no wraps).

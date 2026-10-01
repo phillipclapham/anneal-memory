@@ -439,10 +439,11 @@ class StalePatternDict(TypedDict):
 
 class _WrapPackageOptional(TypedDict, total=False):
     # Present ONLY on a derived-state (project schema) store that is opted in to
-    # re-derive and has a continuity: the State lines not confirmed when the
-    # package was built (every status but ok and judged), each written
-    # "line N: <flag>" (spore-1233).
-    stale_state: list[str]
+    # re-derive and has a continuity, when any State line was not confirmed
+    # while the package was built (every status but ok and judged), each
+    # written "line N: <flag>" (spore-1233). Wider than the save result's
+    # ``stale_state``, which lists only the lines that do not refuse a save.
+    unconfirmed_state: list[str]
 
 
 class WrapPackageDict(_WrapPackageOptional):

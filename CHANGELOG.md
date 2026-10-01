@@ -14,21 +14,42 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   absent from the snapshot to the next session, in the same transaction.
 - `record()` reads its session id and inserts under one `BEGIN IMMEDIATE`, so a wrap that commits
   between the two can no longer close the session the episode is about to be stamped with
-  (without this, the same run still lost about one episode per wrap).
+  (without this, the same run still lost about one episode per wrap). Inside `_batch()` it now
+  opens the batch's transaction the same way instead of reading unlocked.
+- A `prepare_wrap` that read its window before another wrap completed could still open a wrap on
+  it, and its save replaced the newer continuity: episodes only that wrap had compressed were
+  lost, and others were compressed twice (a two-recorder, two-wrapper run compressed 220 twice).
+  The new prepare-time re-derive below can take seconds, which widened the window. `prepare_wrap`
+  now reads `Store.last_wrap_id()` before its window and passes it to `wrap_started`
+  (`expect_last_wrap_id=`), which refuses with the new `WrapWindowMovedError` if a wrap completed
+  since; `prepare_wrap` turns that into a `downgraded-wrap-replaced` result: retry.
+- `Store._MAX_SQL_VARS_IN_CLAUSE` is 996 (was 998): the carry-over UPDATE binds three parameters
+  beside the snapshot ids, so a snapshot at the old guard overflowed SQLite's 999-variable build
+  limit inside the save.
+- Not covered: an episode already stranded by an earlier version stays outside every window (no
+  recovery pass), and a process still running an earlier version on the same store can strand new
+  ones. Restart every anneal process on a store onto this version.
 
 ### Fixed — re-derive
 
 - `anneal-memory derive status` without `--json` raised `UnboundLocalError`.
-- `continuity --rederive` exited 0 when it checked nothing. It now exits 3 when the store is not
-  opted in (with a stderr notice) or its schema has no derived-state section.
+- `continuity --rederive` exited 0 when it checked nothing. It now exits 3 when no State command
+  ran (not opted in, no derived-state section, only `[judged:]` lines, or the load budget spent),
+  and says which on stderr.
+- A re-derive header a composer copied below the title line was persisted by the save. The save
+  now removes it anywhere before the first section heading.
 
 ### Added — re-derive
 
 - `validated_save_continuity(require_rederive=True)` / `save-continuity --require-rederive`:
-  refuse the save unless the store is opted in, so the State lines are run at that save.
+  refuse the save unless the store is opted in and at least one State command ran at that save.
+  Not on the MCP `save_continuity` tool.
 - `prepare_wrap` re-derives the current continuity for the composer: State lines carry their flags
-  in the package (or the not-enabled header), the package gains an optional `stale_state` list,
-  and the instructions say what to do with a flagged line. The save strips the flags as before.
+  in the package (or the not-enabled header), the package gains an optional `unconfirmed_state`
+  list, and the instructions say the marks are stripped at save and what to do with a flagged
+  line. On an opted-in store this runs the State commands at prepare (MCP included), under the
+  same containment as a load.
+- `RederiveReport.ran`: how many State commands executed and answered.
 
 ## [0.9.16] — 2026-09-30
 

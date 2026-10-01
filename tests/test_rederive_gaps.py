@@ -101,7 +101,7 @@ def test_prepare_wrap_shows_the_composer_the_stale_flags(project):
     assert package is not None
     flagged = TRUE_STATE[0] + "  ⚠ STALE (now '0', claimed '1')"
     assert flagged in package["continuity"]
-    assert package["stale_state"] == ["line 7: ⚠ STALE (now '0', claimed '1')"]
+    assert package["unconfirmed_state"] == ["line 7: ⚠ STALE (now '0', claimed '1')"]
     assert flagged in format_wrap_package_text(result)
     assert "⚠" not in store.load_continuity()  # the stored text is untouched
 
@@ -115,4 +115,45 @@ def test_prepare_wrap_says_when_state_was_not_checked(project):
     package = prepare_wrap(store)["package"]
     assert package is not None
     assert "not enabled for this store; STATE lines were not checked" in package["continuity"]
-    assert "stale_state" not in package
+    assert "unconfirmed_state" not in package
+    assert "no State line was checked" in package["instructions"]
+
+
+JUDGED_ONLY = ["- Notes read well [judged: t, 2026-09-30, against the draft]"]
+
+
+def test_an_enabled_store_where_no_command_ran_is_not_a_clean_exit(project):
+    """L1 (spore-1233 review): an opted-in store whose State ran no command
+    (only [judged:] lines here; a spent load budget reaches the same branch)
+    still exited 0."""
+    store, _repo = project
+    _save(store, _continuity(JUDGED_ONLY))
+    assert _cli(store, "continuity", "--rederive").returncode == 3
+
+
+def test_require_rederive_refuses_a_save_where_no_command_ran(project):
+    store, _repo = project
+    _save(store, _continuity(TRUE_STATE))
+    store.record("next session", "observation")
+    prep = prepare_wrap(store)
+    with pytest.raises(ValueError, match="no State command ran"):
+        validated_save_continuity(
+            store, _continuity(JUDGED_ONLY), wrap_token=prep["wrap_token"], require_rederive=True
+        )
+
+
+def test_a_composer_copied_header_below_the_title_is_not_persisted(project):
+    """L1 (spore-1233 review): prepare_wrap now hands the composer re-derive
+    output, header included; a composer that keeps its title first and copies
+    the header under it must not persist a load-time verdict."""
+    store, _repo = project
+    _save(store, _continuity(TRUE_STATE))
+    store.record("next session", "observation")
+    package = prepare_wrap(store)["package"]
+    assert package is not None
+    header = package["continuity"].split("\n")[0]
+    assert header.startswith("> [anneal re-derive]")
+    title, rest = _continuity(TRUE_STATE).split("\n", 1)
+    composed = f"{title}\n{header}\n\n{rest}"
+    validated_save_continuity(store, composed)
+    assert "[anneal re-derive]" not in store.load_continuity()

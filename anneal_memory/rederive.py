@@ -140,8 +140,22 @@ def strip_rederive_output(text: str, schema: list[SectionSpec]) -> str:
     loaded text back must never persist a verdict that is true only at load."""
     lines = text.split("\n")
     # Exactly what rederive_text writes: the header line, then a blank line.
-    if len(lines) > 1 and _HEADER_LINE.match(lines[0].rstrip("\r")) and not lines[1].strip():
-        lines = lines[2:]
+    # It is removed anywhere in the preamble (before the first "## " heading),
+    # because prepare_wrap hands it to a composer, who may keep the title line
+    # first (spore-1233). Inside a section a matching line is left alone.
+    kept: list[str] = []
+    i = 0
+    while i < len(lines):
+        bare = lines[i].rstrip("\r")
+        if bare.startswith("## "):
+            kept.extend(lines[i:])
+            break
+        if _HEADER_LINE.match(bare):
+            i += 2 if i + 1 < len(lines) and not lines[i + 1].strip() else 1
+            continue
+        kept.append(lines[i])
+        i += 1
+    lines = kept
     joined = "\n".join(lines)
     for idx, line in derived_state_lines(joined, schema):
         cr = "\r" if line.endswith("\r") else ""
@@ -750,6 +764,12 @@ class RederiveReport:
 
     def count(self, status: str) -> int:
         return sum(1 for r in self.results if r.status == status)
+
+    @property
+    def ran(self) -> int:
+        """Lines whose command executed and answered (ok, stale or error).
+        Zero means nothing was checked, whatever ``clean`` says (spore-1233)."""
+        return sum(1 for r in self.results if r.status in ("ok", "stale", "error"))
 
     @property
     def clean(self) -> bool:

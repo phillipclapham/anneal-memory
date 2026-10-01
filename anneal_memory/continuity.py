@@ -68,6 +68,7 @@ from .store import (
     StoreError,
     WrapInProgressError,
     WrapOwnershipError,
+    WrapWindowMovedError,
     _fsync_dir,
     _safe_unlink,
 )
@@ -1542,6 +1543,10 @@ def prepare_wrap(
     # observed_partial=True, which forces gated_by to None below and lets a sessionless caller
     # unconditionally cancel ANOTHER session's healthy gated wrap -- so it must be checked first
     # and propagated, not folded into the corruption branch (diogenes-20260926-020547-5a9dab9124e2).
+    # spore-1233: read BEFORE the window, so a wrap that completes while this
+    # call builds its package (the re-derive below can take seconds) is
+    # refused at wrap_started instead of overwritten at save.
+    window_last_wrap_id = store.last_wrap_id()
     try:
         observed = store.load_wrap_snapshot()
         observed_partial = False
@@ -1678,22 +1683,30 @@ def prepare_wrap(
     if existing is not None and any(s["role"] == "derived-state" for s in schema):
         derive_report = rederive_text(existing, schema, trusted_root(store.path))
         package["continuity"] = derive_report.text
+        note = (
+            "\n\n**Re-derive marks in the current continuity.** It is shown as a "
+            "re-derive load shows it: a `> [anneal re-derive]` line above it, and "
+            "on an opted-in store a flag after each State line. They are true only "
+            "now; the save strips them, so do not copy them."
+        )
         if derive_report.enabled:
-            package["stale_state"] = [
+            unconfirmed = [
                 f"line {r.index + 1}: {r.flag}"
                 for r in derive_report.results
                 if r.status not in ("ok", "judged")
             ]
-            if package["stale_state"]:
-                package["instructions"] += (
-                    "\n\n**State lines that were not confirmed.** The current continuity "
-                    "below was re-derived for this wrap. A line flagged STALE no longer "
-                    "holds as written: rewrite it to what is true now, with a "
-                    "[derive: ...] that holds, or remove it. A line flagged DERIVE ERROR "
-                    "or REFUSED would refuse this save: fix or remove its command. A "
-                    "line flagged NOT DERIVED was not checked. Flags are stripped at "
-                    "save; do not copy them."
+            if unconfirmed:
+                package["unconfirmed_state"] = unconfirmed
+                note += (
+                    " A line flagged STALE no longer holds as written: rewrite it to "
+                    "what is true now, with a [derive: ...] that holds, or remove it. "
+                    "A line flagged DERIVE ERROR, REFUSED or NO DERIVE would refuse "
+                    "this save: fix its annotation or remove the line. A line flagged "
+                    "NOT DERIVED was not checked."
                 )
+        else:
+            note += " This store is not opted in, so no State line was checked."
+        package["instructions"] += note
     episode_ids = [ep.id for ep in episodes]
     assoc_context = store.get_association_context(episode_ids) or None
 
@@ -1718,12 +1731,21 @@ def prepare_wrap(
     # rather than re-reading a possibly-concurrently-changed live schema. Passing
     # the already-read `schema` (not letting wrap_started re-read live) closes the
     # read→wrap_started micro-window airtight.
-    store.wrap_started(
-        token=wrap_token,
-        episode_ids=episode_ids,
-        section_schema=schema,
-        gated_session_id=session_id,
-    )
+    try:
+        store.wrap_started(
+            token=wrap_token,
+            episode_ids=episode_ids,
+            section_schema=schema,
+            gated_session_id=session_id,
+            expect_last_wrap_id=window_last_wrap_id,
+        )
+    except WrapWindowMovedError:
+        return _downgraded_empty(
+            "Consolidate downgraded to capture-only (downgraded-wrap-replaced): "
+            "another wrap completed while this call was preparing, so its "
+            "episodes and continuity are out of date and no wrap was opened. "
+            "Retry. Capture (afferent) is unaffected."
+        )
 
     # Move #4 library layer (v0.3.2): surface the list of existing
     # Proven (2x+) pattern names so the methodology-layer
@@ -2157,8 +2179,8 @@ def validated_save_continuity(
             session that prepared with ``allow_sole_live=True`` and holds no
             baton is refused at the save without it. Default ``False``.
         require_rederive: Refuse the save (``ValueError``, nothing written) unless
-            the schema has a derived-state section and the store is opted in to
-            re-derive (``derive allow``), so the State lines are actually run at
+            the schema has a derived-state section, the store is opted in to
+            re-derive (``derive allow``), and at least one State command ran at
             this save. Without it, a store that is not opted in saves after the
             static checks alone. A caller that checks the opt-in before opening
             the wrap passes this to cover a trust revoked before the save.
@@ -2421,6 +2443,11 @@ def validated_save_continuity(
             "for this store"
             + (" (its schema has no derived-state section)" if _derive_report is None else "")
             + ", so no State line would be checked. See `anneal-memory derive allow`."
+        )
+    if require_rederive and _derive_report is not None and not _derive_report.ran:
+        raise ValueError(
+            "Save refused: re-derive was required, but no State command ran at this "
+            "save (only [judged:] lines, or the load budget was spent before any ran)."
         )
     stale_state: list[str] = []
     if _derive_report is not None and _derive_report.enabled:

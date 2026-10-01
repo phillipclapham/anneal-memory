@@ -30,14 +30,16 @@ disagrees, `⚠ DERIVE ERROR` when it errors, `⛔ REFUSED` when its command is
 outside the allowlist below, and `⚠ NOT DERIVED` when the load ran out of
 budget before reaching it. Text loaded this way starts with a
 `> [anneal re-derive]` line and can be saved back as it is. The save removes
-that header only when the whole line is exactly what re-derive writes, so an
-authored note is never deleted, and it always removes a flag after a State
+that header, anywhere before the first `## ` section heading, only when the
+whole line is exactly what re-derive writes, so an authored note is never
+deleted, and it always removes a flag after a State
 line's closing `]`, so a forged `✓` is never persisted.
 Re-deriving already re-derived text gives the same result as re-deriving the
-original. `continuity --rederive` exits 3, not 0, when it could check nothing:
-the store is not opted in (it also says so on stderr), or its schema has no
-derived-state section. Stale lines do not change the exit status; their flags
-are the signal.
+original. `continuity --rederive` exits 3, not 0, when no State command ran:
+the store is not opted in, its schema has no derived-state section, its State
+holds only `[judged: ...]` lines, or the load budget ran out first. It says
+which on stderr. Stale lines do not change the exit status; their flags are
+the signal.
 
 A save (`validated_save_continuity`) refuses a State section in which a line
 carries no annotation or a refused command, and, on a store that is enabled
@@ -45,14 +47,17 @@ for re-derive, one whose command errors. Stale and not-derived lines do not
 refuse the save: they are returned in the result's `stale_state` list (and in
 the MCP tool's reply), with a warning after the save commits. On a store that
 is not opted in, a save runs the static checks alone; pass `require_rederive=True`
-(CLI `save-continuity --require-rederive`) to refuse such a save instead, for a
-caller that checked the opt-in before opening the wrap and must not commit
-unchecked lines if the trust was revoked meanwhile.
+(CLI `save-continuity --require-rederive`) to refuse such a save instead, and
+also a save in which no State command ran. It is for a caller that checked the
+opt-in before opening the wrap and must not commit unchecked lines if the trust
+was revoked meanwhile. The MCP `save_continuity` tool does not take it.
 
 `prepare_wrap` shows the composer the current continuity as a re-derive load
 would show it: flags inline on an opted-in store, the not-enabled header
-otherwise. The package's optional `stale_state` lists the lines that were not
-confirmed. These are the same commands under the same containment as a load;
+otherwise, and its instructions say the marks are stripped at save. The
+package's optional `unconfirmed_state` lists every State line that was not
+confirmed (wider than the save's `stale_state`, which lists only the lines that
+do not refuse a save). These are the same commands under the same containment as a load;
 nothing runs on a store that is not opted in.
 
 ## Why this needs containment
@@ -91,7 +96,8 @@ allow` model:
   another directory.
 - No MCP tool writes the trust file, so an agent that only holds the MCP
   tools cannot enable execution for itself. (Once the user has opted a store
-  in, an MCP save does run the State commands; see the last section.)
+  in, an MCP `prepare_wrap` and an MCP save do run the State commands; see the
+  last section.)
 - The trust file is ignored unless the current user owns it and nobody else
   can write it, and a binding is ignored when the trust file sits inside the
   bound root (a trust file that could have arrived with the repository).
@@ -265,8 +271,10 @@ continuity.
 - **The truth of a `[judged: ...]` line.** It is accepted as written. It exists
   so a judgement is labelled as one rather than passed off as a fact.
 - **The MCP surface.** The `anneal://continuity` resource returns the stored
-  text without re-deriving. The `save_continuity` tool runs the same save gate
-  as the library, so on an opted-in store an MCP save does execute the State
+  text without re-deriving. The `prepare_wrap` tool re-derives the stored
+  continuity for the composer and returns the flags, including the values a
+  stale or erroring line reports. The `save_continuity` tool runs the same save
+  gate as the library. So on an opted-in store both execute the State
   commands, under the same containment, and a refused save's error message
   carries up to one flag's worth of a command's stderr per line. An agent can
   repeat refused saves, so treat an opted-in root as readable by the agent

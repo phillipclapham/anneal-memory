@@ -687,15 +687,17 @@ def cmd_continuity(args: argparse.Namespace) -> None:
             _print_json(payload)
         else:
             print(text)
-        if report is not None and (no_derived or not report.enabled):
-            # spore-1233: a re-derive that could check nothing exits 3, never like
-            # one whose every line held (0).
-            if not report.enabled:
-                print(
-                    "Re-derive not enabled for this store: no State line was checked "
-                    "(see `anneal-memory derive allow`).",
-                    file=sys.stderr,
-                )
+        if report is not None and (no_derived or not report.enabled or not report.ran):
+            # spore-1233: a re-derive in which no State command ran (not opted in,
+            # no derived-state section, only [judged:] lines, or the load budget
+            # spent) exits 3, never like one whose every line held (0).
+            print(
+                "Re-derive not enabled for this store: no State line was checked "
+                "(see `anneal-memory derive allow`)."
+                if not report.enabled
+                else "Re-derive ran no State command: nothing was checked.",
+                file=sys.stderr,
+            )
             sys.exit(3)
 
 

@@ -166,10 +166,11 @@ def strip_flag(line: str) -> str:
 
 
 # Every text rederive_text returns starts with this tag. At save the header is
-# removed only when the whole line matches what rederive_text writes, so an
-# authored note is never deleted; flags are removed from State lines always,
-# since nothing may follow an annotation's closing "]" (a forged "  ✓" is
-# never persisted).
+# removed only when the first line has the header's shape (its fixed opening, a
+# State-line count, its fixed closing sentence), so an authored note is not
+# deleted unless it copies that shape; flags are removed from State lines
+# always, since nothing may follow an annotation's closing "]" (a forged "  ✓"
+# is never persisted).
 _ENVELOPE = "> [anneal re-derive] "
 _HEADER_LINE = re.compile(
     r"^> \[anneal re-derive\] (?:"
@@ -188,8 +189,9 @@ _HEADER_LINE = re.compile(
 
 def drop_header(text: str) -> str:
     """``text`` without the header line :func:`rederive_text` puts first (and
-    the blank line after it). Only that exact line in that place is removed, so
-    an authored note is never deleted."""
+    the blank line after it). Only a first line with the header's shape (fixed
+    opening, a State-line count, fixed closing sentence) is removed, so an
+    authored note is not deleted unless it copies that shape."""
     lines = text.split("\n")
     if len(lines) > 1 and _HEADER_LINE.match(lines[0].rstrip("\r")) and not lines[1].strip():
         return "\n".join(lines[2:])

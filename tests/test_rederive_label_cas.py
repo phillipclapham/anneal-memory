@@ -60,6 +60,16 @@ def _continuity(state: list[str]) -> str:
     ])
 
 
+def _replace(dst: Path, src: Path) -> None:
+    """Replace ``dst`` with a copy of ``src`` at the same path. The copy is made
+    while ``dst`` still exists, so its inode cannot be ``dst``'s reused one
+    (L3 r2: rmtree-then-copytree reuses it on ext4/xfs/tmpfs)."""
+    tmp = dst.parent / (dst.name + ".new")
+    shutil.copytree(src, tmp)
+    shutil.rmtree(dst)
+    os.rename(tmp, dst)
+
+
 def _save(store, text, token):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -186,11 +196,7 @@ def test_a_directory_replaced_at_the_same_path_refuses_the_save(three):
     # it was a different one.
     store, b, c = three
     res = prepare_wrap(store)
-    before = root_identities({"other": str(b.resolve())})
-    shutil.rmtree(b)
-    shutil.copytree(c, b)
-    if root_identities({"other": str(b.resolve())}) == before:
-        pytest.skip("this filesystem reused the inode and reports no creation time")
+    _replace(b, c)
     with pytest.raises(ValueError, match="was replaced by a different directory at the same path"):
         _save(store, _continuity([_LINE]), res["wrap_token"])
 
@@ -198,11 +204,7 @@ def test_a_directory_replaced_at_the_same_path_refuses_the_save(three):
 def test_a_dot_git_replaced_inside_the_same_root_refuses_the_save(three):
     store, b, c = three
     res = prepare_wrap(store)
-    before = root_identities({"other": str(b.resolve())})
-    shutil.rmtree(b / ".git")
-    shutil.copytree(c / ".git", b / ".git")
-    if root_identities({"other": str(b.resolve())}) == before:
-        pytest.skip("this filesystem reused the inode and reports no creation time")
+    _replace(b / ".git", c / ".git")
     with pytest.raises(ValueError, match="was replaced"):
         _save(store, _continuity([_LINE]), res["wrap_token"])
 
@@ -258,19 +260,12 @@ def test_a_root_replaced_while_its_commands_run_refuses(three, monkeypatch):
 
     def swap_then_run(text, schema, roots, **kw):
         report = real(text, schema, roots, **kw)
-        shutil.rmtree(b)
-        shutil.copytree(c, b)
+        _replace(b, c)
         return report
 
     monkeypatch.setattr(rd, "rederive_text", swap_then_run)
-    before = root_identities({"other": str(b.resolve())})
-    try:
+    with pytest.raises(ValueError, match="changed while its commands ran"):
         _save(store, _continuity([_LINE]), res["wrap_token"])
-    except ValueError as e:
-        assert "changed while its commands ran" in str(e)
-    else:
-        assert root_identities({"other": str(b.resolve())}) == before, "replaced root was not caught"
-        pytest.skip("this filesystem reused the inode and reports no creation time")
 
 
 def test_the_map_is_read_against_the_snapshot_token(three):
@@ -301,18 +296,14 @@ def test_a_root_replaced_while_prepares_flags_run_refuses_the_save(three, monkey
     _save(store, _continuity([_LINE]), res["wrap_token"])  # a continuity to flag
     store.record("e2", "observation")
     real = co.rederive_text
-    before = root_identities({"other": str(b.resolve())})
 
     def flag_then_swap(text, schema, roots, **kw):
         report = real(text, schema, roots, **kw)
-        shutil.rmtree(b)
-        shutil.copytree(c, b)
+        _replace(b, c)
         return report
 
     monkeypatch.setattr(co, "rederive_text", flag_then_swap)
     res2 = prepare_wrap(store)
     monkeypatch.setattr(co, "rederive_text", real)
-    if root_identities({"other": str(b.resolve())}) == before:
-        pytest.skip("this filesystem reused the inode and reports no creation time")
     with pytest.raises(ValueError, match="was replaced by a different directory"):
         _save(store, _continuity([_LINE]), res2["wrap_token"])

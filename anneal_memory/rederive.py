@@ -44,6 +44,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -92,7 +93,8 @@ REF_TOKEN = "@REF"
 
 
 class DeriveRefused(ValueError):
-    """A derive command is outside the allowlist. Never executed."""
+    """A derive command is outside the allowlist, or a State line is ambiguous
+    (more than one annotation opener, or an interior line terminator). Never executed."""
 
 
 # --------------------------------------------------------------------------
@@ -109,6 +111,33 @@ _OPENER = re.compile(r"\[(?:derive(?:@([^:\]\s]*))?|judged):")
 # A root label names a root bound in the trust file; it is never a path.
 _LABEL = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 VISIBILITIES = ("public", "private")
+# Anything that LOOKS like an opener, however malformed ("[derive : ", "[Derive:",
+# "[derive grep …]", a label with a space). The strict _OPENER decides what is
+# parsed; this decides what is ambiguous. A near-miss next to a real opener was
+# swallowed into that opener's body, so a derive the author wrote stayed visible
+# and never ran (codex and L1 2026-10-02, reproduced). The keyword must not run
+# into more letters, so prose such as "[derived state]" is not a look-alike.
+_LOOSE_OPENER = re.compile(r"\[\s*(?:derive|judged)(?![A-Za-z0-9])", re.IGNORECASE)
+
+
+# Every character str.splitlines() treats as a line boundary besides "\n". Written
+# out, so the gate does not silently follow Python's definition of a line break.
+_TERMINATORS = re.compile("[\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
+_TERMINATOR_REFUSAL = (
+    "a line terminator other than the newline (CR, VT, FF, FS, GS, RS, NEL, U+2028 or U+2029) "
+    "is inside the text: each claim must be its own line, with its own annotation"
+)
+
+
+def _fold_for_openers(text: str) -> str:
+    """``text`` as an opener scan reads it: NFKC-folded, with every invisible
+    format character (category Cf: zero-width, bidi marks, soft hyphen) and
+    combining mark (Mn/Me: variation selectors, the grapheme joiner) removed,
+    so a spelling a reader sees as ``[derive:`` is counted as one (codex L3 r2
+    reproduced U+200E hiding a second opener). Used for counting only; the
+    parse reads the text as written."""
+    folded = unicodedata.normalize("NFKC", text)
+    return "".join(c for c in folded if unicodedata.category(c) not in ("Cf", "Mn", "Me"))
 
 
 @dataclass(frozen=True)
@@ -213,21 +242,46 @@ def strip_rederive_output(text: str, schema: list[SectionSpec]) -> str:
 def parse_annotation(line: str) -> Annotation | None:
     """Parse the trailing annotation of a State line, or ``None`` if absent.
 
-    The annotation is the LAST ``[derive:`` / ``[derive@LABEL:`` /
-    ``[judged:`` on the line and must close with the line's final ``]`` (after
-    any re-derive flag is removed). A label is returned as written; whether it
-    is a valid label is checked where the command is (:func:`_check_label`).
+    The annotation is the ONE ``[derive:`` / ``[derive@LABEL:`` /
+    ``[judged:`` on the line (a malformed look-alike counts as a second one) and must close with the line's final ``]`` (after
+    any re-derive flag is removed). A line with more than one opener raises
+    :class:`DeriveRefused`: which marker owns the line is a question the
+    grammar cannot answer, and a wrong answer skips or changes execution. So
+    does a line holding a terminator other than the final newline. A
+    label is returned as written; whether it is a valid label is checked where
+    the command is (:func:`_check_label`).
     """
     if line.endswith("\r"):
         line = line[:-1]
+    if _TERMINATORS.search(line):
+        # The text is split on "\n" only, so a lone CR, VT, FF, FS/GS/RS, NEL,
+        # U+2028 or U+2029 inside a State line let an unannotated claim ride on
+        # the next line's annotation: one line to the gate, two to every reader
+        # that splits on those (a model, a terminal, a markdown view). The gate
+        # refuses it rather than re-splitting, so every reader sees the same
+        # lines (spore-1300 follow-up, reproduced by L2 2026-10-02).
+        raise DeriveRefused(_TERMINATOR_REFUSAL)
     stripped = strip_flag(line)
     if not stripped.endswith("]"):
         return None
-    m = None
-    for m in _OPENER.finditer(stripped):
-        pass
-    if m is None:
+    openers = list(_OPENER.finditer(stripped))
+    if not openers:
         return None
+    loose = len(_LOOSE_OPENER.findall(_fold_for_openers(stripped)))
+    if len(openers) > 1 or loose > 1:
+        # One marker covers one claim. Reading the rightmost opener let an
+        # opener inside the claim or inside a derive command (a grep for the
+        # text "[judged:") turn the whole line into a judged one, which no
+        # consumer executes (spore-1300). The grammar is the defect surface, so
+        # it is bounded here: a second opener is refused, never guessed at.
+        raise DeriveRefused(
+            f"{max(len(openers), loose)} annotation openers on one line (the line must hold "
+            "exactly one [derive: …], [derive@LABEL: …] or [judged: …], and no look-alike of "
+            "one); an opener inside the claim or a command makes the parse ambiguous: reword "
+            "it, or to search for such text use grep WITHOUT -F and write the bracket as [[] "
+            "(under -F it is literal and the check cannot fail)"
+        )
+    m = openers[0]
     claim = stripped[: m.start()].rstrip()
     body = stripped[m.end() : -1].strip()
     if m.group(0) == _JUDGED_OPEN:
@@ -241,6 +295,16 @@ def parse_annotation(line: str) -> Annotation | None:
             kind="derive", claim=claim, command=command.strip(), expected=expected.strip(), root=label
         )
     return Annotation(kind="derive", claim=claim, command=body, root=label)
+
+
+def _parse_or_none(line: str) -> Annotation | None:
+    """:func:`parse_annotation`, with an ambiguous line read as unannotated.
+    For callers that only look for derive lines to run: an ambiguous line runs
+    nothing, and every gate that would let it through refuses it first."""
+    try:
+        return parse_annotation(line)
+    except DeriveRefused:
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -902,7 +966,10 @@ def _judge_line(
     cap: int,
     shape: str | None = None,
 ) -> LineResult:
-    ann = parse_annotation(line)
+    try:
+        ann = parse_annotation(line)
+    except DeriveRefused as e:
+        return LineResult(idx, line, "refused", str(e))
     if ann is None:
         return LineResult(idx, line, "unannotated", "no [derive: …] or [judged: …]")
     if ann.kind == "judged":
@@ -1020,7 +1087,7 @@ def rederive_text(
         return RederiveReport(text=notice + "\n\n" + text if targets else text, enabled=False)
 
     deadline = time.monotonic() + budget
-    anns = {idx: parse_annotation(line) for idx, line in targets}
+    anns = {idx: _parse_or_none(line) for idx, line in targets}
 
     def key_of(ann: Annotation | None) -> str | None:
         return ann.root if ann is not None and ann.kind == "derive" else None
@@ -1495,11 +1562,12 @@ _NO_FROZEN_ROOTS = object()
 
 def _derive_roots_used(text: str, schema: list[SectionSpec]) -> set:
     """The root labels (``None`` for the default root) the derive lines of
-    ``text`` run in."""
+    ``text`` run in. An ambiguous line contributes none: its refusal is
+    :func:`check_state_for_save`'s, which runs before this is asked."""
     return {
         a.root
         for _, ln in derived_state_lines(text, schema)
-        if (a := parse_annotation(ln)) is not None and a.kind == "derive"
+        if (a := _parse_or_none(ln)) is not None and a.kind == "derive"
     }
 
 
@@ -1570,7 +1638,7 @@ def check_state_for_save(
     """The save gate for derived-state sections.
 
     Raises ``ValueError`` (nothing is written) when a State line has no
-    annotation or a refused command or label, and, on an opted-in store, when
+    annotation, more than one annotation opener, or a refused command or label, and, on an opted-in store, when
     a command errors or names a label with no bound root. Returns the report (``None`` when the schema has no derived-state
     section) so the caller can surface stale lines without refusing.
 
@@ -1587,9 +1655,19 @@ def check_state_for_save(
     """
     if not _derived_headings(schema):
         return None
+    # Sections are found by splitting on "\n" only, so a terminator anywhere in
+    # the text (not just inside a State line) can hide a "## State" heading from
+    # the gate while a reader that splits on it sees one (codex L3 r3 2026-10-02:
+    # "- item<U+2028>## State" in Plan). Only the CR of a CRLF pair is allowed.
+    if _TERMINATORS.search(text.replace("\r\n", "\n")):
+        raise ValueError("State section refused:\n  " + _TERMINATOR_REFUSAL)
     problems: list[str] = []
     for idx, line in derived_state_lines(text, schema):
-        ann = parse_annotation(line)
+        try:
+            ann = parse_annotation(line)
+        except DeriveRefused as e:
+            problems.append(f"line {idx + 1}: refused: {e}")
+            continue
         if ann is None:
             problems.append(f"line {idx + 1}: no [derive: …] or [judged: …] annotation")
         elif ann.kind == "derive":

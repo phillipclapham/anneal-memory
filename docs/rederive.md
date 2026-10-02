@@ -25,6 +25,17 @@ annotations:
   which is an error, and an error refuses the save.
 - `[judged: WHO, WHEN, AGAINST WHAT]` marks a judgement that no command can
   check. It is accepted as written and never executed.
+- A State line holds exactly one opener. A second `[derive:`, `[derive@…:` or
+  `[judged:` before the line's end, in the claim or inside a command, is refused
+  at save and reported `refused` on load, because which marker owns the line
+  cannot be decided safely. A malformed look-alike (`[derive :`, `[Derive:`, a
+  label with a space) counts too. To search for such text, use `grep` without
+  `-F` and write the bracket as `[[]` (`grep -c '[[]judged:' README.md`); under
+  `-F` the brackets are literal and the check can never fail. A re-derive flag
+  appended after the closing `]` is not part of the line and is dropped at save.
+- One claim per line: a State line holding a line terminator other than the final
+  newline (CR, VT, FF, NEL, U+2028, U+2029) is refused, because a reader that splits
+  on it sees an unannotated claim beside the annotated one.
 - `[derive@LABEL: …]` is either form, run in the root bound to `LABEL` for
   this store instead of the default root (see "Several roots for one store"
   below).

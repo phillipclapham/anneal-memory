@@ -20,6 +20,7 @@ import pytest
 
 from anneal_memory import Store, prepare_wrap, validated_save_continuity
 from anneal_memory.rederive import (
+    DeriveRefused,
     _check_repo_shape,
     allow_store,
     check_state_for_save,
@@ -78,8 +79,9 @@ def test_parse_label():
     a = parse_annotation("- x [derive@other: git describe --tags --abbrev=0 @REF => v2.0.0]")
     assert (a.kind, a.root, a.command, a.expected) == ("derive", "other", "git describe --tags --abbrev=0 @REF", "v2.0.0")
     assert parse_annotation("- x [derive: test -e a.txt]").root is None
-    # the last opener wins, as for the unlabelled form
-    assert parse_annotation("- see [derive@a: x] then [derive@b: test -e a.txt]").root == "b"
+    # a second opener is refused, never resolved to the rightmost (spore-1300)
+    with pytest.raises(DeriveRefused, match="2 annotation openers"):
+        parse_annotation("- see [derive@a: x] then [derive@b: test -e a.txt]")
     assert parse_annotation("- x [derive@: test -e a.txt]").root == ""  # refused later, never dropped
 
 

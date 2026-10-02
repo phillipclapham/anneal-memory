@@ -4,6 +4,28 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — a `[derive: …]` State line could be read as `[judged: …]` and skip execution
+
+- The annotation grammar took the rightmost opener on a line, so a derive command that held the
+  text `[judged:` (`- unmerged [derive: grep -Fqc '[judged:' README.md => 1]`) parsed as a judged
+  line. The validator accepted it and save never ran the derive, while the line looked checked.
+  Reproduced first (`tests/test_rederive_ambiguous_opener.py`). The grammar is bounded at the
+  parser: a State line with more than one `[derive:` / `[derive@LABEL:` / `[judged:` opener raises
+  `DeriveRefused` from `parse_annotation`, so the save refuses it (`line N: refused: 2 annotation
+  openers …`) and a re-derive reports it `refused`, never `judged`. This also closes the mirror
+  case (a judged body holding `[derive:` ran as a derive) and an opener inside the claim.
+  A malformed look-alike (`[derive :`, `[Derive:`, a label with a space, full-width forms) counts as
+  an opener too, since one beside a real opener was swallowed into its body. A pattern that needs a
+  bracket uses `grep` WITHOUT `-F` and writes it as `[[]` (`grep -c '[[]judged:' README.md`).
+- Same release, same gate: the text is split on newline only, so a lone CR, VT, FF, NEL, U+2028 or
+  U+2029 (or FS/GS/RS) inside a State line, or in any line of the text before a forged
+  `## State` heading, let an unannotated claim ride on the next line's annotation
+  (`- unverified claim\r- real [judged: me, now, x]` saved as one judged line, while a model or a
+  terminal shows two). Such text is now refused at save and reported `refused` on load, so every
+  reader sees the same lines. A CRLF file is unaffected.
+  **Behaviour change:** a line that held two openers used to parse as its rightmost one; it is
+  now refused. Checked read-only on the maintainer's live stores before release: none held one.
+
 ## [0.9.20] — 2026-10-02
 
 ### Fixed — the README quickstarts ran as written and showed nothing

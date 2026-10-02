@@ -865,7 +865,9 @@ def _build_wrap_instructions(
                 f"that exits 1 when false (`git rev-parse --verify -q REF`, "
                 f"`test -e PATH`); git exits 128 on a missing ref, which is an "
                 f"error and refuses the save. Counts, versions and statuses "
-                f"belong here as commands, never as bare numbers."
+                f"belong here as commands, never as bare numbers. A line holds exactly "
+                f"ONE annotation: a second `[derive` or `[judged` anywhere on it, "
+                f"in the claim or inside a command, refuses the save."
             )
 
     parts: list[str] = [

@@ -4,6 +4,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.9.21] — 2026-10-02
+
 ### Fixed — a `[derive: …]` State line could be read as `[judged: …]` and skip execution
 
 - The annotation grammar took the rightmost opener on a line, so a derive command that held the

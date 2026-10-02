@@ -71,6 +71,7 @@ __all__ = [
     "trusted_root",
     "trusted_roots",
     "root_identities",
+    "has_derive_lines",
     "VISIBILITIES",
     "allow_store",
     "revoke_store",
@@ -1490,9 +1491,24 @@ def rederive_continuity(store, *, ref: str | None = None, trust_file: Path | Non
 _NO_FROZEN_ROOTS = object()
 
 
+def _derive_roots_used(text: str, schema: list[SectionSpec]) -> set:
+    """The root labels (``None`` for the default root) the derive lines of
+    ``text`` run in."""
+    return {
+        a.root
+        for _, ln in derived_state_lines(text, schema)
+        if (a := parse_annotation(ln)) is not None and a.kind == "derive"
+    }
+
+
+def has_derive_lines(text: str, schema: list[SectionSpec]) -> bool:
+    """Whether any derived-state line of ``text`` is a ``[derive…]`` line."""
+    return bool(_derive_roots_used(text, schema))
+
+
 def _identity(root: str) -> str:
     """``root`` with the identity of the directory and of its ``.git`` as
-    "DEV:INO:DEV:INO:PATH". The path alone does not name a repository: a
+    "DEV:INO[/BIRTH]:DEV:INO[/BIRTH]:PATH". The path alone does not name a repository: a
     directory deleted and replaced by another at the same path keeps it (L2
     2026-10-01, reproduced). Fields that cannot be read are "-"."""
     def ids(path: str, follow: bool) -> str:
@@ -1500,7 +1516,12 @@ def _identity(root: str) -> str:
             st = os.stat(path) if follow else os.lstat(path)
         except (OSError, ValueError):
             return "-:-"
-        return f"{st.st_dev}:{st.st_ino}"
+        # Where the platform reports a creation time it joins the inode, so an
+        # inode reused for the replacement still differs (complement L3 r1:
+        # ext4, xfs and tmpfs hand a freed inode to the next create, and Linux
+        # Python reports no creation time, so there the inode alone can match).
+        born = getattr(st, "st_birthtime", None)
+        return f"{st.st_dev}:{st.st_ino}" + ("" if born is None else f"/{born!r}")
     return f"{ids(root, True)}:{ids(os.path.join(root, '.git'), False)}:{root}"
 
 
@@ -1580,10 +1601,8 @@ def check_state_for_save(
         raise ValueError("State section refused:\n  " + "\n  ".join(problems))
     roots = trusted_roots(db_path, trust_file)
     if frozen_roots is not _NO_FROZEN_ROOTS:
-        if frozen_roots is None and roots and any(
-            (a := parse_annotation(ln)) is not None and a.kind == "derive"
-            for _, ln in derived_state_lines(text, schema)
-        ):
+        used = _derive_roots_used(text, schema)
+        if frozen_roots is None and roots and used:
             raise ValueError(
                 "State section refused: the wrap in progress recorded no re-derive root "
                 "map (it was prepared by an older anneal-memory, or opened with "
@@ -1594,8 +1613,6 @@ def check_state_for_save(
         # Only roots a derive line in this text runs in can certify anything, so
         # only those are compared (L1 W2: an unrelated label bound mid-compose
         # refused a save no line of which was at risk).
-        used = {a.root for _, ln in derived_state_lines(text, schema)
-                if (a := parse_annotation(ln)) is not None and a.kind == "derive"}
         moved = [] if frozen_roots is None else _roots_moved(
             frozen_roots, {k: v for k, v in root_identities(roots).items() if k in used}
         )
@@ -1608,6 +1625,20 @@ def check_state_for_save(
                 "To recover, " + cancel_hint + "."
             )
     report = rederive_text(text, schema, roots)
+    if frozen_roots is not _NO_FROZEN_ROOTS and frozen_roots is not None:
+        # The identities are taken again after the commands ran: a root replaced
+        # while they ran refuses (codex L3 r1). This narrows the check-then-use
+        # window and does not close it: a directory swapped away and back while
+        # a command runs is not seen. Running in descriptors opened and checked
+        # once is the deferred fd-pinning (spore-1272).
+        after = _roots_moved(
+            frozen_roots, {k: v for k, v in root_identities(roots).items() if k in used}
+        )
+        if after:
+            raise ValueError(
+                "State section refused: a re-derive root changed while its commands ran ("
+                + "; ".join(after) + "). To recover, " + cancel_hint + "."
+            )
     if not report.enabled:
         return report
     # An unbound label is not clean: the claim names a root nobody bound, so

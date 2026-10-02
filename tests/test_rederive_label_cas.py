@@ -186,8 +186,11 @@ def test_a_directory_replaced_at_the_same_path_refuses_the_save(three):
     # it was a different one.
     store, b, c = three
     res = prepare_wrap(store)
+    before = root_identities({"other": str(b.resolve())})
     shutil.rmtree(b)
     shutil.copytree(c, b)
+    if root_identities({"other": str(b.resolve())}) == before:
+        pytest.skip("this filesystem reused the inode and reports no creation time")
     with pytest.raises(ValueError, match="was replaced by a different directory at the same path"):
         _save(store, _continuity([_LINE]), res["wrap_token"])
 
@@ -195,8 +198,11 @@ def test_a_directory_replaced_at_the_same_path_refuses_the_save(three):
 def test_a_dot_git_replaced_inside_the_same_root_refuses_the_save(three):
     store, b, c = three
     res = prepare_wrap(store)
+    before = root_identities({"other": str(b.resolve())})
     shutil.rmtree(b / ".git")
     shutil.copytree(c / ".git", b / ".git")
+    if root_identities({"other": str(b.resolve())}) == before:
+        pytest.skip("this filesystem reused the inode and reports no creation time")
     with pytest.raises(ValueError, match="was replaced"):
         _save(store, _continuity([_LINE]), res["wrap_token"])
 
@@ -231,3 +237,82 @@ def test_a_map_frozen_under_another_token_is_not_this_wraps(three):
     assert store.wrap_derive_roots() is None
     with pytest.raises(ValueError, match="recorded no re-derive root map"):
         _save(store, _continuity([_LINE]), "u" * 32)
+
+
+def test_a_legacy_wrap_and_a_full_revoke_still_say_nothing_was_checked(three):
+    # codex L3 r1: a wrap that froze no map took the silent path.
+    store, _, _ = three
+    store.wrap_started(token="t" * 32, episode_ids=[])
+    revoke_store(store.path)
+    with pytest.warns(UserWarning, match="no State line was checked at this save"):
+        validated_save_continuity(store, _continuity([_LINE]), wrap_token="t" * 32)
+
+
+def test_a_root_replaced_while_its_commands_run_refuses(three, monkeypatch):
+    # codex L3 r1: the identity is taken again after the commands ran.
+    import anneal_memory.rederive as rd
+
+    store, b, c = three
+    res = prepare_wrap(store)
+    real = rd.rederive_text
+
+    def swap_then_run(text, schema, roots, **kw):
+        report = real(text, schema, roots, **kw)
+        shutil.rmtree(b)
+        shutil.copytree(c, b)
+        return report
+
+    monkeypatch.setattr(rd, "rederive_text", swap_then_run)
+    before = root_identities({"other": str(b.resolve())})
+    try:
+        _save(store, _continuity([_LINE]), res["wrap_token"])
+    except ValueError as e:
+        assert "changed while its commands ran" in str(e)
+    else:
+        assert root_identities({"other": str(b.resolve())}) == before, "replaced root was not caught"
+        pytest.skip("this filesystem reused the inode and reports no creation time")
+
+
+def test_the_map_is_read_against_the_snapshot_token(three):
+    # complement L3 r1: a map frozen under another token is not this snapshot's.
+    store, _, _ = three
+    res = prepare_wrap(store)
+    assert store.wrap_derive_roots(expect_token=res["wrap_token"]) is not None
+    assert store.wrap_derive_roots(expect_token="x" * 32) is None
+
+
+def test_a_leftover_map_on_an_idle_store_is_not_a_partial_wrap(three):
+    # complement L3 r1
+    store, _, _ = three
+    store._conn.execute("UPDATE metadata SET value='{}' WHERE key='wrap_derive_roots'")
+    store._conn.commit()
+    receipt = store.wrap_cancelled()
+    assert not receipt.partial_state
+    assert store._get_metadata("wrap_derive_roots") == ""
+
+
+def test_a_root_replaced_while_prepares_flags_run_refuses_the_save(three, monkeypatch):
+    # codex L3 r1: prepare took identities after its flags ran, so a root
+    # replaced in between was frozen as the replacement.
+    import anneal_memory.continuity as co
+
+    store, b, c = three
+    res = prepare_wrap(store)
+    _save(store, _continuity([_LINE]), res["wrap_token"])  # a continuity to flag
+    store.record("e2", "observation")
+    real = co.rederive_text
+    before = root_identities({"other": str(b.resolve())})
+
+    def flag_then_swap(text, schema, roots, **kw):
+        report = real(text, schema, roots, **kw)
+        shutil.rmtree(b)
+        shutil.copytree(c, b)
+        return report
+
+    monkeypatch.setattr(co, "rederive_text", flag_then_swap)
+    res2 = prepare_wrap(store)
+    monkeypatch.setattr(co, "rederive_text", real)
+    if root_identities({"other": str(b.resolve())}) == before:
+        pytest.skip("this filesystem reused the inode and reports no creation time")
+    with pytest.raises(ValueError, match="was replaced by a different directory"):
+        _save(store, _continuity([_LINE]), res2["wrap_token"])

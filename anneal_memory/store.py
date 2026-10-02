@@ -2950,7 +2950,9 @@ class Store:
                 or cancelled_ids_raw
                 or cancelled_schema_raw
                 or cancelled_gated_raw
-                or cancelled_roots_raw
+                # A frozen root map alone is not wrap state: a binary that does
+                # not know the key leaves it behind on an idle store (complement
+                # L3 r1). It is still cleared below.
             )
             complete = bool(
                 cancelled_started_at and cancelled_token and episode_ids is not None
@@ -3134,11 +3136,13 @@ class Store:
                 return None
             return self._get_metadata("wrap_gated_session") or None
 
-    def wrap_derive_roots(self) -> dict[str | None, str] | None:
+    def wrap_derive_roots(self, *, expect_token: str | None = None) -> dict[str | None, str] | None:
         """The re-derive root map frozen by the in-progress wrap (spore-1282),
         or ``None`` when no wrap is in progress or this wrap froze none. A map
         frozen under another wrap's token (left behind by a binary that does
-        not clear it) is not this wrap's, and reads as ``None``.
+        not clear it) is not this wrap's, and reads as ``None``; so does one
+        frozen under a token other than ``expect_token`` when it is given (the
+        token of the snapshot the caller already holds).
 
         Raises :class:`StoreError` when the frozen value is present but
         unreadable: a save must not fall back to "nothing frozen" on a value
@@ -3157,7 +3161,9 @@ class Store:
             frozen = json.loads(raw)
             if not isinstance(frozen, dict) or not isinstance(frozen.get("token"), str):
                 raise ValueError("not a {token, roots} object")
-            if frozen["token"] != meta.get("wrap_token"):
+            if frozen["token"] != meta.get("wrap_token") or (
+                expect_token is not None and frozen["token"] != expect_token
+            ):
                 return None
             pairs = frozen.get("roots")
             if not isinstance(pairs, list) or not all(

@@ -15,8 +15,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   between prepare and save (an operator act during the compose) was resolved afresh at save, so a
   line written about one repository was checked, and passed, in another. Reproduced first
   (`tests/test_rederive_label_cas.py`). The frozen map carries each root's directory identity
-  (device and inode of the root and its `.git`), so a directory replaced at the same path refuses
-  too. A root revoked meanwhile is not refused by the compare: a revoked label already reads UNBOUND
+  (device and inode of the root and its `.git`, plus creation time where the platform reports it),
+  taken before prepare's flags run and again after the save's commands run, so a directory replaced
+  at the same path refuses too (not on a Linux filesystem that reuses the inode; see
+  `docs/rederive.md`). A root revoked meanwhile is not refused by the compare: a revoked label already reads UNBOUND
   and refuses; with every root revoked the save checks nothing and now warns that it did not. The
   refusal says how to recover: cancel the wrap by its token, then prepare again.
 - Behaviour change: a wrap that froze no map (prepared by an earlier version, or opened with

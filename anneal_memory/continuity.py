@@ -53,6 +53,7 @@ from .rederive import (
     strip_rederive_output,
     trusted_roots,
     root_identities,
+    has_derive_lines,
 )
 from .schema import (
     DEFAULT_SCHEMA,
@@ -1704,6 +1705,9 @@ def prepare_wrap(
         if any(s["role"] == "derived-state" for s in schema)
         else None
     )
+    # Identities are taken BEFORE the flags run, so a directory replaced while
+    # they run is a different identity from the one frozen (codex L3 r1).
+    frozen_identities = None if derive_roots is None else root_identities(derive_roots)
     if existing is not None and derive_roots is not None:
         derive_report = rederive_text(existing, schema, derive_roots)
         package["continuity"] = drop_header(derive_report.text)
@@ -1766,7 +1770,7 @@ def prepare_wrap(
             section_schema=schema,
             gated_session_id=session_id,
             expect_last_wrap_id=window_last_wrap_id,
-            derive_roots=None if derive_roots is None else root_identities(derive_roots),
+            derive_roots=frozen_identities,
         )
     except WrapWindowMovedError:
         return _downgraded_empty(
@@ -2472,7 +2476,7 @@ def validated_save_continuity(
     _frozen_roots = None
     _derive_report = None
     if any(s["role"] == "derived-state" for s in section_schema):
-        _frozen_roots = store.wrap_derive_roots()
+        _frozen_roots = store.wrap_derive_roots(expect_token=snapshot["token"])
         _derive_report = check_state_for_save(
             text,
             section_schema,
@@ -3444,11 +3448,18 @@ def validated_save_continuity(
     if stale_state:
         result["stale_state"] = stale_state
         _warn_after_commit("State lines that do not hold at save: " + "; ".join(stale_state))
-    if _frozen_roots and _derive_report is not None and not _derive_report.enabled:
-        # L2 2026-10-01: the composer saw checks run at prepare; a save whose
-        # roots were all revoked meanwhile checks nothing, and must say so.
+    if (
+        _frozen_roots != {}
+        and _derive_report is not None
+        and not _derive_report.enabled
+        and has_derive_lines(text, section_schema)
+    ):
+        # L2 2026-10-01: the composer may have seen checks run at prepare; a save
+        # whose roots were all revoked meanwhile checks nothing, and must say so.
+        # A wrap that froze no map (None) is included: nothing shows it did not
+        # (codex L3 r1).
         _warn_after_commit(
-            "Re-derive was disabled for this store after prepare_wrap: no State line "
-            "was checked at this save (pass require_rederive to refuse such a save)."
+            "Re-derive is not enabled for this store at save, so no State line was "
+            "checked at this save (pass require_rederive to refuse such a save)."
         )
     return result

@@ -325,6 +325,12 @@ continuity.
 - **A root's commit moving during a wrap.** The freeze holds which directory
   each label names, not the commit it is at: a save re-checks every line at
   the commit each root has then.
+- **A root replaced without a new identity.** A directory's identity is its
+  device and inode, plus its creation time where the platform reports one.
+  Linux reports none to Python, and ext4, xfs and tmpfs can give a freed inode
+  to the next directory created, so there a replacement can match the frozen
+  identity. The save takes the identities again after its commands ran, which
+  catches a root replaced while they ran but not one swapped away and back.
 
 - **A trusted user's own PATH.** The program is found through the absolute
   entries of `PATH`; a user whose `PATH` is hostile is already compromised.

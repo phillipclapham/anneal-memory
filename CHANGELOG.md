@@ -4,6 +4,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.9.20] — 2026-10-02
+
 ### Fixed — the README quickstarts ran as written and showed nothing
 
 - The Python quickstart (README and `docs/library-quickstart.md`) recalled `keyword="database"`
@@ -36,6 +38,13 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   `Store.wrap_started` without `derive_roots`) refuses its save when any root is bound and a derive
   line would run. Recover by cancelling that wrap by its token and running `prepare_wrap` again;
   direct `wrap_started` callers on an opted-in store pass `derive_roots=root_identities(trusted_roots(path))`.
+
+### Fixed — two comments claimed an exact header strip
+
+- The `drop_header` docstring and the comment above `_HEADER_LINE` said the re-derive header is
+  removed only when the line is exactly what `rederive_text` writes. Since the ReDoS fix the match
+  is on the header's shape (fixed opening, a State-line count, fixed closing sentence), and
+  `docs/rederive.md` already said so. Both now say the same. Comment-only: no behaviour change.
 
 ## [0.9.19] — 2026-10-01
 

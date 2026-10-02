@@ -1297,8 +1297,10 @@ _DEFAULT_METADATA = {
     # predates it reads "" (ungated), so an in-flight wrap across an upgrade
     # keeps the old behaviour.
     "wrap_gated_session": "",
-    # spore-1282: the re-derive root map (label -> root) prepare_wrap read and
-    # showed the composer, JSON-encoded as [[label or null, root], ...]. Empty
+    # spore-1282: the re-derive root map (label -> root identity, see
+    # rederive.root_identities) prepare_wrap read and showed the composer,
+    # JSON-encoded as {"token": the wrap's token, "roots": [[label or null,
+    # value], ...]}. Empty
     # when idle, when the schema has no derived-state section, or when the wrap
     # was started without one (an earlier version, or a direct wrap_started).
     # The save refuses when a root bound then is not the one frozen here for its
@@ -2528,9 +2530,10 @@ class Store:
                 :meth:`section_schema_for_wrap` returns it for the
                 wrap's duration.
             derive_roots: The re-derive root map (label, ``None`` for the
-                default root, to root path) the caller showed the composer,
-                frozen so the save can refuse a map that changed meanwhile
-                (spore-1282; read back with :meth:`wrap_derive_roots`).
+                default root, to a string naming the root) the caller showed
+                the composer, frozen so the save can refuse a map that changed
+                meanwhile (spore-1282; read back with :meth:`wrap_derive_roots`).
+                ``prepare_wrap`` freezes :func:`anneal_memory.rederive.root_identities`.
                 ``None`` freezes nothing.
 
         Raises:
@@ -2619,10 +2622,17 @@ class Store:
                 "wrap_started: derive_roots must be None or a dict of "
                 "label (str or None) to root (str)."
             )
+        # The token rides inside the value, so a map left behind by a binary
+        # that does not clear this key never reads as another wrap's (L1 W3).
         derive_roots_json = (
             ""
             if derive_roots is None
-            else json.dumps(sorted(derive_roots.items(), key=lambda kv: (kv[0] is not None, kv[0] or "")))
+            else json.dumps({
+                "token": token,
+                "roots": sorted(
+                    derive_roots.items(), key=lambda kv: (kv[0] is not None, kv[0] or "")
+                ),
+            })
         )
         ids_list = list(episode_ids)
         ids_json = json.dumps(ids_list)
@@ -3126,23 +3136,30 @@ class Store:
 
     def wrap_derive_roots(self) -> dict[str | None, str] | None:
         """The re-derive root map frozen by the in-progress wrap (spore-1282),
-        or ``None`` when no wrap is in progress or the wrap froze none.
+        or ``None`` when no wrap is in progress or this wrap froze none. A map
+        frozen under another wrap's token (left behind by a binary that does
+        not clear it) is not this wrap's, and reads as ``None``.
 
         Raises :class:`StoreError` when the frozen value is present but
         unreadable: a save must not fall back to "nothing frozen" on a value
-        it cannot read. Recovery is wrap-cancel and a new prepare_wrap.
+        it cannot read. Recovery is cancelling the wrap and a new prepare_wrap.
         """
         with self._db_boundary("wrap_derive_roots"):
             rows = self._conn.execute(
-                "SELECT key, value FROM metadata WHERE key IN (?, ?)",
-                ("wrap_started_at", "wrap_derive_roots"),
+                "SELECT key, value FROM metadata WHERE key IN (?, ?, ?)",
+                ("wrap_started_at", "wrap_token", "wrap_derive_roots"),
             ).fetchall()
         meta = {row["key"]: row["value"] for row in rows}
         raw = meta.get("wrap_derive_roots", "")
         if not meta.get("wrap_started_at") or not raw:
             return None
         try:
-            pairs = json.loads(raw)
+            frozen = json.loads(raw)
+            if not isinstance(frozen, dict) or not isinstance(frozen.get("token"), str):
+                raise ValueError("not a {token, roots} object")
+            if frozen["token"] != meta.get("wrap_token"):
+                return None
+            pairs = frozen.get("roots")
             if not isinstance(pairs, list) or not all(
                 isinstance(p, list) and len(p) == 2
                 and (p[0] is None or isinstance(p[0], str)) and isinstance(p[1], str)
@@ -3160,6 +3177,7 @@ class Store:
                 path=str(self.path),
             ) from exc
         return out
+
     def consolidate_requires_baton(self) -> bool:
         """Does this store require the consolidate baton for EVERY consolidate?
 

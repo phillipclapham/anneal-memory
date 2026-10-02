@@ -159,13 +159,17 @@ runs in the default root, so a store with one root is unchanged.
   its lines read `⚠ UNBOUND`.
 - `derive revoke --label NAME` drops one labelled root; `derive revoke` drops
   the store's whole binding. `derive status` lists every root that is honoured.
-- A wrap freezes the root map its `prepare_wrap` read: the flags the composer
-  sees and the save's checks use the same roots. A root bound at save that is
-  not the one frozen for its label (a label rebound, or bound for the first
-  time, while the composer worked) refuses the save; `wrap-cancel` and a new
-  `prepare_wrap` recover. A root revoked meanwhile is left to the rules above.
-  A wrap prepared by a version without the freeze refuses its save while any
-  root is bound.
+- A wrap freezes the root map its `prepare_wrap` read, with each root's
+  directory identity (the device and inode of the root and of its `.git`): the
+  flags the composer sees and the save's checks use the same roots. A root a
+  saved `[derive…]` line runs in that is not the one frozen for its label (a
+  label rebound, or bound for the first time, or the directory at its path
+  replaced, while the composer worked) refuses the save; cancelling the wrap by its token and a new
+  `prepare_wrap` recover. A root revoked meanwhile is left to the rules above;
+  when every root was revoked the save goes through unchecked and warns that
+  nothing was checked (`require_rederive` refuses it instead). A wrap prepared
+  by a version without the freeze refuses its save while any root is bound
+  and a derive line would run.
 - The trust file keeps each store's default root where earlier versions read
   it, so a version without labels still finds the right default root. Such a
   version reads a `[derive@LABEL: …]` line as unannotated and refuses to save

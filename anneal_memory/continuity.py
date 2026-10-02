@@ -52,6 +52,7 @@ from .rederive import (
     rederive_text,
     strip_rederive_output,
     trusted_roots,
+    root_identities,
 )
 from .schema import (
     DEFAULT_SCHEMA,
@@ -1765,7 +1766,7 @@ def prepare_wrap(
             section_schema=schema,
             gated_session_id=session_id,
             expect_last_wrap_id=window_last_wrap_id,
-            derive_roots=derive_roots,
+            derive_roots=None if derive_roots is None else root_identities(derive_roots),
         )
     except WrapWindowMovedError:
         return _downgraded_empty(
@@ -2468,13 +2469,22 @@ def validated_save_continuity(
     # spore-1282: compare-and-swap on the label -> root map. The map is read once
     # inside, compared with the one prepare_wrap froze, and the commands run
     # against that same map.
-    _derive_report = (
-        check_state_for_save(
-            text, section_schema, store.path, frozen_roots=store.wrap_derive_roots()
+    _frozen_roots = None
+    _derive_report = None
+    if any(s["role"] == "derived-state" for s in section_schema):
+        _frozen_roots = store.wrap_derive_roots()
+        _derive_report = check_state_for_save(
+            text,
+            section_schema,
+            store.path,
+            frozen_roots=_frozen_roots,
+            cancel_hint=(
+                "cancel this wrap by its token (CLI: `anneal-memory wrap-cancel "
+                f"--wrap-token {snapshot['token']}`; MCP: `wrap_cancel` with that "
+                "wrap_token; Python: `store.wrap_cancelled(expect_token=...)`) and run "
+                "prepare_wrap again"
+            ),
         )
-        if any(s["role"] == "derived-state" for s in section_schema)
-        else None
-    )
     if require_rederive and (_derive_report is None or not _derive_report.enabled):
         raise ValueError(
             "Save refused: re-derive was required, but re-derive is not enabled "
@@ -3434,4 +3444,11 @@ def validated_save_continuity(
     if stale_state:
         result["stale_state"] = stale_state
         _warn_after_commit("State lines that do not hold at save: " + "; ".join(stale_state))
+    if _frozen_roots and _derive_report is not None and not _derive_report.enabled:
+        # L2 2026-10-01: the composer saw checks run at prepare; a save whose
+        # roots were all revoked meanwhile checks nothing, and must say so.
+        _warn_after_commit(
+            "Re-derive was disabled for this store after prepare_wrap: no State line "
+            "was checked at this save (pass require_rederive to refuse such a save)."
+        )
     return result

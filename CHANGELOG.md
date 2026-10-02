@@ -8,15 +8,21 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 - `prepare_wrap` reads the re-derive root map once, shows the composer flags from it, and freezes
   it into the wrap (`Store.wrap_derive_roots()`). The save compares the map it reads with the frozen
-  one and runs its checks against that same map: a root bound at save that differs from the frozen
-  one for its label refuses the save, with the label and both roots named. Before, a label rebound
+  one and runs its checks against that same map: a root that a saved derive line runs in and that
+  differs from the frozen one for its label refuses the save, with the label and both roots named.
+  Roots no line uses are not compared. The frozen map carries the wrap's token, so a map left behind
+  by an older binary is never read as another wrap's. Before, a label rebound
   between prepare and save (an operator act during the compose) was resolved afresh at save, so a
   line written about one repository was checked, and passed, in another. Reproduced first
-  (`tests/test_rederive_label_cas.py`). A root revoked meanwhile is not refused by the compare: a
-  revoked label already reads UNBOUND and refuses, and with no root bound nothing runs.
-- A wrap that froze no map (prepared by an earlier version, or opened with `Store.wrap_started`
-  without `derive_roots`) refuses its save on a store that has any root bound. Recover with
-  `wrap-cancel` and a new `prepare_wrap`.
+  (`tests/test_rederive_label_cas.py`). The frozen map carries each root's directory identity
+  (device and inode of the root and its `.git`), so a directory replaced at the same path refuses
+  too. A root revoked meanwhile is not refused by the compare: a revoked label already reads UNBOUND
+  and refuses; with every root revoked the save checks nothing and now warns that it did not. The
+  refusal says how to recover: cancel the wrap by its token, then prepare again.
+- Behaviour change: a wrap that froze no map (prepared by an earlier version, or opened with
+  `Store.wrap_started` without `derive_roots`) refuses its save when any root is bound and a derive
+  line would run. Recover by cancelling that wrap by its token and running `prepare_wrap` again;
+  direct `wrap_started` callers on an opted-in store pass `derive_roots=root_identities(trusted_roots(path))`.
 
 ## [0.9.19] — 2026-10-01
 

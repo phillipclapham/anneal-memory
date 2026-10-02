@@ -70,6 +70,7 @@ __all__ = [
     "trust_file_path",
     "trusted_root",
     "trusted_roots",
+    "root_identities",
     "VISIBILITIES",
     "allow_store",
     "revoke_store",
@@ -1489,18 +1490,49 @@ def rederive_continuity(store, *, ref: str | None = None, trust_file: Path | Non
 _NO_FROZEN_ROOTS = object()
 
 
+def _identity(root: str) -> str:
+    """``root`` with the identity of the directory and of its ``.git`` as
+    "DEV:INO:DEV:INO:PATH". The path alone does not name a repository: a
+    directory deleted and replaced by another at the same path keeps it (L2
+    2026-10-01, reproduced). Fields that cannot be read are "-"."""
+    def ids(path: str, follow: bool) -> str:
+        try:
+            st = os.stat(path) if follow else os.lstat(path)
+        except (OSError, ValueError):
+            return "-:-"
+        return f"{st.st_dev}:{st.st_ino}"
+    return f"{ids(root, True)}:{ids(os.path.join(root, '.git'), False)}:{root}"
+
+
+def root_identities(roots: dict) -> dict:
+    """The value a wrap freezes for a root map (:func:`trusted_roots`): each
+    root with its directory identity, see :func:`_identity`."""
+    return {k: _identity(v) for k, v in roots.items()}
+
+
 def _roots_moved(frozen: dict, now: dict) -> list[str]:
-    """Each root bound now that is not the one ``frozen`` held for its label.
-    A root that was unbound since is not listed: it certifies nothing (a
-    revoked label reads UNBOUND and refuses on its own; with no root left,
-    no command runs)."""
+    """Each root bound now (``now``, as :func:`root_identities` gives it) that
+    is not the one ``frozen`` held for its label: rebound, bound to a label
+    that had none, or replaced at the same path. The caller passes only the
+    roots its lines run in. A root unbound since is not listed: it
+    certifies nothing (a revoked label reads UNBOUND and refuses on its own;
+    with no root left, no command runs)."""
     def name(k):
         return "the default root" if k is None else f"label {k!r}"
-    return [
-        f"{name(k)}: {frozen.get(k) or 'unbound'} -> {now[k]}"
-        for k in sorted(now, key=lambda k: (k is not None, k or ""))
-        if frozen.get(k) != now[k]
-    ]
+
+    def path(ident):
+        return ident.split(":", 4)[-1] if ident else "unbound"
+
+    out = []
+    for k in sorted(now, key=lambda k: (k is not None, k or "")):
+        was, is_ = frozen.get(k), now[k]
+        if was == is_:
+            continue
+        if was is not None and path(was) == path(is_):
+            out.append(f"{name(k)}: {path(is_)} was replaced by a different directory at the same path")
+        else:
+            out.append(f"{name(k)}: {path(was)} -> {path(is_)}")
+    return out
 
 
 def check_state_for_save(
@@ -1510,6 +1542,7 @@ def check_state_for_save(
     trust_file: Path | None = None,
     *,
     frozen_roots: Any = _NO_FROZEN_ROOTS,
+    cancel_hint: str = "cancel this wrap and run prepare_wrap again",
 ) -> RederiveReport | None:
     """The save gate for derived-state sections.
 
@@ -1519,13 +1552,15 @@ def check_state_for_save(
     section) so the caller can surface stale lines without refusing.
 
     ``frozen_roots`` is the root map the wrap's prepare read and showed the
-    composer (:meth:`Store.wrap_derive_roots`). When it is passed, the map is
-    read once here, compared with it, and that same map is the one the commands
-    run against: a root bound now that differs from the frozen one for its
-    label, or is bound to a label that had none, refuses the save (spore-1282,
-    a label rebound while the composer worked). ``None`` means the wrap froze no
-    map, which refuses whenever any root is bound now. Leaving it out skips the
-    comparison.
+    composer, as :func:`root_identities` encodes it
+    (:meth:`Store.wrap_derive_roots`). When it is passed, the map is read once
+    here, compared with it, and that same map is the one the commands run
+    against: a root a derive line here runs in that is not the frozen one for
+    its label refuses the save (spore-1282, a label rebound while the composer
+    worked; see :func:`_roots_moved`). ``None`` means the wrap froze no map,
+    which refuses when any root is bound and any derive line would run.
+    Leaving it out skips the comparison.
+    ``cancel_hint`` finishes each refusal with how to recover.
     """
     if not _derived_headings(schema):
         return None
@@ -1545,21 +1580,32 @@ def check_state_for_save(
         raise ValueError("State section refused:\n  " + "\n  ".join(problems))
     roots = trusted_roots(db_path, trust_file)
     if frozen_roots is not _NO_FROZEN_ROOTS:
-        if frozen_roots is None and roots:
+        if frozen_roots is None and roots and any(
+            (a := parse_annotation(ln)) is not None and a.kind == "derive"
+            for _, ln in derived_state_lines(text, schema)
+        ):
             raise ValueError(
                 "State section refused: the wrap in progress recorded no re-derive root "
                 "map (it was prepared by an older anneal-memory, or opened with "
                 "Store.wrap_started directly), so nothing shows the roots bound now are "
-                "the ones its State lines were written against. Run wrap-cancel and "
-                "re-run prepare_wrap."
+                "the ones its State lines were written against. To recover, "
+                + cancel_hint + "."
             )
-        moved = [] if frozen_roots is None else _roots_moved(frozen_roots, roots)
+        # Only roots a derive line in this text runs in can certify anything, so
+        # only those are compared (L1 W2: an unrelated label bound mid-compose
+        # refused a save no line of which was at risk).
+        used = {a.root for _, ln in derived_state_lines(text, schema)
+                if (a := parse_annotation(ln)) is not None and a.kind == "derive"}
+        moved = [] if frozen_roots is None else _roots_moved(
+            frozen_roots, {k: v for k, v in root_identities(roots).items() if k in used}
+        )
         if moved:
             raise ValueError(
                 "State section refused: the re-derive roots changed after prepare_wrap ("
                 + "; ".join(moved)
-                + "), so these State lines were written against a different repository. "
-                "Run wrap-cancel and re-run prepare_wrap."
+                + "), so these State lines would be checked in a repository the composer "
+                "did not see. "
+                "To recover, " + cancel_hint + "."
             )
     report = rederive_text(text, schema, roots)
     if not report.enabled:

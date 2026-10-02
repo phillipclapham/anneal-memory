@@ -23,17 +23,24 @@ bears on the query. Injecting noise would dilute the exact salience on-demand
 recall exists to protect. Hence: a minimum distinctive-keyword count, a per-item
 ≥2-keyword-hit floor, and a weighted-overlap threshold.
 
-RETRIEVAL BACKEND — keyword PLUS associative (Hebbian). The episode tier is
-weighted keyword overlap and is reliable (episodes carry rich, varied vocabulary).
-The crystallized PATTERN tier is not: a graduated pattern is compressed to a sparse
+RETRIEVAL BACKEND — keyword PLUS the evidence edge. The episode tier is weighted
+keyword overlap and is reliable (episodes carry rich, varied vocabulary). The
+crystallized PATTERN tier is not: a graduated pattern is compressed to a sparse
 name + clause, so its relevance to a query is usually SEMANTIC, not lexical — and
 keyword scoring is blind to that (flow's dogfood measured it firing on ~2% of
 relevant prompts, surfacing the wrong patterns on coincidental token overlap while
-the genuinely-relevant ones stayed cold). So pattern retrieval is AUGMENTED with the
-associative backend: query → keyword-matched episodes (the seed set) → their Hebbian
-co-cited episodes (one hop) → the patterns whose ``evidence`` cites any of them. A
-pattern grounded in an episode the query matched surfaces even with zero query-keyword
-overlap — the keyword-orthogonal miss is fixed.
+the genuinely-relevant ones stayed cold). So pattern retrieval is AUGMENTED by an
+associative pass: query → keyword-matched episodes (the seed set) → the patterns
+whose ``evidence`` cites one of them (the evidence edge). A pattern grounded in an
+episode the query matched surfaces even with zero query-keyword overlap.
+
+The same pass also follows ONE Hebbian hop (seed → its co-cited episodes → the
+patterns citing those). Measured on flow's production recall log on 2026-09-29:
+0 of 788 crystal exposures came through that hop (744 through the evidence edge,
+44 by keyword), and a replay with the hop's constants wide open also gave 0,
+because the episodes the Hebbian links connected and the episodes crystals cite
+were disjoint sets. On a store like that the hop is traversed and contributes
+nothing; the evidence edge is the part of the associative pass that works.
 
 It is strictly additive (``retrieve_relevant(..., associative=True)``, default on):
 the associative pass UNIONS extra patterns under the SAME precision gate + cap, never
@@ -586,9 +593,10 @@ def retrieve_relevant(
         today: logical date for crystallized-pattern activation tiers (+ determinism);
             defaults to ``date.today()``.
         associative: when ``True`` (default), pattern retrieval is AUGMENTED with the
-            Hebbian backend — patterns whose ``evidence`` cites a keyword-matched
-            episode (or one co-cited with it) surface even with zero query-keyword
-            overlap, fixing the keyword-orthogonal miss. Strictly additive: it unions
+            associative pass — patterns whose ``evidence`` cites a keyword-matched
+            episode (the evidence edge), or one Hebbian-co-cited with it (one hop),
+            surface even with zero query-keyword overlap. See the module docstring
+            for what each edge contributed in production. Strictly additive: it unions
             extra patterns under the SAME precision gate + cap, so it never removes a
             keyword hit and (a) needs the episodic ``Store`` (the association graph
             lives there) and (b) is a no-op when nothing keyword-matched an episode.

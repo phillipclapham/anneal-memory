@@ -1112,7 +1112,7 @@ class TestWrapCancelReceiptIsRaceFree:
 
         import sqlite3
 
-        def boom(*, expect_token=None):
+        def boom(*, expect_token=None, session_id=None, force=False):
             # ⚠ The cause must be a REAL, NON-BUSY OperationalError. Raising
             # with no __cause__ at all made this vacuous: the predicate exits at
             # its first isinstance check, so a regression classifying EVERY

@@ -866,9 +866,10 @@ class WrapOwnershipError(AnnealMemoryError):
     persisted per-wrap identity can answer "is this mine", and the token minted
     by :func:`~anneal_memory.prepare_wrap` is that identity.
 
-    **Omitting ``expect_token`` is the override.** There is no separate ``force``
-    flag at this layer — an unproven cancel is exactly a cancel with no claim,
-    which is what every pre-existing caller already does.
+    **Omitting ``expect_token`` is the override** for an ungated wrap: an unproven
+    cancel is a cancel with no claim. A wrap prepared under the consolidate gate
+    also needs the preparing ``session_id`` or an explicit ``force`` (see
+    :class:`WrapCancelGatedError`).
 
     ⛔ **THE STATE IS THREE-WAY AND THE THIRD ONE IS LOAD-BEARING:**
 
@@ -927,6 +928,42 @@ class WrapOwnershipError(AnnealMemoryError):
             _reconstruct_wrap_ownership_error,
             (self.expected, self.actual, self.partial_state),
         )
+
+
+class WrapCancelGatedError(AnnealMemoryError):
+    """Raised by ``wrap_cancelled()`` without ``expect_token`` when the wrap in
+    progress was prepared under the consolidate gate by a session other than the
+    caller's ``session_id`` and ``force`` is not set. Nothing is changed.
+
+    A gated wrap belongs to the session that prepared it; ``validated_save_continuity``
+    already refuses to commit it for anyone else. Before this bound a cancel that
+    named no token ended it anyway, so any session could discard the baton
+    holder's compression (spore-699). The token proves ownership on its own; a
+    matching ``session_id`` is the other proof; ``force`` is the explicit override
+    for a holder that is gone. Partial (corrupt) lifecycle state is never gated:
+    it has no valid wrap to protect, and clearing it is the recovery.
+    """
+
+    def __init__(self, *, gated_session: str, session_id: str | None) -> None:
+        self.gated_session = gated_session
+        self.session_id = session_id
+        caller = f"session {session_id!r}" if session_id else "a caller that named no session"
+        super().__init__(
+            f"wrap_cancelled: the wrap in progress was prepared under the consolidate "
+            f"gate by session {gated_session!r}, and {caller} cannot cancel it without "
+            f"its wrap token. Nothing was changed. Cancel it from that session, pass its "
+            f"wrap token, or override with force if that session is gone."
+        )
+
+    def __reduce__(self) -> tuple:
+        return (_reconstruct_wrap_cancel_gated_error, (self.gated_session, self.session_id))
+
+
+def _reconstruct_wrap_cancel_gated_error(
+    gated_session: str, session_id: str | None
+) -> "WrapCancelGatedError":
+    """Pickle reconstructor for :class:`WrapCancelGatedError` (keyword-only init)."""
+    return WrapCancelGatedError(gated_session=gated_session, session_id=session_id)
 
 
 class ContinuityLockUnavailable(AnnealMemoryError):
@@ -2812,7 +2849,11 @@ class Store:
             )
 
     def wrap_cancelled(
-        self, *, expect_token: str | None = None
+        self,
+        *,
+        expect_token: str | None = None,
+        session_id: str | None = None,
+        force: bool = False,
     ) -> "WrapCancelReceipt":
         """Clear wrap-in-progress flag without recording a completed wrap.
 
@@ -2830,8 +2871,17 @@ class Store:
                 :class:`WrapOwnershipError` and change nothing. The comparison
                 happens inside this method's ``BEGIN IMMEDIATE``, so it is a
                 true compare-and-swap across connections. Omitting it keeps the
-                pre-0.9.9 behaviour (clear whatever is current), which is what
-                an override means at this layer — there is no separate ``force``.
+                pre-0.9.9 behaviour (clear whatever is current) EXCEPT for a
+                gated wrap; see ``session_id`` and ``force``.
+            session_id: The caller's session. Without ``expect_token``, a
+                coherent wrap prepared under the consolidate gate
+                (:meth:`wrap_gated_session`) is cleared only when this equals the
+                session that prepared it; otherwise
+                :class:`WrapCancelGatedError` is raised and nothing changes. The
+                check runs inside the same ``BEGIN IMMEDIATE`` as the clear.
+            force: Clear a gated wrap without its token or session (the holder is
+                gone). Must be the literal ``True``. Ignored when ``expect_token``
+                is given, since the token is the stronger proof.
 
         Returns a :class:`WrapCancelReceipt` describing **what this call
         actually cleared**, read inside the same transaction as the clear —
@@ -2982,6 +3032,21 @@ class Store:
                     expected=expect_token,
                     actual=cancelled_token or None,
                     partial_state=partial_state if had_any else False,
+                )
+
+            # spore-699 bound: a tokenless cancel may not end a coherent gated wrap
+            # unless the caller is the session that prepared it, or forces it. Read
+            # under the same write lock as the clear, so the gate and the clear see
+            # one state. A partial lifecycle is not gated (no valid wrap to protect).
+            if (
+                expect_token is None
+                and force is not True
+                and complete
+                and cancelled_gated_raw
+                and session_id != cancelled_gated_raw
+            ):
+                raise WrapCancelGatedError(
+                    gated_session=cancelled_gated_raw, session_id=session_id
                 )
 
             self._conn.execute(

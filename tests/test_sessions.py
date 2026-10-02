@@ -757,7 +757,7 @@ def test_save_rechecks_the_baton_when_the_session_names_itself(store):
     # it abandons it and prepares its own.
     with pytest.raises(ValueError, match="only that session may commit it"):
         validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep["wrap_token"], session_id="B")
-    store.wrap_cancelled()
+    store.wrap_cancelled(force=True)
     prep_b = prepare_wrap(store, session_id="B")
     validated_save_continuity(store, _WRAP_TEXT, wrap_token=prep_b["wrap_token"], session_id="B")
     assert len(store.get_wrap_history()) == 1
@@ -1131,7 +1131,7 @@ def test_gated_session_key_clears_on_complete_and_cancel(store):
     store.record("obs2", EpisodeType.OBSERVATION)
     prepare_wrap(store, session_id="A")
     assert store.wrap_gated_session() == "A"
-    store.wrap_cancelled()
+    store.wrap_cancelled(force=True)
     assert store.wrap_gated_session() is None
 
 
@@ -1209,7 +1209,7 @@ def test_empty_path_does_not_cancel_a_wrap_started_after_the_window_was_read(sto
     def window_then_a_peer_starts_a_wrap():
         out = real()
         assert out == []
-        store.wrap_cancelled()
+        store.wrap_cancelled(force=True)
         ep2 = store.record("fresh", EpisodeType.OBSERVATION)
         peer["token"] = "e" * 32
         store.wrap_started(token=peer["token"], episode_ids=[ep2.id])
@@ -1233,7 +1233,7 @@ def test_a_stale_gated_key_with_no_wrap_is_inert(store):
 
 def test_cancel_audit_records_the_gated_session(store):
     _ready_wrap_for(store, "A")
-    store.wrap_cancelled()
+    store.wrap_cancelled(force=True)
     ev = [e for e in _audit_events(store) if e["event"] == "wrap_cancelled"][-1]
     assert ev["data"]["wrap_gated_session"] == "A"
 
@@ -1330,11 +1330,15 @@ def test_sole_live_no_longer_authorized_raises_the_one_type(store):
         store, wrap_token=prep["wrap_token"], session_id="me", allow_sole_live=True)
 
 
-def test_wrap_cancelled_stays_ungated_for_a_gated_wrap(store):
-    # flow's `cancel` (and CLI wrap-cancel / MCP wrap_cancel) is the operator override: it
-    # must keep working on a wrap another session prepared under the gate.
+def test_a_tokenless_cancel_of_a_gated_wrap_needs_its_session_or_force(store):
+    # spore-699 bound (ruled by Phill 2026-10-02): this test used to pin the opposite,
+    # on the premise that flow's `cancel` needed a tokenless anneal cancel as its
+    # operator override. flow's cancel always passes a token; the override is `force`.
     _ready_wrap_for(store, "A")
-    receipt = store.wrap_cancelled()
+    with pytest.raises(anneal_memory.WrapCancelGatedError):
+        store.wrap_cancelled()
+    assert store.status().wrap_in_progress
+    receipt = store.wrap_cancelled(force=True)
     assert receipt.token and not store.status().wrap_in_progress
 
 

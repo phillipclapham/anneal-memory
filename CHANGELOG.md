@@ -4,6 +4,18 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added — outcome write-back, surfaced counts, and report-only Worth counters
+
+- **`anneal_memory.worth`** (new module): `OutcomeLog` appends one record per exposure (the harness's id for a recall event) to `<stem>.outcomes.jsonl`, labelling each surfaced crystal or episode `followed`, `ignored` or `not_applicable`, with an optional `success` / `failure` outcome; a later record for the same exposure id supersedes the earlier one. `fold_surfaced()` folds harness retrieval receipts (`exposed[].pattern`) into `surfaced_count` / `last_surfaced_on` on each live crystal, once per wrap, never touching `last_activated_on` (exposure is not activation). `compute_worth()` builds two counters per crystal and per episode (followed with success, followed with failure) and credits a followed crystal's outcome to the episodes it cites. **Report only:** nothing ranks, decays, re-heats or retires from it.
+- CLI: `anneal-memory outcome --exposure-id ID --item crystal:NAME=followed [--outcome success|failure]`, `anneal-memory worth [--episodes]`, `anneal-memory crystal fold-surfaced --receipts PATH...`.
+- `scripts/stale_probe.py`: a mechanically graded knowledge-update probe (planted fact-update pairs in a temp store; does recall return the current fact).
+
+### Changed
+
+- **A tokenless `wrap_cancelled()` no longer ends a wrap prepared under the consolidate gate by another session** (spore-699). It needs that wrap's `expect_token`, the preparing `session_id`, or `force=True`; otherwise `WrapCancelGatedError` is raised and nothing changes. CLI `wrap-cancel` gains `--session-id` and `--force`, MCP `wrap_cancel` gains `session_id` and `force` (tool description and schema changed; `tool-integrity.json` regenerated). Ungated wraps, token-proven cancels and partial (corrupt) lifecycle recovery are unchanged. **Behaviour change** for a caller that cancelled another session's gated wrap without a token: pass `force=True`.
+- `prepare_wrap`'s `rewarm_candidates` no longer lists a crystallized pattern that is already in the working set's `## Patterns`.
+- The retrieval docs credit the evidence edge, not the Hebbian hop, for associative crystal recall, and state the 2026-09-29 production measurement (0 of 788 crystal exposures came through the hop).
+
 ## [0.9.21] — 2026-10-02
 
 ### Fixed — a `[derive: …]` State line could be read as `[judged: …]` and skip execution

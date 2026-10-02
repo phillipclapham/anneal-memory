@@ -51,6 +51,7 @@ from .store import (
     StoreDatabaseError,
     _is_write_lock_contention,
     StoreError,
+    WrapCancelGatedError,
     WrapOwnershipError,
     _WRAP_TOKEN_RE,
 )
@@ -661,8 +662,26 @@ class Server:
                     is_error=True,
                 )
 
+        session_id = args.get("session_id")
+        if session_id is not None and (not isinstance(session_id, str) or not session_id):
+            return _tool_result("session_id must be a non-empty string.", is_error=True)
+        force = args.get("force", False)
+        if not isinstance(force, bool):
+            return _tool_result("force must be true or false.", is_error=True)
+
         try:
-            receipt = self._store.wrap_cancelled(expect_token=expect_token)
+            receipt = self._store.wrap_cancelled(
+                expect_token=expect_token, session_id=session_id, force=force
+            )
+        except WrapCancelGatedError as exc:
+            return _tool_result(
+                f"Refused: the wrap in progress was prepared under the consolidate "
+                f"gate by session {exc.gated_session!r}, and this call is not that "
+                f"session and carries no wrap_token. Nothing was changed. Cancel it "
+                f"from that session, pass its wrap_token, or call wrap_cancel with "
+                f"force=true if that session is gone (its compression is discarded).",
+                is_error=True,
+            )
         except WrapOwnershipError as exc:
             # ⭐ THE REFUSAL IS THE FEATURE, so it reports what is true and what
             # to do — not a bare mismatch. `actual is None` is a DIFFERENT fact
@@ -900,7 +919,8 @@ class Server:
 
         The crystallized tier's READ surface for MCP-in-conversation adopters — the
         parity of the CLI ``crystal recall`` and of the per-turn recall hook a harness
-        fires. Associative (Hebbian) by DEFAULT (AM-CRYSTAL-RECALL, 0.8.0): a pattern
+        fires. Associative by DEFAULT (AM-CRYSTAL-RECALL, 0.8.0; the evidence edge plus one
+        Hebbian hop, see ``retrieval.py``): a pattern
         grounded in an episode the query matched surfaces even with ZERO query-keyword
         overlap (the keyword-orthogonal miss keyword-only recall cannot reach). It
         reuses the server's already-open episodic ``self._store`` for the association
@@ -992,7 +1012,7 @@ class Server:
     def _crystal_recall_associative(
         self, crystal_store: CrystalStore, query: str, max_patterns: int
     ) -> list[RelevantPattern]:
-        """Associative (Hebbian) crystal recall over the server's OPEN episodic store,
+        """Associative crystal recall (evidence edge + one Hebbian hop) over the server's OPEN episodic store,
         degrading to keyword-only when an episodic query faults.
 
         Mirrors the CLI ``_crystal_recall_associative`` but reuses ``self._store``

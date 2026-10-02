@@ -133,10 +133,22 @@ from .store import (
     _is_write_lock_contention,
     StoreError,
     WrapInProgressError,
+    WrapCancelGatedError,
     WrapOwnershipError,
     _WRAP_TOKEN_RE,
 )
 from .types import AffectiveState, AssociationStats, EpisodeType, RelevantPattern
+from .worth import (
+    DEFAULT_FOLD_SKEW_SECONDS,
+    FOLLOWED_VALUES,
+    ITEM_KINDS,
+    OUTCOME_VALUES,
+    ExposureLabel,
+    OutcomeLog,
+    compute_worth,
+    fold_surfaced,
+    outcome_log_path,
+)
 
 
 # -- Time parsing --
@@ -1484,7 +1496,21 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
         # which is false on the one recovery case this subcommand most exists
         # for, and contradicts the error that sent the operator here.
         try:
-            receipt = store.wrap_cancelled(expect_token=expect_token)
+            receipt = store.wrap_cancelled(
+                expect_token=expect_token,
+                session_id=getattr(args, "session_id", None),
+                force=bool(getattr(args, "force", False)),
+            )
+        except WrapCancelGatedError as exc:
+            print(
+                f"Refused: the wrap in progress was prepared under the consolidate "
+                f"gate by session {exc.gated_session!r}. Without its --wrap-token, "
+                f"only --session-id {exc.gated_session} may cancel it; pass --force "
+                f"if that session is gone (its compression is discarded). Nothing "
+                f"was changed.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         except WrapOwnershipError as exc:
             # ⚠ PARITY WITH THE MCP HANDLER IS THE POINT, NOT A COURTESY. 0.9.8
             # shipped the partial-state message on the MCP side and had to fix
@@ -2864,7 +2890,8 @@ def cmd_crystal_recall(args: argparse.Namespace) -> None:
     subprocess harness (e.g. the hub's codex-exec wrapper) shells this to inject
     run-context patterns into a prompt.
 
-    Backend (AM-CRYSTAL-RECALL, 0.8.0): associative (Hebbian) by DEFAULT — the
+    Backend (AM-CRYSTAL-RECALL, 0.8.0): associative by DEFAULT (the evidence edge plus
+    one Hebbian hop; see ``retrieval.py``) — the
     same backend library consumers get from :func:`retrieve_relevant`, so a
     pattern grounded in an episode the query matched surfaces even with zero
     query-keyword overlap (the keyword-orthogonal miss the keyword-only path
@@ -2916,7 +2943,7 @@ def cmd_crystal_recall(args: argparse.Namespace) -> None:
 def _crystal_recall_associative(
     args: argparse.Namespace, crystal_store: CrystalStore
 ) -> list[RelevantPattern]:
-    """Associative (Hebbian) crystal recall against the episodic association graph,
+    """Associative crystal recall (evidence edge + one Hebbian hop) against the episodic store,
     degrading to keyword-only when the graph isn't reachable.
 
     Opens the episodic db beside the crystal store as a **read-only** ``Store``
@@ -3013,6 +3040,84 @@ def cmd_crystal_touch(args: argparse.Namespace) -> None:
         return
     print(f"Touched {item['name']} last_activated_on -> {item['last_activated_on']} "
           f"({activation_tier(item)})")
+
+
+# -- Outcome write-back, surfaced fold, Worth (report-only) --
+
+def _parse_label(raw: str) -> ExposureLabel:
+    """``crystal:NAME=followed`` / ``episode:ID=ignored`` -> ExposureLabel."""
+    kind, sep, rest = raw.partition(":")
+    ref, sep2, followed = rest.rpartition("=")
+    if not sep or not sep2:
+        raise ValueError(
+            f"--item must look like KIND:REF=FOLLOWED (got {raw!r}); KIND is one of "
+            f"{ITEM_KINDS}, FOLLOWED one of {FOLLOWED_VALUES}."
+        )
+    return ExposureLabel(kind, ref, followed)
+
+
+def cmd_outcome(args: argparse.Namespace) -> None:
+    """Write back what happened after an exposure (append-only; a later record for
+    the same exposure id supersedes the earlier one)."""
+    try:
+        items = [_parse_label(raw) for raw in args.item]
+        rec = OutcomeLog(outcome_log_path(Path(args.db).expanduser())).record(
+            args.exposure_id, items, outcome=args.outcome
+        )
+    except (ValueError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        _print_json(rec)
+        return
+    labels = ", ".join(f"{i['kind']}:{i['ref']}={i['followed']}" for i in rec["items"])
+    print(f"Recorded outcome {rec['outcome'] or '(none)'} for {rec['exposure_id']}: {labels}")
+
+
+def cmd_crystal_fold_surfaced(args: argparse.Namespace) -> None:
+    """Fold retrieval receipts into surfaced_count / last_surfaced_on. Run once per
+    wrap by the wrap's single writer; never touches last_activated_on."""
+    store = _open_crystal_store(args)
+    try:
+        result = fold_surfaced(store, args.receipts, skew_seconds=args.skew_seconds)
+    except (CrystalError, ValueError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        _print_json(result.__dict__)
+        return
+    print(f"Folded {result.receipts_folded} receipt(s), {result.exposures_counted} "
+          f"exposure(s), through {result.mark} (previous mark: {result.previous_mark})")
+    if result.names_unknown:
+        print(f"Not a live crystal (not stored): {', '.join(sorted(result.names_unknown))}")
+    if result.lines_skipped:
+        print(f"Skipped {result.lines_skipped} unreadable receipt line(s)")
+
+
+def cmd_worth(args: argparse.Namespace) -> None:
+    """Report-only Memory-Worth counters. Nothing reads this to rank or decay."""
+    db_path = Path(args.db).expanduser()
+    try:
+        report = compute_worth(OutcomeLog(outcome_log_path(db_path)), _open_crystal_store(args))
+    except (CrystalError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        _print_json(report.as_dict())
+        return
+    print(f"Worth (report-only) from {report.exposures} labelled exposure(s)"
+          + (f", {report.lines_skipped} unreadable line(s) skipped" if report.lines_skipped else ""))
+    print(f"{'crystal':<58} {'surf':>5} {'fol':>4} {'ign':>4} {'n/a':>4} {'succ':>5} {'fail':>5}")
+    for r in report.crystals:
+        name = r.ref if r.live else f"{r.ref} (not live)"
+        surf = "-" if r.surfaced_count is None else str(r.surfaced_count)
+        print(f"{name[:58]:<58} {surf:>5} {r.followed:>4} {r.ignored:>4} "
+              f"{r.not_applicable:>4} {r.success:>5} {r.failure:>5}")
+    if args.episodes:
+        print(f"\n{'episode':<20} {'succ':>5} {'fail':>5} {'via citation':>13}")
+        for r in report.episodes:
+            print(f"{r.ref:<20} {r.success:>5} {r.failure:>5} "
+                  f"{r.credited_success:>6}/{r.credited_failure:<6}")
 
 
 def cmd_crystal_update(args: argparse.Namespace) -> None:
@@ -3497,8 +3602,19 @@ def build_parser() -> argparse.ArgumentParser:
             "succeeds only if that wrap is still the one in progress, and is "
             "refused WITHOUT changing anything if a peer replaced it or it "
             "already completed. Omit to cancel whatever is current, which is "
-            "what you want when clearing a wrap you did not open."
+            "what you want when clearing a wrap you did not open (a gated wrap "
+            "also needs --session-id or --force)."
         ),
+    )
+    sub.add_argument(
+        "--session-id",
+        help="Your session. Without --wrap-token, a wrap prepared under the "
+             "consolidate gate is cancelled only by the session that prepared it.",
+    )
+    sub.add_argument(
+        "--force", action="store_true",
+        help="Cancel a gated wrap without its token or session (that session is "
+             "gone). Discards its compression.",
     )
     sub.set_defaults(func=cmd_wrap_cancel)
 
@@ -3721,7 +3837,7 @@ def build_parser() -> argparse.ArgumentParser:
         "recall",
         help="Retrieve crystallized patterns relevant to a free-text query",
         description="Retrieve crystallized patterns relevant to a free-text query. "
-                    "Default backend (0.8.0+): associative (Hebbian) recall against the "
+                    "Default backend (0.8.0+): associative recall (evidence edge plus one Hebbian hop) against the "
                     "episodic association graph (surfaces patterns grounded in a matched "
                     "episode even with zero keyword overlap), auto-degrading to keyword-only "
                     "when no episodic db is resolvable. Use --no-associative for the "
@@ -3737,6 +3853,53 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Force the pre-0.8.0 keyword-only backend (skip the associative "
                          "Hebbian pass and the read-only episodic Store open).")
     cp.set_defaults(func=cmd_crystal_recall)
+
+    cp = crystal_sub.add_parser(
+        "fold-surfaced",
+        help="Fold retrieval receipts into surfaced_count (wrap-time, single writer)",
+        description="Fold harness retrieval receipts (JSONL, exposed[].pattern) into each "
+                    "live crystal's surfaced_count and last_surfaced_on. Counts only "
+                    "receipts after the previous fold's mark and older than the skew, so "
+                    "re-running counts nothing twice. Exposure is not activation: "
+                    "last_activated_on is never written.",
+        parents=[json_parent],
+    )
+    cp.add_argument("--receipts", nargs="+", required=True, metavar="PATH",
+                    help="Receipt JSONL file(s), e.g. the live log and its rotated backup")
+    cp.add_argument("--skew-seconds", type=int, default=DEFAULT_FOLD_SKEW_SECONDS,
+                    help=f"Leave receipts newer than this for the next fold "
+                         f"(default {DEFAULT_FOLD_SKEW_SECONDS})")
+    cp.set_defaults(func=cmd_crystal_fold_surfaced)
+
+    # -- outcome / worth (report-only Memory-Worth counters) --
+    sub = subparsers.add_parser(
+        "outcome",
+        help="Write back what happened after an exposure (followed/ignored/not_applicable)",
+        description="Append an outcome record for one exposure (a recall event, named by "
+                    "the harness's id) to <stem>.outcomes.jsonl. A later record for the same "
+                    "exposure id supersedes the earlier one.",
+        parents=[json_parent],
+    )
+    sub.add_argument("--exposure-id", required=True, help="The harness's id for the recall event")
+    sub.add_argument("--item", action="append", required=True, metavar="KIND:REF=FOLLOWED",
+                     help="A surfaced item and its label, e.g. crystal:my_pattern=followed "
+                          "(repeatable; KIND crystal|episode; FOLLOWED "
+                          "followed|ignored|not_applicable)")
+    sub.add_argument("--outcome", choices=OUTCOME_VALUES, default=None,
+                     help="The turn's outcome, when known")
+    sub.set_defaults(func=cmd_outcome)
+
+    sub = subparsers.add_parser(
+        "worth",
+        help="Report-only Memory-Worth counters per crystal (and episode)",
+        description="Two counters per crystal and per episode, from <stem>.outcomes.jsonl: "
+                    "followed-with-success and followed-with-failure, with a followed "
+                    "crystal's outcome credited to the episodes it cites. Report only: "
+                    "nothing in anneal ranks, decays or re-heats from it.",
+        parents=[json_parent],
+    )
+    sub.add_argument("--episodes", action="store_true", help="Also list per-episode counters")
+    sub.set_defaults(func=cmd_worth)
 
     # -- migrate (self-migration notices: propose instruction-file edits on upgrade) --
     migrate_parser = subparsers.add_parser(

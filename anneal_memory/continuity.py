@@ -694,6 +694,10 @@ def _build_wrap_package(
     crystallization_candidates: list[StalePatternDict] = []
     rewarm_candidates: list[str] = []
     crystal_active = _crystal_active_safe(crystal_store)
+    # The working set's own pattern names, captured before the crystal corpus is
+    # merged into pattern_summaries below: a re-warm candidate already in the working
+    # set is not a candidate to pull back into it.
+    working_set_names = {s.name for s in pattern_summaries}
     if crystal_active:
         # Route level coercion through CrystalStore._safe_level so a hand-edited /
         # migrated non-numeric row level can't crash the wrap (the crystal-fault-
@@ -724,6 +728,7 @@ def _build_wrap_package(
                 rewarm_candidates = [
                     str(c["name"])
                     for c in crystal_store.surface_rewarm_candidates(today=today_date)
+                    if str(c["name"]) not in working_set_names
                 ]
             except (CrystalError, ValueError, OSError):
                 # OSError added (codex L3, 2026-06-06): same crystal-fault-never-breaks

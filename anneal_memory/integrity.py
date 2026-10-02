@@ -298,7 +298,10 @@ TOOLS: list[dict[str, Any]] = [
             "gave you: the cancel then succeeds only if that wrap is still the "
             "one in progress, and is refused without changing anything if a "
             "peer replaced it. Omit wrap_token to cancel whatever is current, "
-            "which is what you want when recovering a wrap you did not open."
+            "which is what you want when recovering a wrap you did not open. "
+            "Exception: a wrap prepared under the consolidate gate (status names "
+            "its session) is cancelled without its token only when session_id is "
+            "that session, or with force=true when that session is gone."
         ),
         "inputSchema": {
             "type": "object",
@@ -313,7 +316,23 @@ TOOLS: list[dict[str, Any]] = [
                         "cannot swap the wrap in between. Refused with no "
                         "change if it does not match, including when the wrap "
                         "has already completed. Omit it to cancel whatever is "
-                        "in progress."
+                        "in progress (a gated wrap also needs session_id or force)."
+                    ),
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": (
+                        "Your session. Without wrap_token, a wrap prepared under "
+                        "the consolidate gate is cancelled only when this is the "
+                        "session that prepared it."
+                    ),
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": (
+                        "Cancel a gated wrap without its token or session, when "
+                        "the session that prepared it is gone. Discards its "
+                        "compression."
                     ),
                 },
             },

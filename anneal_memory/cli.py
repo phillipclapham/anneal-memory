@@ -1460,7 +1460,9 @@ def cmd_wrap_status(args: argparse.Namespace) -> None:
             f"  complete: anneal-memory save-continuity --wrap-token {snapshot['token']} <file>"
         )
         if gated_by is None:
-            print("  abandon:  anneal-memory wrap-cancel")
+            # The token form, so the printed command can only end THIS wrap: a bare
+            # wrap-cancel run later ends whatever wrap is current by then.
+            print(f"  abandon:  anneal-memory wrap-cancel --wrap-token {snapshot['token']}")
 
 
 def cmd_wrap_cancel(args: argparse.Namespace) -> None:
@@ -3104,7 +3106,7 @@ def cmd_worth(args: argparse.Namespace) -> None:
     db_path = Path(args.db).expanduser()
     try:
         report = compute_worth(OutcomeLog(outcome_log_path(db_path)), _open_crystal_store(args))
-    except (CrystalError, OSError) as exc:
+    except (CrystalError, OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
     if args.json:

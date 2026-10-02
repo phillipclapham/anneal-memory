@@ -299,9 +299,9 @@ TOOLS: list[dict[str, Any]] = [
             "one in progress, and is refused without changing anything if a "
             "peer replaced it. Omit wrap_token to cancel whatever is current, "
             "which is what you want when recovering a wrap you did not open. "
-            "Exception: a wrap prepared under the consolidate gate (status names "
-            "its session) is cancelled without its token only when session_id is "
-            "that session, or with force=true when that session is gone."
+            "Exception: a wrap prepared under the consolidate gate is cancelled "
+            "without its token only when session_id is the session that prepared "
+            "it, or with force=true when that session is gone."
         ),
         "inputSchema": {
             "type": "object",

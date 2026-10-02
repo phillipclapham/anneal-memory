@@ -48,7 +48,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .crystal import CrystalStore
+from .crystal import CrystalError, CrystalStore
 
 try:  # POSIX advisory lock; degrades to a no-op elsewhere (mirrors crystal.py)
     import fcntl
@@ -281,14 +281,15 @@ def _parse_ts(value: object) -> datetime | None:
 
 
 def _receipt_day(query_date: object, ts: datetime) -> str:
-    """The receipt's local date when it is a real ``YYYY-MM-DD`` no later than one
-    day after ``ts`` (a local date can run ahead of UTC), else the UTC date of ``ts``."""
+    """The receipt's local date when it is a real ``YYYY-MM-DD`` within one day of
+    ``ts`` (a local date differs from UTC by less than a day), else the UTC date of
+    ``ts``."""
     if isinstance(query_date, str) and len(query_date) == 10:
         try:
             d = date.fromisoformat(query_date)
         except ValueError:
             d = None
-        if d is not None and d <= ts.date() + timedelta(days=1):
+        if d is not None and abs(d - ts.date()) <= timedelta(days=1):
             return d.isoformat()
     return ts.date().isoformat()
 
@@ -337,6 +338,7 @@ def fold_surfaced(
     A path that is missing while others exist (a rotated backup not yet created)
     is reported in ``paths_missing``.
 
+    A receipt without an ``event_id`` is skipped (counted in ``lines_skipped``).
     Receipts are de-duplicated by ``event_id`` within a fold, so a log rotated
     while the fold reads it is not counted twice. Pass the live log FIRST and its
     rotated backup after it: a rotation during the read then moves already-read
@@ -359,8 +361,20 @@ def fold_surfaced(
     cutoff = cutoff.replace(microsecond=0)
     with crystal_store._transaction() as data:
         state = data.get(FOLD_STATE_KEY)
-        prev_mark_str = state.get("through") if isinstance(state, dict) else None
-        prev_mark = _parse_ts(prev_mark_str)
+        prev_mark_str: str | None = None
+        prev_mark: datetime | None = None
+        if state is not None:
+            # A present but unreadable mark must not read as "never folded": that
+            # would count the whole history a second time on top of the stored counts.
+            raw = state.get("through") if isinstance(state, dict) else None
+            prev_mark = _parse_ts(raw)
+            if prev_mark is None:
+                raise CrystalError(
+                    f"{crystal_store.path} holds an unreadable {FOLD_STATE_KEY!r} mark "
+                    f"({state!r}); refusing to fold so no receipt is counted twice. "
+                    f"Inspect it by hand."
+                )
+            prev_mark_str = str(raw)
         mark = cutoff if prev_mark is None or cutoff > prev_mark else prev_mark
         result = FoldResult(previous_mark=prev_mark_str, mark=_fmt_ts(mark))
         missing = [str(p) for p in paths if not p.is_file()]
@@ -406,12 +420,16 @@ def fold_surfaced(
                     names = receipt_crystal_names(receipt)
                     if not names:
                         continue
+                    # No event_id, no way to tell a rotated copy from a new receipt,
+                    # so it is not counted.
                     event_id = receipt.get("event_id")
-                    if isinstance(event_id, str) and event_id:
-                        if event_id in seen_events:
-                            result.duplicates_skipped += 1
-                            continue
-                        seen_events.add(event_id)
+                    if not isinstance(event_id, str) or not event_id:
+                        result.lines_skipped += 1
+                        continue
+                    if event_id in seen_events:
+                        result.duplicates_skipped += 1
+                        continue
+                    seen_events.add(event_id)
                     result.receipts_folded += 1
                     day = _receipt_day(receipt.get("query_date"), ts)
                     for name in names:
@@ -522,19 +540,24 @@ def compute_worth(log: OutcomeLog, crystal_store: CrystalStore | None = None) ->
     Uses the merged record per exposure id (:meth:`OutcomeLog.latest`). Every
     labelled item counts toward its label; it counts toward ``success`` /
     ``failure`` when the exposure has an outcome. Each crystal in an exposure
-    also reaches the episodes in its ``evidence`` (live crystals only; a crystal
-    no longer live has no evidence to walk), and each episode is counted once per
-    exposure. Nothing here writes anywhere.
+    also reaches the episodes in its ``evidence``, whatever the crystal's own label
+    (retrieved semantics; the crystal's ``table`` shows how it was labelled), live
+    crystals only (a crystal no longer live has no evidence to walk), and each
+    episode is counted once per exposure. Nothing here writes anywhere.
     """
     latest, bad = log.latest()
     live: dict[str, dict[str, Any]] = {}
     folded = False
     if crystal_store is not None:
-        for c in crystal_store.active():
-            live[str(c.get("name"))] = dict(c)
+        # ONE read of the document, so the rows and the fold mark come from the same
+        # committed state (a fold between two reads would report 0 for a fresh count).
+        doc = crystal_store._load()
+        for c in doc.get("crystal", []):
+            if isinstance(c, dict) and c.get("status") == "crystallized":
+                live[str(c.get("name"))] = dict(c)
         # After any fold, a live crystal with no surfaced_count was surfaced zero
         # times; before the first fold its count is unknown (None).
-        folded = isinstance(crystal_store._load().get(FOLD_STATE_KEY), dict)
+        folded = isinstance(doc.get(FOLD_STATE_KEY), dict)
 
     crystals: dict[str, WorthRow] = {}
     episodes: dict[str, WorthRow] = {}

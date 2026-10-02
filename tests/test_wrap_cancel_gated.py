@@ -18,7 +18,7 @@ def _gated(store: Store, token: str, session: str | None = "holder") -> None:
     store.wrap_started(token=token, episode_ids=[e.id], gated_session_id=session)
 
 
-def test_gated_wrap_needs_its_session_token_or_force(tmp_path):
+def test_gated_wrap_needs_its_session_token_or_force(tmp_path, monkeypatch):
     store = Store(tmp_path / "m.db")
     _gated(store, "a" * 32)
     for kw in ({}, {"session_id": "other"}, {"force": 1}):
@@ -48,3 +48,20 @@ def test_gated_wrap_needs_its_session_token_or_force(tmp_path):
     assert store.wrap_gated_session() == "holder"
     assert not server._tool_wrap_cancel({"session_id": "holder"}).get("isError")
     assert store.wrap_gated_session() is None
+
+    # prepare_wrap's empty-window path observes PARTIAL state and cancels it
+    # tokenlessly; if a peer's gated wrap lands first, the store refuses, and
+    # prepare_wrap must downgrade rather than raise.
+    from anneal_memory import prepare_wrap
+
+    store = Store(tmp_path / "m2.db")
+    for k, v in (("wrap_started_at", "2026-09-25T00:00:00Z"), ("wrap_gated_session", "A")):
+        store._conn.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)", (k, v))
+    store._conn.commit()
+
+    def peer_landed(**_kw):
+        raise WrapCancelGatedError(gated_session="A", session_id=None)
+
+    monkeypatch.setattr(store, "wrap_cancelled", peer_landed)
+    result = prepare_wrap(store)
+    assert result["status"] != "ready" and "replaced" in result["message"]

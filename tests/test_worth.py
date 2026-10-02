@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from anneal_memory import CrystalStore, FLOW_SCHEMA, Store, prepare_wrap
+from anneal_memory.crystal import CrystalError
 from anneal_memory.worth import (
     ExposureLabel,
     OutcomeLog,
@@ -89,6 +90,7 @@ def test_fold_counts_once_leaves_activation_alone_and_defers_fresh_receipts(tmp_
     crystal = CrystalStore(tmp_path / "mem.crystal.json")
     crystal.crystallize(name="p", level=3, explanation="x", today=date(2026, 6, 1))
     crystal.crystallize(name="q", level=3, explanation="y", today=date(2026, 6, 1))
+    crystal.crystallize(name="r", level=3, explanation="w", today=date(2026, 6, 1))
     now = datetime(2026, 10, 2, 12, 0, 0, tzinfo=timezone.utc)
 
     def rec(ts, names, qd=None):
@@ -109,6 +111,8 @@ def test_fold_counts_once_leaves_activation_alone_and_defers_fresh_receipts(tmp_
         rec("2026-10-02T09:00:00Z", []),
         rec("2026-10-02T11:00:00Z", ["q"], qd="9999-99-99"),  # bogus local date
         rec("2026-10-02T11:01:00Z", ["q"], qd="2099-01-01"),  # valid date, far future
+        rec("2026-10-02T11:02:00Z", ["r"], qd="2000-01-01"),  # valid date, far past
+        json.dumps({"ts": "2026-10-02T11:03:00Z", "exposed": [{"pattern": "p"}]}),  # no id
     ]) + "\n")
 
     with pytest.raises(FileNotFoundError):
@@ -116,8 +120,8 @@ def test_fold_counts_once_leaves_activation_alone_and_defers_fresh_receipts(tmp_
     assert "surfaced_fold" not in json.loads(crystal.path.read_text())  # mark not moved
 
     r1 = fold_surfaced(crystal, [receipts, tmp_path / "rotated-away.jsonl"], now=now)
-    assert (r1.receipts_folded, r1.exposures_counted, r1.duplicates_skipped) == (4, 5, 1)
-    assert r1.names_unknown == {"gone": 1} and r1.lines_skipped == 1
+    assert (r1.receipts_folded, r1.exposures_counted, r1.duplicates_skipped) == (5, 6, 1)
+    assert r1.names_unknown == {"gone": 1} and r1.lines_skipped == 2
     assert r1.paths_missing == [str(tmp_path / "rotated-away.jsonl")]
     assert r1.mark == "2026-10-02T11:59:00Z"
     p = crystal.get("p")
@@ -128,11 +132,19 @@ def test_fold_counts_once_leaves_activation_alone_and_defers_fresh_receipts(tmp_
     assert r2.receipts_folded == 0 and crystal.get("p")["surfaced_count"] == 2
 
     assert crystal.get("q")["last_surfaced_on"] == "2026-10-02"  # bogus date ignored
+    assert crystal.get("r")["last_surfaced_on"] == "2026-10-02"  # out-of-range date ignored
     r3 = fold_surfaced(crystal, [receipts], now=now + timedelta(minutes=5))
     assert r3.receipts_folded == 1 and crystal.get("q")["surfaced_count"] == 4
     crystal.retire("p", kind="superseded")
     crystal.crystallize(name="p", level=3, explanation="x")
     assert crystal.get("p")["surfaced_count"] == 2  # a revive keeps its history
+
+    doc = json.loads(crystal.path.read_text())
+    doc["surfaced_fold"] = {"through": "garbage"}
+    crystal.path.write_text(json.dumps(doc))
+    with pytest.raises(CrystalError):  # an unreadable mark never re-counts history
+        fold_surfaced(crystal, [receipts], now=now + timedelta(days=1))
+    assert crystal.get("p")["surfaced_count"] == 2
     assert compute_worth(OutcomeLog(tmp_path / "x.jsonl"), crystal).crystals[0].surfaced_count == 2
 
 

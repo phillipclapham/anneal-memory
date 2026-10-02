@@ -159,6 +159,13 @@ runs in the default root, so a store with one root is unchanged.
   its lines read `⚠ UNBOUND`.
 - `derive revoke --label NAME` drops one labelled root; `derive revoke` drops
   the store's whole binding. `derive status` lists every root that is honoured.
+- A wrap freezes the root map its `prepare_wrap` read: the flags the composer
+  sees and the save's checks use the same roots. A root bound at save that is
+  not the one frozen for its label (a label rebound, or bound for the first
+  time, while the composer worked) refuses the save; `wrap-cancel` and a new
+  `prepare_wrap` recover. A root revoked meanwhile is left to the rules above.
+  A wrap prepared by a version without the freeze refuses its save while any
+  root is bound.
 - The trust file keeps each store's default root where earlier versions read
   it, so a version without labels still finds the right default root. Such a
   version reads a `[derive@LABEL: …]` line as unannotated and refuses to save
@@ -311,6 +318,9 @@ continuity.
   public and private repositories apart; inside one class, binding a root is a
   statement that the store's text may count over its tracked files.
 - **A false visibility declaration.** `--visibility` is taken as declared.
+- **A root's commit moving during a wrap.** The freeze holds which directory
+  each label names, not the commit it is at: a save re-checks every line at
+  the commit each root has then.
 
 - **A trusted user's own PATH.** The program is found through the absolute
   entries of `PATH`; a user whose `PATH` is hostile is already compromised.

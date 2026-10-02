@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Mapping
-from typing import Literal
+from typing import Any, Literal
 
 from .schema import SectionSpec
 
@@ -1486,11 +1486,30 @@ def rederive_continuity(store, *, ref: str | None = None, trust_file: Path | Non
     return rederive_text(text, store.section_schema, roots, ref=ref, **limits)
 
 
+_NO_FROZEN_ROOTS = object()
+
+
+def _roots_moved(frozen: dict, now: dict) -> list[str]:
+    """Each root bound now that is not the one ``frozen`` held for its label.
+    A root that was unbound since is not listed: it certifies nothing (a
+    revoked label reads UNBOUND and refuses on its own; with no root left,
+    no command runs)."""
+    def name(k):
+        return "the default root" if k is None else f"label {k!r}"
+    return [
+        f"{name(k)}: {frozen.get(k) or 'unbound'} -> {now[k]}"
+        for k in sorted(now, key=lambda k: (k is not None, k or ""))
+        if frozen.get(k) != now[k]
+    ]
+
+
 def check_state_for_save(
     text: str,
     schema: list[SectionSpec],
     db_path: str | os.PathLike,
     trust_file: Path | None = None,
+    *,
+    frozen_roots: Any = _NO_FROZEN_ROOTS,
 ) -> RederiveReport | None:
     """The save gate for derived-state sections.
 
@@ -1498,6 +1517,15 @@ def check_state_for_save(
     annotation or a refused command or label, and, on an opted-in store, when
     a command errors or names a label with no bound root. Returns the report (``None`` when the schema has no derived-state
     section) so the caller can surface stale lines without refusing.
+
+    ``frozen_roots`` is the root map the wrap's prepare read and showed the
+    composer (:meth:`Store.wrap_derive_roots`). When it is passed, the map is
+    read once here, compared with it, and that same map is the one the commands
+    run against: a root bound now that differs from the frozen one for its
+    label, or is bound to a label that had none, refuses the save (spore-1282,
+    a label rebound while the composer worked). ``None`` means the wrap froze no
+    map, which refuses whenever any root is bound now. Leaving it out skips the
+    comparison.
     """
     if not _derived_headings(schema):
         return None
@@ -1515,7 +1543,25 @@ def check_state_for_save(
                 problems.append(f"line {idx + 1}: refused: {e}")
     if problems:
         raise ValueError("State section refused:\n  " + "\n  ".join(problems))
-    report = rederive_text(text, schema, trusted_roots(db_path, trust_file))
+    roots = trusted_roots(db_path, trust_file)
+    if frozen_roots is not _NO_FROZEN_ROOTS:
+        if frozen_roots is None and roots:
+            raise ValueError(
+                "State section refused: the wrap in progress recorded no re-derive root "
+                "map (it was prepared by an older anneal-memory, or opened with "
+                "Store.wrap_started directly), so nothing shows the roots bound now are "
+                "the ones its State lines were written against. Run wrap-cancel and "
+                "re-run prepare_wrap."
+            )
+        moved = [] if frozen_roots is None else _roots_moved(frozen_roots, roots)
+        if moved:
+            raise ValueError(
+                "State section refused: the re-derive roots changed after prepare_wrap ("
+                + "; ".join(moved)
+                + "), so these State lines were written against a different repository. "
+                "Run wrap-cancel and re-run prepare_wrap."
+            )
+    report = rederive_text(text, schema, roots)
     if not report.enabled:
         return report
     # An unbound label is not clean: the claim names a root nobody bound, so

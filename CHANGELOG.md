@@ -4,6 +4,20 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — a label rebound during a wrap could certify a claim in the wrong repository
+
+- `prepare_wrap` reads the re-derive root map once, shows the composer flags from it, and freezes
+  it into the wrap (`Store.wrap_derive_roots()`). The save compares the map it reads with the frozen
+  one and runs its checks against that same map: a root bound at save that differs from the frozen
+  one for its label refuses the save, with the label and both roots named. Before, a label rebound
+  between prepare and save (an operator act during the compose) was resolved afresh at save, so a
+  line written about one repository was checked, and passed, in another. Reproduced first
+  (`tests/test_rederive_label_cas.py`). A root revoked meanwhile is not refused by the compare: a
+  revoked label already reads UNBOUND and refuses, and with no root bound nothing runs.
+- A wrap that froze no map (prepared by an earlier version, or opened with `Store.wrap_started`
+  without `derive_roots`) refuses its save on a store that has any root bound. Recover with
+  `wrap-cancel` and a new `prepare_wrap`.
+
 ## [0.9.19] — 2026-10-01
 
 ### Added — one store, several repositories (multi-root re-derive)

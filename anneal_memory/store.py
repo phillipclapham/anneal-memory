@@ -350,6 +350,7 @@ StoreOperation = Literal[
     "count_episodes_since_wrap",
     "consolidate_requires_baton",
     "wrap_gated_session",
+    "wrap_derive_roots",
     "set_consolidate_requires_baton",
     "get_wrap_history",
     "record_associations",
@@ -1296,6 +1297,15 @@ _DEFAULT_METADATA = {
     # predates it reads "" (ungated), so an in-flight wrap across an upgrade
     # keeps the old behaviour.
     "wrap_gated_session": "",
+    # spore-1282: the re-derive root map (label -> root) prepare_wrap read and
+    # showed the composer, JSON-encoded as [[label or null, root], ...]. Empty
+    # when idle, when the schema has no derived-state section, or when the wrap
+    # was started without one (an earlier version, or a direct wrap_started).
+    # The save refuses when a root bound then is not the one frozen here for its
+    # label, so a label rebound while the composer worked cannot certify a claim
+    # in a repo it was not written about.
+    # Additive lifecycle key like wrap_gated_session, cleared on every terminal path.
+    "wrap_derive_roots": "",
 }
 
 
@@ -2450,6 +2460,7 @@ class Store:
         allow_restart: bool = False,
         gated_session_id: str | None = None,
         expect_last_wrap_id: int | None = None,
+        derive_roots: dict[str | None, str] | None = None,
     ) -> None:
         """Mark that a wrap has been initiated (prepare_wrap called).
 
@@ -2516,6 +2527,11 @@ class Store:
                 stored JSON-encoded in ``wrap_section_schema``;
                 :meth:`section_schema_for_wrap` returns it for the
                 wrap's duration.
+            derive_roots: The re-derive root map (label, ``None`` for the
+                default root, to root path) the caller showed the composer,
+                frozen so the save can refuse a map that changed meanwhile
+                (spore-1282; read back with :meth:`wrap_derive_roots`).
+                ``None`` freezes nothing.
 
         Raises:
             ValueError: If ``token`` is empty. The canonical pipeline
@@ -2592,6 +2608,22 @@ class Store:
                 "wrap_started: gated_session_id must be None or a non-empty str, "
                 f"got {gated_session_id!r}."
             )
+        if derive_roots is not None and not (
+            isinstance(derive_roots, dict)
+            and all(
+                (k is None or isinstance(k, str)) and isinstance(v, str)
+                for k, v in derive_roots.items()
+            )
+        ):
+            raise TypeError(
+                "wrap_started: derive_roots must be None or a dict of "
+                "label (str or None) to root (str)."
+            )
+        derive_roots_json = (
+            ""
+            if derive_roots is None
+            else json.dumps(sorted(derive_roots.items(), key=lambda kv: (kv[0] is not None, kv[0] or "")))
+        )
         ids_list = list(episode_ids)
         ids_json = json.dumps(ids_list)
         # AM-SCHEMASNAPSHOT: freeze the section schema for the wrap's duration.
@@ -2705,6 +2737,10 @@ class Store:
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_gated_session", gated_session_id or ""),
             )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_derive_roots", derive_roots_json),
+            )
             self._conn.commit()
 
         if self._audit is not None:
@@ -2751,6 +2787,11 @@ class Store:
                     # Who prepared the wrap under the consolidate gate (None when
                     # ungated): the chain of custody for who may commit it.
                     "wrap_gated_session": gated_session_id,
+                    # The root map the save will compare against (spore-1282).
+                    "wrap_derive_roots": (
+                        None if derive_roots is None
+                        else {("" if k is None else k): v for k, v in derive_roots.items()}
+                    ),
                 },
                 method="wrap_started",
                 committed="the wrap start",
@@ -2865,6 +2906,7 @@ class Store:
             cancelled_ids_raw = self._get_metadata("wrap_episode_ids")
             cancelled_schema_raw = self._get_metadata("wrap_section_schema")
             cancelled_gated_raw = self._get_metadata("wrap_gated_session")
+            cancelled_roots_raw = self._get_metadata("wrap_derive_roots")
 
             # ⚠ PARSE AND CLASSIFY BEFORE THE COMMIT, NOT AFTER. This ran
             # after the clear at first, and codex reproduced the consequence:
@@ -2898,6 +2940,7 @@ class Store:
                 or cancelled_ids_raw
                 or cancelled_schema_raw
                 or cancelled_gated_raw
+                or cancelled_roots_raw
             )
             complete = bool(
                 cancelled_started_at and cancelled_token and episode_ids is not None
@@ -2944,6 +2987,10 @@ class Store:
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_gated_session", ""),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_derive_roots", ""),
             )
             # AM-SCHEMASNAPSHOT: clear the frozen schema alongside the rest of
             # the wrap-in-progress state so section_schema_for_wrap() falls back
@@ -3017,6 +3064,8 @@ class Store:
                 # the chain of custody for whose compression was abandoned.
                 if cancelled_gated_raw:
                     payload["wrap_gated_session"] = cancelled_gated_raw
+                if cancelled_roots_raw:
+                    payload["wrap_derive_roots_cleared"] = True
                 # ⛔ POST-COMMIT: the metadata clear above is COMMITTED, and the
                 # receipt below is the only correct outcome. The swallow + warn
                 # policy this site introduced on 2026-09-03 now lives in
@@ -3075,6 +3124,42 @@ class Store:
                 return None
             return self._get_metadata("wrap_gated_session") or None
 
+    def wrap_derive_roots(self) -> dict[str | None, str] | None:
+        """The re-derive root map frozen by the in-progress wrap (spore-1282),
+        or ``None`` when no wrap is in progress or the wrap froze none.
+
+        Raises :class:`StoreError` when the frozen value is present but
+        unreadable: a save must not fall back to "nothing frozen" on a value
+        it cannot read. Recovery is wrap-cancel and a new prepare_wrap.
+        """
+        with self._db_boundary("wrap_derive_roots"):
+            rows = self._conn.execute(
+                "SELECT key, value FROM metadata WHERE key IN (?, ?)",
+                ("wrap_started_at", "wrap_derive_roots"),
+            ).fetchall()
+        meta = {row["key"]: row["value"] for row in rows}
+        raw = meta.get("wrap_derive_roots", "")
+        if not meta.get("wrap_started_at") or not raw:
+            return None
+        try:
+            pairs = json.loads(raw)
+            if not isinstance(pairs, list) or not all(
+                isinstance(p, list) and len(p) == 2
+                and (p[0] is None or isinstance(p[0], str)) and isinstance(p[1], str)
+                for p in pairs
+            ):
+                raise ValueError("not a list of [label, root] pairs")
+            out = {k: v for k, v in pairs}
+            if len(out) != len(pairs):
+                raise ValueError("a label is repeated")
+        except (ValueError, TypeError, RecursionError) as exc:
+            raise StoreError(
+                "The re-derive root map frozen by the wrap in progress is unreadable. "
+                f"Run wrap-cancel and re-run prepare_wrap. ({exc})",
+                operation="wrap_derive_roots",
+                path=str(self.path),
+            ) from exc
+        return out
     def consolidate_requires_baton(self) -> bool:
         """Does this store require the consolidate baton for EVERY consolidate?
 
@@ -3590,6 +3675,10 @@ class Store:
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_gated_session", ""),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_derive_roots", ""),
             )
             # AM-SCHEMASNAPSHOT: clear the frozen wrap schema in the same
             # transaction as the other wrap-in-progress clears, so a completed

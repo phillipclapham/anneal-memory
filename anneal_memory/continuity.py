@@ -1696,8 +1696,15 @@ def prepare_wrap(
     # it anywhere, and a verdict outside the State lines would outlive the save
     # (L3 r2). Flags sit after a State line's annotation, where every save
     # strips them.
-    if existing is not None and any(s["role"] == "derived-state" for s in schema):
-        derive_report = rederive_text(existing, schema, trusted_roots(store.path))
+    # spore-1282: the root map is read ONCE, used for these flags and frozen into
+    # the wrap below, so the save compares against the map the composer saw.
+    derive_roots = (
+        trusted_roots(store.path)
+        if any(s["role"] == "derived-state" for s in schema)
+        else None
+    )
+    if existing is not None and derive_roots is not None:
+        derive_report = rederive_text(existing, schema, derive_roots)
         package["continuity"] = drop_header(derive_report.text)
         if derive_report.enabled:
             note = (
@@ -1758,6 +1765,7 @@ def prepare_wrap(
             section_schema=schema,
             gated_session_id=session_id,
             expect_last_wrap_id=window_last_wrap_id,
+            derive_roots=derive_roots,
         )
     except WrapWindowMovedError:
         return _downgraded_empty(
@@ -2457,7 +2465,16 @@ def validated_save_continuity(
     # re-derive, so is a command that errors. Stale or unchecked lines do not
     # refuse: they go into the result's ``stale_state`` and a warning after
     # commit. See docs/rederive.md.
-    _derive_report = check_state_for_save(text, section_schema, store.path)
+    # spore-1282: compare-and-swap on the label -> root map. The map is read once
+    # inside, compared with the one prepare_wrap froze, and the commands run
+    # against that same map.
+    _derive_report = (
+        check_state_for_save(
+            text, section_schema, store.path, frozen_roots=store.wrap_derive_roots()
+        )
+        if any(s["role"] == "derived-state" for s in section_schema)
+        else None
+    )
     if require_rederive and (_derive_report is None or not _derive_report.enabled):
         raise ValueError(
             "Save refused: re-derive was required, but re-derive is not enabled "

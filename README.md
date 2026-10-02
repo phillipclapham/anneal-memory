@@ -85,9 +85,9 @@ anneal-memory record "Chose PostgreSQL as the database for ACID" --type decision
 anneal-memory search "database"
 
 # Agent-driven compression (same workflow as library and MCP)
-anneal-memory prepare-wrap           # Get compression package
+anneal-memory --project-name MyAgent prepare-wrap           # Get compression package
 # Agent compresses...
-anneal-memory save-continuity out.md # Save with validation
+anneal-memory --project-name MyAgent save-continuity out.md # Save with validation
 
 # Operator commands (things MCP can't do)
 anneal-memory stats                  # Detailed analytics
@@ -96,6 +96,9 @@ anneal-memory diff --wraps 5         # Wrap metric progression
 anneal-memory audit --since 7d       # Read audit trail
 anneal-memory audit-repair           # Rebuild a quarantined audit manifest
 anneal-memory export --format json   # Full store export
+
+# Done with the demo: return the CLI to your default store
+unset ANNEAL_MEMORY_DB
 ```
 
 See [`examples/agent-instructions.lean.cli.example`](examples/agent-instructions.lean.cli.example) for the agent workflow snippet.

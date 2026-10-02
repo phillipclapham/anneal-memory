@@ -45,7 +45,7 @@ store = Store("./memory.db", project_name="MyAgent")
 
 # Record episodes during work
 store.record("Connection pool is the real bottleneck", EpisodeType.OBSERVATION)
-store.record("Chose PostgreSQL because ACID outweighs speed", EpisodeType.DECISION)
+store.record("Chose PostgreSQL as the database because ACID outweighs speed", EpisodeType.DECISION)
 
 # Recall before decisions
 result = store.recall(episode_type=EpisodeType.DECISION, keyword="database")
@@ -71,11 +71,17 @@ See [Library Quickstart](docs/library-quickstart.md) for the full guide.
 Inspect, debug, and manage agent memory from the command line — a full operator CLI with machine-readable `--json` output. Agents with shell access (Claude Code, Aider, etc.) can use the CLI directly for the full memory workflow.
 
 ```bash
-# Initialize
-anneal-memory init --project-name MyAgent
+# Point the demo at its own store. Without --db or ANNEAL_MEMORY_DB every
+# command uses ~/.anneal-memory/memory.db, your default store.
+export ANNEAL_MEMORY_DB=./demo.db
+
+# Initialize. Global flags such as --db and --project-name go before the
+# subcommand. --project-name names the memory in the continuity header and is
+# not stored: pass it on each command (the default is "Agent").
+anneal-memory --project-name MyAgent init
 
 # Record and recall
-anneal-memory record "Chose PostgreSQL for ACID" --type decision
+anneal-memory record "Chose PostgreSQL as the database for ACID" --type decision
 anneal-memory search "database"
 
 # Agent-driven compression (same workflow as library and MCP)

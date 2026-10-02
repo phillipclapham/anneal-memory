@@ -20,7 +20,7 @@ store = Store("./memory.db", project_name="MyAgent")
 
 # Record episodes during work
 store.record("Connection pool is the real bottleneck", EpisodeType.OBSERVATION)
-store.record("Chose PostgreSQL because ACID outweighs speed", EpisodeType.DECISION)
+store.record("Chose PostgreSQL as the database because ACID outweighs speed", EpisodeType.DECISION)
 store.record("Latency vs consistency — can't optimize both", EpisodeType.TENSION)
 store.record("Should we shard or add read replicas?", EpisodeType.QUESTION)
 store.record("Migration done, 3x query improvement on hot path", EpisodeType.OUTCOME)

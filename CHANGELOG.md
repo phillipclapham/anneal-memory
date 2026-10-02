@@ -4,6 +4,17 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — the README quickstarts ran as written and showed nothing
+
+- The Python quickstart (README and `docs/library-quickstart.md`) recalled `keyword="database"`
+  from episodes none of which contained the word, so a new user's first recall printed nothing.
+  The demo decision now names the database.
+- The CLI quickstart's `anneal-memory init --project-name MyAgent` failed (`--project-name` is a
+  global flag and goes before the subcommand), so every following step failed on a new machine.
+  It now reads `anneal-memory --project-name MyAgent init` and says the name is per command.
+- The CLI quickstart ran against `~/.anneal-memory/memory.db`, which on a machine with a real store
+  is that store. It now sets `ANNEAL_MEMORY_DB=./demo.db` first.
+
 ### Fixed — a label rebound during a wrap could certify a claim in the wrong repository
 
 - `prepare_wrap` reads the re-derive root map once, shows the composer flags from it, and freezes

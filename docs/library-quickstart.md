@@ -255,7 +255,9 @@ except AnnealMemoryError as err:
 AnnealMemoryError (Exception)
  ├── StoreError
  │    └── StoreDatabaseError
- └── WrapInProgressError
+ ├── WrapInProgressError
+ ├── WrapOwnershipError
+ └── WrapCancelGatedError
 ```
 
 - **`AnnealMemoryError`** — base class. Catch this at your outermost boundary. anneal-memory deliberately does NOT mirror PEP 249 / DB-API 2.0's nine-class hierarchy: this is a library that consumes a database internally, not a database driver, so callers branch on operational intent (log/retry/escalate), not on vendor-level failure taxonomy.

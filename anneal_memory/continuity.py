@@ -694,10 +694,20 @@ def _build_wrap_package(
     crystallization_candidates: list[StalePatternDict] = []
     rewarm_candidates: list[str] = []
     crystal_active = _crystal_active_safe(crystal_store)
-    # The working set's own pattern names, captured before the crystal corpus is
-    # merged into pattern_summaries below: a re-warm candidate already in the working
-    # set is not a candidate to pull back into it.
-    working_set_names = {s.name for s in pattern_summaries}
+    # The working set's own pattern lines: a re-warm candidate already in the
+    # working set is not a candidate to pull back into it. Matched with the same
+    # structural anchor crystal.py uses (the name is the first content token of a
+    # line, then "|"), never a name-character alphabet, so a crystal name the
+    # graduation regex cannot parse is still recognised.
+    working_set_lines = (
+        _role_section_body(existing_continuity, schema, "graduating")
+        if existing_continuity
+        else []
+    )
+
+    def _in_working_set(name: str) -> bool:
+        anchor = re.compile(rf"^[ \t]*(?:[-*•>!✓][ \t]*)*{re.escape(name)}[ \t]*\|")
+        return any(anchor.match(line) for line in working_set_lines)
     if crystal_active:
         # Route level coercion through CrystalStore._safe_level so a hand-edited /
         # migrated non-numeric row level can't crash the wrap (the crystal-fault-
@@ -728,7 +738,7 @@ def _build_wrap_package(
                 rewarm_candidates = [
                     str(c["name"])
                     for c in crystal_store.surface_rewarm_candidates(today=today_date)
-                    if str(c["name"]) not in working_set_names
+                    if not _in_working_set(str(c["name"]))
                 ]
             except (CrystalError, ValueError, OSError):
                 # OSError added (codex L3, 2026-06-06): same crystal-fault-never-breaks
@@ -1618,8 +1628,9 @@ def prepare_wrap(
                 f"Consolidate downgraded to capture-only (downgraded-gated-wrap-open): "
                 f"a wrap prepared under the consolidate gate by session {gated_by!r} is "
                 f"in progress, and a call that names no session_id cannot cancel it. "
-                f"Finish it from that session, or abandon it with wrap-cancel (CLI) / "
-                f"wrap_cancel (MCP), which discards the compression. "
+                f"Finish it from that session. Abandoning it discards that session's "
+                f"compression and is the operator's decision (wrap-cancel refuses it "
+                f"without proof of the wrap). "
                 f"Capture (afferent) is unaffected."
             )
         try:

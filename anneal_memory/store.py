@@ -938,10 +938,17 @@ class WrapCancelGatedError(AnnealMemoryError):
     A gated wrap belongs to the session that prepared it; ``validated_save_continuity``
     already refuses to commit it for anyone else. Before this bound a cancel that
     named no token ended it anyway, so any session could discard the baton
-    holder's compression (spore-699). The token proves ownership on its own; a
-    matching ``session_id`` is the other proof; ``force`` is the explicit override
-    for a holder that is gone. Partial (corrupt) lifecycle state is never gated:
-    it has no valid wrap to protect, and clearing it is the recovery.
+    holder's compression by reflex (spore-699). Passing the wrap's token, the
+    preparing ``session_id``, or ``force`` each lets the cancel through.
+
+    ⚠ This is an ANTI-REFLEX bound, not an anti-adversary one. ``session_id`` is
+    asserted by the caller and never verified, and the token is readable by
+    anyone who can run ``wrap-status`` / ``wrap-token-current``. It stops a
+    cancel made without thinking about whose wrap it is; it does not stop a
+    caller set on ending the wrap. The refusal texts carry no recipe for the same
+    reason. Partial (corrupt) lifecycle state is never gated: it has no valid
+    wrap to protect, and clearing it is the recovery. ``wrap_started(
+    allow_restart=True)`` is a separate explicit discard and is not gated here.
     """
 
     def __init__(self, *, gated_session: str, session_id: str | None) -> None:
@@ -950,9 +957,9 @@ class WrapCancelGatedError(AnnealMemoryError):
         caller = f"session {session_id!r}" if session_id else "a caller that named no session"
         super().__init__(
             f"wrap_cancelled: the wrap in progress was prepared under the consolidate "
-            f"gate by session {gated_session!r}, and {caller} cannot cancel it without "
-            f"its wrap token. Nothing was changed. Cancel it from that session, pass its "
-            f"wrap token, or override with force if that session is gone."
+            f"gate by another session, and {caller} has no claim to it. Cancelling it "
+            f"discards that session's compression, which is the operator's decision. "
+            f"Nothing was changed."
         )
 
     def __reduce__(self) -> tuple:

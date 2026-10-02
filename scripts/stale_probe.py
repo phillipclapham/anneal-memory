@@ -5,23 +5,37 @@ fact with a natural question, and grades the answer mechanically: no judge model
 It measures the store as it ships. It is the "before" for any supersession work
 (anneal-sota-0930.md §3.3) and, run unchanged, that work's acceptance test.
 
-Three update shapes, because real updates do not restate the old sentence:
+Three update shapes, because real updates do not restate the old sentence, and a
+control:
 
 * ``restate``    the update repeats the original sentence with the new value.
+                 Old and new score identically, so current@1 here is decided by the
+                 newest-first tie-break, not by any notion of an update.
 * ``paraphrase`` the update says the same thing in different words.
 * ``negate``     the update names the OLD value as well as the new one.
+* ``control``    the fact is NEVER updated; a newer, unrelated episode mentions the
+                 subject. The original must stay @1. A change that simply prefers
+                 newer episodes passes the update shapes and fails this one.
 
 Two recall surfaces:
 
 * ``relevant``   ``retrieve_relevant`` (scored keyword recall; the harness hook path).
 * ``recall``     ``Store.recall(keyword=<subject>)`` (the MCP/CLI recall path; LIKE
-                 match, newest first).
+                 match, newest first). Its current@1 on the update shapes holds by
+                 construction (every update names the subject and is newer); the
+                 control row is what shows it is sort order.
 
 Per surface and shape it reports:
 
 * ``current@1``  the top result is the update episode.
 * ``stale@k``    the superseded episode is anywhere in the returned set (served stale).
 * ``missed``     the update episode is not in the returned set at all.
+
+For ``control``, "current" is the original fact and stale@k is not applicable.
+
+Scope: this measures recall with no help from the writer. If supersession lands
+as an explicit link the writer must record (``supersedes=``), this probe as written
+does not exercise it; it would need a variant that records the link.
 
 Run from the repo root so the repo's ``anneal_memory`` is imported::
 
@@ -93,7 +107,7 @@ FACTS: list[tuple[str, str, str, str, str, str]] = [
      "which cdn provider serves {s}"),
 ]
 
-SHAPES = ("restate", "paraphrase", "negate")
+SHAPES = ("restate", "paraphrase", "negate", "control")
 
 # Unrelated background so the corpus is large enough for the IDF regime and the
 # planted facts compete with ordinary traffic, as they do in a real store.
@@ -150,10 +164,14 @@ def run(shape: str, workdir: Path) -> dict[str, dict[str, int]]:
                 _sentence(subject, attr, old), "observation", timestamp=_ts(5, n)
             ).id
         for n, fact in enumerate(FACTS):
-            assert len(_update_text(shape, fact)) >= MIN_EPISODE_LEN, fact[0]
-            new_ids[fact[0]] = st.record(
-                _update_text(shape, fact), "observation", timestamp=_ts(40, n)
-            ).id
+            text = (
+                f"Ran the {fact[0]} smoke tests after lunch; nothing notable came up."
+                + CONTEXT
+                if shape == "control"
+                else _update_text(shape, fact)
+            )
+            assert len(text) >= MIN_EPISODE_LEN, fact[0]
+            new_ids[fact[0]] = st.record(text, "observation", timestamp=_ts(40, n)).id
 
         for fact in FACTS:
             subject, _a, _o, _n, _p, question = fact
@@ -169,10 +187,12 @@ def run(shape: str, workdir: Path) -> dict[str, dict[str, int]]:
             }
             for name, ids in surfaces.items():
                 t = tallies[name]
+                current = old_ids[subject] if shape == "control" else new_ids[subject]
                 t["n"] += 1
-                t["current@1"] += bool(ids) and ids[0] == new_ids[subject]
-                t["stale@k"] += old_ids[subject] in ids
-                t["missed"] += new_ids[subject] not in ids
+                t["current@1"] += bool(ids) and ids[0] == current
+                if shape != "control":
+                    t["stale@k"] += old_ids[subject] in ids
+                t["missed"] += current not in ids
     return {k: dict(v) for k, v in tallies.items()}
 
 
@@ -191,8 +211,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{'shape':<11} {'surface':<9} {'n':>3} {'current@1':>10} {'stale@k':>8} {'missed':>7}")
     for shape, by_surface in results.items():
         for surface, t in sorted(by_surface.items()):
+            stale = "-" if shape == "control" else str(t.get("stale@k", 0))
             print(f"{shape:<11} {surface:<9} {t['n']:>3} {t['current@1']:>10} "
-                  f"{t['stale@k']:>8} {t['missed']:>7}")
+                  f"{stale:>8} {t['missed']:>7}")
     return 0
 
 

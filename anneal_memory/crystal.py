@@ -600,6 +600,12 @@ class CrystalStore:
                 "notes": [],
             }
             if revived is not None:
+                # Recall-surfaced counts (anneal_memory.worth.fold_surfaced) describe
+                # the pattern's history, not this row's, so they survive a revive.
+                prior_row = cast(dict, revived)
+                for key in ("surfaced_count", "last_surfaced_on"):
+                    if key in prior_row:
+                        cast(dict, item)[key] = prior_row[key]
                 prior: RetirementDict | dict = revived.get("retirement") or {}
                 item["notes"] = [
                     f"[{now}] re-crystallized after retirement "

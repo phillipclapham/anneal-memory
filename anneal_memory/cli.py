@@ -1459,7 +1459,8 @@ def cmd_wrap_status(args: argparse.Namespace) -> None:
         print(
             f"  complete: anneal-memory save-continuity --wrap-token {snapshot['token']} <file>"
         )
-        print("  abandon:  anneal-memory wrap-cancel")
+        if gated_by is None:
+            print("  abandon:  anneal-memory wrap-cancel")
 
 
 def cmd_wrap_cancel(args: argparse.Namespace) -> None:
@@ -1480,7 +1481,7 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
     if expect_token is not None and not _WRAP_TOKEN_RE.fullmatch(expect_token):
         print(
             "Error: --wrap-token must be the 32-character hex token from "
-            "prepare-wrap. Omit it to cancel whatever wrap is in progress.",
+            "prepare-wrap.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -1502,12 +1503,12 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
                 force=bool(getattr(args, "force", False)),
             )
         except WrapCancelGatedError as exc:
+            # No recipe in this text, on purpose: the reader of a refusal is the
+            # caller the bound exists to stop. flow's own cancel learned the same.
             print(
-                f"Refused: the wrap in progress was prepared under the consolidate "
-                f"gate by session {exc.gated_session!r}. Without its --wrap-token, "
-                f"only --session-id {exc.gated_session} may cancel it; pass --force "
-                f"if that session is gone (its compression is discarded). Nothing "
-                f"was changed.",
+                "Refused: the wrap in progress was prepared under the consolidate "
+                "gate by another session. Cancelling it discards that session's "
+                "compression, which is the operator's decision. Nothing was changed.",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -3057,10 +3058,10 @@ def _parse_label(raw: str) -> ExposureLabel:
 
 
 def cmd_outcome(args: argparse.Namespace) -> None:
-    """Write back what happened after an exposure (append-only; a later record for
-    the same exposure id supersedes the earlier one)."""
+    """Write back what happened after an exposure (append-only; records for one
+    exposure id merge when read)."""
     try:
-        items = [_parse_label(raw) for raw in args.item]
+        items = [_parse_label(raw) for raw in (args.item or [])]
         rec = OutcomeLog(outcome_log_path(Path(args.db).expanduser())).record(
             args.exposure_id, items, outcome=args.outcome
         )
@@ -3070,7 +3071,7 @@ def cmd_outcome(args: argparse.Namespace) -> None:
     if args.json:
         _print_json(rec)
         return
-    labels = ", ".join(f"{i['kind']}:{i['ref']}={i['followed']}" for i in rec["items"])
+    labels = ", ".join(f"{i['kind']}:{i['ref']}={i['followed']}" for i in rec["items"]) or "(outcome only)"
     print(f"Recorded outcome {rec['outcome'] or '(none)'} for {rec['exposure_id']}: {labels}")
 
 
@@ -3092,6 +3093,10 @@ def cmd_crystal_fold_surfaced(args: argparse.Namespace) -> None:
         print(f"Not a live crystal (not stored): {', '.join(sorted(result.names_unknown))}")
     if result.lines_skipped:
         print(f"Skipped {result.lines_skipped} unreadable receipt line(s)")
+    if result.duplicates_skipped:
+        print(f"Skipped {result.duplicates_skipped} duplicate receipt(s) (same event_id)")
+    if result.paths_missing:
+        print(f"Not found (skipped): {', '.join(result.paths_missing)}", file=sys.stderr)
 
 
 def cmd_worth(args: argparse.Namespace) -> None:
@@ -3107,17 +3112,22 @@ def cmd_worth(args: argparse.Namespace) -> None:
         return
     print(f"Worth (report-only) from {report.exposures} labelled exposure(s)"
           + (f", {report.lines_skipped} unreadable line(s) skipped" if report.lines_skipped else ""))
-    print(f"{'crystal':<58} {'surf':>5} {'fol':>4} {'ign':>4} {'n/a':>4} {'succ':>5} {'fail':>5}")
+    print("surf = recall-surfaced (receipt fold); the other columns come from the outcome")
+    print("log and are not joined to it. succ/fail = retrieved with that outcome, any label.")
+    print(f"{'crystal':<52} {'surf':>5} {'fol':>4} {'ign':>4} {'n/a':>4} "
+          f"{'succ':>5} {'fail':>5} {'fol+s':>6} {'fol+f':>6}")
     for r in report.crystals:
         name = r.ref if r.live else f"{r.ref} (not live)"
         surf = "-" if r.surfaced_count is None else str(r.surfaced_count)
-        print(f"{name[:58]:<58} {surf:>5} {r.followed:>4} {r.ignored:>4} "
-              f"{r.not_applicable:>4} {r.success:>5} {r.failure:>5}")
+        fol = r.table["followed"]
+        print(f"{name[:52]:<52} {surf:>5} {r.followed:>4} {r.ignored:>4} "
+              f"{r.not_applicable:>4} {r.success:>5} {r.failure:>5} "
+              f"{fol['success']:>6} {fol['failure']:>6}")
     if args.episodes:
-        print(f"\n{'episode':<20} {'succ':>5} {'fail':>5} {'via citation':>13}")
+        print(f"\n{'episode':<20} {'succ':>5} {'fail':>5} {'only via citation':>18}")
         for r in report.episodes:
             print(f"{r.ref:<20} {r.success:>5} {r.failure:>5} "
-                  f"{r.credited_success:>6}/{r.credited_failure:<6}")
+                  f"{r.credited_success:>9}/{r.credited_failure:<8}")
 
 
 def cmd_crystal_update(args: argparse.Namespace) -> None:
@@ -3856,12 +3866,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     cp = crystal_sub.add_parser(
         "fold-surfaced",
-        help="Fold retrieval receipts into surfaced_count (wrap-time, single writer)",
+        help="Fold retrieval receipts into recall-surfaced counts (intended once per wrap)",
         description="Fold harness retrieval receipts (JSONL, exposed[].pattern) into each "
                     "live crystal's surfaced_count and last_surfaced_on. Counts only "
-                    "receipts after the previous fold's mark and older than the skew, so "
-                    "re-running counts nothing twice. Exposure is not activation: "
-                    "last_activated_on is never written.",
+                    "receipts after the previous fold's mark and older than the skew, "
+                    "de-duplicated by event_id, so re-running counts nothing twice. Pass "
+                    "every receipt source on every fold, the live log first. Refuses, "
+                    "moving nothing, when none of the paths exists. Exposure is not "
+                    "activation: last_activated_on is never written.",
         parents=[json_parent],
     )
     cp.add_argument("--receipts", nargs="+", required=True, metavar="PATH",
@@ -3877,14 +3889,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write back what happened after an exposure (followed/ignored/not_applicable)",
         description="Append an outcome record for one exposure (a recall event, named by "
                     "the harness's id) to <stem>.outcomes.jsonl. A later record for the same "
-                    "exposure id supersedes the earlier one.",
+                    "exposure id merges with it: a later label for an item replaces its "
+                    "earlier label, a later outcome replaces the earlier outcome.",
         parents=[json_parent],
     )
     sub.add_argument("--exposure-id", required=True, help="The harness's id for the recall event")
-    sub.add_argument("--item", action="append", required=True, metavar="KIND:REF=FOLLOWED",
+    sub.add_argument("--item", action="append", metavar="KIND:REF=FOLLOWED",
                      help="A surfaced item and its label, e.g. crystal:my_pattern=followed "
                           "(repeatable; KIND crystal|episode; FOLLOWED "
-                          "followed|ignored|not_applicable)")
+                          "followed|ignored|not_applicable). May be omitted when "
+                          "--outcome is given: records for one exposure id merge.")
     sub.add_argument("--outcome", choices=OUTCOME_VALUES, default=None,
                      help="The turn's outcome, when known")
     sub.set_defaults(func=cmd_outcome)
@@ -3893,9 +3907,10 @@ def build_parser() -> argparse.ArgumentParser:
         "worth",
         help="Report-only Memory-Worth counters per crystal (and episode)",
         description="Two counters per crystal and per episode, from <stem>.outcomes.jsonl: "
-                    "followed-with-success and followed-with-failure, with a followed "
-                    "crystal's outcome credited to the episodes it cites. Report only: "
-                    "nothing in anneal ranks, decays or re-heats from it.",
+                    "retrieved-with-success and retrieved-with-failure, split by "
+                    "followed / ignored / not_applicable, with each crystal's exposure "
+                    "credited once to the episodes it cites. Report only: nothing in "
+                    "anneal ranks, decays or re-heats from it.",
         parents=[json_parent],
     )
     sub.add_argument("--episodes", action="store_true", help="Also list per-episode counters")

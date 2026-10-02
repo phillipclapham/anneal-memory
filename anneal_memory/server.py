@@ -657,8 +657,7 @@ class Server:
             ):
                 return _tool_result(
                     "wrap_token must be the 32-character hex token prepare_wrap "
-                    "returned. Omit it entirely to cancel whatever wrap is "
-                    "currently in progress.",
+                    "returned.",
                     is_error=True,
                 )
 
@@ -674,12 +673,12 @@ class Server:
                 expect_token=expect_token, session_id=session_id, force=force
             )
         except WrapCancelGatedError as exc:
+            # No recipe here, on purpose: the reader of a refusal is the caller the
+            # bound exists to stop.
             return _tool_result(
-                f"Refused: the wrap in progress was prepared under the consolidate "
-                f"gate by session {exc.gated_session!r}, and this call is not that "
-                f"session and carries no wrap_token. Nothing was changed. Cancel it "
-                f"from that session, pass its wrap_token, or call wrap_cancel with "
-                f"force=true if that session is gone (its compression is discarded).",
+                "Refused: the wrap in progress was prepared under the consolidate "
+                "gate by another session. Cancelling it discards that session's "
+                "compression, which is the operator's decision. Nothing was changed.",
                 is_error=True,
             )
         except WrapOwnershipError as exc:

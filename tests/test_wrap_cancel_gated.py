@@ -42,7 +42,9 @@ def test_gated_wrap_needs_its_session_token_or_force(tmp_path):
     server = Server.__new__(Server)
     server._store = store
     refused = server._tool_wrap_cancel({"session_id": "other"})
-    assert refused["isError"] and "holder" in refused["content"][0]["text"]
+    text = refused["content"][0]["text"]
+    # the refusal carries no recipe: its reader is the caller the bound stops
+    assert refused["isError"] and "holder" not in text and "force" not in text
     assert store.wrap_gated_session() == "holder"
     assert not server._tool_wrap_cancel({"session_id": "holder"}).get("isError")
     assert store.wrap_gated_session() is None

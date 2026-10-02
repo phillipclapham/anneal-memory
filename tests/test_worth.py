@@ -121,7 +121,8 @@ def test_fold_counts_once_leaves_activation_alone_and_defers_fresh_receipts(tmp_
 
     r1 = fold_surfaced(crystal, [receipts, tmp_path / "rotated-away.jsonl"], now=now)
     assert (r1.receipts_folded, r1.exposures_counted, r1.duplicates_skipped) == (5, 6, 1)
-    assert r1.names_unknown == {"gone": 1} and r1.lines_skipped == 2
+    assert r1.names_unknown == {"gone": 1} and r1.lines_skipped == 1
+    assert r1.event_id_missing == 1
     assert r1.paths_missing == [str(tmp_path / "rotated-away.jsonl")]
     assert r1.mark == "2026-10-02T11:59:00Z"
     p = crystal.get("p")
@@ -140,12 +141,16 @@ def test_fold_counts_once_leaves_activation_alone_and_defers_fresh_receipts(tmp_
     assert crystal.get("p")["surfaced_count"] == 2  # a revive keeps its history
 
     doc = json.loads(crystal.path.read_text())
-    doc["surfaced_fold"] = {"through": "garbage"}
-    crystal.path.write_text(json.dumps(doc))
-    with pytest.raises(CrystalError):  # an unreadable mark never re-counts history
-        fold_surfaced(crystal, [receipts], now=now + timedelta(days=1))
-    assert crystal.get("p")["surfaced_count"] == 2
-    assert compute_worth(OutcomeLog(tmp_path / "x.jsonl"), crystal).crystals[0].surfaced_count == 2
+    for bad_mark in (None, {"through": "garbage"}):
+        doc["surfaced_fold"] = bad_mark
+        crystal.path.write_text(json.dumps(doc))
+        with pytest.raises(CrystalError):  # an unreadable mark never re-counts history
+            fold_surfaced(crystal, [receipts], now=now + timedelta(days=1))
+        assert crystal.get("p")["surfaced_count"] == 2
+    crystal.crystallize(name="fresh", level=3, explanation="v")
+    rows = {r.ref: r for r in compute_worth(OutcomeLog(tmp_path / "x.jsonl"), crystal).crystals}
+    assert rows["fresh"].surfaced_count is None  # unknown under a bad mark, not 0
+    assert rows["p"].surfaced_count == 2  # a stored count is still reported
 
 
 def test_rewarm_candidates_skip_patterns_already_in_the_working_set(tmp_path):

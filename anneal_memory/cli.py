@@ -43,6 +43,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import sqlite3
 import sys
 from dataclasses import asdict
@@ -1456,13 +1457,17 @@ def cmd_wrap_status(args: argparse.Namespace) -> None:
             print("  session can complete it (library save_continuity with that session_id)")
         print(f"  episodes: {len(snapshot['episode_ids'])}")
         print()
-        print(
-            f"  complete: anneal-memory save-continuity --wrap-token {snapshot['token']} <file>"
-        )
-        if gated_by is None:
-            # The token form, so the printed command can only end THIS wrap: a bare
-            # wrap-cancel run later ends whatever wrap is current by then.
-            print(f"  abandon:  anneal-memory wrap-cancel --wrap-token {snapshot['token']}")
+        # The printed commands name this store and this wrap's token, so a copy-paste
+        # can act only on the wrap described here: without --db it would hit the
+        # default store, and a bare wrap-cancel run later ends whatever is current.
+        # A library-minted token the CLI cannot accept gets no command at all.
+        token = snapshot["token"]
+        if _WRAP_TOKEN_RE.fullmatch(token):
+            db_arg = shlex.quote(str(Path(args.db).expanduser().resolve()))
+            print(f"  complete: anneal-memory --db {db_arg} save-continuity "
+                  f"--wrap-token {token} <file>")
+            if gated_by is None:
+                print(f"  abandon:  anneal-memory --db {db_arg} wrap-cancel --wrap-token {token}")
 
 
 def cmd_wrap_cancel(args: argparse.Namespace) -> None:
@@ -3095,6 +3100,9 @@ def cmd_crystal_fold_surfaced(args: argparse.Namespace) -> None:
         print(f"Not a live crystal (not stored): {', '.join(sorted(result.names_unknown))}")
     if result.lines_skipped:
         print(f"Skipped {result.lines_skipped} unreadable receipt line(s)")
+    if result.event_id_missing:
+        print(f"Skipped {result.event_id_missing} receipt(s) with no event_id; they will "
+              f"not be counted by a later fold", file=sys.stderr)
     if result.duplicates_skipped:
         print(f"Skipped {result.duplicates_skipped} duplicate receipt(s) (same event_id)")
     if result.paths_missing:

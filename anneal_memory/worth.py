@@ -308,6 +308,7 @@ class FoldResult:
     exposures_counted: int = 0
     names_unknown: dict[str, int] = field(default_factory=dict)
     lines_skipped: int = 0
+    event_id_missing: int = 0
     duplicates_skipped: int = 0
     paths_missing: list[str] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
@@ -338,7 +339,8 @@ def fold_surfaced(
     A path that is missing while others exist (a rotated backup not yet created)
     is reported in ``paths_missing``.
 
-    A receipt without an ``event_id`` is skipped (counted in ``lines_skipped``).
+    A receipt without an ``event_id`` is skipped and counted in
+    ``event_id_missing``; the mark moves past it, so it is never counted later.
     Receipts are de-duplicated by ``event_id`` within a fold, so a log rotated
     while the fold reads it is not counted twice. Pass the live log FIRST and its
     rotated backup after it: a rotation during the read then moves already-read
@@ -363,7 +365,7 @@ def fold_surfaced(
         state = data.get(FOLD_STATE_KEY)
         prev_mark_str: str | None = None
         prev_mark: datetime | None = None
-        if state is not None:
+        if FOLD_STATE_KEY in data:  # present, even as null: it must parse
             # A present but unreadable mark must not read as "never folded": that
             # would count the whole history a second time on top of the stored counts.
             raw = state.get("through") if isinstance(state, dict) else None
@@ -424,7 +426,7 @@ def fold_surfaced(
                     # so it is not counted.
                     event_id = receipt.get("event_id")
                     if not isinstance(event_id, str) or not event_id:
-                        result.lines_skipped += 1
+                        result.event_id_missing += 1
                         continue
                     if event_id in seen_events:
                         result.duplicates_skipped += 1
@@ -555,9 +557,11 @@ def compute_worth(log: OutcomeLog, crystal_store: CrystalStore | None = None) ->
         for c in doc.get("crystal", []):
             if isinstance(c, dict) and c.get("status") == "crystallized":
                 live[str(c.get("name"))] = dict(c)
-        # After any fold, a live crystal with no surfaced_count was surfaced zero
-        # times; before the first fold its count is unknown (None).
-        folded = isinstance(doc.get(FOLD_STATE_KEY), dict)
+        # After a fold, a live crystal with no surfaced_count was surfaced zero
+        # times. Before the first fold, or with a mark that does not parse, its
+        # count is unknown (None), never a false zero.
+        state = doc.get(FOLD_STATE_KEY)
+        folded = isinstance(state, dict) and _parse_ts(state.get("through")) is not None
 
     crystals: dict[str, WorthRow] = {}
     episodes: dict[str, WorthRow] = {}

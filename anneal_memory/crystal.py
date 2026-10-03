@@ -244,11 +244,13 @@ def _rev(record: dict, *, live: bool) -> str:
     content = {
         k: v for k, v in record.items() if k != "rev" and k not in REV_EXCLUDED_FIELDS
     }
+    # ensure_ascii=True: a lone surrogate (legal in a JSON escape, so it can be on
+    # disk) would make a UTF-8 encode raise on every read; escaped, it hashes fine.
     canon = json.dumps(
         {"live": live, "record": content},
-        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        sort_keys=True, separators=(",", ":"), ensure_ascii=True,
     )
-    return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(canon.encode("ascii")).hexdigest()[:16]
 
 
 class RetirementDict(TypedDict):
@@ -271,8 +273,8 @@ class CrystalDict(TypedDict):
     stored: a digest of the record's content and of whether it is live or retired,
     ignoring :data:`REV_EXCLUDED_FIELDS`. Any content change, or a retire or revive,
     changes it; a touch or a surfaced-count fold does not. Pass it back as
-    ``expect=`` to :meth:`CrystalStore.crystallize` / :meth:`CrystalStore.retire` for
-    a compare-and-mutate."""
+    ``expect=`` to :meth:`CrystalStore.crystallize` / :meth:`CrystalStore.update` /
+    :meth:`CrystalStore.retire` for a compare-and-mutate."""
 
     name: str
     rev: str
@@ -864,6 +866,7 @@ class CrystalStore:
         source: str | None | _Unset = _UNSET,
         add_note: str | None = None,
         today: date | None = None,
+        expect: str | None | _Unset = _UNSET,
     ) -> CrystalDict:
         """Metadata surgery on a live pattern (re-route the 2 axes, re-tag, sharpen
         the explanation) without re-crystallizing. Omitted arguments are left
@@ -871,8 +874,14 @@ class CrystalStore:
         set as given (the explicit-correction path — unlike :meth:`crystallize`'s
         monotonic upsert), but still must be >= ``MIN_PROVEN_LEVEL``. Deliberately does NOT bump
         ``last_activated_on`` — activation is signalled explicitly via :meth:`touch`,
-        which keeps the tier honest."""
+        which keeps the tier honest.
+
+        ``expect`` is the same compare-and-mutate as :meth:`crystallize`'s, checked
+        before anything is mutated: a mismatch raises :class:`CrystalConflictError`
+        and writes nothing."""
+        self._validate_expect(expect)
         with self._transaction() as data:
+            self._check_expect(data, name, expect)
             item = self._require_live(data, name)
             if not isinstance(explanation, _Unset):
                 if not isinstance(explanation, str) or not explanation.strip():

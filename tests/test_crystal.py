@@ -444,3 +444,15 @@ def test_expect_refuses_a_stale_write_and_writes_nothing(tmp_path):
     assert exc.value.current["explanation"] == "B newer"
     assert p.read_bytes() == before
     assert all("rev" not in r for r in json.loads(before)["crystal"])  # computed, never stored
+
+
+def test_rev_survives_a_lone_surrogate_on_disk(tmp_path):
+    """JSON can escape a lone surrogate, so a store can hold one. The rev digest
+    once encoded it as UTF-8, which raised a bare UnicodeEncodeError on every read."""
+    p = tmp_path / "mem.crystal.json"
+    CrystalStore(p).crystallize(name="x", level=2, explanation="v1",
+                                today=date(2026, 1, 1))
+    doc = json.loads(p.read_text())
+    doc["crystal"][0]["explanation"] = "a\ud800b"
+    p.write_text(json.dumps(doc))  # default ensure_ascii writes the escape
+    assert CrystalStore(p).get("x")["rev"]

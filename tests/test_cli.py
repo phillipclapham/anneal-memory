@@ -4349,7 +4349,10 @@ def test_outcome_and_worth_refuse_a_missing_db_or_a_directory(tmp_path):
 def test_db_path_naming_an_unknown_user_refuses_without_a_traceback():
     """L3 10-03 (codex + complement, reproduced first by a real run): a quoted
     `~user` path with no such user made expanduser() raise RuntimeError outside the
-    guard, so the CLI printed a traceback for a path it claims to refuse cleanly."""
+    guard, so the CLI printed a traceback for a path it claims to refuse cleanly.
+    On Windows expanduser() guesses C:\\Users\\<name> instead of raising (L3 r2,
+    codex), so there the path is simply not found; both must exit 1 cleanly."""
+    said = "database not found" if sys.platform == "win32" else "cannot inspect the database path"
     for argv in (["worth"], ["status"]):
         result = subprocess.run(
             [sys.executable, "-m", "anneal_memory.cli",
@@ -4358,4 +4361,4 @@ def test_db_path_naming_an_unknown_user_refuses_without_a_traceback():
         )
         assert result.returncode == 1, (argv, result.stdout, result.stderr)
         assert "Traceback" not in result.stderr, result.stderr
-        assert "cannot inspect the database path" in result.stderr, result.stderr
+        assert said in result.stderr, result.stderr

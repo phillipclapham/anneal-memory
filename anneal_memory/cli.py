@@ -40,6 +40,7 @@ Zero dependencies beyond Python stdlib.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
@@ -283,6 +284,9 @@ def _json_parent() -> argparse.ArgumentParser:
 
 # -- Store factory --
 
+_DB_ABSENT_ERRNOS = (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP)
+
+
 def _existing_db_path(args: argparse.Namespace, *, require_file: bool = False) -> Path:
     """The --db path, or exit 1 when no database is there. Every command that opens
     the episodic store through ``_open_store`` refuses a missing path here; ``init``,
@@ -294,15 +298,22 @@ def _existing_db_path(args: argparse.Namespace, *, require_file: bool = False) -
     at it from the file's contents refused real stores and accepted impostors (four
     review rounds, 10-03); binding the outcome log to a persisted store identity is
     the design that answers it."""
+    exists = is_file = False
+    db_path = Path(args.db)
     try:
-        db_path = Path(args.db).expanduser()
+        db_path = db_path.expanduser()
         st = db_path.stat()
-    except (FileNotFoundError, NotADirectoryError):  # what Path.exists() reads as absent
-        exists = False
-        is_file = False
-    except (OSError, RuntimeError) as exc:
-        # PermissionError on an unreadable parent; RuntimeError from expanduser()
-        # when "~user" names no user or no home directory can be found.
+    except ValueError:  # an embedded NUL; Path.exists() reads it as absent
+        pass
+    except OSError as exc:
+        # Path.exists() reads these errnos as absent (measured on 3.13: ENOENT,
+        # ENOTDIR, ELOOP; EBADF by its source); anything else, e.g. EACCES on an
+        # unreadable parent, is an inspection failure.
+        if exc.errno not in _DB_ABSENT_ERRNOS:
+            print(f"Error: cannot inspect the database path {args.db}: {exc}", file=sys.stderr)
+            sys.exit(1)
+    except RuntimeError as exc:
+        # expanduser() when "~user" names no user or no home directory is found.
         print(f"Error: cannot inspect the database path {args.db}: {exc}", file=sys.stderr)
         sys.exit(1)
     else:

@@ -90,8 +90,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - Parsing and save checks (review round): facts are `- `, `* ` or `1. ` bullets, and an indented
   line under a fact continues it (carried and re-inserted with it); any other line in the section
   draws a "not tracked" warning. Every `## Durable Facts` section counts: a second one's facts are
-  protected, and a wrap with several has them merged into the first, with a warning. Headers
-  inside fenced code blocks never count. CR and CRLF are read as LF, a bullet-form drop marker is
+  protected, and a wrap with several has them merged into the first, with a warning. A durable
+  section header is the exact heading (`## Durable Facts`, case as the schema writes it), so
+  `## Archived Durable Facts` is not one. CR and CRLF are read as LF, a bullet-form drop marker is
   always a marker, and a rebuilt text keeps its dominant line ending. A rebuilt section has its
   runs of blank lines collapsed. The reword check caches token sets, names at most 20 pairs and
   summarises the rest. New warnings: a re-inserted line that may be superseded by a new one
@@ -100,6 +101,34 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   wrote; an unknown marker now names the closest prior line. `– cues:` (en dash) is accepted.
   The save result gains `durable_warnings` (present when the schema has a durable section), and
   the wrap package lists the current pending-transition lines for the composer to re-check.
+- Review round 2: the catastrophic-shrink gate's whole-document backstop leaves the durable
+  section out of both sides, as it does the graduating section, so dropping durable lines by
+  marker cannot trip it. A cue suffix is read only on a fact's last physical line, and the fact's
+  identity includes its continuation lines, so a continuation under a cue line is never swallowed
+  as cues. The durable section is measured in raw chars (CRLF counts two), the same basis as
+  the document length the backstop subtracts it from. An optional heading counts toward header ambiguity only as an exact header, so
+  `## Decisions (durable facts)` is a Decisions header. Re-inserted lines are byte-for-byte
+  (trailing spaces kept). Closest-line hints for unknown markers are capped at 20, with one
+  summary line for the rest. The audit `durable_dropped` / `durable_reinserted` entries carry the
+  whole fact, every physical line joined with `\n`; warnings show a multi-line fact on one line,
+  joined with ` / `. A marker that drops more than one prior fact (a first line several facts
+  share) warns, naming them.
+- Known open: (a) a writer calling bare `Store.save_continuity()` between a validated save's read
+  and its rename is overwritten, durable lines included; this holds for all continuity content,
+  and bare save is the documented bypass of the pipeline. (b) The save-time durable budget is
+  computed from the schema's default `max_chars`, not from a `max_chars` passed to
+  `prepare_wrap`, which is not frozen into the wrap. (c) The durable parser is fence-unaware,
+  like `validate_structure` and every other section header: a `## ` line inside a fenced code
+  block is a header. Measured on this build: a `## Durable Facts` header inside a fenced block in
+  another section is read as a durable section. If the real section is left out, an omitted prior
+  fact is re-inserted there, after the block's closing fence (at the end of that section); if the
+  real section is kept, the two are merged, so the fenced header is removed and the block's
+  remaining lines (its closing fence included) move into the real section, leaving the block
+  in the other section unclosed. Either way the fenced `- ` lines become tracked durable facts,
+  and the fence line draws a "not tracked" warning. A heading-like line inside a fenced block
+  within the durable section (```` ``` ```` then `## Notes`) ends the section: lines after it,
+  including `- ` facts after the block, are not durable facts, and are dropped without a durable
+  warning if a later wrap leaves them out.
 - Migration manifest entry `AM-DURABLE-FACTS` (0.9.27): what the section is, that new stores get
   it and an existing store gets it only when its operator re-runs
   `anneal-memory --db <path> set-schema <its schema name>` (or `store.set_section_schema(...)`), and a

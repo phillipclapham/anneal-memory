@@ -26,8 +26,8 @@ the new durable section, ``[drop-durable: <exact line text>]``, naming the
 fact or its full first line; the save removes the marker and records the drop in
 the audit chain.
 
-Lines inside fenced code blocks (``` or ~~~) never start or end a section.
-CR and CRLF line endings are read as LF; a rebuilt text takes the dominant
+The parser is fence-unaware, like ``validate_structure``: a ``## `` line
+inside a code block is a header like any other. CR and CRLF line endings are read as LF; a rebuilt text takes the dominant
 line ending of the text it was built from.
 
 This module imports only :mod:`anneal_memory.schema`, so the save pipeline and
@@ -62,9 +62,9 @@ DROP_DURABLE_RE = re.compile(
     r"^[ \t]*(?:(?:[-*]|\d+\.)[ \t]+)?\[drop-durable:[ \t]*(.*?)[ \t]*\][ \t]*$",
     re.IGNORECASE,
 )
-# A fence opener/closer (CommonMark: up to three spaces of indent).
-_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _NEWLINES_RE = re.compile(r"\r\n|\r")
+# Any line ending, for measuring raw chars line by line.
+_LINE_END_RE = re.compile(r"\r\n|\r|\n")
 # A graduation line (``name | 2x (date)``) or an evidence tag: pattern syntax.
 _PATTERN_SHAPE_RE = re.compile(r"\|[ \t]*\d+x\b|\[evidence:", re.IGNORECASE)
 # A fact that describes a change that has not happened yet.
@@ -97,11 +97,13 @@ class DurableFact:
     """One fact of a durable section.
 
     Attributes:
-        line: the raw first line (trailing whitespace removed).
+        line: the raw first line, byte-for-byte (LF line endings).
         fact: the fact text, bullet and cue marker removed, continuation lines
             joined with single spaces.
-        cues: the lowercased, trimmed cue words; ``()`` with no cue marker.
-        continuation: the raw indented lines that continue the fact.
+        cues: the lowercased, trimmed cue words of a cue marker on the fact's
+            LAST physical line; ``()`` with none.
+        continuation: the raw indented lines that continue the fact,
+            byte-for-byte.
     """
 
     line: str
@@ -113,6 +115,11 @@ class DurableFact:
     def raw_lines(self) -> list[str]:
         """Every raw line of the fact, first line first."""
         return [self.line, *self.continuation]
+
+    @property
+    def raw(self) -> str:
+        """The whole fact as written: its raw lines joined with ``\\n``."""
+        return "\n".join(self.raw_lines)
 
 
 def match_headings(line_lower: str, headings: set[str]) -> list[str]:
@@ -148,53 +155,29 @@ def _dominant_newline(text: str) -> str:
     return max((lf, "\n"), (crlf, "\r\n"), (cr, "\r"), key=lambda p: p[0])[1]
 
 
-def _fenced(lines: list[str]) -> list[bool]:
-    """Per line: is it part of a fenced code block (fence lines included)?"""
-    out: list[bool] = []
-    fence: str | None = None
-    for line in lines:
-        m = _FENCE_RE.match(line)
-        if fence is None:
-            if m is not None:
-                fence = m.group(1)
-                out.append(True)
-            else:
-                out.append(False)
-            continue
-        out.append(True)
-        stripped = line.strip()
-        if (
-            m is not None
-            and stripped
-            and set(stripped) == {fence[0]}
-            and len(stripped) >= len(fence)
-        ):
-            fence = None
-    return out
+def _headers(lines: list[str]) -> list[int]:
+    return [i for i, line in enumerate(lines) if line.startswith("## ")]
 
 
-def _headers(lines: list[str], fenced: list[bool]) -> list[int]:
-    return [i for i, line in enumerate(lines) if line.startswith("## ") and not fenced[i]]
+def _is_durable_header(line: str, heading: str) -> bool:
+    """A durable section header is the EXACT heading (stripped, case as the
+    schema writes it): ``## Archived Durable Facts`` or
+    ``## Decisions (durable facts)`` is not one."""
+    return line.startswith("## ") and line[3:].strip() == heading
 
 
-def section_spans(
-    lines: list[str], schema: list[SectionSpec], fenced: list[bool] | None = None
-) -> list[tuple[int, int]]:
+def section_spans(lines: list[str], schema: list[SectionSpec]) -> list[tuple[int, int]]:
     """``(header_index, end_index)`` of EVERY durable section in ``lines`` (LF
-    lines): each ``## `` header outside a code fence that matches the durable
-    heading and no other schema heading, up to the next such header (or the
-    end). ``[]`` when the schema or the text has none."""
+    lines): each header that is exactly the durable heading, up to the next
+    ``## `` header (or the end). ``[]`` when the schema or the text has none."""
     spec = durable_spec(schema)
     if spec is None:
         return []
-    if fenced is None:
-        fenced = _fenced(lines)
-    target = spec["heading"].lower()
-    all_lower = {s["heading"].lower() for s in schema}
-    headers = _headers(lines, fenced)
+    heading = spec["heading"]
+    headers = _headers(lines)
     spans: list[tuple[int, int]] = []
     for k, i in enumerate(headers):
-        if match_headings(lines[i].lower(), all_lower) == [target]:
+        if _is_durable_header(lines[i], heading):
             end = headers[k + 1] if k + 1 < len(headers) else len(lines)
             spans.append((i, end))
     return spans
@@ -214,15 +197,20 @@ def split_cues(text: str) -> tuple[str, tuple[str, ...]]:
 
 
 def _make_fact(first: str, body: str, continuation: list[str]) -> DurableFact | None:
-    joined = " ".join([body, *(c.strip() for c in continuation)])
-    fact, cues = split_cues(joined)
+    """A fact from its raw physical lines. A cue suffix is recognised only on
+    the LAST physical line, so a continuation under a line that ends in cues
+    is part of the fact (and of its identity), never swallowed as cues. The raw
+    lines are kept byte-for-byte; only the comparison key is normalised."""
+    parts = [body, *(c.strip() for c in continuation)]
+    last_fact, cues = split_cues(parts[-1])
+    fact = _norm_ws(" ".join([*parts[:-1], last_fact]))
     if not fact:
         return None
     return DurableFact(
-        line=first.rstrip(),
-        fact=_norm_ws(fact),
+        line=first,
+        fact=fact,
         cues=cues,
-        continuation=tuple(c.rstrip() for c in continuation),
+        continuation=tuple(continuation),
     )
 
 
@@ -236,7 +224,7 @@ class _Item:
     target: str = ""
 
 
-def _items(body: list[str], fenced: list[bool]) -> list[_Item]:
+def _items(body: list[str]) -> list[_Item]:
     """Classify a section body's lines: facts (with their continuation lines),
     drop markers, blanks, and anything else."""
     items: list[_Item] = []
@@ -254,11 +242,7 @@ def _items(body: list[str], fenced: list[bool]) -> list[_Item]:
             items.append(_Item("fact", [first, *cont], fact=fact))
         pending = None
 
-    for line, in_fence in zip(body, fenced):
-        if in_fence:
-            _close()
-            items.append(_Item("other", [line]))
-            continue
+    for line in body:
         if not line.strip():
             _close()
             items.append(_Item("blank", [line]))
@@ -286,11 +270,11 @@ def _items(body: list[str], fenced: list[bool]) -> list[_Item]:
 
 
 def _section_items(
-    lines: list[str], spans: list[tuple[int, int]], fenced: list[bool]
+    lines: list[str], spans: list[tuple[int, int]]
 ) -> list[_Item]:
     out: list[_Item] = []
     for start, end in spans:
-        out += _items(lines[start + 1:end], fenced[start + 1:end])
+        out += _items(lines[start + 1:end])
     return out
 
 
@@ -305,11 +289,10 @@ def parse_durable_facts(
     if not continuity_text:
         return []
     lines = _normalise(continuity_text).split("\n")
-    fenced = _fenced(lines)
-    spans = section_spans(lines, schema, fenced)
+    spans = section_spans(lines, schema)
     return [
         it.fact
-        for it in _section_items(lines, spans, fenced)
+        for it in _section_items(lines, spans)
         if it.kind == "fact" and it.fact is not None
     ]
 
@@ -327,16 +310,19 @@ def pending_transitions(
 
 
 def section_chars(text: str | None, schema: list[SectionSpec]) -> int:
-    """Chars of the durable section(s) (header included, as
-    ``measure_sections`` counts a section, LF line endings), 0 when the schema
-    or the text has none."""
+    """RAW chars of the durable section(s) of ``text``: header included, each
+    line counted with the line ending it actually has (CRLF counts two). This
+    is the same basis as ``len(text)``, so the shrink gate can subtract it.
+    0 when the schema or the text has none."""
     if not text:
         return 0
-    lines = _normalise(text).split("\n")
+    parts = _LINE_END_RE.split(text)
+    seps = _LINE_END_RE.findall(text)
+    seps.append("")  # the last line has no ending
     return sum(
-        len(line) + 1
-        for start, end in section_spans(lines, schema)
-        for line in lines[start:end]
+        len(parts[i]) + len(seps[i])
+        for start, end in section_spans(parts, schema)
+        for i in range(start, end)
     )
 
 
@@ -375,6 +361,8 @@ class DurableReport:
     reinserted: list[str]
     dropped: list[str]
     unknown_drops: list[tuple[str, str | None]]  # (target, closest prior line)
+    unknown_drops_more: int
+    multi_drops: list[tuple[str, list[str]]]  # (marker target, facts it dropped)
     own_lines_dropped: list[str]
     recreated: bool
     merged_sections: int
@@ -421,15 +409,14 @@ def enforce_durable_facts(
 
     newline = _dominant_newline(new_text)
     lines = _normalise(new_text).split("\n")
-    fenced = _fenced(lines)
-    spans = section_spans(lines, schema, fenced)
-    items = _section_items(lines, spans, fenced)
+    spans = section_spans(lines, schema)
+    items = _section_items(lines, spans)
 
     in_section = {i for s, e in spans for i in range(s + 1, e)}
     stray = [
         line.strip()
         for i, line in enumerate(lines)
-        if i not in in_section and not fenced[i] and DROP_DURABLE_RE.match(line)
+        if i not in in_section and DROP_DURABLE_RE.match(line)
     ]
 
     # A marker names the fact part or the full first line (with or without its
@@ -455,14 +442,16 @@ def enforce_durable_facts(
     dropped_keys = {
         k for f, k in prior if k in marker_keys or _first_body(f) in marker_keys
     }
-    dropped = [f.line for f, k in prior if k in dropped_keys]
-    matched_targets = {
-        marker_keys[key]
-        for f, k in prior
-        if k in dropped_keys
-        for key in (k, _first_body(f))
-        if key in marker_keys
-    }
+    dropped = [f.raw for f, k in prior if k in dropped_keys]
+    # Which prior facts each marker dropped: a marker naming a first line can
+    # match several facts that share it (their continuations differ).
+    matches_by_target: dict[str, list[str]] = {}
+    for f, k in prior:
+        if k not in dropped_keys:
+            continue
+        for t in {marker_keys[key] for key in (k, _first_body(f)) if key in marker_keys}:
+            matches_by_target.setdefault(t, []).append(f.raw)
+    matched_targets = set(matches_by_target)
     unknown_targets = list(dict.fromkeys(
         [t for t in marker_keys.values() if t not in matched_targets] + empty_markers
     ))
@@ -472,8 +461,11 @@ def enforce_durable_facts(
     for f, k in prior:
         candidates.setdefault(k, f.line)
         candidates.setdefault(_first_body(f), f.line)
+    # Bounded: a closest-line hint for at most _PAIR_WARN_LIMIT markers (each
+    # costs a pass over the prior lines); the rest go into one summary line.
     unknown: list[tuple[str, str | None]] = []
-    for t in unknown_targets:
+    unknown_more = max(len(unknown_targets) - _PAIR_WARN_LIMIT, 0)
+    for t in unknown_targets[:_PAIR_WARN_LIMIT]:
         tb2 = _BULLET_RE.match(t)
         probe = _norm_ws(split_cues(tb2.group(1) if tb2 is not None else t)[0])
         close = difflib.get_close_matches(probe, list(candidates), n=1, cutoff=0.5)
@@ -526,7 +518,7 @@ def enforce_durable_facts(
         order = [s["heading"].lower() for s in schema]
         later = set(order[order.index(heading.lower()) + 1:])
         insert_at: int | None = None
-        for i in _headers(lines, fenced):
+        for i in _headers(lines):
             matched = match_headings(lines[i].lower(), all_lower)
             if len(matched) == 1 and matched[0] in later:
                 insert_at = i
@@ -593,9 +585,11 @@ def enforce_durable_facts(
 
     return text, DurableReport(
         heading=heading,
-        reinserted=[f.line for f in missing],
+        reinserted=[f.raw for f in missing],
         dropped=dropped,
         unknown_drops=unknown,
+        unknown_drops_more=unknown_more,
+        multi_drops=[(t, r) for t, r in matches_by_target.items() if len(r) > 1],
         own_lines_dropped=own_dropped,
         recreated=recreated,
         merged_sections=len(spans) if len(spans) > 1 else 0,
@@ -614,8 +608,14 @@ def enforce_durable_facts(
     )
 
 
+def _one_line(raw: str) -> str:
+    """A fact's raw lines on one line, for a warning: joined with `` / ``."""
+    return " / ".join(part.strip() for part in raw.split("\n"))
+
+
 def report_warnings(report: DurableReport) -> list[str]:
-    """The post-commit warning texts for one save's :class:`DurableReport`."""
+    """The post-commit warning texts for one save's :class:`DurableReport`.
+    A multi-line fact is shown on one line, its lines joined with `` / ``."""
     h = report.heading
     marker = "`[drop-durable: <exact line text>]`"
     out: list[str] = []
@@ -633,7 +633,7 @@ def report_warnings(report: DurableReport) -> list[str]:
         out.append(
             f"Durable facts: {where} {len(report.reinserted)} line(s) of the prior "
             f"continuity, re-inserted verbatim: "
-            + " | ".join(report.reinserted)
+            + " | ".join(_one_line(r) for r in report.reinserted)
             + f". If a fact changed, drop the old line with the marker, {marker} "
             f"in `## {h}`; that marker is the only way a durable line is removed."
         )
@@ -648,6 +648,19 @@ def report_warnings(report: DurableReport) -> list[str]:
             f"`## {h}` section; the marker was removed and nothing else changed. "
             f"Matching is exact (whitespace aside), on the fact or the whole line."
             + hint
+        )
+    if report.unknown_drops_more:
+        out.append(
+            f"Durable facts: and {report.unknown_drops_more} more drop marker(s) "
+            f"named no line of the prior `## {h}` section; they were removed and "
+            f"nothing else changed."
+        )
+    for target, raws in report.multi_drops:
+        out.append(
+            f"Durable facts: `[drop-durable: {target}]` matched {len(raws)} prior "
+            f"facts and dropped them all: "
+            + " | ".join(_one_line(r) for r in raws)
+            + ". To drop only one, name its whole fact."
         )
     for line in report.own_lines_dropped:
         out.append(

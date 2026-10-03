@@ -160,47 +160,72 @@ class OutcomeLog:
         every record. Records for one ``exposure_id`` merge when read (see
         :meth:`latest`).
         """
-        _check_id(exposure_id, "exposure_id")
-        if outcome is not None and outcome not in OUTCOME_VALUES:
-            raise ValueError(
-                f"outcome must be one of {OUTCOME_VALUES} or None (got {outcome!r})."
-            )
-        merged: dict[tuple[str, str], ExposureLabel] = {}
-        for item in items:
-            if not isinstance(item, ExposureLabel):
-                raise ValueError(f"items must be ExposureLabel values (got {item!r}).")
-            merged[(item.kind, item.ref)] = item
-        if not merged and outcome is None:
-            raise ValueError("a record needs at least one labelled item or an outcome.")
-        seen: dict[tuple[str, str], ExposedRef] = {}
-        for ex in exposed:
-            if not isinstance(ex, ExposedRef):
-                raise ValueError(f"exposed must be ExposedRef values (got {ex!r}).")
-            seen[(ex.kind, ex.ref)] = ex
-        when = (ts or datetime.now(timezone.utc)).astimezone(timezone.utc)
-        rec: dict[str, Any] = {
-            "v": OUTCOME_LOG_VERSION,
-            "exposure_id": exposure_id,
-            "ts": when.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "outcome": outcome,
-            "items": [
-                {"kind": i.kind, "ref": i.ref, "followed": i.followed}
-                for i in merged.values()
-            ],
-        }
-        if seen:
-            rec["exposed"] = [{"kind": e.kind, "ref": e.ref} for e in seen.values()]
-        line = (json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+        rec = _build_record(exposure_id, items, outcome, exposed, ts)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
         try:
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_EX)
-            view = memoryview(line)
-            while view:
-                written = os.write(fd, view)
-                view = view[written:]
-            os.fsync(fd)
+            _append(fd, rec)
+        finally:
+            os.close(fd)
+        return rec
+
+    def record_if_missing(
+        self,
+        exposure_id: str,
+        items: Sequence[ExposureLabel],
+        *,
+        outcome: str | None = None,
+        exposed: Sequence[ExposedRef] = (),
+        ts: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        """Append only what the log does not already hold for this exposure, and
+        return the appended record, or ``None`` when nothing was missing.
+
+        "Missing" is judged per EXPOSURE: ``items`` are written only when the
+        exposure has no label at all yet (a judge who labelled any item judged the
+        exposure, and a second judge's labels must not be mixed into it); ``outcome``
+        only when the exposure has none. ``exposed`` rides along with whatever is
+        written and is unioned on read, but it is never written on its own: a
+        record with no label and no outcome is the shape every released reader
+        skips as a bad line, so when only ``exposed`` would be new this returns
+        ``None`` and writes nothing. Arguments are validated exactly as
+        :meth:`record` validates them, before the log is touched.
+
+        The read and the append are ONE span of the same exclusive lock
+        :meth:`record` takes, so a :meth:`record` from another process (a human
+        correction) lands either wholly before this call's read, where it is seen
+        and kept, or wholly after its append, where it wins the merge. A
+        :meth:`latest` followed by :meth:`record` is two spans and can overwrite
+        it. Each call reads the whole log.
+        """
+        rec = _build_record(exposure_id, items, outcome, exposed, ts)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            chunks: list[bytes] = []
+            os.lseek(fd, 0, os.SEEK_SET)
+            while True:
+                chunk = os.read(fd, 1 << 16)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            text = b"".join(chunks).decode("utf-8", errors="replace")
+            records = [
+                r for r in (_parse_record(line) for line in text.split("\n") if line.strip())
+                if r is not None
+            ]
+            cur = _merge_records(records).get(exposure_id)
+            if cur and cur["items"]:
+                rec["items"] = []
+            if cur and cur["outcome"] is not None:
+                rec["outcome"] = None
+            if not rec["items"] and rec["outcome"] is None:
+                return None
+            _append(fd, rec)
         finally:
             os.close(fd)
         return rec
@@ -232,23 +257,81 @@ class OutcomeLog:
         carries ``items``, ``exposed`` and ``outcome``.
         """
         records, bad = self.read()
-        out: dict[str, dict[str, Any]] = {}
-        for rec in records:
-            cur = out.setdefault(
-                rec["exposure_id"],
-                {"exposure_id": rec["exposure_id"], "outcome": None, "_items": {},
-                 "_exposed": {}},
-            )
-            for i in rec["items"]:
-                cur["_items"][(i["kind"], i["ref"])] = i
-            for e in rec.get("exposed") or ():
-                cur["_exposed"][(e["kind"], e["ref"])] = e
-            if rec.get("outcome") is not None:
-                cur["outcome"] = rec["outcome"]
-        for cur in out.values():
-            cur["items"] = list(cur.pop("_items").values())
-            cur["exposed"] = list(cur.pop("_exposed").values())
-        return out, bad
+        return _merge_records(records), bad
+
+
+def _build_record(
+    exposure_id: str,
+    items: Sequence[ExposureLabel],
+    outcome: str | None,
+    exposed: Sequence[ExposedRef],
+    ts: datetime | None,
+) -> dict[str, Any]:
+    """Validate one record's arguments and return the record :meth:`OutcomeLog.record`
+    would store. Raises ``ValueError`` before anything is written."""
+    _check_id(exposure_id, "exposure_id")
+    if outcome is not None and outcome not in OUTCOME_VALUES:
+        raise ValueError(
+            f"outcome must be one of {OUTCOME_VALUES} or None (got {outcome!r})."
+        )
+    merged: dict[tuple[str, str], ExposureLabel] = {}
+    for item in items:
+        if not isinstance(item, ExposureLabel):
+            raise ValueError(f"items must be ExposureLabel values (got {item!r}).")
+        merged[(item.kind, item.ref)] = item
+    if not merged and outcome is None:
+        raise ValueError("a record needs at least one labelled item or an outcome.")
+    seen: dict[tuple[str, str], ExposedRef] = {}
+    for ex in exposed:
+        if not isinstance(ex, ExposedRef):
+            raise ValueError(f"exposed must be ExposedRef values (got {ex!r}).")
+        seen[(ex.kind, ex.ref)] = ex
+    when = (ts or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    rec: dict[str, Any] = {
+        "v": OUTCOME_LOG_VERSION,
+        "exposure_id": exposure_id,
+        "ts": when.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "outcome": outcome,
+        "items": [
+            {"kind": i.kind, "ref": i.ref, "followed": i.followed}
+            for i in merged.values()
+        ],
+    }
+    if seen:
+        rec["exposed"] = [{"kind": e.kind, "ref": e.ref} for e in seen.values()]
+    return rec
+
+
+def _append(fd: int, rec: dict[str, Any]) -> None:
+    """Write one record as one line to ``fd`` (opened ``O_APPEND``, already locked)
+    and fsync it."""
+    line = (json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+    view = memoryview(line)
+    while view:
+        written = os.write(fd, view)
+        view = view[written:]
+    os.fsync(fd)
+
+
+def _merge_records(records: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Merge parsed records per exposure id, in order (see :meth:`OutcomeLog.latest`)."""
+    out: dict[str, dict[str, Any]] = {}
+    for rec in records:
+        cur = out.setdefault(
+            rec["exposure_id"],
+            {"exposure_id": rec["exposure_id"], "outcome": None, "_items": {},
+             "_exposed": {}},
+        )
+        for i in rec["items"]:
+            cur["_items"][(i["kind"], i["ref"])] = i
+        for e in rec.get("exposed") or ():
+            cur["_exposed"][(e["kind"], e["ref"])] = e
+        if rec.get("outcome") is not None:
+            cur["outcome"] = rec["outcome"]
+    for cur in out.values():
+        cur["items"] = list(cur.pop("_items").values())
+        cur["exposed"] = list(cur.pop("_exposed").values())
+    return out
 
 
 def _parse_record(line: str) -> dict[str, Any] | None:
@@ -529,6 +612,11 @@ class WorthRow:
     ``failure``: a label means something judged the item, an unlabelled exposure
     only that it was surfaced. An unlabelled crystal credits nothing to the
     episodes it cites.
+
+    ``exposed_unrecorded`` (crystals only) counts the receipts passed to
+    :func:`compute_worth` that exposed this crystal under an ``event_id`` with NO
+    record in the outcome log at all. ``None`` when no receipts were passed, and
+    always ``None`` for an episode, because receipts list crystals only.
     """
 
     kind: str
@@ -543,6 +631,7 @@ class WorthRow:
     unlabelled_success: int = 0
     unlabelled_failure: int = 0
     unlabelled_unknown: int = 0
+    exposed_unrecorded: int | None = None
     table: dict[str, dict[str, int]] = field(
         default_factory=lambda: {
             label: {"success": 0, "failure": 0, "unknown": 0} for label in FOLLOWED_VALUES
@@ -556,6 +645,8 @@ class WorthRow:
     def as_dict(self) -> dict[str, Any]:
         d = dict(self.__dict__)
         d["table"] = {k: dict(v) for k, v in self.table.items()}
+        if d["exposed_unrecorded"] is None:  # no receipts passed: the output is unchanged
+            del d["exposed_unrecorded"]
         return d
 
     def _count_unlabelled(self, outcome: str | None) -> None:
@@ -583,23 +674,76 @@ class WorthReport:
     """The full report. ``crystals`` covers every live crystal (zero rows
     included) plus any labelled or exposed name that is no longer live
     (``live`` False).
-    ``exposures`` counts distinct exposure ids after merging."""
+    ``exposures`` counts distinct exposure ids after merging. When receipts were
+    passed, ``receipts_read`` counts the distinct exposing receipts read and
+    ``receipts_skipped`` the ones that were not a dict or carried no ``event_id``
+    (they cannot be matched to the log, so they are in no row); both are ``None``
+    otherwise."""
 
     crystals: list[WorthRow]
     episodes: list[WorthRow]
     exposures: int
     lines_skipped: int
+    receipts_read: int | None = None
+    receipts_skipped: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "exposures": self.exposures,
             "lines_skipped": self.lines_skipped,
             "crystals": [r.as_dict() for r in self.crystals],
             "episodes": [r.as_dict() for r in self.episodes],
         }
+        if self.receipts_read is not None:
+            d["receipts_read"] = self.receipts_read
+            d["receipts_skipped"] = self.receipts_skipped
+        return d
 
 
-def compute_worth(log: OutcomeLog, crystal_store: CrystalStore | None = None) -> WorthReport:
+def load_receipts(
+    paths: Iterable[str | os.PathLike[str]],
+) -> tuple[list[dict[str, Any]], int, list[str]]:
+    """Read retrieval receipts (JSONL) for :func:`compute_worth`: the receipts, the
+    count of lines that are not a JSON object, and the paths that do not exist.
+    Raises ``FileNotFoundError`` when none of the paths exists, so a wrong path
+    cannot read as "nothing exposed". Pass the live log first and its rotated
+    backup after it, as for :func:`fold_surfaced`; duplicates are dropped by
+    ``event_id`` in :func:`compute_worth`."""
+    ps = [Path(p) for p in paths]
+    if not ps:
+        raise ValueError("load_receipts needs at least one receipt path.")
+    receipts: list[dict[str, Any]] = []
+    bad = 0
+    missing: list[str] = []
+    for path in ps:
+        try:
+            f = open(path, "r", encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            missing.append(str(path))
+            continue
+        with f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    bad += 1
+                    continue
+                if isinstance(r, dict):
+                    receipts.append(r)
+                else:
+                    bad += 1
+    if len(missing) == len(ps):
+        raise FileNotFoundError(f"none of the receipt paths exists ({', '.join(missing)}).")
+    return receipts, bad, missing
+
+
+def compute_worth(
+    log: OutcomeLog,
+    crystal_store: CrystalStore | None = None,
+    receipts: Iterable[Mapping[str, Any]] | None = None,
+) -> WorthReport:
     """Build the report-only Worth counters from the outcome log.
 
     Uses the merged record per exposure id (:meth:`OutcomeLog.latest`). Every
@@ -611,6 +755,14 @@ def compute_worth(log: OutcomeLog, crystal_store: CrystalStore | None = None) ->
     episode is counted once per exposure. An item in the record's ``exposed``
     list that this exposure did not label (and, for an episode, did not credit
     through a labelled crystal) counts in the ``unlabelled_*`` columns only.
+
+    ``receipts`` (optional; the harness's retrieval receipts, e.g. from
+    :func:`load_receipts`) adds ``exposed_unrecorded`` per crystal: each distinct
+    ``event_id`` that exposed the crystal (:func:`receipt_crystal_names`) and has no
+    record in the log. It is keyed by event id only: an exposure WITH a record that
+    neither labels nor lists the crystal is not counted there. The window is
+    whatever receipts are passed, so receipts older than the log count too. A
+    receipt name that is not a live crystal gets a row with ``live`` False.
     Nothing here writes anywhere.
     """
     latest, bad = log.latest()
@@ -631,6 +783,7 @@ def compute_worth(log: OutcomeLog, crystal_store: CrystalStore | None = None) ->
 
     crystals: dict[str, WorthRow] = {}
     episodes: dict[str, WorthRow] = {}
+    with_receipts = receipts is not None
 
     def crow(name: str) -> WorthRow:
         if name not in crystals:
@@ -642,6 +795,7 @@ def compute_worth(log: OutcomeLog, crystal_store: CrystalStore | None = None) ->
                 last_surfaced_on=c.get("last_surfaced_on") if c else None,
                 last_activated_on=c.get("last_activated_on") if c else None,
                 live=c is not None,
+                exposed_unrecorded=0 if with_receipts else None,
             )
         return crystals[name]
 
@@ -679,9 +833,37 @@ def compute_worth(log: OutcomeLog, crystal_store: CrystalStore | None = None) ->
             row = crow(e["ref"]) if e["kind"] == "crystal" else erow(e["ref"])
             row._count_unlabelled(outcome)
 
+    receipts_read: int | None = None
+    receipts_skipped: int | None = None
+    if receipts is not None:
+        receipts_read = receipts_skipped = 0
+        seen_events: set[str] = set()
+        for receipt in receipts:
+            if not isinstance(receipt, Mapping):
+                receipts_skipped += 1
+                continue
+            names = receipt_crystal_names(receipt)
+            if not names:
+                continue  # not an exposure
+            event_id = receipt.get("event_id")
+            if not isinstance(event_id, str) or not event_id:
+                receipts_skipped += 1
+                continue
+            if event_id in seen_events:  # a rotated copy of a receipt already read
+                continue
+            seen_events.add(event_id)
+            receipts_read += 1
+            if event_id in latest:
+                continue
+            for name in names:
+                row = crow(name)
+                row.exposed_unrecorded = (row.exposed_unrecorded or 0) + 1
+
     return WorthReport(
         crystals=sorted(crystals.values(), key=lambda r: r.ref),
         episodes=sorted(episodes.values(), key=lambda r: r.ref),
         exposures=len(latest),
         lines_skipped=bad,
+        receipts_read=receipts_read,
+        receipts_skipped=receipts_skipped,
     )

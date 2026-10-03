@@ -33,12 +33,31 @@ import logging
 import os
 import stat
 import re
+import threading
 import time
 import zlib
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
+
+try:  # POSIX advisory locking; absent on Windows (see AuditTrail._manifest_lock).
+    import fcntl
+except ImportError:  # pragma: no cover - exercised only on non-POSIX platforms
+    fcntl = None  # type: ignore[assignment]
+
+# ``flock`` raising one of these means "advisory locking is unavailable on this
+# filesystem" (some NFS configs), not a fault: the manifest lock then degrades
+# to no lock, as ``store.continuity_lock`` does. Duplicated rather than imported
+# from ``store`` because this module imports none of its siblings.
+_LOCK_UNAVAILABLE_ERRNOS = frozenset(
+    e for e in (
+        getattr(errno, "ENOLCK", None),
+        getattr(errno, "EOPNOTSUPP", None),
+        getattr(errno, "ENOTSUP", None),
+    ) if e is not None
+)
 
 logger = logging.getLogger("anneal-memory")
 
@@ -134,6 +153,12 @@ def _quarantine_markers(audit_dir: Path, stem: str) -> list[str]:
         return _markers_in([p.name for p in audit_dir.iterdir()], stem)
     except FileNotFoundError:
         return []
+
+
+class _AuditLockError(OSError):
+    """The manifest lock could not be taken for a reason other than "this
+    filesystem has no advisory locks" (that case degrades to no lock). Callers
+    that would quarantine or repair refuse instead of proceeding unlocked."""
 
 
 class _ManifestUnavailable(OSError):
@@ -456,6 +481,14 @@ class AuditTrail:
         # anneal touch; the honest thing meanwhile is that this comment says
         # so rather than the docstring implying a guarantee it does not have.
         self._dropped_since_last: int = 0
+        # The cross-process manifest lock (spore-1030), reentrant within this
+        # instance: repair holds it and calls ``_load_manifest`` and
+        # ``_save_manifest``, which take it too. A second ``flock`` on a fresh
+        # descriptor in the same process would block on the first, so nesting
+        # reuses the held descriptor instead of opening another.
+        self._lock_mutex = threading.RLock()
+        self._lock_fd: int | None = None
+        self._lock_depth = 0
 
     # -- Public API --
 
@@ -1439,11 +1472,26 @@ class AuditTrail:
         file's first entry, does not start at genesis, its starting hash is recorded as ``chain_anchor`` together with
         ``chain_anchor_recovered: true``, and :meth:`verify` then reports
         ``anchor_trusted=False``.
+
+        Holds the manifest lock (``_manifest_lock``) from its first listing to
+        its return, so a writer in another process cannot quarantine the
+        rebuilt manifest while repair runs, or after it from bytes it read
+        before (spore-1030). Where the lock cannot be taken for any reason
+        other than the platform having none, repair refuses.
         """
-        db_path = Path(db_path)
+        trail = cls(Path(db_path))
+        try:
+            with trail._manifest_lock():
+                return cls._repair_locked(trail)
+        except _AuditLockError as e:
+            return AuditRepairResult(repaired=False, error=f"{e}; nothing was written.")
+
+    @classmethod
+    def _repair_locked(cls, trail: "AuditTrail") -> AuditRepairResult:
+        """:meth:`repair_manifest`'s body; the caller holds the manifest lock."""
+        db_path = trail._db_path
         stem = db_path.stem
         audit_dir = db_path.parent
-        trail = cls(db_path)
         # Every refusal ends with this. Once repair has quarantined the manifest
         # itself, "nothing was written" is false (codex, re-pass 598cd40ffcfcbc18).
         nothing = "nothing was written."
@@ -1638,6 +1686,73 @@ class AuditTrail:
     def _manifest_path(self) -> Path:
         """Path to the manifest index."""
         return self._db_path.parent / f"{self._db_path.stem}.audit.manifest.json"
+
+    @contextmanager
+    def _manifest_lock(self) -> Iterator[bool]:
+        """Hold the cross-process lock that serializes every change to the
+        manifest PATH: a save, a quarantine rename, and a whole repair.
+
+        ⛔ WHY (spore-1030, reproduced with two real processes): a writer that
+        parsed the old invalid manifest renamed whatever stood at the manifest
+        path by the time it got there, which could be the manifest repair had
+        just rebuilt. Repair returned ``repaired=True`` and ``verify()`` then
+        reported the trail quarantined. Under this lock a quarantine re-reads
+        the manifest and renames only bytes it parsed as invalid while holding
+        it, and a repair holds it from its first listing to its return.
+
+        The lock file is ``<stem>.audit-manifest.lock`` beside the database, in
+        the RESOLVED directory, so two spellings of one path take one lock. Its
+        name is deliberately outside ``<stem>.audit.*``, the set the CLI
+        compares before and after a read to detect a change in the trail.
+
+        Yields ``True`` when held. Yields ``False``, with no lock, where advisory
+        locking does not exist: no ``fcntl`` (Windows), or ``flock`` raising an
+        errno in ``_LOCK_UNAVAILABLE_ERRNOS``. That is the behaviour before the
+        lock existed. Any other failure to open or lock raises
+        ``_AuditLockError``. Blocking: a holder is a quarantine, a save or a
+        repair, none of which waits on anything else. Two ``AuditTrail``
+        instances for one database in ONE thread must not nest it: the inner
+        one opens its own descriptor and blocks on the outer (an earlier draft
+        of this fix's own test did exactly that and hung).
+        """
+        with self._lock_mutex:
+            if self._lock_depth:
+                self._lock_depth += 1
+                try:
+                    yield self._lock_fd is not None
+                finally:
+                    self._lock_depth -= 1
+                return
+            fd: int | None = None
+            if fcntl is not None:
+                lock_path = (
+                    self._db_path.parent.resolve()
+                    / f"{self._db_path.stem}.audit-manifest.lock"
+                )
+                try:
+                    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+                except OSError as e:
+                    raise _AuditLockError(
+                        f"cannot open the audit manifest lock {lock_path.name}: {e}"
+                    ) from e
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                except OSError as e:
+                    os.close(fd)
+                    fd = None
+                    if e.errno not in _LOCK_UNAVAILABLE_ERRNOS:
+                        raise _AuditLockError(
+                            f"cannot lock the audit manifest lock {lock_path.name}: {e}"
+                        ) from e
+            self._lock_fd = fd
+            self._lock_depth = 1
+            try:
+                yield fd is not None
+            finally:
+                self._lock_depth = 0
+                self._lock_fd = None
+                if fd is not None:
+                    os.close(fd)
 
     def _initialize(self) -> None:
         """Lazy init: recover seq and prev_hash from existing audit file.
@@ -2354,12 +2469,55 @@ class AuditTrail:
             raise _ManifestUnavailable(f"the audit manifest cannot be read right now: {e}") from e
         try:
             return _parse_manifest_bytes(raw, stem)
-        except _UNPARSEABLE_JSON as e:
-            marker = self._quarantine_manifest()
-            raise _ManifestQuarantined(
-                f"the audit manifest is invalid ({e}) and was quarantined as {marker}; "
-                "run `anneal-memory audit-repair`",
-                [marker],
+        except _UNPARSEABLE_JSON:
+            pass
+        # ⛔ QUARANTINE ONLY WHAT WAS PARSED AS INVALID UNDER THE LOCK (spore-1030,
+        # reproduced with two processes). The bytes above were read unlocked, so
+        # by now a repair may have rebuilt the manifest, and renaming the path
+        # would quarantine that. Under the lock no writer of this version can
+        # change the path (its saves, quarantines and repairs all take it), so the
+        # markers and bytes read here are the ones the rename acts on. An older
+        # anneal-memory writer takes no lock; mixed-version writers stay unsupported.
+        try:
+            with self._manifest_lock():
+                try:
+                    markers = _quarantine_markers(self._db_path.parent, stem)
+                except OSError as e:
+                    raise _ManifestUnavailable(
+                        "the audit manifest is invalid and the directory cannot be "
+                        f"listed to rule out a quarantine: {e}"
+                    ) from e
+                if markers:
+                    raise _ManifestQuarantined(
+                        f"the audit manifest is quarantined as {markers[-1]}; "
+                        "run `anneal-memory audit-repair`",
+                        markers,
+                    )
+                try:
+                    raw = _read_regular_bytes(self._manifest_path)
+                except FileNotFoundError as e:
+                    # Gone with no marker while we held the lock: not ours to
+                    # rebuild here. Nothing is renamed; the next caller decides.
+                    raise _ManifestUnavailable(
+                        "the invalid audit manifest disappeared before it could be "
+                        "quarantined"
+                    ) from e
+                except OSError as e:
+                    raise _ManifestUnavailable(
+                        f"the audit manifest cannot be read right now: {e}"
+                    ) from e
+                try:
+                    return _parse_manifest_bytes(raw, stem)
+                except _UNPARSEABLE_JSON as e:
+                    marker = self._quarantine_manifest()
+                    raise _ManifestQuarantined(
+                        f"the audit manifest is invalid ({e}) and was quarantined as "
+                        f"{marker}; run `anneal-memory audit-repair`",
+                        [marker],
+                    ) from e
+        except _AuditLockError as e:
+            raise _ManifestUnavailable(
+                f"the audit manifest is invalid and was not quarantined: {e}"
             ) from e
 
     def _quarantine_manifest(self) -> str:
@@ -2394,23 +2552,24 @@ class AuditTrail:
         }
 
     def _save_manifest(self, manifest: dict[str, Any]) -> None:
-        """Save manifest with atomic write."""
+        """Save manifest with atomic write, under the manifest lock (spore-1030)."""
         path = self._manifest_path
         tmp_path = path.with_suffix(".json.tmp")
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(manifest, f, indent=2, sort_keys=True)
-                f.write("\n")
-                f.flush()
-                os.fsync(f.fileno())
-            tmp_path.replace(path)
-            _fsync_dir(path.parent)
-        except Exception:
+        with self._manifest_lock():
             try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-            raise
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(manifest, f, indent=2, sort_keys=True)
+                    f.write("\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                tmp_path.replace(path)
+                _fsync_dir(path.parent)
+            except Exception:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+                raise
 
     @staticmethod
     def _compute_hash(json_line: str) -> str:

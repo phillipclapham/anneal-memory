@@ -12,11 +12,15 @@ Memory without grounding is amplification infrastructure.
 
 Persistent user memory profiles [increase agent sycophancy 16–45% across models](https://arxiv.org/abs/2509.12517) (Gemini 2.5 Pro at 45%, others lower). Production deployments [accumulate 97.8% junk entries](https://github.com/mem0ai/mem0/issues/4573) within weeks. Clinical research documents memory [scaffolding delusions across sessions](https://doi.org/10.1016/S2215-0366(25)00396-7). The failure mode here isn't memory. It's memory with nothing checking what gets kept.
 
-anneal-memory adds structural defenses at the citation layer that the systems surveyed below don't ship. Patterns earn promotion through cited episode evidence with lexical-overlap explanation-grounding, fabricated citations get demoted, per-ID citation gaming surfaces a flag, replay attempts against stale episodes fail by construction, and the audit chain is SHA-256 hash-chained and tamper-evident. Stale patterns surface for the agent to act on; associations form through consolidation. These are narrow, structural primitives — not a complete defense against every form of memory drift. See *Honest scope* below for what these primitives catch and what they don't.
+anneal-memory puts a check between what an agent writes down and what it comes to believe. That idea isn't rare any more. [MemTxn](https://arxiv.org/abs/2607.27834) refuses a fact update whose values don't appear in the source it cites, and [Agent Zero Memory](https://arxiv.org/abs/2608.29606) answers only from evidence its reader actually opened.
+
+Here's what I think is actually distinct, going by the 2026 systems I've read. A pattern in anneal is an abstraction, not a copied fact, and it has to earn its rank: it moves up a level (1x → 2x → 3x, no ceiling) only when it cites real episodes its explanation is grounded in, and it drops a level when a citation fails. The consolidator can't quietly gut the memory it rewrites, either. On a store that declares an identity layer, a save that collapses those sections is refused, and consolidators wearing down their own memory is [a documented failure](https://arxiv.org/abs/2605.12978). Then there's the assembly: an episodic evidence store, a bounded always-loaded continuity file, a long-term pattern tier recalled on cue, prospective tasks, a single-writer consolidation gate and a hash-chained audit log, in one store with zero dependencies and no embeddings. None of those pieces is unique on its own. The combination is, as far as I've found.
+
+The citation checks are narrow and structural: cited IDs must exist, the explanation must share words with the episode it cites, fabricated citations demote, one episode cited too often raises a flag, and re-citing old episodes doesn't count. They are not a complete defense against memory drift. *Honest scope* below says what they catch and what they don't.
 
 And it's memory you own and govern. A local store, zero dependencies, no vendor in the loop — you decide what graduates into long-term memory, every change is recorded in a tamper-evident chain (best-effort on the write side — see *Hash-chained audit trail* for what `verify` can and cannot see), and the consolidation step that rewrites an agent's identity is gated to a human, not run unbidden (the *Single-consolidator gate* below). Own the substrate; govern what enters it.
 
-Four cognitive layers — episodic store, compressed continuity, Hebbian associations, affective state tracking — plus two sibling stores: prospective **spores** (what the agent intends to do next) and a **crystallized** pattern store (graduated wisdom held *out* of always-loaded context and recalled on cue, so a large body of proven knowledge stays effective without clogging attention). Together they implement Complementary Learning Systems — see *The Memory Architecture* below. Zero dependencies (Python stdlib only). Works with any agent framework.
+Four cognitive layers — episodic store, compressed continuity, Hebbian associations, affective state tracking — plus two sibling stores: prospective **spores** (what the agent intends to do next) and a **crystallized** pattern store (graduated wisdom held *out* of always-loaded context and recalled on cue, so a large body of proven knowledge stays effective without clogging attention). Together they implement Complementary Learning Systems — see *The Memory Architecture* below. The Hebbian layer records links between episodes, but on the one long-running store where it was measured it has never changed what recall returns. The part of recall that works is the citation edge (see *Associations through consolidation*). Zero dependencies (Python stdlib only). Works with any agent framework.
 
 ## Quick Start
 
@@ -200,15 +204,15 @@ Three independent production failures share one root cause: no quality mechanism
 
 **Harmful reinforcement.** Clinical research documents AI systems with persistent memory scaffolding delusional content across sessions — stored context creates feedback loops between recalled memories and generated responses, with cases of documented real-world harm ([Morrin et al., Lancet Psychiatry 2026](https://doi.org/10.1016/S2215-0366(25)00396-7)).
 
-Every existing MCP memory server stores memories and retrieves them. None of them ask: *is this memory still true? Was it ever true? Is it making the agent worse?*
+Most memory servers store memories and retrieve them. Few ask: *is this memory still true? Was it ever true? Is it making the agent worse?*
 
-anneal-memory asks all three:
+anneal-memory asks the first two at the pattern level, and has started measuring the third (see *Does a recalled memory help?* below):
 
 - **Is it true?** Patterns must cite specific episode IDs as evidence to graduate. The server verifies the episodes exist and the explanation references the cited content via lexical overlap (≥2 meaningful words shared between the explanation and the episode body). Ungrounded citations demote.
 - **Is it still true?** Graduated patterns whose dates fall behind the staleness threshold (default 7 days) surface in the next wrap's package as removal candidates. The agent decides whether to demote, refresh evidence, or carry forward.
 - **Is the citation evidence real?** The library catches fabricated episode IDs (no matching episode → demote), suspicious reuse of the same episode across many patterns in one session (per-ID frequency ≥3 → flag), and bare graduations with no `[evidence:]` tag at all. The explanation-grounding check (≥2-word lexical overlap with episode content) raises the cost of fabricated evidence chains but is not a semantic-coherence check — see *Honest scope* below for what this catches and what it doesn't.
 
-The result: **memory as a living system, not a filing cabinet.** Episodes accumulate fast, get compressed at session boundaries — and that compression is where patterns emerge and get validated. Co-cited episodes form lateral Hebbian associations, building a cognitive network through use. The continuity file stays bounded and always-loaded, getting denser rather than longer.
+The result: **memory as a living system, not a filing cabinet.** Episodes accumulate fast, get compressed at session boundaries — and that compression is where patterns emerge and get validated. Co-cited episodes form lateral Hebbian associations (recorded today; recall doesn't yet draw anything useful from them). The continuity file stays bounded and always-loaded, getting denser rather than longer.
 
 ## The Immune System
 
@@ -274,11 +278,13 @@ This is fundamentally different from how other systems form associations:
 |----------|----------------|----------------|
 | **Co-access** ([BrainBox](https://github.com/thebasedcapital/brainbox)) | Episodes retrieved in the same query | Shallow — reflects search patterns, not understanding |
 | **Co-retrieval** ([Ori-Mnemos](https://github.com/aayoawoyemi/Ori-Mnemos)) | Episodes returned together at runtime | Better — but still driven by the retrieval system, not the agent |
-| **Co-citation during consolidation** (anneal-memory) | Agent explicitly connects episodes while compressing | Deepest — links form from semantic judgment during a cognitive act |
+| **Co-citation during consolidation** (anneal-memory) | Agent explicitly connects episodes while compressing | Formed by the agent's own judgment while compressing, not by search patterns (what recall gets from them so far: see below) |
 
 The association network is gated by the immune system where gaming is *actively detected*: citations to non-existent episodes form no links, and citations the cross-session anti-sycophancy check flags as suspected re-graduation are refused. Grounding quality — whether a pattern's prose explanation lexically matches its cited episodes — governs whether the pattern *graduates*, not whether the co-cited episodes *associate*: a real but paraphrased co-citation still records that those episodes fired together (it just doesn't level the pattern up). The topology is built on real co-occurrence of real episodes under active gaming defense, not on retrieval frequency.
 
 **Strength model:** Direct co-citation adds 1.0, session co-citation adds 0.3. Links decay 0.9x per wrap (unused connections fade). Strength caps at 10.0 to prevent calcification. Cleanup at 0.1 threshold.
+
+**What the links do today, measured.** Pattern recall (`retrieve_relevant`, `crystal recall`) follows one Hebbian hop from the episodes a query matched. On the one long-running production store where this was measured (15,774 recall events, June 21 to September 30, 2026), recall exposed a crystallized pattern 788 times: 744 through the citation edge (query → matched episode → the patterns that cite it), 44 by keyword, and **0 through the Hebbian hop**. A replay with the hop's thresholds wide open also gave 0, because the episodes the links connect and the episodes the patterns cite turned out to be disjoint sets. So the links are written and traversed, and on that store they contribute nothing. The citation edge is the associative recall that works. Whether the Hebbian hop gets fixed or retired will be decided by measurement.
 
 ### Affective state tracking
 
@@ -336,7 +342,7 @@ This is experimental infrastructure. The associations and strength model work wi
 
 1. **Episodic store** (SQLite) — timestamped, typed episodes. Fast writes, indexed queries. Cheap to accumulate. The hippocampus.
 2. **Continuity file** (Markdown) — compressed session memory. Always loaded at session start. Rewritten (not appended) at each session boundary. The neocortex's always-loaded **working set** (its long-term semantic half is the crystallized store, below). Its structure is a configurable section schema (below) — four sections by default; partnership entities add a timeless felt layer.
-3. **Hebbian associations** (SQLite) — lateral links between episodes, formed through co-citation during compression. Strengthen with reuse, decay without it. The association cortex.
+3. **Hebbian associations** (SQLite) — lateral links between episodes, formed through co-citation during compression. Strengthen with reuse, decay without it. The association cortex. Recall traverses them but, on the store where it was measured, has never surfaced anything through them (see *Associations through consolidation*).
 4. **Affective layer** (on associations) — functional state tags recorded during compression. Intensity modulates association strength. Persistent state infrastructure.
 
 These four describe how the store *works*. Two sibling stores sit alongside them (separate files, same atomic-write durability discipline) and address a different axis — *when* a thing is loaded, and whether it's retrospective or prospective:
@@ -384,13 +390,36 @@ store.set_section_schema(FLOW_SCHEMA)   # validated; frozen during an active wra
 | **Access patterns** | Library + CLI + MCP | MCP only | REST API | Python only | MCP only |
 | **Dependencies** | Zero (Python stdlib) | Node.js | Docker + cloud | Embeddings model | Not specified |
 
+The table compares against MCP-adjacent memory servers. Further out, several 2026 systems are ahead of anneal on pieces of this. [MemLineage](https://arxiv.org/abs/2605.14421)'s audit log is an RFC-6962 Merkle log with per-principal Ed25519 signatures, which is stronger than anneal's SHA-256 chain. Letta's [MemFS](https://docs.letta.com/concepts/memfs) commits every memory edit to git. [Agent Zero Memory](https://arxiv.org/abs/2608.29606) and [MemClaw](https://arxiv.org/abs/2606.24535) carry provenance on every item. [HeLa-Mem](https://arxiv.org/abs/2604.16839) uses its Hebbian graph at retrieval, which anneal, in effect, does not yet.
+
 ## The Memory Architecture (Complementary Learning Systems)
 
 anneal splits memory the way the brain does, and for the same reason: **attention doesn't scale.** Past a few dozen always-loaded patterns they drown each other out, so a pattern's value is *firing at the right moment*, not *being present*. Graduated wisdom lives in the **crystallized** store (`<stem>.crystal.json`), held *out* of the always-loaded continuity and recalled on cue — the working set stays small while the body of proven patterns keeps growing. This is Complementary Learning Systems ([McClelland, McNaughton & O'Reilly, 1995](https://pubmed.ncbi.nlm.nih.gov/7624455/)): a fast episodic store, slow consolidation at the wrap, and a long-term store you retrieve from rather than hold open. The crystallized tier is what gives graduation an OUT path — without it, every Proven pattern had nowhere to live but the always-loaded file, and the working set only ever grew.
 
 **anneal is the substrate; the harness fires it.** The library owns the crystallized store and the on-demand recall API — `retrieve_patterns(crystal_store, query)`, `anneal-memory crystal index`/`recall`, and the `crystal_index` / `crystal_recall` MCP tools — but it can't fire on its own. Surfacing the right pattern at the right moment needs a per-turn hook, and a hook is harness-specific (a Claude Code hook would break the 12-framework neutrality the library guarantees). So raw anneal gives you the store, the API, and *manual* recall — you query if you remember to, which is the dead-store failure mode discipline always rots into. A harness with hooks runs that recall on every prompt automatically. **flow** does this today, and **[Levain](https://github.com/levainhq/levain)** — the portable kit built on anneal — fires both the prospective (spore) layer and per-turn crystallized recall on every prompt. The store is universal; the firing is the harness's job, which is also why anneal stays zero-dep and framework-neutral while a harness can be opinionated on top of it.
 
+**The cue index.** `anneal-memory crystal index` (MCP: `crystal_index`) prints one line per live crystallized pattern: its name and one clause, nothing else. A harness loads it (at session start, for example) so the agent knows which patterns exist without carrying their bodies; `crystal recall` fills a body on cue. The index is the only part of the crystallized tier meant to be always loaded, so it is kept that thin on purpose.
+
 *Why the tiers fall out of one problem — the full Complementary Learning Systems derivation, the tier table, and the one-way ratchet that forced the crystallized store → [docs/architecture.md](docs/architecture.md).*
+
+## Does a recalled memory help? (report-only)
+
+Graduation shows a pattern was earned. It doesn't show the pattern ever helped. anneal now records that, and only records it:
+
+- `anneal-memory outcome --exposure-id ID --item crystal:NAME=followed --outcome success` writes back what happened after a recall: per surfaced item `followed`, `ignored` or `not_applicable`, and optionally whether the turn succeeded. Records go to `<stem>.outcomes.jsonl`, append-only; a later record for the same exposure corrects an earlier one.
+- `anneal-memory crystal fold-surfaced --receipts FILE...`, run once per wrap, counts how often recall surfaced each crystallized pattern. Being surfaced is not counted as being used, so it never re-heats a pattern.
+- `anneal-memory worth` reports, per pattern (and per cited episode with `--episodes`), how often it was retrieved on a turn that succeeded and on one that failed, split by label. The library API is `anneal_memory.worth` (`OutcomeLog`, `fold_surfaced`, `compute_worth`).
+
+**This is a report. Nothing in anneal ranks, decays, re-heats or retires anything from it.** A failure after a recall is not evidence the recalled memory caused it. There is no evidence yet that the counters separate useful memory from useless; that needs real outcome labels collected over time.
+
+## Known gap: updated facts
+
+When a fact changes, the new episode sits beside the old one. Nothing marks the old one as superseded, so recall can return both, and sometimes only the old one. `scripts/stale_probe.py` measures this on a fresh temporary store (16 planted fact-and-update pairs among 120 unrelated episodes, graded mechanically, no judge model). On the 0.9.22 code:
+
+- Keyword recall (`Store.recall`, the CLI `search` and MCP `recall` path) puts the current fact first, but only because it sorts newest-first. It returns the stale fact beside it in 16 of 16 cases.
+- Scored recall (`retrieve_relevant`), when the update is reworded rather than restated, returns the stale fact in 14 of 16 cases and misses the current one entirely in 14 of 16.
+
+Supersession (an update that names the episode it replaces, with recall invalidating rather than deleting the old one) is the planned fix. Until it ships, treat recalled facts that can change as possibly out of date.
 
 ## Prospective memory — spores
 
@@ -412,11 +441,16 @@ The groups diverge on one load-bearing question: **what gates quality?**
 
 | System | Quality gate | Sycophancy-vulnerable? |
 |---|---|---|
-| **anneal-memory** | Structural citation evidence (agent cites episode IDs; server verifies) | No — gate is not LLM-scored |
+| **anneal-memory** | Structural citation evidence (agent cites episode IDs; server verifies) | Less — the promotion gate is a lexical check, not an LLM score, though the agent's LLM still writes the compression |
 | **OpenClaw Dreaming** | LLM reflection + six weighted signals: Relevance 0.30, Frequency 0.24, Query diversity 0.15, Recency 0.15, Consolidation 0.10, Conceptual richness 0.06 | Yes — Relevance and Conceptual richness are LLM-judged |
 | **KAIROS / autoDream** | LLM consolidation (merge, remove contradictions, promote tentative observations to absolute facts) | Yes — promotion gate is model-reliant |
+| **Letta sleep-time agents** ([paper](https://arxiv.org/abs/2504.13171)) | A background agent rewrites memory; with [MemFS](https://docs.letta.com/concepts/memfs) every edit is a git commit | Yes — the rewrite is model-judged |
 
-Structural gates ask "did subsequent episodes cite this?" Model-reliant gates ask "does the LLM consider this good?" The difference matters: persistent user memory profiles have been shown to amplify sycophancy 16–45% across models ([Jain et al., CHI 2026](https://arxiv.org/abs/2509.12517); Gemini 2.5 Pro at 45%, others lower). The same RLHF-inherited bias surfaces wherever an LLM evaluates output for the user — including memory-quality scoring. A memory architecture whose quality mechanism runs through an LLM inherits that bias. anneal-memory's citation-evidence gates bypass it by construction.
+Structural gates ask "did subsequent episodes cite this?" Model-reliant gates ask "does the LLM consider this good?" The difference matters: persistent user memory profiles have been shown to amplify sycophancy 16–45% across models ([Jain et al., CHI 2026](https://arxiv.org/abs/2509.12517); Gemini 2.5 Pro at 45%, others lower). The same RLHF-inherited bias surfaces wherever an LLM evaluates output for the user — including memory-quality scoring. A memory architecture whose quality mechanism runs through an LLM inherits that bias. anneal-memory's citation gate keeps the LLM out of the promotion decision; it does not keep it out of the compression, so the gate narrows that bias rather than removing it.
+
+Write-time source checks exist elsewhere now. [MemTxn](https://arxiv.org/abs/2607.27834) refuses an update unless every value in it appears, in order, in the source it cites. That is a stricter lexical check than anneal's, aimed at extracted facts. anneal's gate is aimed at abstractions: it ranks a pattern by repeated grounded citation and demotes it when a citation fails.
+
+There is a second question beside what gates quality: what stops the consolidator from wearing the memory down? [Useful Memories Become Faulty](https://arxiv.org/abs/2605.12978) documents consolidation degrading the memory it maintains. anneal's answer is the catastrophic-shrink gate (*The Immune System* above), a refusal at save time rather than an instruction to the model. It covers stores that declare an identity layer.
 
 The same shift toward LLM-scored quality is going mainstream at the adjacent evaluation layer (AWS Bedrock AgentCore Evaluations), and the April 2026 multi-layer-memory papers (HeLa-Mem, GAM) mostly inherit it too — the differentiator across the field is increasingly *what gates the consolidation*, not whether consolidation happens.
 

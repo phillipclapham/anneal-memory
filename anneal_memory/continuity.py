@@ -1118,9 +1118,11 @@ whole system depends on) goes dark. So, every wrap:
 - horizontal_scaling_strategy | 1x ({today})
 ```
 
-### Superseded facts (anywhere in the file)
+### Superseded facts (any section except a derived-state one such as State)
 When an episode from THIS session replaces an older fact (a value changed, a
 decision was reversed), write `[supersedes: <old_id> by <new_id>]` on its own line.
+Do not put it inside a derived-state section: there every line must carry a
+`[derive: ...]` or `[judged: ...]` annotation, so the marker refuses the save.
 The save validates it like a citation: `<new_id>` must be an episode in this wrap,
 `<old_id>` must exist and not be newer, and the two texts must share at least a
 quarter of the shorter one's meaningful words. Recall then hides the old episode by default (it is kept, not
@@ -2474,13 +2476,14 @@ def validated_save_continuity(
                 f"This wrap was prepared under the consolidate gate by session {gated_by!r}, "
                 f"so the save must come from that session, naming its session_id: without one the "
                 f"baton is never re-checked. Finish it from the library with that session_id, or "
-                f"abandon it with wrap-cancel (CLI) / wrap_cancel (MCP), which discards the "
-                f"compression. Nothing was written."
+                f"abandon it with wrap-cancel --wrap-token <this wrap's token> (MCP: wrap_cancel "
+                f"with wrap_token), which discards the compression. Nothing was written."
             )
         raise SaveAuthorityError(
             f"This wrap was prepared by session {gated_by!r}, and only that session may "
             f"commit it; {session_id!r} cannot, even as the current baton holder. Abandon it "
-            f"(wrap-cancel / wrap_cancel, which discards the compression) and prepare_wrap "
+            f"(wrap-cancel --wrap-token <this wrap's token>, or MCP wrap_cancel with wrap_token, "
+            f"which discards the compression) and prepare_wrap "
             f"again from {session_id!r}. Nothing was written."
         )
 

@@ -86,7 +86,7 @@ MIN_HITS = 2              # require ≥ this many DISTINCT keyword hits, always
 MIN_EPISODE_LEN = 80      # skip trivially short episodes (not applied to patterns)
 CANDIDATE_LIMIT_PER_KEYWORD = 400  # per-keyword recall fetch cap before scoring
 
-# --- Associative (Hebbian) pattern retrieval (AM-CRYSTAL-RECALL backend) ---
+# --- Associative pattern retrieval (evidence edge + one Hebbian hop; AM-CRYSTAL-RECALL backend) ---
 # The fix for keyword-ORTHOGONAL pattern relevance: a pattern whose distilled text
 # shares no distinctive keyword with the query, but which was GROUNDED in an episode
 # the query matched (or one co-cited with it). The keyword episode tier is reliable

@@ -33,9 +33,10 @@ class Episode:
     source: str = "agent"  # Agent/source attribution
     session_id: str | None = None  # Wrap cycle ID
     metadata: dict[str, Any] | None = None
-    # Set only by ``Store.recall(include_superseded=True)``: the id of a newer
-    # episode recorded as replacing this one. ``None`` everywhere else, which
-    # means "not looked up", not "not superseded".
+    # The id of a newer episode recorded as replacing this one. Set by
+    # ``Store.recall(include_superseded=True)`` and on the wrap window that
+    # ``prepare_wrap`` builds; where it was not looked up, ``None`` means "not
+    # looked up", not "not superseded".
     superseded_by: str | None = None
 
 

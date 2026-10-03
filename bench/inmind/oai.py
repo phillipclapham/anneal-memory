@@ -102,6 +102,8 @@ class Client:
                 break
             except urllib.error.HTTPError as e:
                 detail = e.read().decode(errors="replace")[:500]
+                if "insufficient_quota" in detail:  # no credits: retrying cannot help
+                    raise BudgetExceeded(f"OpenAI account quota exhausted: {detail}") from None
                 if e.code in (429, 500, 502, 503, 504) and attempt < retries - 1:
                     time.sleep(delay)
                     delay *= 2

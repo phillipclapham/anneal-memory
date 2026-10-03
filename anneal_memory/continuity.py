@@ -1529,7 +1529,11 @@ def prepare_wrap(
             :func:`_build_wrap_package`, or ``None`` if empty
           - ``assoc_context`` (str | None): Hebbian association context
             for the episodes being compressed, or ``None`` if empty or
-            no associations exist
+            no associations exist. Usually ``None``: a wrap forms links
+            among its own episodes at save, and those episodes are outside
+            the next wrap's window, so only links the caller recorded
+            itself (``Store.record_associations``) that touch a window
+            episode, at strength >= 0.5, appear here
           - ``wrap_token`` (str | None): session-handshake token for
             the pending wrap when ``status == "ready"``, ``None`` on
             the empty path. Transports should round-trip this back to

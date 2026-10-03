@@ -72,7 +72,11 @@ wrap = prepare_wrap(store)
 #   wrap["message"]        — human-readable status summary
 #   wrap["episode_count"]  — number of episodes in the wrap window
 #   wrap["package"]        — the compression package (dict, or None if empty)
-#   wrap["assoc_context"]  — optional Hebbian association context (str or None)
+#   wrap["assoc_context"]  — Hebbian association context (str or None). Usually None:
+#                            a wrap forms links among its own episodes at save, and those
+#                            episodes are outside the next wrap's window. It is non-empty
+#                            only when your code itself linked a current-window episode
+#                            (Store.record_associations) at strength >= 0.5.
 
 if wrap["status"] == "ready":
     package = wrap["package"]

@@ -389,10 +389,11 @@ MIGRATION_MANIFEST: list[MigrationEntry] = [
             "has not happened`). NEW stores get the section: `init`, `init "
             "--schema partnership`, and a store with no persisted schema. An "
             "EXISTING store with a persisted schema does not, and behaves exactly "
-            "as before, until its operator re-sets the schema: CLI `anneal-memory "
-            "--db <path> set-schema partnership` (or `set-schema default`), "
-            "library `store.set_section_schema(schema_by_name(\"partnership\"))`, "
-            "run with no wrap in progress."
+            "as before, until its operator opts it in: re-run `anneal-memory --db "
+            "<path> set-schema <its schema name>` (e.g. partnership). `anneal-memory "
+            "--db <path> status` prints the name. In the library: "
+            "`store.set_section_schema(schema_by_name(\"partnership\"))`, with no "
+            "wrap in progress."
         ),
         "suggested_edit": (
             "If your store has (or is set to) the section, add one short "

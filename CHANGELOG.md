@@ -37,9 +37,22 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   keep criterion), one line per fact, cue words, the drop marker, the current-value-plus-pending-
   transition shape, and the section's size against its budget,
   `Durable Facts: <current> / <budget> chars`.
+- Parsing and save checks (review round): facts are `- `, `* ` or `1. ` bullets, and an indented
+  line under a fact continues it (carried and re-inserted with it); any other line in the section
+  draws a "not tracked" warning. Every `## Durable Facts` section counts: a second one's facts are
+  protected, and a wrap with several has them merged into the first, with a warning. Headers
+  inside fenced code blocks never count. CR and CRLF are read as LF, a bullet-form drop marker is
+  always a marker, and a rebuilt text keeps its dominant line ending. A rebuilt section has its
+  runs of blank lines collapsed. The reword check caches token sets, names at most 20 pairs and
+  summarises the rest. New warnings: a re-inserted line that may be superseded by a new one
+  (two shared cue words, or two shared identifier-like or uncommon tokens); a durable line shaped
+  like a pattern line; two lines sharing one fact; a marker that also removed a line the wrap
+  wrote; an unknown marker now names the closest prior line. `– cues:` (en dash) is accepted.
+  The save result gains `durable_warnings` (present when the schema has a durable section), and
+  the wrap package lists the current pending-transition lines for the composer to re-check.
 - Migration manifest entry `AM-DURABLE-FACTS` (0.9.27): what the section is, that new stores get
-  it and an existing store gets it only when its operator re-sets the schema
-  (`anneal-memory --db <path> set-schema partnership`, or `store.set_section_schema(...)`), and a
+  it and an existing store gets it only when its operator re-runs
+  `anneal-memory --db <path> set-schema <its schema name>` (or `store.set_section_schema(...)`), and a
   suggested edit that points composers at the section and leaves the detail to `prepare_wrap`.
 
 ## [0.9.26] — 2026-10-03

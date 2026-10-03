@@ -430,3 +430,184 @@ class TestSchemaValidation:
         assert default_max_chars(DEFAULT_SCHEMA) == default_max_chars(OLD_DEFAULT4) == 20000
         assert default_max_chars(FLOW_SCHEMA) == default_max_chars(OLD_FLOW6)
         assert durable_budget(20000) == 3000
+
+
+# -- Fix round (L1 + L2 review findings) -------------------------------------
+#
+# Each test reproduces a finding against 11d8d92 (it fails there) and pins the
+# fix.
+
+CUTOVER_OLD = (
+    "- The nightly bank export calls fmt_row52; it switches to fmt_row64 only at "
+    "the bank cutover, which has not happened — cues: cutover, bank, export, "
+    "nightly, formatter"
+)
+CUTOVER_NEW = (
+    "- The nightly bank export now calls fmt_row64; the bank cutover happened — "
+    "cues: cutover, bank, export, nightly, formatter"
+)
+
+
+def saved_bytes(store: Store) -> bytes:
+    return Path(store.continuity_path).read_bytes()
+
+
+class TestFixRoundSilentLoss:
+    def test_h1_second_durable_section_is_protected(self, pstore):
+        two = partnership_text(ALLERGY).replace(
+            "## Patterns", "## Durable Facts\n- second section fact\n\n## Patterns"
+        )
+        assert [f.fact for f in parse_durable_facts(two, FLOW_SCHEMA)] == [
+            "tree nut allergy", "second section fact",
+        ]
+        wrap(pstore, two, 1)
+        _, msgs = wrap(pstore, partnership_text(None), 2)
+        saved = pstore.load_continuity()
+        assert "- second section fact" in saved and ALLERGY in saved
+        assert saved.count("## Durable Facts") == 1
+
+    def test_h1_new_text_with_two_sections_is_merged_and_warned(self, pstore):
+        two = partnership_text(ALLERGY).replace(
+            "## Patterns", "## Durable Facts\n- second section fact\n\n## Patterns"
+        )
+        _, msgs = wrap(pstore, two, 1)
+        saved = pstore.load_continuity()
+        assert saved.count("## Durable Facts") == 1
+        facts = [f.fact for f in parse_durable_facts(saved, FLOW_SCHEMA)]
+        assert facts == ["tree nut allergy", "second section fact"]
+        headers = [l for l in saved.split("\n") if l.startswith("## ")]
+        assert headers.index("## Durable Facts") == headers.index("## Active Threads") + 1
+        assert any("merged" in m for m in durable_warnings(msgs))
+
+    def test_m1_star_and_numbered_bullets_and_continuations(self, pstore):
+        body = "* star fact\n1. numbered fact\n- wrapped fact that\n  continues here"
+        assert [f.fact for f in parse_durable_facts(partnership_text(body), FLOW_SCHEMA)] == [
+            "star fact", "numbered fact", "wrapped fact that continues here",
+        ]
+        wrap(pstore, partnership_text(body), 1)
+        wrap(pstore, partnership_text(None), 2)
+        saved = pstore.load_continuity()
+        assert "* star fact\n1. numbered fact\n- wrapped fact that\n  continues here" in saved
+
+    def test_m1_untracked_prose_line_warns(self, pstore):
+        _, msgs = wrap(pstore, partnership_text(f"{ALLERGY}\nSome prose about facts."), 1)
+        assert any(
+            "'Some prose about facts.'" in m and "not tracked" in m
+            for m in durable_warnings(msgs)
+        )
+
+    def test_m2_fenced_header_is_not_the_section(self, pstore):
+        fenced = partnership_text(None, context="c\n```\n## Durable Facts\n- fenced fake\n```")
+        assert parse_durable_facts(fenced, FLOW_SCHEMA) == []
+        wrap(pstore, partnership_text(ALLERGY), 1)
+        wrap(pstore, fenced, 2)
+        saved = pstore.load_continuity()
+        before_patterns = saved.split("\n## Patterns")[0]
+        assert f"## Durable Facts\n{ALLERGY}" in before_patterns
+        assert "```\n## Durable Facts\n- fenced fake\n```" in saved
+
+    def test_m3_crlf_marker_is_a_marker_and_reinsert_takes_crlf(self, pstore):
+        wrap(pstore, partnership_text(f"{ALLERGY}\n{PENDING}").replace("\n", "\r\n"), 1)
+        crlf = partnership_text(f"- [drop-durable: {ALLERGY}]").replace("\n", "\r\n")
+        _, msgs = wrap(pstore, crlf, 2)
+        raw = saved_bytes(pstore)
+        assert b"drop-durable" not in raw and b"tree nut" not in raw
+        assert PENDING.encode() in raw  # re-inserted
+        assert b"\n" not in raw.replace(b"\r\n", b"")  # every line ending is CRLF
+
+    def test_m4_large_section_is_bounded_and_summarised(self, pstore):
+        import time
+        old = "\n".join(f"- service s{i} runs on host alpha in region east zone" for i in range(300))
+        new = "\n".join(f"- service s{i} runs on host alpha in region east area" for i in range(300))
+        wrap(pstore, partnership_text(old), 1)
+        t0 = time.perf_counter()
+        _, msgs = wrap(pstore, partnership_text(new), 2)
+        assert time.perf_counter() - t0 < 2.0
+        got = durable_warnings(msgs)
+        assert sum("looks reworded as" in m for m in got) == 20
+        assert any(m.startswith("Durable facts: and ") and "more" in m for m in got)
+
+
+class TestFixRoundSupersede:
+    def test_l2_resolved_transition_is_a_contradiction_candidate(self, pstore):
+        wrap(pstore, partnership_text(CUTOVER_OLD), 1)
+        _, msgs = wrap(pstore, partnership_text(CUTOVER_NEW), 2)
+        got = durable_warnings(msgs)
+        assert any(
+            "may be superseded by" in m and "fmt_row52" in m and "fmt_row64; the bank" in m
+            and "[drop-durable: " in m
+            for m in got
+        )
+
+    def test_package_lists_pending_transitions(self, pstore):
+        wrap(pstore, partnership_text(f"{ALLERGY}\n{CUTOVER_OLD}"), 1)
+        pstore.record("e", "observation")
+        text = format_wrap_package_text(prepare_wrap(pstore))
+        check = text.index("Check whether these pending changes have happened")
+        tail = text[check:check + 600]
+        assert CUTOVER_OLD in tail and ALLERGY not in tail
+
+
+class TestFixRoundTexts:
+    def test_guidance_wording_and_dateless_example(self, pstore):
+        pstore.record("e", "observation")
+        text = format_wrap_package_text(prepare_wrap(pstore))
+        block = text[text.index("**Durable Facts**"):]
+        assert "Most sessions add zero or one line." in block
+        assert "Patterns belong in ## Patterns, not here." in block
+        assert "(as of" not in block
+
+    def test_pattern_shaped_line_warns(self, pstore):
+        _, msgs = wrap(pstore, partnership_text("- x_rule | 2x (2026-10-03) [evidence: abcd1234]"), 1)
+        assert any("belong in ## Patterns" in m for m in durable_warnings(msgs))
+
+    def test_reinsert_warning_says_how_to_drop_a_changed_fact(self, pstore):
+        wrap(pstore, partnership_text(ALLERGY), 1)
+        _, msgs = wrap(pstore, partnership_text(None), 2)
+        assert any("If a fact changed, drop the old line" in m for m in durable_warnings(msgs))
+
+    def test_unknown_drop_names_closest_prior_line(self, pstore):
+        wrap(pstore, partnership_text(ALLERGY), 1)
+        _, msgs = wrap(pstore, partnership_text(f"{ALLERGY}\n[drop-durable: tree nut allergies]"), 2)
+        [m] = [m for m in durable_warnings(msgs) if "names no line" in m]
+        assert f"closest prior line is {ALLERGY!r}" in m and "exact" in m
+
+    def test_rebuilt_section_collapses_blank_runs(self, pstore):
+        wrap(pstore, partnership_text(f"{ALLERGY}\n{PENDING}"), 1)
+        wrap(pstore, partnership_text(f"{ALLERGY}\n\n\n\n[drop-durable: {PENDING}]\n\n"), 2)
+        section = pstore.load_continuity().split("## Durable Facts")[1].split("## Patterns")[0]
+        assert "\n\n\n" not in section
+
+    def test_marker_deleting_own_new_line_warns(self, pstore):
+        wrap(pstore, partnership_text(ALLERGY), 1)
+        _, msgs = wrap(pstore, partnership_text(f"{ALLERGY}\n[drop-durable: {ALLERGY}]"), 2)
+        assert any("which this wrap wrote itself" in m for m in durable_warnings(msgs))
+
+    def test_save_result_carries_durable_warnings(self, pstore, tmp_path):
+        wrap(pstore, partnership_text(ALLERGY), 1)
+        result, msgs = wrap(pstore, partnership_text(None), 2)
+        assert result["durable_warnings"] == durable_warnings(msgs) != []
+        old = Store(tmp_path / "old.db", project_name="T", section_schema=OLD_FLOW6)
+        try:
+            res_old, _ = wrap(old, partnership_text(None), 1)
+            assert "durable_warnings" not in res_old
+        finally:
+            old.close()
+
+    def test_en_dash_cue_separator(self):
+        [f] = parse_durable_facts(default_text("- tree nut allergy – cues: dinner, menu"), DEFAULT_SCHEMA)
+        assert f.fact == "tree nut allergy" and f.cues == ("dinner", "menu")
+
+    def test_two_prior_lines_sharing_a_fact_warn(self, pstore):
+        two = f"{ALLERGY}\n- tree nut allergy — cues: bakery, snack"
+        wrap(pstore, partnership_text(two), 1)
+        _, msgs = wrap(pstore, partnership_text(None), 2)
+        assert any("two lines share the fact 'tree nut allergy'" in m for m in durable_warnings(msgs))
+
+    def test_migration_entry_names_the_set_schema_rerun(self):
+        from anneal_memory.migration import MIGRATION_MANIFEST
+        [entry] = [e for e in MIGRATION_MANIFEST if e["feature"] == "AM-DURABLE-FACTS"]
+        assert (
+            "re-run `anneal-memory --db <path> set-schema <its schema name>` "
+            "(e.g. partnership)"
+        ) in entry["summary"]

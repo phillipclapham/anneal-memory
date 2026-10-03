@@ -1811,14 +1811,17 @@ class AuditTrail:
         # process was silent because the warning fired once per process. Now
         # once per lock path, on stderr and to the logger.
         if str(lock_path) not in _lock_degrade_warned:
-            _lock_degrade_warned.add(str(lock_path))
             message = (
                 f"Advisory locks are unavailable for {lock_path}; the audit manifest "
                 "lock is NOT held, so audit manifest changes are not serialized "
                 "across processes."
             )
-            print(f"[anneal-memory] WARNING: {message}", file=sys.stderr)
             logger.warning(message)
+            try:
+                print(f"[anneal-memory] WARNING: {message}", file=sys.stderr)
+            except (OSError, ValueError):
+                pass  # a closed or broken stderr must not turn a degrade into a failure
+            _lock_degrade_warned.add(str(lock_path))
         return None
 
     def _initialize(self) -> None:
@@ -1923,7 +1926,7 @@ class AuditTrail:
                 "that may be missing a sealed week"
             )
 
-    def _seed_from_manifest(self, adopted: bool = True) -> None:
+    def _seed_from_manifest(self, *, adopted: bool) -> None:
         """Anchor the chain on the sealed files when the active file has none.
 
         Called from BOTH no-usable-entry branches of :meth:`_initialize` —

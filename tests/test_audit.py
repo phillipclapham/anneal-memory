@@ -5623,7 +5623,7 @@ class TestDiogenes20260909StillOpen:
         # ⚖ HYBRID (Phill, 2026-09-13): a corrupt manifest is quarantined, not
         # degraded to genesis; with no sealed file to seed from, seeding refuses.
         with pytest.raises(audit_module._ManifestQuarantined):
-            trail._seed_from_manifest()
+            trail._seed_from_manifest(adopted=True)
 
         assert trail._prev_hash == GENESIS_HASH, (
             "a manifest field containing an invalid-UTF-8-derived lone "
@@ -5703,7 +5703,7 @@ class TestDiogenes20260909StillOpen:
         # and, with no sealed tail, seeding refuses — but the dirty state must
         # already have been reset by the time it does.
         with pytest.raises(audit_module._ManifestQuarantined):
-            trail._seed_from_manifest()
+            trail._seed_from_manifest(adopted=True)
 
         assert trail._prev_hash == GENESIS_HASH, (
             "an unparseable manifest left the dirty chain state standing "
@@ -6021,7 +6021,7 @@ class TestFixDiffRound4FieldTypeCompleteness:
         # ⚖ HYBRID (Phill, 2026-09-13): rejected means quarantined; with no
         # sealed tail to seed from, seeding refuses instead of guessing genesis.
         with pytest.raises(audit_module._ManifestQuarantined):
-            trail._seed_from_manifest()
+            trail._seed_from_manifest(adopted=True)
 
         assert trail._prev_hash == GENESIS_HASH, (
             "a boolean active_last_seq should be rejected as corrupt, "

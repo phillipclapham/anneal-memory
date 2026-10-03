@@ -18,7 +18,7 @@ def _gated(store: Store, token: str, session: str | None = "holder") -> None:
     store.wrap_started(token=token, episode_ids=[e.id], gated_session_id=session)
 
 
-def test_gated_wrap_needs_its_session_token_or_force(tmp_path, monkeypatch):
+def test_gated_wrap_needs_its_session_token_or_force(tmp_path):
     store = Store(tmp_path / "m.db")
     _gated(store, "a" * 32)
     for kw in ({}, {"session_id": "other"}, {"force": 1}):
@@ -49,19 +49,33 @@ def test_gated_wrap_needs_its_session_token_or_force(tmp_path, monkeypatch):
     assert not server._tool_wrap_cancel({"session_id": "holder"}).get("isError")
     assert store.wrap_gated_session() is None
 
-    # prepare_wrap's empty-window path observes PARTIAL state and cancels it
-    # tokenlessly; if a peer's gated wrap lands first, the store refuses, and
-    # prepare_wrap must downgrade rather than raise.
+
+
+def test_empty_window_recovery_never_clears_a_wrap_started_mid_call(tmp_path):
+    # Reproduced on the branch before the fix (2026-10-02): prepare_wrap observed
+    # PARTIAL state with an empty window; before its tokenless cancel ran, a peer
+    # cleared the partial state and started a healthy UNGATED wrap, and the cancel
+    # destroyed it. The cancel is now a compare-and-swap on "still partial".
     from anneal_memory import prepare_wrap
 
-    store = Store(tmp_path / "m2.db")
-    for k, v in (("wrap_started_at", "2026-09-25T00:00:00Z"), ("wrap_gated_session", "A")):
-        store._conn.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)", (k, v))
-    store._conn.commit()
+    path = tmp_path / "m.db"
+    a = Store(path)
+    a._conn.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES "
+                    "('wrap_started_at', '2026-09-25T00:00:00Z')")
+    a._conn.commit()
+    real = a.wrap_cancelled
 
-    def peer_landed(**_kw):
-        raise WrapCancelGatedError(gated_session="A", session_id=None)
+    def peer_then_cancel(**kw):
+        b = Store(path)
+        b.wrap_cancelled()  # the peer clears the partial state...
+        e = b.record("y" * 90, "observation")
+        b.wrap_started(token="b" * 32, episode_ids=[e.id])  # ...and starts its own wrap
+        b.close()
+        return real(**kw)
 
-    monkeypatch.setattr(store, "wrap_cancelled", peer_landed)
-    result = prepare_wrap(store)
+    a.wrap_cancelled = peer_then_cancel  # type: ignore[method-assign]
+    result = prepare_wrap(a)
     assert result["status"] != "ready" and "replaced" in result["message"]
+    assert Store(path).load_wrap_snapshot()["token"] == "b" * 32  # the peer's wrap survives
+    with pytest.raises(ValueError):
+        real(expect_partial=True, expect_token="b" * 32)

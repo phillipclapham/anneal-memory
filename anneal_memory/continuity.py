@@ -70,7 +70,6 @@ from .store import (
     StoreDatabaseError,
     StoreError,
     WrapInProgressError,
-    WrapCancelGatedError,
     WrapOwnershipError,
     WrapWindowMovedError,
     _fsync_dir,
@@ -1638,16 +1637,9 @@ def prepare_wrap(
             if observed is not None:
                 store.wrap_cancelled(expect_token=observed["token"])
             elif observed_partial:
-                store.wrap_cancelled()
-        except WrapCancelGatedError:
-            # Between this call's observation and the cancel, a peer's gated wrap
-            # replaced the partial state; the store refused to cancel it. Same answer
-            # as a replaced wrap.
-            return _downgraded_empty(
-                "Consolidate downgraded to capture-only (downgraded-wrap-replaced): "
-                "the wrap this call observed was replaced or changed while it was deciding, so it "
-                "left it alone. Retry. Capture (afferent) is unaffected."
-            )
+                # Clear only the partial state observed above: a peer that cleared it and
+                # started a fresh wrap meanwhile (gated or not) must not be destroyed.
+                store.wrap_cancelled(expect_partial=True)
         except WrapOwnershipError as exc:
             if exc.actual is not None or exc.partial_state:
                 return _downgraded_empty(

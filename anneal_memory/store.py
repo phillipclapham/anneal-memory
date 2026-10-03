@@ -2861,6 +2861,7 @@ class Store:
         expect_token: str | None = None,
         session_id: str | None = None,
         force: bool = False,
+        expect_partial: bool = False,
     ) -> "WrapCancelReceipt":
         """Clear wrap-in-progress flag without recording a completed wrap.
 
@@ -2889,6 +2890,13 @@ class Store:
             force: Clear a gated wrap without its token or session (the holder is
                 gone). Must be the literal ``True``. Ignored when ``expect_token``
                 is given, since the token is the stronger proof.
+            expect_partial: Clear ONLY if the lifecycle state is still partial
+                (corrupt, no usable token) when the write lock is taken. The
+                compare-and-swap for a caller that observed partial state and has
+                no token to name: if a coherent wrap replaced it meanwhile, raise
+                :class:`WrapOwnershipError` with ``actual`` = that wrap's token;
+                if the store went idle, raise it with ``actual=None``. Nothing is
+                changed in either case. Cannot be combined with ``expect_token``.
 
         Returns a :class:`WrapCancelReceipt` describing **what this call
         actually cleared**, read inside the same transaction as the clear —
@@ -2961,6 +2969,8 @@ class Store:
         # partial-state cancel emitted NO audit event at all —
         # silent_error_swallowing inside the very tool that exists
         # to recover from silent error states. 10.5c.5 L1 MEDIUM.
+        if expect_partial and expect_token is not None:
+            raise ValueError("wrap_cancelled: expect_partial and expect_token are exclusive.")
         with self._db_boundary("wrap_cancelled"):
             # Take the write lock BEFORE the reads so no peer connection can
             # replace the wrap between what we report and what we clear. See
@@ -3034,6 +3044,14 @@ class Store:
             # through the guard written to prevent it. Both L3 seats caught it
             # (glm HIGH, codex MED). ``actual is None`` now means IDLE and
             # nothing else.
+            if expect_partial and not partial_state:
+                # Observed partial, now coherent (a peer's fresh wrap) or idle:
+                # the state this caller judged is gone, so it clears nothing.
+                raise WrapOwnershipError(
+                    expected="(partial state)",
+                    actual=(cancelled_token or None) if complete else None,
+                    partial_state=False,
+                )
             if expect_token is not None and cancelled_token != expect_token:
                 raise WrapOwnershipError(
                     expected=expect_token,

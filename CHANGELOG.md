@@ -33,15 +33,16 @@ manifest: a crashed rotation's orphaned week could be newer than the manifest kn
 it forked the chain for good (measured for the lock and the unlistable directory, each with the refusal
 removed or skipped). A quarantined manifest is not refused here; it anchors on the newest sealed file on
 disk. The refusal names its cause, and the next write retries; a cause that does not clear refuses every
-write (and `audit-repair`) until it is removed. For a symlink, FIFO or directory at the lock path the
-error says so and gives the way out: remove `<stem>.audit-manifest.lock`; it holds no state.
+write (and `audit-repair`) until it is cleared; the error names the lock path and the OS error, and
+gives no remedy, because removing a lock file another process holds would split the lock.
 
 Known and not fixed: with an empty active file, an unreadable or corrupt newer sealed week does not stop
 the chain; it continues from the manifest past that week and `verify()` reports the week as unmanifested
 (round 10: a permanently bad orphan must not block writes).
 
 Known and not fixed: a crash during a manifest save can leave a uniquely named
-`<stem>.audit.manifest.json.<hex>.tmp` beside the manifest; nothing removes it. It is not a sealed-file
+`.anneal-manifest-<hex>.tmp` beside the manifest (a fixed-length name, so a long stem cannot push it
+past the filesystem's name limit); nothing removes it. It is not a sealed-file
 name, so `verify()` and adoption ignore it, and it is safe to delete.
 
 Each manifest save writes its own randomly named temp file and replaces the manifest from it, so where the

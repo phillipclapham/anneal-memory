@@ -67,9 +67,6 @@ logger = logging.getLogger("anneal-memory")
 # (AuditTrail._open_and_flock).
 _lock_degrade_warned: set[str] = set()
 _ENOLCK_RETRIES = 3
-# The way out of a lock path that cannot be opened or is not a regular file
-# (L2, run: a planted symlink refused every write and every repair).
-_LOCK_WAY_OUT = "remove that lock file; it holds no state and is recreated on the next lock"
 _ENOLCK_RETRY_SECONDS = 0.05
 
 # Chain anchors
@@ -1788,14 +1785,12 @@ class AuditTrail:
                 fd = os.open(lock_path, os.O_RDONLY | flags, 0o644)
         except OSError as e:
             raise _AuditLockError(
-                f"cannot open the audit manifest lock {lock_path}: {e}; "
-                f"{_LOCK_WAY_OUT}"
+                f"cannot open the audit manifest lock {lock_path}: {e}"
             ) from e
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise _AuditLockError(
-                    f"the audit manifest lock {lock_path} is not a regular file; "
-                    f"{_LOCK_WAY_OUT}"
+                    f"the audit manifest lock {lock_path} is not a regular file"
                 )
             # ENOLCK is also what a lock table out of records returns, which is
             # transient; Linux NFS without lock support returns it for good. A
@@ -1823,18 +1818,19 @@ class AuditTrail:
         # its logging to a file showed nothing, and a second store in the same
         # process was silent because the warning fired once per process. Now
         # once per lock path, on stderr and to the logger.
+        # Recorded BEFORE emitting, and stderr only (no logger call): a failing
+        # emission can then cost at most this one warning, never the degrade.
         if str(lock_path) not in _lock_degrade_warned:
-            message = (
-                f"Advisory locks are unavailable for {lock_path}; the audit manifest "
-                "lock is NOT held, so audit manifest changes are not serialized "
-                "across processes."
-            )
-            logger.warning(message)
+            _lock_degrade_warned.add(str(lock_path))
             try:
-                print(f"[anneal-memory] WARNING: {message}", file=sys.stderr)
+                print(
+                    f"[anneal-memory] WARNING: Advisory locks are unavailable for "
+                    f"{lock_path}; the audit manifest lock is NOT held, so audit "
+                    "manifest changes are not serialized across processes.",
+                    file=sys.stderr,
+                )
             except (OSError, ValueError):
                 pass  # a closed or broken stderr must not turn a degrade into a failure
-            _lock_degrade_warned.add(str(lock_path))
         return None
 
     def _initialize(self) -> None:
@@ -2043,8 +2039,8 @@ class AuditTrail:
             with self._manifest_lock():
                 return self._adopt_locked()
         except _AuditLockError as exc:
-            logger.warning("Not adopting orphaned audit files: %s", exc)
             self._adoption_skip_reason = str(exc)
+            logger.warning("Not adopting orphaned audit files: %s", exc)
             return False
 
     def _adopt_locked(self) -> bool:
@@ -2119,8 +2115,8 @@ class AuditTrail:
         try:
             manifest = self._load_manifest()
         except _ManifestUnavailable as exc:
-            logger.warning("Not adopting orphaned audit files: %s", exc)
             self._adoption_skip_reason = str(exc)
+            logger.warning("Not adopting orphaned audit files: %s", exc)
             return False
         try:
             names = sorted(p.name for p in audit_dir.iterdir())
@@ -2130,8 +2126,8 @@ class AuditTrail:
             # Writable but not listable. Recovery is skipped rather than
             # failing every write (L1, round 10, reproduced at mode 0o300);
             # verify() reports the directory itself.
-            logger.warning("Cannot list audit directory for recovery: %s", e)
             self._adoption_skip_reason = f"cannot list the audit directory: {e}"
+            logger.warning("Cannot list audit directory for recovery: %s", e)
             return False
 
         # A crash while compressing leaves ``<sealed>.jsonl.gz.tmp`` beside
@@ -2743,7 +2739,9 @@ class AuditTrail:
         with self._manifest_lock():
             # O_EXCL on a random name, mode 0o666 under the umask: the manifest
             # keeps the mode a plain ``open()`` gave it (mkstemp would make it 0600).
-            tmp_path = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
+            # The basename is fixed-length and independent of the stem, so a stem
+            # the manifest name fits never pushes the temp name past NAME_MAX.
+            tmp_path = path.with_name(f".anneal-manifest-{secrets.token_hex(8)}.tmp")
             fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:

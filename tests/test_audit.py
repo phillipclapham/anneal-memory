@@ -8454,6 +8454,14 @@ class TestManifestLockL3:
         leftovers = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
         assert leftovers == [theirs.name]
 
+    def test_a_long_stem_manifest_save_fits_the_name_limit(self, tmp_path):
+        """L3 codex HIGH [run: a 220-character stem gave a 240-byte manifest name
+        and a 261-byte temp name, and the save raised ENAMETOOLONG]: the temp
+        basename must not grow with the stem."""
+        trail = AuditTrail(tmp_path / ("s" * 220 + ".db"))
+        trail._save_manifest(trail._fresh_manifest())
+        assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+
     def test_an_enolck_degrade_warns_on_stderr(self, tmp_path, monkeypatch, capsys):
         """L2 MED "silent degrade", ruled 10-03: degrade with a stderr warning.
         Reproduced first: an application logging to a file saw nothing on

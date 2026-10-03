@@ -3097,6 +3097,9 @@ def _pull_note(why: str) -> None:
     if err is None:
         return
     try:
+        # One physical line: a reason carrying CR or LF (an OS error text, a path)
+        # must not forge a second line.
+        why = " ".join(why.split())
         err.write(f"crystal get: pull not recorded ({why})\n")
         err.flush()
     except (OSError, ValueError):

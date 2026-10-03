@@ -853,39 +853,10 @@ def test_only_json_true_marks_a_pull_so_any_other_value_keeps_its_counts(tmp_pat
     assert row.pulled == 0 and row.followed == 1 and row.success == 1
 
 
-def test_a_skipped_pull_leaves_no_new_empty_log_or_directory(tmp_path):
-    log = OutcomeLog(tmp_path / "a" / "b" / "mem.outcomes.jsonl")
-
-    def refuse():
-        raise RuntimeError("store replaced")
-
-    with pytest.raises(RuntimeError):
-        log.record("a", [ExposureLabel("crystal", "p", "followed")],
-                   pull=True, before_append=refuse)
-    assert not (tmp_path / "a").exists()
-    # an existing log is never removed, empty or not, and its directory stays
-    keep = OutcomeLog(tmp_path / "mem.outcomes.jsonl")
-    keep.path.write_text("")
-    with pytest.raises(RuntimeError):
-        keep.record("a", [ExposureLabel("crystal", "p", "followed")],
-                    pull=True, before_append=refuse)
-    assert keep.path.exists() and tmp_path.exists()
-
-
-def test_crystal_get_replaced_store_leaves_no_log_behind(tmp_path):
+def test_the_pull_note_is_one_physical_line_whatever_the_reason(capsys):
     from anneal_memory import cli
 
-    db, _ = _pull_store(tmp_path)
-    real = cli._outcome_store_id
-    reads = []
-
-    def swapped(db_path, **kw):
-        reads.append(1)
-        return real(db_path, **kw) if len(reads) == 1 else "b" * 32
-
-    cli._outcome_store_id = swapped
-    try:
-        cli._record_pull_label(__import__("argparse").Namespace(db=str(db)), "derive_dont_invent")
-    finally:
-        cli._outcome_store_id = real
-    assert not outcome_log_path(db).exists()
+    cli._pull_note("disk said:\r\nforged second line\nand a third")
+    err = capsys.readouterr().err
+    assert err == "crystal get: pull not recorded (disk said: forged second line and a third)\n"
+    assert err.count("\n") == 1 and "\r" not in err

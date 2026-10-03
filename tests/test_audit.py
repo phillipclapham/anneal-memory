@@ -1762,10 +1762,12 @@ class TestDiogenesBugFixes:
             "last_hash": "",
             "sha256_file": "",
         })
-        trail._save_manifest(manifest)
+        with trail._operation_span():
+            trail._save_manifest(manifest)
 
         # Run cleanup — should NOT delete file with empty last_ts
-        removed = trail._cleanup()
+        with trail._operation_span():
+            removed = trail._cleanup()
         assert removed == 0
         assert empty_gz.exists()
 
@@ -5218,7 +5220,8 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
         assert active.stat().st_size > 0, "fixture: must be NONEMPTY"
 
         fresh = AuditTrail(db)
-        fresh._initialize()
+        with fresh._operation_span():
+            fresh._initialize()
         assert fresh._prev_hash != GENESIS_HASH, (
             "recovery restarted the chain from genesis over a torn-only "
             "active file, ignoring the sealed files the manifest names"
@@ -5267,7 +5270,8 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
 
         monkeypatch.setattr(builtins, "open", sick_open)
         fresh = AuditTrail(db)
-        fresh._initialize()                        # must NOT raise
+        with fresh._operation_span():
+            fresh._initialize()                        # must NOT raise
         monkeypatch.undo()
 
         assert fresh._initialized is True
@@ -5359,7 +5363,8 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
         monkeypatch.setattr(audit_module, "_open_regular", dying_open)
         fresh = AuditTrail(db)
         with pytest.raises(type(exc)):
-            fresh._initialize()
+            with fresh._operation_span():
+                fresh._initialize()
         assert state["armed"], "fixture never armed"
         assert fresh._initialized is False, (
             "the trail marked itself initialised after a scan that FAILED "
@@ -5396,7 +5401,8 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
         assert active.stat().st_size > 0, "fixture: must be NONEMPTY"
 
         fresh = AuditTrail(db)
-        fresh._initialize()  # must NOT raise
+        with fresh._operation_span():
+            fresh._initialize()  # must NOT raise
         assert fresh._initialized is True
         assert fresh._prev_hash != GENESIS_HASH, (
             "a torn multibyte tail left the trail unanchored — recovery "
@@ -5621,7 +5627,8 @@ class TestDiogenes20260909StillOpen:
         # ⚖ HYBRID (Phill, 2026-09-13): a corrupt manifest is quarantined, not
         # degraded to genesis; with no sealed file to seed from, seeding refuses.
         with pytest.raises(audit_module._ManifestQuarantined):
-            trail._seed_from_manifest(adopted=True)
+            with trail._operation_span():
+                trail._seed_from_manifest(adopted=True)
 
         assert trail._prev_hash == GENESIS_HASH, (
             "a manifest field containing an invalid-UTF-8-derived lone "
@@ -5701,7 +5708,8 @@ class TestDiogenes20260909StillOpen:
         # and, with no sealed tail, seeding refuses — but the dirty state must
         # already have been reset by the time it does.
         with pytest.raises(audit_module._ManifestQuarantined):
-            trail._seed_from_manifest(adopted=True)
+            with trail._operation_span():
+                trail._seed_from_manifest(adopted=True)
 
         assert trail._prev_hash == GENESIS_HASH, (
             "an unparseable manifest left the dirty chain state standing "
@@ -5749,7 +5757,8 @@ class TestDiogenes20260909StillOpen:
         trail._active_path.rename(trail._active_path.parent / sealed_name)
         trail._last_week = "1999-W01"  # force the rotation check to fire
 
-        trail._rotate_if_needed()
+        with trail._operation_span():
+            trail._rotate_if_needed()
 
         assert trail._seq == 3, (
             "the early-return rotation branch reset _seq even though it "
@@ -5836,7 +5845,8 @@ class TestFixDiffRound2Ac055fb:
 
         trail._last_week = "1999-W01"  # force the weekly rotation
 
-        trail._rotate_if_needed()  # must NOT raise
+        with trail._operation_span():
+            trail._rotate_if_needed()  # must NOT raise
 
         sealed = active.parent / "seal_torn.audit.1999-W01.jsonl.gz"
         assert sealed.exists()
@@ -5920,7 +5930,8 @@ class TestFixDiffRound3EntryLineTypeSweep:
         active.write_bytes(b"[1, 2, 3]\n")
 
         trail = AuditTrail(db)
-        trail._initialize()  # must NOT raise
+        with trail._operation_span():
+            trail._initialize()  # must NOT raise
 
         assert trail._initialized is True
         assert trail._prev_hash == GENESIS_HASH, (
@@ -5953,7 +5964,8 @@ class TestFixDiffRound3EntryLineTypeSweep:
         orphan.write_bytes(orphan.read_bytes() + b"[1, 2, 3]\n")
 
         fresh = AuditTrail(db)
-        fresh._adopt_orphaned_files()  # must NOT raise
+        with fresh._operation_span():
+            fresh._adopt_orphaned_files()  # must NOT raise
 
         manifest = fresh._load_manifest()
         assert any(
@@ -5980,7 +5992,8 @@ class TestFixDiffRound3EntryLineTypeSweep:
 
         trail._last_week = "1999-W01"  # force the weekly rotation
 
-        trail._rotate_if_needed()  # must NOT raise
+        with trail._operation_span():
+            trail._rotate_if_needed()  # must NOT raise
 
         sealed = active.parent / "seal_non_object.audit.1999-W01.jsonl.gz"
         assert sealed.exists()
@@ -6019,7 +6032,8 @@ class TestFixDiffRound4FieldTypeCompleteness:
         # ⚖ HYBRID (Phill, 2026-09-13): rejected means quarantined; with no
         # sealed tail to seed from, seeding refuses instead of guessing genesis.
         with pytest.raises(audit_module._ManifestQuarantined):
-            trail._seed_from_manifest(adopted=True)
+            with trail._operation_span():
+                trail._seed_from_manifest(adopted=True)
 
         assert trail._prev_hash == GENESIS_HASH, (
             "a boolean active_last_seq should be rejected as corrupt, "
@@ -6081,7 +6095,8 @@ class TestFixDiffRound4FieldTypeCompleteness:
         )
 
         trail._last_week = "1999-W01"  # force the weekly rotation
-        trail._rotate_if_needed()  # must NOT raise
+        with trail._operation_span():
+            trail._rotate_if_needed()  # must NOT raise
 
         manifest = trail._load_manifest()
         assert isinstance(manifest.get("files"), list)
@@ -6130,7 +6145,8 @@ class TestFixDiffRound4FieldTypeCompleteness:
         )
 
         trail = AuditTrail(db)
-        trail._initialize()  # must NOT raise
+        with trail._operation_span():
+            trail._initialize()  # must NOT raise
 
         assert trail._initialized is True
         assert trail._prev_hash == GENESIS_HASH, (
@@ -6269,7 +6285,8 @@ class TestFixDiffRound6WriterReaderConsistency:
 
         manifest = trail._load_manifest()
         manifest["files"] = manifest["files"] * 2
-        trail._save_manifest(manifest)
+        with trail._operation_span():
+            trail._save_manifest(manifest)
 
         result = AuditTrail.verify(db)  # must NOT raise
 
@@ -6691,7 +6708,8 @@ class TestFixDiffRound9LoudNotSilent:
         plain.write_bytes(gzip.decompress(sealed.read_bytes()))
         manifest = trail._load_manifest()
         manifest["files"] = []
-        trail._save_manifest(manifest)
+        with trail._operation_span():
+            trail._save_manifest(manifest)
         raw = sealed.read_bytes()
         sealed.write_bytes(raw[: len(raw) // 2])
 
@@ -6777,7 +6795,8 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         sealed.write_bytes(torn)
         manifest = trail._load_manifest()
         manifest["files"] = []
-        trail._save_manifest(manifest)
+        with trail._operation_span():
+            trail._save_manifest(manifest)
 
         AuditTrail(db).log("after", {})
 
@@ -7182,7 +7201,8 @@ class TestFixDiffRound10RecoveryNeverDeletes:
             if path.name == "m.audit.jsonl" and not fired:
                 fired.append(path)
                 trail._last_week = "1999-W02"
-                trail._rotate_if_needed()  # seals the week; nothing appended yet
+                with trail._operation_span():
+                    trail._rotate_if_needed()  # seals the week; nothing appended yet
                 path.touch()  # the next append has opened the new active file
             return real_iter(path)
 
@@ -7254,7 +7274,9 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         AuditTrail(db).log("first", {})
         (store / "m.audit.manifest.json").write_text("{not json")
         with pytest.raises(audit_module._ManifestQuarantined):
-            AuditTrail(db)._load_manifest()
+            _op_trail = AuditTrail(db)
+            with _op_trail._operation_span():
+                _op_trail._load_manifest()
         (store / "m.audit.jsonl").unlink()
         before = sorted(p.name for p in store.iterdir())
 
@@ -7543,7 +7565,8 @@ class TestHybridManifestQuarantine:
         last = (tmp_path / "m.audit.jsonl").read_text().splitlines()[-1]
         assert json.loads(last)["event"] == "would-rotate"
         trail._retention_days = 0
-        assert trail._cleanup() == 0
+        with trail._operation_span():
+            assert trail._cleanup() == 0
         assert self._sealed_names(tmp_path) == sealed
 
     def test_an_empty_active_file_seeds_from_the_newest_sealed_tail(self, tmp_path):
@@ -8092,32 +8115,43 @@ class TestManifestLock:
 
     _two_sealed_weeks = staticmethod(TestHybridManifestQuarantine._two_sealed_weeks)
 
-    def test_a_stale_reader_does_not_quarantine_the_rebuilt_manifest(
-        self, tmp_path, monkeypatch
-    ):
-        """⛔ MUTATION-CHECKED: quarantine the unlocked read's bytes without
-        re-reading under the lock, and this fails."""
+    def test_a_repair_cannot_land_inside_a_readers_span(self, tmp_path, monkeypatch):
+        """The stale-reader race (spore-1030), under one span per operation
+        (10-03): it was a repair landing between a reader's read of the old
+        invalid bytes and its quarantine. A repair started at that point now
+        waits for the reader's span; the reader quarantines what it read, and
+        the repair then rebuilds."""
+        import threading as threading_module
+
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
         real = audit_module._read_regular_bytes
-        state: dict = {"fired": False, "repaired": None}
+        state: dict = {"fired": False, "repaired": None, "done_in_hook": None}
 
-        def stale_read_then_repair_elsewhere(path):
+        def repair_elsewhere():
+            state["repaired"] = AuditTrail.repair_manifest(db)
+
+        repairer = threading_module.Thread(target=repair_elsewhere)
+
+        def read_then_start_a_repair(path):
             raw = real(path)
             if Path(path).name == "m.audit.manifest.json" and not state["fired"]:
-                # Another trail (its own lock descriptor) repairs while this
-                # reader holds the old bytes. ``fired`` is set first: repair
-                # reads the manifest through this same hook.
                 state["fired"] = True
-                state["repaired"] = AuditTrail.repair_manifest(db)
+                repairer.start()  # its own trail, its own lock descriptor
+                repairer.join(0.5)
+                state["done_in_hook"] = not repairer.is_alive()
             return raw
 
-        monkeypatch.setattr(audit_module, "_read_regular_bytes", stale_read_then_repair_elsewhere)
-        manifest = AuditTrail(db)._load_manifest()
+        monkeypatch.setattr(audit_module, "_read_regular_bytes", read_then_start_a_repair)
+        reader = AuditTrail(db)
+        with pytest.raises(audit_module._ManifestQuarantined):
+            with reader._operation_span():
+                reader._load_manifest()
+        repairer.join(10)
         monkeypatch.setattr(audit_module, "_read_regular_bytes", real)
 
+        assert state["done_in_hook"] is False, "the repair ran inside the reader's span"
         assert state["repaired"].repaired is True, state["repaired"].error
-        assert len(manifest["files"]) == 2
         assert audit_module._quarantine_markers(tmp_path, "m") == []
         assert AuditTrail.verify(db).valid
 
@@ -8143,7 +8177,9 @@ class TestManifestLock:
 
         monkeypatch.setattr(audit_module, "_read_regular_bytes", another_process_quarantines_then_saves)
         with pytest.raises(audit_module._ManifestQuarantined) as caught:
-            AuditTrail(db)._load_manifest()
+            _op_trail = AuditTrail(db)
+            with _op_trail._operation_span():
+                _op_trail._load_manifest()
         monkeypatch.setattr(audit_module, "_read_regular_bytes", real)
 
         assert caught.value.markers == [marker]
@@ -8177,21 +8213,28 @@ class TestManifestLock:
             trail = AuditTrail(db)
             release.write_text("x")
             start = datetime.now()
-            trail._save_manifest(trail._fresh_manifest())
+            with trail._operation_span():
+                trail._save_manifest(trail._fresh_manifest())
             waited = (datetime.now() - start).total_seconds()
         finally:
             release.write_text("x")
             child.wait(timeout=20)
         assert waited >= 0.2, f"the save did not wait for the other process ({waited:.3f}s)"
 
-    def test_the_lock_is_reentrant_within_one_trail(self, tmp_path):
+    def test_the_lock_is_taken_once_per_operation_never_nested(self, tmp_path):
+        """One span per operation (10-03): internals require the lock and do
+        not take it, so a nested take is a programming error, refused loudly
+        rather than deadlocking or silently reusing the descriptor."""
         trail = AuditTrail(tmp_path / "m.db")
-        with trail._manifest_lock() as outer:
-            with trail._manifest_lock() as inner:
-                trail._save_manifest(trail._fresh_manifest())
-            assert inner == outer
-            assert trail._lock_depth == 1
-        assert trail._lock_depth == 0 and trail._lock_fd is None
+        with trail._manifest_lock():
+            trail._save_manifest(trail._fresh_manifest())
+            with pytest.raises(RuntimeError):
+                with trail._manifest_lock():
+                    pass
+            assert trail._lock_owner is not None
+        assert trail._lock_owner is None and trail._lock_fd is None
+        with pytest.raises(RuntimeError):
+            trail._save_manifest(trail._fresh_manifest())  # no operation holds it
 
     def test_the_lock_file_is_outside_the_audit_name_set(self, tmp_path):
         """The CLI compares the ``<stem>.audit.*`` names before and after a read
@@ -8236,7 +8279,9 @@ class TestManifestLock:
 
         monkeypatch.setattr(audit_module.fcntl, "flock", faulty)
         with pytest.raises(audit_module._ManifestUnavailable) as caught:
-            AuditTrail(db)._load_manifest()
+            _op_trail = AuditTrail(db)
+            with _op_trail._operation_span():
+                _op_trail._load_manifest()
         assert not isinstance(caught.value, audit_module._ManifestQuarantined)
         result = AuditTrail.repair_manifest(db)
 
@@ -8340,7 +8385,8 @@ class TestManifestLockSpans:
         (tmp_path / "m.audit.manifest.json").write_text(json.dumps(manifest))
         trail = AuditTrail(db)
         probes = self._probe_at_load(trail, monkeypatch)
-        trail._adopt_orphaned_files()
+        with trail._operation_span():
+            trail._adopt_orphaned_files()
         monkeypatch.undo()
         names = [f["filename"] for f in json.loads((tmp_path / "m.audit.manifest.json").read_text())["files"]]
         assert "m.audit.1999-W02.jsonl.gz" in names
@@ -8355,7 +8401,8 @@ class TestManifestLockSpans:
         mpath.write_text(json.dumps(manifest))
         trail = AuditTrail(db, retention_days=1)
         probes = self._probe_at_load(trail, monkeypatch)
-        removed = trail._cleanup()
+        with trail._operation_span():
+            removed = trail._cleanup()
         monkeypatch.undo()
         assert removed == 2
         assert probes and set(probes) == {"held"}, probes
@@ -8374,7 +8421,7 @@ class TestManifestLockFile:
         with pytest.raises(audit_module._AuditLockError):
             with trail._manifest_lock():
                 pass
-        assert trail._lock_depth == 0 and trail._lock_fd is None
+        assert trail._lock_owner is None and trail._lock_fd is None
 
     def test_a_symlink_at_the_lock_path_is_refused_not_followed(self, tmp_path):
         """⛔ MUTATION-CHECKED: drop O_NOFOLLOW and this fails."""
@@ -8447,7 +8494,8 @@ class TestManifestLockL3:
         trail = AuditTrail(tmp_path / "m.db")
         theirs = tmp_path / "m.audit.manifest.json.tmp"
         theirs.write_text("another writer's in-flight save")
-        trail._save_manifest(trail._fresh_manifest())
+        with trail._operation_span():
+            trail._save_manifest(trail._fresh_manifest())
         assert theirs.read_text() == "another writer's in-flight save"
         leftovers = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
         assert leftovers == [theirs.name]
@@ -8604,7 +8652,8 @@ class TestManifestLockL3:
         and a 261-byte temp name, and the save raised ENAMETOOLONG]: the temp
         basename must not grow with the stem."""
         trail = AuditTrail(tmp_path / ("s" * 220 + ".db"))
-        trail._save_manifest(trail._fresh_manifest())
+        with trail._operation_span():
+            trail._save_manifest(trail._fresh_manifest())
         assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
 
     def test_an_enolck_degrade_warns_on_stderr(self, tmp_path, monkeypatch, capsys):
@@ -8702,4 +8751,56 @@ class TestManifestLockL3:
         assert (tmp_path / "m.audit.jsonl").read_bytes() == b""
 
         AuditTrail(db).log("after", {})
+        assert AuditTrail.verify(db).valid
+
+
+@pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+class TestOneSpanPerOperation:
+    """Phill, 10-03, item 2: one manifest-lock span per public operation."""
+
+    _two_sealed_weeks = staticmethod(TestHybridManifestQuarantine._two_sealed_weeks)
+
+    def test_a_repair_in_another_process_cannot_land_between_adoption_and_seed(
+        self, tmp_path, monkeypatch
+    ):
+        """[run before the fix, with a real second process] Adoption saw a
+        quarantined manifest and released its span; ``audit-repair`` in
+        another process rebuilt the manifest in the gap; the seed then read
+        the rebuilt manifest and refused this write on adoption's stale "did
+        not complete", telling the operator to run the repair that had just
+        succeeded. Under one span the repair waits for the whole ``log()``.
+        ⛔ MUTATION-CHECKED: drop the span in ``log()`` and the write is
+        refused."""
+        import subprocess
+
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / "m.audit.jsonl").write_bytes(b"")  # no usable active file
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        repair = (
+            "import sys; from anneal_memory.audit import AuditTrail; "
+            "r = AuditTrail.repair_manifest(sys.argv[1]); print(r.repaired, r.error)"
+        )
+        real = AuditTrail._adopt_orphaned_files
+        state: dict = {}
+
+        def adopt_then_repair_in_another_process(self):
+            adopted = real(self)
+            state["proc"] = subprocess.Popen(
+                [sys.executable, "-c", repair, str(db)], stdout=subprocess.PIPE, text=True,
+                env={**os.environ, "PYTHONPATH": str(Path(audit_module.__file__).parent.parent)},
+            )
+            try:
+                state["proc"].wait(timeout=2.0)
+                state["landed_in_gap"] = True
+            except subprocess.TimeoutExpired:
+                state["landed_in_gap"] = False
+            return adopted
+
+        monkeypatch.setattr(AuditTrail, "_adopt_orphaned_files", adopt_then_repair_in_another_process)
+        AuditTrail(db).log("x", {})  # must NOT raise
+        out = state["proc"].communicate(timeout=30)[0]
+        monkeypatch.undo()
+
+        assert state["landed_in_gap"] is False
+        assert out.startswith("True"), out
         assert AuditTrail.verify(db).valid

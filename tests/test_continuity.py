@@ -451,8 +451,12 @@ class TestTypedDictReturnShapes:
                 # proposed, recorded and rejected (with reasons).
                 "supersessions_recorded", "supersessions_rejected",
                 "sections", "wrap_result",
+                # B1 (0.9.27): present when the schema has a durable section,
+                # as a fresh store's default schema does; empty here.
+                "durable_warnings",
             }
             assert set(result.keys()) == expected
+            assert result["durable_warnings"] == []
         finally:
             store.close()
 

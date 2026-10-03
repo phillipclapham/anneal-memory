@@ -69,6 +69,7 @@ from .crystal import CrystalError, CrystalStore
 from .durable import (
     enforce_durable_facts,
     match_headings,
+    pending_transitions as durable_pending_transitions,
     report_warnings as durable_report_warnings,
     section_chars as durable_section_chars,
 )
@@ -778,6 +779,7 @@ def _build_wrap_package(
         crystallization_candidates=crystallization_candidates,
         rewarm_candidates=rewarm_candidates,
         durable_chars=durable_section_chars(existing_continuity, schema),
+        durable_pending=durable_pending_transitions(existing_continuity, schema),
     )
 
     return WrapPackageDict(
@@ -805,6 +807,7 @@ def _build_wrap_instructions(
     crystallization_candidates: list[StalePatternDict] | None = None,
     rewarm_candidates: list[str] | None = None,
     durable_chars: int = 0,
+    durable_pending: list[str] | None = None,
 ) -> str:
     """Build the compression instructions the agent receives via prepare_wrap.
 
@@ -824,7 +827,9 @@ def _build_wrap_instructions(
     Defaults to ``None`` (no block) so direct callers stay backward-compatible.
 
     ``durable_chars``: the current size of the existing continuity's durable
-    section, shown against that section's own budget. Only a schema with a
+    section, shown against that section's own budget; ``durable_pending``: its
+    facts that describe a change that has not happened yet, listed for the
+    composer to check. Only a schema with a
     ``durable`` section gets the durable guidance; any other schema's text is
     unchanged by it.
     """
@@ -960,7 +965,12 @@ def _build_wrap_instructions(
         ]
     parts += ["**How to compress:**", *how_lines, ""]
     if durable_heading is not None:
-        parts += [_durable_block(durable_heading, today, durable_chars, max_chars), ""]
+        parts += [
+            _durable_block(
+                durable_heading, durable_chars, max_chars, durable_pending or []
+            ),
+            "",
+        ]
     parts += [
         "**Quality:** One insightful line > three vague ones. If removing something",
         "wouldn't change your next decision, cut it. Compress principles, not events.",
@@ -995,15 +1005,20 @@ def _build_wrap_instructions(
     return "\n".join(parts)
 
 
-def _durable_block(heading: str, today: str, current_chars: int, max_chars: int) -> str:
+def _durable_block(
+    heading: str, current_chars: int, max_chars: int, pending: list[str]
+) -> str:
     """The wrap-package guidance for a ``durable`` section (B1). The keep
-    criterion is InMind's, the one its memory probe was measured with."""
-    return "\n".join([
+    criterion is InMind's, the one its memory probe was measured with. The
+    example line carries no date: refreshing a date would be a reword."""
+    lines = [
         f"**{heading}** (`{heading}: {current_chars} / {durable_budget(max_chars)} chars`)",
         f"- Put a fact here when it would change what advice or answer you give, or "
         f"the user would be upset or harmed if you forgot it: health, allergies, "
         f"constraints, commitments, preferences, relationships, identity facts, and "
-        f"system facts a future action depends on. One `- ` line per fact.",
+        f"system facts a future action depends on. One `- ` line per fact. Most "
+        f"sessions add zero or one line. Re-read each line and drop the ones that "
+        f"no longer hold. Patterns belong in ## Patterns, not here.",
         f"- End a line with 3-8 cue words for the situations where the fact should "
         f"come to mind (places, activities, objects, topics a future request would "
         f"mention), not synonyms of the fact: "
@@ -1017,12 +1032,20 @@ def _durable_block(heading: str, today: str, current_chars: int, max_chars: int)
         f"- When a fact has a current value that will change on a future event, "
         f"state the CURRENT value AND the pending change, and cue the event too: "
         f"`- The nightly bank export calls fmt_row52; it switches to fmt_row64 only "
-        f"at the bank cutover, which has not happened (as of {today}) — cues: "
+        f"at the bank cutover, which has not happened — cues: "
         f"cutover, bank, export, nightly, formatter`. When the event happens, drop "
         f"the old line with the marker and write the new current value.",
         f"- This section's budget is on top of the limit above. Over it, the save "
         f"warns and keeps every line: drop facts that no longer hold.",
-    ])
+    ]
+    if pending:
+        lines += [
+            "",
+            "Check whether these pending changes have happened; if one has, drop "
+            "the old line and write the new current value:",
+            *pending,
+        ]
+    return "\n".join(lines)
 
 
 def _marker_reference(
@@ -3468,8 +3491,10 @@ def validated_save_continuity(
             "refusal it overrode was removed in 0.9.26. Stop passing it "
             "(CLI --allow-unlinked; MCP \"allow_unlinked\")."
         )
+    durable_messages: list[str] = []
     if durable_report is not None:
-        for durable_message in durable_report_warnings(durable_report):
+        durable_messages = durable_report_warnings(durable_report)
+        for durable_message in durable_messages:
             _warn_after_commit(durable_message)
     if still_graduating:
         _warn_after_commit(
@@ -3583,6 +3608,8 @@ def validated_save_continuity(
     )
     if compost_names is not None:
         result["composted"] = composted
+    if durable_report is not None:
+        result["durable_warnings"] = durable_messages
     if stale_state:
         result["stale_state"] = stale_state
         _warn_after_commit("State lines that do not hold at save: " + "; ".join(stale_state))

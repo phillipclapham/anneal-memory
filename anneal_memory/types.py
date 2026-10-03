@@ -638,6 +638,10 @@ class _SaveContinuityOptional(TypedDict, total=False):
     # hold at save (stale, or not derived within the load budget). The save
     # committed; these lines are the agent's to fix next wrap.
     stale_state: list[str]
+    # Present ONLY when the store's schema has a durable section: every
+    # durable-facts warning text this save emitted (also delivered as
+    # UserWarnings), empty when there were none.
+    durable_warnings: list[str]
 
 
 class SaveContinuityResult(_SaveContinuityOptional):

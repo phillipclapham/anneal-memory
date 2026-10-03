@@ -7,8 +7,11 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 ### Fixed — `outcome --adopt-unbound` on a platform with no file lock (Windows)
 
 - It refused with "nothing was written" after it had already minted the store's id into the
-  database. The CLI now checks for the lock before minting, so the refusal writes nothing.
-  Found by Windows CI 2026-10-03 (run 37159022302).
+  database. Where Python has no `fcntl` (Windows) the CLI now refuses before minting, so the
+  refusal writes nothing. Found by Windows CI 2026-10-03 (run 37159022302).
+- Known and not fixed: on a filesystem that has `fcntl` but refuses `flock` (some NFS, CIFS
+  or FUSE mounts), the store id is still minted before adopt fails on the lock, as in 0.9.26.
+  The check above looks at the platform, not at the mount.
 - Test-only: the cross-process audit-lock test raced its own marker file (the child created it
   before writing it); CI's Linux py3.11/py3.13 failures since 13e8094 were that race, measured
   on Linux under load (the exclusion check itself never failed). Windows tests for lock-only

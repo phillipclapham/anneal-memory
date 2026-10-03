@@ -4364,10 +4364,23 @@ def test_outcome_and_worth_refuse_a_db_that_is_not_an_anneal_store(tmp_path):
     c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     c.close()
     (ro / "s.db").write_bytes((tmp_path / "s.db").read_bytes())
+    # The desk's case [run 10:24]: a fresh store whose creation is still only in its
+    # -wal, copied with it into a read-only directory, read as "not anneal".
+    from anneal_memory import Store
+    live = Store(str(tmp_path / "w.db"))
+    try:
+        live.record("hello world", episode_type="observation")
+        (ro / "w.db").write_bytes((tmp_path / "w.db").read_bytes())
+        (ro / "w.db-wal").write_bytes((tmp_path / "w.db-wal").read_bytes())
+    finally:
+        live.close()
     ro.chmod(0o555)
     try:
         result = run(ro / "s.db", "worth")
         assert result.returncode == 0, result.stderr
-        assert sorted(p.name for p in ro.iterdir()) == ["s.db"]
+        result = run(ro / "w.db", "worth")
+        assert result.returncode == 1
+        assert "cannot read the database" in result.stderr, result.stderr
+        assert sorted(p.name for p in ro.iterdir()) == ["s.db", "w.db", "w.db-wal"]
     finally:
         ro.chmod(0o755)

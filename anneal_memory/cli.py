@@ -309,20 +309,32 @@ def _is_anneal_db(db_path: Path) -> bool:
     Where that open fails (a WAL store in a read-only directory with no ``-shm``),
     the marker is read once more with ``immutable=1``, which ignores the WAL: the
     rows checked are written when the store is created, so this can only turn a
-    brand-new, never-checkpointed store into a refusal, never accept a foreign
-    file. Raises ``sqlite3.OperationalError`` when neither open can read it."""
+    brand-new, never-checkpointed store into "cannot read", never accept a foreign
+    file. Raises ``sqlite3.OperationalError`` when neither open can read it, or when
+    the fallback finds no marker while an unapplied ``-wal`` sits beside the file."""
     if not db_path.is_file():
         return False
     uri = db_path.resolve().as_uri()
     try:
         return _read_anneal_marker(f"{uri}?mode=rw")
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as rw_error:
         try:
-            return _read_anneal_marker(f"{uri}?mode=ro&immutable=1")
+            found = _read_anneal_marker(f"{uri}?mode=ro&immutable=1")
         except sqlite3.OperationalError:
             raise  # cannot read it at all (unreadable, locked): not evidence either way
         except sqlite3.DatabaseError:
             return False
+        wal = db_path.with_name(db_path.name + "-wal")
+        if not found and wal.is_file() and wal.stat().st_size > 0:
+            # The immutable read ignores the WAL, and a store whose creation is
+            # still only in it reads as empty here [run 10:24: a valid store copied
+            # with its un-checkpointed -wal into a 0555 directory was refused].
+            # Not evidence either way, so say so instead of answering "not anneal".
+            raise sqlite3.OperationalError(
+                f"{rw_error}; and it has an unapplied write-ahead log (-wal), which "
+                "only a writable open can read"
+            )
+        return found
     except sqlite3.DatabaseError:
         return False  # "file is not a database" and the like
 

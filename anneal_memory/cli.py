@@ -281,8 +281,10 @@ def _json_parent() -> argparse.ArgumentParser:
 
 # -- Store factory --
 
-def _open_store(args: argparse.Namespace) -> Store:
-    """Open a Store from CLI args."""
+def _existing_db_path(args: argparse.Namespace) -> Path:
+    """The --db path, or exit 1 when no database is there. A command that derives a
+    sibling file from --db (the outcome log) must refuse a wrong path rather than
+    write to, or report from, a file beside a database that does not exist."""
     db_path = Path(args.db).expanduser()
     if not db_path.exists():
         print(f"Error: database not found: {db_path}", file=sys.stderr)
@@ -292,6 +294,12 @@ def _open_store(args: argparse.Namespace) -> Store:
             file=sys.stderr,
         )
         sys.exit(1)
+    return db_path
+
+
+def _open_store(args: argparse.Namespace) -> Store:
+    """Open a Store from CLI args."""
+    db_path = _existing_db_path(args)
     try:
         return Store(
             path=db_path,
@@ -3142,7 +3150,7 @@ def cmd_outcome(args: argparse.Namespace) -> None:
     try:
         items = [_parse_label(raw) for raw in (args.item or [])]
         exposed = [_parse_exposed(raw) for raw in (args.exposed or [])]
-        rec = OutcomeLog(outcome_log_path(Path(args.db).expanduser())).record(
+        rec = OutcomeLog(outcome_log_path(_existing_db_path(args))).record(
             args.exposure_id, items, outcome=args.outcome, exposed=exposed
         )
     except (ValueError, OSError) as exc:
@@ -3186,7 +3194,7 @@ def cmd_crystal_fold_surfaced(args: argparse.Namespace) -> None:
 
 def cmd_worth(args: argparse.Namespace) -> None:
     """Report-only Memory-Worth counters. Nothing reads this to rank or decay."""
-    db_path = Path(args.db).expanduser()
+    db_path = _existing_db_path(args)
     try:
         report = compute_worth(OutcomeLog(outcome_log_path(db_path)), _open_crystal_store(args))
     except (CrystalError, OSError, ValueError) as exc:

@@ -4322,3 +4322,22 @@ class TestHybridSnapshotAuditCli:
         assert result.returncode == 0, result.stderr
         assert "Traceback" not in result.stderr
         assert json.loads(result.stdout)["anchor_trusted"] is False
+
+
+def test_outcome_and_worth_refuse_a_missing_db(tmp_path):
+    """Diogenes 2026-10-03 MED, reproduced by a real CLI run before the fix:
+    `outcome` exited 0 and created nope/deep/typo.outcomes.jsonl (directories
+    included), and `worth` exited 0 reporting 0 exposures, on a --db that does
+    not exist. Both must refuse like every store command and create nothing."""
+    for argv in (
+        ["outcome", "--exposure-id", "ev1", "--item", "crystal:foo=followed", "--outcome", "success"],
+        ["worth"],
+    ):
+        result = subprocess.run(
+            [sys.executable, "-m", "anneal_memory.cli",
+             "--db", str(tmp_path / "nope" / "deep" / "typo.db"), *argv],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 1, (argv, result.stdout, result.stderr)
+        assert "database not found" in result.stderr
+    assert list(tmp_path.iterdir()) == []

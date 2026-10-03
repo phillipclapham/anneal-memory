@@ -4409,10 +4409,11 @@ def test_outcome_log_left_beside_a_replaced_store_is_not_adopted(tmp_path):
 
 def test_adopt_unbound_binds_records_written_before_store_ids(tmp_path):
     """Reproduced by a real CLI run first (10-03) on a 0.9.23 store and log: the
-    store had no id, the log's records no `store`. `worth` mints the id with one
-    write-capable open and reports the old record as unbound (still counted);
-    `--adopt-unbound` appends one marker and binds it; a second adopt writes
-    nothing; new records carry the id."""
+    store had no id, the log's records no `store`. `worth` is read-only (Phill
+    10-03): it reports "no id yet" and the old record as unbound (still counted)
+    and writes nothing; `--adopt-unbound`, a write path, mints the id and appends
+    one marker binding it; a second adopt writes nothing; new records carry the
+    id."""
 
     def run(*argv):
         return subprocess.run(
@@ -4432,8 +4433,20 @@ def test_adopt_unbound_binds_records_written_before_store_ids(tmp_path):
                    + "\n")
     data = json.loads(run("worth", "--json").stdout)
     assert (data["bound"], data["unbound"], data["foreign"], data["exposures"]) == (0, 1, 0, 1)
-    sid = data["store_id"]
+    assert data["store_id"] is None and "no id yet" in run("worth").stdout
+
+    def minted():
+        db = sqlite3.connect(tmp_path / "mem.db")
+        try:
+            row = db.execute("SELECT value FROM metadata WHERE key = 'store_id'").fetchone()
+        finally:
+            db.close()
+        return row[0] if row else None
+
+    assert minted() is None  # worth wrote nothing
     adopt = run("outcome", "--adopt-unbound")
+    sid = minted()
+    assert sid
     assert adopt.returncode == 0 and "Adopted" in adopt.stdout
     assert json.loads(log.read_text().splitlines()[-1]) == {
         "v": 1, "adopt": True, "store": sid, "ts": json.loads(log.read_text().splitlines()[-1])["ts"]}

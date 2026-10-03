@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -26,9 +29,36 @@ PRICES = {"gpt-5-mini": {"input": 0.25, "cached_input": 0.025, "output": 2.00}}
 PRICES_SOURCE = "https://developers.openai.com/api/docs/pricing, Standard tier, gpt-5-mini row (read 2026-10-03)"
 
 
+AGY = Path.home() / ".local/bin/agy"
+AGY_PREFIX = "agy:"
+
+
+def is_agy(model: str) -> bool:
+    """A model served by the Antigravity CLI (``agy:<model>``, e.g. ``agy:gemini-3.8-flash-medium``)."""
+    return model.startswith(AGY_PREFIX)
+
+
 def is_ollama(model: str) -> bool:
     """An Ollama model name (``name:tag``, e.g. ``gpt-oss:120b-cloud``); OpenAI names have no colon."""
-    return ":" in model
+    return ":" in model and not is_agy(model)
+
+
+def is_free_tier(model: str) -> bool:
+    """Runs at $0 against a quota (Ollama, agy): every number from it is TUNING-ONLY."""
+    return is_agy(model) or is_ollama(model)
+
+
+# Structured judge output under agy, identical on every run so BEFORE and AFTER are graded
+# the same way: the judge prompts already ask for {"score": 0|1, "reason": ...}. (An integer
+# `enum` is rejected by the Gemini API: "enum[0]: cannot be empty", measured 2026-10-03.)
+JUDGE_SCHEMA = json.dumps({"type": "object",
+                           "properties": {"score": {"type": "integer", "minimum": 0, "maximum": 1},
+                                          "reason": {"type": "string"}},
+                           "required": ["score", "reason"]})
+
+_AGY_STOP = re.compile(r"quota|rate.?limit|resource.?exhausted|429|exhausted|login|log in|"
+                       r"auth|unauthori[sz]ed|permission denied|limit reached|try again later",
+                       re.IGNORECASE)
 
 
 def _load_key() -> str:
@@ -85,7 +115,16 @@ class Ledger:
 
 class Client:
     def __init__(self, model: str, ledger: Ledger, budget_usd: float) -> None:
+        self.agy = is_agy(model)
         self.ollama = is_ollama(model)
+        if self.agy:
+            self.model = model
+            self.ledger = ledger
+            self.budget_usd = budget_usd
+            self._key = None
+            self._url = str(AGY)
+            self.ollama = False
+            return
         if not self.ollama and model not in PRICES:
             raise ValueError(f"no price on record for {model}")
         self.model = model
@@ -98,6 +137,10 @@ class Client:
              retries: int = 5) -> tuple[str, str]:
         """One completion -> (content, finish_reason). No temperature/top-p
         override (paper protocol)."""
+        if self.agy:
+            schema = JUDGE_SCHEMA if role == "judge" else None
+            text, _usage = self.agy_run(_flatten(messages), role=role, json_schema=schema)
+            return text, "stop"
         msg, finish = self.chat_message(messages, role=role,
                                         max_completion_tokens=max_completion_tokens,
                                         retries=retries)
@@ -152,10 +195,67 @@ class Client:
         return choice["message"], choice.get("finish_reason") or ""
 
 
+def _flatten(messages: list[dict]) -> str:
+    """agy -p takes one prompt: render the chat as labelled blocks, system first."""
+    out = []
+    for m in messages:
+        role = {"system": "SYSTEM INSTRUCTIONS", "user": "USER", "assistant": "ASSISTANT"}.get(
+            m.get("role", ""), str(m.get("role", "")).upper())
+        out.append(f"### {role}\n{m.get('content') or ''}")
+    return "\n\n".join(out)
+
+
 def _looks_like_usage_limit(text: str) -> bool:
     t = text.lower()
     return any(k in t for k in ("usage limit", "weekly limit", "rate limit", "quota",
                                 "too many requests", "upgrade your plan"))
+
+
+def _agy_run(client: "Client", prompt: str, *, role: str, env_extra: dict | None = None,
+             allow_tools: bool = False, timeout_s: int = 300,
+             json_schema: str | None = None) -> tuple[str, dict]:
+    """One `agy -p` turn. Runs in a fresh empty directory with --sandbox. A quota, rate or
+    auth problem raises UsageLimit (the run stops; never retried). With allow_tools the
+    agent may call MCP tools without a prompt (used only by the agentic condition, whose
+    only tool is the recall-only anneal shim)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ANNEAL_BENCH_")}
+    env.update(env_extra or {})
+    cmd = [str(AGY), "-p", prompt, "--output-format", "json", "--sandbox",
+           "--print-timeout", f"{timeout_s}s", "--model", client.model[len(AGY_PREFIX):],
+           "--disable-slash-commands"]
+    if allow_tools:
+        cmd.append("--dangerously-skip-permissions")
+    if json_schema:
+        cmd += ["--json-schema", json_schema]
+    with tempfile.TemporaryDirectory(prefix="agy-ws-") as ws:
+        proc = subprocess.run(cmd, cwd=ws, env=env, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=timeout_s + 60)
+    raw = proc.stdout.strip()
+    try:
+        data = json.loads(raw[raw.find("{"):]) if "{" in raw else {}
+    except json.JSONDecodeError:
+        data = {}
+    status = data.get("status")
+    if proc.returncode != 0 or status != "SUCCESS":
+        detail = (proc.stderr[-600:] + " " + raw[-600:]).strip()
+        if _AGY_STOP.search(detail) or status not in (None, "SUCCESS"):
+            raise UsageLimit(f"agy stopped (exit {proc.returncode}, status {status}): {detail}")
+        raise RuntimeError(f"agy failed (exit {proc.returncode}): {detail}")
+    u = data.get("usage") or {}
+    if not str(data.get("response") or "").strip():
+        # A SUCCESS with an empty response was measured on an oversized judge prompt; it
+        # must fail loudly (recorded as an error), never become an unparsed score.
+        raise RuntimeError(f"agy returned an empty response (role {role}, "
+                           f"{len(prompt)} prompt chars)")
+    client.ledger.add(role, client.model, {
+        "prompt_tokens": u.get("input_tokens", 0),
+        "prompt_tokens_details": {"cached_tokens": u.get("cache_read_tokens", 0)},
+        "completion_tokens": u.get("output_tokens", 0) + u.get("thinking_tokens", 0),
+        "completion_tokens_details": {"reasoning_tokens": u.get("thinking_tokens", 0)}})
+    return str(data.get("response") or ""), u
+
+
+Client.agy_run = _agy_run  # type: ignore[attr-defined]
 
 
 class BudgetExceeded(RuntimeError):

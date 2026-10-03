@@ -59,7 +59,8 @@ from anneal_memory.continuity import format_wrap_package_text  # noqa: E402
 from anneal_memory.retrieval import retrieve_relevant  # noqa: E402
 from anneal_memory.server import TOOLS as MCP_TOOLS, Server as McpServer  # noqa: E402
 
-from oai import PRICES, PRICES_SOURCE, BudgetExceeded, Client, Ledger, UsageLimit, is_ollama  # noqa: E402
+from oai import (PRICES, PRICES_SOURCE, BudgetExceeded, Client, Ledger, UsageLimit,  # noqa: E402
+                 is_agy, is_free_tier, is_ollama)
 
 DEFAULT_INMIND = Path.home() / ".cache/anneal-bench/inmind/InMind"
 MODEL = "gpt-5-mini"
@@ -100,9 +101,9 @@ PROBE_ANSWER_SYSTEM = (
 )
 PROJECT_NAME = "Assistant"
 TUNING_ONLY = (
-    "TUNING-ONLY, NOT COMPARABLE TO THE PAPER: reader, judge and composer are {model} via "
-    "Ollama, not gpt-5-mini. Use these numbers to tune and to compare conditions within one "
-    "run, never against the paper's figures."
+    "TUNING-ONLY, NOT COMPARABLE TO THE PAPER: reader, judge and composer are {model} "
+    "(Ollama or agy, quota-billed at $0), not gpt-5-mini. Use these numbers to tune and to "
+    "compare conditions within one run, never against the paper's figures."
 )
 
 COMPARABILITY = (
@@ -344,11 +345,60 @@ def answer(client: Client, prompts: dict, context: str, query: str, cond: str = 
     return text
 
 
+AGY_MCP_SHIM = HERE / "agy_anneal_mcp.py"
+AGY_AGENTIC_CONTEXT = (
+    "No memory is preloaded. You have a `recall` tool (MCP server `anneal_bench`) that "
+    "searches the user's past conversations with you; call it as many times as you need "
+    "before answering. Use no other tool."
+)
+
+
+def answer_agentic_agy(client: Client, prompts: dict, db: Path, query: str,
+                       target_ids: list[str]) -> tuple[str, str, dict]:
+    """The agentic reader under agy: one `agy -p` turn whose only tool is anneal's real MCP
+    `recall`, served by the recall-only shim on this task's store (agy's global MCP entry
+    `anneal_bench` runs it only when ANNEAL_BENCH_DB is set). The judge's context is every
+    recall result the shim logged, in order."""
+    from oai import _flatten  # noqa: PLC0415
+    system = prompts["answer"].replace("{context}", AGY_AGENTIC_CONTEXT)
+    log = db.parent / f"recall_log.{abs(hash(query))}.jsonl"
+    log.unlink(missing_ok=True)
+    src = os.environ.get("ANNEAL_SRC")
+    env = {"ANNEAL_BENCH_DB": str(db), "ANNEAL_BENCH_PY": sys.executable,
+           "ANNEAL_BENCH_LOG": str(log)}
+    if src:
+        env["PYTHONPATH"] = src
+    text, usage = client.agy_run(_flatten([{"role": "system", "content": system},
+                                           {"role": "user", "content": query}]),
+                                 role="answer", env_extra=env, allow_tools=True)
+    calls: list[dict] = []
+    seen: list[str] = []
+    if log.exists():
+        for line in log.read_text().splitlines():
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            out = rec.get("text", "")
+            if len(out) > TOOL_RESULT_MAX:
+                out = out[:TOOL_RESULT_MAX] + "\n[truncated]"
+            calls.append({"args": rec.get("args", {}), "chars": len(out),
+                          "no_match": out.startswith("No matching")})
+            seen.append(f"[recall {json.dumps(rec.get('args', {}), ensure_ascii=False)}]\n{out}")
+    context = "\n\n".join(seen)
+    diag = {"tool_calls": calls, "n_calls": len(calls),
+            "target_retrieved": any(t in context for t in target_ids),
+            "agy_usage": usage}
+    return text, context, diag
+
+
 def answer_agentic(client: Client, prompts: dict, db: Path, query: str,
                    target_ids: list[str]) -> tuple[str, str, dict]:
     """The reader answers with anneal's MCP ``recall`` as a tool. Returns (answer, context,
     diag), where context is every tool result the reader saw, in order (what the judge
     grades for target-recall), and diag records each call."""
+    if client.agy:
+        return answer_agentic_agy(client, prompts, db, query, target_ids)
     spec = next(t for t in MCP_TOOLS if t["name"] == "recall")
     tools = [{"type": "function", "function": {"name": "recall",
                                                "description": spec["description"],
@@ -500,7 +550,7 @@ def main() -> None:
     work = out / "work"
     ledger = Ledger()
     client = Client(args.model, ledger, args.budget)
-    tuning = is_ollama(args.model)
+    tuning = is_free_tier(args.model)
     inj = int(manifest["injection_session_index"])
     print(f"anneal_memory from {anneal_memory.__file__} ({anneal_memory.__version__})")
     print(f"tasks ({len(ids)}): {ids}", flush=True)
@@ -573,8 +623,16 @@ def main() -> None:
         "anneal_memory_version": anneal_memory.__version__,
         "inmind_tasks_sha256": tasks_sha,
         "model": args.model, "prices_usd_per_1M": PRICES.get(args.model, "Ollama: $0, quota-limited"),
-        "prices_source": PRICES_SOURCE if not tuning else "Ollama cloud via the local daemon",
+        "prices_source": PRICES_SOURCE if not tuning else (
+            "agy (Antigravity CLI), Google AI Pro quota" if is_agy(args.model)
+            else "Ollama cloud via the local daemon"),
         "tuning_only": tuning, "stopped_on_usage_limit": stopped,
+        "agentic_condition": (
+            f"agentic, capped {os.environ.get('ANNEAL_BENCH_MAX_CALLS', '6')}x"
+            f"{os.environ.get('ANNEAL_BENCH_MAX_LIMIT', '10')} (recall calls per answer x "
+            "episodes per call, no paging; agy MCP shim)" if is_agy(args.model)
+            else f"agentic, up to {MAX_TOOL_ROUNDS} tool rounds (Ollama tool calls)"),
+        "judge_output": "agy --json-schema {score: 0|1, reason}" if is_agy(args.model) else "free text",
         "cost": ledger.summary(), "prefix_wrap_stats": prefix_stats,
         "errors": errors, "elapsed_s": round(time.time() - t0, 1), "task_ids": ids,
         "comparability": TUNING_ONLY.format(model=args.model) if tuning else COMPARABILITY,

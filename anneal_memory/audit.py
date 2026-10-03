@@ -64,38 +64,42 @@ _LOCK_UNAVAILABLE_ERRNOS = frozenset(
 
 # The module's logger, used as logging registered it: never re-classed or
 # wrapped, so an application's logger class, levels, filters and handlers on it
-# (or on "anneal-memory", its parent) behave as the application set them up.
+# behave as the application set them up. On "anneal-memory", its parent, levels
+# and handlers apply by propagation; logging does not run a parent's filters.
 logger = logging.getLogger("anneal-memory.audit")
 
 
 def _log(level: int, msg: str, *args: object, exc_info: bool = False,
-         stacklevel: int = 1) -> bool:
-    """Emit one diagnostic through ``logger``; True when it went through.
+         stacklevel: int = 1) -> str:
+    """Emit one diagnostic through ``logger``. Returns where it went: "logged"
+    (the logger call returned), "stderr" (it raised and the fallback below was
+    written) or "lost" (both raised).
 
     Every diagnostic here sits on a degrade, refusal or recovery path, and an
     application's logging code that raised replaced those outcomes (L3 10-03,
     run). So the whole emission (record creation, filters, handlers) is one
     guarded call: an ``Exception`` from any of it is swallowed, the message goes
-    to stderr instead, and False is returned. For that one record, delivery to
-    the handlers after the raising one is lost. ``BaseException`` subclasses that
-    are not ``Exception`` (KeyboardInterrupt, SystemExit, asyncio's
-    CancelledError) still propagate."""
+    to stderr instead, and handlers after the raising one get nothing for that
+    record. ``BaseException`` subclasses that are not ``Exception``
+    (KeyboardInterrupt, SystemExit, asyncio's CancelledError) still propagate."""
     caller_exc = sys.exc_info() if exc_info else None  # before our own except replaces it
+    if caller_exc is not None and caller_exc[0] is None:
+        caller_exc = None
     try:
         logger.log(level, msg, *args, exc_info=caller_exc, stacklevel=stacklevel + 1)
-        return True
+        return "logged"
     except Exception:
         try:
             text = msg % args if args else msg
         except Exception:
             text = str(msg)
         try:
-            if caller_exc and caller_exc[0] is not None:
+            if caller_exc is not None:
                 text += "\n" + "".join(traceback.format_exception(*caller_exc))
             print(f"[anneal-memory] {logging.getLevelName(level)}: {text}", file=sys.stderr)
+            return "stderr"
         except Exception:
-            pass
-        return False
+            return "lost"
 
 
 # Lock paths whose runtime ``flock`` degrade has been reported in this process
@@ -108,9 +112,11 @@ _ENOLCK_RETRY_SECONDS = 0.05
 def _emit_warning(message: str, *, stderr: bool = False) -> None:
     """A diagnostic to the logger (see ``_log``) and, when ``stderr``, a copy on
     standard error for an application that keeps only that channel. When the
-    logger raised, ``_log`` already printed it there, so it is not printed twice."""
-    delivered = _log(logging.WARNING, message, stacklevel=2)
-    if stderr and delivered:
+    logger raised, ``_log``'s own fallback is that copy, so this module does not
+    print a second one (an application handler that writes to stderr before
+    raising is not counted)."""
+    went = _log(logging.WARNING, message, stacklevel=2)
+    if stderr and went != "stderr":
         try:
             print(f"[anneal-memory] WARNING: {message}", file=sys.stderr)
         except Exception:
@@ -1013,18 +1019,15 @@ class AuditTrail:
                 # written at all. This message said "is" and was wrong in
                 # both. What is certain is the part the operator needs:
                 # state comes from the file now.
-                try:
-                    _log(logging.WARNING, 
-                        "audit rollback failed for seq %d; the aborted entry "
-                        "may still be on disk, so the chain state has NOT "
-                        "been rewound — the next append re-derives "
-                        "seq/prev_hash from the file rather than reusing "
-                        "this seq",
-                        entry["seq"],
-                        exc_info=True,
-                    )
-                except Exception:
-                    pass
+                _log(logging.WARNING,
+                    "audit rollback failed for seq %d; the aborted entry "
+                    "may still be on disk, so the chain state has NOT "
+                    "been rewound — the next append re-derives "
+                    "seq/prev_hash from the file rather than reusing "
+                    "this seq",
+                    entry["seq"],
+                    exc_info=True,
+                )
             # ⛔ THE ORDER OF THESE THREE IS LOAD-BEARING — ``_prev_hash``
             # BEFORE ``_seq``. It was accidental until 2026-09-07, when L2
             # asked and the measurement answered. A signal landing BETWEEN
@@ -2216,7 +2219,7 @@ class AuditTrail:
                     ):
                         _set_aside(path, "dup")
                     else:
-                        _log(logging.WARNING, 
+                        _log(logging.WARNING,
                             "Leaving %s on its name: it is not a readable, "
                             "byte-identical copy of the manifested %s "
                             "(verify() reports it)",
@@ -2233,7 +2236,7 @@ class AuditTrail:
                 # loud; raising made every ``log()`` fail for as long as the
                 # file stayed unreadable (``chmod 000``, reproduced 3 of 3).
                 for path in paths:
-                    _log(logging.WARNING, 
+                    _log(logging.WARNING,
                         "Not adopting unreadable orphaned audit file %s (left "
                         "on disk; verify() reports it): %s",
                         path.name, scans[path].error,
@@ -2248,14 +2251,14 @@ class AuditTrail:
                     keep = gz
                 else:
                     keep = plain
-                    _log(logging.WARNING, 
+                    _log(logging.WARNING,
                         "Audit copies %s and %s hold different bytes; adopting "
                         "the uncompressed copy",
                         plain.name, gz.name,
                     )
             scan = scans[keep]
             if scan.first_prev_hash != tip:
-                _log(logging.WARNING, 
+                _log(logging.WARNING,
                     "Not adopting orphaned audit file %s: its first entry does "
                     "not continue the sealed chain (verify() reports it)",
                     keep.name,
@@ -2281,7 +2284,7 @@ class AuditTrail:
                 ]
                 kept = chain[: links[-1] + 1] if links else []
                 for _, path, _, _ in chain[len(kept):]:
-                    _log(logging.WARNING, 
+                    _log(logging.WARNING,
                         "Not adopting orphaned audit file %s: the active file "
                         "does not continue from it (verify() reports it)",
                         path.name,
@@ -2296,7 +2299,7 @@ class AuditTrail:
                 if other.error is None and other.digest == scan.digest:
                     _set_aside(path, "dup")
                 else:
-                    _log(logging.WARNING, 
+                    _log(logging.WARNING,
                         "Leaving %s on its name: it is not a readable, "
                         "byte-identical copy of the adopted %s (verify() "
                         "reports it)",
@@ -2313,7 +2316,7 @@ class AuditTrail:
             })
             if scan.last_hash:
                 manifest["active_last_hash"] = scan.last_hash
-            _log(logging.INFO, 
+            _log(logging.INFO,
                 "Adopted orphaned audit file: %s (%d entries)", keep.name, scan.entries
             )
 
@@ -2410,7 +2413,7 @@ class AuditTrail:
                 # Adoption is best-effort recovery; failing it must not stop
                 # the caller. The orphan stays on disk and the next open
                 # retries, which is exactly the pre-existing behaviour.
-                _log(logging.WARNING, 
+                _log(logging.WARNING,
                     "could not adopt orphaned sealed audit file(s) while "
                     "rotating; the trail may verify as broken until the store "
                     "is reopened", exc_info=True,
@@ -2469,7 +2472,7 @@ class AuditTrail:
             self._last_week = current_week
             if not self._rotation_refusal_logged:
                 self._rotation_refusal_logged = True
-                _log(logging.WARNING, 
+                _log(logging.WARNING,
                     "Not rotating the audit trail: sealed week %s is already on "
                     "disk; appending to the active file instead",
                     refused_week,
@@ -2756,7 +2759,7 @@ class AuditTrail:
         except OSError as e:
             raise _ManifestUnavailable(f"could not quarantine the invalid audit manifest: {e}") from e
         _fsync_dir(path.parent)
-        _log(logging.WARNING, 
+        _log(logging.WARNING,
             "Quarantined an invalid audit manifest as %s. Appending continues; "
             "rotation, orphan adoption and retention are paused until "
             "`anneal-memory audit-repair` rebuilds it.", target.name,
@@ -3210,7 +3213,7 @@ def _set_aside(path: Path, reason: str) -> None:
             target = path.with_name(f"{path.name}.{reason}-{stamp}-{suffix}")
         os.rename(path, target)
     except OSError:
-        _log(logging.WARNING, 
+        _log(logging.WARNING,
             "Could not set aside audit file %s; it stays under its own name",
             path.name, exc_info=True,
         )

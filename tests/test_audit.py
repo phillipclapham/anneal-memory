@@ -8557,6 +8557,48 @@ class TestManifestLockL3:
             log.removeHandler(boom)
         assert capsys.readouterr().err.count("lock is NOT held") == 1
 
+    def test_a_degrade_warning_survives_a_stderr_write_that_fails_once(
+        self, tmp_path, monkeypatch
+    ):
+        """L3 r2 10-03 on 1f888cd (codex MED, reproduced with a one-shot-failing
+        stderr): a raising handler plus a failed fallback write made _log report
+        "already on stderr", so _emit_warning skipped its copy and the ENOLCK
+        degrade warned nowhere."""
+        import errno as errno_module
+        import io
+        import logging
+
+        class FlakyErr(io.StringIO):
+            failed = False
+
+            def write(self, text):
+                if not FlakyErr.failed:
+                    FlakyErr.failed = True
+                    raise BlockingIOError(errno_module.EAGAIN, "try again")
+                return super().write(text)
+
+        class Boom(logging.Handler):
+            def emit(self, record):
+                raise RuntimeError("handler exploded")
+
+        def no_locks(fd, op):
+            raise OSError(errno_module.ENOLCK, "no locks")
+
+        err = FlakyErr()
+        monkeypatch.setattr(audit_module.sys, "stderr", err)
+        monkeypatch.setattr(audit_module.fcntl, "flock", no_locks)
+        monkeypatch.setattr(audit_module, "_ENOLCK_RETRY_SECONDS", 0)
+        log = logging.getLogger("anneal-memory")
+        boom = Boom()
+        log.addHandler(boom)
+        try:
+            with AuditTrail(tmp_path / "f.db")._manifest_lock() as held:
+                assert held is False
+        finally:
+            log.removeHandler(boom)
+        assert FlakyErr.failed
+        assert err.getvalue().count("lock is NOT held") == 1
+
     def test_a_long_stem_manifest_save_fits_the_name_limit(self, tmp_path):
         """L3 codex HIGH [run: a 220-character stem gave a 240-byte manifest name
         and a 261-byte temp name, and the save raised ENAMETOOLONG]: the temp

@@ -34,6 +34,7 @@ import os
 import stat
 import secrets
 import sys
+import traceback
 import re
 import threading
 import time
@@ -65,28 +66,49 @@ class _NeverRaisingLogger:
     """The module's logger, made unable to change control flow. Every diagnostic in
     this module sits on a degrade, refusal or recovery path, and a log handler
     whose ``emit()`` raises replaced those outcomes at site after site (L3 10-03,
-    run). Wrapping the logger once covers every call, including future ones,
-    instead of guarding sites one by one. A message the logger cannot take goes to
-    stderr; if that fails too, it is dropped."""
+    run). Wrapping the logger once covers every emitting call instead of guarding
+    sites one by one; every emitting method of ``logging.Logger`` is here, and any
+    other attribute is delegated (non-emitting: levels, handlers). The guarantee is
+    CONTROL FLOW, not delivery: a handler that raises still stops the handlers after
+    it, as in plain ``logging``; the message then goes to stderr (with the
+    traceback ``exc_info`` asked for), and if that fails too it is dropped.
+    ``KeyboardInterrupt`` and ``SystemExit`` still propagate."""
 
     def __init__(self, inner: logging.Logger) -> None:
         self._inner = inner
 
-    def _emit(self, level: int, msg: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+    def _emit(self, level: int, msg: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> bool:
+        """True when the logger took the message, False when stderr got it instead."""
+        pending = sys.exc_info() if kwargs.get("exc_info") else None
         kwargs.setdefault("stacklevel", 3)
         try:
             self._inner.log(level, msg, *args, **kwargs)
-            return
+            return True
         except Exception:
             pass
         try:
-            text = msg % args if args else str(msg)
+            if len(args) == 1 and isinstance(args[0], dict):
+                text = msg % args[0]
+            else:
+                text = msg % args if args else str(msg)
         except Exception:
             text = str(msg)
         try:
+            if pending and pending[0] is not None:
+                text += "\n" + "".join(traceback.format_exception(*pending))
             print(f"[anneal-memory] {logging.getLevelName(level)}: {text}", file=sys.stderr)
         except Exception:
             pass
+        return False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def log(self, level: int, msg: str, *args: Any, **kwargs: Any) -> None:
+        self._emit(level, msg, args, kwargs)
+
+    def critical(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        self._emit(logging.CRITICAL, msg, args, kwargs)
 
     def debug(self, msg: str, *args: Any, **kwargs: Any) -> None:
         self._emit(logging.DEBUG, msg, args, kwargs)
@@ -118,8 +140,8 @@ def _emit_warning(message: str, *, stderr: bool = False) -> None:
     """A diagnostic to the logger (which cannot raise; see _NeverRaisingLogger)
     and, when ``stderr``, a copy on standard error for an application that keeps
     only that channel."""
-    logger.warning(message)
-    if stderr:
+    took = logger._emit(logging.WARNING, message, (), {})
+    if stderr and took:  # when the logger refused it, _emit already wrote stderr
         try:
             print(f"[anneal-memory] WARNING: {message}", file=sys.stderr)
         except Exception:

@@ -36,12 +36,13 @@ disk. The refusal names its cause, and the next write retries; a cause that does
 write (and `audit-repair`) until it is cleared; the error names the lock path and the OS error, and
 gives no remedy, because removing a lock file another process holds would split the lock.
 
-Diagnostics in `audit.py` go through a logger wrapper that cannot change control flow: a log handler
-that raises no longer replaces a degrade, refusal or recovery outcome, and the message falls back to
-stderr. Not covered, and judged acceptable rather than measured as harmless [judged by 1003+4, 10:49
-EDT, against the capped L3 on 72b748b]: a raising handler still stops the handlers registered after it
-(plain `logging` behaviour; those handlers miss that message), and `KeyboardInterrupt`/`SystemExit`
-raised by a handler still propagate.
+Diagnostics in `audit.py` go through its own logger, `anneal-memory.audit` (a child of
+`anneal-memory`, so handlers and levels set there still apply), whose handler calls cannot change
+control flow: every emitting `Logger` method reaches handlers through `callHandlers`, which runs each
+handler on its own. A handler that raises an `Exception` costs only its own delivery; the handlers after
+it still run, and the message also goes to stderr. `BaseException` subclasses that are not `Exception`
+(`KeyboardInterrupt`, `SystemExit`, `CancelledError`) still propagate. Records from this module are now
+named `anneal-memory.audit` instead of `anneal-memory`.
 
 Known and not fixed: with an empty active file, an unreadable or corrupt newer sealed week does not stop
 the chain; it continues from the manifest past that week and `verify()` reports the week as unmanifested

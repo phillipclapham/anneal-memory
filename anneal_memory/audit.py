@@ -62,72 +62,55 @@ _LOCK_UNAVAILABLE_ERRNOS = frozenset(
     ) if e is not None
 )
 
-class _NeverRaisingLogger:
-    """The module's logger, made unable to change control flow. Every diagnostic in
-    this module sits on a degrade, refusal or recovery path, and a log handler
-    whose ``emit()`` raises replaced those outcomes at site after site (L3 10-03,
-    run). Wrapping the logger once covers every emitting call instead of guarding
-    sites one by one; every emitting method of ``logging.Logger`` is here, and any
-    other attribute is delegated (non-emitting: levels, handlers). The guarantee is
-    CONTROL FLOW, not delivery: a handler that raises still stops the handlers after
-    it, as in plain ``logging``; the message then goes to stderr (with the
-    traceback ``exc_info`` asked for), and if that fails too it is dropped.
-    ``KeyboardInterrupt`` and ``SystemExit`` still propagate."""
-
-    def __init__(self, inner: logging.Logger) -> None:
-        self._inner = inner
-
-    def _emit(self, level: int, msg: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> bool:
-        """True when the logger took the message, False when stderr got it instead."""
-        pending = sys.exc_info() if kwargs.get("exc_info") else None
-        kwargs.setdefault("stacklevel", 3)
-        try:
-            self._inner.log(level, msg, *args, **kwargs)
-            return True
-        except Exception:
-            pass
-        try:
-            if len(args) == 1 and isinstance(args[0], dict):
-                text = msg % args[0]
-            else:
-                text = msg % args if args else str(msg)
-        except Exception:
-            text = str(msg)
-        try:
-            if pending and pending[0] is not None:
-                text += "\n" + "".join(traceback.format_exception(*pending))
-            print(f"[anneal-memory] {logging.getLevelName(level)}: {text}", file=sys.stderr)
-        except Exception:
-            pass
-        return False
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
-
-    def log(self, level: int, msg: str, *args: Any, **kwargs: Any) -> None:
-        self._emit(level, msg, args, kwargs)
-
-    def critical(self, msg: str, *args: Any, **kwargs: Any) -> None:
-        self._emit(logging.CRITICAL, msg, args, kwargs)
-
-    def debug(self, msg: str, *args: Any, **kwargs: Any) -> None:
-        self._emit(logging.DEBUG, msg, args, kwargs)
-
-    def info(self, msg: str, *args: Any, **kwargs: Any) -> None:
-        self._emit(logging.INFO, msg, args, kwargs)
-
-    def warning(self, msg: str, *args: Any, **kwargs: Any) -> None:
-        self._emit(logging.WARNING, msg, args, kwargs)
-
-    def error(self, msg: str, *args: Any, **kwargs: Any) -> None:
-        self._emit(logging.ERROR, msg, args, kwargs)
-
-    def exception(self, msg: str, *args: Any, **kwargs: Any) -> None:
-        kwargs.setdefault("exc_info", True)
-        self._emit(logging.ERROR, msg, args, kwargs)
+def _stderr_fallback(record: logging.LogRecord) -> None:
+    try:
+        text = record.getMessage()
+    except Exception:
+        text = str(getattr(record, "msg", "<unformattable message>"))
+    try:
+        if record.exc_info and record.exc_info[0] is not None:
+            text += "\n" + "".join(traceback.format_exception(*record.exc_info))
+        print(f"[anneal-memory] {record.levelname}: {text}", file=sys.stderr)
+    except Exception:
+        pass
 
 
-logger = _NeverRaisingLogger(logging.getLogger("anneal-memory"))
+class _GuardedLogger(logging.Logger):
+    """The module's logger: a real ``logging.Logger`` whose handler calls cannot
+    change control flow. Every diagnostic here sits on a degrade, refusal or
+    recovery path, and a handler whose ``emit()`` raises replaced those outcomes
+    (L3 10-03, run). Every emitting method of ``Logger`` (warning, warn, fatal,
+    log, exception, handle...) reaches handlers only through ``callHandlers``,
+    so guarding each handler call here covers all of them, and the next one
+    added. A handler that raises an ``Exception`` costs only its own delivery:
+    the handlers after it still run, and the message also goes to stderr.
+    ``BaseException`` subclasses that are not ``Exception`` (KeyboardInterrupt,
+    SystemExit, CancelledError...) still propagate. A child of
+    ``anneal-memory`` named ``anneal-memory.audit``, so an application's
+    handlers and levels on ``anneal-memory`` apply through propagation."""
+
+    def callHandlers(self, record: logging.LogRecord) -> None:
+        found = 0
+        node: logging.Logger | None = self
+        while node is not None:
+            for handler in node.handlers:
+                found += 1
+                if record.levelno >= handler.level:
+                    try:
+                        handler.handle(record)
+                    except Exception:
+                        _stderr_fallback(record)
+            node = node.parent if node.propagate else None
+        if found == 0 and logging.lastResort is not None:
+            if record.levelno >= logging.lastResort.level:
+                try:
+                    logging.lastResort.handle(record)
+                except Exception:
+                    _stderr_fallback(record)
+
+
+logger = _GuardedLogger("anneal-memory.audit")
+logger.parent = logging.getLogger("anneal-memory")
 
 # Lock paths whose runtime ``flock`` degrade has been reported in this process
 # (AuditTrail._open_and_flock).
@@ -137,11 +120,11 @@ _ENOLCK_RETRY_SECONDS = 0.05
 
 
 def _emit_warning(message: str, *, stderr: bool = False) -> None:
-    """A diagnostic to the logger (which cannot raise; see _NeverRaisingLogger)
-    and, when ``stderr``, a copy on standard error for an application that keeps
-    only that channel."""
-    took = logger._emit(logging.WARNING, message, (), {})
-    if stderr and took:  # when the logger refused it, _emit already wrote stderr
+    """A diagnostic to the logger (whose handler calls cannot raise; see
+    _GuardedLogger) and, when ``stderr``, a copy on standard error for an
+    application that keeps only that channel."""
+    logger.warning(message, stacklevel=2)
+    if stderr:
         try:
             print(f"[anneal-memory] WARNING: {message}", file=sys.stderr)
         except Exception:

@@ -2,6 +2,30 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed — the Hebbian hop in pattern recall
+
+- `retrieve_relevant` (and so `crystal recall`, MCP `crystal_recall` and any harness hook built
+  on it) no longer follows the one Hebbian hop from a query's matched episodes to their co-cited
+  episodes. Associative recall is now the evidence edge alone: query → keyword-matched episode
+  → the patterns whose `evidence` cites it. The measurement that decided it: on flow's store the
+  hop had surfaced 0 of 788 production pattern exposures (2026-09-29), and on 2026-10-03 a store
+  copy given the cheapest fix (co-citation links among each pattern's own evidence) still showed
+  no pattern surfaced by the hop that the evidence edge had not already surfaced, over 1,000
+  replayed real prompts at the shipped constants and at double link strength. Its only firing
+  path, in a wide-open configuration, went around the evidence-IDF hub guard.
+- Removed with it: the module constants `ASSOC_SEED_LIMIT`, `ASSOC_FETCH_LIMIT`,
+  `ASSOC_MIN_STRENGTH`, `ASSOC_HOP_FACTOR` and `ASSOC_STRENGTH_NORM` in `anneal_memory.retrieval`
+  (code that set them to tune the hop should drop those lines). `ASSOC_SCORE_THRESHOLD` stays.
+- `RelevantPattern.source` is now only `"keyword"` or `"evidence_edge"`. `"graph_hop"` stays
+  documented because receipts written by 0.9.6 through 0.9.25 carry it.
+- Unchanged: Hebbian links still form at each wrap, decay, and feed the wrap's association
+  context, `associations` stats and AM-WARN. The `associative` parameter keeps its meaning (the
+  evidence edge on or off). On the evidence edge the reach and scores are the same as before.
+- MCP `crystal_recall`'s `associative` description now names the evidence edge, not the Hebbian
+  backend; both `tool-integrity.json` manifests regenerated.
+
 ## [0.9.25] — 2026-10-03
 
 ### Fixed — a cancel refusal no longer points a gated wrap at a cancel the gate refuses

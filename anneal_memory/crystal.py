@@ -638,7 +638,7 @@ class CrystalStore:
         and belongs in the working set). There is NO UPPER BOUND — the level is the
         strength axis and a pattern re-earned many times keeps climbing. ``evidence``
         is the list of episode ids that grounded the pattern — the substrate for
-        associative retrieval (pattern → evidence-episode → Hebbian co-pattern).
+        associative retrieval (query → matched evidence episode → pattern).
         ``permanence`` × ``activation_mode`` is the 2-axis routing record; the store
         holds the ``timeless`` × ``just-in-time`` bulk, but the tags are kept on every
         row so a later re-route is auditable.

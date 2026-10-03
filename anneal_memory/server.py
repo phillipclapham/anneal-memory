@@ -981,8 +981,8 @@ class Server:
 
         The crystallized tier's READ surface for MCP-in-conversation adopters — the
         parity of the CLI ``crystal recall`` and of the per-turn recall hook a harness
-        fires. Associative by DEFAULT (AM-CRYSTAL-RECALL, 0.8.0; the evidence edge plus one
-        Hebbian hop, see ``retrieval.py``): a pattern
+        fires. Associative by DEFAULT (AM-CRYSTAL-RECALL, 0.8.0; the evidence edge, see
+        ``retrieval.py``): a pattern
         grounded in an episode the query matched surfaces even with ZERO query-keyword
         overlap (the keyword-orthogonal miss keyword-only recall cannot reach). It
         reuses the server's already-open episodic ``self._store`` for the association
@@ -1074,7 +1074,7 @@ class Server:
     def _crystal_recall_associative(
         self, crystal_store: CrystalStore, query: str, max_patterns: int
     ) -> list[RelevantPattern]:
-        """Associative crystal recall (evidence edge + one Hebbian hop) over the server's OPEN episodic store,
+        """Associative crystal recall (the evidence edge) over the server's OPEN episodic store,
         degrading to keyword-only when an episodic query faults.
 
         Mirrors the CLI ``_crystal_recall_associative`` but reuses ``self._store``

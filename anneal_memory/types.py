@@ -337,9 +337,10 @@ class RelevantPattern:
     * ``"evidence_edge"`` — keyword-orthogonal: surfaced via the associative
       backend because the pattern's ``evidence`` cites an episode the query
       *directly* keyword-matched (no graph hop).
-    * ``"graph_hop"`` — surfaced via the associative backend through one
-      episode-Hebbian hop (the pattern cites an episode co-cited with a
-      query-matched seed). Near-dead on sparse/decayed graphs.
+    * ``"graph_hop"`` — written by anneal 0.9.6 through 0.9.25, whose associative
+      backend also followed one episode-Hebbian hop. That hop was removed in
+      0.9.26, so this version never sets it; the value stays documented because
+      receipts written by older versions carry it.
 
     Defaults to ``"keyword"`` so the field is additive (older constructors and
     adopter mocks stay valid; only the associative path sets the other values)."""

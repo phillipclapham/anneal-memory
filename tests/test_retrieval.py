@@ -356,12 +356,12 @@ class TestRetrievePatterns:
         assert by_name["bare_tag_pat"].tags == ["apparatus"]  # NOT "a p p a r a t u s"
 
 
-# -- associative (Hebbian) pattern retrieval -------------------------------
+# -- associative (evidence-edge) pattern retrieval -------------------------
 
 
 class TestAssociativeRetrieval:
-    """The Hebbian backend: a pattern grounded in a keyword-matched episode (or one
-    co-cited with it) surfaces even with ZERO query-keyword overlap with the pattern's
+    """The evidence edge: a pattern grounded in a keyword-matched episode
+    surfaces even with ZERO query-keyword overlap with the pattern's
     own compressed text — the keyword-orthogonal miss Step C measured. Precision is
     inherited from the episode tier: no episode match → no associative pattern."""
 
@@ -428,7 +428,11 @@ class TestAssociativeRetrieval:
         )
         assert r.patterns == []
 
-    def test_hebbian_hop_reaches_co_cited_episode_pattern(self, stores):
+    def test_hebbian_link_does_not_surface_pattern(self, stores):
+        """Recall no longer follows Hebbian links (retired in 0.9.26). A pattern
+        grounded ONLY in an episode co-cited with the matched seed, by a link far
+        stronger than the old hop needed (strength 3.0 ≥ the old 2.0 full-weight
+        norm), must NOT surface, while the same pattern grounded in the seed does."""
         store, crystal = stores
         e_match = store.record(
             self._DRIFT_EPISODE, EpisodeType.DECISION, source="flow",
@@ -439,37 +443,9 @@ class TestAssociativeRetrieval:
             "provenance proofs across the precedent registry tier.",
             EpisodeType.DECISION, source="flow", timestamp="2026-06-06T09:05:00Z",
         )
-        # Strongly associate the two episodes (3 direct co-citations ≥ ASSOC_STRENGTH_NORM).
         for _ in range(3):
             store.record_associations(direct_pairs={(e_match.id, e_other.id)})
-        # The pattern is grounded ONLY in e_other and shares no query keyword.
-        crystal.crystallize(
-            name="memory_is_governance", level=3,
-            explanation="audit ledger chains prove provenance across the registry",
-            evidence=[e_other.id], today=T0,
-        )
-        r = retrieve_relevant(store, crystal, self._QUERY, now=NOW, today=T0)
-        # e_other is reached via the strong Hebbian hop from the matched seed e_match.
-        by_name = {p.name: p for p in r.patterns}
-        assert "memory_is_governance" in by_name
-        # ... and its provenance is the graph hop (the pattern's evidence episode was
-        # reached only THROUGH the Hebbian link, not by a direct keyword match).
-        assert by_name["memory_is_governance"].source == "graph_hop"
-
-    def test_weak_hop_alone_does_not_clear_gate(self, stores):
-        store, crystal = stores
-        e_match = store.record(
-            self._DRIFT_EPISODE, EpisodeType.DECISION, source="flow",
-            timestamp="2026-06-06T09:00:00Z",
-        )
-        e_other = store.record(
-            "A separate consolidation about governance ledgers, audit chains, and "
-            "provenance proofs across the precedent registry tier.",
-            EpisodeType.OBSERVATION, source="flow", timestamp="2026-06-06T09:05:00Z",
-        )
-        # A single SESSION co-citation = weak link (0.3) → the one-hop reach is far
-        # below the precision gate, so a pattern grounded only there must NOT surface.
-        store.record_associations(direct_pairs=set(), session_pairs={(e_match.id, e_other.id)})
+        assert store.get_associations([e_match.id])[0].strength >= 3.0
         crystal.crystallize(
             name="memory_is_governance", level=3,
             explanation="audit ledger chains prove provenance across the registry",
@@ -477,6 +453,16 @@ class TestAssociativeRetrieval:
         )
         r = retrieve_relevant(store, crystal, self._QUERY, now=NOW, today=T0)
         assert "memory_is_governance" not in {p.name for p in r.patterns}
+        assert all(p.source != "graph_hop" for p in r.patterns)
+        # Control: grounded in the matched seed itself, the same pattern surfaces.
+        crystal.crystallize(
+            name="memory_is_governance_seeded", level=3,
+            explanation="audit ledger chains prove provenance across the registry",
+            evidence=[e_match.id], today=T0,
+        )
+        r = retrieve_relevant(store, crystal, self._QUERY, now=NOW, today=T0)
+        by_name = {p.name: p for p in r.patterns}
+        assert by_name["memory_is_governance_seeded"].source == "evidence_edge"
 
     def test_no_duplicate_when_both_keyword_and_associative(self, stores):
         store, crystal = stores

@@ -3144,8 +3144,8 @@ def cmd_crystal_recall(args: argparse.Namespace) -> None:
     subprocess harness (e.g. the hub's codex-exec wrapper) shells this to inject
     run-context patterns into a prompt.
 
-    Backend (AM-CRYSTAL-RECALL, 0.8.0): associative by DEFAULT (the evidence edge plus
-    one Hebbian hop; see ``retrieval.py``) — the
+    Backend (AM-CRYSTAL-RECALL, 0.8.0): associative by DEFAULT (the evidence edge;
+    see ``retrieval.py``) — the
     same backend library consumers get from :func:`retrieve_relevant`, so a
     pattern grounded in an episode the query matched surfaces even with zero
     query-keyword overlap (the keyword-orthogonal miss the keyword-only path
@@ -3163,7 +3163,7 @@ def cmd_crystal_recall(args: argparse.Namespace) -> None:
     score, source}]`` list — the field shape is identical on both backends (``score``
     is keyword-overlap on the keyword path and evidence-reach on the associative path:
     same scale + threshold, different basis; ``source`` is the per-pattern provenance
-    ``keyword`` | ``evidence_edge`` | ``graph_hop``). ORDERING on the associative path is
+    ``keyword`` | ``evidence_edge``). ORDERING on the associative path is
     keyword-matches first, then associative reaches — NOT strictly global-score-
     descending: a keyword hit (overlap on the pattern's own text) is higher-confidence
     than evidence-mediated reach and is never displaced by a numerically larger
@@ -3197,7 +3197,7 @@ def cmd_crystal_recall(args: argparse.Namespace) -> None:
 def _crystal_recall_associative(
     args: argparse.Namespace, crystal_store: CrystalStore
 ) -> list[RelevantPattern]:
-    """Associative crystal recall (evidence edge + one Hebbian hop) against the episodic store,
+    """Associative crystal recall (the evidence edge) against the episodic store,
     degrading to keyword-only when the graph isn't reachable.
 
     Opens the episodic db beside the crystal store as a **read-only** ``Store``
@@ -4324,7 +4324,7 @@ def build_parser() -> argparse.ArgumentParser:
         "recall",
         help="Retrieve crystallized patterns relevant to a free-text query",
         description="Retrieve crystallized patterns relevant to a free-text query. "
-                    "Default backend (0.8.0+): associative recall (evidence edge plus one Hebbian hop) against the "
+                    "Default backend (0.8.0+): associative recall (the evidence edge) against the "
                     "episodic association graph (surfaces patterns grounded in a matched "
                     "episode even with zero keyword overlap), auto-degrading to keyword-only "
                     "when no episodic db is resolvable. Use --no-associative for the "

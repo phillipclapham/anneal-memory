@@ -455,8 +455,8 @@ TOOLS: list[dict[str, Any]] = [
                 "associative": {
                     "type": "boolean",
                     "description": (
-                        "When true (default), augment keyword recall with the Hebbian "
-                        "backend — patterns whose evidence cites an episode your query "
+                        "When true (default), augment keyword recall with the evidence "
+                        "edge — patterns whose evidence cites an episode your query "
                         "matched surface even with zero keyword overlap. Set false for "
                         "pure keyword scoring (the pre-0.8.0 path)."
                     ),

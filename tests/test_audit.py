@@ -8421,34 +8421,6 @@ class TestManifestLockL3:
 
     _two_sealed_weeks = staticmethod(TestHybridManifestQuarantine._two_sealed_weeks)
 
-    @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
-    def test_a_forked_child_does_not_keep_the_lock(self, tmp_path):
-        """codex HIGH (L2 reproduced it): a child forked while the lock was held
-        kept it after the parent released. ⛔ MUTATION-CHECKED: skip the fork
-        handler and this fails."""
-        import time as time_module
-
-        trail = AuditTrail(tmp_path / "m.db")
-        lock = tmp_path / "m.audit-manifest.lock"
-        state = tmp_path / "child_state"
-        with trail._manifest_lock():
-            pid = os.fork()
-            if pid == 0:  # child: report the reset, outlive the parent's hold
-                try:
-                    state.write_text(f"{trail._lock_fd} {trail._lock_depth}")
-                    time_module.sleep(2.0)
-                finally:
-                    os._exit(0)
-            deadline = time_module.time() + 10
-            while not state.exists() and time_module.time() < deadline:
-                time_module.sleep(0.01)
-        try:
-            probe = _probe_lock_from_another_process(lock)
-        finally:
-            os.waitpid(pid, 0)
-        assert state.read_text() == "None 0"
-        assert probe == "acquired"
-
     def test_enolck_is_retried_before_degrading(self, tmp_path, monkeypatch):
         """codex HIGH: ENOLCK is also a transient lock-table exhaustion. A lock
         that succeeds on a retry is held, not degraded.

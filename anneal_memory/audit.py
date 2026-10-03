@@ -35,7 +35,6 @@ import stat
 import re
 import threading
 import time
-import weakref
 import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -66,36 +65,6 @@ logger = logging.getLogger("anneal-memory")
 _lock_degrade_warned = False
 _ENOLCK_RETRIES = 3
 _ENOLCK_RETRY_SECONDS = 0.05
-
-# ⛔ A FORKED CHILD MUST NOT KEEP THE PARENT'S MANIFEST LOCK (L3: codex, and L2
-# reproduced it). ``flock`` belongs to the open file description, which a child
-# inherits: a long-lived child kept the lock after the parent released it, and
-# an inherited ``_lock_depth`` let the child walk into a critical section it did
-# not hold. In the child, each trail that held the lock closes its copy of the
-# descriptor (never LOCK_UN, which would release the PARENT's lock: same
-# description) and resets; ``_fork_generation`` tells an in-flight
-# ``_manifest_lock`` frame continuing in the child not to close it again.
-_fork_generation = 0
-_lock_holders: "weakref.WeakSet[AuditTrail]" = weakref.WeakSet()
-
-
-def _after_fork_in_child() -> None:
-    global _fork_generation
-    _fork_generation += 1
-    for trail in list(_lock_holders):
-        if trail._lock_fd is not None:
-            try:
-                os.close(trail._lock_fd)
-            except OSError:
-                pass
-        trail._lock_fd = None
-        trail._lock_depth = 0
-        trail._lock_mutex = threading.RLock()
-    _lock_holders.clear()
-
-
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_after_fork_in_child)
 
 # Chain anchors
 GENESIS_HASH = "sha256:GENESIS"
@@ -446,6 +415,11 @@ class AuditTrail:
     write to a given db_path at a time. Concurrent writers will corrupt
     the hash chain (interleaved entries with incompatible prev_hash values).
     The MCP server's single-threaded model enforces this naturally.
+
+    **No fork support:** do not fork a process while an AuditTrail in it is
+    in use; a child must open its own AuditTrail. A child forked while the
+    manifest lock is held inherits its descriptor, and so the lock, along
+    with the parent's lock state.
 
     **Timestamp note:** Timestamps are self-reported via the local system
     clock (``datetime.now(timezone.utc)``). This provides audit logging but
@@ -1747,8 +1721,8 @@ class AuditTrail:
         locking does not exist: no ``fcntl`` (Windows, silently, as the README
         documents), or ``flock`` raising an errno in ``_LOCK_UNAVAILABLE_ERRNOS``
         (warned once per process). That is the behaviour before the lock
-        existed. A process forked while holding it keeps the inherited
-        descriptor, and so the lock, until the child exits or closes it. Any other failure to open or lock raises
+        existed. Forking while a trail is in use is unsupported (see the class
+        docstring). Any other failure to open or lock raises
         ``_AuditLockError``. Who takes it: every manifest save, a quarantine,
         a whole repair, and the load-modify-save spans of rotation, orphan
         adoption and retention, each taken BEFORE its first irreversible step.
@@ -1762,31 +1736,22 @@ class AuditTrail:
         """
         with self._lock_mutex:
             if self._lock_depth:
-                nested_gen = _fork_generation
                 self._lock_depth += 1
                 try:
                     yield self._lock_fd is not None
                 finally:
-                    if nested_gen == _fork_generation:
-                        self._lock_depth -= 1
+                    self._lock_depth -= 1
                 return
-            gen = _fork_generation
             fd = self._open_and_flock() if fcntl is not None else None
             self._lock_fd = fd
             self._lock_depth = 1
-            if fd is not None:
-                _lock_holders.add(self)
             try:
                 yield fd is not None
             finally:
-                _lock_holders.discard(self)
-                # In a child forked while this was held, the fork handler has
-                # already closed the inherited descriptor and reset the state.
-                if gen == _fork_generation:
-                    self._lock_depth = 0
-                    self._lock_fd = None
-                    if fd is not None:
-                        os.close(fd)
+                self._lock_depth = 0
+                self._lock_fd = None
+                if fd is not None:
+                    os.close(fd)
 
     def _open_and_flock(self) -> int | None:
         """Open the lock file and take ``LOCK_EX`` on it; ``None`` when advisory

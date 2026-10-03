@@ -17,9 +17,9 @@ rotation, orphan adoption and retention cleanup (each takes the lock before its 
 that cannot be taken refuses the step with nothing sealed or moved). A writer that read an invalid
 manifest takes the lock, lists the markers and reads the manifest again, and renames only bytes it parsed
 as invalid while holding it; if a repair got there first it uses the rebuilt manifest. The lock is
-reentrant within one `AuditTrail`, and released when its descriptor closes or the process dies. A child
-forked while it is held closes its inherited copy, so it neither keeps the parent's lock nor walks into
-the parent's critical section. It is opened read-write (Linux NFS needs that for an exclusive lock), and
+reentrant within one `AuditTrail`, and released when its descriptor closes or the process dies. Forking
+is not supported: do not fork a process while an `AuditTrail` in it is in use; a child must open its own
+`AuditTrail` (a child forked while the lock is held inherits the descriptor, and so the lock). It is opened read-write (Linux NFS needs that for an exclusive lock), and
 read-only when this user may not write the lock file (another user's, or a restrictive umask). A symlink,
 FIFO or directory at its path is refused rather than followed or silently ignored. It blocks with no
 timeout: a stopped holder delays other processes' rotations and quarantines until it exits.

@@ -121,17 +121,18 @@ disk. The refusal names its cause, and the next write retries; a cause that does
 write (and `audit-repair`) until it is cleared; the error names the lock path and the OS error, and
 gives no remedy, because removing a lock file another process holds would split the lock.
 
-Diagnostics in `audit.py` go through its own logger, `anneal-memory.audit` (a child of
-`anneal-memory`, so handlers and levels set there still apply by propagation; a filter on
-`anneal-memory` does not, because logging never runs a parent logger's filters, so put it on
-`anneal-memory.audit` or on the handler. Records from this module were named `anneal-memory`
-before). Every diagnostic sits on a degrade, refusal or recovery path, and an application's logging
-code that raised replaced those outcomes (L3 10-03, run), so each emission (record creation, filters,
-handlers) is one guarded call: an `Exception` from any of it is swallowed and this module writes the
-message to stderr instead, one copy of its own (a handler that wrote to stderr before raising is not
-counted). For that record, handlers after the raising one receive nothing. `BaseException` subclasses that are not `Exception` (`KeyboardInterrupt`, `SystemExit`,
+Diagnostics in `audit.py` go through its own logger, `anneal-memory.audit` (a child of `anneal-memory`,
+so handlers set there still apply by propagation, and its level applies while `anneal-memory.audit` has
+no level of its own; a filter on `anneal-memory` does not, because logging never runs a parent logger's
+filters, so put it on `anneal-memory.audit` or on the handler. Records from this module were named
+`anneal-memory` before). Every diagnostic sits on a degrade, refusal or recovery path, and an
+application's logging code that raised replaced those outcomes (L3 10-03, run), so each emission (record
+creation, filters, handlers) is one guarded call: an `Exception` from any of it is swallowed and this
+module writes the message to stderr instead, one copy of its own (a handler that wrote to stderr before
+raising is not counted). For that record, handlers after the raising one receive nothing.
+`BaseException` subclasses that are not `Exception` (`KeyboardInterrupt`, `SystemExit`,
 `asyncio.CancelledError`) still propagate. The registered logger itself is not re-classed or wrapped:
-two earlier shapes on this branch did that, and one made `import anneal_memory` raise `TypeError` under
+two earlier, unreleased shapes did that, and one made `import anneal_memory` raise `TypeError` under
 an application's slotted logger class (L3 10-03, codex HIGH, run).
 
 Known and not fixed: with an empty active file, an unreadable or corrupt newer sealed week does not stop

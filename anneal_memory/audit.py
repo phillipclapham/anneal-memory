@@ -64,8 +64,9 @@ _LOCK_UNAVAILABLE_ERRNOS = frozenset(
 
 # The module's logger, used as logging registered it: never re-classed or
 # wrapped, so an application's logger class, levels, filters and handlers on it
-# behave as the application set them up. On "anneal-memory", its parent, levels
-# and handlers apply by propagation; logging does not run a parent's filters.
+# behave as the application set them up. From "anneal-memory", its parent,
+# handlers apply by propagation and its level only while this logger's own is
+# unset; logging never runs a parent's filters.
 logger = logging.getLogger("anneal-memory.audit")
 
 
@@ -96,7 +97,9 @@ def _log(level: int, msg: str, *args: object, exc_info: bool = False,
         try:
             if caller_exc is not None:
                 text += "\n" + "".join(traceback.format_exception(*caller_exc))
-            print(f"[anneal-memory] {logging.getLevelName(level)}: {text}", file=sys.stderr)
+            # One write, so a failure cannot leave half a line that the caller's
+            # retry then duplicates (L3 r3 10-03, complement).
+            sys.stderr.write(f"[anneal-memory] {logging.getLevelName(level)}: {text}\n")
             return "stderr"
         except Exception:
             return "lost"
@@ -118,7 +121,7 @@ def _emit_warning(message: str, *, stderr: bool = False) -> None:
     went = _log(logging.WARNING, message, stacklevel=2)
     if stderr and went != "stderr":
         try:
-            print(f"[anneal-memory] WARNING: {message}", file=sys.stderr)
+            sys.stderr.write(f"[anneal-memory] WARNING: {message}\n")
         except Exception:
             pass
 

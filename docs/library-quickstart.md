@@ -77,6 +77,7 @@ wrap = prepare_wrap(store)
 #                            episodes are outside the next wrap's window. It is non-empty
 #                            only when your code itself linked a current-window episode
 #                            (Store.record_associations) at strength >= 0.5.
+#                            Unreinforced links decay x0.9 per wrap; at most 20 are shown.
 
 if wrap["status"] == "ready":
     package = wrap["package"]

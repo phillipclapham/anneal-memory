@@ -283,15 +283,22 @@ def _json_parent() -> argparse.ArgumentParser:
 # -- Store factory --
 
 def _existing_db_path(args: argparse.Namespace, *, require_file: bool = False) -> Path:
-    """The --db path, or exit 1 when no database is there, as every store command
-    refuses it. ``outcome`` and ``worth`` never open the store, only a file derived
-    from this path, so they pass ``require_file=True`` and a directory is refused
-    too. Whether an existing file is THIS store is not decided here: a check that
+    """The --db path, or exit 1 when no database is there, as every episodic-store
+    command refuses it. ``outcome`` and ``worth`` read and write files derived from
+    this path rather than the database itself, so they pass ``require_file=True``
+    and a directory is refused too. Checked once, when the command starts: a
+    database removed after that point is not noticed. Whether an existing file is THIS store is not decided here: a check that
     guesses at it from the file's contents refused real stores and accepted
     impostors (four review rounds, 10-03); binding the outcome log to a persisted
     store identity is the design that answers it."""
     db_path = Path(args.db).expanduser()
-    if not db_path.exists():
+    try:
+        exists = db_path.exists()
+        is_file = db_path.is_file()
+    except OSError as exc:  # e.g. PermissionError on an unreadable parent (Python 3.13)
+        print(f"Error: cannot inspect the database path {db_path}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if not exists:
         print(f"Error: database not found: {db_path}", file=sys.stderr)
         print(
             "Run 'anneal-memory init' to create a new store, "
@@ -299,7 +306,7 @@ def _existing_db_path(args: argparse.Namespace, *, require_file: bool = False) -
             file=sys.stderr,
         )
         sys.exit(1)
-    if require_file and not db_path.is_file():
+    if require_file and not is_file:
         print(f"Error: not a database file: {db_path}", file=sys.stderr)
         sys.exit(1)
     return db_path

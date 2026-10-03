@@ -411,6 +411,8 @@ Graduation shows a pattern was earned. It doesn't show the pattern ever helped. 
 - `anneal-memory crystal fold-surfaced --receipts FILE...`, run once per wrap, writes into the crystal store how often recall surfaced each crystallized pattern. Being surfaced is not counted as being used, so it never re-heats a pattern.
 - `anneal-memory worth` reports, per pattern (and per cited episode with `--episodes`), how often it was retrieved on a turn that succeeded and on one that failed, split by label. The library API is `anneal_memory.worth` (`OutcomeLog`, `fold_surfaced`, `compute_worth`).
 
+- `anneal-memory crystal get NAME` also records a pull: one `pull: true` record (exposure id `pull:<uuid>`, one `followed` label, no outcome) in the outcome log. `worth` counts it in its own `pull` column (`pulled` in `--json`), never in `fol`, succ/fail or the unlabelled columns, and it credits no episode. `--no-record` reads without recording; the label is skipped with one stderr line when the store has no id, is busy or was replaced, and never changes the read's exit status.
+
 - `--exposed KIND:REF` (repeatable, or `exposed=[ExposedRef(kind, ref)]` in `OutcomeLog.record`) lists what the recall surfaced, labelled or not, straight from the harness's receipt. An item that was exposed and never labelled is counted in its own columns (`unl+s` / `unl+f`), never in succ/fail: a label means something judged the item, and an unlabelled exposure only means it was shown.
 
 **This is a report. Nothing in anneal ranks, decays, re-heats or retires anything from it.** A failure after a recall is not evidence the recalled memory caused it. There is no evidence yet that the counters separate useful memory from useless; that needs real outcome labels collected over time.

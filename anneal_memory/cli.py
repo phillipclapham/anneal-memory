@@ -51,6 +51,7 @@ import sqlite3
 import stat
 import uuid
 import sys
+import urllib.parse
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -3079,19 +3080,62 @@ def cmd_crystal_crystallize(args: argparse.Namespace) -> None:
           f"{item['activation_mode']}) {_truncate(item['explanation'], 70)}")
 
 
-# How long a pull waits for the outcome log's write lock before giving the label up.
+# How long a pull waits for the outcome log's write lock, and for the db to be
+# readable, before giving the label up. Each wait is bounded on its own.
 _PULL_LOCK_TIMEOUT_SECONDS = 2.0
+_PULL_DB_TIMEOUT_SECONDS = 0.5
+
+
+class _PullSkipped(Exception):
+    """The pull is not recorded; the message is the one stderr line."""
+
+
+def _pull_note(why: str) -> None:
+    """The pull's one stderr line. Best effort: no stderr, or one that cannot be
+    written, changes nothing (never falls back to stdout, never alters the exit)."""
+    err = sys.stderr
+    if err is None:
+        return
+    try:
+        err.write(f"crystal get: pull not recorded ({why})\n")
+        err.flush()
+    except (OSError, ValueError):
+        # The unwritten text stays buffered in the dead stream, and the interpreter
+        # flushes sys.stderr at exit and turns a failure there into exit status 120.
+        # The pull is the last thing this command does, so point it at nowhere.
+        try:
+            sys.stderr = open(os.devnull, "w")
+        except OSError:
+            pass
+
+
+def _pull_store_id(db_path: Path) -> str | None:
+    """The store id for a pull, bounded; ``None`` when the store has none."""
+    refusal = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(refusal):
+            return _outcome_store_id(
+                db_path, mint=False, busy_timeout=_PULL_DB_TIMEOUT_SECONDS)
+    except _StoreBusy:
+        raise _PullSkipped("store busy") from None
+    except SystemExit:
+        why = " ".join(refusal.getvalue().split())
+        if why.startswith("Error:"):
+            why = why[len("Error:"):].strip()
+        raise _PullSkipped(why or "the store id could not be read") from None
 
 
 def _record_pull_label(args: argparse.Namespace, name: str) -> None:
-    """Append one ``followed`` label for a crystal pulled by name, to the outcome
-    log beside the episodic db. A pull is the one production label that is not a
-    guess: the reader asked for this pattern from the index by name.
+    """Append one ``followed`` pull record for a crystal pulled by name, to the
+    outcome log beside the episodic db. A pull is the one production signal that
+    is not a guess: the reader asked for this pattern from the index by name.
 
     Never fails the read and never mints a store id (``mint=False``): a store
     with no id gets one stderr line and no record. A crystal-only deployment (no
-    episodic db file) skips quietly. A log whose write lock is not free within
-    the pull's bound, and any other failure, is one stderr line."""
+    episodic db file) skips quietly. The db read, the log lock and the append
+    are each bounded; a store replaced between the id read and the append (the
+    id re-read under the log lock no longer matches) records nothing. Any other
+    failure is one stderr line."""
     try:
         db_path = Path(args.db).expanduser()
         if not db_path.is_file():
@@ -3099,33 +3143,30 @@ def _record_pull_label(args: argparse.Namespace, name: str) -> None:
     except (OSError, ValueError, RuntimeError):
         return
     try:
-        refusal = io.StringIO()
-        try:
-            with contextlib.redirect_stderr(refusal):
-                sid = _outcome_store_id(db_path, mint=False)
-        except SystemExit:
-            why = " ".join(refusal.getvalue().split())
-            if why.startswith("Error:"):
-                why = why[len("Error:"):].strip()
-            print(f"crystal get: pull not recorded ({why or 'the store id could not be read'})",
-                  file=sys.stderr)
-            return
+        sid = _pull_store_id(db_path)
         if sid is None:
-            print(
-                "crystal get: pull not recorded (the store has no store id yet; "
-                "a read does not mint one, run 'anneal-memory outcome' once)",
-                file=sys.stderr,
+            raise _PullSkipped(
+                "the store has no store id yet; a read does not mint one, "
+                "run 'anneal-memory outcome' once"
             )
-            return
+
+        def still_this_store() -> None:
+            if _pull_store_id(db_path) != sid:
+                raise _PullSkipped("the store changed while the label was being written")
+
         OutcomeLog(outcome_log_path(db_path), store_id=sid).record(
             PULL_EXPOSURE_PREFIX + uuid.uuid4().hex,
             [ExposureLabel("crystal", name, "followed")],
             lock_timeout=_PULL_LOCK_TIMEOUT_SECONDS,
+            pull=True,
+            before_append=still_this_store,
         )
+    except _PullSkipped as skip:
+        _pull_note(str(skip))
     except OutcomeLogBusy:
-        print("crystal get: pull not recorded (outcome log busy)", file=sys.stderr)
+        _pull_note("outcome log busy")
     except (OSError, ValueError, sqlite3.Error) as exc:
-        print(f"crystal get: pull not recorded ({exc})", file=sys.stderr)
+        _pull_note(str(exc))
 
 
 def _print_crystal_item(item: CrystalDict, as_json: bool) -> None:
@@ -3402,12 +3443,51 @@ def _is_anneal_schema(conn: sqlite3.Connection) -> bool:
     ).fetchone() is not None
 
 
-def _outcome_store_id(db_path: Path, *, mint: bool) -> str | None:
+class _StoreBusy(Exception):
+    """The db could not be read within a caller's short ``busy_timeout``."""
+
+
+def _read_store_id_bounded(db_path: Path, timeout: float) -> tuple[str | None, str | None]:
+    """``(store id or None, refusal or None)`` read through a read-only connection
+    that waits at most ``timeout`` seconds for a lock (the library's own open waits
+    its default busy timeout, several seconds). Applies the same refusals as the
+    library open: not an anneal store, written by a newer anneal. Raises
+    :class:`_StoreBusy` when the db stays locked."""
+    uri = "file:" + urllib.parse.quote(str(db_path.resolve())) + "?mode=ro"
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(uri, uri=True, timeout=timeout)
+        if not _is_anneal_schema(conn):
+            return None, "not an anneal store (no episodes table or no format_version); nothing written"
+        found = _parse_format_version(conn.execute(
+            "SELECT value FROM metadata WHERE key = 'format_version'"
+        ).fetchone()[0])
+        if found is not None and found > _SCHEMA_VERSION:
+            return None, (f"written by a newer anneal-memory schema (format_version {found} > "
+                          f"{_SCHEMA_VERSION}); nothing written")
+        row = conn.execute("SELECT value FROM metadata WHERE key = 'store_id'").fetchone()
+    except sqlite3.OperationalError as exc:
+        if "locked" in str(exc) or "busy" in str(exc):
+            raise _StoreBusy(str(exc)) from None
+        raise
+    finally:
+        if conn is not None:
+            conn.close()
+    value = row[0] if row else None
+    return (value if isinstance(value, str) and value else None), None
+
+
+def _outcome_store_id(
+    db_path: Path, *, mint: bool, busy_timeout: float | None = None
+) -> str | None:
     """The store id that binds ``<stem>.outcomes.jsonl`` to the store at ``db_path``,
     or exit 1. Read through the library's read-only open, which also refuses a
     store written by a newer anneal; a file that is not an anneal store (see
     :func:`_is_anneal_schema`) refuses too. A store with no id yet returns
     ``None`` unless ``mint`` (``outcome``; ``worth`` never mints, Phill 10-03).
+    ``busy_timeout`` (seconds, never with ``mint``) reads through
+    :func:`_read_store_id_bounded` instead and raises :class:`_StoreBusy` when the
+    db stays locked; ``None`` is the library open every other caller uses.
 
     The mint takes the writer lock only when the id is missing, and re-proves
     the schema, the version (with the store's own ``_parse_format_version`` and
@@ -3421,6 +3501,16 @@ def _outcome_store_id(db_path: Path, *, mint: bool) -> str | None:
         sys.exit(1)
 
     not_anneal = "not an anneal store (no episodes table or no format_version); nothing written"
+    if busy_timeout is not None:
+        if mint:
+            raise ValueError("busy_timeout is for reads; a mint takes the writer lock.")
+        try:
+            sid, why = _read_store_id_bounded(db_path, busy_timeout)
+        except (OSError, sqlite3.Error) as exc:
+            refuse(exc)
+        if why is not None:
+            refuse(why)
+        return sid
     try:
         with Store(db_path, audit=False, read_only=True) as store:
             if not _is_anneal_schema(store._conn):

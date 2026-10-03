@@ -14,6 +14,7 @@ import pytest
 from anneal_memory import CrystalStore, FLOW_SCHEMA, Store, prepare_wrap
 from anneal_memory.crystal import CrystalError
 from anneal_memory.worth import (
+    FOLLOWED_VALUES,
     ExposedRef,
     ExposureLabel,
     OutcomeLog,
@@ -465,7 +466,7 @@ def test_crystal_get_found_pull_writes_one_followed_record(tmp_path):
     (rec,) = _log_lines(db)
     assert rec["exposure_id"].startswith("pull:") and len(rec["exposure_id"]) == len("pull:") + 32
     assert rec["items"] == [{"kind": "crystal", "ref": "derive_dont_invent", "followed": "followed"}]
-    assert rec["outcome"] is None and rec["store"] == sid
+    assert rec["outcome"] is None and rec["store"] == sid and rec["pull"] is True
     assert "exposed" not in rec
     # --json prints the item alone on stdout and records too
     again = _pull_cli(db, "crystal", "get", "derive_dont_invent", "--json")
@@ -644,8 +645,8 @@ def test_a_pull_moves_pulled_only_and_never_a_judged_cell_or_an_episode_row(tmp_
     log = OutcomeLog(tmp_path / "mem.outcomes.jsonl")
     log.record("judged", [ExposureLabel("crystal", "p", "followed")], outcome="success")
     before = compute_worth(log, crystal)
-    log.record("pull:" + "a" * 32, [ExposureLabel("crystal", "p", "followed")])
-    log.record("pull:" + "b" * 32, [ExposureLabel("crystal", "gone", "followed")])
+    log.record("pull:" + "a" * 32, [ExposureLabel("crystal", "p", "followed")], pull=True)
+    log.record("pull:" + "b" * 32, [ExposureLabel("crystal", "gone", "followed")], pull=True)
     after = compute_worth(log, crystal)
 
     rows = {r.ref: r for r in after.crystals}
@@ -668,7 +669,142 @@ def test_a_pull_alone_creates_no_episode_row(tmp_path):
     crystal = CrystalStore(tmp_path / "mem.crystal.json")
     crystal.crystallize(name="p", level=3, explanation="x", evidence=["e1", "e2"])
     log = OutcomeLog(tmp_path / "mem.outcomes.jsonl")
-    log.record("pull:" + "a" * 32, [ExposureLabel("crystal", "p", "followed")])
+    log.record("pull:" + "a" * 32, [ExposureLabel("crystal", "p", "followed")], pull=True)
     report = compute_worth(log, crystal)
     assert report.episodes == []
     assert {r.ref: r.pulled for r in report.crystals}["p"] == 1
+
+
+def test_an_ordinary_record_named_pull_keeps_all_its_counts(tmp_path):
+    crystal = CrystalStore(tmp_path / "mem.crystal.json")
+    crystal.crystallize(name="p", level=3, explanation="x", evidence=["e1"])
+    log = OutcomeLog(tmp_path / "mem.outcomes.jsonl")
+    log.record("pull:manual", [ExposureLabel("crystal", "p", "followed")], outcome="success")
+    log.record("pull:both", [ExposureLabel("crystal", "p", "ignored")], pull=True)
+    log.record("pull:both", [], outcome="failure")  # a later judgement makes it ordinary
+    rows = {r.ref: r for r in compute_worth(log, crystal).crystals}
+    p = rows["p"]
+    assert p.pulled == 0
+    assert p.followed == 1 and p.ignored == 1
+    assert p.success == 1 and p.failure == 1
+    assert p.table["followed"]["success"] == 1
+    erows = {r.ref: r for r in compute_worth(log, crystal).episodes}
+    assert erows["e1"].success == 1 and erows["e1"].failure == 1
+
+
+def test_the_pull_field_is_ignored_by_a_reader_that_does_not_know_it(tmp_path):
+    log = OutcomeLog(tmp_path / "mem.outcomes.jsonl")
+    log.record("pull:x", [ExposureLabel("crystal", "p", "followed")], pull=True)
+    line = json.loads(log.path.read_text())
+    assert line["pull"] is True and line["v"] == 1 and line["items"][0]["followed"] == "followed"
+    # the released parser reads only v, exposure_id, outcome, items, exposed and store
+    assert set(line) == {"v", "exposure_id", "ts", "outcome", "items", "pull"}
+
+
+def test_crystal_get_a_locked_db_is_bounded_not_a_stall(tmp_path):
+    import sqlite3
+    import subprocess
+    import sys
+    import time
+
+    db, _ = _pull_store(tmp_path)
+    # A rollback-journal db: there an exclusive writer blocks readers (a WAL db
+    # keeps serving them, so it would not exercise the bound).
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete"
+    conn.close()
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import sqlite3, sys, time\n"
+         "c = sqlite3.connect(sys.argv[1], isolation_level=None)\n"
+         "c.execute('BEGIN EXCLUSIVE')\n"
+         "print('held', flush=True)\n"
+         "time.sleep(60)\n", str(db)],
+        stdout=subprocess.PIPE, text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        started = time.monotonic()
+        got = _pull_cli(db, "crystal", "get", "derive_dont_invent", timeout=30)
+        elapsed = time.monotonic() - started
+    finally:
+        holder.kill()
+        holder.wait()
+    assert elapsed < 4, elapsed
+    assert got.returncode == 0, got.stderr
+    assert "derive_dont_invent" in got.stdout
+    assert got.stderr == "crystal get: pull not recorded (store busy)\n"
+    assert _log_lines(db) == []
+    sqlite3.connect(str(db)).close()
+
+
+def test_a_store_replaced_before_the_append_gets_no_pull_from_the_old_one(tmp_path, capsys):
+    from argparse import Namespace
+
+    from anneal_memory import cli
+
+    db, sid = _pull_store(tmp_path)
+    real = cli._outcome_store_id
+    reads = []
+
+    def swapped(db_path, **kw):
+        reads.append(kw)
+        return real(db_path, **kw) if len(reads) == 1 else "b" * 32  # store B now
+
+    cli._outcome_store_id = swapped
+    try:
+        cli._record_pull_label(Namespace(db=str(db)), "derive_dont_invent")
+    finally:
+        cli._outcome_store_id = real
+    assert len(reads) == 2
+    assert _log_lines(db) == []
+    err = capsys.readouterr().err
+    assert err.count("\n") == 1 and "pull not recorded" in err and "changed" in err
+
+
+def test_crystal_get_diagnostics_never_reach_stdout_or_change_the_exit(tmp_path):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    pytest.importorskip("fcntl")
+    db, _ = _pull_store(tmp_path, with_id=False)  # a store with no id says so on stderr
+    root = Path(__file__).resolve().parent.parent
+    base = dict(cwd=str(root), env=dict(os.environ, PYTHONPATH=str(root)),
+                capture_output=False, timeout=60)
+    cmd = [sys.executable, "-m", "anneal_memory.cli", "--db", str(db),
+           "crystal", "get", "derive_dont_invent"]
+    # stderr closed at startup (sys.stderr is None): print(file=None) would use stdout
+    closed = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            text=True, preexec_fn=lambda: os.close(2),
+                            **{k: v for k, v in base.items() if k != "capture_output"})
+    assert closed.returncode == 0
+    assert "derive_dont_invent" in closed.stdout and "not recorded" not in closed.stdout
+    # stderr a pipe nobody reads: the write fails and the exit is still 0
+    r, w = os.pipe()
+    os.close(r)
+    try:
+        broken = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=w, text=True,
+                                **{k: v for k, v in base.items() if k != "capture_output"})
+    finally:
+        os.close(w)
+    assert broken.returncode == 0
+    assert "derive_dont_invent" in broken.stdout and "not recorded" not in broken.stdout
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1, -0.5, True, "2", object()])
+def test_record_lock_timeout_is_validated_before_anything_is_touched(tmp_path, bad):
+    log = OutcomeLog(tmp_path / "sub" / "mem.outcomes.jsonl")
+    with pytest.raises(ValueError, match="lock_timeout"):
+        log.record("a", [ExposureLabel("crystal", "p", "followed")], lock_timeout=bad)
+    assert not (tmp_path / "sub").exists()
+
+
+def test_worthrow_positional_construction_keeps_its_old_arity():
+    from anneal_memory.worth import WorthRow
+
+    tbl = {k: {"success": 0, "failure": 0, "unknown": 0} for k in FOLLOWED_VALUES}
+    row = WorthRow("crystal", "p", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, tbl, 12, "s", "a", False)
+    assert (row.exposed_unrecorded, row.surfaced_count, row.last_surfaced_on) == (11, 12, "s")
+    assert row.last_activated_on == "a" and row.live is False and row.pulled == 0

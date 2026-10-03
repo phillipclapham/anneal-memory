@@ -8,25 +8,35 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 - `anneal-memory crystal get NAME` now appends one record to the outcome log beside the episodic
   db (`<stem>.outcomes.jsonl`) when the pattern is found AND live: exposure id `pull:<uuid4 hex>`,
-  one item `crystal:NAME=followed`, no outcome, stamped with the store's id. A pull by name from
+  one item `crystal:NAME=followed`, no outcome, stamped with the store's id and with
+  `"pull": true`. A pull by name from
   the always-loaded cue index is the one production signal that is not a guess. A retired
   pattern is still printed but not recorded (the cue index lists live patterns only). The record
-  is a valid version-1 record with no new label value, so older readers parse it unchanged.
+  is a valid version-1 record with no new label value; released readers ignore the extra field
+  (0.9.26 was run against one) and count the label as `followed`, as they always counted a label.
 - `worth` counts these in a NEW per-pattern column, `pulled` (`pull` in the text table, last
-  column; `"pulled"` in `--json`). An exposure whose id starts with `pull:` moves `pulled` and
-  nothing else: not `fol`, not any `followed` / `succ` / `fail` / unlabelled cell, and it
+  column; `"pulled"` in `--json`). An exposure whose records all carry `"pull": true` moves
+  `pulled` and nothing else (the field decides, never the id: an ordinary record you named
+  `pull:x` keeps its counts): not `fol`, not any `followed` / `succ` / `fail` / unlabelled cell, and it
   credits no episode through the pattern's evidence, so `fol` keeps its judged meaning. The
-  `exposures` total still counts the record. New `PULL_EXPOSURE_PREFIX` in `anneal_memory.worth`.
+  `exposures` total still counts the record. `WorthRow.pulled` is the last field, so positional construction is unchanged.
 - The read never fails because of the label. It is recorded only after the text was flushed to
   stdout (a closed pipe records nothing). A read command never mints a store id: a store with
   none gets one stderr line and no record (run `outcome` once to mint it). A crystal-only
   deployment (no episodic db file) records nothing and says nothing. A not-found name records
-  nothing and exits as before. A held write lock on the log is waited for at most 2 seconds, then
-  one stderr line (`crystal get: pull not recorded (outcome log busy)`), exit 0. Any other write
-  failure is one stderr line, exit 0, with the pattern still printed.
+  nothing and exits as before. Each wait is bounded: the db read at most 0.5 seconds
+  (`store busy`), the log's write lock at most 2 seconds (`outcome log busy`); either is one
+  stderr line, exit 0, the pattern still printed. The store id is read again under the log
+  lock just before the append, and a store replaced in between records nothing. Any other write
+  failure is the same one line. The stderr line is best effort: a missing or closed stderr
+  changes nothing, and it never goes to stdout. The label write reads the outcome log once
+  (to check the log belongs to this store), so its cost grows with the log.
 - New flag `--no-record` for scripted callers that read patterns without meaning to use them.
-- `OutcomeLog.record` takes an optional `lock_timeout` (seconds; default `None` waits as before)
-  and raises the new `OutcomeLogBusy` (an `OSError`) when the lock is not free in time.
+- `OutcomeLog.record` takes an optional `lock_timeout` (seconds; default `None` waits as before;
+  anything but `None` or a finite, non-negative number is a `ValueError` before any file is
+  touched) and raises the new `OutcomeLogBusy` (an `OSError`) when the lock is not free in time.
+  It also takes `pull=` (stamps `"pull": true`) and `before_append=` (a callable run under the
+  lock just before the append; what it raises aborts the write).
 
 ## [0.9.26] — 2026-10-03
 

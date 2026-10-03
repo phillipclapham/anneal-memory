@@ -8369,6 +8369,11 @@ class TestManifestLock:
 
     _two_sealed_weeks = staticmethod(TestHybridManifestQuarantine._two_sealed_weeks)
 
+    @pytest.mark.skipif(
+        audit_module.fcntl is None,
+        reason="no manifest lock on this platform (documented: no audit lock on Windows), "
+        "so a repair cannot wait for a reader's span",
+    )
     def test_a_repair_cannot_land_inside_a_readers_span(self, tmp_path, monkeypatch):
         """The stale-reader race (spore-1030), under one span per operation
         (10-03): it was a repair landing between a reader's read of the old
@@ -8455,7 +8460,11 @@ class TestManifestLock:
             "from anneal_memory.audit import AuditTrail\n"
             f"t = AuditTrail({str(db)!r})\n"
             "with t._manifest_lock() as ok:\n"
-            f"    Path({str(held)!r}).write_text(str(ok))\n"
+            # tmp + rename: the parent polls for `held` to EXIST, and a plain
+            # write_text creates the file before it writes the bytes, so the
+            # parent could read it empty (CI 10-03, Linux py3.11 + py3.13).
+            f"    Path({str(held) + '.tmp'!r}).write_text(str(ok))\n"
+            f"    Path({str(held) + '.tmp'!r}).replace({str(held)!r})\n"
             f"    while not Path({str(release)!r}).exists(): time.sleep(0.01)\n"
             "    time.sleep(0.3)\n",
         ], cwd=str(Path(audit_module.__file__).parent.parent))

@@ -4401,6 +4401,10 @@ def test_outcome_log_left_beside_a_replaced_store_is_not_adopted(tmp_path):
     for argv in (["outcome", "--exposure-id", "evB", "--item", "crystal:pB=ignored"],
                  ["outcome", "--adopt-unbound"]):
         result = run(*argv)
+        if sys.platform == "win32" and "--adopt-unbound" in argv:
+            # no file lock on Windows: adopt refuses before it reads the log (documented)
+            assert result.returncode == 1 and "needs a file lock" in result.stderr, result.stderr
+            continue
         assert result.returncode == 1 and a_id in result.stderr and data["store_id"] in result.stderr
     assert log.read_bytes() == before
 
@@ -4457,6 +4461,11 @@ def test_adopt_unbound_binds_records_written_before_store_ids(tmp_path):
 
     assert minted() is None  # worth wrote nothing
     adopt = run("outcome", "--adopt-unbound")
+    if sys.platform == "win32":
+        # no file lock on Windows: adopt refuses and writes nothing (documented)
+        assert adopt.returncode == 1 and "needs a file lock" in adopt.stderr, adopt.stderr
+        assert minted() is None and len(log.read_text().splitlines()) == 1
+        return
     sid = minted()
     assert sid
     assert adopt.returncode == 0 and "Adopted" in adopt.stdout

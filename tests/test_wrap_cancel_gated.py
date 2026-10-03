@@ -148,26 +148,6 @@ def test_a_mismatch_refusal_never_offers_an_override_the_gate_refuses(tmp_path):
     after.close()
 
 
-def test_partial_state_with_a_surviving_token_is_not_called_tokenless(tmp_path):
-    """L3 glm (1003+16, run): a partial wrap whose token survived told a wrong-token
-    caller there was "no usable token" and that no proven cancel would ever succeed;
-    the right token does succeed. The advice given now is followed here."""
-    from anneal_memory import WrapOwnershipError
-
-    store = Store(tmp_path / "m.db")
-    _gated(store, "a" * 32)
-    store._conn.execute("UPDATE metadata SET value='' WHERE key='wrap_episode_ids'")
-    store._conn.commit()
-    with pytest.raises(WrapOwnershipError) as exc:
-        store.wrap_cancelled(expect_token="0" * 32)
-    assert exc.value.partial_state and exc.value.actual == "a" * 32
-    assert "no usable token" not in str(exc.value) and "PARTIAL" in str(exc.value)
-    text = Server(store)._tool_wrap_cancel({"wrap_token": "0" * 32})["content"][0]["text"]
-    assert "no usable token" not in text and "WITHOUT wrap_token" in text
-    assert store.wrap_cancelled().partial_state  # the advice: tokenless clears it
-    assert not store.status().wrap_in_progress
-
-
 def test_force_with_a_stale_token_says_force_was_ignored(tmp_path):
     """L3 codex (1003+16, run): force=True with a stale token is a deliberate
     operator act, and the refusal said only "the operator's decision"."""

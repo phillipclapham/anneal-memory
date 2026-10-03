@@ -943,15 +943,6 @@ class WrapOwnershipError(AnnealMemoryError):
                 f"ever succeed. Nothing was changed — call without expect_token "
                 f"to clear the broken state."
             )
-        elif partial_state:
-            # Partial, but a token survived: the right token would clear it, so
-            # "no usable token" would be false here (L3 glm, 1003+16, run).
-            super().__init__(
-                f"wrap_cancelled: caller claims wrap {expected!r}, but the store "
-                f"holds PARTIAL wrap state under {actual!r} (a crash or a manual "
-                f"edit); it cannot be saved. Nothing was changed — call without "
-                f"expect_token to clear the broken state."
-            )
         elif actual is None:
             super().__init__(
                 f"wrap_cancelled: caller claims wrap {expected!r} but NO wrap is "

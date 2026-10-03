@@ -16,10 +16,6 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   its own session and that a cancel without the token, keeping the session id, ends it.
 - A wrong-token cancel that also passed `force` (CLI `--force`) now says force is ignored while a
   token is given, instead of calling the end of the wrap "the operator's decision".
-- A wrong-token cancel of PARTIAL wrap state whose token survived said there was "no usable
-  token" and that no proven cancel could ever succeed; the right token does succeed. MCP and CLI
-  now say the state is partial under a different token (the library text already did not claim
-  it was tokenless, and now says the same).
 - `WrapOwnershipError` gains `gated_session` (read under the same lock as the token compare;
   `None` when the wrap was ungated), `session_id` (the caller's) and `force`; all survive
   pickling.

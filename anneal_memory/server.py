@@ -606,6 +606,12 @@ class Server:
                 f"Supersession rejected ({rej['old_id']} by {rej['new_id']}): {rej['reason']}"
             )
 
+        if allow_unlinked:
+            lines.append(
+                "allow_unlinked is deprecated and did nothing: the AM-LINKGATE save "
+                "refusal it overrode was removed in 0.9.26."
+            )
+
         lines.append("\nSection sizes:")
         for name, chars in sorted(result["sections"].items()):
             lines.append(f"  {name}: {chars} chars")

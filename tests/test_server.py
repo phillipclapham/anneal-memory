@@ -642,6 +642,37 @@ class TestToolSaveContinuity:
         result = server._tool_save_continuity({"text": text})
         assert _is_error(result)
 
+    def test_allow_unlinked_is_reported_as_a_deprecated_no_op(self, server):
+        """The AM-LINKGATE refusal was removed in 0.9.26; an MCP caller passing
+        allow_unlinked must be TOLD it did nothing (a UserWarning never reaches it)."""
+        server._tool_record({"content": "Test obs", "episode_type": "observation"})
+        text = (
+            "# TestProject — Memory (v1)\n"
+            "## State\nActive on test\n"
+            "## Patterns\nthought: testing works | 1x (2026-03-31)\n"
+            "## Decisions\n[decided(rationale: \"test\", on: \"2026-03-31\")] Use SQLite\n"
+            "## Context\nFirst session. Tested things.\n"
+        )
+        server._tool_prepare_wrap({})
+        result = server._tool_save_continuity({"text": text, "allow_unlinked": True})
+        assert not _is_error(result)
+        output = _text_from_result(result)
+        assert "Continuity saved" in output
+        assert "allow_unlinked is deprecated and did nothing" in output
+
+    def test_save_without_allow_unlinked_has_no_deprecation_line(self, server):
+        server._tool_record({"content": "Test obs", "episode_type": "observation"})
+        text = (
+            "# TestProject — Memory (v1)\n"
+            "## State\nActive on test\n"
+            "## Patterns\n\n"
+            "## Decisions\n\n"
+            "## Context\nFirst session.\n"
+        )
+        server._tool_prepare_wrap({})
+        output = _text_from_result(server._tool_save_continuity({"text": text}))
+        assert "allow_unlinked" not in output
+
     def test_save_updates_store(self, server, store):
         server._tool_record({"content": "Test", "episode_type": "observation"})
         text = (

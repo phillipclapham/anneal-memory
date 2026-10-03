@@ -1827,6 +1827,19 @@ def cmd_export(args: argparse.Namespace) -> None:
                 print(text)
 
 
+def _warn_if_policy_lost(store: Store) -> None:
+    """spore-1170 LOW: the export dropped the require-baton policy, so a store
+    rebuilt from it silently lost its consolidate protection. Import still never
+    sets it: a policy change on an existing target is the operator's act."""
+    if not store.consolidate_requires_baton():
+        print(
+            "Warning: the exported store required the consolidate baton; this store "
+            "does not. Set it with Store.set_consolidate_requires_baton(True) if it "
+            "should.",
+            file=sys.stderr,
+        )
+
+
 def cmd_import(args: argparse.Namespace) -> None:
     """Import episodes from a JSON export file.
 
@@ -1864,23 +1877,24 @@ def cmd_import(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
 
-    if data.get("consolidate_requires_baton") is True:
-        # spore-1170 LOW: the export dropped the policy, so a store rebuilt from it
-        # silently lost its consolidate protection. Checked before the empty-export
-        # return (L1 + L2). Import still never sets it: a policy change on an
-        # existing target is the operator's act.
-        with _open_store(args) as store:
-            lost = not store.consolidate_requires_baton()
-        if lost:
-            print(
-                "Warning: the exported store required the consolidate baton; this store "
-                "does not. Set it with Store.set_consolidate_requires_baton(True) if it "
-                "should.",
-                file=sys.stderr,
-            )
+    policy_exported = data.get("consolidate_requires_baton") is True
 
     episodes = data.get("episodes", [])
     if not episodes:
+        if policy_exported:
+            # An empty export still warns (L1 + L2), through a read-only probe of an
+            # existing target only: the no-op import must not take the writer lock
+            # or fail on a missing database (L3: codex MED, complement LOW).
+            db_path = Path(args.db).expanduser()
+            if db_path.exists():
+                try:
+                    probe = Store(db_path, audit=False, read_only=True)
+                    try:
+                        _warn_if_policy_lost(probe)
+                    finally:
+                        probe.close()
+                except Exception:
+                    pass  # a warning must never fail the import
         if args.json:
             _print_json({"imported": 0, "skipped": 0, "errors": 0})
         else:
@@ -1888,6 +1902,8 @@ def cmd_import(args: argparse.Namespace) -> None:
         return
 
     with _open_store(args) as store:
+        if policy_exported:
+            _warn_if_policy_lost(store)
         imported = 0
         skipped = 0
         errors = 0

@@ -742,6 +742,24 @@ def test_policy_rides_the_json_export_and_import_warns_when_it_is_lost(tmp_path)
     assert run.returncode == 0, run.stderr
     assert "required the consolidate baton" in run.stderr
 
+    # L3 (codex MED): the empty import probes read-only, so a writer holding the
+    # target's write lock does not turn the no-op into a lock error, and a missing
+    # target is still "No episodes to import" (exit 0), as before.
+    import sqlite3
+
+    holder = sqlite3.connect(dst)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        run = cli("--db", dst, "import", str(empty))
+    finally:
+        holder.rollback()
+        holder.close()
+    assert run.returncode == 0, run.stderr
+    assert "required the consolidate baton" in run.stderr
+    run = cli("--db", str(tmp_path / "missing.db"), "import", str(empty))
+    assert run.returncode == 0, run.stderr
+    assert "No episodes to import" in run.stdout
+
 
 # -- L1/L2 review fixes (2026-09-24) --
 

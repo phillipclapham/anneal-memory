@@ -24,10 +24,13 @@ read-only when this user may not write the lock file (another user's, or a restr
 FIFO or directory at its path is refused rather than followed or silently ignored. It blocks with no
 timeout: a stopped holder delays other processes' rotations and quarantines until it exits.
 
-A process that cannot take the lock at its first write, with no usable active file and sealed files on
-disk, refuses that write instead of continuing the chain from the manifest: a crashed rotation's orphaned
-week could be newer than the manifest knows, and continuing past it forked the chain for good (measured
-with the refusal removed). The next write retries.
+A process whose orphan adoption at its first write does not finish its scan (the lock cannot be taken,
+the manifest cannot be read, or the directory cannot be listed), with no usable active file and sealed
+files on disk or a directory it cannot list, refuses that write instead of continuing the chain from the
+manifest: a crashed rotation's orphaned week could be newer than the manifest knows, and continuing past
+it forked the chain for good (measured for the lock and the unlistable directory, each with the refusal
+removed or skipped). A quarantined manifest is not refused here; it anchors on the newest sealed file on
+disk. The next write retries.
 
 Where advisory locks do not exist it degrades to no lock, which is the previous behaviour: silently on
 Windows (no `fcntl`), and with a warning logged once per process on a filesystem whose `flock` reports

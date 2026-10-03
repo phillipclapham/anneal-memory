@@ -8486,3 +8486,32 @@ class TestManifestLockL3:
         lock.rmdir()
         AuditTrail(db).log("after", {})
         assert AuditTrail.verify(db).valid
+
+    @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root lists a mode-300 directory")
+    def test_no_chain_start_from_the_manifest_after_an_unlisted_adoption(self, tmp_path):
+        """codex MED, L3 r2 [run before the fix]: the same crash shape as the test
+        above, with the directory unlistable instead of the lock unavailable.
+        Adoption returned before its scan yet reported success, the write was
+        accepted from the manifest anchor, and verify() then reported W03
+        unmanifested for good. ⛔ MUTATION-CHECKED: return True from
+        ``_adopt_locked``'s unlistable branch and this fails."""
+        db = self._two_sealed_weeks(tmp_path)
+        t = AuditTrail(db)
+        t.log("w3", {})
+        mpath = tmp_path / "m.audit.manifest.json"
+        before_rotation = mpath.read_bytes()
+        t._last_week = "1999-W03"
+        t.log("rot3", {})
+        mpath.write_bytes(before_rotation)
+        (tmp_path / "m.audit.jsonl").write_bytes(b"")
+
+        tmp_path.chmod(0o300)
+        try:
+            with pytest.raises(audit_module._ManifestUnavailable):
+                AuditTrail(db).log("while-unlistable", {})
+        finally:
+            tmp_path.chmod(0o700)
+        assert (tmp_path / "m.audit.jsonl").read_bytes() == b""
+
+        AuditTrail(db).log("after", {})
+        assert AuditTrail.verify(db).valid

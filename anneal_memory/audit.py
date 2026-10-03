@@ -1842,8 +1842,7 @@ class AuditTrail:
         # which the bare ``exists()`` was right.
         if not active.exists() or active.stat().st_size == 0:
             # Fresh start — anchor on the sealed files via the manifest.
-            self._refuse_seed_after_skipped_adoption(adopted)
-            self._seed_from_manifest()
+            self._seed_from_manifest(adopted=adopted)
             self._last_week = _iso_week_now()
             self._initialized = True
             return
@@ -1883,23 +1882,23 @@ class AuditTrail:
             # helper, so they cannot drift apart again; two pieces of code
             # computing one thing, disagreeing exactly where the rollback
             # puts you, is the defect this file has now shipped twice.
-            self._refuse_seed_after_skipped_adoption(adopted)
-            self._seed_from_manifest()
+            self._seed_from_manifest(adopted=adopted)
             self._last_week = _iso_week_now()
 
         self._initialized = True
 
-    def _refuse_seed_after_skipped_adoption(self, adopted: bool) -> None:
-        """⛔ NO CHAIN ANCHOR FROM A MANIFEST THAT MAY BE MISSING A SEALED WEEK (L3:
-        codex, reasoned). With no usable active file the chain continues from the
-        manifest's last week. If adoption was just refused (the lock could not be
-        taken) and sealed files exist, a crashed rotation's orphan may be newer
-        than that week: appending from the manifest would fork the chain past it,
-        and adoption could never reconnect it. Raising fails this write and
-        ``_initialize`` retries on the next ``log()``. A store with no sealed file
-        has nothing to fork from, so it is not refused."""
-        if adopted:
-            return
+    def _refuse_seed_after_incomplete_adoption(self) -> None:
+        """⛔ NO CHAIN ANCHOR FROM A MANIFEST THAT MAY BE MISSING A SEALED WEEK (L3
+        r1 + r2: codex). With no usable active file the chain continues from the
+        manifest's last week. If orphan adoption did not finish its scan (the
+        lock could not be taken, the manifest could not be read, or the
+        directory could not be listed) and sealed files may exist, a crashed
+        rotation's orphan may be newer than that week: appending from the
+        manifest would continue the chain past it, and adoption could never
+        reconnect it. Raising fails this write and ``_initialize`` retries on
+        the next ``log()``. A store with no sealed file has nothing to continue
+        past, so it is not refused; a directory that cannot be listed may hold
+        one, so it is."""
         stem = self._db_path.stem
         try:
             sealed = any(_is_sealed_filename(p.name, stem) for p in self._db_path.parent.iterdir())
@@ -1907,15 +1906,15 @@ class AuditTrail:
             return
         except OSError as e:
             raise _ManifestUnavailable(
-                f"orphan adoption was skipped and the audit directory cannot be listed: {e}"
+                f"orphan adoption did not complete and the audit directory cannot be listed: {e}"
             ) from e
         if sealed:
             raise _ManifestUnavailable(
-                "orphan adoption was skipped because the audit manifest lock could not be "
-                "taken; not starting the chain from a manifest that may be missing a sealed week"
+                "orphan adoption did not complete; not starting the chain from a manifest "
+                "that may be missing a sealed week"
             )
 
-    def _seed_from_manifest(self) -> None:
+    def _seed_from_manifest(self, adopted: bool = True) -> None:
         """Anchor the chain on the sealed files when the active file has none.
 
         Called from BOTH no-usable-entry branches of :meth:`_initialize` —
@@ -1954,6 +1953,11 @@ class AuditTrail:
         the newest sealed file's last entry instead — the value rotation would
         have recorded — so appending continues on the true chain. If there is
         no readable sealed tail, it refuses (raises); genesis would be a guess.
+
+        ``adopted`` is False when orphan adoption did not finish its scan; then
+        a chain anchor read from the manifest is refused (see
+        :meth:`_refuse_seed_after_incomplete_adoption`). The quarantine branch
+        is not, since it anchors on the newest sealed file on disk.
         """
         # Reset FIRST: this can run on an instance whose cached chain state
         # is stale, and genesis is the only defensible starting anchor.
@@ -1964,6 +1968,8 @@ class AuditTrail:
         except _ManifestQuarantined:
             self._seed_from_sealed_tail()
             return
+        if not adopted:
+            self._refuse_seed_after_incomplete_adoption()
         self._prev_hash = manifest.get("active_last_hash", GENESIS_HASH)
         self._seq = manifest.get("active_last_seq", 0)
 
@@ -2001,17 +2007,17 @@ class AuditTrail:
     def _adopt_orphaned_files(self) -> bool:
         """Run :meth:`_adopt_locked` under the manifest lock (spore-1030): its
         load, renames and save are one span, so a repair cannot land between its
-        load and its save. A lock that cannot be taken skips recovery, as an
-        unreadable manifest does, and returns False; otherwise True."""
+        load and its save. Returns True only when the scan completed; a lock that
+        cannot be taken skips recovery and returns False, as
+        :meth:`_adopt_locked` does on each early return."""
         try:
             with self._manifest_lock():
-                self._adopt_locked()
+                return self._adopt_locked()
         except _AuditLockError as exc:
             logger.warning("Not adopting orphaned audit files: %s", exc)
             return False
-        return True
 
-    def _adopt_locked(self) -> None:
+    def _adopt_locked(self) -> bool:
         """Adopt sealed files that the manifest doesn't know about.
 
         This handles crash recovery: if the process dies between
@@ -2061,6 +2067,11 @@ class AuditTrail:
         like tampering.
         Every decision and every manifest field for a file come from one
         read of it (``_scan_sealed``).
+
+        Returns True when every name in the directory was considered (whether
+        or not anything was adopted), False when it returned before that: the
+        manifest could not be loaded or the directory could not be listed. A
+        missing directory has nothing to adopt and returns True.
         """
         stem = self._db_path.stem
         audit_dir = self._db_path.parent
@@ -2074,17 +2085,17 @@ class AuditTrail:
             manifest = self._load_manifest()
         except _ManifestUnavailable as exc:
             logger.warning("Not adopting orphaned audit files: %s", exc)
-            return
+            return False
         try:
             names = sorted(p.name for p in audit_dir.iterdir())
         except FileNotFoundError:
-            return  # no directory yet, so nothing to adopt
+            return True  # no directory yet, so nothing to adopt
         except OSError as e:
             # Writable but not listable. Recovery is skipped rather than
             # failing every write (L1, round 10, reproduced at mode 0o300);
             # verify() reports the directory itself.
             logger.warning("Cannot list audit directory for recovery: %s", e)
-            return
+            return False
 
         # A crash while compressing leaves ``<sealed>.jsonl.gz.tmp`` beside
         # the ``.jsonl`` it was being written from. Nothing adopts it.
@@ -2230,6 +2241,7 @@ class AuditTrail:
 
         if chain:
             self._save_manifest(manifest)
+        return True
 
     def _scan_sealed(self, path: Path) -> _SealedScan:
         """Read ``path`` once to the end: its entry metadata, and a digest of

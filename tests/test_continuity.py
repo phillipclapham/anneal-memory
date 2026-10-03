@@ -6194,6 +6194,26 @@ class TestCompostSever:
         finally:
             store.close()
 
+    @pytest.mark.parametrize(
+        "bad",
+        ["alpha", b"alpha", [""], [" alpha"], ["alpha "], [1], [None], ("alpha", 2)],
+        ids=["bare-str", "bytes", "empty-name", "lead-space", "trail-space", "int", "none", "mixed"],
+    )
+    def test_a_malformed_compost_raises_typeerror_and_writes_nothing(self, tmp_path, bad):
+        """spore-1170 carried LOW: compost's TypeError cases had no test.
+        ⛔ MUTATION-CHECKED: drop the bare-string check (a str iterates into
+        one-letter names) or the whitespace check and this fails."""
+        store, text, token = self._primed(tmp_path)
+        try:
+            before = self._edges(store)
+            with pytest.raises(TypeError, match="compost must be"):
+                validated_save_continuity(store, text, wrap_token=token, compost=bad)
+            assert self._edges(store) == before
+            assert store.status().wrap_in_progress
+            assert store.get_wrap_history() == []
+        finally:
+            store.close()
+
     def test_default_path_adds_no_key_and_touches_no_edge(self, tmp_path):
         store, text, token = self._primed(tmp_path)
         try:

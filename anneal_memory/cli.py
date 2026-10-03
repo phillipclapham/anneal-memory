@@ -1185,6 +1185,12 @@ def cmd_audit_repair(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+# prepare-wrap's exit when the wrap was downgraded. 3 is the CLI's "nothing was
+# done, and that is the answer" code (``continuity --rederive`` uses it too),
+# distinct from 1 (error) and 2 (usage).
+_EXIT_DOWNGRADED = 3
+
+
 def cmd_prepare_wrap(args: argparse.Namespace) -> None:
     """Output the compression package for agent-driven wraps.
 
@@ -1201,6 +1207,15 @@ def cmd_prepare_wrap(args: argparse.Namespace) -> None:
     (or a wrapping script) can round-trip it to ``save-continuity``
     via ``--wrap-token`` for explicit mismatch detection across the
     CLI process boundary.
+
+    Exits 3 when the wrap was DOWNGRADED, for any reason the library gives
+    (the store requires the consolidate baton and this command holds none,
+    another session's gated wrap is open, or the wrap was replaced while
+    deciding): no wrap was opened, so it must not exit like one that was
+    (spore-1170). The status and message are printed as before, and the
+    message also goes to stderr so a caller that keeps only stderr sees why.
+    ``empty`` (nothing to compress) exits 0, but on a store that requires the
+    baton the gate runs first, so an empty store downgrades and exits 3.
     """
     with _open_store(args) as store:
         try:
@@ -1227,15 +1242,18 @@ def cmd_prepare_wrap(args: argparse.Namespace) -> None:
             if result["status"] != "ready":
                 # Emit wrap_token: null on the empty and downgraded paths so
                 # jq-style scrapers can uniformly access the field without a
-                # missing-key error. "downgraded" is reachable from this
-                # command only on a store with the require-baton policy
-                # (this command passes no session_id); without this branch it
-                # printed a bare {"wrap_token": null} and dropped the reason.
+                # missing-key error. This command passes no session_id, so
+                # "downgraded" means a require-baton store, another session's
+                # gated wrap, or a wrap replaced mid-decision; without this
+                # branch it printed a bare {"wrap_token": null} and dropped the reason.
                 _print_json({
                     "status": result["status"],
                     "message": result["message"],
                     "wrap_token": None,
                 })
+                if result["status"] == "downgraded":
+                    print(result["message"], file=sys.stderr)
+                    sys.exit(_EXIT_DOWNGRADED)
             else:
                 # Preserve the pre-10.5c.4 JSON shape: emit the package
                 # dict so scripts scraping fields like `instructions`,
@@ -1261,6 +1279,9 @@ def cmd_prepare_wrap(args: argparse.Namespace) -> None:
             # universal parser works across both transports.
             text = f"{text}\n\n---\nWrap token: {result['wrap_token']}"
         print(text)
+        if result["status"] == "downgraded":
+            print(result["message"], file=sys.stderr)
+            sys.exit(_EXIT_DOWNGRADED)
 
 
 def cmd_save_continuity(args: argparse.Namespace) -> None:
@@ -1762,6 +1783,9 @@ def cmd_export(args: argparse.Namespace) -> None:
                 "wraps": wraps,
                 "continuity": continuity,
                 "meta": meta,
+                # Informational, like supersessions: import never sets a policy on
+                # the target store; it warns when the source had one (spore-1170).
+                "consolidate_requires_baton": store.consolidate_requires_baton(),
             }
             if args.output:
                 out = Path(args.output)
@@ -1822,6 +1846,19 @@ def cmd_export(args: argparse.Namespace) -> None:
                 print(text)
 
 
+def _warn_if_policy_lost(store: Store) -> None:
+    """spore-1170 LOW: the export dropped the require-baton policy, so a store
+    rebuilt from it silently lost its consolidate protection. Import still never
+    sets it: a policy change on an existing target is the operator's act."""
+    if not store.consolidate_requires_baton():
+        print(
+            "Warning: the exported store required the consolidate baton; this store "
+            "does not. Set it with Store.set_consolidate_requires_baton(True) if it "
+            "should.",
+            file=sys.stderr,
+        )
+
+
 def cmd_import(args: argparse.Namespace) -> None:
     """Import episodes from a JSON export file.
 
@@ -1859,8 +1896,31 @@ def cmd_import(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
 
+    policy_exported = data.get("consolidate_requires_baton") is True
+
     episodes = data.get("episodes", [])
     if not episodes:
+        if policy_exported:
+            # An empty export still warns (L1 + L2), through a read-only probe of an
+            # existing target only: the no-op import must not take the writer lock
+            # or fail on a missing database (L3: codex MED, complement LOW).
+            db_path = Path(args.db).expanduser()
+            if db_path.exists():
+                try:
+                    probe = Store(db_path, audit=False, read_only=True)
+                    try:
+                        _warn_if_policy_lost(probe)
+                    finally:
+                        probe.close()
+                except Exception as exc:
+                    # A warning must never fail the import, and must not go quiet
+                    # either: an unverifiable policy is reported, not skipped
+                    # (L3 r2: codex MED + complement LOW).
+                    print(
+                        "Warning: the exported store required the consolidate baton, and "
+                        f"this store's policy could not be read to check it ({exc}).",
+                        file=sys.stderr,
+                    )
         if args.json:
             _print_json({"imported": 0, "skipped": 0, "errors": 0})
         else:
@@ -1868,6 +1928,8 @@ def cmd_import(args: argparse.Namespace) -> None:
         return
 
     with _open_store(args) as store:
+        if policy_exported:
+            _warn_if_policy_lost(store)
         imported = 0
         skipped = 0
         errors = 0
@@ -3662,7 +3724,7 @@ def build_parser() -> argparse.ArgumentParser:
     # -- prepare-wrap --
     sub = subparsers.add_parser(
         "prepare-wrap",
-        help="Output compression package for agent-driven wraps",
+        help="Output compression package for agent-driven wraps (exits 3 if the wrap was downgraded)",
         parents=[json_parent],
     )
     sub.add_argument("--max-chars", type=int, default=None,

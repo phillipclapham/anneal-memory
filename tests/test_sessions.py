@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 
 import pytest
@@ -633,10 +634,138 @@ def test_policy_cli_prepare_wrap_json_reports_the_downgrade(tmp_path):
         [sys.executable, "-m", "anneal_memory.cli", "--db", db, "prepare-wrap", "--json"],
         capture_output=True, text=True,
     )
-    assert run.returncode == 0, run.stderr
+    # spore-1170 LOW: a downgrade opened no wrap, so it must not exit like one that
+    # did (it exited 0, and a flow caller read the token-less package as "no new
+    # episodes"). ⛔ MUTATION-CHECKED: exit 0 on a downgrade and this fails.
+    assert run.returncode == 3, run.stderr
     payload = json.loads(run.stdout)
     assert payload["status"] == "downgraded" and payload["wrap_token"] is None
     assert "downgraded-baton-required" in payload["message"]
+
+
+def test_policy_cli_prepare_wrap_text_downgrade_exits_3_and_empty_exits_0(tmp_path):
+    import subprocess
+    import sys
+
+    plain = str(tmp_path / "plain.db")
+    Store(plain).close()
+    empty = subprocess.run(
+        [sys.executable, "-m", "anneal_memory.cli", "--db", plain, "prepare-wrap"],
+        capture_output=True, text=True,
+    )
+    assert empty.returncode == 0, empty.stderr  # nothing to compress is not a refusal
+
+    db = str(tmp_path / "cli.db")
+    s = Store(db)
+    s.record("obs", EpisodeType.OBSERVATION)
+    s.set_consolidate_requires_baton(True)
+    s.close()
+    run = subprocess.run(
+        [sys.executable, "-m", "anneal_memory.cli", "--db", db, "prepare-wrap"],
+        capture_output=True, text=True,
+    )
+    assert run.returncode == 3, run.stderr
+    assert "Wrap token:" not in run.stdout
+    assert "downgraded-baton-required" in run.stderr  # the reason reaches a stderr-only caller
+    after = Store(db)
+    try:
+        assert after.status().wrap_in_progress is False
+    finally:
+        after.close()
+
+
+@pytest.mark.parametrize("reason", ["downgraded-gated-wrap-open", "downgraded-wrap-replaced"])
+@pytest.mark.parametrize("as_json", [False, True])
+def test_cli_prepare_wrap_exits_3_on_every_downgrade_reason(tmp_path, monkeypatch, capsys, reason, as_json):
+    """Every downgrade reason exits 3, not only the baton policy (L1 MED). The
+    library is stubbed: these two reasons need a live peer wrap to reach."""
+    from anneal_memory import cli
+
+    db = str(tmp_path / "cli.db")
+    Store(db).close()
+    message = f"Consolidate downgraded to capture-only ({reason}): test"
+    monkeypatch.setattr(cli, "_lib_prepare_wrap", lambda *a, **k: {
+        "status": "downgraded", "message": message, "package": None,
+        "wrap_token": None, "episode_count": 0,
+    })
+    argv = ["anneal-memory", "--db", db, "prepare-wrap"] + (["--json"] if as_json else [])
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit) as exited:
+        cli.main()
+    assert exited.value.code == 3
+    assert reason in capsys.readouterr().err
+
+
+def test_policy_rides_the_json_export_and_import_warns_when_it_is_lost(tmp_path):
+    """spore-1170 LOW: the JSON export dropped the require-baton policy, so a
+    store rebuilt from it lost its protection silently. ⛔ MUTATION-CHECKED:
+    drop the export key or the import warning and this fails."""
+    import subprocess
+    import sys
+
+    src = str(tmp_path / "src.db")
+    s = Store(src)
+    s.record("obs", EpisodeType.OBSERVATION)
+    s.set_consolidate_requires_baton(True)
+    s.close()
+    out = tmp_path / "export.json"
+
+    def cli(*args):
+        return subprocess.run([sys.executable, "-m", "anneal_memory.cli", *args],
+                              capture_output=True, text=True)
+
+    run = cli("--db", src, "export", "--format", "json", "--output", str(out))
+    assert run.returncode == 0, run.stderr
+    assert json.loads(out.read_text())["consolidate_requires_baton"] is True
+
+    dst = str(tmp_path / "dst.db")
+    Store(dst).close()
+    run = cli("--db", dst, "import", str(out))
+    assert run.returncode == 0, run.stderr
+    assert "required the consolidate baton" in run.stderr
+    check = Store(dst)
+    try:
+        assert check.consolidate_requires_baton() is False  # import never sets it
+    finally:
+        check.close()
+
+    run = cli("--db", src, "import", str(out))  # a target that has it: no warning
+    assert run.returncode == 0, run.stderr
+    assert "required the consolidate baton" not in run.stderr
+
+    # An export with no episodes still warns (it returned before the check; L1 + L2).
+    empty = tmp_path / "empty.json"
+    data = json.loads(out.read_text())
+    data["episodes"] = []
+    empty.write_text(json.dumps(data))
+    run = cli("--db", dst, "import", str(empty))
+    assert run.returncode == 0, run.stderr
+    assert "required the consolidate baton" in run.stderr
+
+    # L3 (codex MED): the empty import probes read-only, so a writer holding the
+    # target's write lock does not turn the no-op into a lock error, and a missing
+    # target is still "No episodes to import" (exit 0), as before.
+    import sqlite3
+
+    holder = sqlite3.connect(dst)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        run = cli("--db", dst, "import", str(empty))
+    finally:
+        holder.rollback()
+        holder.close()
+    assert run.returncode == 0, run.stderr
+    assert "required the consolidate baton" in run.stderr
+    run = cli("--db", str(tmp_path / "missing.db"), "import", str(empty))
+    assert run.returncode == 0, run.stderr
+    assert "No episodes to import" in run.stdout
+
+    # A target whose policy cannot be read is reported, not skipped (L3 r2).
+    not_a_store = tmp_path / "plain.db"
+    sqlite3.connect(not_a_store).close()  # a SQLite file with no metadata table
+    run = cli("--db", str(not_a_store), "import", str(empty))
+    assert run.returncode == 0, run.stderr
+    assert "could not be read to check it" in run.stderr
 
 
 # -- L1/L2 review fixes (2026-09-24) --

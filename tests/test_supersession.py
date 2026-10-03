@@ -507,9 +507,10 @@ def test_batch_on_a_closed_store_is_a_store_error(tmp_path):
 
     st = Store(str(tmp_path / "m.db"))
     st.close()
-    with pytest.raises(StoreError):
+    with pytest.raises(StoreError) as err:
         with st._batch():
             pass
+    assert err.value.operation == "batch_begin"
     assert st._defer_commit is False
 
 

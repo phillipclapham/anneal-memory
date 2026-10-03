@@ -227,3 +227,12 @@ def test_unlabelled_exposures_count_in_their_own_column(tmp_path):
     with pytest.raises(ValueError):
         ExposedRef("note", "p")
 
+
+
+def test_cli_exposed_takes_refs_with_equals_but_not_pasted_labels(tmp_path):
+    from anneal_memory.cli import _parse_exposed
+
+    assert _parse_exposed("crystal:a=b") == ExposedRef("crystal", "a=b")
+    for raw in ("crystal:foo=followed", "episode:abcd1234=ignored"):
+        with pytest.raises(ValueError, match="use --item"):
+            _parse_exposed(raw)

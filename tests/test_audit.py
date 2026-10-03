@@ -8760,6 +8760,41 @@ class TestOneSpanPerOperation:
 
     _two_sealed_weeks = staticmethod(TestHybridManifestQuarantine._two_sealed_weeks)
 
+    def test_a_nested_call_from_a_refused_rotation_warning_is_refused(self, tmp_path):
+        """L3 r1 10-03 (codex HIGH): a refused rotation (the sealed name already
+        exists) advances _last_week before its warning, so a handler's nested
+        log() needed no span, skipped the re-entry guard, and appended while the
+        outer operation held the manifest lock (its on_event too). The guard
+        now runs at the top of every log()."""
+        import logging
+
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        trail.log("a", {})
+        trail._last_week = "1999-W01"
+        (tmp_path / "m.audit.1999-W01.jsonl.gz").write_bytes(b"")  # sealed name taken
+        inner: list[BaseException] = []
+
+        class Reenter(logging.Handler):
+            def emit(self, record):
+                if not inner:
+                    try:
+                        trail.log("nested", {})
+                    except BaseException as e:  # noqa: BLE001 - asserted below
+                        inner.append(e)
+
+        log = logging.getLogger("anneal-memory.audit")
+        handler = Reenter()
+        log.addHandler(handler)
+        try:
+            trail.log("outer", {})
+        finally:
+            log.removeHandler(handler)
+        assert inner and isinstance(inner[0], RuntimeError), inner
+        events = [json.loads(line)["event"] for line in
+                  (tmp_path / "m.audit.jsonl").read_text().splitlines()]
+        assert "nested" not in events and events[-1] == "outer", events
+
     def test_a_nested_call_cannot_erase_the_outer_lock_failure(self, tmp_path):
         """L2 10-03 (probe run on 951fefa): with the lock unavailable, a logging
         handler calling back into the trail opened a nested span whose exit
@@ -8806,12 +8841,15 @@ class TestOneSpanPerOperation:
         the motivating "orphan adoption did not complete" refusal. Dropping
         the span entirely fails on a different error and proves nothing."""
         import subprocess
+        import time
 
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.jsonl").write_bytes(b"")  # no usable active file
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        ready = tmp_path / "child-ready"
         repair = (
-            "import sys; from anneal_memory.audit import AuditTrail; "
+            "import sys, pathlib; from anneal_memory.audit import AuditTrail; "
+            "pathlib.Path(sys.argv[2]).touch(); "
             "r = AuditTrail.repair_manifest(sys.argv[1]); print(r.repaired, r.error)"
         )
         real = AuditTrail._adopt_orphaned_files
@@ -8820,9 +8858,17 @@ class TestOneSpanPerOperation:
         def adopt_then_repair_in_another_process(self):
             adopted = real(self)
             state["proc"] = subprocess.Popen(
-                [sys.executable, "-c", repair, str(db)], stdout=subprocess.PIPE, text=True,
+                [sys.executable, "-c", repair, str(db), str(ready)],
+                stdout=subprocess.PIPE, text=True,
                 env={**os.environ, "PYTHONPATH": str(Path(audit_module.__file__).parent.parent)},
             )
+            # The 2s window starts once the child has imported and is about to
+            # repair, so a slow start cannot pass for a blocked repair (L3 r1
+            # 10-03, complement).
+            deadline = time.monotonic() + 30
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert ready.exists(), "the repair child never started"
             try:
                 state["proc"].wait(timeout=2.0)
                 state["landed_in_gap"] = True

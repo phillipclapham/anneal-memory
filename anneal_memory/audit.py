@@ -617,6 +617,17 @@ class AuditTrail:
             probe["data"] = data
         _require_entry_dict(probe)
 
+        # ⛔ RE-ENTRY IS REFUSED HERE, BEFORE THE GATE BELOW (L3 r1 10-03, codex
+        # HIGH): _operation_span's own refusal runs only when this call needs a
+        # span, and a refused rotation advances _last_week before its warning,
+        # so a handler's nested log() needed none and appended while the outer
+        # operation held the manifest lock.
+        if threading.get_ident() in self._span_threads:
+            raise RuntimeError(
+                "an audit operation is already in progress on this thread; "
+                "the trail is not reentrant (e.g. from a logging handler)"
+            )
+
         # ⛔ ONE MANIFEST-LOCK SPAN FOR EVERYTHING THIS CALL DOES TO THE MANIFEST
         # (Phill, 10-03, item 2; reproduced with a real second process first):
         # with adoption and the seed in separate spans, adoption saw a

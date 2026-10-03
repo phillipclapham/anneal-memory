@@ -28,8 +28,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   schema changed; both `tool-integrity.json` manifests regenerated. The transports pass
   `expect_partial` only when asked, so the plain call is unchanged.
 - `WrapOwnershipError` gains `gated_session` (read under the same lock as the token compare;
-  `None` when the wrap was ungated), `session_id` (the caller's) and `force`; all survive
-  pickling.
+  `None` when the wrap was ungated), `session_id` (the caller's), `force`, and `expect_partial`
+  (True only for an `expect_partial=True` refusal; test it rather than `expected`, which holds
+  whatever token the caller passed); all survive pickling.
 - `WrapInProgressError` adds that, if the wrap was prepared under the consolidate gate, it is
   the preparing session's or the operator's to end, and a plain cancel of it is refused.
 - Three corruption errors that can fire on a complete gated wrap (an unreadable frozen section

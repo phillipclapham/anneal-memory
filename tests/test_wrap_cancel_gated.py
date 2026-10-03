@@ -194,7 +194,15 @@ def test_partial_state_recovery_is_the_partial_only_clear(tmp_path):
     assert late["isError"] and "not touched" in late["content"][0]["text"]
     with pytest.raises(WrapOwnershipError) as lib:
         store.wrap_cancelled(expect_partial=True)
-    assert "no longer holds partial" in str(lib.value)
+    assert lib.value.expect_partial and "no longer holds partial" in str(lib.value)
+    clone = pickle.loads(pickle.dumps(lib.value))
+    assert clone.expect_partial and str(clone) == str(lib.value)
+    # L3 r4 codex (run): a token that happens to equal the old marker string is an
+    # ordinary mismatch, not a partial-only refusal.
+    with pytest.raises(WrapOwnershipError) as odd:
+        store.wrap_cancelled(expect_token="(partial state)")
+    assert not odd.value.expect_partial
+    assert "expect_partial" not in str(odd.value) and "no longer holds" not in str(odd.value)
     assert peer.wrap_cancelled(expect_token="a" * 32).token == "a" * 32  # B survived
     idle = server._tool_wrap_cancel({"partial": True})["content"][0]["text"]
     assert "no wrap is in progress" in idle

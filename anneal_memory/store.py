@@ -654,8 +654,6 @@ _WRAP_PARTIAL_CANCEL_PATHS = (
     "`store.wrap_cancelled(expect_partial=True)`), which refuses if a healthy "
     "wrap has replaced it"
 )
-# ``WrapOwnershipError.expected`` when the caller asked for the partial-only clear.
-_EXPECTED_PARTIAL = "(partial state)"
 
 
 class WrapCancelReceipt(NamedTuple):
@@ -825,6 +823,7 @@ def _reconstruct_wrap_ownership_error(
     gated_session: str | None = None,
     session_id: str | None = None,
     force: bool = False,
+    expect_partial: bool = False,
 ) -> "WrapOwnershipError":
     """Module-level reconstructor for pickling :class:`WrapOwnershipError`.
 
@@ -838,6 +837,7 @@ def _reconstruct_wrap_ownership_error(
     return WrapOwnershipError(
         expected=expected, actual=actual, partial_state=partial_state,
         gated_session=gated_session, session_id=session_id, force=force,
+        expect_partial=expect_partial,
     )
 
 
@@ -916,9 +916,10 @@ class WrapOwnershipError(AnnealMemoryError):
       ``expect_partial=True``, which clears only while the state is still
       partial; a plain cancel would also end a healthy wrap a peer started
       after clearing it.
-    * ``expected`` is ``"(partial state)"`` — the caller asked for
-      ``expect_partial=True`` and the store is no longer partial: ``actual`` is
-      the healthy wrap now in progress, or ``None`` when idle.
+    * ``expect_partial`` True — the caller asked for ``expect_partial=True`` and
+      the store is no longer partial: ``actual`` is the healthy wrap now in
+      progress, or ``None`` when idle. Test the attribute, never ``expected``:
+      a caller's token can be any string (L3 r4 codex, 1003+16, run).
 
     ⚠ The first cut collapsed the last two into ``actual is None`` and told the
     operator NO WRAP IS IN PROGRESS while ``wrap_started_at`` survived the
@@ -937,6 +938,7 @@ class WrapOwnershipError(AnnealMemoryError):
         gated_session: str | None = None,
         session_id: str | None = None,
         force: bool = False,
+        expect_partial: bool = False,
     ) -> None:
         self.expected = expected
         self.actual = actual
@@ -953,7 +955,10 @@ class WrapOwnershipError(AnnealMemoryError):
         self.session_id = session_id
         # The caller passed force=True, which is ignored when expect_token is given.
         self.force = force
-        if expected == _EXPECTED_PARTIAL:
+        # Set only by the expect_partial=True refusal. ``expected`` cannot carry
+        # this: a token is caller-chosen and could equal any marker string.
+        self.expect_partial = expect_partial
+        if expect_partial:
             now = f"wrap {actual!r} is in progress" if actual else "it is idle"
             super().__init__(
                 f"wrap_cancelled(expect_partial=True): the store no longer holds "
@@ -1022,6 +1027,7 @@ class WrapOwnershipError(AnnealMemoryError):
                 self.gated_session,
                 self.session_id,
                 self.force,
+                self.expect_partial,
             ),
         )
 
@@ -3614,7 +3620,8 @@ class Store:
                 # Observed partial, now coherent (a peer's fresh wrap) or idle:
                 # the state this caller judged is gone, so it clears nothing.
                 raise WrapOwnershipError(
-                    expected=_EXPECTED_PARTIAL,
+                    expected="(partial state)",
+                    expect_partial=True,
                     actual=(cancelled_token or None) if complete else None,
                     partial_state=False,
                 )

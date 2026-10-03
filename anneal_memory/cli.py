@@ -135,6 +135,7 @@ from .store import (
     StoreError,
     WrapInProgressError,
     WrapCancelGatedError,
+    SupersessionError,
     WrapOwnershipError,
     _WRAP_TOKEN_RE,
 )
@@ -332,6 +333,9 @@ def _episode_dict(ep: Any) -> dict[str, Any]:
         "source": ep.source,
         "session_id": ep.session_id,
         "metadata": ep.metadata,
+        # Only when recall was asked for superseded episodes and this is one, so
+        # the shape every existing consumer reads is unchanged.
+        **({"superseded_by": ep.superseded_by} if getattr(ep, "superseded_by", None) else {}),
     }
 
 
@@ -795,12 +799,17 @@ def cmd_record(args: argparse.Namespace) -> None:
         if args.tags:
             metadata = {"tags": [t.strip() for t in args.tags.split(",")]}
 
-        episode = store.record(
-            content=content,
-            episode_type=args.type,
-            source=args.source,
-            metadata=metadata,
-        )
+        try:
+            episode = store.record(
+                content=content,
+                episode_type=args.type,
+                source=args.source,
+                metadata=metadata,
+                supersedes=getattr(args, "supersedes", None),
+            )
+        except SupersessionError as exc:
+            print(f"Error: {exc}. Nothing was recorded.", file=sys.stderr)
+            sys.exit(1)
 
         if args.json:
             _print_json({
@@ -826,6 +835,7 @@ def cmd_search(args: argparse.Namespace) -> None:
             episode_type=ep_type,
             source=args.source,
             limit=args.limit,
+            include_superseded=getattr(args, "include_superseded", False),
         )
 
         if args.json:
@@ -844,7 +854,8 @@ def cmd_search(args: argparse.Namespace) -> None:
         for ep in result.episodes:
             age = _format_timestamp(ep.timestamp)
             content = _truncate(ep.content.replace("\n", " "), 100)
-            print(f"  [{ep.id}] {ep.type.value:<12} {age}")
+            replaced = f"  (superseded by {ep.superseded_by})" if ep.superseded_by else ""
+            print(f"  [{ep.id}] {ep.type.value:<12} {age}{replaced}")
             print(f"           {content}")
             print()
 
@@ -1328,6 +1339,8 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 "associations_decayed": result["associations_decayed"],
                 "linkgate_overridden": result["linkgate_overridden"],
                 "citation_spread": result["citation_spread"],
+                "supersessions_recorded": result["supersessions_recorded"],
+                "supersessions_rejected": result["supersessions_rejected"],
                 "sections": {name: c for name, c in sorted(sections.items())},
                 "stale_state": result.get("stale_state", []),
             })
@@ -1346,6 +1359,10 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 "AM-LINKGATE OVERRIDE: saved with --allow-unlinked; the "
                 "association write recorded 0 of the pairs offered."
             )
+        if result["supersessions_recorded"]:
+            print(f"Supersessions recorded: {result['supersessions_recorded']}")
+        for rej in result["supersessions_rejected"]:
+            print(f"Supersession rejected ({rej['old_id']} by {rej['new_id']}): {rej['reason']}")
 
         if result["graduations_validated"]:
             print(f"Citations validated: {result['graduations_validated']}")
@@ -3450,6 +3467,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Source attribution (default: cli, or ANNEAL_MEMORY_SOURCE env var)",
     )
     sub.add_argument("--tags", help="Comma-separated tags")
+    sub.add_argument(
+        "--supersedes", action="append", metavar="ID", default=None,
+        help="Id of an older episode this one replaces (repeatable). Validated like "
+             "a citation; on refusal nothing is recorded. Recall then hides the old one.",
+    )
     sub.set_defaults(func=cmd_record)
 
     # -- search (alias: recall) --
@@ -3469,6 +3491,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--type", choices=[t.value for t in EpisodeType], help="Filter by episode type")
     sub.add_argument("--source", help="Filter by source")
     sub.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
+    sub.add_argument("--include-superseded", action="store_true",
+                     help="Also show episodes a newer episode replaced (hidden by default)")
     sub.set_defaults(func=cmd_search)
 
     # -- associations --

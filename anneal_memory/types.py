@@ -33,6 +33,10 @@ class Episode:
     source: str = "agent"  # Agent/source attribution
     session_id: str | None = None  # Wrap cycle ID
     metadata: dict[str, Any] | None = None
+    # Set only by ``Store.recall(include_superseded=True)``: the id of a newer
+    # episode recorded as replacing this one. ``None`` everywhere else, which
+    # means "not looked up", not "not superseded".
+    superseded_by: str | None = None
 
 
 @dataclass(frozen=True)
@@ -634,6 +638,10 @@ class SaveContinuityResult(_SaveContinuityOptional):
     graduations_validated: int
     graduations_demoted: int  # Total: demoted + bare_demoted
     demoted: int  # Citations demoted due to bad evidence only
+    # ``[supersedes: OLD by NEW]`` links this wrap proposed: how many were
+    # recorded, and each rejected one with its reason (the save still committed).
+    supersessions_recorded: int
+    supersessions_rejected: list[dict[str, str]]
     bare_demoted: int  # Bare (evidence-free) Proven-tier graduations demoted
     citation_reuse_max: int  # Max times any single episode was cited
     # Graduation-format lines whose date != today (carried-forward

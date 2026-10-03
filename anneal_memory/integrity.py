@@ -68,6 +68,16 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "object",
                     "description": "Optional JSON metadata to attach to the episode.",
                 },
+                "supersedes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Ids of older episodes this one replaces (a changed fact). "
+                        "Each must exist, not be newer, and share at least two meaningful "
+                        "words with this content; otherwise nothing is recorded. "
+                        "recall then hides the old episode by default."
+                    ),
+                },
             },
             "required": ["content", "episode_type"],
         },
@@ -121,6 +131,14 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "integer",
                     "description": "Skip first N matching episodes. Default 0.",
                     "default": 0,
+                },
+                "include_superseded": {
+                    "type": "boolean",
+                    "description": (
+                        "Also return episodes a newer episode replaced, marked with "
+                        "what replaced them. Default false: they are left out."
+                    ),
+                    "default": False,
                 },
             },
         },

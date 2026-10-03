@@ -33,9 +33,15 @@ Per surface and shape it reports:
 
 For ``control``, "current" is the original fact and stale@k is not applicable.
 
-Scope: this measures recall with no help from the writer. If supersession lands
-as an explicit link the writer must record (``supersedes=``), this probe as written
-does not exercise it; it would need a variant that records the link.
+Scope: by default this measures recall with no help from the writer. With
+``--supersede explicit`` each update is recorded with ``supersedes=[old]``; with
+``--supersede wrap`` the updates are recorded bare and the link is proposed in a
+wrap (``[supersedes: OLD by NEW]`` in the continuity text) and validated at save.
+Either way the writer has to say what it replaces: a writer who never does gets
+the default numbers. The control shape never records a link in any mode.
+
+Every update shares the subject and the CONTEXT sentence with its old fact, so
+the grounding check always passes here; this probe does not test its refusals.
 
 Run from the repo root so the repo's ``anneal_memory`` is imported::
 
@@ -145,8 +151,23 @@ def _ts(day: int, minute: int) -> str:
     return f"2026-0{1 + day // 28}-{1 + day % 28:02d}T{10 + minute // 60:02d}:{minute % 60:02d}:00Z"
 
 
-def run(shape: str, workdir: Path) -> dict[str, dict[str, int]]:
-    db = workdir / f"probe-{shape}.db"
+def _wrap_link(st: Store, links: list[tuple[str, str]]) -> None:
+    """Propose ``links`` (old, new) through a real wrap and save it."""
+    from anneal_memory import prepare_wrap, validated_save_continuity
+
+    wrap = prepare_wrap(st)
+    assert wrap["status"] == "ready", wrap["status"]
+    marks = "\n".join(f"[supersedes: {old} by {new}]" for old, new in links)
+    text = (
+        "## State\nProbe store.\n" + marks + "\n\n## Patterns\n\n"
+        "## Decisions\n\n## Context\nPlanted updates.\n"
+    )
+    res = validated_save_continuity(st, text)
+    assert res["supersessions_recorded"] == len(links), res.get("supersessions_rejected")
+
+
+def run(shape: str, workdir: Path, mode: str = "none") -> dict[str, dict[str, int]]:
+    db = workdir / f"probe-{shape}-{mode}.db"
     tallies: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     with Store(str(db)) as st:
         old_ids: dict[str, str] = {}
@@ -171,7 +192,13 @@ def run(shape: str, workdir: Path) -> dict[str, dict[str, int]]:
                 else _update_text(shape, fact)
             )
             assert len(text) >= MIN_EPISODE_LEN, fact[0]
-            new_ids[fact[0]] = st.record(text, "observation", timestamp=_ts(40, n)).id
+            link = mode == "explicit" and shape != "control"
+            new_ids[fact[0]] = st.record(
+                text, "observation", timestamp=_ts(40, n),
+                supersedes=[old_ids[fact[0]]] if link else None,
+            ).id
+        if mode == "wrap" and shape != "control":
+            _wrap_link(st, [(old_ids[f[0]], new_ids[f[0]]) for f in FACTS])
 
         for fact in FACTS:
             subject, _a, _o, _n, _p, question = fact
@@ -199,11 +226,13 @@ def run(shape: str, workdir: Path) -> dict[str, dict[str, int]]:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--json", action="store_true", help="emit JSON")
+    ap.add_argument("--supersede", choices=("none", "explicit", "wrap"), default="none",
+                    help="how updates record the episode they replace (default: not at all)")
     args = ap.parse_args(argv)
     results: dict[str, dict[str, dict[str, int]]] = {}
     with tempfile.TemporaryDirectory(prefix="anneal-stale-probe-") as d:
         for shape in SHAPES:
-            results[shape] = run(shape, Path(d))
+            results[shape] = run(shape, Path(d), args.supersede)
     if args.json:
         json.dump(results, sys.stdout, indent=2, sort_keys=True)
         print()

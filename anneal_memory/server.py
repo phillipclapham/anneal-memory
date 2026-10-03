@@ -333,8 +333,9 @@ class Server:
                 episode_type=episode_type,
                 source=source,
                 metadata=metadata,
+                supersedes=args.get("supersedes"),
             )
-        except ValueError as e:
+        except ValueError as e:  # SupersessionError is a ValueError
             return _tool_result(f"Error: {e}", is_error=True)
 
         return _tool_result(
@@ -372,6 +373,7 @@ class Server:
             keyword=args.get("keyword"),
             limit=max(0, args.get("limit", 100)),
             offset=max(0, args.get("offset", 0)),
+            include_superseded=args.get("include_superseded") is True,
         )
 
         if not result.episodes:
@@ -383,9 +385,10 @@ class Server:
         ]
         for ep in result.episodes:
             source_info = f" [{ep.source}]" if ep.source != "agent" else ""
+            replaced = f" (superseded by {ep.superseded_by})" if ep.superseded_by else ""
             lines.append(
                 f"- ({ep.id}) [{ep.type.value}] {ep.timestamp}"
-                f"{source_info}: {ep.content}"
+                f"{source_info}{replaced}: {ep.content}"
             )
 
         return _tool_result("\n".join(lines))
@@ -599,6 +602,12 @@ class Server:
             lines.append(
                 "AM-LINKGATE OVERRIDE: saved with allow_unlinked; the "
                 "association write recorded 0 of the pairs offered."
+            )
+        if result["supersessions_recorded"]:
+            lines.append(f"Supersessions recorded: {result['supersessions_recorded']}")
+        for rej in result["supersessions_rejected"]:
+            lines.append(
+                f"Supersession rejected ({rej['old_id']} by {rej['new_id']}): {rej['reason']}"
             )
 
         lines.append("\nSection sizes:")

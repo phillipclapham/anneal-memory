@@ -9,6 +9,7 @@ Zero dependencies beyond Python stdlib.
 
 from __future__ import annotations
 
+import dataclasses
 import errno
 import inspect
 import hashlib
@@ -66,6 +67,7 @@ from .associations import (
     record_associations as _record_associations,
 )
 from .audit import AuditTrail
+from .graduation import check_explanation_overlap
 
 #: SQLite's own write-lock message grammar, for the Python 3.10 fallback in
 #: :func:`_is_write_lock_contention` where no primary result code is available.
@@ -337,6 +339,8 @@ StoreOperation = Literal[
     "get",
     "delete",
     "recall",
+    "supersede",
+    "supersession_exists",
     "episodes_since_wrap",
     # Row materialization (post-SQL): a corrupt/legacy/badly-imported row whose
     # ``type`` isn't a valid EpisodeType (ValueError) surfaces here as a StoreError
@@ -973,6 +977,25 @@ def _reconstruct_wrap_cancel_gated_error(
     return WrapCancelGatedError(gated_session=gated_session, session_id=session_id)
 
 
+class SupersessionError(AnnealMemoryError, ValueError):
+    """Raised when a supersession link fails validation. Nothing was written:
+    not the link, and on ``record(supersedes=...)`` not the episode either.
+
+    A link is validated like a citation: the superseded episode exists, is not
+    the new episode, is not newer than it, does not already supersede it, and
+    the new text shares at least two meaningful words with the old one
+    (:func:`anneal_memory.graduation.check_explanation_overlap`). The overlap
+    rule is lexical, so a real update worded with almost nothing in common with
+    the old fact is refused; record it without the link, or reword it.
+
+    ⚠ The overlap rule is a floor, not a judgment that the new episode really
+    replaces the old one. Two episodes that share boilerplate (a repeated
+    sign-off, a project name plus one common word) clear it. The decision is
+    the writer's explicit link; a wrong link hides a still-valid episode from
+    default recall (``include_superseded=True`` still shows it).
+    """
+
+
 class ContinuityLockUnavailable(AnnealMemoryError):
     """Raised by :func:`continuity_lock` / :meth:`Store.continuity_lock` with
     ``require=True`` when an exclusive cross-process lock cannot be acquired — a
@@ -1224,6 +1247,18 @@ CREATE TABLE IF NOT EXISTS metadata (
     value TEXT NOT NULL
 );
 
+-- Supersession (§3.3): a newer episode recorded as replacing an older one.
+-- Invalidate, never delete: both episodes stay; recall hides the old one by
+-- default. Additive, like pattern_history: an older binary ignores the table.
+CREATE TABLE IF NOT EXISTS supersessions (
+    old_id TEXT NOT NULL,
+    new_id TEXT NOT NULL,
+    recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    source TEXT NOT NULL DEFAULT 'agent',
+    PRIMARY KEY (old_id, new_id)
+);
+CREATE INDEX IF NOT EXISTS idx_supersessions_new ON supersessions(new_id);
+
 -- Cross-session graduation history per pattern name. Closes the
 -- slow-drift sycophantic-accumulation gap surfaced by Bold Stand
 -- Phase 1b probe #1 (2026-05-21): without per-pattern history,
@@ -1370,6 +1405,23 @@ def _today_local() -> str:
     from the local wrap date in the evening-UTC-rollover window (the spore-081
     class, one layer out — codex L3 MED)."""
     return datetime.now().strftime("%Y-%m-%d")
+
+
+def _normalize_supersedes(ids: list[str] | tuple[str, ...] | None) -> list[str]:
+    """Strip, lowercase and de-duplicate supersession ids, keeping order.
+    A bare string is refused: iterating it would link each character."""
+    if ids is None:
+        return []
+    if isinstance(ids, str):
+        raise SupersessionError("supersedes must be a list of episode ids, not a string")
+    out: list[str] = []
+    for raw in ids:
+        if not isinstance(raw, str) or not raw.strip():
+            raise SupersessionError(f"supersedes: {raw!r} is not an episode id")
+        norm = raw.strip().lower()
+        if norm not in out:
+            out.append(norm)
+    return out
 
 
 def _episode_id(content: str, timestamp: str, nonce: int = 0) -> str:
@@ -2101,6 +2153,7 @@ class Store:
         source: str = "agent",
         metadata: dict[str, Any] | None = None,
         timestamp: str | None = None,
+        supersedes: list[str] | tuple[str, ...] | None = None,
     ) -> Episode:
         """Record a new episode.
 
@@ -2110,6 +2163,14 @@ class Store:
             source: Agent/source attribution.
             metadata: Optional JSON-serializable metadata.
             timestamp: Optional ISO 8601 UTC timestamp. Defaults to now.
+            supersedes: Ids of older episodes this one replaces (a changed fact).
+                Each link is validated before anything is written (see
+                :class:`SupersessionError`); the episode and its links commit
+                together or not at all. Superseded episodes are kept and are
+                hidden from :meth:`recall` by default.
+
+        Raises:
+            SupersessionError: a ``supersedes`` link failed validation.
 
         Returns:
             The recorded Episode.
@@ -2128,6 +2189,7 @@ class Store:
 
         ts = timestamp or _now_utc()
         meta_json = json.dumps(metadata) if metadata is not None else None
+        old_ids = _normalize_supersedes(supersedes)
 
         # Retry with incrementing nonce on ID collision (birthday or duplicate content).
         # 10.5c.5 L3 Fix #17: batch-aware commit. If this method is
@@ -2165,6 +2227,27 @@ class Store:
             if not self._conn.in_transaction:
                 self._conn.execute("BEGIN IMMEDIATE")
             session_id = self._current_session_id()
+            # Validated under the same write lock as the insert, so a target
+            # cannot vanish between the check and the link. ⛔ The refusal is
+            # RAISED OUTSIDE this boundary: _db_boundary rolls back on any
+            # exception, and inside a caller's _batch() that would discard the
+            # batch's earlier writes (measured on the wrap path while building
+            # this: a rejected link rolled back the link recorded before it).
+            problem = next(
+                (p for p in (self._supersession_problem(o, None, content, ts)
+                             for o in old_ids) if p),
+                None,
+            )
+        if problem:
+            if not self._defer_commit:
+                with self._db_boundary("record"):
+                    self._conn.commit()  # ends the empty write transaction opened above
+            raise SupersessionError(problem)
+        # Same transaction as the session read above: nothing committed in
+        # between, so spore-1233's read-and-insert atomicity holds.
+        with self._db_boundary("record"):
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")
             for nonce in range(max_retries):
                 ep_id = _episode_id(content, ts, nonce)
                 try:
@@ -2173,13 +2256,18 @@ class Store:
                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
                         (ep_id, ts, episode_type.value, content, source, session_id, meta_json),
                     )
-                    if not self._defer_commit:
-                        self._conn.commit()
                     break
                 except sqlite3.IntegrityError:
                     if nonce == max_retries - 1:
                         raise
                     continue
+            for old_id in old_ids:
+                self._conn.execute(
+                    "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
+                    (old_id, ep_id, source),
+                )
+            if not self._defer_commit:
+                self._conn.commit()
 
         episode = Episode(
             id=ep_id,
@@ -2202,8 +2290,120 @@ class Store:
             "content_hash": _content_hash(content),
             "source": source,
         }, method="record", committed="the episode", actor=source)
+        for old_id in old_ids:
+            self._audit_log_after_commit("supersede", {
+                "old_id": old_id,
+                "new_id": ep_id,
+                "source": source,
+            }, method="record", committed="the supersession", actor=source)
 
         return episode
+
+    def supersede(self, new_id: str, old_id: str, *, source: str = "agent") -> bool:
+        """Record that episode ``new_id`` replaces the older episode ``old_id``.
+
+        Validated like a citation (see :class:`SupersessionError`). Invalidate,
+        never delete: both episodes stay, and :meth:`recall` hides ``old_id`` by
+        default. Recording a link that already exists changes nothing.
+
+        Returns:
+            True if the link was recorded, False if it already existed.
+
+        Raises:
+            SupersessionError: the link failed validation; nothing was written.
+        """
+        new_id = _normalize_supersedes([new_id])[0]
+        old_id = _normalize_supersedes([old_id])[0]
+        with self._db_boundary("supersede"):
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")
+            # ⛔ No raise inside this boundary: it rolls back on any exception,
+            # and supersede() runs inside the wrap's _batch() (see record()).
+            row = self._conn.execute(
+                "SELECT content, timestamp FROM episodes WHERE id = ?", (new_id,)
+            ).fetchone()
+            exists = row is not None and self._conn.execute(
+                "SELECT 1 FROM supersessions WHERE old_id = ? AND new_id = ?",
+                (old_id, new_id),
+            ).fetchone() is not None
+            if row is None:
+                problem: str | None = f"supersede: the new episode {new_id!r} does not exist"
+            elif exists:
+                problem = None
+            else:
+                problem = self._supersession_problem(
+                    old_id, new_id, row["content"], row["timestamp"]
+                )
+            if not exists and problem is None:
+                self._conn.execute(
+                    "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
+                    (old_id, new_id, source),
+                )
+            if not self._defer_commit:
+                self._conn.commit()
+        if problem:
+            raise SupersessionError(problem)
+        if exists:
+            return False
+        self._audit_log_after_commit("supersede", {
+            "old_id": old_id,
+            "new_id": new_id,
+            "source": source,
+        }, method="supersede", committed="the supersession", actor=source)
+        return True
+
+    def supersession_exists(self, old_id: str, new_id: str) -> bool:
+        """True if ``new_id`` is recorded as superseding ``old_id``."""
+        with self._db_boundary("supersession_exists"):
+            if not self._has_supersessions_table():
+                return False
+            return self._conn.execute(
+                "SELECT 1 FROM supersessions WHERE old_id = ? AND new_id = ?",
+                (old_id.strip().lower(), new_id.strip().lower()),
+            ).fetchone() is not None
+
+    def _supersession_problem(
+        self, old_id: str, new_id: str | None, new_content: str, new_ts: str
+    ) -> str | None:
+        """Why one link fails validation, or None if it passes. Never raises a
+        refusal (callers raise outside their ``_db_boundary``). Runs inside the
+        caller's write transaction. ``new_id`` is None when the new episode is
+        not yet inserted (``record``)."""
+        if new_id is not None and old_id == new_id:
+            return f"supersede: {old_id!r} cannot supersede itself"
+        row = self._conn.execute(
+            "SELECT content, timestamp FROM episodes WHERE id = ?", (old_id,)
+        ).fetchone()
+        if row is None:
+            return f"supersede: the superseded episode {old_id!r} does not exist"
+        # String order, the same notion ``recall`` sorts by.
+        if row["timestamp"] > new_ts:
+            return (
+                f"supersede: {old_id!r} ({row['timestamp']}) is newer than the episode "
+                f"replacing it ({new_ts}); only a newer episode can supersede an older one"
+            )
+        if new_id is not None and self._conn.execute(
+            "SELECT 1 FROM supersessions WHERE old_id = ? AND new_id = ?",
+            (new_id, old_id),
+        ).fetchone():
+            return (
+                f"supersede: {old_id!r} already supersedes {new_id!r}; a link in the "
+                f"other direction would hide both"
+            )
+        if not check_explanation_overlap(new_content, row["content"]):
+            return (
+                f"supersede: the new text shares fewer than two meaningful words with "
+                f"{old_id!r}, so it does not ground as an update of it"
+            )
+        return None
+
+    def _has_supersessions_table(self) -> bool:
+        """A read_only Store skips schema init, so a database last opened by an
+        older binary has no ``supersessions`` table. Readers check before using it
+        rather than fault on the per-turn recall path."""
+        return self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'supersessions'"
+        ).fetchone() is not None
 
     def get(self, episode_id: str) -> Episode | None:
         """Get a single episode by ID.
@@ -2288,6 +2488,7 @@ class Store:
         keyword: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        include_superseded: bool = False,
     ) -> RecallResult:
         """Query episodes with filters.
 
@@ -2299,6 +2500,9 @@ class Store:
             keyword: Search content (LIKE %keyword%). Wildcards % and _ are escaped.
             limit: Max episodes to return.
             offset: Skip first N matching episodes.
+            include_superseded: Also return episodes a newer episode was
+                recorded as replacing, each with ``superseded_by`` set. By
+                default they are left out (and out of ``total_matching``).
 
         Returns:
             RecallResult with matching episodes and total count.
@@ -2328,9 +2532,18 @@ class Store:
             conditions.append("LOWER(content) LIKE ? ESCAPE '\\'")
             params.append(f"%{escaped}%")
 
-        where = " AND ".join(conditions) if conditions else "1=1"
-
         with self._db_boundary("recall"):
+            has_links = self._has_supersessions_table()
+            if has_links and not include_superseded:
+                # Only while the replacement still exists: a link whose new
+                # episode was deleted or pruned must not leave the old fact
+                # hidden with nothing in its place (reproduced before this join).
+                conditions.append(
+                    "id NOT IN (SELECT s.old_id FROM supersessions s"
+                    " JOIN episodes r ON r.id = s.new_id)"
+                )
+            where = " AND ".join(conditions) if conditions else "1=1"
+
             # Get total count
             count_row = self._conn.execute(
                 f"SELECT COUNT(*) FROM episodes WHERE {where}", params
@@ -2344,7 +2557,27 @@ class Store:
                 [*params, limit, offset],
             ).fetchall()
 
+            replaced_by: dict[str, str] = {}
+            if has_links and include_superseded and rows:
+                ids = [row["id"] for row in rows]
+                marks = ",".join("?" * len(ids))
+                # Newest replacement wins when one episode was superseded twice.
+                for link in self._conn.execute(
+                    f"""SELECT s.old_id, s.new_id FROM supersessions s
+                        JOIN episodes e ON e.id = s.new_id
+                        WHERE s.old_id IN ({marks})
+                        ORDER BY e.timestamp ASC, s.new_id ASC""",
+                    ids,
+                ):
+                    replaced_by[link["old_id"]] = link["new_id"]
+
         episodes = [self._row_to_episode(row) for row in rows]
+        if replaced_by:
+            episodes = [
+                dataclasses.replace(ep, superseded_by=replaced_by[ep.id])
+                if ep.id in replaced_by else ep
+                for ep in episodes
+            ]
 
         return RecallResult(
             episodes=episodes,
@@ -2359,6 +2592,7 @@ class Store:
                     "keyword": keyword,
                     "limit": limit,
                     "offset": offset,
+                    "include_superseded": include_superseded or None,
                 }.items()
                 if v is not None
             },
@@ -6172,6 +6406,7 @@ class Store:
         audit events through :meth:`_audit_log_after_commit`):
 
         - :meth:`record` (episode writes)
+        - :meth:`supersede` (supersession links)
         - :meth:`delete` (episode deletions)
         - :meth:`record_associations` / :meth:`decay_associations`
         - :meth:`wrap_completed`

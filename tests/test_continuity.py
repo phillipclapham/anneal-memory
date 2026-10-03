@@ -447,6 +447,9 @@ class TestTypedDictReturnShapes:
                 # AM-LINKGATE gauge (spore-721): distinct resolved episodes
                 # cited across today's graduation lines. Report only.
                 "citation_spread",
+                # §3.3 supersession: [supersedes: OLD by NEW] links the wrap
+                # proposed, recorded and rejected (with reasons).
+                "supersessions_recorded", "supersessions_rejected",
                 "sections", "wrap_result",
             }
             assert set(result.keys()) == expected

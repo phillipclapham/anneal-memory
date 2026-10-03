@@ -71,6 +71,7 @@ from .store import (
     StoreError,
     WrapInProgressError,
     WrapOwnershipError,
+    SupersessionError,
     WrapWindowMovedError,
     _fsync_dir,
     _safe_unlink,
@@ -1112,6 +1113,15 @@ whole system depends on) goes dark. So, every wrap:
 - horizontal_scaling_strategy | 1x ({today})
 ```
 
+### Superseded facts (anywhere in the file)
+When an episode from THIS session replaces an older fact (a value changed, a
+decision was reversed), write `[supersedes: <old_id> by <new_id>]` on its own line.
+The save validates it like a citation: `<new_id>` must be an episode in this wrap,
+`<old_id>` must exist and not be newer, and the two texts must share at least two
+meaningful words. Recall then hides the old episode by default (it is kept, not
+deleted). A rejected link does not fail the save; it is reported back. Only link a
+real replacement, never two facts that merely sit side by side.
+
 ### Decisions (use in ## Decisions)
 Use `[decided(rationale: "why", on: "date")] choice` markers.
 - Existing decisions still referenced by active State/Patterns → keep
@@ -2076,6 +2086,47 @@ def _check_linkgate(
     )
 
 
+_SUPERSEDES_RE = re.compile(
+    r"\[supersedes:\s*([0-9A-Fa-f]{8})\s+by\s+([0-9A-Fa-f]{8})\s*\]"
+)
+
+
+def _record_wrap_supersessions(
+    store: Store, text: str, valid_ids: set[str]
+) -> tuple[int, list[dict[str, str]]]:
+    """Record the ``[supersedes: OLD by NEW]`` links a wrap proposes.
+
+    Runs inside the save's batch. ``NEW`` must be an episode of this wrap's
+    frozen snapshot (the same set a citation is checked against); the rest of
+    the validation is :meth:`Store.supersede`'s. A link already on record is
+    skipped silently, so a marker carried forward into later wraps is
+    idempotent. A rejected link never fails the save: it is returned with the
+    reason, like a demotion.
+    """
+    recorded = 0
+    rejected: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for m in _SUPERSEDES_RE.finditer(text):
+        old_id, new_id = m.group(1).lower(), m.group(2).lower()
+        if (old_id, new_id) in seen:
+            continue
+        seen.add((old_id, new_id))
+        if new_id not in valid_ids:
+            if store.supersession_exists(old_id, new_id):
+                continue
+            rejected.append({
+                "old_id": old_id, "new_id": new_id,
+                "reason": f"{new_id} is not an episode of this wrap",
+            })
+            continue
+        try:
+            if store.supersede(new_id, old_id, source="wrap"):
+                recorded += 1
+        except SupersessionError as exc:
+            rejected.append({"old_id": old_id, "new_id": new_id, "reason": str(exc)})
+    return recorded, rejected
+
+
 def validated_save_continuity(
     store: Store,
     text: str,
@@ -2764,6 +2815,9 @@ def validated_save_continuity(
                 composted[name] = store.sever_pattern_concept(
                     name, today=today_str
                 )
+
+            supersessions_recorded, supersessions_rejected = \
+                _record_wrap_supersessions(store, grad_result.text, valid_ids)
 
             wrap_result = store.wrap_completed(
                 episodes_compressed=len(episodes),
@@ -3457,6 +3511,8 @@ def validated_save_continuity(
         # the grounding and cross-session checks, so this counts distinct
         # resolved episodes cited, including on lines later demoted.
         citation_spread=len(grad_result.citation_counts),
+        supersessions_recorded=supersessions_recorded,
+        supersessions_rejected=supersessions_rejected,
         sections=sections,
         # asdict() makes the full return value JSON-serializable
         # top-to-bottom. Library users who want the typed object can

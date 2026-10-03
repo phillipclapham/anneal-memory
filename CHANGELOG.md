@@ -94,8 +94,13 @@ rename: a lock that cannot be taken refuses each step it would have covered, wit
 moved. One span closes a window the earlier per-step spans left open, reproduced with a real second
 process: adoption saw a quarantined manifest, an `audit-repair` in another process rebuilt it before the
 seed, and the seed refused the write while telling the operator to run the repair that had just
-succeeded. A quarantine lists the markers and reads the manifest again under the lock before renaming,
-so an older writer that takes no lock cannot get a rebuilt manifest quarantined. The lock is released
+succeeded. A quarantine renames only under the operation's span, after listing the markers and reading
+the manifest again; that re-read narrows, without closing, the window for a writer that does not hold the
+lock (one whose lock degraded to none, or an older anneal-memory writer, which takes no lock;
+mixed-version writers stay unsupported). The lock serializes manifest changes, not appends: two
+writer processes on one trail still fork the chain, as before, and a single writer per trail remains the
+contract. A call back into the same trail while its span is open (from a logging handler) is refused,
+and that nested event is not recorded. The lock is released
 before the entry is appended and before `on_event` runs, and when its descriptor closes or the process
 dies. It is
 opened read-write (Linux NFS needs that for an exclusive lock), and read-only when this user may not

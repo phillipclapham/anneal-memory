@@ -1171,6 +1171,16 @@ _SCHEMA_VERSION = 1
 # in tests/test_store.py, ``TestTheWriterSchemaFunctionLetsABumpRefuseOpenWriters``).
 _WRITER_SCHEMA_FUNCTION = "anneal_writer_schema"
 
+
+def register_writer_schema(conn: sqlite3.Connection) -> None:
+    """Register ``_WRITER_SCHEMA_FUNCTION`` on ``conn``. Every connection that
+    writes a store calls this, ``Store``'s own and any opened directly (L3 r1
+    10-03, codex + complement: the CLI's store-id mint wrote ``metadata`` on a
+    raw connection that would fail the bump's trigger at a matching schema)."""
+    conn.create_function(
+        _WRITER_SCHEMA_FUNCTION, 0, lambda: _SCHEMA_VERSION, deterministic=True,
+    )
+
 def _sql_statements(script: str) -> list[str]:
     """Split a DDL script into individual statements.
 
@@ -1796,10 +1806,7 @@ class Store:
             with self._db_boundary("schema_init"):
                 self._conn = sqlite3.connect(str(self._path))
                 self._conn.row_factory = sqlite3.Row
-                self._conn.create_function(
-                    _WRITER_SCHEMA_FUNCTION, 0, lambda: _SCHEMA_VERSION,
-                    deterministic=True,
-                )
+                register_writer_schema(self._conn)
                 # ⛔ FIRST, BEFORE EVERY PERSISTENT WRITE — INCLUDING THE
                 # PRAGMAS. This used to sit just above ``_init_schema``, on the
                 # reasoning that schema init is what mutates the database.

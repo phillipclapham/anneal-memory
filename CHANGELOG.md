@@ -85,8 +85,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ### Added — a schema bump can refuse writers that are already open
 
-- Every store connection registers an SQL function, `anneal_writer_schema()`, returning this
-  release's schema version. No trigger uses it yet. The first release that raises the schema
+- Every connection this release opens to write a store (`Store`'s own and the CLI's store-id mint)
+  registers an SQL function, `anneal_writer_schema()`, returning this release's schema version. No trigger uses it yet. The first release that raises the schema
   version will install write triggers that abort when it is below the store's stamped
   `format_version`, so a process that opened the store before that migration is refused inside
   its own write transaction instead of writing an older-schema row (the open-time check cannot
@@ -237,24 +237,30 @@ Older anneal-memory versions ignore the `set_aside` field and keep it on their o
 A deleted or emptied active audit file is no longer a silent loss (Phill, 2026-10-03). Before, a
 fresh open re-seeded from the manifest and so did a rotation that found its active file missing,
 so the chain continued past the lost entries and `verify()` stayed valid with no gap (measured on
-0.9.23: three entries deleted, store reopened, one entry logged, `valid`). Now the first append to
-an active file saves a new manifest field, `active_begun` (`period`, `first_hash`,
-`first_prev_hash`), once per active file, and an open that finds an active file with entries but
+0.9.23: three entries deleted, store reopened, one entry logged, `valid`). Now the first append into
+an active file with no valid entry (absent, empty, or only a torn fragment) saves a new manifest
+field, `active_begun` (`period`, `first_hash`, `first_prev_hash`), once per active file, and an open that finds an active file with entries but
 no record (one begun by an earlier release) records it from that file's first entry, so an
 upgraded store is covered from its first open; the seal that moves the file into `files` clears it, and
 so does the adoption of a crashed rotation's orphan that starts from the same `first_prev_hash`.
+A process whose active file is deleted or emptied while it is open refuses its next append there
+instead of chaining past it, and keeps the record.
 When it names a week that is not sealed and the active file holds no valid entry, writes REFUSE
 naming the week, `verify()` is invalid naming `audit-repair`, and `audit-repair` records the week
 in `set_aside` with `set_aside_as` empty (there is no file to move) and clears the field; writes
 then resume and `verify()` is valid with a `GAP:` line saying the active file went missing with
-its entries. A repair that sets aside a crashed rotation's unreadable orphan clears the field
-instead of recording a second gap (that orphan is the active file, renamed). A store now has a
+its entries. A repair that sets aside a crashed rotation's unreadable orphan for the recorded week
+clears the field instead of recording a second gap (that orphan is the active file, renamed); an
+unrelated corrupt week does not clear it. A READABLE orphan that starts where the recorded file
+started is left for adoption, which takes it with its entries, and repair records nothing. A store now has a
 manifest from its first audit entry, not from its first rotation. Not covered: entries removed
 from the END of an active file that still holds a valid entry; a week whose record was not saved
 (a failed save warns; with the audit lock unavailable the save is skipped, under that lock's own
 warning), which is then unprotected; a crash during a rotation that also deleted the active file
 reads as one gap, not two; and a manifest rebuilt from quarantine has no `active_begun`, nor any
-set-aside record without a file on disk. Older releases ignore the field and re-save the manifest
+set-aside record without a file on disk; a system clock moving back across ISO weeks, so a week
+label repeats; and a loss caused by an older release, which only warns (the record of the lost
+file is kept, not overwritten). Older releases ignore the field and re-save the manifest
 they loaded, so it survives their saves (read in 0.9.23's code, not run); their seal does not
 clear it, and the sealed week's `files` record then accounts for it by period.
 

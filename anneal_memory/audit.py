@@ -601,6 +601,12 @@ class AuditTrail:
         # Unmanifested sealed files newer than the manifest's last week that
         # the last adoption could not read, as (name, cause).
         self._unreadable_newer: list[tuple[str, str]] = []
+        # Whether the active file holds an entry this instance knows of: set by
+        # recovery and by each append, cleared by every seed and by a seal. An
+        # append that finds the file absent or empty while this is True is
+        # writing past a file that vanished under it (L3 r1 10-03, codex HIGH +
+        # complement, run).
+        self._active_has_entry = False
 
     # -- Public API --
 
@@ -754,6 +760,20 @@ class AuditTrail:
         active = self._active_path
         active.parent.mkdir(parents=True, exist_ok=True)
         resume_at = active.stat().st_size if active.exists() else 0
+        if resume_at == 0 and self._active_has_entry:
+            # ⛔ THE FILE THIS INSTANCE WAS APPENDING TO IS GONE. Appending would
+            # chain from its lost tip into a new file and overwrite the
+            # manifest's record of it; verify then reports a hash break that
+            # audit-repair cannot see (L3 r1 10-03, run). Re-init on the next
+            # call, so the refusal and the repair go through the manifest.
+            self._initialized = False
+            raise _ManifestUnavailable(
+                f"the active audit file {active.name} this process was appending to "
+                "is gone (deleted or emptied); not continuing the chain past it. If "
+                "it can be restored, put it back and retry; otherwise run "
+                "`anneal-memory audit-repair` to record the week as a gap"
+            )
+        had_entry = self._active_has_entry
         # ⛔ THE APPEND MUST START AT A LINE BOUNDARY, AND UNTIL 2026-09-07
         # NOTHING MADE IT. Every write here is ``json_line + "\n"``, so a
         # file NOT ending in a newline is ALWAYS an incomplete write — there
@@ -833,6 +853,7 @@ class AuditTrail:
             # Update chain state
             self._prev_hash = new_prev_hash
             self._seq += 1
+            self._active_has_entry = True
             # Cleared only now — after fsync — so a failure while writing THIS
             # entry keeps the pending count for the next attempt rather than
             # losing the very fact it exists to preserve.
@@ -1134,11 +1155,12 @@ class AuditTrail:
         # ⛔ THE ACTIVE FILE'S FIRST ENTRY IS RECORDED IN THE MANIFEST, so a
         # restart can tell a deleted active file from an empty one (see
         # ``_refuse_vanished_active``). Once per active file: only the append
-        # that found the file absent or empty. The append itself holds no lock,
+        # into a file that held no valid entry (absent, empty, or only a torn
+        # fragment: L3 r1 10-03, codex + glm, run). The append itself holds no lock,
         # so the save takes the span here. A failure is logged and never fails
         # this write (the entry is already on disk); that week is then not
         # protected, as in degrade mode, where the span cannot save at all.
-        if resume_at == 0:
+        if not had_entry:
             self._record_active_begun(new_prev_hash, saved_chain_state[0])
 
         # Fire callback after successful write
@@ -1911,9 +1933,13 @@ class AuditTrail:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         new: list[dict[str, str]] = []
         not_corrupt: list[str] = []
+        adoptable_starts: set[str | None] = set()
         for week, paths in sorted(by_week.items()):
             scans = {path: trail._scan_sealed(path) for path in paths}
             if any(scan.error is None for scan in scans.values()):
+                adoptable_starts.update(
+                    scan.first_prev_hash for scan in scans.values() if scan.error is None
+                )
                 continue  # a readable copy is adoption's to take, not repair's
             if not set_aside_unreadable and not all(
                 isinstance(scan.error, _CorruptAuditFile) for scan in scans.values()
@@ -1965,12 +1991,17 @@ class AuditTrail:
                 )
         vanished: dict[str, str] | None = None
         begun = vanished_active_week(manifest)
-        if begun is not None and new:
-            # A sealed week newer than the manifest with no usable active file is
-            # what a rotation that crashed before its manifest save leaves: the
-            # active file the record describes, renamed. Setting it aside records
-            # the gap; a second record would count it twice. (A deletion on top
-            # of such a crash then reads as one gap, not two.)
+        if begun is not None and begun["first_prev_hash"] in adoptable_starts:
+            # A readable sealed week starting where the recorded active file
+            # started is that file, renamed by a rotation that crashed before its
+            # manifest save; the next open adopts it, entries and all. Recording a
+            # gap would be false and permanent (L3 r1 10-03, complement, run).
+            begun = None
+        if begun is not None and any(r["period"] == begun["period"] for r in new):
+            # The same, unreadable: setting it aside records the gap, and a second
+            # record would count it twice. Only the week the record names: an
+            # unrelated corrupt week must not clear it (L3 r1 10-03, codex + glm,
+            # run). A deletion on top of such a crash reads as one gap, not two.
             manifest["active_begun"] = None
         elif begun is not None:
             try:
@@ -2285,6 +2316,7 @@ class AuditTrail:
         if last_line:
             last_entry = json.loads(last_line)  # Guaranteed valid by helper
             self._seq = last_entry.get("seq", 0) + 1
+            self._active_has_entry = True
             # Hash the line from disk, not a re-serialization
             self._prev_hash = self._compute_hash(last_line)
             # Recover week from last entry timestamp
@@ -2400,6 +2432,7 @@ class AuditTrail:
         # is stale, and genesis is the only defensible starting anchor.
         self._prev_hash = GENESIS_HASH
         self._seq = 0
+        self._active_has_entry = False
         try:
             manifest = self._load_manifest()  # absent -> fresh (genesis)
         except _ManifestQuarantined:
@@ -2422,15 +2455,33 @@ class AuditTrail:
             if self._lock_failures.get(threading.get_ident()) is not None:
                 return
             manifest = self._load_manifest()
-            if manifest.get("active_begun"):
-                return
             first = _first_valid_line(active)
             if first is None:
                 return
-            prev = json.loads(first).get("prev_hash", "")
+            first_hash = self._compute_hash(first)
+            recorded = manifest.get("active_begun")
+            if recorded and recorded["first_hash"] == first_hash:
+                return
+            if recorded and vanished_active_week(manifest) is not None:
+                # A record of a different active file whose week is not sealed:
+                # that file is gone and this one replaced it. Overwriting would
+                # erase the only record of the loss, so it stays, unresolved.
+                _log(logging.WARNING,
+                    "the audit manifest records an earlier active file (week %s) that "
+                    "is gone; its entries are not in the chain", recorded["period"],
+                )
+                return
+            # No record, or a stale one a release that does not clear it left
+            # behind when it sealed that week (L3 r1 10-03, codex).
+            entry = json.loads(first)
+            prev = entry.get("prev_hash", "")
             manifest["active_begun"] = {
+                # ``_last_week``, not the first entry's week: it is the week the
+                # seal names the file by (L3 r1 10-03: complement and glm asked
+                # for the first entry's; a seal's period is the match that
+                # matters, and repair's period match needs the same label).
                 "period": self._last_week,
-                "first_hash": self._compute_hash(first),
+                "first_hash": first_hash,
                 "first_prev_hash": prev if isinstance(prev, str) else "",
             }
             self._save_manifest(manifest)
@@ -3064,6 +3115,7 @@ class AuditTrail:
         # recovery restores the correct starting seq (0), not the
         # pre-rotation value.
         self._seq = 0
+        self._active_has_entry = False
         manifest["active_last_seq"] = self._seq
         self._save_manifest(manifest)
 

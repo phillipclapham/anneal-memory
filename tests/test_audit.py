@@ -6595,6 +6595,13 @@ class TestFixDiffRound9LoudNotSilent:
         for i in range(segment):
             trail.log("seg", {"i": i, "pad": "x" * 200})
         trail._last_week = "1999-W02"
+        # Keep the manifest's record of this active file in the week this
+        # fixture forces, as real code would have it (``_last_week`` changes
+        # only by rotating, so the record and the seal name one week).
+        mpath = tmp_path / "m.audit.manifest.json"
+        manifest = json.loads(mpath.read_text())
+        manifest["active_begun"]["period"] = "1999-W02"
+        mpath.write_text(json.dumps(manifest))
 
         real_gzipfile = gzip.GzipFile
 
@@ -7082,6 +7089,11 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         for i in range(5):
             trail.log("seg", {"i": i})
         trail._last_week = "1999-W02"
+        # the record of this active file names the forced week, as a real seal would
+        mpath = tmp_path / "m.audit.manifest.json"
+        manifest = json.loads(mpath.read_text())
+        manifest["active_begun"]["period"] = "1999-W02"
+        mpath.write_text(json.dumps(manifest))
         real_gzip = audit_module.gzip.GzipFile
 
         def full_disk(*a, **k):
@@ -9193,3 +9205,67 @@ class TestADeletedActiveFileIsNotASilentLoss:
         trail._active_path.unlink()  # w2's entry is lost: refused
         with pytest.raises(audit_module._ManifestUnavailable):
             AuditTrail(db).log("w3", {})
+
+
+class TestWitnessL3Round1:
+    """Each reproduced on 09429dc by 1003+12 before the fix (L3 r1 10-03)."""
+
+    def test_a_deletion_under_a_live_trail_is_refused_and_the_record_kept(self, tmp_path):
+        # codex + complement: the live append chained from the lost tip and
+        # overwrote the record; verify broke and audit-repair saw nothing.
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("ev", {"i": i})
+        mpath = tmp_path / "m.audit.manifest.json"
+        recorded = json.loads(mpath.read_text())["active_begun"]
+        trail._active_path.unlink()
+        with pytest.raises(audit_module._ManifestUnavailable, match="is gone"):
+            trail.log("after", {})
+        assert json.loads(mpath.read_text())["active_begun"] == recorded
+        with pytest.raises(audit_module._ManifestUnavailable):
+            trail.log("again", {})  # re-initialised: refused through the manifest
+        assert AuditTrail.repair_manifest(db).repaired
+        trail.log("after_repair", {})
+        assert AuditTrail.verify(db).valid
+
+    def test_an_append_past_a_torn_fragment_records_the_file(self, tmp_path):
+        # codex + glm: resume_at > 0, so the record was never saved
+        db = tmp_path / "m.db"
+        AuditTrail(db).log("ev", {})
+        active = tmp_path / "m.audit.jsonl"
+        active.write_text('{"v":1,"seq":0,"ts":"2026-')
+        mpath = tmp_path / "m.audit.manifest.json"
+        manifest = json.loads(mpath.read_text())
+        manifest["active_begun"] = None  # as a real torn first append leaves it
+        mpath.write_text(json.dumps(manifest))
+        AuditTrail(db).log("after", {})
+        assert json.loads(mpath.read_text())["active_begun"]
+        active.unlink()
+        with pytest.raises(audit_module._ManifestUnavailable):
+            AuditTrail(db).log("x", {})
+
+    def test_an_unrelated_corrupt_week_does_not_clear_the_record(self, tmp_path):
+        # codex + glm: setting aside any corrupt week cleared it
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("ev", {"i": i})
+        trail._active_path.unlink()
+        (tmp_path / "m.audit.1999-W05.jsonl.gz").write_bytes(gzip.compress(b'{"x":1}\n')[:10])
+        repair = AuditTrail.repair_manifest(db)
+        assert repair.repaired
+        assert sorted(r["set_aside_as"] == "" for r in repair.set_aside) == [False, True]
+
+    def test_a_readable_crashed_rotation_orphan_is_left_for_adoption(self, tmp_path):
+        # complement: repair recorded a false, permanent gap for entries on disk
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("ev", {"i": i})
+        trail._active_path.rename(tmp_path / "m.audit.2026-W39.jsonl")
+        repair = AuditTrail.repair_manifest(db)
+        assert not repair.repaired and "nothing to repair" in (repair.error or "")
+        AuditTrail(db).log("after", {})
+        result = AuditTrail.verify(db)
+        assert result.valid and result.total_entries == 4 and result.set_aside == []

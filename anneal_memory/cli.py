@@ -133,6 +133,7 @@ from .crystal import (
 )
 from .retrieval import retrieve_patterns, retrieve_relevant, MAX_PATTERNS
 from .store import (
+    register_writer_schema,
     Store,
     StoreDatabaseError,
     _is_write_lock_contention,
@@ -3318,6 +3319,7 @@ def _outcome_store_id(db_path: Path, *, mint: bool) -> str | None:
         return sid
     try:
         conn = sqlite3.connect(str(db_path), timeout=30.0, isolation_level=None)
+        register_writer_schema(conn)
     except (OSError, sqlite3.Error) as exc:
         refuse(exc)
     try:

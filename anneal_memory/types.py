@@ -369,6 +369,23 @@ class ScoredEpisode:
     score: float
 
 
+@dataclass(frozen=True)
+class RelevantFact:
+    """A durable fact (a line of the continuity's ``## Durable Facts`` section) that
+    the query cued.
+
+    ``fact`` is the fact text without its cue list, ``line`` the raw ``- `` line as
+    written (cues included), ``matched`` the tokens that brought it up (the cue words
+    and/or fact-text words found in the query, as the fact spells them), and
+    ``source`` is ``"cue"`` when at least one cue word matched, ``"fact"`` when only
+    a distinctive word of the fact text did."""
+
+    fact: str
+    line: str
+    matched: tuple[str, ...]
+    source: str = "cue"
+
+
 @dataclass
 class RelevantResult:
     """The unified result of :func:`anneal_memory.retrieval.retrieve_relevant`.
@@ -383,6 +400,9 @@ class RelevantResult:
     patterns: list[RelevantPattern]
     episodes: list[ScoredEpisode]
     query_keywords: list[str] = field(default_factory=list)
+    # Durable facts the query cued (at most MAX_DURABLE_FACTS). Additive: empty unless
+    # the store's continuity has a durable section and a fact matched.
+    facts: list[RelevantFact] = field(default_factory=list)
 
 
 # -- TypedDict return shapes for the canonical pipeline --

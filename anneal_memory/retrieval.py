@@ -76,7 +76,15 @@ from typing import Any, Literal
 
 from .crystal import CrystalDict, CrystalStore, activation_tier
 from .store import Store
-from .types import Episode, EpisodeType, RelevantPattern, RelevantResult, ScoredEpisode
+from .durable import DurableFact, parse_durable_facts
+from .types import (
+    Episode,
+    EpisodeType,
+    RelevantFact,
+    RelevantPattern,
+    RelevantResult,
+    ScoredEpisode,
+)
 
 RetrievalMode = Literal["prompt", "query"]
 
@@ -103,6 +111,18 @@ CANDIDATE_LIMIT_PER_KEYWORD = 400  # per-keyword recall fetch cap before scoring
 RETRIEVAL_MODES = ("prompt", "query")
 QUERY_MIN_KEYWORDS = 1
 QUERY_MIN_HITS = 1
+
+# --- Durable facts (the continuity's ``## Durable Facts`` section) ---
+# The cue tier is deliberately NOT behind the gates above (the bar, the anchor, the hit
+# floor, the keyword floor): a durable fact is one the composer wrote cue words for, and
+# a one-word prompt ("restaurant?") must be able to bring it up. The precision guard is
+# structural instead: a cue matches by WHOLE-TOKEN equality (never a substring), after
+# light stemming; a token under three characters or a stopword never matches; and at
+# most MAX_DURABLE_FACTS surface per call, ranked by distinct matched tokens, then by
+# section order.
+MAX_DURABLE_FACTS = 2
+_FACT_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_FACT_MIN_TOKEN_LEN = 3
 
 # --- Associative pattern retrieval (the evidence edge; AM-CRYSTAL-RECALL backend) ---
 # The fix for keyword-ORTHOGONAL pattern relevance: a pattern whose distilled text
@@ -605,6 +625,97 @@ def _associative_patterns(
     return scored[:max_patterns]
 
 
+def _fact_tokens(text: str) -> list[str]:
+    """Lowercase word tokens of ``text`` that may take part in a durable-fact match:
+    at least three characters and not a stopword. Order-preserving, deduplicated."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for tok in _FACT_TOKEN_RE.findall(text.lower()):
+        if len(tok) < _FACT_MIN_TOKEN_LEN or tok in _STOPWORDS or tok in seen:
+            continue
+        seen.add(tok)
+        out.append(tok)
+    return out
+
+
+def _token_forms(tok: str) -> frozenset[str]:
+    """The token and its light stems: one trailing ``ing``, ``es`` or ``s`` removed,
+    each only while at least three characters remain. Two tokens match when their
+    form sets intersect, so ``restaurants``/``restaurant`` and ``recipes``/``recipe``
+    agree and ``restaurateur`` agrees with neither."""
+    forms = {tok}
+    for suffix in ("ing", "es", "s"):
+        if tok.endswith(suffix) and len(tok) - len(suffix) >= _FACT_MIN_TOKEN_LEN:
+            forms.add(tok[: -len(suffix)])
+    return frozenset(forms)
+
+
+def load_durable_facts(store: Store) -> list[DurableFact]:
+    """The durable facts of ``store``'s current continuity, parsed with the store's
+    section schema. Never raises: no continuity file, no durable section, an unreadable
+    file or schema all give ``[]`` (a missing memory tier must not break recall)."""
+    try:
+        return parse_durable_facts(store.load_continuity(), store.section_schema)
+    except Exception:  # noqa: BLE001 - a recall tier fails soft by contract
+        return []
+
+
+def match_durable_facts(
+    facts: list[DurableFact],
+    query: str,
+    *,
+    mode: RetrievalMode = "prompt",
+    max_facts: int = MAX_DURABLE_FACTS,
+) -> list[RelevantFact]:
+    """The facts ``query`` cues, best first, at most ``max_facts``.
+
+    A fact surfaces when a query token matches one of its cue tokens (cue phrases are
+    split into word tokens), or when a distinctive keyword of the fact text
+    (:func:`extract_keywords` in ``mode``) matches a query token. Matching is whole-token
+    equality after light stemming (:func:`_token_forms`), never a substring; a token under
+    three characters or a stopword never matches. The retrieval gates (score bar, anchor,
+    hit floor, keyword floor) do not apply to this tier, on purpose: the guard is the
+    token rule above plus the cap. Ranking is by distinct matched tokens, then section
+    order. ``source`` is ``"cue"`` when any cue matched, else ``"fact"``."""
+    _check_mode(mode)
+    if max_facts <= 0 or not facts:
+        return []
+    query_forms = [(tok, _token_forms(tok)) for tok in _fact_tokens(query)]
+    if not query_forms:
+        return []
+
+    def hits(words: list[str]) -> list[str]:
+        out: list[str] = []
+        for word in words:
+            forms = _token_forms(word)
+            if any(forms & qf for _tok, qf in query_forms) and word not in out:
+                out.append(word)
+        return out
+
+    ranked: list[tuple[int, int, RelevantFact]] = []
+    for position, fact in enumerate(facts):
+        cue_words = [w for cue in fact.cues for w in _fact_tokens(cue)]
+        cue_hits = hits(list(dict.fromkeys(cue_words)))
+        fact_words = [
+            w for kw in extract_keywords(fact.fact, mode=mode) for w in _fact_tokens(kw)
+        ]
+        fact_hits = [w for w in hits(list(dict.fromkeys(fact_words))) if w not in cue_hits]
+        if not cue_hits and not fact_hits:
+            continue
+        ranked.append((
+            len(cue_hits) + len(fact_hits),
+            position,
+            RelevantFact(
+                fact=fact.fact,
+                line=fact.line,
+                matched=tuple(cue_hits + fact_hits),
+                source="cue" if cue_hits else "fact",
+            ),
+        ))
+    ranked.sort(key=lambda r: (-r[0], r[1]))
+    return [r[2] for r in ranked[:max_facts]]
+
+
 def retrieve_relevant(
     store: Store,
     crystal_store: CrystalStore | None,
@@ -617,6 +728,7 @@ def retrieve_relevant(
     today: date | None = None,
     associative: bool = True,
     mode: RetrievalMode = "prompt",
+    durable: bool = True,
 ) -> RelevantResult:
     """Surface the memory relevant to ``query`` — crystallized patterns AND episodes
     — scored, ranked, and capped. THE on-demand recall contract a harness hook calls.
@@ -653,6 +765,15 @@ def retrieve_relevant(
             or digit/``_``/``-`` tokens as keywords (:func:`extract_keywords`). The IDF
             weights, the ranking and the caps are the same in both modes. Anything
             else raises ``ValueError``.
+        durable: when ``True`` (default), the result's ``facts`` holds the durable facts
+            (the store's current continuity, ``## Durable Facts`` section) the query
+            cues, at most :data:`MAX_DURABLE_FACTS`. This tier is NOT behind the gates
+            above (it runs even for a one-word query, before the keyword floor) and is
+            additive: ``patterns`` and ``episodes`` are the same with it on or off. Its
+            guard is whole-token matching after light stemming, no stopwords or tokens
+            under three characters, and the cap (:func:`match_durable_facts`). Never
+            raises: a store with no continuity or no durable section gives ``[]``.
+            ``False`` leaves ``facts`` empty.
 
     Returns:
         :class:`RelevantResult` with ``patterns`` + ``episodes`` (each scored/ranked)
@@ -666,9 +787,14 @@ def retrieve_relevant(
     """
     _check_mode(mode)
     today = today or date.today()
+    facts = (
+        match_durable_facts(load_durable_facts(store), query, mode=mode) if durable else []
+    )
     keywords = extract_keywords(query, mode=mode)
     if len(keywords) < _min_keywords(mode):
-        return RelevantResult(patterns=[], episodes=[], query_keywords=keywords)
+        return RelevantResult(
+            patterns=[], episodes=[], query_keywords=keywords, facts=facts
+        )
 
     # The keyword-matched episode candidates are computed ONCE and serve two roles:
     # the displayed episode tier (capped) AND the SEED set for associative pattern
@@ -727,7 +853,9 @@ def retrieve_relevant(
                 score_threshold=_precision_bar(used_idf),
             )
 
-    return RelevantResult(patterns=patterns, episodes=episodes, query_keywords=keywords)
+    return RelevantResult(
+        patterns=patterns, episodes=episodes, query_keywords=keywords, facts=facts
+    )
 
 
 def retrieve_patterns(

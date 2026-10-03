@@ -44,6 +44,8 @@ from .retrieval import (
     MIN_KEYWORDS,
     QUERY_MIN_KEYWORDS,
     RETRIEVAL_MODES,
+    load_durable_facts,
+    match_durable_facts,
     EpisodeMatch,
     RetrievalMode,
     extract_keywords,
@@ -60,7 +62,7 @@ from .store import (
     WrapOwnershipError,
     _WRAP_TOKEN_RE,
 )
-from .types import AffectiveState, EpisodeType, RelevantPattern
+from .types import AffectiveState, EpisodeType, RelevantFact, RelevantPattern
 
 logger = logging.getLogger("anneal-memory")
 
@@ -164,6 +166,18 @@ def _as_int(value: object) -> int | None:
     if isinstance(value, float) and value.is_integer():
         return int(value)
     return None
+
+
+def _durable_block(facts: list[RelevantFact]) -> str:
+    """The reply block for durable facts a query cued, or ``""`` for none: each fact's
+    line as written, then the word that cued it."""
+    if not facts:
+        return ""
+    lines = ["Durable facts matching your words:"]
+    for f in facts:
+        label = "cue" if f.source == "cue" else "fact"
+        lines.append(f"{f.line.strip()} ({label}: {', '.join(f.matched)})")
+    return "\n".join(lines)
 
 
 def _word_match_line(match: EpisodeMatch, word_count: int) -> str:
@@ -402,6 +416,31 @@ class Server:
         return _tool_result(msg)
 
     def _tool_recall(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Episode recall with the durable-fact tier on top: when a ``keyword`` is given
+        on the first page, the durable facts its words cue are listed first (see
+        :func:`_durable_block`), and a call that matched no episode but cued a fact
+        returns the facts instead of "No matching episodes found."."""
+        result = self._recall_episodes(args)
+        keyword = args.get("keyword")
+        if (
+            result.get("isError")
+            or not isinstance(keyword, str)
+            or _as_int(args.get("offset", 0)) != 0
+        ):
+            return result
+        block = _durable_block(self._cued_facts(keyword, "query"))
+        if not block:
+            return result
+        text = result["content"][0]["text"]
+        if text == "No matching episodes found.":
+            return _tool_result(block)
+        return _tool_result(block + "\n\n" + text)
+
+    def _cued_facts(self, query: str, mode: RetrievalMode) -> list[RelevantFact]:
+        """The durable facts of this server's store that ``query`` cues."""
+        return match_durable_facts(load_durable_facts(self._store), query, mode=mode)
+
+    def _recall_episodes(self, args: dict[str, Any]) -> dict[str, Any]:
         episode_type = args.get("episode_type")
         if episode_type is not None and (
             not isinstance(episode_type, str)
@@ -1211,6 +1250,13 @@ class Server:
             # parity (cli.cmd_crystal_recall) and is belt-and-suspenders at the boundary.
             return _tool_result(f"Error: {exc}", is_error=True)
 
+        # The durable facts the query cues come first, ahead of the patterns (a no-op
+        # call, max_patterns <= 0, asks for nothing, so it gets nothing here either).
+        facts_block = (
+            _durable_block(self._cued_facts(query, mode)) if max_patterns > 0 else ""
+        )
+        if not patterns and facts_block:
+            return _tool_result(facts_block)
         if not patterns:
             # Disambiguate the retry signal for an LLM consumer: a thin query (the
             # library floors recall at MIN_KEYWORDS distinctive keywords) is fixable by
@@ -1232,6 +1278,8 @@ class Server:
                 f"- {p.name} ({p.level}x, {p.activation}, score={p.score:.1f})"
                 f"{tag_info}: {p.explanation}"
             )
+        if facts_block:
+            lines = [facts_block, "", *lines]
         return _tool_result("\n".join(lines))
 
     def _crystal_recall_associative(

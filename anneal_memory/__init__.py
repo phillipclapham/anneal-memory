@@ -26,6 +26,7 @@ from .types import (
     FeltCurrency,
     PrepareWrapResult,
     RecallResult,
+    RelevantFact,
     RelevantPattern,
     RelevantResult,
     SaveContinuityResult,
@@ -251,5 +252,6 @@ __all__ = [
     "extract_keywords",
     "RelevantResult",
     "RelevantPattern",
+    "RelevantFact",
     "ScoredEpisode",
 ]

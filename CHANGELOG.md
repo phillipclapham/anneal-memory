@@ -86,6 +86,35 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   (`anneal-memory --db <path> set-schema partnership`, or `store.set_section_schema(...)`), and a
   suggested edit that points composers at the section and leaves the detail to `prepare_wrap`.
 
+### Added — durable facts come back on the recall paths (cue wiring)
+
+- `retrieve_relevant(..., durable=True)` returns `RelevantResult.facts`, a list of the new frozen
+  `RelevantFact(fact, line, matched, source)`: the durable facts (the `## Durable Facts` section
+  of the store's current continuity, parsed with the store's schema) that the query cues. `facts`
+  defaults to empty, so existing constructors and consumers are unaffected, and `patterns` and
+  `episodes` are identical with the tier on or off. A store with no continuity, no durable
+  section, or an unreadable continuity gives an empty `facts`; the tier never raises.
+- The rule, and why it is not behind the retrieval gates. The tier runs before the keyword floor
+  and does not use the score bar, the distinctive anchor or the hit floor, on purpose: the
+  composer wrote cue words for a fact, and a one-word prompt such as "restaurant?" must be able to
+  bring it up. The guard is structural. A fact surfaces when a query token equals one of its cue
+  tokens (a cue phrase is split into word tokens), or when a distinctive word of the fact text
+  (`extract_keywords` in the call's mode) equals a query token. Equality is on whole tokens, never
+  a substring, lowercase, after light stemming on both sides (one trailing `s`, `es` or `ing`
+  removed while three or more characters remain, so `restaurants` and `recipes` match their cue
+  and `restaurateur` does not). A token under three characters or a stopword never matches. At
+  most `MAX_DURABLE_FACTS` (2) surface per call, ranked by distinct matched tokens, then section
+  order. `source` is `"cue"` when a cue matched and `"fact"` when only the fact text did.
+- MCP `recall` with a `keyword` (first page) lists the facts its words cue first, under "Durable
+  facts matching your words:", each as its line plus "(cue: word)"; a call that matched no episode
+  but cued a fact returns the facts instead of "No matching episodes found." MCP `crystal_recall`
+  does the same ahead of its patterns. Both tool descriptions say so (manifests regenerated).
+- A harness that renders `RelevantResult` must read `result.facts` to show them; `patterns` and
+  `episodes` are unchanged.
+- Measured on the InMind bench with cues written for each planted fact (no API calls, 125 tasks):
+  the planted fact came back for 72 of 125 task-text queries and 17 of 125 indirect queries, in
+  both modes (34 of those calls matched on the fact text alone).
+
 ## [0.9.26] — 2026-10-03
 
 ### Removed — the Hebbian hop in pattern recall (BREAKING for code that imports the hop constants)

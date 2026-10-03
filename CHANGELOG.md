@@ -92,6 +92,12 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   (`anneal-memory --db <path> set-schema partnership`, or `store.set_section_schema(...)`), and a
   suggested edit that points composers at the section and leaves the detail to `prepare_wrap`.
 
+### Added — MCP save_continuity reports durable-fact warnings
+
+- MCP `save_continuity` appends the save's `durable_warnings` (a re-inserted durable line, a drop
+  marker that named nothing) to its result text under "Durable facts:", because a post-commit
+  warning never reaches an MCP client any other way. A result with no warnings adds nothing.
+
 ### Added — durable facts come back on the recall paths (cue wiring)
 
 - `retrieve_relevant(..., durable=True)` returns `RelevantResult.facts`, a list of the new frozen

@@ -17,7 +17,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from . import __version__
 from .continuity import (
@@ -807,6 +807,18 @@ class Server:
                 "allow_unlinked is deprecated and did nothing: the AM-LINKGATE save "
                 "refusal it overrode was removed in 0.9.26."
             )
+
+        # Durable-fact save warnings (a re-inserted line, a drop marker that named
+        # nothing) are post-commit and never reach an MCP client as a UserWarning, so
+        # they travel in the result text too. Read leniently: a result without the key
+        # has none.
+        raw_warnings: Any = cast("dict[str, Any]", result).get("durable_warnings") or []
+        durable_warnings = [w for w in raw_warnings if isinstance(w, str) and w]
+        if durable_warnings:
+            lines.append("\nDurable facts:")
+            prefix = "Durable facts: "
+            for w in durable_warnings:
+                lines.append(f"  - {w[len(prefix):] if w.startswith(prefix) else w}")
 
         lines.append("\nSection sizes:")
         for name, chars in sorted(result["sections"].items()):

@@ -359,3 +359,18 @@ def test_fold_on_a_store_with_no_crystal_file_does_not_create_it(tmp_path):
     with pytest.raises(FileNotFoundError):  # a wrong receipt path still refuses
         fold_surfaced(CrystalStore(path), [tmp_path / "nope.jsonl"])
     assert not path.exists()
+
+
+def test_a_record_after_a_torn_line_starts_its_own_line(tmp_path):
+    """A crash can leave the last line without its newline; the next append used
+    to be glued onto it, so a good record was lost with the torn one."""
+    log = OutcomeLog(tmp_path / "mem.outcomes.jsonl")
+    log.record("a", [ExposureLabel("crystal", "p", "followed")])
+    log.path.write_bytes(log.path.read_bytes()[:-1])  # the newline never made it
+    log.record("b", [ExposureLabel("crystal", "p", "ignored")])
+    assert log.latest()[0].keys() == {"a", "b"}
+    with open(log.path, "ab") as f:
+        f.write(b'{"v": 1, "exposure_id": "torn"')  # torn mid-record
+    log.record_if_missing("c", [ExposureLabel("crystal", "q", "followed")])
+    latest, bad = log.latest()
+    assert latest.keys() == {"a", "b", "c"} and bad == 1  # only the torn line lost

@@ -162,7 +162,7 @@ class OutcomeLog:
         """
         rec = _build_record(exposure_id, items, outcome, exposed, ts)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        fd = os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
         try:
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_EX)
@@ -303,9 +303,16 @@ def _build_record(
 
 
 def _append(fd: int, rec: dict[str, Any]) -> None:
-    """Write one record as one line to ``fd`` (opened ``O_APPEND``, already locked)
-    and fsync it."""
+    """Write one record as one line to ``fd`` (opened ``O_RDWR | O_APPEND``,
+    already locked) and fsync it. When the file does not end in a newline (a
+    torn last line from a crash) the record starts a new line, so only the torn
+    line is lost, not this record glued onto it."""
     line = (json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+    size = os.fstat(fd).st_size
+    if size:
+        os.lseek(fd, size - 1, os.SEEK_SET)  # O_APPEND still writes at the end
+        if os.read(fd, 1) != b"\n":
+            line = b"\n" + line
     view = memoryview(line)
     while view:
         written = os.write(fd, view)

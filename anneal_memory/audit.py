@@ -470,9 +470,6 @@ class AuditRepairResult:
     # Unreadable or corrupt sealed files this repair set aside and recorded in
     # the manifest (the same dicts as ``AuditVerifyResult.set_aside``).
     set_aside: list[dict[str, str]] = field(default_factory=list)
-    # Records this repair dropped because their set-aside file is gone (the
-    # week was renamed back, or a repair stopped before its rename).
-    pruned: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -1861,8 +1858,6 @@ class AuditTrail:
                 error=f"Cannot list the audit directory: {e}; nothing was written.",
             )
         manifested = {_week_of(f["filename"], prefix) for f in manifest["files"]}
-        existing = list(manifest.get("set_aside", []))
-        stale = [r for r in existing if r["set_aside_as"] not in names]
         by_week: dict[str, list[Path]] = {}
         for name in names:
             if _is_sealed_filename(name, stem) and _week_of(name, prefix) not in manifested:
@@ -1922,19 +1917,10 @@ class AuditTrail:
                         "it aside. verify reports it. Nothing was written."
                     ),
                 )
-        if not new and not stale:
+        if not new:
             return AuditRepairResult(
                 repaired=False, error="The manifest is valid; there is nothing to repair."
             )
-        if not new:
-            manifest["set_aside"] = [r for r in existing if r not in stale]
-            try:
-                trail._save_manifest(manifest)
-            except OSError as e:
-                return AuditRepairResult(
-                    repaired=False, error=f"Could not save the manifest: {e}; nothing was written."
-                )
-            return AuditRepairResult(repaired=True, pruned=stale)
         taken = [r["set_aside_as"] for r in new if os.path.lexists(audit_dir / r["set_aside_as"])]
         if taken:
             # os.rename replaces an existing file on POSIX; recovery never does.
@@ -1942,7 +1928,16 @@ class AuditTrail:
                 repaired=False,
                 error=f"A set-aside name is already taken ({taken}); nothing was written.",
             )
-        kept = [r for r in existing if r not in stale]
+        # ⛔ A RECORD IS THE ONLY EVIDENCE OF A GAP, SO REPAIR NEVER DROPS ONE
+        # BECAUSE ITS FILE IS MISSING (L3 r2 10-03, codex HIGH + complement: a
+        # moved or lost set-aside file then erased the gap from verify). Only
+        # the record of a file being moved again is replaced; adoption drops
+        # the record of a week it proves into the chain.
+        moving = {r["filename"] for r in new}
+        kept = [
+            r for r in manifest.get("set_aside", [])
+            if not (r["filename"] in moving and r["set_aside_as"] not in names)
+        ]
         manifest["set_aside"] = kept + new
         try:
             trail._save_manifest(manifest)
@@ -1970,7 +1965,7 @@ class AuditTrail:
                 f"{record['set_aside_as']} ({record['cause']})"
             )
         _fsync_dir(audit_dir)
-        return AuditRepairResult(repaired=True, set_aside=new, pruned=stale)
+        return AuditRepairResult(repaired=True, set_aside=new)
 
     # -- Internal --
 

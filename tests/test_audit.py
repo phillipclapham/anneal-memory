@@ -6950,9 +6950,6 @@ class TestFixDiffRound10RecoveryNeverDeletes:
     @pytest.mark.skipif(
         sys.platform == "win32", reason="chmod 000 does not make a file unreadable on Windows"
     )
-    @pytest.mark.skipif(
-        sys.platform == "win32", reason="chmod 000 does not make a file unreadable on Windows"
-    )
     def test_a_repair_by_another_instance_before_the_retry_does_not_fork_the_chain(
         self, tmp_path, monkeypatch
     ):
@@ -7000,8 +6997,8 @@ class TestFixDiffRound10RecoveryNeverDeletes:
     ):
         """L3 r1 10-03 on 54a40c9 (codex + glm): a set-aside week renamed back
         before the next write was adopted, but its record stayed and printed a
-        stale line forever; a record whose file is gone was never dropped,
-        because repair returned "nothing to repair" first."""
+        stale line forever. (Repair does NOT drop a record whose file is gone:
+        L3 r2 10-03, a record is the only evidence of a gap.)"""
         db, orphan = TestFixDiffRound9LoudNotSilent._failed_rotation(tmp_path, monkeypatch, segment=5)
         orphan.chmod(0)
         try:
@@ -7017,21 +7014,9 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         assert result.valid is True, result.error
         assert result.set_aside == []
 
-        db2, orphan2 = TestFixDiffRound9LoudNotSilent._failed_rotation(
-            tmp_path / "two", monkeypatch, segment=5
-        )
-        orphan2.chmod(0)
-        try:
-            [gone] = AuditTrail.repair_manifest(db2, set_aside_unreadable=True).set_aside
-        finally:
-            for p in (tmp_path / "two").iterdir():
-                if p.name.startswith(orphan2.name):
-                    p.chmod(0o600)
-        (tmp_path / "two" / gone["set_aside_as"]).unlink()  # the operator removed it
-        again = AuditTrail.repair_manifest(db2)
-        assert again.repaired is True and [r["filename"] for r in again.pruned] == [orphan2.name]
-        assert AuditTrail.verify(db2).set_aside == []
-
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="chmod 000 does not make a file unreadable on Windows"
+    )
     def test_the_same_process_cannot_write_past_an_unreadable_newer_week(
         self, tmp_path, monkeypatch
     ):

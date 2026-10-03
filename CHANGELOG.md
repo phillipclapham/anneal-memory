@@ -156,9 +156,9 @@ manifest's tip; the week can be renamed back only before the next write. Repair 
 when the active file holds no valid entry (the refusal's own case): with entries in it the chain may run
 through the week, and moving it would leave a gap mid-chain, so repair refuses and names it. A rotation
 that finds its active file missing re-seeds from the manifest rather than from the hash it had cached (that
-hash was the tip of a week that may since have been set aside by another instance's repair). Repair drops a
-record whose set-aside file is gone (reported as `pruned`), even when nothing else needs repair, and an
-adoption drops the record of a week it adopts. Known and not fixed: a `verify` that runs while a repair is
+hash was the tip of a week that may since have been set aside by another instance's repair). An adoption
+drops the record of a week it adopts; repair never drops a record because its set-aside file is missing,
+since the record is the only evidence of the gap. Known and not fixed: a `verify` that runs while a repair is
 between saving a record and renaming the file reports that file as unmanifested (invalid) for that
 moment; the next `verify` is valid. `verify()` reports the record
 as `AuditVerifyResult.set_aside`, and the CLI and `server.py --verify-audit` print a `GAP:` line for each

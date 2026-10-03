@@ -281,11 +281,21 @@ def _json_parent() -> argparse.ArgumentParser:
 
 # -- Store factory --
 
-def _existing_db_path(args: argparse.Namespace) -> Path:
+def _existing_db_path(args: argparse.Namespace, *, require_sqlite: bool = False) -> Path:
     """The --db path, or exit 1 when no database is there. A command that derives a
-    sibling file from --db (the outcome log) must refuse a wrong path rather than
-    write to, or report from, a file beside a database that does not exist."""
+    sibling file from --db (the outcome log) passes ``require_sqlite=True``: it never
+    opens the database, so a directory or a non-SQLite file at that path must be
+    refused here, or it would write to, or report from, an orphan sibling file."""
     db_path = Path(args.db).expanduser()
+    if require_sqlite and db_path.exists():
+        try:
+            with open(db_path, "rb") as fh:
+                is_sqlite = fh.read(16) == b"SQLite format 3\x00"
+        except OSError:
+            is_sqlite = False
+        if not is_sqlite:
+            print(f"Error: not an anneal-memory database: {db_path}", file=sys.stderr)
+            sys.exit(1)
     if not db_path.exists():
         print(f"Error: database not found: {db_path}", file=sys.stderr)
         print(
@@ -3147,10 +3157,11 @@ def _parse_exposed(raw: str) -> ExposedRef:
 def cmd_outcome(args: argparse.Namespace) -> None:
     """Write back what happened after an exposure (append-only; records for one
     exposure id merge when read)."""
+    log_path = outcome_log_path(_existing_db_path(args, require_sqlite=True))
     try:
         items = [_parse_label(raw) for raw in (args.item or [])]
         exposed = [_parse_exposed(raw) for raw in (args.exposed or [])]
-        rec = OutcomeLog(outcome_log_path(_existing_db_path(args))).record(
+        rec = OutcomeLog(log_path).record(
             args.exposure_id, items, outcome=args.outcome, exposed=exposed
         )
     except (ValueError, OSError) as exc:
@@ -3194,7 +3205,7 @@ def cmd_crystal_fold_surfaced(args: argparse.Namespace) -> None:
 
 def cmd_worth(args: argparse.Namespace) -> None:
     """Report-only Memory-Worth counters. Nothing reads this to rank or decay."""
-    db_path = _existing_db_path(args)
+    db_path = _existing_db_path(args, require_sqlite=True)
     try:
         report = compute_worth(OutcomeLog(outcome_log_path(db_path)), _open_crystal_store(args))
     except (CrystalError, OSError, ValueError) as exc:

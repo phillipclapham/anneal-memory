@@ -83,8 +83,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   own (it rides with labels or an outcome), and it is written only when non-empty, so
   the log stays version 1: anneal-memory 0.9.22 reads a record carrying it with no
   skipped line and the same counts [run 2026-10-02]. The `worth` CLI shows them as
-  `unl+s` / `unl+f`. `--exposed` refuses a ref ending in a label (`crystal:x=followed`
-  is `--item` syntax) while accepting a name that contains `=`. Prompted by flow, which labels an item only when it is cited
+  `unl+s` / `unl+f`. `--exposed` records any `KIND:REF`, including a name that contains `=`;
+  a ref ending in a label (`crystal:x=followed`, which may be `--item` syntax pasted
+  by mistake) is recorded as written with a warning on stderr. Prompted by flow, which labels an item only when it is cited
   verbatim, so most of its real outcomes carried no label and were invisible.
 
 ⚠ Behaviour change: `recall` now hides superseded episodes unless asked. Known and

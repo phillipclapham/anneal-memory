@@ -229,10 +229,18 @@ def test_unlabelled_exposures_count_in_their_own_column(tmp_path):
 
 
 
-def test_cli_exposed_takes_refs_with_equals_but_not_pasted_labels(tmp_path):
+def test_cli_exposed_records_any_ref_and_warns_on_a_label_suffix(capsys):
+    """L3 flipped this twice: refusing a ref ending in a label rejected a valid
+    crystal named foo=followed; accepting it silently recorded pasted --item
+    syntax. Phill 2026-10-02: record it, warn on stderr."""
     from anneal_memory.cli import _parse_exposed
 
     assert _parse_exposed("crystal:a=b") == ExposedRef("crystal", "a=b")
-    for raw in ("crystal:foo=followed", "episode:abcd1234=ignored"):
-        with pytest.raises(ValueError, match="use --item"):
-            _parse_exposed(raw)
+    assert capsys.readouterr().err == ""
+    for raw in ("crystal:foo=followed", "crystal:x=ignored", "crystal:y=not_applicable",
+                "crystal:z=Followed ", "crystal:=followed"):
+        kind, _, ref = raw.partition(":")
+        assert _parse_exposed(raw) == ExposedRef(kind, ref)
+        assert "with --item" in capsys.readouterr().err
+    with pytest.raises(ValueError):
+        _parse_exposed("no-colon")

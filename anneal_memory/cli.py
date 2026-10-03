@@ -3125,12 +3125,14 @@ def _parse_exposed(raw: str) -> ExposedRef:
     kind, sep, ref = raw.partition(":")
     if not sep:
         raise ValueError(f"--exposed must look like KIND:REF (got {raw!r}).")
-    # A ref may contain "=" (a crystal named a=b is valid), but one ending in a
-    # label is almost surely --item syntax pasted here (glm/complement L3).
-    head, eq, tail = ref.rpartition("=")
-    if eq and head and tail in FOLLOWED_VALUES:
-        raise ValueError(f"--exposed takes KIND:REF with no label (got {raw!r}); "
-                         f"use --item {raw} for a labelled item.")
+    # A ref may contain "=", and one that ends in a label is ambiguous: a crystal
+    # can be named foo=followed, or --item syntax was pasted here. Refusing it
+    # rejected valid names, accepting it silently recorded typos (L3, twice), so
+    # it is recorded as written and the ambiguity is said out loud.
+    _head, eq, tail = ref.rpartition("=")
+    if eq and tail.strip().lower() in FOLLOWED_VALUES:
+        print(f"Warning: --exposed {raw!r} is recorded as the ref {ref!r}; if that "
+              f"was a label, record it with --item {raw} instead.", file=sys.stderr)
     return ExposedRef(kind, ref)
 
 

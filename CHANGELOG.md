@@ -9,41 +9,47 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - `retrieve_relevant(..., mode="prompt" | "query")` and `retrieve_patterns(..., mode=...)`.
   `"prompt"` (the default) is today's behavior, unchanged: it is the path a per-turn recall hook
   takes, and it keeps every precision gate. `"query"` is for a question an agent or operator asked
-  on purpose: one distinctive keyword is enough, one keyword hit is enough, and neither the
-  weighted-overlap bar nor the distinctive-term anchor applies, for episodes, patterns and the
-  evidence edge. The IDF weights, ranking, the 80-character episode floor and the caps are the same
-  in both modes. Any other `mode` raises `ValueError`. It returns more matches and weaker ones by
-  design. The gates are parameters, not module constants rewritten at call time.
+  on purpose, and returns more matches and weaker ones by design. The query-mode contract:
+  one distinctive keyword is enough and one keyword hit is enough; the weighted-overlap bar and
+  the distinctive-term anchor do not apply to episodes or to a pattern's own text; the evidence
+  edge (a pattern reached through an episode the query matched) keeps the prompt-mode bar; there is
+  no 80-character episode floor (a one-line episode such as "User is allergic to tree nuts." can
+  match); a short token counts as a keyword when it is written ALL-CAPS or contains a digit, `_` or
+  `-` (`SQL`, `API`, `S3`, `k8s`, `v2`; plain lowercase short words and stopwords stay out, and
+  `extract_keywords` takes the same `mode`); every match of every keyword is fetched, with no
+  per-keyword cap; and each `search_episodes` match carries its `superseded_by`. The IDF weights,
+  the ranking and the display caps are the same in both modes. Any other `mode` raises
+  `ValueError`. The gates are parameters, not module constants rewritten at call time.
 - Measured on the InMind bench, with no API calls (125 tasks, target episode in the top 3 for the
   raw task text): 4 hits in prompt mode, 34 in query mode; in the top 10, 4 and 53.
 - `search_episodes(store, query, *, episode_type=None, source=None, since=None, until=None,
   limit=10, include_superseded=False)`: word-by-word episode search (query-mode scoring with the
   `Store.recall` filters applied in SQL). It returns `EpisodeMatch(episode, matched)` best first,
   where `matched` is the query keywords found in that episode.
-- Query mode differs from prompt mode in four more ways: it has no 80-character episode floor (a
-  one-line episode such as "User is allergic to tree nuts." can match), it keeps a short token when
-  it is written ALL-CAPS or contains a digit, `_` or `-` (`SQL`, `API`, `S3`, `k8s`, `v2`; plain
-  lowercase short words and stopwords stay out; `extract_keywords` takes the same `mode`), it
-  returns each match's `superseded_by`, and the evidence edge keeps the prompt-mode score bar, so
-  one common word cannot float every pattern citing an episode it brushed.
 - MCP `recall`: the exact-phrase match still runs first and answers as before. When it finds
   nothing, and the `keyword` is two or more words that reduce to at least one distinctive word, the
   tool ranks episodes by the words they contain (same filters) and says so in the reply, with how
   many of the query's words each episode matched. Without an explicit `limit` it lists the top 10
   and reports "Showing top 10 of N word matches"; an explicit `limit` is honoured. When an exact
   phrase hit fewer than three episodes and the keyword has three or more words, up to five word
-  matches the exact search did not show follow under "Also matching by words:". A one-word keyword,
+  matches the exact search did not show follow under "Also matching by words:" (never more than
+  the `limit` allows). A one-word keyword,
   an exact hit of three or more, a `limit` of 0 and an `offset` past the matches behave as before.
   An agent that sent `"bank export fmt_row64 CLI nightly rows"` used to get "No matching episodes
   found" although single words from it were in the store.
 - MCP `crystal_recall` takes an optional `mode` (`"prompt"` default, `"query"`).
 - Both `tool-integrity.json` manifests are regenerated (the `recall` and `crystal_recall` hashes).
+- Known open: the per-keyword candidate fetches and the document-frequency counts behind the IDF
+  weights are separate SQLite reads, not one snapshot, so a write landing between them can skew a
+  weight slightly (`retrieve_relevant` has done this since 0.9.3); one read transaction in
+  `Store` would fix it.
 
 ### Fixed
 
 - MCP `recall` with a `limit` or `offset` of `3.0` crashed the word-by-word path and was an opaque
   SQLite error for `2.5`. A whole-number float is now read as that integer, and a bool, a
   fractional number, a string or null returns "Error: limit must be an integer" (same for `offset`).
+  A negative `limit` or `offset` is read as 0, on the exact path and the word-by-word path alike.
 - MCP `recall` with an `episode_type` that is not an episode type returned "Error: 'message' is not
   a valid EpisodeType" and no list of the valid values, so the caller could not correct itself. It
   now returns an error result that names them: "episode_type 'message' is not one of: observation,

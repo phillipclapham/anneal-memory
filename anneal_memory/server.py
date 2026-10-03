@@ -153,6 +153,7 @@ _INTERNAL_ERROR = -32603
 _FALLBACK_DEFAULT_CAP = 10   # word matches listed when the caller passed no ``limit``
 _EXACT_RESULTS_ENOUGH = 3    # an exact result this small is topped up with word matches
 _ALSO_MATCHING_MAX = 5       # how many word matches are appended to such a result
+_RECALL_DEFAULT_LIMIT = 100  # MCP recall's ``limit`` when the caller passes none
 
 
 def _as_int(value: object) -> int | None:
@@ -462,14 +463,15 @@ class Server:
                     return _tool_result(
                         f"Error: {name} must be an integer", is_error=True
                     )
-                args[name] = value
+                # Negative reads as 0 on every path (the exact path always clamped it).
+                args[name] = max(0, value)
         result = self._store.recall(
             since=args.get("since"),
             until=args.get("until"),
             episode_type=args.get("episode_type"),
             source=args.get("source"),
             keyword=args.get("keyword"),
-            limit=max(0, args.get("limit", 100)),
+            limit=max(0, args.get("limit", _RECALL_DEFAULT_LIMIT)),
             offset=max(0, args.get("offset", 0)),
             include_superseded=args.get("include_superseded") is True,
         )
@@ -506,10 +508,13 @@ class Server:
             words = extract_keywords(keyword, mode="query")
             if len(words) >= 3:
                 shown = {ep.id for ep in result.episodes}
+                room = min(
+                    _ALSO_MATCHING_MAX, args.get("limit", _RECALL_DEFAULT_LIMIT) - len(shown)
+                )
                 extra = [
                     m for m in self._word_matches(args, keyword)
                     if m.episode.id not in shown
-                ][:_ALSO_MATCHING_MAX]
+                ][:max(0, room)]
                 if extra:
                     lines.append("")
                     lines.append("Also matching by words:")

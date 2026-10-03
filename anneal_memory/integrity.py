@@ -137,7 +137,11 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum episodes to return. Default 100.",
+                    "description": (
+                        "Maximum episodes to return. Default 100. When a multi-word "
+                        "keyword has no exact match and is ranked word by word, the "
+                        "default is 10 instead; pass a limit to see more."
+                    ),
                     "default": 100,
                 },
                 "offset": {

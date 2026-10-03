@@ -282,15 +282,14 @@ def _json_parent() -> argparse.ArgumentParser:
 
 # -- Store factory --
 
-def _existing_db_path(args: argparse.Namespace, *, require_anneal: bool = False) -> Path:
-    """The --db path, or exit 1 when no database is there. A command that derives a
-    sibling file from --db (the outcome log) and never otherwise opens the store
-    passes ``require_anneal=True``: the path must then open as an anneal store the
-    way every reading command opens one (``Store(read_only=True)``, then a status
-    read), so a directory, another program's database, an impostor, or a store
-    written by a newer anneal is refused with the library's own reason instead of
-    getting an orphan sibling file. Whatever that reader cannot open, this refuses;
-    nothing here judges a database the library itself would not."""
+def _existing_db_path(args: argparse.Namespace, *, require_file: bool = False) -> Path:
+    """The --db path, or exit 1 when no database is there, as every store command
+    refuses it. ``outcome`` and ``worth`` never open the store, only a file derived
+    from this path, so they pass ``require_file=True`` and a directory is refused
+    too. Whether an existing file is THIS store is not decided here: a check that
+    guesses at it from the file's contents refused real stores and accepted
+    impostors (four review rounds, 10-03); binding the outcome log to a persisted
+    store identity is the design that answers it."""
     db_path = Path(args.db).expanduser()
     if not db_path.exists():
         print(f"Error: database not found: {db_path}", file=sys.stderr)
@@ -300,19 +299,9 @@ def _existing_db_path(args: argparse.Namespace, *, require_anneal: bool = False)
             file=sys.stderr,
         )
         sys.exit(1)
-    if require_anneal:
-        try:
-            if not db_path.is_file():
-                raise OSError(f"{db_path} is not a file")
-            probe = Store(path=db_path, read_only=True, audit=False)
-            try:
-                probe.status()
-            finally:
-                probe.close()
-        except (StoreError, sqlite3.Error, OSError) as exc:
-            print(f"Error: cannot open {db_path} as an anneal-memory database: {exc}",
-                  file=sys.stderr)
-            sys.exit(1)
+    if require_file and not db_path.is_file():
+        print(f"Error: not a database file: {db_path}", file=sys.stderr)
+        sys.exit(1)
     return db_path
 
 
@@ -3228,7 +3217,7 @@ def _parse_exposed(raw: str) -> ExposedRef:
 def cmd_outcome(args: argparse.Namespace) -> None:
     """Write back what happened after an exposure (append-only; records for one
     exposure id merge when read)."""
-    log_path = outcome_log_path(_existing_db_path(args, require_anneal=True))
+    log_path = outcome_log_path(_existing_db_path(args, require_file=True))
     try:
         items = [_parse_label(raw) for raw in (args.item or [])]
         exposed = [_parse_exposed(raw) for raw in (args.exposed or [])]
@@ -3281,7 +3270,7 @@ def cmd_crystal_fold_surfaced(args: argparse.Namespace) -> None:
 
 def cmd_worth(args: argparse.Namespace) -> None:
     """Report-only Memory-Worth counters. Nothing reads this to rank or decay."""
-    db_path = _existing_db_path(args, require_anneal=True)
+    db_path = _existing_db_path(args, require_file=True)
     receipts = None
     receipt_bad = 0
     receipt_missing: list[str] = []

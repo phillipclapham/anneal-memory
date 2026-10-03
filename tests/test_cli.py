@@ -4324,16 +4324,12 @@ class TestHybridSnapshotAuditCli:
         assert json.loads(result.stdout)["anchor_trusted"] is False
 
 
-def test_outcome_and_worth_refuse_a_db_that_is_not_an_anneal_store(tmp_path):
-    """Diogenes 2026-10-03 MED and the L3 rounds after it, each reproduced by a real
-    CLI run first: `outcome`/`worth` exited 0 on a missing --db (writing an orphan
-    log and its directories), then on a directory, another program's database and
-    impostors with anneal-like table names. The check is now the library's own
-    reader (Store(read_only=True) + status), so it refuses whatever no anneal
-    reader can open, with that reader's reason, and accepts a real store."""
-    import sqlite3
-
-    from anneal_memory import Store
+def test_outcome_and_worth_refuse_a_missing_db_or_a_directory(tmp_path):
+    """Diogenes 2026-10-03 MED, reproduced by a real CLI run first: `outcome` and
+    `worth` exited 0 on a --db that does not exist (`outcome` writing an orphan log
+    and creating its directories); L1 then ran a directory. Both now refuse, as
+    every store command refuses a missing path, and create nothing. Whether an
+    EXISTING file is this store is deliberately not judged here (CHANGELOG)."""
 
     def run(db, *argv):
         return subprocess.run(
@@ -4341,31 +4337,10 @@ def test_outcome_and_worth_refuse_a_db_that_is_not_an_anneal_store(tmp_path):
             capture_output=True, text=True,
         )
 
-    def make(name, *sql):
-        c = sqlite3.connect(tmp_path / name)
-        for q in sql:
-            c.execute(q)
-        c.commit()
-        c.close()
-
     (tmp_path / "d").mkdir()
-    make("other.db", "CREATE TABLE t (x)")
-    make("imp.db", "CREATE TABLE episodes (x)", "CREATE TABLE metadata (key, value)",
-         "INSERT INTO metadata VALUES ('format_version', '1')")
-    future = Store(str(tmp_path / "fut.db"))
-    future.close()
-    make("fut.db", "UPDATE metadata SET value = '999' WHERE key = 'format_version'")
-    before = sorted(p.name for p in tmp_path.iterdir())
-    for wrong, said in (("nope/deep/typo.db", "database not found"), ("d", "cannot open"),
-                        ("other.db", "cannot open"), ("imp.db", "cannot open"),
-                        ("fut.db", "newer anneal-memory schema")):
+    for wrong, said in (("nope/deep/typo.db", "database not found"), ("d", "not a database file")):
         for argv in (["outcome", "--exposure-id", "ev1", "--outcome", "success"], ["worth"]):
             result = run(tmp_path / wrong, *argv)
             assert result.returncode == 1, (wrong, argv, result.stdout, result.stderr)
             assert said in result.stderr, (wrong, result.stderr)
-    assert sorted(p.name for p in tmp_path.iterdir()) == before
-
-    real = Store(str(tmp_path / "real.db"))
-    real.record("hello world", episode_type="observation")
-    real.close()
-    assert run(tmp_path / "real.db", "worth").returncode == 0
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["d"]

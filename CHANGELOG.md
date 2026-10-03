@@ -252,9 +252,16 @@ then resume and `verify()` is valid with a `GAP:` line saying the active file we
 its entries. A repair that sets aside a crashed rotation's unreadable orphan for the recorded week
 clears the field instead of recording a second gap (that orphan is the active file, renamed); an
 unrelated corrupt week does not clear it. A READABLE orphan whose first entry is the recorded file's first
-entry, when it is the only readable unmanifested week and continues the manifest's tip, is left
-for adoption, which takes it with its entries, and repair records nothing; in any other case
-repair records the gap, so writes resume and `verify()` still reports a week adoption did not take. A store now has a
+entry, when it is the only unmanifested week with a readable entry and its first entry chains from
+the manifest's `active_last_hash`, is left for adoption, which takes it with its entries, and
+repair records nothing; in any other case repair records the gap, so writes resume and `verify()`
+still reports a week adoption did not take. That rule is the shape one writer leaves (a rotation
+that crashed before its manifest save); it does not follow adoption's own choices, so after outside
+damage it can be wrong in two directions. It can record a gap for entries adoption then takes: a
+chain of more than one orphan week, or a manifest rebuilt from quarantine with no sealed files. And
+when a week's `.jsonl` and `.jsonl.gz` copies differ (one altered after the crash), it can match the
+copy adoption does not take, leaving writes refused with repair reporting nothing to do; the way out
+is to remove the altered copy by hand. A store now has a
 manifest from its first audit entry, not from its first rotation. Not covered: entries removed
 from the END of an active file that still holds a valid entry; a week whose record was not saved
 (a failed save warns; with the audit lock unavailable the save is skipped, under that lock's own

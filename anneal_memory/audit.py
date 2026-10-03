@@ -2008,16 +2008,19 @@ class AuditTrail:
             )
         ):
             # A readable sealed week whose first entry IS the recorded active
-            # file's first entry is that file, renamed (by first entry, not by
-            # the hash it chained from: an unrelated file can share that, L3 r2
-            # 10-03, codex HIGH, run). And only when adoption is certain to take
-            # it: the one readable week, continuing the manifest's tip. With a
-            # second readable week adoption may take that one and reject this,
-            # and a suppressed gap then refuses every write with no way out
-            # (L3 r3 10-03, codex MED, run); the gap is recorded instead, and
-            # verify still reports the week adoption did not take. by a rotation that crashed before its
-            # manifest save; the next open adopts it, entries and all. Recording a
-            # gap would be false and permanent (L3 r1 10-03, complement, run).
+            # file's first entry is that file, renamed by a rotation that crashed
+            # before its manifest save; the next open adopts it, entries and all,
+            # so recording a gap would be false and permanent (L3 r1 10-03,
+            # complement, run). Matched by first entry, not by the hash it chained
+            # from: an unrelated file can share that (L3 r2 10-03, codex HIGH, run).
+            # Only the shape a single writer leaves: one readable week, continuing
+            # the manifest's ``active_last_hash``. With a second readable week
+            # adoption may take that one and reject this, and a suppressed gap
+            # then refused every write with no way out (L3 r3 10-03, codex MED,
+            # run); the gap is recorded instead. This does NOT follow adoption's
+            # own copy choice or tip (L3 r4 10-03: differing .jsonl/.gz copies of
+            # the week, a manifest rebuilt with no sealed files, a chain of orphan
+            # weeks); those need outside damage, and the CHANGELOG names them.
             begun = None
         if begun is not None and any(r["period"] == begun["period"] for r in new):
             # The same, unreadable: setting it aside records the gap, and a second

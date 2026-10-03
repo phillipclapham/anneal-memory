@@ -36,6 +36,13 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ### Fixed
 
+- `anneal-memory outcome` and `worth` refuse a `--db` that is not an anneal store (exit 1): missing,
+  a directory, a non-SQLite file, another program's database, or one whose tables are merely named
+  like anneal's. They exited 0 (Diogenes 2026-10-03 MED): `outcome` wrote labels to an orphan log,
+  creating its directories, and `worth` reported 0 exposures as a clean measurement. The check reads
+  anneal's `format_version` row without writing (opened as `Store(read_only=True)` opens a store,
+  falling back to an `immutable` read for a WAL store in a read-only directory); a database it
+  cannot read at all is reported with its own error.
 - `fold_surfaced` / `crystal fold-surfaced` no longer creates `<stem>.crystal.json` on a store
   that has none. That file's existence is the wrap path's opt-in to the crystal tier, so a fold
   could silently opt a store in. With no crystal file the fold writes nothing and returns
@@ -46,13 +53,6 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - A gated wrap's save refusals named a tokenless `wrap-cancel`, which 0.9.22 refuses for exactly
   that wrap; they now name the token cancel. The wrap instruction no longer says a
   `[supersedes:]` marker may go "anywhere": inside a derived-state section it refuses the save.
-
-### Known and not fixed
-
-- `anneal-memory outcome` and `worth` still accept a `--db` that does not exist or is not an
-  anneal store and exit 0 (Diogenes 2026-10-03 MED). A fix was built and reviewed on
-  `seat/1003-4-integration`; its read-only schema check falsely rejected a valid store in a
-  read-only directory, so it is held off main.
 
 ### Changed — 0.9.13 follow-ups (spore-1170)
 

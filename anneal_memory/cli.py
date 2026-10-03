@@ -282,8 +282,57 @@ def _json_parent() -> argparse.ArgumentParser:
 
 # -- Store factory --
 
-def _open_store(args: argparse.Namespace) -> Store:
-    """Open a Store from CLI args."""
+def _read_anneal_marker(uri: str) -> bool:
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        conn.execute("PRAGMA query_only=ON")
+        tables = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'")}
+        if not {"episodes", "metadata"} <= tables:
+            return False
+        if not {"key", "value"} <= {row[1] for row in conn.execute(
+                "PRAGMA table_info(metadata)")}:
+            return False
+        return conn.execute(
+            "SELECT 1 FROM metadata WHERE key = 'format_version'").fetchone() is not None
+    finally:
+        conn.close()
+
+
+def _is_anneal_db(db_path: Path) -> bool:
+    """True when ``db_path`` is an existing anneal store: a SQLite database with
+    anneal's ``episodes`` table and the ``format_version`` row anneal seeds into
+    ``metadata(key, value)`` when it creates a store. Nothing in it is written:
+    the first open is the one ``Store(read_only=True)`` uses (read-write on an
+    existing file only, URI ``mode=rw``, which never creates the file, then
+    ``PRAGMA query_only=ON``), so the WAL ``-shm`` index attaches on a live store.
+    Where that open fails (a WAL store in a read-only directory with no ``-shm``),
+    the marker is read once more with ``immutable=1``, which ignores the WAL: the
+    rows checked are written when the store is created, so this can only turn a
+    brand-new, never-checkpointed store into a refusal, never accept a foreign
+    file. Raises ``sqlite3.OperationalError`` when neither open can read it."""
+    if not db_path.is_file():
+        return False
+    uri = db_path.resolve().as_uri()
+    try:
+        return _read_anneal_marker(f"{uri}?mode=rw")
+    except sqlite3.OperationalError:
+        try:
+            return _read_anneal_marker(f"{uri}?mode=ro&immutable=1")
+        except sqlite3.OperationalError:
+            raise  # cannot read it at all (unreadable, locked): not evidence either way
+        except sqlite3.DatabaseError:
+            return False
+    except sqlite3.DatabaseError:
+        return False  # "file is not a database" and the like
+
+
+def _existing_db_path(args: argparse.Namespace, *, require_anneal: bool = False) -> Path:
+    """The --db path, or exit 1 when no database is there. A command that derives a
+    sibling file from --db (the outcome log) passes ``require_anneal=True``: it never
+    opens the store, so a directory, a non-SQLite file or another program's database
+    at that path must be refused here, or it would write to, or report from, an
+    orphan sibling file."""
     db_path = Path(args.db).expanduser()
     if not db_path.exists():
         print(f"Error: database not found: {db_path}", file=sys.stderr)
@@ -293,6 +342,21 @@ def _open_store(args: argparse.Namespace) -> Store:
             file=sys.stderr,
         )
         sys.exit(1)
+    if require_anneal:
+        try:
+            is_anneal = _is_anneal_db(db_path)
+        except sqlite3.OperationalError as exc:
+            print(f"Error: cannot read the database {db_path}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if not is_anneal:
+            print(f"Error: not an anneal-memory database: {db_path}", file=sys.stderr)
+            sys.exit(1)
+    return db_path
+
+
+def _open_store(args: argparse.Namespace) -> Store:
+    """Open a Store from CLI args."""
+    db_path = _existing_db_path(args)
     try:
         return Store(
             path=db_path,
@@ -3202,10 +3266,11 @@ def _parse_exposed(raw: str) -> ExposedRef:
 def cmd_outcome(args: argparse.Namespace) -> None:
     """Write back what happened after an exposure (append-only; records for one
     exposure id merge when read)."""
+    log_path = outcome_log_path(_existing_db_path(args, require_anneal=True))
     try:
         items = [_parse_label(raw) for raw in (args.item or [])]
         exposed = [_parse_exposed(raw) for raw in (args.exposed or [])]
-        rec = OutcomeLog(outcome_log_path(Path(args.db).expanduser())).record(
+        rec = OutcomeLog(log_path).record(
             args.exposure_id, items, outcome=args.outcome, exposed=exposed
         )
     except (ValueError, OSError) as exc:
@@ -3254,7 +3319,7 @@ def cmd_crystal_fold_surfaced(args: argparse.Namespace) -> None:
 
 def cmd_worth(args: argparse.Namespace) -> None:
     """Report-only Memory-Worth counters. Nothing reads this to rank or decay."""
-    db_path = Path(args.db).expanduser()
+    db_path = _existing_db_path(args, require_anneal=True)
     receipts = None
     receipt_bad = 0
     receipt_missing: list[str] = []

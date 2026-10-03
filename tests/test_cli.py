@@ -4322,3 +4322,52 @@ class TestHybridSnapshotAuditCli:
         assert result.returncode == 0, result.stderr
         assert "Traceback" not in result.stderr
         assert json.loads(result.stdout)["anchor_trusted"] is False
+
+
+def test_outcome_and_worth_refuse_a_db_that_is_not_an_anneal_store(tmp_path):
+    """Diogenes 2026-10-03 MED and the L3 rounds after it, each reproduced by a real
+    CLI run first: `outcome`/`worth` exited 0 on a missing --db (writing an orphan
+    log and its directories), then on a directory, another program's SQLite
+    database, and an impostor whose tables are merely NAMED episodes+metadata; a
+    `mode=ro` check then refused a valid store in a read-only directory."""
+    import sqlite3
+
+    def run(db, *argv):
+        return subprocess.run(
+            [sys.executable, "-m", "anneal_memory.cli", "--db", str(db), *argv],
+            capture_output=True, text=True,
+        )
+
+    (tmp_path / "d").mkdir()
+    other = sqlite3.connect(tmp_path / "other.db")
+    other.execute("CREATE TABLE t (x)")
+    other.commit()
+    other.close()
+    imp = sqlite3.connect(tmp_path / "imp.db")
+    imp.execute("CREATE TABLE episodes (x)")
+    imp.execute("CREATE TABLE metadata (y)")
+    imp.commit()
+    imp.close()
+    for wrong, said in (("nope/deep/typo.db", "database not found"), ("d", "not an anneal"),
+                        ("other.db", "not an anneal"), ("imp.db", "not an anneal")):
+        for argv in (["outcome", "--exposure-id", "ev1", "--outcome", "success"], ["worth"]):
+            result = run(tmp_path / wrong, *argv)
+            assert result.returncode == 1, (wrong, argv, result.stdout, result.stderr)
+            assert said in result.stderr, (wrong, result.stderr)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["d", "imp.db", "other.db"]
+
+    # A valid WAL store, checkpointed, copied alone into a read-only directory.
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    assert run(tmp_path / "s.db", "init").returncode == 0
+    c = sqlite3.connect(tmp_path / "s.db")
+    c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    c.close()
+    (ro / "s.db").write_bytes((tmp_path / "s.db").read_bytes())
+    ro.chmod(0o555)
+    try:
+        result = run(ro / "s.db", "worth")
+        assert result.returncode == 0, result.stderr
+        assert sorted(p.name for p in ro.iterdir()) == ["s.db"]
+    finally:
+        ro.chmod(0o755)

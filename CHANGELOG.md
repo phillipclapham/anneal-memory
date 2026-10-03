@@ -14,10 +14,17 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   `WrapCancelGatedError`. When the caller IS the preparing session (`session_id` /
   `--session-id`), every surface, the library included, says the wrap is a different one under
   its own session and that a cancel without the token, keeping the session id, ends it.
+- A wrong-token cancel that also passed `force` (CLI `--force`) now says force is ignored while a
+  token is given, instead of calling the end of the wrap "the operator's decision".
+- A wrong-token cancel of PARTIAL wrap state whose token survived said there was "no usable
+  token" and that no proven cancel could ever succeed; the right token does succeed. MCP and CLI
+  now say the state is partial under a different token (the library text already did not claim
+  it was tokenless, and now says the same).
 - `WrapOwnershipError` gains `gated_session` (read under the same lock as the token compare;
-  `None` when the wrap was ungated) and `session_id` (the caller's); both survive pickling.
-- `WrapInProgressError` adds that a wrap prepared under the consolidate gate is the preparing
-  session's or the operator's to end, and that a plain cancel of it is refused.
+  `None` when the wrap was ungated), `session_id` (the caller's) and `force`; all survive
+  pickling.
+- `WrapInProgressError` adds that, if the wrap was prepared under the consolidate gate, it is
+  the preparing session's or the operator's to end, and a plain cancel of it is refused.
 - Three corruption errors that can fire on a complete gated wrap (an unreadable frozen section
   schema, a pre-snapshot wrap with none, an unreadable frozen re-derive root map) said to run a
   plain `wrap-cancel`; they now name the token cancel. The partial-state recovery texts are

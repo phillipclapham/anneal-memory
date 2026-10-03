@@ -1671,7 +1671,17 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
             # shipped the partial-state message on the MCP side and had to fix
             # the CLI "a round later" — the same lands-somewhere-not-everywhere
             # shape. Both surfaces answer the same two facts the same way.
-            if exc.partial_state:
+            if exc.partial_state and exc.actual is not None:
+                # Partial, but a token survived: "no usable token" would be false.
+                print(
+                    "The store holds PARTIAL wrap state under a different token "
+                    "than the one you named — a crash or a hand edit left it "
+                    "half-written, and it cannot be saved. prepare-wrap will keep "
+                    "refusing until it is cleared. Nothing was changed. Re-run "
+                    "WITHOUT --wrap-token to clear the broken state.",
+                    file=sys.stderr,
+                )
+            elif exc.partial_state:
                 print(
                     "The store holds PARTIAL wrap state with no usable token — "
                     "a crash or a hand edit left it half-written. Your token "
@@ -1687,6 +1697,14 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
                     "Nothing to cancel: the wrap you named has already "
                     "completed or been cancelled, and no wrap is in progress "
                     "now. Nothing was changed.",
+                    file=sys.stderr,
+                )
+            elif exc.gated_session and exc.gated_session != exc.session_id and exc.force:
+                print(
+                    "Refused: the wrap in progress is NOT the one you named, and "
+                    "another session prepared it under the consolidate gate. "
+                    "--force is ignored while --wrap-token is given, so nothing "
+                    "was changed.",
                     file=sys.stderr,
                 )
             elif exc.gated_session and exc.gated_session != exc.session_id:

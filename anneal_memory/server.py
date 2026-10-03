@@ -696,6 +696,18 @@ class Server:
             # from "a peer owns it": the first means the caller's own wrap has
             # already finished (retry-safe, nothing to do), the second means
             # cancelling would destroy someone else's compression.
+            if exc.partial_state and exc.actual is not None:
+                # Partial, but a token survived, so "no usable token" below would
+                # be false: the right token clears it (L3 glm, 1003+16, run).
+                # Partial state is never gated, so the tokenless clear works.
+                return _tool_result(
+                    "The store holds PARTIAL wrap state under a different token "
+                    "than the one you named — a crash or a hand edit left it "
+                    "half-written, and it cannot be saved. prepare_wrap will keep "
+                    "refusing until it is cleared. Nothing was changed. Call "
+                    "wrap_cancel again WITHOUT wrap_token to clear the broken state.",
+                    is_error=True,
+                )
             if exc.partial_state:
                 # ⛔ THE THIRD STATE, AND OMITTING IT WAS A REAL LOCKOUT. Partial
                 # metadata (wrap_started_at set, wrap_token empty) can match NO
@@ -718,6 +730,13 @@ class Server:
                     "Nothing to cancel: the wrap you named has already completed "
                     "or been cancelled, and no wrap is in progress now. Nothing "
                     "was changed — prepare_wrap will start a fresh one.",
+                    is_error=True,
+                )
+            if exc.gated_session and exc.gated_session != session_id and exc.force:
+                return _tool_result(
+                    "Refused: the wrap in progress is NOT the one you named, and "
+                    "another session prepared it under the consolidate gate. force "
+                    "is ignored while wrap_token is given, so nothing was changed.",
                     is_error=True,
                 )
             if exc.gated_session and exc.gated_session != session_id:

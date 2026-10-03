@@ -735,9 +735,9 @@ class WrapInProgressError(AnnealMemoryError):
         return (
             f"a wrap is already in progress{when}. Either "
             f"{_WRAP_FINISH_PATHS}, or {_WRAP_CANCEL_PATHS}, "
-            "before starting a new wrap. A wrap prepared under the consolidate "
-            "gate is the preparing session's or the operator's to end; a plain "
-            "cancel of it is refused."
+            "before starting a new wrap. If it was prepared under the consolidate "
+            "gate, it is the preparing session's or the operator's to end, and a "
+            "plain cancel of it is refused."
         )
 
     def __reduce__(self) -> "tuple[type[WrapInProgressError], tuple[str | None]]":
@@ -812,6 +812,7 @@ def _reconstruct_wrap_ownership_error(
     partial_state: bool,
     gated_session: str | None = None,
     session_id: str | None = None,
+    force: bool = False,
 ) -> "WrapOwnershipError":
     """Module-level reconstructor for pickling :class:`WrapOwnershipError`.
 
@@ -824,7 +825,7 @@ def _reconstruct_wrap_ownership_error(
     """
     return WrapOwnershipError(
         expected=expected, actual=actual, partial_state=partial_state,
-        gated_session=gated_session, session_id=session_id,
+        gated_session=gated_session, session_id=session_id, force=force,
     )
 
 
@@ -917,6 +918,7 @@ class WrapOwnershipError(AnnealMemoryError):
         partial_state: bool = False,
         gated_session: str | None = None,
         session_id: str | None = None,
+        force: bool = False,
     ) -> None:
         self.expected = expected
         self.actual = actual
@@ -931,6 +933,8 @@ class WrapOwnershipError(AnnealMemoryError):
         # anti-reflex, not anti-adversary, and only the TEXT withholds the recipe.
         self.gated_session = gated_session
         self.session_id = session_id
+        # The caller passed force=True, which is ignored when expect_token is given.
+        self.force = force
         if partial_state and actual is None:
             super().__init__(
                 f"wrap_cancelled: caller claims wrap {expected!r}, but the store "
@@ -939,12 +943,28 @@ class WrapOwnershipError(AnnealMemoryError):
                 f"ever succeed. Nothing was changed — call without expect_token "
                 f"to clear the broken state."
             )
+        elif partial_state:
+            # Partial, but a token survived: the right token would clear it, so
+            # "no usable token" would be false here (L3 glm, 1003+16, run).
+            super().__init__(
+                f"wrap_cancelled: caller claims wrap {expected!r}, but the store "
+                f"holds PARTIAL wrap state under {actual!r} (a crash or a manual "
+                f"edit); it cannot be saved. Nothing was changed — call without "
+                f"expect_token to clear the broken state."
+            )
         elif actual is None:
             super().__init__(
                 f"wrap_cancelled: caller claims wrap {expected!r} but NO wrap is "
                 f"in progress — it already completed or was cancelled. Nothing "
                 f"was changed. Call without expect_token to clear whatever is "
                 f"current, or treat this as already-done."
+            )
+        elif gated_session and gated_session != session_id and force:
+            super().__init__(
+                f"wrap_cancelled: caller claims wrap {expected!r} but the store "
+                f"holds {actual!r}, prepared under the consolidate gate by another "
+                f"session. force is ignored while expect_token is given, so "
+                f"nothing was changed."
             )
         elif gated_session and gated_session != session_id:
             # No recipe, as in WrapCancelGatedError: the reader of this refusal is
@@ -984,6 +1004,7 @@ class WrapOwnershipError(AnnealMemoryError):
                 self.partial_state,
                 self.gated_session,
                 self.session_id,
+                self.force,
             ),
         )
 
@@ -3587,6 +3608,7 @@ class Store:
                     partial_state=partial_state if had_any else False,
                     gated_session=(cancelled_gated_raw or None) if complete else None,
                     session_id=session_id,
+                    force=force is True,
                 )
 
             # spore-699 bound: a tokenless cancel may not end a coherent gated wrap

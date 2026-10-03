@@ -2,7 +2,7 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.25] — 2026-10-03
 
 ### Fixed — a cancel refusal no longer points a gated wrap at a cancel the gate refuses
 

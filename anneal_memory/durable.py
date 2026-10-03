@@ -63,8 +63,6 @@ DROP_DURABLE_RE = re.compile(
     re.IGNORECASE,
 )
 _NEWLINES_RE = re.compile(r"\r\n|\r")
-# Any line ending, for measuring raw chars line by line.
-_LINE_END_RE = re.compile(r"\r\n|\r|\n")
 # A graduation line (``name | 2x (date)``) or an evidence tag: pattern syntax.
 _PATTERN_SHAPE_RE = re.compile(r"\|[ \t]*\d+x\b|\[evidence:", re.IGNORECASE)
 # A fact that describes a change that has not happened yet.
@@ -159,11 +157,16 @@ def _headers(lines: list[str]) -> list[int]:
     return [i for i, line in enumerate(lines) if line.startswith("## ")]
 
 
+def is_exact_heading(title: str, heading: str) -> bool:
+    """The one rule for an optional heading: the header's stripped text equals
+    the heading, case-insensitively (casefold). ``## durable facts`` is the
+    durable heading; ``## Archived Durable Facts`` and
+    ``## Decisions (durable facts)`` are not."""
+    return title.strip().casefold() == heading.strip().casefold()
+
+
 def _is_durable_header(line: str, heading: str) -> bool:
-    """A durable section header is the EXACT heading (stripped, case as the
-    schema writes it): ``## Archived Durable Facts`` or
-    ``## Decisions (durable facts)`` is not one."""
-    return line.startswith("## ") and line[3:].strip() == heading
+    return line.startswith("## ") and is_exact_heading(line[3:], heading)
 
 
 def section_spans(lines: list[str], schema: list[SectionSpec]) -> list[tuple[int, int]]:
@@ -310,15 +313,16 @@ def pending_transitions(
 
 
 def section_chars(text: str | None, schema: list[SectionSpec]) -> int:
-    """RAW chars of the durable section(s) of ``text``: header included, each
-    line counted with the line ending it actually has (CRLF counts two). This
+    """RAW chars of the durable section(s) of ``text``: header included, lines
+    split on ``\n`` as ``measure_sections`` splits them (CRLF counts two). This
     is the same basis as ``len(text)``, so the shrink gate can subtract it.
     0 when the schema or the text has none."""
     if not text:
         return 0
-    parts = _LINE_END_RE.split(text)
-    seps = _LINE_END_RE.findall(text)
-    seps.append("")  # the last line has no ending
+    # Split like measure_sections: on "\n" only, so a lone "\r" is not a line
+    # break and a CRLF line keeps its "\r" in its length.
+    parts = text.split("\n")
+    seps = ["\n"] * (len(parts) - 1) + [""]  # the last line has no ending
     return sum(
         len(parts[i]) + len(seps[i])
         for start, end in section_spans(parts, schema)
@@ -444,14 +448,22 @@ def enforce_durable_facts(
     }
     dropped = [f.raw for f, k in prior if k in dropped_keys]
     # Which prior facts each marker dropped: a marker naming a first line can
-    # match several facts that share it (their continuations differ).
+    # match several facts that share it (their continuations differ). Each
+    # dropped fact is attributed to the FIRST marker (in text order) that names
+    # it; every marker that names some prior fact counts as matched.
+    marker_rank: dict[str, int] = {}
+    for it in items:
+        if it.kind == "marker":
+            marker_rank.setdefault(it.target, len(marker_rank))
     matches_by_target: dict[str, list[str]] = {}
+    matched_targets: set[str] = set()
     for f, k in prior:
         if k not in dropped_keys:
             continue
-        for t in {marker_keys[key] for key in (k, _first_body(f)) if key in marker_keys}:
-            matches_by_target.setdefault(t, []).append(f.raw)
-    matched_targets = set(matches_by_target)
+        naming = {marker_keys[key] for key in (k, _first_body(f)) if key in marker_keys}
+        matched_targets |= naming
+        first = min(naming, key=lambda t: marker_rank.get(t, len(marker_rank)))
+        matches_by_target.setdefault(first, []).append(f.raw)
     unknown_targets = list(dict.fromkeys(
         [t for t in marker_keys.values() if t not in matched_targets] + empty_markers
     ))
@@ -655,6 +667,8 @@ def report_warnings(report: DurableReport) -> list[str]:
             f"named no line of the prior `## {h}` section; they were removed and "
             f"nothing else changed."
         )
+    for raw in report.dropped:
+        out.append(f"Durable facts: dropped by marker: {_one_line(raw)}")
     for target, raws in report.multi_drops:
         out.append(
             f"Durable facts: `[drop-durable: {target}]` matched {len(raws)} prior "

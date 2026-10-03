@@ -184,7 +184,8 @@ class TestDropMarker:
         assert PENDING not in saved
         assert "drop-durable" not in saved
         assert ALLERGY in saved
-        assert durable_warnings(msgs) == []
+        # Every marker drop is reported (scoped round on 7c161d3).
+        assert durable_warnings(msgs) == [f"Durable facts: dropped by marker: {PENDING}"]
         entries = [
             json.loads(l)
             for l in (tmp_path / "m.audit.jsonl").read_text(encoding="utf-8").splitlines()
@@ -725,3 +726,41 @@ class TestFixDiffRound:
         assert "wrapped fact" not in pstore.load_continuity()
         assert any("matched 2 prior facts" in m for m in durable_warnings(msgs))
 
+
+
+# -- scoped round on 7c161d3 ---------------------------------------------------
+
+
+class TestScopedRound:
+    def test_lowercase_durable_header_is_protected(self, pstore):
+        lower = partnership_text(ALLERGY).replace("## Durable Facts", "## durable facts")
+        assert [f.fact for f in parse_durable_facts(lower, FLOW_SCHEMA)] == ["tree nut allergy"]
+        wrap(pstore, lower, 1)
+        wrap(pstore, partnership_text(None), 2)
+        assert ALLERGY in pstore.load_continuity()
+
+    def test_every_marker_drop_is_reported(self, pstore):
+        two_line = "- wrapped fact\n  second line"
+        wrap(pstore, partnership_text(f"{ALLERGY}\n{two_line}"), 1)
+        fenced = f"{ALLERGY}\n```\n[drop-durable: - wrapped fact]\n```"
+        result, msgs = wrap(pstore, partnership_text(fenced), 2)
+        assert "wrapped fact" not in pstore.load_continuity()
+        assert "Durable facts: dropped by marker: - wrapped fact / second line" in result[
+            "durable_warnings"
+        ]
+
+    def test_section_chars_splits_like_measure_sections(self):
+        from anneal_memory.continuity import measure_sections
+        from anneal_memory.durable import section_chars
+        text = partnership_text("- a\r## Not a header\n- b")
+        assert section_chars(text, FLOW_SCHEMA) == measure_sections(text)["Durable Facts"]
+
+    def test_dropped_fact_attributed_to_first_marker_only(self, pstore):
+        two = "- wrapped fact\n  variant a\n- wrapped fact\n  variant b"
+        wrap(pstore, partnership_text(two), 1)
+        markers = "[drop-durable: wrapped fact variant a]\n[drop-durable: - wrapped fact]"
+        _, msgs = wrap(pstore, partnership_text(markers), 2)
+        got = durable_warnings(msgs)
+        assert "wrapped fact" not in pstore.load_continuity()
+        assert not any("matched 2 prior facts" in m for m in got)
+        assert not any("names no line" in m for m in got)

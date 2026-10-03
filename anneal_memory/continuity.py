@@ -68,6 +68,7 @@ from .schema import (
 from .crystal import CrystalError, CrystalStore
 from .durable import (
     enforce_durable_facts,
+    is_exact_heading,
     match_headings,
     parse_durable_facts,
     pending_transitions as durable_pending_transitions,
@@ -133,7 +134,7 @@ def _header_matches(line_lower: str, schema: list[SectionSpec]) -> list[str]:
     )
     title = line_lower[3:].strip() if line_lower.startswith("## ") else line_lower
     for spec in schema:
-        if spec.get("optional") is True and title == spec["heading"].lower():
+        if spec.get("optional") is True and is_exact_heading(title, spec["heading"]):
             matched.append(title)
     return matched
 

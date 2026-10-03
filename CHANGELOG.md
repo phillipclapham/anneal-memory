@@ -33,7 +33,8 @@ removed or skipped). A quarantined manifest is not refused here; it anchors on t
 disk. The next write retries.
 
 Where advisory locks do not exist it degrades to no lock, which is the previous behaviour: silently on
-Windows (no `fcntl`), and with a warning logged once per process on a filesystem whose `flock` reports
+Windows (no `fcntl`), and with a warning on stderr (and to the `anneal-memory` logger), once per lock
+path, saying the lock is not held, on a filesystem whose `flock` reports
 `EOPNOTSUPP`, or `ENOLCK` after three short retries. `ENOLCK` is ambiguous: Linux NFS without lock support
 returns it for good, and a kernel out of lock records returns it briefly. Failing closed on it would leave
 such NFS stores unable to rotate or repair; degrading means a repair racing a writer during real

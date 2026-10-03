@@ -8440,6 +8440,27 @@ class TestManifestLockL3:
         with AuditTrail(tmp_path / "m.db")._manifest_lock() as held:
             assert held is True
 
+    def test_an_enolck_degrade_warns_on_stderr(self, tmp_path, monkeypatch, capsys):
+        """L2 MED "silent degrade", ruled 10-03: degrade with a stderr warning.
+        Reproduced first: an application logging to a file saw nothing on
+        stderr, and a second store in the process was silent (once per
+        process). ⛔ MUTATION-CHECKED: warn through the logger only and this
+        fails."""
+        import errno as errno_module
+
+        def no_locks(fd, op):
+            raise OSError(errno_module.ENOLCK, "no locks")
+
+        monkeypatch.setattr(audit_module.fcntl, "flock", no_locks)
+        monkeypatch.setattr(audit_module, "_ENOLCK_RETRY_SECONDS", 0)
+        for name in ("a", "b"):
+            with AuditTrail(tmp_path / f"{name}.db")._manifest_lock() as held:
+                assert held is False
+        err = capsys.readouterr().err
+        for name in ("a", "b"):
+            assert f"{tmp_path / name}.audit-manifest.lock" in err
+        assert err.count("lock is NOT held") == 2
+
     def test_the_lock_opens_read_write_first(self, tmp_path, monkeypatch):
         """complement + codex MED: on Linux NFS an exclusive flock needs a
         descriptor open for writing. ⛔ MUTATION-CHECKED: open read-only first

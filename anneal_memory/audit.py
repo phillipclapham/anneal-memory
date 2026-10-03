@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import stat
+import sys
 import re
 import threading
 import time
@@ -61,8 +62,9 @@ _LOCK_UNAVAILABLE_ERRNOS = frozenset(
 
 logger = logging.getLogger("anneal-memory")
 
-# Set once a runtime ``flock`` degrade has been logged (AuditTrail._manifest_lock).
-_lock_degrade_warned = False
+# Lock paths whose runtime ``flock`` degrade has been reported in this process
+# (AuditTrail._open_and_flock).
+_lock_degrade_warned: set[str] = set()
 _ENOLCK_RETRIES = 3
 _ENOLCK_RETRY_SECONDS = 0.05
 
@@ -1720,7 +1722,7 @@ class AuditTrail:
         Yields ``True`` when held. Yields ``False``, with no lock, where advisory
         locking does not exist: no ``fcntl`` (Windows, silently, as the README
         documents), or ``flock`` raising an errno in ``_LOCK_UNAVAILABLE_ERRNOS``
-        (warned once per process). That is the behaviour before the lock
+        (a warning on stderr, once per lock path). That is the behaviour before the lock
         existed. Forking while a trail is in use is unsupported (see the class
         docstring). Any other failure to open or lock raises
         ``_AuditLockError``. Who takes it: every manifest save, a quarantine,
@@ -1755,7 +1757,7 @@ class AuditTrail:
 
     def _open_and_flock(self) -> int | None:
         """Open the lock file and take ``LOCK_EX`` on it; ``None`` when advisory
-        locks are unavailable here (warned once per process). See
+        locks are unavailable here (warned on stderr once per lock path). See
         :meth:`_manifest_lock`."""
         assert fcntl is not None
         lock_path = self._db_path.parent / f"{self._db_path.stem}.audit-manifest.lock"
@@ -1803,13 +1805,20 @@ class AuditTrail:
                 raise _AuditLockError(
                     f"cannot lock the audit manifest lock {lock_path.name}: {e}"
                 ) from e
-        global _lock_degrade_warned
-        if not _lock_degrade_warned:
-            _lock_degrade_warned = True
-            logger.warning(
-                "Advisory locks are unavailable for %s; audit manifest changes are "
-                "not serialized across processes.", lock_path,
+        # ⛔ STDERR, NOT ONLY THE LOGGER (L2 MED "silent degrade", ruled 10-03:
+        # degrade with a stderr warning). Reproduced: an application that sends
+        # its logging to a file showed nothing, and a second store in the same
+        # process was silent because the warning fired once per process. Now
+        # once per lock path, on stderr and to the logger.
+        if str(lock_path) not in _lock_degrade_warned:
+            _lock_degrade_warned.add(str(lock_path))
+            message = (
+                f"Advisory locks are unavailable for {lock_path}; the audit manifest "
+                "lock is NOT held, so audit manifest changes are not serialized "
+                "across processes."
             )
+            print(f"[anneal-memory] WARNING: {message}", file=sys.stderr)
+            logger.warning(message)
         return None
 
     def _initialize(self) -> None:

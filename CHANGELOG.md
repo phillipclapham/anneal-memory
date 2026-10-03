@@ -9,7 +9,13 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - `Store.record(..., supersedes=[old_id])` and `Store.supersede(old_id=..., new_id=...)`
   (keyword-only) record that a newer episode replaces an older one. Each link is
   validated like a citation: the old episode exists, is not newer, the link closes no
-  cycle of any length, and the two texts share at least two meaningful words.
+  cycle of any length, and the two texts share at least 25% of the shorter text's
+  meaningful words (`SUPERSEDE_MIN_OVERLAP_RATIO`). The floor is derived, not chosen:
+  `scripts/supersede_floor.py` on a copy of a 12,489-episode store, 2026-10-02 —
+  probe update pairs 48/48 pass (minimum ratio 0.25, so no margin), random episode
+  pairs 8/500, same-topic pairs 113/500. A two-shared-words rule passed 422/500 random
+  pairs and refused 13/48 probe updates once their shared boilerplate was removed. No
+  lexical floor separates "replaces" from "same subject"; the link is the writer's call.
   `Store.unsupersede(old_id=..., new_id=...)` removes a wrong link (CLI `supersede` /
   `unsupersede --old ID --new ID`). On refusal (`SupersessionError`, a
   `ValueError`) nothing is written, not even the episode. The audit chain gets a

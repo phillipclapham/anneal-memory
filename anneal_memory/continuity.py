@@ -1122,8 +1122,8 @@ whole system depends on) goes dark. So, every wrap:
 When an episode from THIS session replaces an older fact (a value changed, a
 decision was reversed), write `[supersedes: <old_id> by <new_id>]` on its own line.
 The save validates it like a citation: `<new_id>` must be an episode in this wrap,
-`<old_id>` must exist and not be newer, and the two texts must share at least two
-meaningful words. Recall then hides the old episode by default (it is kept, not
+`<old_id>` must exist and not be newer, and the two texts must share at least a
+quarter of the shorter one's meaningful words. Recall then hides the old episode by default (it is kept, not
 deleted). A rejected link does not fail the save; it is reported back. Only link a
 real replacement, never two facts that merely sit side by side.
 

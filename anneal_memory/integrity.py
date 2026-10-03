@@ -73,8 +73,9 @@ TOOLS: list[dict[str, Any]] = [
                     "items": {"type": "string"},
                     "description": (
                         "Ids of older episodes this one replaces (a changed fact). "
-                        "Each must exist, not be newer, and share at least two meaningful "
-                        "words with this content; otherwise nothing is recorded. "
+                        "Each must exist, not be newer, and share at least a quarter of "
+                        "the shorter text's meaningful words with this content; "
+                        "otherwise nothing is recorded. "
                         "recall then hides the old episode by default."
                     ),
                 },

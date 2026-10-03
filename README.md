@@ -416,7 +416,9 @@ Graduation shows a pattern was earned. It doesn't show the pattern ever helped. 
 
 When a fact changes, the new episode can say which episode it replaces. Then recall stops serving the old one. Nothing is deleted: the old episode stays in the store and in exports, and `include_superseded=True` (CLI `--include-superseded`) shows it, marked with what replaced it.
 
-There are two ways to write the link. Either way it's validated like a citation: the old episode has to exist and not be newer, the link can't close a cycle, and the two texts have to share at least two meaningful words.
+There are two ways to write the link. Either way it's validated like a citation: the old episode has to exist and not be newer, the link can't close a cycle, and the two texts have to share at least a quarter of the shorter one's meaningful words.
+
+That last check is a floor, and I measured where to put it (`scripts/supersede_floor.py`, on a copy of my own 12,489-episode store). It keeps every planted update in the probe and rejects all but 8 of 500 random pairs of episodes. The two-shared-words rule it replaced let 422 of those 500 through, and it refused some real updates that only share the subject's name. What no word-overlap rule can do is tell "replaces" from "is about the same thing": 113 of 500 same-topic pairs pass. So the floor catches a link to the wrong episode entirely, not a link to the wrong episode on the same subject. That part is still the writer's call.
 
 - Explicitly, when recording: `store.record(text, "observation", supersedes=[old_id])`, CLI `record --supersedes ID`, MCP `record` with `supersedes`. A link that fails validation records nothing at all.
 - In a wrap: the agent writes `[supersedes: OLD_ID by NEW_ID]` in the continuity text, where `NEW_ID` is an episode of that wrap. A bad link doesn't fail the save; it comes back in `supersessions_rejected` with the reason.

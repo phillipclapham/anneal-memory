@@ -231,3 +231,26 @@ def test_export_keeps_superseded_episodes(tmp_path, capsys, monkeypatch):
     data = __import__("json").loads(capsys.readouterr().out)
     assert {e["id"] for e in data["episodes"]} == {old.id, new.id}
     assert [(l["old_id"], l["new_id"]) for l in data["supersessions"]] == [(old.id, new.id)]
+
+
+def test_the_floor_is_a_ratio_not_a_word_count(tmp_path):
+    """The two cases scripts/supersede_floor.py measured the old ">= 2 shared
+    words" rule getting wrong, in both directions."""
+    with Store(str(tmp_path / "m.db")) as st:
+        contact = st.record("The primary contact for Brindlewood is Ainsley.", "observation",
+                            timestamp="2026-01-01T00:00:00Z")
+        # A real update sharing one word (the subject): the old rule refused it.
+        st.record("Talk to Marguerite about anything Brindlewood.", "observation",
+                  timestamp="2026-02-01T00:00:00Z", supersedes=[contact.id])
+        long_a = st.record(
+            "Reviewed the release checklist, rotated staging credentials, benchmarked "
+            "the parser on large fixtures, drafted onboarding notes, triaged incoming "
+            "issues and paired on the flaky integration test before lunch.",
+            "observation", timestamp="2026-01-01T00:00:00Z")
+        # Unrelated long episodes sharing two words: the old rule linked them.
+        with pytest.raises(SupersessionError, match="shares too little"):
+            st.record(
+                "Cooked a long dinner, walked the dog around the river loop, read two "
+                "chapters, fixed the bike chain, called family and wrote the weekly "
+                "release notes for the garden club newsletter.",
+                "observation", timestamp="2026-02-01T00:00:00Z", supersedes=[long_a.id])

@@ -67,7 +67,7 @@ from .associations import (
     record_associations as _record_associations,
 )
 from .audit import AuditTrail
-from .graduation import check_explanation_overlap
+from .graduation import _meaningful_words
 
 #: SQLite's own write-lock message grammar, for the Python 3.10 fallback in
 #: :func:`_is_write_lock_contention` where no primary result code is available.
@@ -987,16 +987,16 @@ class SupersessionError(AnnealMemoryError, ValueError):
 
     A link is validated like a citation: the superseded episode exists, is not
     the new episode, is not newer than it, does not already supersede it, and
-    the new text shares at least two meaningful words with the old one
-    (:func:`anneal_memory.graduation.check_explanation_overlap`). The overlap
+    the two texts overlap enough (:data:`SUPERSEDE_MIN_OVERLAP_RATIO` of the
+    shorter one's meaningful words; the derivation is beside the constant). The
     rule is lexical, so a real update worded with almost nothing in common with
     the old fact is refused; record it without the link, or reword it.
 
-    ⚠ The overlap rule is a floor, not a judgment that the new episode really
-    replaces the old one. Two episodes that share boilerplate (a repeated
-    sign-off, a project name plus one common word) clear it. The decision is
-    the writer's explicit link; a wrong link hides a still-valid episode from
-    default recall (``include_superseded=True`` still shows it).
+    ⚠ The floor rejects unrelated episodes, not related ones: two episodes about
+    the same subject clear it whether or not one replaces the other, and short
+    episodes sharing boilerplate clear it too. The decision is the writer's
+    explicit link; a wrong link hides a still-valid episode from default recall
+    until :meth:`Store.unsupersede` removes it.
     """
 
 
@@ -1409,6 +1409,27 @@ def _today_local() -> str:
     from the local wrap date in the evening-UTC-rollover window (the spore-081
     class, one layer out — codex L3 MED)."""
     return datetime.now().strftime("%Y-%m-%d")
+
+
+# Supersession grounding floor: the meaningful words two episodes share, as a
+# fraction of the SHORTER episode's meaningful words. Derived 2026-10-02 by
+# scripts/supersede_floor.py on a copy of a 12,489-episode store: every probe
+# update pair passed (minimum 0.25, so the floor sits on it with no margin),
+# 8 of 500 random pairs passed (the old ">= 2 shared words" rule passed 422 of
+# 500, and refused 13 of the 48 probe updates once their shared boilerplate was
+# removed). Same-topic pairs that are not updates pass 113 of 500: no lexical
+# floor tells "replaces" from "is about the same thing", so the link remains the
+# writer's decision. Re-derive with the script before changing the number.
+SUPERSEDE_MIN_OVERLAP_RATIO = 0.25
+
+
+def _supersession_grounds(new_text: str, old_text: str) -> bool:
+    """True when ``new_text`` shares at least one meaningful word with
+    ``old_text`` and the shared words are at least
+    :data:`SUPERSEDE_MIN_OVERLAP_RATIO` of the shorter text's meaningful words."""
+    a, b = _meaningful_words(new_text), _meaningful_words(old_text)
+    shared = len(a & b)
+    return shared >= 1 and shared / max(1, min(len(a), len(b))) >= SUPERSEDE_MIN_OVERLAP_RATIO
 
 
 def _hidden_by_supersession_sql(until: str | None) -> tuple[str, list[str]]:
@@ -2541,10 +2562,11 @@ class Store:
                 f"supersede: {new_id!r} already leads, through recorded links, to "
                 f"{old_id!r}; this link would close a cycle and hide every episode on it"
             )
-        if not check_explanation_overlap(new_content, row["content"]):
+        if not _supersession_grounds(new_content, row["content"]):
             return (
-                f"supersede: the new text shares fewer than two meaningful words with "
-                f"{old_id!r}, so it does not ground as an update of it"
+                f"supersede: the new text shares too little with {old_id!r} to ground as "
+                f"an update of it (needs {SUPERSEDE_MIN_OVERLAP_RATIO:.0%} of the shorter "
+                f"episode's meaningful words)"
             )
         return None
 

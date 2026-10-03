@@ -8827,7 +8827,6 @@ class TestOneSpanPerOperation:
         assert inner and isinstance(inner[0], RuntimeError), inner
         assert "not reentrant" in str(inner[0])
 
-    @pytest.mark.skipif(audit_module.fcntl is None, reason="the child probes the lock with fcntl")
     def test_a_repair_in_another_process_cannot_land_between_adoption_and_seed(
         self, tmp_path, monkeypatch
     ):
@@ -8847,24 +8846,11 @@ class TestOneSpanPerOperation:
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.jsonl").write_bytes(b"")  # no usable active file
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
-        probe = tmp_path / "child-probe"
-        # The child first probes the manifest lock without blocking and records
-        # what it found, then repairs (blocking). "held" proves the parent's span
-        # covered the gap at the moment the child looked, whatever the scheduler
-        # did (L3 r2 10-03, codex: a timed wait could pass a split span).
+        ready = tmp_path / "child-ready"
         repair = (
-            "import sys, os, fcntl, pathlib\n"
-            "from anneal_memory.audit import AuditTrail\n"
-            "fd = os.open(sys.argv[3], os.O_RDWR | os.O_CREAT, 0o644)\n"
-            "try:\n"
-            "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
-            "    found = 'free'\n"
-            "    fcntl.flock(fd, fcntl.LOCK_UN)\n"
-            "except BlockingIOError:\n"
-            "    found = 'held'\n"
-            "os.close(fd)\n"
-            "pathlib.Path(sys.argv[2]).write_text(found)\n"
-            "r = AuditTrail.repair_manifest(sys.argv[1]); print(r.repaired, r.error)\n"
+            "import sys, pathlib; from anneal_memory.audit import AuditTrail; "
+            "pathlib.Path(sys.argv[2]).touch(); "
+            "r = AuditTrail.repair_manifest(sys.argv[1]); print(r.repaired, r.error)"
         )
         real = AuditTrail._adopt_orphaned_files
         state: dict = {}
@@ -8872,27 +8858,29 @@ class TestOneSpanPerOperation:
         def adopt_then_repair_in_another_process(self):
             adopted = real(self)
             state["proc"] = subprocess.Popen(
-                [sys.executable, "-c", repair, str(db), str(probe),
-                 str(tmp_path / "m.audit-manifest.lock")],
+                [sys.executable, "-c", repair, str(db), str(ready)],
                 stdout=subprocess.PIPE, text=True,
                 env={**os.environ, "PYTHONPATH": str(Path(audit_module.__file__).parent.parent)},
             )
+            # The 2s window starts once the child has imported and is about to
+            # repair, so a slow start cannot pass for a blocked repair (L3 r1
+            # 10-03, complement).
             deadline = time.monotonic() + 30
-            while not probe.exists() and time.monotonic() < deadline:
+            while not ready.exists() and time.monotonic() < deadline:
                 time.sleep(0.01)
-            state["found"] = probe.read_text() if probe.exists() else None
+            assert ready.exists(), "the repair child never started"
+            try:
+                state["proc"].wait(timeout=2.0)
+                state["landed_in_gap"] = True
+            except subprocess.TimeoutExpired:
+                state["landed_in_gap"] = False
             return adopted
 
         monkeypatch.setattr(AuditTrail, "_adopt_orphaned_files", adopt_then_repair_in_another_process)
-        try:
-            AuditTrail(db).log("x", {})  # must NOT raise
-            out = state["proc"].communicate(timeout=30)[0]
-        finally:
-            monkeypatch.undo()
-            if "proc" in state and state["proc"].poll() is None:
-                state["proc"].kill()
-                state["proc"].wait()
+        AuditTrail(db).log("x", {})  # must NOT raise
+        out = state["proc"].communicate(timeout=30)[0]
+        monkeypatch.undo()
 
-        assert state["found"] == "held", state["found"]
+        assert state["landed_in_gap"] is False
         assert out.startswith("True"), out
         assert AuditTrail.verify(db).valid

@@ -1937,12 +1937,15 @@ class AuditTrail:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         new: list[dict[str, str]] = []
         not_corrupt: list[str] = []
-        adoptable_starts: set[str] = set()
+        # (week, first entry hash, the hash it chained from) of each readable
+        # unmanifested week with an entry: repair's view of what adoption sees
+        readable_weeks: list[tuple[str, str, str | None]] = []
         for week, paths in sorted(by_week.items()):
             scans = {path: trail._scan_sealed(path) for path in paths}
             if any(scan.error is None for scan in scans.values()):
-                adoptable_starts.update(
-                    scan.first_hash for scan in scans.values() if scan.error is None
+                readable_weeks.extend(
+                    (week, scan.first_hash, scan.first_prev_hash)
+                    for scan in scans.values() if scan.error is None and scan.entries > 0
                 )
                 continue  # a readable copy is adoption's to take, not repair's
             if not set_aside_unreadable and not all(
@@ -1995,11 +1998,24 @@ class AuditTrail:
                 )
         vanished: dict[str, str] | None = None
         begun = vanished_active_week(manifest)
-        if begun is not None and begun["first_hash"] in adoptable_starts:
+        if (
+            begun is not None
+            and len({w for w, _, _ in readable_weeks}) == 1
+            and any(
+                h == begun["first_hash"]
+                and prev == manifest.get("active_last_hash", GENESIS_HASH)
+                for _, h, prev in readable_weeks
+            )
+        ):
             # A readable sealed week whose first entry IS the recorded active
             # file's first entry is that file, renamed (by first entry, not by
             # the hash it chained from: an unrelated file can share that, L3 r2
-            # 10-03, codex HIGH, run) by a rotation that crashed before its
+            # 10-03, codex HIGH, run). And only when adoption is certain to take
+            # it: the one readable week, continuing the manifest's tip. With a
+            # second readable week adoption may take that one and reject this,
+            # and a suppressed gap then refuses every write with no way out
+            # (L3 r3 10-03, codex MED, run); the gap is recorded instead, and
+            # verify still reports the week adoption did not take. by a rotation that crashed before its
             # manifest save; the next open adopts it, entries and all. Recording a
             # gap would be false and permanent (L3 r1 10-03, complement, run).
             begun = None

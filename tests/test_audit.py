@@ -9290,3 +9290,27 @@ def test_an_orphan_sharing_only_the_predecessor_hash_does_not_hide_a_loss(tmp_pa
     repair = AuditTrail.repair_manifest(db)
     assert repair.repaired, repair.error
     assert [r["set_aside_as"] for r in repair.set_aside] == [""]
+
+
+def test_a_gap_is_not_suppressed_for_an_orphan_adoption_will_reject(tmp_path):
+    """L3 r3 10-03, codex MED, reproduced on 4d11bb6: the renamed active file
+    and a second readable week chaining from the same tip. Adoption takes the
+    earlier one and rejects the renamed file; repair, seeing the renamed file's
+    first entry, recorded nothing, and every write refused with no way out.
+    Now repair suppresses the gap only for the one readable week continuing the
+    manifest's tip; here it records the gap, writes resume, and verify still
+    reports the week adoption rejected."""
+    db = tmp_path / "m.db"
+    trail = AuditTrail(db)
+    for i in range(3):
+        trail.log("ev", {"i": i})
+    first = json.loads(trail._active_path.read_text().splitlines()[0])
+    trail._active_path.rename(tmp_path / "m.audit.2026-W39.jsonl")
+    (tmp_path / "m.audit.2026-W38.jsonl").write_text(
+        json.dumps(dict(first, event="fork"), sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    repair = AuditTrail.repair_manifest(db)
+    assert repair.repaired, repair.error
+    AuditTrail(db).log("after", {})
+    result = AuditTrail.verify(db)
+    assert result.valid is False and "Unmanifested" in (result.error or "")

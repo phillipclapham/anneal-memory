@@ -252,7 +252,9 @@ then resume and `verify()` is valid with a `GAP:` line saying the active file we
 its entries. A repair that sets aside a crashed rotation's unreadable orphan for the recorded week
 clears the field instead of recording a second gap (that orphan is the active file, renamed); an
 unrelated corrupt week does not clear it. A READABLE orphan whose first entry is the recorded file's first
-entry is left for adoption, which takes it with its entries, and repair records nothing. A store now has a
+entry, when it is the only readable unmanifested week and continues the manifest's tip, is left
+for adoption, which takes it with its entries, and repair records nothing; in any other case
+repair records the gap, so writes resume and `verify()` still reports a week adoption did not take. A store now has a
 manifest from its first audit entry, not from its first rotation. Not covered: entries removed
 from the END of an active file that still holds a valid entry; a week whose record was not saved
 (a failed save warns; with the audit lock unavailable the save is skipped, under that lock's own

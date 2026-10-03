@@ -35,6 +35,7 @@ import stat
 import re
 import threading
 import time
+import weakref
 import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -63,6 +64,38 @@ logger = logging.getLogger("anneal-memory")
 
 # Set once a runtime ``flock`` degrade has been logged (AuditTrail._manifest_lock).
 _lock_degrade_warned = False
+_ENOLCK_RETRIES = 3
+_ENOLCK_RETRY_SECONDS = 0.05
+
+# ⛔ A FORKED CHILD MUST NOT KEEP THE PARENT'S MANIFEST LOCK (L3: codex, and L2
+# reproduced it). ``flock`` belongs to the open file description, which a child
+# inherits: a long-lived child kept the lock after the parent released it, and
+# an inherited ``_lock_depth`` let the child walk into a critical section it did
+# not hold. In the child, each trail that held the lock closes its copy of the
+# descriptor (never LOCK_UN, which would release the PARENT's lock: same
+# description) and resets; ``_fork_generation`` tells an in-flight
+# ``_manifest_lock`` frame continuing in the child not to close it again.
+_fork_generation = 0
+_lock_holders: "weakref.WeakSet[AuditTrail]" = weakref.WeakSet()
+
+
+def _after_fork_in_child() -> None:
+    global _fork_generation
+    _fork_generation += 1
+    for trail in list(_lock_holders):
+        if trail._lock_fd is not None:
+            try:
+                os.close(trail._lock_fd)
+            except OSError:
+                pass
+        trail._lock_fd = None
+        trail._lock_depth = 0
+        trail._lock_mutex = threading.RLock()
+    _lock_holders.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_in_child)
 
 # Chain anchors
 GENESIS_HASH = "sha256:GENESIS"
@@ -1729,64 +1762,90 @@ class AuditTrail:
         """
         with self._lock_mutex:
             if self._lock_depth:
+                nested_gen = _fork_generation
                 self._lock_depth += 1
                 try:
                     yield self._lock_fd is not None
                 finally:
-                    self._lock_depth -= 1
+                    if nested_gen == _fork_generation:
+                        self._lock_depth -= 1
                 return
-            fd: int | None = None
-            if fcntl is not None:
-                lock_path = self._db_path.parent / f"{self._db_path.stem}.audit-manifest.lock"
-                # Read-only is enough for ``flock``, so a lock file created by
-                # another user, or under a umask that left it 0600, still locks
-                # (L1 + L2, reproduced: O_RDWR refused it and rotation then failed
-                # mid-way). O_NOFOLLOW + O_NONBLOCK + the regular-file check: a
-                # symlink, FIFO or directory planted at the path is refused, not
-                # followed, waited on, or silently degraded to no lock (L2,
-                # reproduced: a FIFO made ``flock`` report ENOTSUP).
-                try:
-                    fd = os.open(
-                        lock_path,
-                        os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
-                        0o644,
-                    )
-                except OSError as e:
-                    raise _AuditLockError(
-                        f"cannot open the audit manifest lock {lock_path.name}: {e}"
-                    ) from e
-                try:
-                    if not stat.S_ISREG(os.fstat(fd).st_mode):
-                        raise _AuditLockError(
-                            f"the audit manifest lock {lock_path.name} is not a regular file"
-                        )
-                    fcntl.flock(fd, fcntl.LOCK_EX)
-                except BaseException as e:
-                    # Any exception, an interrupt included, closes the descriptor.
-                    os.close(fd)
-                    fd = None
-                    if isinstance(e, _AuditLockError) or not isinstance(e, OSError):
-                        raise
-                    if e.errno not in _LOCK_UNAVAILABLE_ERRNOS:
-                        raise _AuditLockError(
-                            f"cannot lock the audit manifest lock {lock_path.name}: {e}"
-                        ) from e
-                    global _lock_degrade_warned
-                    if not _lock_degrade_warned:
-                        _lock_degrade_warned = True
-                        logger.warning(
-                            "Advisory locks are unavailable for %s (%s); audit manifest "
-                            "changes are not serialized across processes.", lock_path, e,
-                        )
+            gen = _fork_generation
+            fd = self._open_and_flock() if fcntl is not None else None
             self._lock_fd = fd
             self._lock_depth = 1
+            if fd is not None:
+                _lock_holders.add(self)
             try:
                 yield fd is not None
             finally:
-                self._lock_depth = 0
-                self._lock_fd = None
-                if fd is not None:
-                    os.close(fd)
+                _lock_holders.discard(self)
+                # In a child forked while this was held, the fork handler has
+                # already closed the inherited descriptor and reset the state.
+                if gen == _fork_generation:
+                    self._lock_depth = 0
+                    self._lock_fd = None
+                    if fd is not None:
+                        os.close(fd)
+
+    def _open_and_flock(self) -> int | None:
+        """Open the lock file and take ``LOCK_EX`` on it; ``None`` when advisory
+        locks are unavailable here (warned once per process). See
+        :meth:`_manifest_lock`."""
+        assert fcntl is not None
+        lock_path = self._db_path.parent / f"{self._db_path.stem}.audit-manifest.lock"
+        # O_RDWR first: on Linux NFS an exclusive lock needs a descriptor open for
+        # writing (L3: complement + codex). O_RDONLY is the fallback for a lock
+        # file this user may not write (another user's, or 0444 under a umask),
+        # where local filesystems lock it anyway (L1 + L2, reproduced: O_RDWR
+        # alone refused it and rotation failed mid-way). O_NOFOLLOW + O_NONBLOCK
+        # + the regular-file check: a symlink, FIFO or directory planted at the
+        # path is refused, not followed, waited on, or silently degraded to no
+        # lock (L2, reproduced: a FIFO made ``flock`` report ENOTSUP).
+        flags = os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+        try:
+            try:
+                fd = os.open(lock_path, os.O_RDWR | flags, 0o644)
+            except PermissionError:
+                fd = os.open(lock_path, os.O_RDONLY | flags, 0o644)
+        except OSError as e:
+            raise _AuditLockError(
+                f"cannot open the audit manifest lock {lock_path.name}: {e}"
+            ) from e
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise _AuditLockError(
+                    f"the audit manifest lock {lock_path.name} is not a regular file"
+                )
+            # ENOLCK is also what a lock table out of records returns, which is
+            # transient; Linux NFS without lock support returns it for good. A
+            # few short retries separate the two before degrading (L3: codex).
+            for attempt in range(_ENOLCK_RETRIES + 1):
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                    return fd
+                except OSError as e:
+                    if e.errno != errno.ENOLCK or attempt == _ENOLCK_RETRIES:
+                        raise
+                    time.sleep(_ENOLCK_RETRY_SECONDS)
+            raise AssertionError("unreachable")  # pragma: no cover
+        except BaseException as e:
+            # Any exception, an interrupt included, closes the descriptor.
+            os.close(fd)
+            if isinstance(e, _AuditLockError) or not isinstance(e, OSError):
+                raise
+            if e.errno not in _LOCK_UNAVAILABLE_ERRNOS:
+                raise _AuditLockError(
+                    f"cannot lock the audit manifest lock {lock_path.name}: {e}"
+                ) from e
+        global _lock_degrade_warned
+        if not _lock_degrade_warned:
+            _lock_degrade_warned = True
+            logger.warning(
+                "Advisory locks are unavailable for %s; audit manifest changes are "
+                "not serialized across processes.", lock_path,
+            )
+        return None
 
     def _initialize(self) -> None:
         """Lazy init: recover seq and prev_hash from existing audit file.
@@ -1797,7 +1856,7 @@ class AuditTrail:
         """
         # Adopt orphaned sealed files — crash between rename and manifest
         # update during rotation leaves .gz files the manifest doesn't know about.
-        self._adopt_orphaned_files()
+        adopted = self._adopt_orphaned_files()
 
         active = self._active_path
         # ⛔ ``or st_size == 0`` IS LOAD-BEARING, AND THIS FILE ALREADY KNEW
@@ -1818,6 +1877,7 @@ class AuditTrail:
         # which the bare ``exists()`` was right.
         if not active.exists() or active.stat().st_size == 0:
             # Fresh start — anchor on the sealed files via the manifest.
+            self._refuse_seed_after_skipped_adoption(adopted)
             self._seed_from_manifest()
             self._last_week = _iso_week_now()
             self._initialized = True
@@ -1858,10 +1918,37 @@ class AuditTrail:
             # helper, so they cannot drift apart again; two pieces of code
             # computing one thing, disagreeing exactly where the rollback
             # puts you, is the defect this file has now shipped twice.
+            self._refuse_seed_after_skipped_adoption(adopted)
             self._seed_from_manifest()
             self._last_week = _iso_week_now()
 
         self._initialized = True
+
+    def _refuse_seed_after_skipped_adoption(self, adopted: bool) -> None:
+        """⛔ NO CHAIN ANCHOR FROM A MANIFEST THAT MAY BE MISSING A SEALED WEEK (L3:
+        codex, reasoned). With no usable active file the chain continues from the
+        manifest's last week. If adoption was just refused (the lock could not be
+        taken) and sealed files exist, a crashed rotation's orphan may be newer
+        than that week: appending from the manifest would fork the chain past it,
+        and adoption could never reconnect it. Raising fails this write and
+        ``_initialize`` retries on the next ``log()``. A store with no sealed file
+        has nothing to fork from, so it is not refused."""
+        if adopted:
+            return
+        stem = self._db_path.stem
+        try:
+            sealed = any(_is_sealed_filename(p.name, stem) for p in self._db_path.parent.iterdir())
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            raise _ManifestUnavailable(
+                f"orphan adoption was skipped and the audit directory cannot be listed: {e}"
+            ) from e
+        if sealed:
+            raise _ManifestUnavailable(
+                "orphan adoption was skipped because the audit manifest lock could not be "
+                "taken; not starting the chain from a manifest that may be missing a sealed week"
+            )
 
     def _seed_from_manifest(self) -> None:
         """Anchor the chain on the sealed files when the active file has none.
@@ -1946,16 +2033,18 @@ class AuditTrail:
             "has no readable entry to continue the chain from; run `anneal-memory audit-repair`"
         )
 
-    def _adopt_orphaned_files(self) -> None:
+    def _adopt_orphaned_files(self) -> bool:
         """Run :meth:`_adopt_locked` under the manifest lock (spore-1030): its
         load, renames and save are one span, so a repair cannot land between its
         load and its save. A lock that cannot be taken skips recovery, as an
-        unreadable manifest does; the next open retries."""
+        unreadable manifest does, and returns False; otherwise True."""
         try:
             with self._manifest_lock():
                 self._adopt_locked()
         except _AuditLockError as exc:
             logger.warning("Not adopting orphaned audit files: %s", exc)
+            return False
+        return True
 
     def _adopt_locked(self) -> None:
         """Adopt sealed files that the manifest doesn't know about.

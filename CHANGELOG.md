@@ -17,14 +17,24 @@ rotation, orphan adoption and retention cleanup (each takes the lock before its 
 that cannot be taken refuses the step with nothing sealed or moved). A writer that read an invalid
 manifest takes the lock, lists the markers and reads the manifest again, and renames only bytes it parsed
 as invalid while holding it; if a repair got there first it uses the rebuilt manifest. The lock is
-reentrant within one `AuditTrail`, released when its descriptor closes or the process dies, opened
-read-only (so a lock file another user created still locks), and a symlink, FIFO or directory at its path
-is refused rather than followed or silently ignored. It blocks with no timeout: a stopped holder delays
-other processes' rotations and quarantines until it exits.
+reentrant within one `AuditTrail`, and released when its descriptor closes or the process dies. A child
+forked while it is held closes its inherited copy, so it neither keeps the parent's lock nor walks into
+the parent's critical section. It is opened read-write (Linux NFS needs that for an exclusive lock), and
+read-only when this user may not write the lock file (another user's, or a restrictive umask). A symlink,
+FIFO or directory at its path is refused rather than followed or silently ignored. It blocks with no
+timeout: a stopped holder delays other processes' rotations and quarantines until it exits.
+
+A process that cannot take the lock at its first write, with no usable active file and sealed files on
+disk, refuses that write instead of continuing the chain from the manifest: a crashed rotation's orphaned
+week could be newer than the manifest knows, and continuing past it forked the chain for good (measured
+with the refusal removed). The next write retries.
 
 Where advisory locks do not exist it degrades to no lock, which is the previous behaviour: silently on
 Windows (no `fcntl`), and with a warning logged once per process on a filesystem whose `flock` reports
-`ENOLCK`/`EOPNOTSUPP`. Any other failure to take it is a refusal: the writer does not quarantine, rotate,
+`EOPNOTSUPP`, or `ENOLCK` after three short retries. `ENOLCK` is ambiguous: Linux NFS without lock support
+returns it for good, and a kernel out of lock records returns it briefly. Failing closed on it would leave
+such NFS stores unable to rotate or repair; degrading means a repair racing a writer during real
+lock-record exhaustion can still hit this race. Any other failure to take it is a refusal: the writer does not quarantine, rotate,
 adopt or prune, and `audit-repair` writes nothing.
 
 This replaces 0.9.10's caveat that `audit-repair` must not run while another process writes the trail,

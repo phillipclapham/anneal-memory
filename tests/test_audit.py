@@ -8413,3 +8413,104 @@ class TestManifestLockFile:
         trail.log("not-rotated", {})
         assert not list(tmp_path.glob("m.audit.1999-W01*"))
         assert AuditTrail.verify(db).valid
+
+
+@pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+class TestManifestLockL3:
+    """L3 round 1 on spore-1030 (complement, codex, glm slot served by gpt-oss)."""
+
+    _two_sealed_weeks = staticmethod(TestHybridManifestQuarantine._two_sealed_weeks)
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+    def test_a_forked_child_does_not_keep_the_lock(self, tmp_path):
+        """codex HIGH (L2 reproduced it): a child forked while the lock was held
+        kept it after the parent released. ⛔ MUTATION-CHECKED: skip the fork
+        handler and this fails."""
+        import time as time_module
+
+        trail = AuditTrail(tmp_path / "m.db")
+        lock = tmp_path / "m.audit-manifest.lock"
+        state = tmp_path / "child_state"
+        with trail._manifest_lock():
+            pid = os.fork()
+            if pid == 0:  # child: report the reset, outlive the parent's hold
+                try:
+                    state.write_text(f"{trail._lock_fd} {trail._lock_depth}")
+                    time_module.sleep(2.0)
+                finally:
+                    os._exit(0)
+            deadline = time_module.time() + 10
+            while not state.exists() and time_module.time() < deadline:
+                time_module.sleep(0.01)
+        try:
+            probe = _probe_lock_from_another_process(lock)
+        finally:
+            os.waitpid(pid, 0)
+        assert state.read_text() == "None 0"
+        assert probe == "acquired"
+
+    def test_enolck_is_retried_before_degrading(self, tmp_path, monkeypatch):
+        """codex HIGH: ENOLCK is also a transient lock-table exhaustion. A lock
+        that succeeds on a retry is held, not degraded.
+        ⛔ MUTATION-CHECKED: no retry and this fails."""
+        import errno as errno_module
+
+        real = audit_module.fcntl.flock
+        calls = {"n": 0}
+
+        def flaky(fd, op):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise OSError(errno_module.ENOLCK, "no lock records")
+            return real(fd, op)
+
+        monkeypatch.setattr(audit_module.fcntl, "flock", flaky)
+        with AuditTrail(tmp_path / "m.db")._manifest_lock() as held:
+            assert held is True
+
+    def test_the_lock_opens_read_write_first(self, tmp_path, monkeypatch):
+        """complement + codex MED: on Linux NFS an exclusive flock needs a
+        descriptor open for writing. ⛔ MUTATION-CHECKED: open read-only first
+        and this fails."""
+        real = os.open
+        flags_seen: list[int] = []
+
+        def recording_open(path, flags, *a):
+            if str(path).endswith(".audit-manifest.lock"):
+                flags_seen.append(flags)
+            return real(path, flags, *a)
+
+        monkeypatch.setattr(audit_module.os, "open", recording_open)
+        with AuditTrail(tmp_path / "m.db")._manifest_lock():
+            pass
+        assert flags_seen and flags_seen[0] & os.O_ACCMODE == os.O_RDWR
+
+    def test_no_chain_start_from_the_manifest_after_a_skipped_adoption(self, tmp_path):
+        """codex MED (reasoned, then run here): an orphaned sealed week, an empty
+        active file and a lock that cannot be taken. Seeding from the manifest
+        forked the chain past the orphan for good [run with the refusal removed:
+        the locked-out write was accepted and verify() then reported W03
+        unmanifested for good]. ⛔ MUTATION-CHECKED: drop the refusal and this
+        fails."""
+        db = self._two_sealed_weeks(tmp_path)
+        t = AuditTrail(db)
+        t.log("w3", {})
+        mpath = tmp_path / "m.audit.manifest.json"
+        before_rotation = mpath.read_bytes()
+        t._last_week = "1999-W03"
+        t.log("rot3", {})
+        # A crash between rotation 3's rename and its save: the old manifest,
+        # the sealed W03 as an orphan, and an empty active file.
+        mpath.write_bytes(before_rotation)
+        (tmp_path / "m.audit.jsonl").write_bytes(b"")
+        lock = tmp_path / "m.audit-manifest.lock"
+        lock.unlink(missing_ok=True)
+        lock.mkdir()
+
+        with pytest.raises(audit_module._ManifestUnavailable):
+            AuditTrail(db).log("while-locked-out", {})
+        assert (tmp_path / "m.audit.jsonl").read_bytes() == b""
+
+        lock.rmdir()
+        AuditTrail(db).log("after", {})
+        assert AuditTrail.verify(db).valid

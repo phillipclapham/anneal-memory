@@ -3233,10 +3233,26 @@ def _outcome_store_id(db_path: Path, *, mint: bool) -> str | None:
     try:
         with Store(db_path, audit=False, read_only=True) as store:
             sid = store.store_id
+            # Mint only into a proven anneal store: a metadata table alone is not
+            # proof, and a write-capable open writes anneal's whole schema into
+            # whatever file it is given (L1 10-03, a metadata-only db).
+            anneal = sid is not None or (
+                store._conn.execute(
+                    "SELECT 1 FROM metadata WHERE key = 'format_version'"
+                ).fetchone() is not None
+                and store._conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'episodes'"
+                ).fetchone() is not None
+            )
         if sid is None and mint:
+            if not anneal:
+                print(f"Error: cannot read the store id of {db_path}: not an anneal store "
+                      f"(no format_version or no episodes table); nothing written",
+                      file=sys.stderr)
+                sys.exit(1)
             with Store(db_path, audit=False) as store:
                 sid = store.store_id
-    except (StoreError, OSError) as exc:
+    except (StoreError, OSError, sqlite3.Error) as exc:
         print(f"Error: cannot read the store id of {db_path}: {exc}", file=sys.stderr)
         sys.exit(1)
     if sid is None and mint:  # pragma: no cover - the write-capable open seeds it
@@ -3338,18 +3354,27 @@ def cmd_worth(args: argparse.Namespace) -> None:
         sys.exit(1)
     if receipt_missing:
         print(f"Not found (skipped): {', '.join(receipt_missing)}", file=sys.stderr)
+    b = report.binding
+    # An all-foreign log is a wrong log, not a clean zero: exit 1 (L1 10-03, the
+    # same shape as the missing-db finding), with the report still printed.
+    foreign_warning = (
+        f"This outcome log belongs to another store ({', '.join(b.foreign_stores)}), "
+        f"not this one ({b.store_id or 'no store id yet'}): none of its {b.foreign} "
+        f"exposure(s) are counted."
+        if b is not None and b.all_foreign else None
+    )
+    if foreign_warning:
+        print(f"!! {foreign_warning}", file=sys.stderr)
     if args.json:
         out = report.as_dict()
         if receipts is not None:
             out["receipt_lines_unreadable"] = receipt_bad
+        if foreign_warning:
+            out["warning"] = foreign_warning
         _print_json(out)
+        if foreign_warning:
+            sys.exit(1)
         return
-    b = report.binding
-    if b is not None and b.all_foreign:
-        print(f"!! This outcome log belongs to another store ({', '.join(b.foreign_stores)}), "
-              f"not this one ({b.store_id or 'no store id yet'}): none of its {b.foreign} "
-              f"exposure(s) are counted.",
-              file=sys.stderr)
     print(f"Worth (report-only) from {report.exposures} exposure(s)"
           + (f", {report.lines_skipped} unreadable line(s) skipped" if report.lines_skipped else ""))
     if b is not None and b.store_id is None:
@@ -3390,6 +3415,8 @@ def cmd_worth(args: argparse.Namespace) -> None:
             print(f"{r.ref:<20} {r.success:>5} {r.failure:>5} "
                   f"{r.credited_success:>9}/{r.credited_failure:<8} "
                   f"{r.unlabelled_success:>6} {r.unlabelled_failure:>6}")
+    if foreign_warning:
+        sys.exit(1)
 
 
 def cmd_crystal_update(args: argparse.Namespace) -> None:
@@ -4188,8 +4215,12 @@ def build_parser() -> argparse.ArgumentParser:
                           "the harness's receipt). Unlabelled ones are reported in their own "
                           "columns, never in succ/fail. Needs --item or --outcome beside it.")
     sub.add_argument("--adopt-unbound", action="store_true",
-                     help="Bind every record written before store ids to THIS store: appends "
-                          "one marker record, rewrites nothing. Takes no other outcome flags.")
+                     help="Bind EVERY unbound record in the log (no store id: written before "
+                          "store ids, including any a store replaced at this path left) to THIS "
+                          "store, so check the log is this store's first. Appends one marker, "
+                          "rewrites nothing. Changes no count (unbound records are already "
+                          "counted), only the report and how a later reader classifies them. "
+                          "Takes no other outcome flags.")
     sub.set_defaults(func=cmd_outcome)
 
     sub = subparsers.add_parser(

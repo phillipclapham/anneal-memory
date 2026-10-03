@@ -39,6 +39,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - Every store gets a `store_id` (`uuid4().hex`) in its metadata, seeded on write-capable opens
   beside `format_version` and never rewritten; `Store.store_id` reads it (`None` when only a
   read-only open has run since the upgrade). Export/import does not copy it.
+- The `store_id` mint is not under the require-baton gate: it is seeded in `Store.__init__`'s
+  schema init on every write-capable open, alongside `format_version` and the default metadata.
+  The baton guards the consolidate recompose; seeding a metadata row is an ordinary write.
 - `OutcomeLog(path, store_id=...)` stamps `"store"` on every record it writes and sorts the log
   into bound (this store), unbound (no `store` key: everything written before this release, or by
   a caller passing no id) and foreign (another store). `latest()` and `compute_worth()` count
@@ -53,15 +56,21 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   mints a missing id with one write-capable open, as every store command makes. `worth` stays
   read-only and never mints: on a store with no id yet it reports "no id yet" and counts the
   log's unstamped records as unbound (stamped ones are foreign), writing nothing to the store.
-  `worth` prints a loud line for an all-foreign log and a `bound / unbound / foreign` line
-  whenever the log is not all bound; `outcome` refuses an all-foreign log.
+  `worth` prints a loud line for an all-foreign log and EXITS 1 (with `--json`, a `warning`
+  field and `all_foreign`), since zeros from the wrong log are not a clean measurement, and a
+  `bound / unbound / foreign` line whenever the log is not all bound; `outcome` refuses an
+  all-foreign log. `outcome` mints a missing id only into a proven anneal store (a
+  `format_version` row and an `episodes` table); a file with a `metadata` table alone refuses
+  and is not written.
 - `OutcomeLog(..., bind=True)` with `store_id=None` reads a log bound to a store that has no id
   yet (refusing writes), so a caller passing `store.store_id` straight through is not silently
   read as unpartitioned when it is `None`.
 - `anneal-memory outcome --adopt-unbound` (`OutcomeLog.adopt_unbound()`): an explicit operator act
   that appends one marker `{"v": 1, "adopt": true, "store": <id>, "ts": ...}` binding the unbound
   records before it to this store. Nothing is rewritten; a second run with nothing unbound writes
-  nothing. Readers older than this release skip the marker as one unreadable line and count
+  nothing. It binds EVERY unbound record, including any that a store replaced at the same path
+  left behind, so check the log is this store's first. It changes no count (unbound records are
+  already counted), only the report and how later readers classify them. Readers older than this release skip the marker as one unreadable line and count
   nothing from it (measured on 0.9.23).
 
 ### Fixed

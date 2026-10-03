@@ -83,6 +83,18 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   schema per store; the class fix is designed, not built (append logs stay readable at every older
   `v`, and SQLite writes are refused by triggers installed with the first schema bump).
 
+### Added — a schema bump can refuse writers that are already open
+
+- Every store connection registers an SQL function, `anneal_writer_schema()`, returning this
+  release's schema version. No trigger uses it yet. The first release that raises the schema
+  version will install write triggers that abort when it is below the store's stamped
+  `format_version`, so a process that opened the store before that migration is refused inside
+  its own write transaction instead of writing an older-schema row (the open-time check cannot
+  see a migration that happens after it). Releases before this one do not register it, so those
+  triggers refuse them too, with "no such function".
+- A test pins the released version-1 outcome-log record shapes: a later release that changes the
+  record writes a new `v` and keeps reading these.
+
 ### Fixed
 
 - The outcome log reads a record only when its `v` is the integer `1`. A line carrying `v: true`
@@ -222,12 +234,29 @@ quarantine re-creates the records from the set-aside names on disk (the cause is
 Older anneal-memory versions ignore the `set_aside` field and keep it on their own saves, but their
 `audit-repair` rebuild drops it and their `verify()` does not report it.
 
-Known and not fixed: the entries of an active audit file deleted mid-week are not detected. A fresh
-open re-seeds from the manifest and so does a rotation that finds its active file missing, so the
-chain continues past them and `verify()` stays valid with no gap reported (measured 2026-10-03 on
-the release before this one too: three entries deleted, store reopened, one entry logged, `valid`).
-The fix is designed and being built: a manifest record that the active file has entries, so a
-missing one refuses writes and `audit-repair` records it as a gap.
+A deleted or emptied active audit file is no longer a silent loss (Phill, 2026-10-03). Before, a
+fresh open re-seeded from the manifest and so did a rotation that found its active file missing,
+so the chain continued past the lost entries and `verify()` stayed valid with no gap (measured on
+0.9.23: three entries deleted, store reopened, one entry logged, `valid`). Now the first append to
+an active file saves a new manifest field, `active_begun` (`period`, `first_hash`,
+`first_prev_hash`), once per active file, and an open that finds an active file with entries but
+no record (one begun by an earlier release) records it from that file's first entry, so an
+upgraded store is covered from its first open; the seal that moves the file into `files` clears it, and
+so does the adoption of a crashed rotation's orphan that starts from the same `first_prev_hash`.
+When it names a week that is not sealed and the active file holds no valid entry, writes REFUSE
+naming the week, `verify()` is invalid naming `audit-repair`, and `audit-repair` records the week
+in `set_aside` with `set_aside_as` empty (there is no file to move) and clears the field; writes
+then resume and `verify()` is valid with a `GAP:` line saying the active file went missing with
+its entries. A repair that sets aside a crashed rotation's unreadable orphan clears the field
+instead of recording a second gap (that orphan is the active file, renamed). A store now has a
+manifest from its first audit entry, not from its first rotation. Not covered: entries removed
+from the END of an active file that still holds a valid entry; a week whose record was not saved
+(a failed save warns; with the audit lock unavailable the save is skipped, under that lock's own
+warning), which is then unprotected; a crash during a rotation that also deleted the active file
+reads as one gap, not two; and a manifest rebuilt from quarantine has no `active_begun`, nor any
+set-aside record without a file on disk. Older releases ignore the field and re-save the manifest
+they loaded, so it survives their saves (read in 0.9.23's code, not run); their seal does not
+clear it, and the sealed week's `files` record then accounts for it by period.
 
 Known and not fixed: a crash during a manifest save can leave a uniquely named
 `.anneal-manifest-<hex>.tmp` beside the manifest (a fixed-length name, so a long stem cannot push it

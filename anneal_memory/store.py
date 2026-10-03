@@ -1160,6 +1160,16 @@ _NEW_FORMAT_PAIR_ID_RE = re.compile(r"[0-9a-f]{12}-[0-9a-f]{8}")
 
 # Schema version — increment on breaking changes
 _SCHEMA_VERSION = 1
+# ⛔ THE SQL FUNCTION A FUTURE SCHEMA BUMP'S WRITE GUARD CALLS (Phill 2026-10-03).
+# Every connection registers it, returning ``_SCHEMA_VERSION``. The first migration that
+# raises ``_SCHEMA_VERSION`` installs BEFORE INSERT/UPDATE/DELETE triggers that
+# ``RAISE(ABORT, ...)`` when this function is below the stamped
+# ``format_version``, so a process that opened the store before that migration
+# is refused inside its own write transaction instead of writing an older-schema
+# row. A release that does not register it fails those triggers with "no such
+# function", which also refuses. No trigger is installed at schema 1 (asserted
+# in tests/test_store.py, ``TestTheWriterSchemaFunctionLetsABumpRefuseOpenWriters``).
+_WRITER_SCHEMA_FUNCTION = "anneal_writer_schema"
 
 def _sql_statements(script: str) -> list[str]:
     """Split a DDL script into individual statements.
@@ -1786,6 +1796,10 @@ class Store:
             with self._db_boundary("schema_init"):
                 self._conn = sqlite3.connect(str(self._path))
                 self._conn.row_factory = sqlite3.Row
+                self._conn.create_function(
+                    _WRITER_SCHEMA_FUNCTION, 0, lambda: _SCHEMA_VERSION,
+                    deterministic=True,
+                )
                 # ⛔ FIRST, BEFORE EVERY PERSISTENT WRITE — INCLUDING THE
                 # PRAGMAS. This used to sit just above ``_init_schema``, on the
                 # reasoning that schema init is what mutates the database.

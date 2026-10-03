@@ -4563,3 +4563,23 @@ def test_an_adopt_marker_needs_an_integer_version():
         line = '{"v": %s, "adopt": true, "store": "aaaaaaaa", "ts": "x"}' % v
         assert worth._parse_record(line) is None, v
     assert worth._parse_record('{"v": 1, "adopt": true, "store": "aaaaaaaa", "ts": "x"}')
+
+
+def test_audit_repair_names_a_missing_active_file_as_lost_not_moved(tmp_path):
+    """[run] 1003+12 on a real store copy: the repair of a deleted active file
+    printed the moved-file line, "Set aside sealed file memory.audit.jsonl as
+    (...); kept on disk", for a file that is neither moved nor on disk."""
+    from anneal_memory.audit import AuditTrail
+
+    db = tmp_path / "m.db"
+    trail = AuditTrail(db)
+    for i in range(3):
+        trail.log("ev", {"i": i})
+    trail._active_path.unlink()
+    out = subprocess.run(
+        [sys.executable, "-m", "anneal_memory.cli", "--db", str(db), "audit-repair"],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 0, out.stderr
+    assert "Recorded the missing active audit file m.audit.jsonl" in out.stdout
+    assert "Set aside sealed file" not in out.stdout

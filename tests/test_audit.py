@@ -18,6 +18,19 @@ import anneal_memory.audit as audit_module
 from anneal_memory.audit import GENESIS_HASH, AuditTrail, AuditVerifyResult
 
 
+
+def _first_append_never_completed(db):
+    """Make a fixture that hand-writes a torn or empty active file over a
+    COMPLETED first append match what a real crash leaves: a first append that
+    tears or rolls back dies before ``log()`` saves the manifest's
+    ``active_begun`` record, so the record is absent. Without this, the
+    hand-written state is a completed entry later deleted, which is refused."""
+    import json as _json
+    mp = db.parent / f"{db.stem}.audit.manifest.json"
+    m = _json.loads(mp.read_text())
+    m["active_begun"] = None
+    mp.write_text(_json.dumps(m))
+
 class TestAuditBasics:
     """Basic audit trail operations."""
 
@@ -999,14 +1012,34 @@ class TestAZeroByteActiveFileIsNotAnActiveFile:
         for i in range(3):
             trail.log("before", {"i": i})
 
-        # force the weekly rotation, then land one entry in the new file
+        # force the weekly rotation, then fail the first append into the new
+        # file at its fsync, so log() rolls it back itself. (This fixture used
+        # to land the entry and empty the file by hand; with the manifest now
+        # recording an active file's first entry, that shape is a DELETED
+        # active file, which is refused, not a rollback, which saves nothing.)
+        import anneal_memory.audit as audit_mod
+
         trail._last_week = "1999-W01"
-        trail.log("after_rotation", {})
+        real_fsync = audit_mod.os.fsync
+        calls = {"n": 0}
+
+        def fsync_failing_once(fd):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError(5, "injected fsync failure")
+            return real_fsync(fd)
+
+        with trail._operation_span():  # rotate first: its own fsyncs are not the target
+            trail._rotate_if_needed()
+        audit_mod.os.fsync = fsync_failing_once
+        try:
+            with pytest.raises(OSError):
+                trail.log("after_rotation", {})
+        finally:
+            audit_mod.os.fsync = real_fsync
         active = trail._active_path
-        assert active.stat().st_size > 0
 
         # what a rolled-back first-append-into-a-fresh-file leaves behind
-        active.write_text("")
         assert active.exists() and active.stat().st_size == 0
 
         AuditTrail(db).log("next_process", {})
@@ -1131,6 +1164,9 @@ class TestWeeklyRotation:
             real_fsync_dir(path)
 
         monkeypatch.setattr(audit_module, "_fsync_dir", spy)
+        # This pins rotation's own call sites; the active-file record a first
+        # append saves (one more manifest save each) is not one of them.
+        monkeypatch.setattr(AuditTrail, "_record_active_begun", lambda *a: None)
 
         db = tmp_path / "test.db"
         trail = AuditTrail(db)
@@ -1727,11 +1763,20 @@ class TestDiogenesBugFixes:
         )
         assert manifest["active_last_seq"] == 0
 
-        # Simulate crash: delete the active file (as if it was never written)
+        # Delete the active file, which holds entry 3 (written just above)
         active = tmp_path / "test.audit.jsonl"
         active.unlink()
 
         # New trail recovers from manifest — should start at seq 0
+        # Entry 3 was in the deleted file: since 1003+12 that is a loss the
+        # manifest's ``active_begun`` record exposes, so the append refuses
+        # until audit-repair records the gap (before, it silently continued).
+        from anneal_memory.audit import _ManifestUnavailable
+        with pytest.raises(_ManifestUnavailable):
+            AuditTrail(db).log("record", {"id": "4"})
+        repair = AuditTrail.repair_manifest(db)
+        assert repair.repaired and [r["set_aside_as"] for r in repair.set_aside] == [""]
+
         trail2 = AuditTrail(db)
         entry = trail2.log("record", {"id": "4"})
         assert entry["seq"] == 0  # Matches normal rotation behavior
@@ -5217,6 +5262,7 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
         active = db.parent / "rot.audit.jsonl"
         # what a failed rollback on a freshly rotated file leaves behind
         active.write_text('{"v":1,"seq":4,"ts":"2026-09-07T00:00:00.0000')
+        _first_append_never_completed(db)
         assert active.stat().st_size > 0, "fixture: must be NONEMPTY"
 
         fresh = AuditTrail(db)
@@ -5259,6 +5305,7 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
 
         active = db.parent / "fast.audit.jsonl"
         active.write_text("")                      # the rolled-back state
+        _first_append_never_completed(db)
         assert active.stat().st_size == 0
 
         real_open = builtins.open
@@ -5399,6 +5446,7 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
             '{"v":1,"seq":4,"ts":"2026-09-07T00:00:00.0000⛔'.encode("utf-8")[:-1]
         )
         assert active.stat().st_size > 0, "fixture: must be NONEMPTY"
+        _first_append_never_completed(db)
 
         fresh = AuditTrail(db)
         with fresh._operation_span():
@@ -7119,7 +7167,9 @@ class TestFixDiffRound10RecoveryNeverDeletes:
                     snapshot_and_stall()
 
         def save(self, *args, **kwargs):
-            if mine() and stall_at == "before_manifest_save":
+            # Once: the rotation's own save. The first append's active-file
+            # record is a later save on the same thread (1003+12).
+            if mine() and stall_at == "before_manifest_save" and not seen:
                 snapshot_and_stall()
             return real_save(self, *args, **kwargs)
 
@@ -7334,6 +7384,12 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         )
         orphan.write_text(foreign + "\n", encoding="utf-8")
 
+        # The active file's entries were in the orphan this fixture overwrote,
+        # so nothing holds them now: since 1003+12 the manifest's record of the
+        # active file refuses the write until audit-repair records the gap.
+        with pytest.raises(audit_module._ManifestUnavailable):
+            AuditTrail(db).log("after", {})
+        assert AuditTrail.repair_manifest(db).repaired
         AuditTrail(db).log("after", {})
 
         names = [f["filename"] for f in AuditTrail(db)._load_manifest()["files"]]
@@ -7581,6 +7637,7 @@ class TestRound10bL3Fixes:
                 trail._last_week = "1999-W01"
                 trail.log("rot", {})
                 (tmp_path / "m.audit.jsonl").write_bytes(b"")
+                _first_append_never_completed(db)
             return real(cls, *args, **kwargs)
 
         monkeypatch.setattr(AuditTrail, "_verify_listed", classmethod(racing))
@@ -7640,6 +7697,7 @@ class TestRound10bL3Fixes:
                 trail._last_week = "1999-W01"
                 trail.log("rot", {})
                 (tmp_path / "m.audit.jsonl").write_bytes(b"")
+                _first_append_never_completed(db)
                 names = set()
             return real(cls, db_path, names, manifest_signature)
 
@@ -7685,6 +7743,9 @@ class TestRound10bL3Fixes:
         for i in range(3):
             trail.log("pre", {"i": i})
         (tmp_path / "m.audit.jsonl").rename(tmp_path / "m.audit.1999-W01.jsonl")
+        # No manifest: a release before 1003+12 wrote none until the first
+        # rotation; this one saves it on the first append (``active_begun``).
+        (tmp_path / "m.audit.manifest.json").unlink()
 
         result = AuditTrail._verify_listed(db, set(), None)
 
@@ -9065,3 +9126,70 @@ class TestOneSpanPerOperation:
         assert state["landed_in_gap"] is False
         assert out.startswith("True"), out
         assert AuditTrail.verify(db).valid
+
+
+class TestADeletedActiveFileIsNotASilentLoss:
+    """Phill 2026-10-03 "3A" (W). [run] on main 393dcce before this: three
+    entries logged, the active file deleted, a fresh trail, one append, and
+    ``verify()`` said valid with 1 entry and no gap. The manifest's
+    ``active_begun`` record is what a restart can read."""
+
+    @staticmethod
+    def _deleted(tmp_path):
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("ev", {"i": i})
+        trail._active_path.unlink()
+        return db
+
+    def test_a_restart_refuses_then_repair_records_the_gap_and_writes_resume(self, tmp_path):
+        from anneal_memory.audit import set_aside_report_lines
+
+        db = self._deleted(tmp_path)
+        with pytest.raises(audit_module._ManifestUnavailable, match="held entries"):
+            AuditTrail(db).log("after", {})  # a new instance: nothing cached survives
+        before = AuditTrail.verify(db)
+        assert before.valid is False and "audit-repair" in (before.error or "")
+
+        repair = AuditTrail.repair_manifest(db)
+        assert repair.repaired, repair.error
+        [record] = repair.set_aside
+        assert record["set_aside_as"] == "" and record["filename"] == "m.audit.jsonl"
+
+        AuditTrail(db).log("after", {})
+        after = AuditTrail.verify(db)
+        assert after.valid is True and after.total_entries == 1, after.error
+        [line] = set_aside_report_lines(after.set_aside, db)
+        assert line.startswith("GAP: the active audit file m.audit.jsonl")
+
+    def test_a_second_deletion_in_the_same_week_is_refused_again(self, tmp_path):
+        db = self._deleted(tmp_path)
+        assert AuditTrail.repair_manifest(db).repaired
+        trail = AuditTrail(db)
+        trail.log("after", {})
+        trail._active_path.unlink()
+        with pytest.raises(audit_module._ManifestUnavailable, match="held entries"):
+            AuditTrail(db).log("again", {})
+
+    def test_an_active_file_that_never_had_an_entry_is_not_refused(self, tmp_path):
+        # a fresh store, and a store whose active file was emptied before any
+        # entry completed, have no record and write as before
+        db = tmp_path / "m.db"
+        AuditTrail(db).log("first", {})
+        assert AuditTrail.verify(db).valid
+        manifest = json.loads((tmp_path / "m.audit.manifest.json").read_text())
+        assert manifest["active_begun"]["period"]
+
+    def test_a_deletion_after_a_rotation_is_refused(self, tmp_path):
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        trail.log("w1", {})
+        trail._last_week = "1999-W01"
+        trail.log("w2", {})  # seals w1's file; w2 starts a new active file
+        manifest = json.loads((tmp_path / "m.audit.manifest.json").read_text())
+        assert manifest["active_begun"]["first_hash"] != ""
+        assert [f["period"] for f in manifest["files"]] == ["1999-W01"]
+        trail._active_path.unlink()  # w2's entry is lost: refused
+        with pytest.raises(audit_module._ManifestUnavailable):
+            AuditTrail(db).log("w3", {})

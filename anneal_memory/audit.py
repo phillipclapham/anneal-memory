@@ -278,6 +278,12 @@ _SET_ASIDE_KEYS = ("filename", "set_aside_as", "period", "cause", "at")
 # The reason ``audit-repair`` sets an unreadable or corrupt sealed file aside
 # under: ``<sealed name>.unreadable-<UTC stamp>`` (see ``_set_aside``).
 _UNREADABLE_REASON = "unreadable"
+# The manifest's ``active_begun`` record: the week of the active file's first
+# entry, that entry's hash, and the ``prev_hash`` it chained from, saved once per
+# active file by ``log()``. Cleared by the seal that moves the file into
+# ``files`` and by an adoption of the orphan that starts from that ``prev_hash``
+# (a rotation that crashed before its manifest save).
+_ACTIVE_BEGUN_KEYS = ("period", "first_hash", "first_prev_hash")
 
 
 def _parse_manifest_bytes(raw: bytes, stem: str) -> dict[str, Any]:
@@ -384,6 +390,12 @@ def _parse_manifest_bytes(raw: bytes, stem: str) -> dict[str, Any]:
         for r in set_aside
     ):
         raise TypeError("manifest field 'set_aside' is not a list of set-aside records")
+    begun = manifest.get("active_begun")
+    if begun is not None and not (
+        isinstance(begun, dict)
+        and all(isinstance(begun.get(k), str) for k in _ACTIVE_BEGUN_KEYS)
+    ):
+        raise TypeError("manifest field 'active_begun' is not an active-file record")
     manifest["files"] = files
     return manifest
 
@@ -1119,6 +1131,16 @@ class AuditTrail:
                 self._dropped_since_last = saved_chain_state[2]
             raise
 
+        # ⛔ THE ACTIVE FILE'S FIRST ENTRY IS RECORDED IN THE MANIFEST, so a
+        # restart can tell a deleted active file from an empty one (see
+        # ``_refuse_vanished_active``). Once per active file: only the append
+        # that found the file absent or empty. The append itself holds no lock,
+        # so the save takes the span here. A failure is logged and never fails
+        # this write (the entry is already on disk); that week is then not
+        # protected, as in degrade mode, where the span cannot save at all.
+        if resume_at == 0:
+            self._record_active_begun(new_prev_hash, saved_chain_state[0])
+
         # Fire callback after successful write
         if self._on_event is not None:
             try:
@@ -1339,6 +1361,7 @@ class AuditTrail:
         # reads an empty new active file, and returned valid=True without the
         # week it never walked. Rotation and retention replace the manifest,
         # so a changed signature means this pass was not a snapshot.
+        begun: dict[str, str] | None = None
         if manifest_path.name in names:
             try:
                 manifest = _parse_manifest_bytes(_read_regular_bytes(manifest_path), stem)
@@ -1349,6 +1372,7 @@ class AuditTrail:
                     chain_anchor = anchor
                 anchor_trusted = manifest.get("chain_anchor_recovered") is not True
                 set_aside.extend(dict(r) for r in manifest.get("set_aside", []))
+                begun = vanished_active_week(manifest)
                 for f in manifest.get("files", []):
                     fpath = audit_dir / f["filename"]
                     # is_file(), not exists() (codex, round 6): a filename
@@ -1407,6 +1431,28 @@ class AuditTrail:
                     f"{missing_files}{_RERUN_HINT}"
                 ),
             )
+
+        # ⛔ AN ACTIVE FILE THE MANIFEST SAYS HELD ENTRIES, NOW WITH NONE, IS A
+        # LOSS NOBODY HAS ACKNOWLEDGED (1003+12 [run]: three entries deleted read
+        # valid=True with 0 entries). Invalid until ``audit-repair`` records it as
+        # a gap, as an unmanifested sealed week is.
+        if begun is not None:
+            try:
+                has_entry = (
+                    active_path.name in names and _first_prev_hash(active_path) is not None
+                )
+            except OSError:
+                has_entry = True  # unreadable: the walk below reports it
+            if not has_entry:
+                return AuditVerifyResult(
+                    valid=False, total_entries=0, files_verified=0,
+                    anchor_trusted=anchor_trusted,
+                    error=(
+                        f"The active audit file {active_path.name} held entries in week "
+                        f"{begun['period']} and now holds none; run `anneal-memory "
+                        f"audit-repair` to record them as a gap{_RERUN_HINT}"
+                    ),
+                )
 
         if not files_to_verify:
             # ⛔ THE EMPTY-TRAIL VALID RETURN RE-CHECKS THE MANIFEST TOO (codex,
@@ -1917,7 +1963,39 @@ class AuditTrail:
                         "it aside. verify reports it. Nothing was written."
                     ),
                 )
-        if not new:
+        vanished: dict[str, str] | None = None
+        begun = vanished_active_week(manifest)
+        if begun is not None and new:
+            # A sealed week newer than the manifest with no usable active file is
+            # what a rotation that crashed before its manifest save leaves: the
+            # active file the record describes, renamed. Setting it aside records
+            # the gap; a second record would count it twice. (A deletion on top
+            # of such a crash then reads as one gap, not two.)
+            manifest["active_begun"] = None
+        elif begun is not None:
+            try:
+                active_entry = (
+                    trail._active_path.name in names
+                    and _first_prev_hash(trail._active_path) is not None
+                )
+            except OSError as e:
+                return AuditRepairResult(
+                    repaired=False,
+                    error=f"Cannot inspect the active audit file: {e}; nothing was written.",
+                )
+            if not active_entry:
+                # ``set_aside_as`` "" marks it: there is no file to move.
+                vanished = {
+                    "filename": trail._active_path.name,
+                    "set_aside_as": "",
+                    "period": begun["period"],
+                    "cause": (
+                        "the active file was deleted or emptied after its first entry "
+                        f"(hash {begun['first_hash']}) was recorded"
+                    ),
+                    "at": stamp,
+                }
+        if not new and vanished is None:
             return AuditRepairResult(
                 repaired=False, error="The manifest is valid; there is nothing to repair."
             )
@@ -1938,7 +2016,9 @@ class AuditTrail:
             r for r in manifest.get("set_aside", [])
             if not (r["filename"] in moving and r["set_aside_as"] not in names)
         ]
-        manifest["set_aside"] = kept + new
+        manifest["set_aside"] = kept + new + ([vanished] if vanished else [])
+        if vanished:
+            manifest["active_begun"] = None
         try:
             trail._save_manifest(manifest)
         except OSError as e:
@@ -1965,7 +2045,14 @@ class AuditTrail:
                 f"{record['set_aside_as']} ({record['cause']})"
             )
         _fsync_dir(audit_dir)
-        return AuditRepairResult(repaired=True, set_aside=new)
+        if vanished:
+            _emit_warning(
+                f"Recorded the missing active audit file {vanished['filename']} "
+                f"({vanished['period']}) as a gap"
+            )
+        return AuditRepairResult(
+            repaired=True, set_aside=new + ([vanished] if vanished else [])
+        )
 
     # -- Internal --
 
@@ -2210,6 +2297,7 @@ class AuditTrail:
                     self._last_week = _iso_week_now()
             else:
                 self._last_week = _iso_week_now()
+            self._backfill_active_begun(active)
         else:
             # ⛔ A NONEMPTY ACTIVE FILE WITH NO VALID ENTRY IS THE SAME CASE
             # AS A ZERO-BYTE ONE, AND THIS BRANCH DID NOT KNOW IT. It fell
@@ -2320,8 +2408,80 @@ class AuditTrail:
         if not adopted:
             self._refuse_seed_after_incomplete_adoption()
         self._refuse_past_unreadable_newer()
+        self._refuse_vanished_active(manifest)
         self._prev_hash = manifest.get("active_last_hash", GENESIS_HASH)
         self._seq = manifest.get("active_last_seq", 0)
+
+    def _backfill_active_begun(self, active: Path) -> None:
+        """Record ``active_begun`` for an active file begun before it existed (an
+        upgraded store), from that file's first valid entry, so the protection
+        starts at the upgrade rather than at the next rotation. Runs inside
+        ``_initialize``'s span; saves only when the record is missing. A failure
+        is logged and never fails the open."""
+        try:
+            if self._lock_failures.get(threading.get_ident()) is not None:
+                return
+            manifest = self._load_manifest()
+            if manifest.get("active_begun"):
+                return
+            first = _first_valid_line(active)
+            if first is None:
+                return
+            prev = json.loads(first).get("prev_hash", "")
+            manifest["active_begun"] = {
+                "period": self._last_week,
+                "first_hash": self._compute_hash(first),
+                "first_prev_hash": prev if isinstance(prev, str) else "",
+            }
+            self._save_manifest(manifest)
+        except Exception:
+            _log(logging.WARNING,
+                "could not record the existing active audit file in the manifest; "
+                "a deletion of it will not be detected", exc_info=True,
+            )
+
+    def _record_active_begun(self, first_hash: str, first_prev_hash: str) -> None:
+        """Save ``active_begun`` for the active file this call just started."""
+        try:
+            with self._operation_span():
+                if self._lock_failures.get(threading.get_ident()) is not None:
+                    return  # degrade: no manifest save without the lock
+                manifest = self._load_manifest()
+                manifest["active_begun"] = {
+                    "period": self._last_week, "first_hash": first_hash,
+                    "first_prev_hash": first_prev_hash,
+                }
+                self._save_manifest(manifest)
+        except Exception:
+            _log(logging.WARNING,
+                "could not record the active audit file's first entry in the "
+                "manifest; a deletion of this week's active file will not be "
+                "detected", exc_info=True,
+            )
+
+    def _refuse_vanished_active(self, manifest: dict[str, Any]) -> None:
+        """Raise when the manifest records that the active file held entries
+        and the seed is running anyway, so there is no usable entry in it now.
+
+        ⛔ THE ENTRIES OF A DELETED ACTIVE FILE WERE INVISIBLE AFTER A RESTART
+        (codex L3 r2 10-03 on the rotation re-seed; [run] 10-03 on main before
+        this: three entries deleted, reopen, one append, ``verify()`` valid with
+        no gap). Within a week nothing on disk but the active file said it had
+        entries. ``active_begun`` is that record, and it survives a restart.
+        Not refused: a week that is now sealed (``files`` has its period; a
+        rotation or adoption took it) or one ``audit-repair`` already recorded
+        as a gap."""
+        begun = vanished_active_week(manifest)
+        if begun is None:
+            return
+        raise _ManifestUnavailable(
+            f"the active audit file {self._active_path.name} held entries in week "
+            f"{begun['period']} (first entry hash {begun['first_hash']}) and now holds "
+            "none: it was deleted or emptied. Appending would continue the chain past "
+            "them with nothing reporting the loss. If the file can be restored, put it "
+            "back and retry; otherwise run `anneal-memory audit-repair` to record the "
+            "week as a gap, and writes resume"
+        )
 
     def _refuse_past_unreadable_newer(self) -> None:
         """Raise when the last adoption found sealed weeks newer than the
@@ -2626,6 +2786,11 @@ class AuditTrail:
             })
             if scan.last_hash:
                 manifest["active_last_hash"] = scan.last_hash
+            begun = manifest.get("active_begun")
+            if begun and scan.first_prev_hash == begun["first_prev_hash"]:
+                # The active file the record describes, sealed by a rotation
+                # that crashed before its manifest save.
+                manifest["active_begun"] = None
             _log(logging.INFO,
                 "Adopted orphaned audit file: %s (%d entries)", keep.name, scan.entries
             )
@@ -2894,6 +3059,7 @@ class AuditTrail:
             "sha256_file": f"sha256:{file_hash.hexdigest()}",
         })
         manifest["active_last_hash"] = self._prev_hash
+        manifest["active_begun"] = None  # the file it describes is sealed above
         # Reset seq for new file BEFORE saving manifest, so crash
         # recovery restores the correct starting seq (0), not the
         # pre-rotation value.
@@ -3506,6 +3672,25 @@ def _sealed_record(path: Path) -> dict[str, Any] | None:
     }
 
 
+def _first_valid_line(path: Path) -> str | None:
+    """The first valid entry line in ``path``, stripped, or None if it holds
+    none. A read error raises."""
+    errors: list[OSError] = []
+    for line in _guarded_lines(path, errors):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            text = stripped.decode("utf-8")
+            _require_entry_dict(json.loads(text))
+        except _UNPARSEABLE_JSON:
+            continue
+        return text
+    if errors:
+        raise errors[0]
+    return None
+
+
 def _first_prev_hash(path: Path) -> str | None:
     """``prev_hash`` of the first valid entry in ``path`` ("" if that entry has
     none), or None if the file holds no valid entry. A read error raises."""
@@ -3530,6 +3715,23 @@ def _week_of(name: str, prefix: str) -> str:
     return name.removeprefix(prefix).removesuffix(".gz").removesuffix(".jsonl")
 
 
+def vanished_active_week(manifest: dict[str, Any]) -> dict[str, str] | None:
+    """The manifest's ``active_begun`` record unless its week is sealed (a
+    ``files`` record has that period: the fallback for a seal by a release that
+    keeps the field but does not clear it; this release's seal and adoption clear
+    it). ``audit-repair`` clears the record in the same save that records the
+    gap, so a later deletion in the same week is seen again. The caller
+    establishes that the active file holds no usable entry; this says only that
+    it once did."""
+    begun = manifest.get("active_begun")
+    if not begun:
+        return None
+    period = begun["period"]
+    if any(f.get("period") == period for f in manifest.get("files", [])):
+        return None
+    return dict(begun)
+
+
 def set_aside_report_lines(
     records: list[dict[str, str]], db_path: str | Path
 ) -> list[str]:
@@ -3543,7 +3745,14 @@ def set_aside_report_lines(
     audit_dir = Path(db_path).expanduser().parent
     lines = []
     for record in records:
-        if os.path.lexists(audit_dir / record["set_aside_as"]):
+        if record["set_aside_as"] == "":
+            lines.append(
+                f"GAP: the active audit file {record['filename']} ({record['period']}) "
+                f"went missing with its entries; audit-repair recorded it at "
+                f"{record['at']}: {record['cause']}; its entries are not in the "
+                "verified chain"
+            )
+        elif os.path.lexists(audit_dir / record["set_aside_as"]):
             lines.append(
                 f"GAP: {record['filename']} ({record['period']}) was set aside by "
                 f"audit-repair as {record['set_aside_as']} at {record['at']}: "

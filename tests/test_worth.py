@@ -386,3 +386,31 @@ def test_a_record_whose_version_is_not_the_int_1_is_skipped(tmp_path, v, read):
         "items": [{"kind": "crystal", "ref": "a", "followed": "followed"}]}) + "\n")
     records, bad = log.read()
     assert (len(records), bad) == ((1, 0) if read else (0, 1))
+
+
+# ⛔ FROZEN, NEVER EDITED: version-1 outcome-log lines in the exact shapes released
+# code writes. A later anneal that changes a record's shape writes a NEW "v" and
+# must still read these (Phill 2026-10-03, "3A", V-LOG). That is what makes an
+# older process's late append after a newer anneal's migration a correct v1
+# record rather than a corruption (the race named in the store-identity
+# CHANGELOG entry). If this fails, the change dropped a released format.
+_FROZEN_V1_LINES = (
+    # 0.9.20-0.9.23: no "store" key (an unbound record)
+    '{"v": 1, "exposure_id": "x1", "ts": "2026-10-02T00:00:00Z", "outcome": "success", '
+    '"items": [{"kind": "crystal", "ref": "p", "followed": "followed"}], '
+    '"exposed": [{"kind": "crystal", "ref": "p"}]}',
+    # store identity: the same record stamped with its store
+    '{"v": 1, "exposure_id": "x2", "ts": "2026-10-03T00:00:00Z", "outcome": "failure", '
+    '"items": [{"kind": "episode", "ref": "e9", "followed": "ignored"}], "store": "s1"}',
+)
+
+
+def test_released_v1_outcome_records_stay_readable(tmp_path):
+    log = OutcomeLog(tmp_path / "x.outcomes.jsonl", store_id="s1")
+    log.path.write_text("\n".join(_FROZEN_V1_LINES) + "\n")
+    latest, bad = log.latest()
+    assert bad == 0
+    assert latest["x1"]["outcome"] == "success"
+    assert latest["x1"]["items"] == [{"kind": "crystal", "ref": "p", "followed": "followed"}]
+    assert latest["x2"]["outcome"] == "failure"
+    assert latest["x2"]["items"] == [{"kind": "episode", "ref": "e9", "followed": "ignored"}]

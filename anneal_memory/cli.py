@@ -1212,6 +1212,13 @@ def cmd_audit_repair(args: argparse.Namespace) -> None:
         })
     elif result.repaired and result.set_aside and not result.files:
         for record in result.set_aside:
+            if record["set_aside_as"] == "":
+                print(
+                    f"Recorded the missing active audit file {record['filename']} "
+                    f"({record['period']}) as a gap ({record['cause']}); its entries are "
+                    "lost. Writes continue past this gap, and verify reports it."
+                )
+                continue
             print(
                 f"Set aside sealed file {record['filename']} as "
                 f"{record['set_aside_as']} ({record['cause']}); kept on disk and "

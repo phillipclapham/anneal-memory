@@ -4300,3 +4300,78 @@ class TestRecoveryOracle:
         finally:
             store2.close()
             tmp.unlink(missing_ok=True)
+
+
+class TestTheWriterSchemaFunctionLetsABumpRefuseOpenWriters:
+    """Phill 2026-10-03 "3A": every connection registers the SQL function the
+    first schema bump's write triggers call (``_WRITER_SCHEMA_FUNCTION``). No
+    trigger exists at schema 1; this plays the bump from a second connection
+    while a Store is already open, which is the race only this closes (the
+    open-time check has already passed)."""
+
+    TABLES = ("episodes", "metadata")
+
+    def _bump(self, db, to):
+        import sqlite3
+        from anneal_memory.store import _WRITER_SCHEMA_FUNCTION
+
+        conn = sqlite3.connect(str(db))
+        conn.create_function(_WRITER_SCHEMA_FUNCTION, 0, lambda: to, deterministic=True)
+        conn.execute("BEGIN IMMEDIATE")
+        for table in self.TABLES:
+            for op in ("INSERT", "UPDATE", "DELETE"):
+                conn.execute(
+                    f"CREATE TRIGGER bump_guard_{table}_{op.lower()} BEFORE {op} ON {table} "
+                    "BEGIN SELECT RAISE(ABORT, 'store is a newer anneal schema') WHERE "
+                    f"{_WRITER_SCHEMA_FUNCTION}() < (SELECT CAST(value AS INTEGER) "
+                    "FROM metadata WHERE key = 'format_version'); END"
+                )
+        conn.execute("UPDATE metadata SET value = ? WHERE key = 'format_version'", (str(to),))
+        conn.commit()
+        conn.close()
+
+    def test_an_open_store_is_refused_after_another_process_bumps_the_schema(self, tmp_path):
+        from anneal_memory.store import _SCHEMA_VERSION
+
+        db = tmp_path / "m.db"
+        store = Store(db)
+        store.record("before the bump", episode_type="observation")
+        self._bump(db, _SCHEMA_VERSION + 1)
+        with pytest.raises(StoreError, match="newer anneal schema"):
+            store.record("after the bump", episode_type="observation")
+        store.close()
+
+    def test_triggers_at_this_schema_let_this_release_write(self, tmp_path):
+        # positive control: the same triggers with the stamp unchanged pass
+        from anneal_memory.store import _SCHEMA_VERSION
+
+        db = tmp_path / "m.db"
+        store = Store(db)
+        import sqlite3 as _sq
+
+        fresh = _sq.connect(str(db))
+        assert fresh.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger'"
+        ).fetchone()[0] == 0, "schema 1 installs no trigger; the first bump does"
+        fresh.close()
+        self._bump(db, _SCHEMA_VERSION)
+        store.record("same schema", episode_type="observation")
+        store.close()
+        import sqlite3
+
+        conn = sqlite3.connect(str(db))
+        assert conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0] == 1
+        conn.close()
+
+    def test_a_connection_without_the_function_is_refused(self, tmp_path):
+        # what a release from before this one does: it never registered it
+        import sqlite3
+        from anneal_memory.store import _SCHEMA_VERSION
+
+        db = tmp_path / "m.db"
+        Store(db).close()
+        self._bump(db, _SCHEMA_VERSION + 1)
+        conn = sqlite3.connect(str(db))
+        with pytest.raises(sqlite3.OperationalError, match="no such function"):
+            conn.execute("DELETE FROM episodes")
+        conn.close()

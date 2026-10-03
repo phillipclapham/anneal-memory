@@ -150,6 +150,7 @@ from .worth import (
     OutcomeLog,
     compute_worth,
     fold_surfaced,
+    load_receipts,
     outcome_log_path,
 )
 
@@ -3188,6 +3189,11 @@ def cmd_crystal_fold_surfaced(args: argparse.Namespace) -> None:
     if args.json:
         _print_json(result.__dict__)
         return
+    if result.store_missing:
+        print(f"No crystal store at {store.path}; nothing is live, nothing folded, no mark written")
+        if result.paths_missing:
+            print(f"Not found (skipped): {', '.join(result.paths_missing)}", file=sys.stderr)
+        return
     print(f"Folded {result.receipts_folded} receipt(s), {result.exposures_counted} "
           f"exposure(s), through {result.mark} (previous mark: {result.previous_mark})")
     if result.names_unknown:
@@ -3206,21 +3212,38 @@ def cmd_crystal_fold_surfaced(args: argparse.Namespace) -> None:
 def cmd_worth(args: argparse.Namespace) -> None:
     """Report-only Memory-Worth counters. Nothing reads this to rank or decay."""
     db_path = _existing_db_path(args, require_sqlite=True)
+    receipts = None
+    receipt_bad = 0
+    receipt_missing: list[str] = []
     try:
-        report = compute_worth(OutcomeLog(outcome_log_path(db_path)), _open_crystal_store(args))
+        if args.receipts:
+            receipts, receipt_bad, receipt_missing = load_receipts(args.receipts)
+        report = compute_worth(OutcomeLog(outcome_log_path(db_path)), _open_crystal_store(args),
+                               receipts=receipts)
     except (CrystalError, OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
+    if receipt_missing:
+        print(f"Not found (skipped): {', '.join(receipt_missing)}", file=sys.stderr)
     if args.json:
-        _print_json(report.as_dict())
+        out = report.as_dict()
+        if receipts is not None:
+            out["receipt_lines_unreadable"] = receipt_bad
+        _print_json(out)
         return
     print(f"Worth (report-only) from {report.exposures} exposure(s)"
           + (f", {report.lines_skipped} unreadable line(s) skipped" if report.lines_skipped else ""))
     print("surf = recall-surfaced (receipt fold); the other columns come from the outcome")
     print("log and are not joined to it. succ/fail = retrieved with that outcome, any label.")
     print("unl+s/unl+f = exposed with that outcome and never labelled (not in succ/fail).")
+    if receipts is not None:
+        print("unrec = receipts that exposed it with no record in the outcome log at all "
+              f"({report.receipts_read} exposing receipt(s) read"
+              + (f", {report.receipts_skipped} with no event_id" if report.receipts_skipped else "")
+              + (f", {receipt_bad} unreadable line(s)" if receipt_bad else "") + ").")
     print(f"{'crystal':<52} {'surf':>5} {'fol':>4} {'ign':>4} {'n/a':>4} "
-          f"{'succ':>5} {'fail':>5} {'fol+s':>6} {'fol+f':>6} {'unl+s':>6} {'unl+f':>6}")
+          f"{'succ':>5} {'fail':>5} {'fol+s':>6} {'fol+f':>6} {'unl+s':>6} {'unl+f':>6}"
+          + (f" {'unrec':>6}" if receipts is not None else ""))
     for r in report.crystals:
         name = r.ref if r.live else f"{r.ref} (not live)"
         surf = "-" if r.surfaced_count is None else str(r.surfaced_count)
@@ -3230,7 +3253,8 @@ def cmd_worth(args: argparse.Namespace) -> None:
         print(f"{name:<52} {surf:>5} {r.followed:>4} {r.ignored:>4} "
               f"{r.not_applicable:>4} {r.success:>5} {r.failure:>5} "
               f"{fol['success']:>6} {fol['failure']:>6} "
-              f"{r.unlabelled_success:>6} {r.unlabelled_failure:>6}")
+              f"{r.unlabelled_success:>6} {r.unlabelled_failure:>6}"
+              + (f" {r.exposed_unrecorded:>6}" if r.exposed_unrecorded is not None else ""))
     if args.episodes:
         print(f"\n{'episode':<20} {'succ':>5} {'fail':>5} {'only via citation':>18} "
               f"{'unl+s':>6} {'unl+f':>6}")
@@ -4047,6 +4071,10 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[json_parent],
     )
     sub.add_argument("--episodes", action="store_true", help="Also list per-episode counters")
+    sub.add_argument("--receipts", nargs="+", metavar="PATH",
+                     help="Retrieval receipt logs (JSONL, live log first): adds an 'unrec' "
+                          "column, receipts that exposed the crystal and have no record in "
+                          "the outcome log. Report only.")
     sub.set_defaults(func=cmd_worth)
 
     # -- migrate (self-migration notices: propose instruction-file edits on upgrade) --

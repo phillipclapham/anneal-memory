@@ -418,7 +418,7 @@ def test_released_v1_outcome_records_stay_readable(tmp_path):
 
 # -- `crystal get` records a followed label (a pull is the one non-guessed label) --
 
-def _pull_cli(db, *args):
+def _pull_cli(db, *args, timeout=60):
     import os
     import subprocess
     import sys
@@ -428,7 +428,7 @@ def _pull_cli(db, *args):
     env = dict(os.environ, PYTHONPATH=str(root))
     return subprocess.run(
         [sys.executable, "-m", "anneal_memory.cli", "--db", str(db), *args],
-        capture_output=True, text=True, env=env, timeout=60, cwd=str(root),
+        capture_output=True, text=True, env=env, timeout=timeout, cwd=str(root),
     )
 
 
@@ -533,3 +533,142 @@ def test_crystal_get_on_a_store_with_no_id_writes_nothing_and_never_mints_one(tm
             "SELECT 1 FROM metadata WHERE key = 'store_id'").fetchone() is None
     finally:
         conn.close()
+
+
+def test_crystal_get_a_held_log_lock_is_bounded_not_a_hang(tmp_path):
+    fcntl = pytest.importorskip("fcntl")
+    import subprocess
+    import sys
+    import time
+
+    db, _ = _pull_store(tmp_path)
+    log = outcome_log_path(db)
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import fcntl, os, sys, time\n"
+         "fd = os.open(sys.argv[1], os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)\n"
+         "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+         "print('held', flush=True)\n"
+         "time.sleep(60)\n", str(log)],
+        stdout=subprocess.PIPE, text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        started = time.monotonic()
+        got = _pull_cli(db, "crystal", "get", "derive_dont_invent", timeout=20)
+        elapsed = time.monotonic() - started
+    finally:
+        holder.kill()
+        holder.wait()
+    assert elapsed < 8, elapsed
+    assert got.returncode == 0, got.stderr
+    assert "derive_dont_invent" in got.stdout
+    assert got.stderr == "crystal get: pull not recorded (outcome log busy)\n"
+    assert log.read_bytes() == b""
+
+
+def test_outcome_log_record_lock_timeout_raises_busy_and_default_is_unchanged(tmp_path):
+    fcntl = pytest.importorskip("fcntl")
+    import os
+
+    from anneal_memory.worth import OutcomeLogBusy
+
+    log = OutcomeLog(tmp_path / "mem.outcomes.jsonl")
+    held = os.open(log.path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        with pytest.raises(OutcomeLogBusy):
+            log.record("a", [ExposureLabel("crystal", "p", "followed")], lock_timeout=0.1)
+        assert log.path.read_bytes() == b""
+    finally:
+        os.close(held)  # releases the lock
+    log.record("a", [ExposureLabel("crystal", "p", "followed")], lock_timeout=0.1)
+    log.record("b", [ExposureLabel("crystal", "p", "followed")])  # blocking default
+    assert sorted(log.latest()[0]) == ["a", "b"]
+
+
+def test_crystal_get_a_closed_stdout_is_not_a_received_pull(tmp_path):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    db, _ = _pull_store(tmp_path)
+    root = Path(__file__).resolve().parent.parent
+    r, w = os.pipe()
+    os.close(r)  # nobody reads: the flush fails
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "anneal_memory.cli", "--db", str(db),
+             "crystal", "get", "derive_dont_invent"],
+            stdout=w, stderr=subprocess.PIPE, text=True, timeout=60, cwd=str(root),
+            env=dict(os.environ, PYTHONPATH=str(root)),
+        )
+    finally:
+        os.close(w)
+    assert proc.returncode != 0
+    assert _log_lines(db) == []
+
+
+def test_crystal_get_a_retired_pattern_is_printed_but_not_recorded(tmp_path):
+    db, _ = _pull_store(tmp_path)
+    assert _pull_cli(db, "crystal", "get", "derive_dont_invent").returncode == 0
+    assert len(_log_lines(db)) == 1  # control: live records
+    CrystalStore(tmp_path / "mem.crystal.json").retire("derive_dont_invent", kind="obsolete")
+    got = _pull_cli(db, "crystal", "get", "derive_dont_invent")
+    assert got.returncode == 0 and "retired" in got.stdout and got.stderr == ""
+    assert len(_log_lines(db)) == 1
+
+
+def test_crystal_get_refusal_text_is_one_line_without_the_error_prefix(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "mem.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE unrelated (x)")
+    conn.commit()
+    conn.close()
+    CrystalStore(tmp_path / "mem.crystal.json").crystallize(
+        name="derive_dont_invent", level=3, explanation="x")
+    got = _pull_cli(db, "crystal", "get", "derive_dont_invent")
+    assert got.returncode == 0 and "derive_dont_invent" in got.stdout
+    assert got.stderr.count("\n") == 1
+    assert got.stderr.startswith("crystal get: pull not recorded (cannot read the store id")
+    assert "Error:" not in got.stderr
+    assert _log_lines(db) == []
+
+
+def test_a_pull_moves_pulled_only_and_never_a_judged_cell_or_an_episode_row(tmp_path):
+    crystal = CrystalStore(tmp_path / "mem.crystal.json")
+    crystal.crystallize(name="p", level=3, explanation="x", evidence=["e1", "e2"])
+    log = OutcomeLog(tmp_path / "mem.outcomes.jsonl")
+    log.record("judged", [ExposureLabel("crystal", "p", "followed")], outcome="success")
+    before = compute_worth(log, crystal)
+    log.record("pull:" + "a" * 32, [ExposureLabel("crystal", "p", "followed")])
+    log.record("pull:" + "b" * 32, [ExposureLabel("crystal", "gone", "followed")])
+    after = compute_worth(log, crystal)
+
+    rows = {r.ref: r for r in after.crystals}
+    was = {r.ref: r for r in before.crystals}
+    assert rows["p"].pulled == 1 and was["p"].pulled == 0
+    for field_name in ("followed", "ignored", "not_applicable", "success", "failure",
+                       "unlabelled_success", "unlabelled_failure", "unlabelled_unknown"):
+        assert getattr(rows["p"], field_name) == getattr(was["p"], field_name), field_name
+    assert rows["p"].table == was["p"].table
+    assert rows["p"].table["followed"]["unknown"] == 0
+    # a pull of a name that is not live still shows as pulled, in no judged cell
+    assert rows["gone"].pulled == 1 and rows["gone"].live is False
+    assert rows["gone"].followed == 0 and rows["gone"].table["followed"]["unknown"] == 0
+    assert [(r.ref, r.success, r.credited_success) for r in after.episodes] == \
+        [(r.ref, r.success, r.credited_success) for r in before.episodes]
+    assert rows["p"].as_dict()["pulled"] == 1
+
+
+def test_a_pull_alone_creates_no_episode_row(tmp_path):
+    crystal = CrystalStore(tmp_path / "mem.crystal.json")
+    crystal.crystallize(name="p", level=3, explanation="x", evidence=["e1", "e2"])
+    log = OutcomeLog(tmp_path / "mem.outcomes.jsonl")
+    log.record("pull:" + "a" * 32, [ExposureLabel("crystal", "p", "followed")])
+    report = compute_worth(log, crystal)
+    assert report.episodes == []
+    assert {r.ref: r.pulled for r in report.crystals}["p"] == 1

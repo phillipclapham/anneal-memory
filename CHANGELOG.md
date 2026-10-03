@@ -4,19 +4,29 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
-### Added — `crystal get` records a `followed` label for the pull
+### Added — `crystal get` records a pull, and `worth` counts it in its own column
 
 - `anneal-memory crystal get NAME` now appends one record to the outcome log beside the episodic
-  db (`<stem>.outcomes.jsonl`) when the pattern is found: exposure id `pull:<uuid4 hex>`, one
-  item `crystal:NAME=followed`, no outcome, stamped with the store's id. A pull by name from the
-  always-loaded cue index is the one production label that is not a guess; `worth` already counts
-  `followed`, so it reports these with no change.
-- The read never fails because of the label. A read command never mints a store id: a store with
+  db (`<stem>.outcomes.jsonl`) when the pattern is found AND live: exposure id `pull:<uuid4 hex>`,
+  one item `crystal:NAME=followed`, no outcome, stamped with the store's id. A pull by name from
+  the always-loaded cue index is the one production signal that is not a guess. A retired
+  pattern is still printed but not recorded (the cue index lists live patterns only). The record
+  is a valid version-1 record with no new label value, so older readers parse it unchanged.
+- `worth` counts these in a NEW per-pattern column, `pulled` (`pull` in the text table, last
+  column; `"pulled"` in `--json`). An exposure whose id starts with `pull:` moves `pulled` and
+  nothing else: not `fol`, not any `followed` / `succ` / `fail` / unlabelled cell, and it
+  credits no episode through the pattern's evidence, so `fol` keeps its judged meaning. The
+  `exposures` total still counts the record. New `PULL_EXPOSURE_PREFIX` in `anneal_memory.worth`.
+- The read never fails because of the label. It is recorded only after the text was flushed to
+  stdout (a closed pipe records nothing). A read command never mints a store id: a store with
   none gets one stderr line and no record (run `outcome` once to mint it). A crystal-only
-  deployment (no episodic db file) records nothing and says nothing. An unwritable log or a lock
-  error prints one stderr line, exits 0 and still prints the pattern. A name that is not found
-  records nothing and exits as before. A retired pattern that is found counts as a pull.
+  deployment (no episodic db file) records nothing and says nothing. A not-found name records
+  nothing and exits as before. A held write lock on the log is waited for at most 2 seconds, then
+  one stderr line (`crystal get: pull not recorded (outcome log busy)`), exit 0. Any other write
+  failure is one stderr line, exit 0, with the pattern still printed.
 - New flag `--no-record` for scripted callers that read patterns without meaning to use them.
+- `OutcomeLog.record` takes an optional `lock_timeout` (seconds; default `None` waits as before)
+  and raises the new `OutcomeLogBusy` (an `OSError`) when the lock is not free in time.
 
 ## [0.9.26] — 2026-10-03
 

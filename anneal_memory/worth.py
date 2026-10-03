@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -60,6 +61,12 @@ OUTCOME_LOG_VERSION = 1
 FOLLOWED_VALUES: tuple[str, ...] = ("followed", "ignored", "not_applicable")
 OUTCOME_VALUES: tuple[str, ...] = ("success", "failure")
 ITEM_KINDS: tuple[str, ...] = ("crystal", "episode")
+
+# An exposure id with this prefix is a PULL: a reader fetched one pattern by name
+# (``crystal get``). It is a valid version-1 record carrying the ordinary
+# ``followed`` label, so a reader that does not know the prefix counts it as it
+# always counted a label; this module's report counts it in ``pulled`` instead.
+PULL_EXPOSURE_PREFIX = "pull:"
 
 # Bounds on caller-supplied identifiers: a line of the log must stay one line.
 _MAX_ID_LEN = 256
@@ -181,6 +188,7 @@ class OutcomeLog:
         outcome: str | None = None,
         exposed: Sequence[ExposedRef] = (),
         ts: datetime | None = None,
+        lock_timeout: float | None = None,
     ) -> dict[str, Any]:
         """Append the outcome for one exposure and return the stored record.
 
@@ -196,6 +204,10 @@ class OutcomeLog:
         With a ``store_id`` the log is read under the lock first and a log whose
         records all belong to another store refuses
         (:class:`ForeignOutcomeLogError`).
+
+        ``lock_timeout`` (seconds) bounds the wait for the write lock: when it is
+        not free in time, :class:`OutcomeLogBusy` (an ``OSError``) is raised and
+        nothing is written. ``None`` waits as long as it takes.
         """
         self._writable_id()
         rec = _build_record(exposure_id, items, outcome, exposed, ts, self.store_id)
@@ -204,8 +216,7 @@ class OutcomeLog:
         # torn final line, so a write-only (0200) log now refuses.
         fd = os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
         try:
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_EX)
+            _lock_exclusive(fd, lock_timeout)
             if self.bound:
                 self._refuse_foreign(_bind(_parse_entries(_read_fd(fd))[0], self.store_id)[1])
             _append(fd, rec)
@@ -363,6 +374,29 @@ class OutcomeLog:
 
 class ForeignOutcomeLogError(ValueError):
     """Writing to an outcome log whose records all belong to another store."""
+
+
+class OutcomeLogBusy(OSError):
+    """The log's write lock was not free within a ``lock_timeout``."""
+
+
+def _lock_exclusive(fd: int, timeout: float | None) -> None:
+    """Take the exclusive lock on ``fd``: block when ``timeout`` is None, else poll
+    without blocking until the deadline and raise :class:`OutcomeLogBusy`."""
+    if fcntl is None:
+        return
+    if timeout is None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise OutcomeLogBusy("outcome log busy") from None
+            time.sleep(0.02)
 
 
 @dataclass
@@ -841,6 +875,12 @@ class WorthRow:
     only that it was surfaced. An unlabelled crystal credits nothing to the
     episodes it cites.
 
+    ``pulled`` (crystals only) counts the exposures whose id starts with
+    :data:`PULL_EXPOSURE_PREFIX` (a reader fetched this crystal by name). A pull
+    moves ``pulled`` and nothing else: it is not a judged label, so it is in no
+    ``followed`` / ``table`` / ``success`` / ``failure`` / ``unlabelled_*`` cell,
+    and it credits no episode through the crystal's evidence.
+
     ``exposed_unrecorded`` (crystals only) counts the receipts passed to
     :func:`compute_worth` that exposed this crystal under an ``event_id`` with NO
     record in the outcome log at all. ``None`` when no receipts were passed, and
@@ -860,6 +900,7 @@ class WorthRow:
     unlabelled_failure: int = 0
     unlabelled_unknown: int = 0
     exposed_unrecorded: int | None = None
+    pulled: int = 0
     table: dict[str, dict[str, int]] = field(
         default_factory=lambda: {
             label: {"success": 0, "failure": 0, "unknown": 0} for label in FOLLOWED_VALUES
@@ -1044,7 +1085,12 @@ def compute_worth(
     for name in live:
         crow(name)
 
-    for rec in latest.values():
+    for exposure_id, rec in latest.items():
+        if exposure_id.startswith(PULL_EXPOSURE_PREFIX):
+            for item in rec["items"]:
+                if item["kind"] == "crystal":
+                    crow(item["ref"]).pulled += 1
+            continue
         outcome = rec.get("outcome")
         direct: dict[str, str] = {}
         cited: set[str] = set()

@@ -154,9 +154,11 @@ from .worth import (
     FOLLOWED_VALUES,
     ITEM_KINDS,
     OUTCOME_VALUES,
+    PULL_EXPOSURE_PREFIX,
     ExposedRef,
     ExposureLabel,
     OutcomeLog,
+    OutcomeLogBusy,
     _build_record as _build_worth_record,
     compute_worth,
     fold_surfaced,
@@ -3077,6 +3079,10 @@ def cmd_crystal_crystallize(args: argparse.Namespace) -> None:
           f"{item['activation_mode']}) {_truncate(item['explanation'], 70)}")
 
 
+# How long a pull waits for the outcome log's write lock before giving the label up.
+_PULL_LOCK_TIMEOUT_SECONDS = 2.0
+
+
 def _record_pull_label(args: argparse.Namespace, name: str) -> None:
     """Append one ``followed`` label for a crystal pulled by name, to the outcome
     log beside the episodic db. A pull is the one production label that is not a
@@ -3084,7 +3090,8 @@ def _record_pull_label(args: argparse.Namespace, name: str) -> None:
 
     Never fails the read and never mints a store id (``mint=False``): a store
     with no id gets one stderr line and no record. A crystal-only deployment (no
-    episodic db file) skips quietly. Any other failure is one stderr line."""
+    episodic db file) skips quietly. A log whose write lock is not free within
+    the pull's bound, and any other failure, is one stderr line."""
     try:
         db_path = Path(args.db).expanduser()
         if not db_path.is_file():
@@ -3097,8 +3104,11 @@ def _record_pull_label(args: argparse.Namespace, name: str) -> None:
             with contextlib.redirect_stderr(refusal):
                 sid = _outcome_store_id(db_path, mint=False)
         except SystemExit:
-            why = " ".join(refusal.getvalue().split()) or "the store id could not be read"
-            print(f"crystal get: pull not recorded ({why})", file=sys.stderr)
+            why = " ".join(refusal.getvalue().split())
+            if why.startswith("Error:"):
+                why = why[len("Error:"):].strip()
+            print(f"crystal get: pull not recorded ({why or 'the store id could not be read'})",
+                  file=sys.stderr)
             return
         if sid is None:
             print(
@@ -3108,8 +3118,12 @@ def _record_pull_label(args: argparse.Namespace, name: str) -> None:
             )
             return
         OutcomeLog(outcome_log_path(db_path), store_id=sid).record(
-            "pull:" + uuid.uuid4().hex, [ExposureLabel("crystal", name, "followed")]
+            PULL_EXPOSURE_PREFIX + uuid.uuid4().hex,
+            [ExposureLabel("crystal", name, "followed")],
+            lock_timeout=_PULL_LOCK_TIMEOUT_SECONDS,
         )
+    except OutcomeLogBusy:
+        print("crystal get: pull not recorded (outcome log busy)", file=sys.stderr)
     except (OSError, ValueError, sqlite3.Error) as exc:
         print(f"crystal get: pull not recorded ({exc})", file=sys.stderr)
 
@@ -3140,17 +3154,20 @@ def _print_crystal_item(item: CrystalDict, as_json: bool) -> None:
 def cmd_crystal_get(args: argparse.Namespace) -> None:
     """Show a single crystallized pattern by name (searches live then retired).
     A found pattern also records a ``followed`` label (see
-    :func:`_record_pull_label`) unless ``--no-record`` is passed."""
+    :func:`_record_pull_label`) when the pattern is live (the cue index lists
+    live patterns only, so a retired pull is not that signal) and its text
+    reached stdout, unless ``--no-record`` is passed."""
     store = _open_crystal_store(args)
     item = store.get(args.name)
     if item is None:
         print(f"Crystallized pattern {args.name!r} not found.", file=sys.stderr)
         sys.exit(1)
-    try:
-        _print_crystal_item(item, args.json)
-    finally:
-        if not args.no_record:
-            _record_pull_label(args, item["name"])
+    _print_crystal_item(item, args.json)
+    # A pull the reader did not receive is not a pull: a failed flush raises here
+    # and records nothing.
+    sys.stdout.flush()
+    if not args.no_record and item.get("status") == "crystallized":
+        _record_pull_label(args, item["name"])
 
 
 def cmd_crystal_index(args: argparse.Namespace) -> None:
@@ -3591,6 +3608,8 @@ def cmd_worth(args: argparse.Namespace) -> None:
     print("surf = recall-surfaced (receipt fold); the other columns come from the outcome")
     print("log and are not joined to it. succ/fail = retrieved with that outcome, any label.")
     print("unl+s/unl+f = exposed with that outcome and never labelled (not in succ/fail).")
+    print("pull = fetched by name (crystal get); a pull is not a judged label, so it is in")
+    print("no other column.")
     if receipts is not None:
         print("unrec = receipts that exposed it with no record in the outcome log at all "
               f"({report.receipts_read} exposing receipt(s) read"
@@ -3598,7 +3617,7 @@ def cmd_worth(args: argparse.Namespace) -> None:
               + (f", {receipt_bad} unreadable line(s)" if receipt_bad else "") + ").")
     print(f"{'crystal':<52} {'surf':>5} {'fol':>4} {'ign':>4} {'n/a':>4} "
           f"{'succ':>5} {'fail':>5} {'fol+s':>6} {'fol+f':>6} {'unl+s':>6} {'unl+f':>6}"
-          + (f" {'unrec':>6}" if receipts is not None else ""))
+          + (f" {'unrec':>6}" if receipts is not None else "") + f" {'pull':>5}")
     for r in report.crystals:
         name = r.ref if r.live else f"{r.ref} (not live)"
         surf = "-" if r.surfaced_count is None else str(r.surfaced_count)
@@ -3609,7 +3628,8 @@ def cmd_worth(args: argparse.Namespace) -> None:
               f"{r.not_applicable:>4} {r.success:>5} {r.failure:>5} "
               f"{fol['success']:>6} {fol['failure']:>6} "
               f"{r.unlabelled_success:>6} {r.unlabelled_failure:>6}"
-              + (f" {r.exposed_unrecorded:>6}" if r.exposed_unrecorded is not None else ""))
+              + (f" {r.exposed_unrecorded:>6}" if r.exposed_unrecorded is not None else "")
+              + f" {r.pulled:>5}")
     if args.episodes:
         print(f"\n{'episode':<20} {'succ':>5} {'fail':>5} {'only via citation':>18} "
               f"{'unl+s':>6} {'unl+f':>6}")

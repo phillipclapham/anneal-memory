@@ -60,11 +60,28 @@ from .schema import (
     DEFAULT_SCHEMA,
     SectionSpec,
     default_max_chars,
+    durable_budget,
     graduating_headings,
     required_headings,
     schema_role_warning,
 )
 from .crystal import CrystalError, CrystalStore
+from .durable import (
+    enforce_durable_facts,
+    is_exact_heading,
+    match_headings,
+    parse_durable_facts,
+    pending_transitions as durable_pending_transitions,
+    report_warnings as durable_report_warnings,
+    section_chars as durable_section_chars,
+)
+from .retrieval import (
+    DURABLE_GENERIC_DF,
+    INERT_TOKENS_KEY,
+    _fact_tokens,
+    compute_durable_inert_tokens,
+    continuity_hash,
+)
 from .store import (
     AnnealMemoryError,
     SaveAuthorityError,
@@ -101,11 +118,25 @@ def _matching_required_headings(line_lower: str, required: set[str]) -> list[str
     shrink gate (v0.3.5), and it also lets one line silently satisfy two
     ``validate_structure`` requirements. Callers treat ``len > 1`` as malformed.
     """
-    return [
-        h
-        for h in required
-        if re.search(rf"(?<!\w){re.escape(h)}(?!\w)", line_lower)
-    ]
+    return match_headings(line_lower, required)
+
+
+def _header_matches(line_lower: str, schema: list[SectionSpec]) -> list[str]:
+    """The schema headings (lowercased) one ``## `` header line counts for when
+    judging ambiguity: every REQUIRED heading it contains as a word-bounded
+    phrase, plus an optional heading only when the header IS that heading
+    (``## Durable Facts``). So ``## Decisions (durable facts)`` is a Decisions
+    header, not an ambiguous one, while ``## Patterns and Understanding`` is
+    still ambiguous. For a schema with no optional section this is exactly the
+    required-heading match."""
+    matched = _matching_required_headings(
+        line_lower, {h.lower() for h in required_headings(schema)}
+    )
+    title = line_lower[3:].strip() if line_lower.startswith("## ") else line_lower
+    for spec in schema:
+        if spec.get("optional") is True and is_exact_heading(title, spec["heading"]):
+            matched.append(title)
+    return matched
 
 
 def validate_structure(text: str, schema: list[SectionSpec] | None = None) -> bool:
@@ -118,7 +149,7 @@ def validate_structure(text: str, schema: list[SectionSpec] | None = None) -> bo
     embedded substrings (``## Interstate`` does NOT satisfy ``State``). **Every**
     section the schema declares must be present, which makes a partnership
     entity's ``narrative-timeless`` section (e.g. ``Understanding``) a structural
-    requirement.
+    requirement; only an ``optional`` section may be left out.
 
     The word-boundary test uses ``(?<!\\w)…(?!\\w)`` rather than ``\\b…\\b`` so
     headings ending in non-word characters (``## C++``) match correctly. Schemas
@@ -134,7 +165,9 @@ def validate_structure(text: str, schema: list[SectionSpec] | None = None) -> bo
             (State / Patterns / Decisions / Context).
 
     Returns:
-        True if every required heading is found, False otherwise.
+        True if every required heading is found, False otherwise. An
+        ``optional`` section (``Durable Facts``) may be absent. Section order
+        is not checked, for any section.
     """
     if schema is None:
         schema = DEFAULT_SCHEMA
@@ -142,7 +175,7 @@ def validate_structure(text: str, schema: list[SectionSpec] | None = None) -> bo
     found: set[str] = set()
     for line in text.split("\n"):
         if line.startswith("## "):
-            matched = _matching_required_headings(line.lower(), required)
+            matched = _header_matches(line.lower(), schema)
             # An ambiguous header (one line satisfying multiple required
             # sections, e.g. "## Patterns and Understanding") is malformed: it
             # merges two protected roles into one body and would defeat the
@@ -151,7 +184,7 @@ def validate_structure(text: str, schema: list[SectionSpec] | None = None) -> bo
             if len(matched) > 1:
                 return False
             found.update(matched)
-    return found == required
+    return required <= found
 
 
 def measure_sections(text: str) -> dict[str, int]:
@@ -495,15 +528,23 @@ def _check_no_catastrophic_shrink(
     grad_lowers = headings_by_role.get("graduating", [])
     grad_prior = sum(prior_masses.get(h, 0) for h in grad_lowers)
     grad_new = sum(new_masses.get(h, 0) for h in grad_lowers)
-    nongrad_prior = len(prior_text) - grad_prior
-    nongrad_new = len(new_text) - grad_new
+    # The durable section is excluded the same way, on both sides: its lines
+    # leave only by an explicit drop marker (and are put back when merely left
+    # out), so a deliberate drop must never read as a collapse, and durable
+    # mass must not make an unrelated section's shrink look smaller. A schema
+    # without a durable section measures 0 here, so its gate is unchanged.
+    durable_prior = durable_section_chars(prior_text, schema)
+    durable_new = durable_section_chars(new_text, schema)
+    nongrad_prior = len(prior_text) - grad_prior - durable_prior
+    nongrad_new = len(new_text) - grad_new - durable_new
     if (
         nongrad_prior >= _SHRINK_GATE_MIN_PRIOR_CHARS
         and nongrad_new < nongrad_prior * _DOC_SHRINK_RETAIN_FRACTION
     ):
         pct = round(100 * (1 - nongrad_new / nongrad_prior))
         offenders.append(
-            f"  - whole continuity (excl. graduating): {nongrad_prior} -> "
+            f"  - whole continuity (excl. graduating"
+            f"{' and durable' if durable_prior or durable_new else ''}): {nongrad_prior} -> "
             f"{nongrad_new} chars ({pct}% smaller; must retain "
             f">={int(_DOC_SHRINK_RETAIN_FRACTION * 100)}%)"
         )
@@ -767,6 +808,8 @@ def _build_wrap_package(
         project_name, max_chars, today, schema, uncovered_proven, pattern_summaries,
         crystallization_candidates=crystallization_candidates,
         rewarm_candidates=rewarm_candidates,
+        durable_chars=durable_section_chars(existing_continuity, schema),
+        durable_pending=durable_pending_transitions(existing_continuity, schema),
     )
 
     return WrapPackageDict(
@@ -793,6 +836,8 @@ def _build_wrap_instructions(
     *,
     crystallization_candidates: list[StalePatternDict] | None = None,
     rewarm_candidates: list[str] | None = None,
+    durable_chars: int = 0,
+    durable_pending: list[str] | None = None,
 ) -> str:
     """Build the compression instructions the agent receives via prepare_wrap.
 
@@ -810,6 +855,13 @@ def _build_wrap_instructions(
     inline with the list so the methodology-layer discipline travels WITH the
     package rather than living in a separate protocol doc an entity can retire.
     Defaults to ``None`` (no block) so direct callers stay backward-compatible.
+
+    ``durable_chars``: the current size of the existing continuity's durable
+    section, shown against that section's own budget; ``durable_pending``: its
+    facts that describe a change that has not happened yet, listed for the
+    composer to check. Only a schema with a
+    ``durable`` section gets the durable guidance; any other schema's text is
+    unchanged by it.
     """
     if schema is None:
         schema = DEFAULT_SCHEMA
@@ -822,7 +874,13 @@ def _build_wrap_instructions(
     ]
     marker_ref = _marker_reference(today, graduating_section_names)
 
-    section_list = ", ".join(f"`## {s['heading']}`" for s in schema)
+    section_list = ", ".join(
+        f"`## {s['heading']}`" + (" (optional)" if s.get("optional") is True else "")
+        for s in schema
+    )
+    durable_heading = next(
+        (s["heading"] for s in schema if s["role"] == "durable"), None
+    )
     has_graduating = any(s["role"] == "graduating" for s in schema)
     has_narrative = any(
         s["role"] in ("narrative", "narrative-timeless") for s in schema
@@ -890,13 +948,25 @@ def _build_wrap_instructions(
                 f"ONE annotation: a second `[derive` or `[judged` anywhere on it, "
                 f"in the claim or inside a command, refuses the save."
             )
+        elif role == "durable":
+            how_lines.append(
+                f"- {h}: One `- ` line per durable fact; see **{h}** below. Carry "
+                f"every line forward: the save puts back any line you leave out."
+            )
 
+    if durable_heading is None:
+        size_line = f"Stay within {max_chars} characters."
+    else:
+        size_line = (
+            f"Stay within {max_chars} characters, not counting `## {durable_heading}`, "
+            f"which has its own budget ({durable_budget(max_chars)} characters)."
+        )
     parts: list[str] = [
         "Compress your session episodes into your continuity file.",
         "",
         f"**Output:** A markdown file starting with `# {project_name} — Memory (v1)` "
         f"containing EXACTLY these sections, in order: {section_list}.",
-        f"Stay within {max_chars} characters.",
+        size_line,
         "",
     ]
     if has_graduating:
@@ -924,6 +994,13 @@ def _build_wrap_instructions(
             _crystallization_block(crystallization_candidates, rewarm_candidates), ""
         ]
     parts += ["**How to compress:**", *how_lines, ""]
+    if durable_heading is not None:
+        parts += [
+            _durable_block(
+                durable_heading, durable_chars, max_chars, durable_pending or []
+            ),
+            "",
+        ]
     parts += [
         "**Quality:** One insightful line > three vague ones. If removing something",
         "wouldn't change your next decision, cut it. Compress principles, not events.",
@@ -956,6 +1033,49 @@ def _build_wrap_instructions(
         "**Return ONLY the markdown.** No explanation, no code fences.",
     ]
     return "\n".join(parts)
+
+
+def _durable_block(
+    heading: str, current_chars: int, max_chars: int, pending: list[str]
+) -> str:
+    """The wrap-package guidance for a ``durable`` section (B1). The keep
+    criterion is InMind's, the one its memory probe was measured with. The
+    example line carries no date: refreshing a date would be a reword."""
+    lines = [
+        f"**{heading}** (`{heading}: {current_chars} / {durable_budget(max_chars)} chars`)",
+        f"- Put a fact here when it would change what advice or answer you give, or "
+        f"the user would be upset or harmed if you forgot it: health, allergies, "
+        f"constraints, commitments, preferences, relationships, identity facts, and "
+        f"system facts a future action depends on. One `- ` line per fact. Most "
+        f"sessions add zero or one line. Re-read each line and drop the ones that "
+        f"no longer hold. Patterns belong in ## Patterns, not here.",
+        f"- End a line with 3-8 cue words for the situations where the fact should "
+        f"come to mind (places, activities, objects, topics a future request would "
+        f"mention), not synonyms of the fact: "
+        f"`- tree nut allergy — cues: restaurant, dinner, recipe, food, menu`. "
+        f"Cues count toward this section's budget.",
+        f"- Lines persist: the save puts back any line of the current `## {heading}` "
+        f"that you leave out. To remove one, write `[drop-durable: <exact line text>]` "
+        f"on its own line in this section. A reworded fact is a drop plus an add: "
+        f"drop the old line with the marker and write the new one. Changing only "
+        f"a line's cues needs no marker.",
+        f"- When a fact has a current value that will change on a future event, "
+        f"state the CURRENT value AND the pending change, and cue the event too: "
+        f"`- The nightly bank export calls fmt_row52; it switches to fmt_row64 only "
+        f"at the bank cutover, which has not happened — cues: "
+        f"cutover, bank, export, nightly, formatter`. When the event happens, drop "
+        f"the old line with the marker and write the new current value.",
+        f"- This section's budget is on top of the limit above. Over it, the save "
+        f"warns and keeps every line: drop facts that no longer hold.",
+    ]
+    if pending:
+        lines += [
+            "",
+            "Check whether these pending changes have happened; if one has, drop "
+            "the old line and write the new current value:",
+            *pending,
+        ]
+    return "\n".join(lines)
 
 
 def _marker_reference(
@@ -2085,6 +2205,54 @@ def _record_wrap_supersessions(
     return recorded, rejected
 
 
+def _durable_cue_state(
+    store: Store, schema: list[SectionSpec], saved_text: str
+) -> tuple[str | None, list[str]]:
+    """The recall tier's per-store state for a saved continuity with a durable section:
+    ``(value for the ``durable_inert_tokens`` metadata key, cue warnings)``.
+
+    The value is the cue and fact words that are too common in this store's episodes to
+    cue anything (:func:`~anneal_memory.retrieval.compute_durable_inert_tokens`), tied to
+    the hash of the exact text being saved, so the per-prompt recall path only READS it
+    and ignores it the moment the continuity changes. The warnings name each inert cue
+    (it will cue nothing) and each cue token too short to match. A failure here must
+    never cost the save: it returns ``(None, [])`` and the key is simply not written."""
+    try:
+        facts = parse_durable_facts(saved_text, schema)
+        inert = compute_durable_inert_tokens(store, facts)
+        episodes = store.recall(limit=0).total_matching
+        value = json.dumps({
+            "tokens": sorted(inert),
+            "continuity_hash": continuity_hash(saved_text),
+            "episodes": episodes,
+            "threshold": DURABLE_GENERIC_DF,
+        })
+        warnings_out: list[str] = []
+        seen_inert: set[str] = set()
+        seen_short: set[str] = set()
+        percent = f"{DURABLE_GENERIC_DF:.0%}"
+        for fact in facts:
+            for cue in fact.cues:
+                for token in re.findall(r"[a-z0-9]+", cue.lower()):
+                    if len(token) < 3:
+                        if token not in seen_short:
+                            seen_short.add(token)
+                            warnings_out.append(
+                                f"cue {token!r} is too short to match; spell it out"
+                            )
+                for token in _fact_tokens(cue):
+                    if token in inert and token not in seen_inert:
+                        seen_inert.add(token)
+                        warnings_out.append(
+                            f"cue {token!r} appears in more than {percent} of this "
+                            f"store's episodes, so it will not cue anything; add a more "
+                            f"specific cue"
+                        )
+        return value, warnings_out
+    except Exception:  # noqa: BLE001 - see the docstring
+        return None, []
+
+
 def validated_save_continuity(
     store: Store,
     text: str,
@@ -2473,16 +2641,26 @@ def validated_save_continuity(
         # Text loaded with --rederive carries load-time verdicts; they are
         # true only at load, so they never persist (L1 round-trip finding).
         text = strip_rederive_output(text, section_schema)
+    # Loaded once here and reused by the durable-facts invariant just below,
+    # the catastrophic-shrink gate and the silent-omission audit further down.
+    prior_continuity = store.load_continuity()
+    # Durable facts (B1): before anything validates, hashes or writes the text,
+    # carry every prior durable line forward (re-inserting what the composer
+    # left out) and apply the composer's drop markers. Never a refusal. A
+    # schema without a durable section returns the text untouched and None.
+    text, durable_report = enforce_durable_facts(
+        prior_continuity, text, section_schema
+    )
     grad_headings = graduating_headings(section_schema)
     # Reject ambiguous merged headings (e.g. "## Patterns and Understanding")
     # with a clear message before the generic all-sections check: one header
     # satisfying two required sections would route a single body into two
     # protected roles and defeat the shrink gate (v0.3.5). Each section needs
-    # its own '## ' header line.
-    _required_lower = {h.lower() for h in required_headings(section_schema)}
+    # its own '## ' header line. An optional heading counts only as an exact
+    # header (see _header_matches).
     for _line in text.split("\n"):
         if _line.startswith("## "):
-            _matched = _matching_required_headings(_line.lower(), _required_lower)
+            _matched = _header_matches(_line.lower(), section_schema)
             if len(_matched) > 1:
                 raise ValueError(
                     f"Ambiguous section heading {_line.strip()!r} satisfies "
@@ -2546,8 +2724,10 @@ def validated_save_continuity(
     # raising ValueError leaves the wrap in progress (same as the
     # structure-validation failure above), so the agent re-wraps with the
     # felt/identity layers preserved (or passes allow_shrink for a deliberate
-    # diet) without losing the prepared wrap.
-    prior_continuity = store.load_continuity()
+    # diet) without losing the prepared wrap. The prior continuity was loaded
+    # above, before the durable-facts invariant; durable lines kept or
+    # re-inserted only ever add to the new text, so they can never be what
+    # makes this gate refuse.
     # AM-CRYSTAL-MIGRATE: credit chars that crystallized OUT of the graduating
     # section this wrap (crystal-store-grounded, by recoverability not date), so the
     # gate reads a crystallization as a recoverable MOVE — the (prior - credit) gate
@@ -2755,6 +2935,15 @@ def validated_save_continuity(
     content_hash: str = hashlib.sha256(
         grad_result.text.encode("utf-8")
     ).hexdigest()
+    # Durable cue state (cue wiring): computed here, before the batch opens, from the exact
+    # text being saved, so the recall tier's inert-token set is committed with the wrap.
+    # Only a schema with a durable section has any; others write nothing.
+    inert_value: str | None = None
+    cue_warnings: list[str] = []
+    if durable_report is not None:
+        inert_value, cue_warnings = _durable_cue_state(
+            store, section_schema, grad_result.text
+        )
     cont_tmp: Path | None = store._prepare_continuity_write(
         grad_result.text, token_hex=tmp_pair_id
     )
@@ -2948,6 +3137,15 @@ def validated_save_continuity(
             # baton flock across the commit instead was tried and withdrawn in L3: a failed
             # unlock after the commit discarded the committed tmp files, and an on_audit_event
             # callback that touches the baton would block on the lock this process holds.
+            # Durable cue state: one metadata row, in this transaction, so it commits or
+            # rolls back with the wrap row and always names the continuity it was computed
+            # for (the recall path also checks that hash, so a continuity written any other
+            # way simply turns the filter off).
+            if inert_value is not None:
+                store._conn.execute(
+                    "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                    (INERT_TOKENS_KEY, inert_value),
+                )
             _check_save_authority(store, session_id, wrap_token, allow_sole_live)
             # Batch context manager commits here on successful exit.
 
@@ -3170,6 +3368,17 @@ def validated_save_continuity(
                     {"name": p.name, "level": p.level}
                     for p in proven_without_declaration
                 ]
+            # Durable facts (B1): a drop by marker is recorded here, and only
+            # here, so the hash-chained audit log is the trail of every durable
+            # line that left the store. Re-insertions ride along, lean when
+            # empty like the keys above.
+            if durable_report is not None:
+                if durable_report.dropped:
+                    audit_payload["durable_dropped"] = list(durable_report.dropped)
+                if durable_report.reinserted:
+                    audit_payload["durable_reinserted"] = list(
+                        durable_report.reinserted
+                    )
             # ⛔ POST-COMMIT, and routed through the store's shared
             # after-commit helper so this site cannot drift from the other
             # four. Behaviour change: a failed emit now WARNS instead of
@@ -3378,6 +3587,11 @@ def validated_save_continuity(
             "refusal it overrode was removed in 0.9.26. Stop passing it "
             "(CLI --allow-unlinked; MCP \"allow_unlinked\")."
         )
+    durable_messages: list[str] = []
+    if durable_report is not None:
+        durable_messages = durable_report_warnings(durable_report) + cue_warnings
+        for durable_message in durable_messages:
+            _warn_after_commit(durable_message)
     if still_graduating:
         _warn_after_commit(
             f"compost: {still_graduating} also graduated in this wrap's text. "
@@ -3490,6 +3704,8 @@ def validated_save_continuity(
     )
     if compost_names is not None:
         result["composted"] = composted
+    if durable_report is not None:
+        result["durable_warnings"] = durable_messages
     if stale_state:
         result["stale_state"] = stale_state
         _warn_after_commit("State lines that do not hold at save: " + "; ".join(stale_state))

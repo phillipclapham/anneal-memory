@@ -16,6 +16,228 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   before writing it); CI's Linux py3.11/py3.13 failures since 13e8094 were that race, measured
   on Linux under load (the exclusion check itself never failed). Windows tests for lock-only
   behaviour now skip or assert the documented refusal.
+### Added — typed-query recall
+
+- `retrieve_relevant(..., mode="prompt" | "query")` and `retrieve_patterns(..., mode=...)`.
+  `"prompt"` (the default) is today's behavior, unchanged: it is the path a per-turn recall hook
+  takes, and it keeps every precision gate. `"query"` is for a question an agent or operator asked
+  on purpose, and returns more matches and weaker ones by design. The query-mode contract:
+  one distinctive keyword is enough and one keyword hit is enough; the weighted-overlap bar and
+  the distinctive-term anchor do not apply to episodes or to a pattern's own text; the evidence
+  edge (a pattern reached through an episode the query matched) keeps the prompt-mode bar; there is
+  no 80-character episode floor (a one-line episode such as "User is allergic to tree nuts." can
+  match); a short token counts as a keyword when it is written ALL-CAPS or contains a digit, `_` or
+  `-` (`SQL`, `API`, `S3`, `k8s`, `v2`; plain lowercase short words and stopwords stay out, and
+  `extract_keywords` takes the same `mode`); every match of every keyword is fetched, with no
+  per-keyword cap; and each `search_episodes` match carries its `superseded_by`. The IDF weights,
+  the ranking and the display caps are the same in both modes. Any other `mode` raises
+  `ValueError`. The gates are parameters, not module constants rewritten at call time.
+- Measured on the InMind bench, with no API calls (125 tasks, target episode in the top 3 for the
+  raw task text): 4 hits in prompt mode, 34 in query mode; in the top 10, 4 and 53.
+- `search_episodes(store, query, *, episode_type=None, source=None, since=None, until=None,
+  limit=10, include_superseded=False)`: word-by-word episode search (query-mode scoring with the
+  `Store.recall` filters applied in SQL). It returns `EpisodeMatch(episode, matched)` best first,
+  where `matched` is the query keywords found in that episode.
+- MCP `recall`: the exact-phrase match still runs first and answers as before. When it finds
+  nothing, and the `keyword` is two or more words that reduce to at least one distinctive word, the
+  tool ranks episodes by the words they contain (same filters) and says so in the reply, with how
+  many of the query's words each episode matched. Without an explicit `limit` it lists the top 10
+  and reports "Showing top 10 of N word matches"; an explicit `limit` is honoured. When an exact
+  phrase hit fewer than three episodes and the keyword has three or more words, up to five word
+  matches the exact search did not show follow under "Also matching by words:" (never more than
+  the `limit` allows). A one-word keyword,
+  an exact hit of three or more, a `limit` of 0 and an `offset` past the matches behave as before.
+  An agent that sent `"bank export fmt_row64 CLI nightly rows"` used to get "No matching episodes
+  found" although single words from it were in the store.
+- MCP `crystal_recall` takes an optional `mode` (`"prompt"` default, `"query"`).
+- Both `tool-integrity.json` manifests are regenerated (the `recall` and `crystal_recall` hashes).
+- Known open: the per-keyword candidate fetches and the document-frequency counts behind the IDF
+  weights are separate SQLite reads, not one snapshot, so a write landing between them can skew a
+  weight slightly (`retrieve_relevant` has done this since 0.9.3); one read transaction in
+  `Store` would fix it.
+
+### Fixed
+
+- MCP `recall` with a `limit` or `offset` of `3.0` crashed the word-by-word path and was an opaque
+  SQLite error for `2.5`. A whole-number float is now read as that integer, and a bool, a
+  fractional number, a string or null returns "Error: limit must be an integer" (same for `offset`).
+  A negative `limit` or `offset` is read as 0, on the exact path and the word-by-word path alike.
+- MCP `recall` with an `episode_type` that is not an episode type returned "Error: 'message' is not
+  a valid EpisodeType" and no list of the valid values, so the caller could not correct itself. It
+  now returns an error result that names them: "episode_type 'message' is not one of: observation,
+  decision, tension, question, outcome, context."
+### Added — durable facts
+
+- A new section role, `durable`, and an optional `## Durable Facts` section in `DEFAULT_SCHEMA`
+  (after State) and `FLOW_SCHEMA` (after Active Threads). `SectionSpec` gains an optional
+  `optional: bool` key; only a `durable` section may be optional, and a schema may have one.
+  An optional section is not required by `validate_structure` and is ignored by
+  `name_for_schema`, so a store that persisted the default or partnership schema before this
+  release keeps its schema, its name and its exact wrap package and save behaviour (checked on a
+  copy of flow's store: package text, save result and saved bytes identical to 0.9.26). A new
+  store and a store with no persisted schema get the section; an existing store opts in by
+  re-setting its schema.
+- The save invariant (`validated_save_continuity`): every `- ` line of the prior continuity's
+  durable section must be in the new text's, compared by its whitespace-normalised fact part. A
+  missing line is re-inserted verbatim (the section is re-created at its schema position if the
+  wrap left it out) and named in a warning after the commit. It is never a refusal. The only way
+  to remove a line is a marker line in the section, `[drop-durable: <exact line text>]` (the fact
+  part or the full line); the marker is removed and the drop is recorded on the
+  `continuity_saved` audit event as `durable_dropped` (re-insertions as `durable_reinserted`). A
+  marker naming no prior line is removed with a warning. A re-inserted line that looks reworded
+  as a new one (token overlap >= 0.6) draws a warning naming the marker to use.
+- Cue words: a durable line may end with `— cues: a, b, c` (also `-- cues:` and `| cues:`). A
+  line whose fact is unchanged but whose cues changed is an update, not an omission. More than
+  eight cues on a line draws a warning. New module `anneal_memory.durable` with the one parser,
+  `parse_durable_facts(text, schema) -> list[DurableFact]` (exported from the package).
+- Size: the durable section has its own budget, 15% of `max_chars`, on top of `max_chars`
+  (`schema.durable_budget`); `default_max_chars` is unchanged for every schema. Over the budget
+  the save warns and keeps every line. Re-inserted lines only add to the new text, so they can
+  never make the catastrophic-shrink gate refuse; a wrap that left out a large durable section,
+  which that gate refused before, now saves with the lines back.
+- Wrap package guidance (only for a schema with a durable section): what belongs there (InMind's
+  keep criterion), one line per fact, cue words, the drop marker, the current-value-plus-pending-
+  transition shape, and the section's size against its budget,
+  `Durable Facts: <current> / <budget> chars`.
+- Parsing and save checks (review round): facts are `- `, `* ` or `1. ` bullets, and an indented
+  line under a fact continues it (carried and re-inserted with it); any other line in the section
+  draws a "not tracked" warning. Every `## Durable Facts` section counts: a second one's facts are
+  protected, and a wrap with several has them merged into the first, with a warning. A durable
+  section header is the exact heading, compared case-insensitively (`## durable facts` counts;
+  the same rule decides header ambiguity), so `## Archived Durable Facts` is not one. CR and CRLF are read as LF, a bullet-form drop marker is
+  always a marker, and a rebuilt text keeps its dominant line ending. A rebuilt section has its
+  runs of blank lines collapsed. The reword check caches token sets, names at most 20 pairs and
+  summarises the rest. New warnings: a re-inserted line that may be superseded by a new one
+  (two shared cue words, or two shared identifier-like or uncommon tokens); a durable line shaped
+  like a pattern line; two lines sharing one fact; a marker that also removed a line the wrap
+  wrote; an unknown marker now names the closest prior line. `– cues:` (en dash) is accepted.
+  The save result gains `durable_warnings` (present when the schema has a durable section), and
+  the wrap package lists the current pending-transition lines for the composer to re-check.
+- Review round 2: the catastrophic-shrink gate's whole-document backstop leaves the durable
+  section out of both sides, as it does the graduating section, so dropping durable lines by
+  marker cannot trip it. A cue suffix is read only on a fact's last physical line, and the fact's
+  identity includes its continuation lines, so a continuation under a cue line is never swallowed
+  as cues. The durable section is measured in raw chars (CRLF counts two), the same basis as
+  the document length the backstop subtracts it from. An optional heading counts toward header ambiguity only as an exact header, so
+  `## Decisions (durable facts)` is a Decisions header. Re-inserted lines are byte-for-byte
+  (trailing spaces kept). Closest-line hints for unknown markers are capped at 20, with one
+  summary line for the rest. The audit `durable_dropped` / `durable_reinserted` entries carry the
+  whole fact, every physical line joined with `\n`; warnings show a multi-line fact on one line,
+  joined with ` / `. A marker that drops more than one prior fact (a first line several facts
+  share) warns, naming them; a dropped fact is attributed to the first marker that names it.
+  Every fact a marker drops is reported, `Durable facts: dropped by marker: <fact>`, in the
+  warnings and in `durable_warnings`, as well as in the audit chain. The durable section's raw
+  size is measured with lines split on `\n` only, as `measure_sections` splits them.
+- Known open: (a) a writer calling bare `Store.save_continuity()` between a validated save's read
+  and its rename is overwritten, durable lines included; this holds for all continuity content,
+  and bare save is the documented bypass of the pipeline. (b) The save-time durable budget is
+  computed from the schema's default `max_chars`, not from a `max_chars` passed to
+  `prepare_wrap`, which is not frozen into the wrap. (c) The durable parser is fence-unaware,
+  like `validate_structure` and every other section header: a `## ` line inside a fenced code
+  block is a header. Measured on this build: a `## Durable Facts` header inside a fenced block in
+  another section is read as a durable section. If the real section is left out, an omitted prior
+  fact is re-inserted there, after the block's closing fence (at the end of that section); if the
+  real section is kept, the two are merged, so the fenced header is removed and the block's
+  remaining lines (its closing fence included) move into the real section, leaving the block
+  in the other section unclosed. Either way the fenced `- ` lines become tracked durable facts,
+  and the fence line draws a "not tracked" warning. A heading-like line inside a fenced block
+  within the durable section (```` ``` ```` then `## Notes`) ends the section: lines after it,
+  including `- ` facts after the block, are not durable facts, and are dropped without a durable
+  warning if a later wrap leaves them out. A drop marker inside a fenced block within the
+  durable section is applied like any other marker: measured, a ```` ``` ```` block holding
+  `[drop-durable: - example fact]` dropped that fact (and the wrap's own copy of it), and the save
+  reported `dropped by marker: - example fact`; the empty fence lines stay in the section, each
+  with a "not tracked" warning. (d) A decorated header such as `## Durable Facts:` or
+  `## Durable Facts (pinned)` is not the durable heading. Measured: its lines are kept as written
+  but are not durable facts. If the prior continuity had a real `## Durable Facts` section, the
+  save re-creates it, so its facts appear twice (under both headers); if the decorated header held
+  the only copy, a later wrap that leaves those lines out drops them with no durable warning.
+- Migration manifest entry `AM-DURABLE-FACTS` (0.9.27): what the section is, that new stores get
+  it and an existing store gets it only when its operator re-runs
+  `anneal-memory --db <path> set-schema <its schema name>` (or `store.set_section_schema(...)`), and a
+  suggested edit that points composers at the section and leaves the detail to `prepare_wrap`.
+
+### Added — MCP save_continuity reports durable-fact warnings
+
+- MCP `save_continuity` appends the save's `durable_warnings` (a re-inserted durable line, a drop
+  marker that named nothing) to its result text under "Durable facts:", because a post-commit
+  warning never reaches an MCP client any other way. A result with no warnings adds nothing.
+
+### Added — durable facts come back on the recall paths (cue wiring)
+
+- `retrieve_relevant(..., durable=True)` returns `RelevantResult.facts`, a list of the new frozen
+  `RelevantFact(fact, line, matched, source)`: the durable facts (the `## Durable Facts` section
+  of the store's current continuity, parsed with the store's schema) that the query cues. `facts`
+  defaults to empty, so existing constructors and consumers are unaffected, and `patterns` and
+  `episodes` are identical with the tier on or off. A store with no continuity, no durable
+  section, or an unreadable continuity gives an empty `facts`; the tier never raises.
+- The rule, and why it is not behind the retrieval gates. The tier runs before the keyword floor
+  and does not use the score bar, the distinctive anchor or the hit floor, on purpose: the
+  composer wrote cue words for a fact, and a one-word prompt such as "restaurant?" must be able to
+  bring it up. It runs on every prompt, so its precision guard has six parts instead.
+  (1) A fact surfaces when a query token equals one of its cue tokens (a cue phrase is split into
+  word tokens). Equality is on whole tokens, never a substring, lowercase, after light stemming on
+  both sides (one trailing `s` removed while three or more characters remain, or `es` / `ing`
+  while four or more remain, so `restaurants` and `recipes` match their cue, and `rating`, `files`
+  and `lines` do not collide with `rat`, `fil` and `lin`; `restaurateur` matches nothing). A token
+  under three characters or a stopword never matches. (2) A cue or fact word that is inert in this
+  store never matches: it is found, as a whole word, in more than `DURABLE_GENERIC_DF` (10%) of
+  the store's own episodes. `compute_durable_inert_tokens(store, facts)` counts that in Python over
+  the episodes in pages (`cat` is not found in "category", `rent` not in "current"), and a store
+  with fewer than `IDF_MIN_CORPUS` (50) episodes gets the empty set. The prompt path never counts
+  anything: it reads the set from the metadata key `durable_inert_tokens`
+  (`{"tokens", "continuity_hash", "episodes", "threshold"}`) and uses it only when its
+  `continuity_hash` is the SHA-256 of the current continuity; with no key or a stale hash there
+  is no filter. The set is the store's own, not a shipped list: one derived from a general chat
+  corpus marks "restaurant", "dinner", "recipe" and "food" generic at a 5% cut-off, which are the
+  cues the tier exists for. (3) A prompt with more than `DURABLE_SHORT_PROMPT_TOKENS` (2) usable
+  tokens needs two DISTINCT query tokens that matched: a token matching a cue and a fact word
+  counts once, and so do inflections of one token. A short prompt still cues on one. (4) The fact
+  text alone cues a fact only through `DURABLE_FACT_TEXT_MIN` (2) distinct distinctive words of it
+  (`extract_keywords` in the call's mode); a cue match is the primary path. (5) Only the first
+  `MAX_DURABLE_QUERY_TOKENS` (12) distinct usable query tokens are considered, so a pasted
+  document costs what a sentence costs, and the tier cannot raise: any failure gives an empty
+  tier. (6) At most `MAX_DURABLE_FACTS` (2) surface per call, ranked by distinct matched query
+  tokens, then section order. `source` is `"cue"` when a cue matched (`matched` holds the cue
+  words) and `"fact"` when only the fact text did (`matched` holds those words). Each number is a
+  module constant.
+- Measured on the InMind bench with all 125 cue lines in one continuity (a store larger than any
+  real one), the shipped `retrieve_relevant` in prompt mode, API-free. TUNING-ONLY: the rule's
+  numbers were chosen on set A (even task ids and 50 off-topic everyday prompts) and the held-out
+  set B (odd task ids and a second 50 prompts, written before any result on it) shows how it
+  generalizes; neither is a claim about a real store, whose cues, facts and episodes differ. Set B
+  (68 tasks): the tier as first built surfaced the task's own fact for 30 of 68 task-text queries,
+  a wrong fact for 51 calls (mean 1.09 per call), and some fact for 31 of 50 off-topic prompts;
+  with rules (3) and (4) only, 22 own, 27 wrong calls, 7 of 50; shipped, 19 own, 19 wrong calls
+  (mean 0.34), 2 of 50. On the indirect query type: own fact 2 of 68 in each configuration, wrong
+  calls 52, 8 and 4. Set A (57 tasks), shipped: 8 own, 15 wrong calls, 4 of 50 off-topic. A store
+  with well-chosen cues and few shared words will lose less. Cost: about 7 ms per prompt on
+  a 247-episode store with 125 facts, and a 160-token prompt on a 12,000-episode store stays
+  under 50 ms (the metadata read is the only store access beyond the continuity). Reproduce with
+  `python scripts/cue_precision.py --cue-reach <cue_reach.json> --bench-dir <inmind>/bench/inmind`.
+- `validated_save_continuity` writes that set. For a store whose schema has a durable section it
+  computes `compute_durable_inert_tokens` over the facts of the exact text being saved, before
+  the save's transaction opens (a failure there costs nothing: the key is simply not written),
+  and writes `durable_inert_tokens` inside the same transaction as the wrap row, so it commits
+  or rolls back with the save and always names the continuity it was computed for; the recall
+  path checks the hash as well, so a continuity written any other way turns the filter off. A
+  store without a durable section writes nothing. On a copy of flow's store (no durable section)
+  the wrap package, save result, warnings, saved bytes and metadata keys are identical to 0.9.26.
+  Cost: about 0.4 s on a 12,000-episode store (120 words each, 25 facts), once per wrap.
+- Two new `durable_warnings` (and `UserWarning`s) from the save: "cue 'deploy' appears in more
+  than 10% of this store's episodes, so it will not cue anything; add a more specific cue" for
+  each inert cue token, and "cue 'db' is too short to match; spell it out" for each cue token
+  under three characters, each named once per save.
+- MCP `recall` with a `keyword` (first page, `limit` above 0, and no `since` / `until` / `source` /
+  `episode_type` filter, since facts are not episodes) lists the facts its words cue first, under
+  "Durable facts matching your words:", each as the fact text (not its cue list) plus "(cue: word)"
+  for a cue match or "(matches: word)" for a fact-text match, then the episode output; a call that
+  matched no episode keeps "No matching episodes found." after the facts block. MCP `crystal_recall`
+  does the same ahead of its patterns, with its own miss line after the block. Both tool
+  descriptions say so (manifests regenerated).
+- A harness that renders `RelevantResult` must read `result.facts` to show them; `patterns` and
+  `episodes` are unchanged. The documented render is `Durable fact (cue: restaurant): tree nut
+  allergy`, built from `.fact` and the first of `.matched`.
 
 ## [0.9.26] — 2026-10-03
 

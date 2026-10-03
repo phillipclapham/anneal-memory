@@ -368,6 +368,46 @@ MIGRATION_MANIFEST: list[MigrationEntry] = [
         ),
         "files": list(CORE_FILES),
     },
+    {
+        "version": "0.9.27",
+        "feature": "AM-DURABLE-FACTS",
+        "summary": (
+            "anneal-memory 0.9.27 adds an optional `## Durable Facts` section "
+            "(role `durable`) to the default and partnership schemas. It holds "
+            "facts that would change a future answer, or that the user would be "
+            "upset or harmed to have forgotten: health, allergies, constraints, "
+            "commitments, preferences, relationships, identity facts, and system "
+            "facts a future action depends on. One `- ` line per fact, with "
+            "optional cue words for the situations where it matters "
+            "(`- tree nut allergy — cues: restaurant, dinner, recipe`). The save "
+            "carries every line forward: a line a wrap leaves out is re-inserted "
+            "and named in a warning, and a line is dropped only by a marker line "
+            "in the section, `[drop-durable: <line>]`, which the audit chain "
+            "records. A fact whose value will change on a future event states the "
+            "current value AND the pending change (`- The nightly export calls "
+            "fmt_row52; it switches to fmt_row64 only at the bank cutover, which "
+            "has not happened`). NEW stores get the section: `init`, `init "
+            "--schema partnership`, and a store with no persisted schema. An "
+            "EXISTING store with a persisted schema does not, and behaves exactly "
+            "as before, until its operator opts it in: re-run `anneal-memory --db "
+            "<path> set-schema <its schema name>` (e.g. partnership). `anneal-memory "
+            "--db <path> status` prints the name. In the library: "
+            "`store.set_section_schema(schema_by_name(\"partnership\"))`, with no "
+            "wrap in progress."
+        ),
+        "suggested_edit": (
+            "If your store has (or is set to) the section, add one short "
+            "instruction where your files describe the wrap: durable facts go "
+            "under `## Durable Facts`, one `- ` line each, with cue words in the "
+            "form `- fact — cues: a, b, c`, and they persist until dropped with "
+            "the marker. Let the guidance `prepare_wrap` emits carry the detail "
+            "(the keep criterion, the drop marker, the pending-transition shape, "
+            "the section's budget); do not copy those rules into your files, "
+            "where a static copy goes stale. Re-setting an existing store's "
+            "schema is the operator's decision, not the composer's."
+        ),
+        "files": list(CORE_FILES),
+    },
 ]
 
 

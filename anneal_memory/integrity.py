@@ -90,7 +90,15 @@ TOOLS: list[dict[str, Any]] = [
             "context before making decisions, to locate specific episodes for "
             "citation during graduation, or to review recent work. Returns "
             "matching episodes ordered by timestamp (newest first). Supports "
-            "time range, type, source, and keyword filters."
+            "time range, type, source, and keyword filters. The keyword is "
+            "matched as an exact phrase first; if no episode contains the whole "
+            "phrase and it has two or more distinctive words, the call falls "
+            "back to ranking episodes by how many of those words they contain "
+            "(the reply says so and names the words each episode matched), so a "
+            "multi-word query does not need to appear verbatim. A phrase with "
+            "only one or two exact hits is followed by a few word matches, listed "
+            "under 'Also matching by words'. A durable fact whose cue words appear in the "
+            "keyword is listed first, under 'Durable facts matching your words'."
         ),
         "inputSchema": {
             "type": "object",
@@ -121,11 +129,19 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "keyword": {
                     "type": "string",
-                    "description": "Search episode content for this keyword.",
+                    "description": (
+                        "Search episode content for this keyword or phrase. An exact "
+                        "phrase match is tried first; a multi-word phrase with no exact "
+                        "match is then matched word by word and ranked."
+                    ),
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum episodes to return. Default 100.",
+                    "description": (
+                        "Maximum episodes to return. Default 100. When a multi-word "
+                        "keyword has no exact match and is ranked word by word, the "
+                        "default is 10 instead; pass a limit to see more."
+                    ),
                     "default": 100,
                 },
                 "offset": {
@@ -425,9 +441,11 @@ TOOLS: list[dict[str, Any]] = [
             "crystal_index, the always-on menu of what exists). Associative by "
             "default: a pattern grounded in an episode your query matched surfaces "
             "even with zero keyword overlap (the evidence edge). Returns scored "
-            "patterns (name, level, activation, explanation, tags); precision-biased "
-            "— a thin query or no match returns none, by design (surface nothing "
-            "rather than noise)."
+            "patterns (name, level, activation, explanation, tags). In the default "
+            "'prompt' mode it is precision-biased: a thin query or no match returns "
+            "none, by design (surface nothing rather than noise). Pass mode='query' "
+            "when you are asking explicitly. Durable facts whose cue words appear in the "
+            "query are listed first, under 'Durable facts matching your words'."
         ),
         "inputSchema": {
             "type": "object",
@@ -455,6 +473,17 @@ TOOLS: list[dict[str, Any]] = [
                         "pure keyword scoring (the pre-0.8.0 path)."
                     ),
                     "default": True,
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["prompt", "query"],
+                    "description": (
+                        "'query': for a question you are asking on purpose; one "
+                        "keyword is enough, and weaker matches come back too. "
+                        "'prompt' (default): strict, built for automatic per-turn "
+                        "injection; may return nothing."
+                    ),
+                    "default": "prompt",
                 },
             },
             "required": ["query"],

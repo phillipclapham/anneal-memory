@@ -38,6 +38,21 @@ recent = store.recall(since="2026-04-01T00:00:00Z")
 store.close()
 ```
 
+### Searching with a multi-word query
+
+`store.recall(keyword=...)` matches the keyword as one exact substring, so `"bank export nightly rows"` finds only an episode containing those words in that order. To match word by word, use `search_episodes`: it reduces the query to its distinctive words, returns every episode that contains at least one, ranks by how many it contains (rarer words count more), and says which words each episode matched. It takes the same `episode_type`, `source`, `since` and `until` filters as `recall`.
+
+```python
+from anneal_memory import search_episodes
+
+for m in search_episodes(store, "bank export fmt_row64 nightly rows", limit=5):
+    print(m.episode.id, m.matched, m.episode.content)
+```
+
+The MCP `recall` tool does this for you: it tries the exact phrase first, and only when no episode contains it and the keyword has two or more distinctive words does it fall back to `search_episodes` with the same filters and limit. Its reply says when it did.
+
+`retrieve_relevant` and `retrieve_patterns` take `mode="prompt"` (the default: the precision gates meant for a hook that injects memory on every prompt) or `mode="query"`, for a question asked on purpose, where one keyword and one hit are enough and the score bar and the distinctive-term anchor are dropped. Query mode returns more matches and weaker ones. The MCP `crystal_recall` tool passes the same `mode` through.
+
 ## The Wrap Sequence
 
 This is the most important part. Wrapping is how raw episodes compress into working memory.

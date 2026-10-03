@@ -369,6 +369,26 @@ class ScoredEpisode:
     score: float
 
 
+@dataclass(frozen=True)
+class RelevantFact:
+    """A durable fact (a line of the continuity's ``## Durable Facts`` section) that
+    the query cued.
+
+    ``fact`` is the fact text without its cue list, ``line`` the raw ``- `` line as
+    written (cues included), and ``matched`` the words that brought it up: the matched
+    CUE words when ``source`` is ``"cue"``, the matched fact-text words when it is
+    ``"fact"`` (a cue match is the primary path; the fact text alone needs two words).
+
+    A harness hook renders one as ``Durable fact (cue: restaurant): tree nut allergy``,
+    built from ``.fact`` and the first of ``.matched`` (``cue`` for ``source == "cue"``,
+    ``matches`` otherwise)."""
+
+    fact: str
+    line: str
+    matched: tuple[str, ...]
+    source: str = "cue"
+
+
 @dataclass
 class RelevantResult:
     """The unified result of :func:`anneal_memory.retrieval.retrieve_relevant`.
@@ -383,6 +403,9 @@ class RelevantResult:
     patterns: list[RelevantPattern]
     episodes: list[ScoredEpisode]
     query_keywords: list[str] = field(default_factory=list)
+    # Durable facts the query cued (at most MAX_DURABLE_FACTS). Additive: empty unless
+    # the store's continuity has a durable section and a fact matched.
+    facts: list[RelevantFact] = field(default_factory=list)
 
 
 # -- TypedDict return shapes for the canonical pipeline --
@@ -618,6 +641,10 @@ class _SaveContinuityOptional(TypedDict, total=False):
     # hold at save (stale, or not derived within the load budget). The save
     # committed; these lines are the agent's to fix next wrap.
     stale_state: list[str]
+    # Present ONLY when the store's schema has a durable section: every
+    # durable-facts warning text this save emitted (also delivered as
+    # UserWarnings), empty when there were none.
+    durable_warnings: list[str]
 
 
 class SaveContinuityResult(_SaveContinuityOptional):

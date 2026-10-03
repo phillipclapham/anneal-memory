@@ -26,6 +26,7 @@ from .types import (
     FeltCurrency,
     PrepareWrapResult,
     RecallResult,
+    RelevantFact,
     RelevantPattern,
     RelevantResult,
     SaveContinuityResult,
@@ -62,6 +63,7 @@ from .rederive import (
     rederive_continuity,
     revoke_store,
 )
+from .durable import DurableFact, parse_durable_facts
 from .continuity import (
     felt_currency,
     format_wrap_package_text,
@@ -123,7 +125,13 @@ from .crystal import (
     activation_tier,
     parse_crystal_decisions,
 )
-from .retrieval import extract_keywords, retrieve_patterns, retrieve_relevant
+from .retrieval import (
+    EpisodeMatch,
+    extract_keywords,
+    retrieve_patterns,
+    retrieve_relevant,
+    search_episodes,
+)
 from .server import Server
 
 __all__ = [
@@ -181,6 +189,8 @@ __all__ = [
     "sections_by_role",
     "schema_role_warning",
     "heading_marker",
+    "DurableFact",
+    "parse_durable_facts",
     "validate_structure",
     "prepare_wrap",
     "felt_currency",
@@ -237,8 +247,11 @@ __all__ = [
     "RETIRE_KINDS",
     "retrieve_relevant",
     "retrieve_patterns",
+    "search_episodes",
+    "EpisodeMatch",
     "extract_keywords",
     "RelevantResult",
     "RelevantPattern",
+    "RelevantFact",
     "ScoredEpisode",
 ]

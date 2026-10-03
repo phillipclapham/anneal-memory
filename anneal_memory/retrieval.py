@@ -42,6 +42,14 @@ because the episodes the Hebbian links connected and the episodes crystals cite
 were disjoint sets. On a store like that the hop is traversed and contributes
 nothing; the evidence edge is the part of the associative pass that works.
 
+Superseded episodes (a newer episode recorded as replacing them) are left out of
+the candidate fetch, because it goes through ``Store.recall``'s default. So they
+are not seeds either: a pattern whose evidence cites only a superseded episode no
+longer surfaces through the evidence edge (keyword matching on the pattern's own
+text is unaffected). That is chosen, not incidental: a pattern grounded only in a
+replaced fact should not be resurfaced by it. A pattern that generalizes over the
+old episode loses that path until it is re-grounded on current evidence.
+
 It is strictly additive (``retrieve_relevant(..., associative=True)``, default on):
 the associative pass UNIONS extra patterns under the SAME precision gate + cap, never
 removing a keyword hit, and it inherits the episode tier's precision (a pattern can

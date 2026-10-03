@@ -107,7 +107,7 @@ def test_wrap_proposed_link_is_validated_and_idempotent(tmp_path):
         # The link recorded BEFORE the two rejections must survive them: a
         # rejection raised inside the save batch once rolled it back (and with
         # it the batch's association writes), reproduced while writing this.
-        assert st.supersession_exists(old.id, new.id)
+        assert st.supersession_exists(old_id=old.id, new_id=new.id)
         reasons = {(r["old_id"], r["new_id"]) for r in res["supersessions_rejected"]}
         assert reasons == {(new.id, old.id), (old.id, stranger.id)}
         assert [e.id for e in st.recall(keyword="quillmark").episodes] == [new.id]
@@ -135,4 +135,74 @@ def test_read_only_recall_on_a_store_without_the_table(tmp_path):
     con.close()
     with Store(str(db), read_only=True) as ro:
         assert [e.content for e in ro.recall(keyword="quillmark").episodes] == [OLD]
-        assert ro.supersession_exists("a", "b") is False
+        assert ro.supersession_exists(old_id="a", new_id="b") is False
+
+
+# --- built from the L1/L2 review's reproduced failures (2026-10-02) ---
+
+def _pair(st: Store, t_old: str = "2026-01-05T10:00:00Z", t_new: str = "2026-02-10T10:00:00Z"):
+    old = st.record(OLD, "observation", timestamp=t_old)
+    new = st.record(NEW, "observation", timestamp=t_new, supersedes=[old.id])
+    return old, new
+
+
+def test_a_cutoff_before_the_replacement_still_shows_the_old_fact(tmp_path):
+    """flow's hook recalls with a recent-exclusion cutoff; a just-updated fact
+    vanished from it entirely (old hidden, new excluded as recent)."""
+    with Store(str(tmp_path / "m.db")) as st:
+        _seed(st)
+        old, new = _pair(st)
+        assert [e.id for e in st.recall(keyword="quillmark", until="2026-02-01T00:00:00Z").episodes] == [old.id]
+        got = retrieve_relevant(st, None, QUESTION, max_patterns=0, associative=False,
+                                exclude_recent_minutes=60, now="2026-02-10T10:30:00Z").episodes
+        assert [e.id for e in got] == [old.id]
+
+
+def test_chains_cycles_and_undo(tmp_path):
+    with Store(str(tmp_path / "m.db")) as st:
+        a = st.record(OLD, "observation", timestamp="2026-01-01T00:00:00Z")
+        b = st.record(NEW, "observation", timestamp="2026-01-01T00:00:00Z", supersedes=[a.id])
+        c = st.record("Quillmark moved its storage to duckdb." + CONTEXT, "observation",
+                      timestamp="2026-01-01T00:00:00Z", supersedes=[b.id])
+        # Equal timestamps pass the order rule; a cycle of any length is refused.
+        with pytest.raises(SupersessionError, match="cycle"):
+            st.supersede(old_id=c.id, new_id=a.id)
+        # Deleting the middle keeps the oldest hidden behind the live end.
+        st.delete(b.id)
+        assert [e.id for e in st.recall(keyword="quillmark").episodes] == [c.id]
+        assert st.superseded_by_map([a.id]) == {a.id: c.id}
+        # The undo for a wrong link.
+        assert st.unsupersede(old_id=b.id, new_id=c.id) is True
+        assert st.unsupersede(old_id=a.id, new_id=b.id) is True
+        assert {e.id for e in st.recall(keyword="quillmark").episodes} == {a.id, c.id}
+
+
+def test_record_refusal_inside_a_batch_keeps_the_batch(tmp_path):
+    with Store(str(tmp_path / "m.db")) as st:
+        old = st.record(OLD, "observation", timestamp="2026-01-05T10:00:00Z")
+        with st._batch():
+            kept = st.record("An earlier write in the same batch." + CONTEXT, "observation")
+            with pytest.raises(SupersessionError):
+                st.record("Lunch is tacos.", "observation", supersedes=[old.id])
+        assert st.get(kept.id) is not None
+
+
+def test_wrap_marks_superseded_and_reports_unparsed_markers(tmp_path):
+    with Store(str(tmp_path / "m.db")) as st:
+        _pair(st)
+        wrap = prepare_wrap(st)
+        assert "[superseded by" in wrap["package"]["episodes"]
+        res = validated_save_continuity(st, _continuity("[Supersedes: abc → def]"))
+        assert [r["reason"][:15] for r in res["supersessions_rejected"]] == ["unparsed marker"]
+
+
+def test_export_keeps_superseded_episodes(tmp_path, capsys, monkeypatch):
+    from anneal_memory.cli import main as cli_main
+    db = str(tmp_path / "m.db")
+    with Store(db) as st:
+        old, new = _pair(st)
+    monkeypatch.setattr("sys.argv", ["anneal-memory", "--db", db, "export", "--format", "json"])
+    cli_main()
+    data = __import__("json").loads(capsys.readouterr().out)
+    assert {e["id"] for e in data["episodes"]} == {old.id, new.id}
+    assert data["supersessions"] == [{"old_id": old.id, "new_id": new.id}]

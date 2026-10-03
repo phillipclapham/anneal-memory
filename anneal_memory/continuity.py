@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import dataclasses
 import re
 import uuid
 import logging
@@ -551,7 +552,11 @@ def format_episodes_for_wrap(episodes: list[Episode]) -> str:
         lines.append(f"\n### {type_name.title()}s ({len(type_eps)})")
         for ep in type_eps:
             source_info = f" [{ep.source}]" if ep.source != "agent" else ""
-            lines.append(f"- ({ep.id}) {ep.content}{source_info}")
+            replaced = (
+                f" [superseded by {ep.superseded_by}: do not cite as current]"
+                if ep.superseded_by else ""
+            )
+            lines.append(f"- ({ep.id}) {ep.content}{source_info}{replaced}")
 
     return "\n".join(lines)
 
@@ -1712,8 +1717,16 @@ def prepare_wrap(
     schema_warning = schema_role_warning(schema)
     if schema_warning is not None:
         warnings.warn(schema_warning, UserWarning, stacklevel=2)
+    # Mark episodes in the window that a later episode replaced, so the agent
+    # does not graduate a pattern on a stale fact (L2 review: unmarked, a 2x
+    # citing only the superseded episode validated).
+    _replaced = store.superseded_by_map([ep.id for ep in episodes])
     package = _build_wrap_package(
-        episodes,
+        [
+            dataclasses.replace(ep, superseded_by=_replaced[ep.id])
+            if ep.id in _replaced else ep
+            for ep in episodes
+        ],
         existing,
         store.project_name,
         max_chars=max_chars,
@@ -2087,8 +2100,11 @@ def _check_linkgate(
 
 
 _SUPERSEDES_RE = re.compile(
-    r"\[supersedes:\s*([0-9A-Fa-f]{8})\s+by\s+([0-9A-Fa-f]{8})\s*\]"
+    r"\[supersedes:\s*([0-9A-Fa-f]{8})\s+by\s+([0-9A-Fa-f]{8})\s*\]", re.IGNORECASE
 )
+# Anything that LOOKS like the marker. One that the strict form does not parse is
+# reported as rejected, so a typo never reads as "nothing to record".
+_SUPERSEDES_LOOSE_RE = re.compile(r"\[\s*supersedes\b[^\]\n]*\]?", re.IGNORECASE)
 
 
 def _record_wrap_supersessions(
@@ -2106,13 +2122,21 @@ def _record_wrap_supersessions(
     recorded = 0
     rejected: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
+    parsed_at = {m.start() for m in _SUPERSEDES_RE.finditer(text)}
+    for loose in _SUPERSEDES_LOOSE_RE.finditer(text):
+        if loose.start() not in parsed_at:
+            rejected.append({
+                "old_id": "", "new_id": "",
+                "reason": f"unparsed marker {loose.group(0)!r}; the form is "
+                          f"[supersedes: <old 8-hex id> by <new 8-hex id>]",
+            })
     for m in _SUPERSEDES_RE.finditer(text):
         old_id, new_id = m.group(1).lower(), m.group(2).lower()
         if (old_id, new_id) in seen:
             continue
         seen.add((old_id, new_id))
         if new_id not in valid_ids:
-            if store.supersession_exists(old_id, new_id):
+            if store.supersession_exists(old_id=old_id, new_id=new_id):
                 continue
             rejected.append({
                 "old_id": old_id, "new_id": new_id,
@@ -2120,7 +2144,7 @@ def _record_wrap_supersessions(
             })
             continue
         try:
-            if store.supersede(new_id, old_id, source="wrap"):
+            if store.supersede(old_id=old_id, new_id=new_id, source="wrap"):
                 recorded += 1
         except SupersessionError as exc:
             rejected.append({"old_id": old_id, "new_id": new_id, "reason": str(exc)})

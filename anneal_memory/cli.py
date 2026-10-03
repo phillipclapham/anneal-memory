@@ -606,6 +606,7 @@ def cmd_episodes(args: argparse.Namespace) -> None:
             keyword=args.keyword,
             limit=args.limit,
             offset=args.offset,
+            include_superseded=getattr(args, "include_superseded", False),
         )
 
         if args.json:
@@ -860,6 +861,31 @@ def cmd_search(args: argparse.Namespace) -> None:
             print()
 
 
+def cmd_supersede(args: argparse.Namespace) -> None:
+    """Record a supersession link between two existing episodes."""
+    with _open_store(args) as store:
+        try:
+            added = store.supersede(old_id=args.old, new_id=args.new, source="cli")
+        except SupersessionError as exc:
+            print(f"Error: {exc}. Nothing was recorded.", file=sys.stderr)
+            sys.exit(1)
+    if args.json:
+        _print_json({"old_id": args.old, "new_id": args.new, "recorded": added})
+    else:
+        print(f"{args.new} supersedes {args.old}" + ("" if added else " (already recorded)"))
+
+
+def cmd_unsupersede(args: argparse.Namespace) -> None:
+    """Remove a supersession link."""
+    with _open_store(args) as store:
+        removed = store.unsupersede(old_id=args.old, new_id=args.new, source="cli")
+    if args.json:
+        _print_json({"old_id": args.old, "new_id": args.new, "removed": removed})
+    else:
+        print(f"Removed: {args.new} no longer supersedes {args.old}" if removed
+              else f"No link {args.old} by {args.new} was recorded.")
+
+
 def cmd_pattern_associations(args: argparse.Namespace) -> None:
     """Inspect the cortical pattern-association graph (AM-LINKGATE-DECAY, Slice B).
 
@@ -1033,7 +1059,8 @@ def cmd_prune(args: argparse.Namespace) -> None:
             cutoff = (datetime.now(timezone.utc) - timedelta(days=args.older_than)).strftime(
                 "%Y-%m-%dT%H:%M:%S.%fZ"
             )
-            result = store.recall(until=cutoff)
+            # prune() deletes superseded episodes too, so count them.
+            result = store.recall(until=cutoff, include_superseded=True)
             count = result.total_matching
             if args.json:
                 _print_json({"would_prune": count, "older_than_days": args.older_than})
@@ -1665,9 +1692,14 @@ def cmd_export(args: argparse.Namespace) -> None:
         return
 
     with _open_store(args) as store:
-        # Gather all data
-        result = store.recall(limit=100000)
+        # Gather all data. Superseded episodes are kept (invalidate, never
+        # delete), so an export carries them, marked, plus the links.
+        result = store.recall(limit=100000, include_superseded=True)
         episodes = [_episode_dict(ep) for ep in result.episodes]
+        supersessions = [
+            {"old_id": ep.id, "new_id": ep.superseded_by}
+            for ep in result.episodes if ep.superseded_by
+        ]
         continuity = store.load_continuity()
         meta = store.load_meta()
         assoc_stats = store.association_stats()
@@ -1703,6 +1735,8 @@ def cmd_export(args: argparse.Namespace) -> None:
                 "project_name": store.project_name,
                 "episodes": episodes,
                 "associations": associations,
+                # Informational: import does not restore links (episodes only).
+                "supersessions": supersessions,
                 "wraps": wraps,
                 "continuity": continuity,
                 "meta": meta,
@@ -1737,7 +1771,8 @@ def cmd_export(args: argparse.Namespace) -> None:
             lines.append("## Episodes")
             lines.append("")
             for ep in episodes:
-                lines.append(f"### [{ep['id']}] {ep['type']} — {ep['timestamp']}")
+                replaced = f" (superseded by {ep['superseded_by']})" if ep.get("superseded_by") else ""
+                lines.append(f"### [{ep['id']}] {ep['type']} — {ep['timestamp']}{replaced}")
                 if ep.get("source") and ep["source"] != "agent":
                     lines.append(f"Source: {ep['source']}")
                 lines.append("")
@@ -1768,7 +1803,9 @@ def cmd_export(args: argparse.Namespace) -> None:
 def cmd_import(args: argparse.Namespace) -> None:
     """Import episodes from a JSON export file.
 
-    Imports episodes only — not associations, continuity, or wrap history.
+    Imports episodes only — not associations, continuity, wrap history, or
+    supersession links: an export's superseded episodes come back unhidden;
+    re-link them with ``supersede`` if they should stay hidden.
     This is intentional: associations form through the agent's own consolidation
     acts during wraps, not through external injection. Importing someone else's
     cognitive topology would undermine the system's thesis that identity emerges
@@ -2204,7 +2241,7 @@ def cmd_graph(args: argparse.Namespace) -> None:
     """Export association graph."""
     with _open_store(args) as store:
         # Get all episodes to build node list
-        result = store.recall(limit=100000)
+        result = store.recall(limit=100000, include_superseded=True)
         all_ids = [ep.id for ep in result.episodes]
 
         if not all_ids:
@@ -2317,7 +2354,7 @@ def cmd_stats(args: argparse.Namespace) -> None:
         wraps = store.get_wrap_history()
 
         # Episode age distribution
-        all_eps = store.recall(limit=100000)
+        all_eps = store.recall(limit=100000, include_superseded=True)
         now = datetime.now(timezone.utc)
         age_buckets = {"<1h": 0, "1-24h": 0, "1-7d": 0, "7-30d": 0, ">30d": 0}
         for ep in all_eps.episodes:
@@ -3407,7 +3444,19 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--keyword", help="Search content by keyword")
     sub.add_argument("--limit", type=int, default=50, help="Max episodes to return (default: 50)")
     sub.add_argument("--offset", type=int, default=0, help="Skip first N episodes")
+    sub.add_argument("--include-superseded", action="store_true",
+                     help="Also show episodes a newer episode replaced (hidden by default)")
     sub.set_defaults(func=cmd_episodes)
+
+    # -- supersede / unsupersede --
+    for _verb, _help in (
+        ("supersede", "Record that a newer episode replaces an older one (validated)"),
+        ("unsupersede", "Remove a recorded supersession link (the undo for a wrong one)"),
+    ):
+        sub = subparsers.add_parser(_verb, help=_help, parents=[json_parent])
+        sub.add_argument("--old", required=True, metavar="ID", help="The replaced episode")
+        sub.add_argument("--new", required=True, metavar="ID", help="The replacing episode")
+        sub.set_defaults(func=cmd_supersede if _verb == "supersede" else cmd_unsupersede)
 
     # -- get --
     sub = subparsers.add_parser("get", help="Show a single episode by ID", parents=[json_parent])

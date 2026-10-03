@@ -6,22 +6,30 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ### Added — supersession: an update can say which episode it replaces
 
-- `Store.record(..., supersedes=[old_id])` and `Store.supersede(new_id, old_id)` record
-  that a newer episode replaces an older one. Each link is validated like a citation:
-  the old episode exists, is not newer, does not already supersede the new one, and the
-  two texts share at least two meaningful words. On refusal (`SupersessionError`, a
+- `Store.record(..., supersedes=[old_id])` and `Store.supersede(old_id=..., new_id=...)`
+  (keyword-only) record that a newer episode replaces an older one. Each link is
+  validated like a citation: the old episode exists, is not newer, the link closes no
+  cycle of any length, and the two texts share at least two meaningful words.
+  `Store.unsupersede(old_id=..., new_id=...)` removes a wrong link (CLI `supersede` /
+  `unsupersede --old ID --new ID`). On refusal (`SupersessionError`, a
   `ValueError`) nothing is written, not even the episode. The audit chain gets a
   `supersede` event per link.
 - A wrap can propose a link with `[supersedes: OLD by NEW]` anywhere in the continuity
   text. `NEW` must be an episode of that wrap. A rejected link does not fail the save;
   the result reports `supersessions_recorded` and `supersessions_rejected` (with
-  reasons), and a link already on record is skipped, so a carried-forward marker is
-  harmless.
-- Invalidate, never delete: both episodes stay. `Store.recall` (and so CLI `search` /
-  MCP `recall` and `retrieve_relevant`) leaves a superseded episode out by default, but
-  only while its replacement still exists. `include_superseded=True` (CLI
-  `--include-superseded`) returns it with `Episode.superseded_by` set. CLI
-  `record --supersedes ID`; MCP `record.supersedes`, `recall.include_superseded`.
+  reasons, including any marker-shaped text the strict form did not parse), and a link
+  already on record is skipped, so a carried-forward marker is harmless. The wrap
+  package marks episodes in the window that a later episode replaced.
+- Invalidate, never delete: both episodes stay. `Store.recall` leaves a superseded
+  episode out by default while any live episode is reachable down its chain of links,
+  counting only replacements at or before `until` when one is given. That default
+  reaches CLI `search` and `episodes`, MCP `recall`, and `retrieve_relevant` (episode
+  tier and the associative pass's seeds). `include_superseded=True` (CLI
+  `--include-superseded`, MCP `recall.include_superseded`) returns them with
+  `Episode.superseded_by` set to the earliest live replacement. Export, `graph`,
+  `stats` and `prune --dry-run` count everything; JSON export carries the links under
+  `supersessions`, but import restores episodes only, so re-imported superseded
+  episodes come back unhidden. CLI `record --supersedes ID`; MCP `record.supersedes`.
 - Storage is a new `supersessions` table, created like `pattern_history`; no schema
   version change. A read-only open of a store that predates the table skips the filter
   instead of failing.
@@ -29,7 +37,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   recorded. On this build, both modes serve the stale fact 0 of 16 times on every update
   shape and both recall surfaces; without a link, recall serves it as before.
 
-⚠ Behaviour change: `recall` now hides superseded episodes unless asked. ⚠ The grounding
+⚠ Behaviour change: `recall` now hides superseded episodes unless asked. Deleting or
+pruning an episode leaves its link rows in place (the chain stays walkable; the ids
+remain, as tombstones keep them). ⚠ The grounding
 rule is a lexical floor: two episodes that share boilerplate clear it, so a wrong link
 hides a valid episode from default recall. The writer's link is the decision.
 

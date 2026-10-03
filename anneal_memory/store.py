@@ -340,7 +340,9 @@ StoreOperation = Literal[
     "delete",
     "recall",
     "supersede",
+    "unsupersede",
     "supersession_exists",
+    "superseded_by_map",
     "episodes_since_wrap",
     # Row materialization (post-SQL): a corrupt/legacy/badly-imported row whose
     # ``type`` isn't a valid EpisodeType (ValueError) surfaces here as a StoreError
@@ -1407,13 +1409,36 @@ def _today_local() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
+def _hidden_by_supersession_sql(until: str | None) -> tuple[str, list[str]]:
+    """SQL selecting every episode id hidden by a supersession, and its params.
+
+    An episode is hidden while ANY live episode is reachable down its chain of
+    links (A -> B -> C hides A even after B is deleted), and, when ``until`` is
+    given, only by replacements at or before it: a query for the state of the
+    store at a cutoff must not hide a fact replaced after that cutoff (flow's
+    per-turn hook excludes the last 45 minutes, and a just-updated fact vanished
+    from it entirely before this, reproduced in review)."""
+    cut = " AND r.timestamp <= ?" if until else ""
+    return (
+        "WITH RECURSIVE chain(old_id, cur) AS ("
+        " SELECT old_id, new_id FROM supersessions"
+        " UNION SELECT c.old_id, s.new_id FROM chain c"
+        " JOIN supersessions s ON s.old_id = c.cur)"
+        " SELECT c.old_id FROM chain c JOIN episodes r ON r.id = c.cur"
+        f" WHERE r.id != c.old_id{cut}",
+        [until] if until else [],
+    )
+
+
 def _normalize_supersedes(ids: list[str] | tuple[str, ...] | None) -> list[str]:
     """Strip, lowercase and de-duplicate supersession ids, keeping order.
     A bare string is refused: iterating it would link each character."""
     if ids is None:
         return []
-    if isinstance(ids, str):
-        raise SupersessionError("supersedes must be a list of episode ids, not a string")
+    if not isinstance(ids, (list, tuple)):
+        raise SupersessionError(
+            f"supersedes must be a list of episode ids, not {type(ids).__name__}"
+        )
     out: list[str] = []
     for raw in ids:
         if not isinstance(raw, str) or not raw.strip():
@@ -2299,7 +2324,7 @@ class Store:
 
         return episode
 
-    def supersede(self, new_id: str, old_id: str, *, source: str = "agent") -> bool:
+    def supersede(self, *, old_id: str, new_id: str, source: str = "agent") -> bool:
         """Record that episode ``new_id`` replaces the older episode ``old_id``.
 
         Validated like a citation (see :class:`SupersessionError`). Invalidate,
@@ -2352,7 +2377,65 @@ class Store:
         }, method="supersede", committed="the supersession", actor=source)
         return True
 
-    def supersession_exists(self, old_id: str, new_id: str) -> bool:
+    def unsupersede(self, *, old_id: str, new_id: str, source: str = "agent") -> bool:
+        """Remove a recorded link, the undo for a wrong one. Both episodes are
+        untouched; ``old_id`` shows in recall again unless another link still
+        hides it. Returns False if no such link existed. Audited."""
+        old_id = _normalize_supersedes([old_id])[0]
+        new_id = _normalize_supersedes([new_id])[0]
+        with self._db_boundary("unsupersede"):
+            if not self._has_supersessions_table():
+                return False
+            cur = self._conn.execute(
+                "DELETE FROM supersessions WHERE old_id = ? AND new_id = ?",
+                (old_id, new_id),
+            )
+            if not self._defer_commit:
+                self._conn.commit()
+        if cur.rowcount == 0:
+            return False
+        self._audit_log_after_commit("unsupersede", {
+            "old_id": old_id,
+            "new_id": new_id,
+            "source": source,
+        }, method="unsupersede", committed="the link removal", actor=source)
+        return True
+
+    def superseded_by_map(self, episode_ids: list[str]) -> dict[str, str]:
+        """For each id hidden by a supersession, the earliest live episode
+        replacing it (following chains). Ids not hidden are absent."""
+        with self._db_boundary("superseded_by_map"):
+            if not episode_ids or not self._has_supersessions_table():
+                return {}
+            return self._live_replacements(list(episode_ids), None)
+
+    def _live_replacements(self, ids: list[str], until: str | None) -> dict[str, str]:
+        """``old_id -> the earliest live episode reachable down its chain``,
+        restricted to replacements at or before ``until``. Same reachability
+        as the recall filter, so an annotated episode is exactly a hidden one."""
+        out: dict[str, str] = {}
+        cut = " AND r.timestamp <= ?" if until else ""
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            marks = ",".join("?" * len(chunk))
+            rows = self._conn.execute(
+                f"""WITH RECURSIVE chain(old_id, cur) AS (
+                        SELECT old_id, new_id FROM supersessions WHERE old_id IN ({marks})
+                        UNION
+                        SELECT c.old_id, s.new_id FROM chain c
+                        JOIN supersessions s ON s.old_id = c.cur
+                    )
+                    SELECT c.old_id, c.cur FROM chain c
+                    JOIN episodes r ON r.id = c.cur
+                    WHERE r.id != c.old_id{cut}
+                    ORDER BY r.timestamp DESC, r.id DESC""",
+                [*chunk, *([until] if until else [])],
+            ).fetchall()
+            for row in rows:  # DESC, so the earliest is written last and wins
+                out[row["old_id"]] = row["cur"]
+        return out
+
+    def supersession_exists(self, *, old_id: str, new_id: str) -> bool:
         """True if ``new_id`` is recorded as superseding ``old_id``."""
         with self._db_boundary("supersession_exists"):
             if not self._has_supersessions_table():
@@ -2383,12 +2466,19 @@ class Store:
                 f"replacing it ({new_ts}); only a newer episode can supersede an older one"
             )
         if new_id is not None and self._conn.execute(
-            "SELECT 1 FROM supersessions WHERE old_id = ? AND new_id = ?",
+            """WITH RECURSIVE down(cur) AS (
+                   SELECT new_id FROM supersessions WHERE old_id = ?
+                   UNION
+                   SELECT s.new_id FROM down d JOIN supersessions s ON s.old_id = d.cur
+               )
+               SELECT 1 FROM down WHERE cur = ? LIMIT 1""",
             (new_id, old_id),
         ).fetchone():
+            # Any length, not only the 2-cycle: equal timestamps pass the order
+            # check, and a 3-cycle of them hid all three (reproduced in review).
             return (
-                f"supersede: {old_id!r} already supersedes {new_id!r}; a link in the "
-                f"other direction would hide both"
+                f"supersede: {new_id!r} already leads, through recorded links, to "
+                f"{old_id!r}; this link would close a cycle and hide every episode on it"
             )
         if not check_explanation_overlap(new_content, row["content"]):
             return (
@@ -2535,13 +2625,9 @@ class Store:
         with self._db_boundary("recall"):
             has_links = self._has_supersessions_table()
             if has_links and not include_superseded:
-                # Only while the replacement still exists: a link whose new
-                # episode was deleted or pruned must not leave the old fact
-                # hidden with nothing in its place (reproduced before this join).
-                conditions.append(
-                    "id NOT IN (SELECT s.old_id FROM supersessions s"
-                    " JOIN episodes r ON r.id = s.new_id)"
-                )
+                hide_sql, hide_params = _hidden_by_supersession_sql(until)
+                conditions.append(f"id NOT IN ({hide_sql})")
+                params.extend(hide_params)
             where = " AND ".join(conditions) if conditions else "1=1"
 
             # Get total count
@@ -2559,17 +2645,9 @@ class Store:
 
             replaced_by: dict[str, str] = {}
             if has_links and include_superseded and rows:
-                ids = [row["id"] for row in rows]
-                marks = ",".join("?" * len(ids))
-                # Newest replacement wins when one episode was superseded twice.
-                for link in self._conn.execute(
-                    f"""SELECT s.old_id, s.new_id FROM supersessions s
-                        JOIN episodes e ON e.id = s.new_id
-                        WHERE s.old_id IN ({marks})
-                        ORDER BY e.timestamp ASC, s.new_id ASC""",
-                    ids,
-                ):
-                    replaced_by[link["old_id"]] = link["new_id"]
+                replaced_by = self._live_replacements(
+                    [row["id"] for row in rows], until
+                )
 
         episodes = [self._row_to_episode(row) for row in rows]
         if replaced_by:
@@ -6209,6 +6287,13 @@ class Store:
         into multiple sub-boundaries fragments the caller-facing
         abstraction and is explicitly NOT the pattern.
 
+        ⚠ ONE EXCEPTION: a VALIDATION REFUSAL must be raised OUTSIDE the
+        boundary, because the boundary rolls back on any exception and inside a
+        caller's ``_batch()`` that discards the batch's earlier writes. So
+        :meth:`record` (with ``supersedes``) computes its refusal inside one
+        block, raises between blocks, and inserts in a second block of the same
+        transaction. Do not merge them back into one block.
+
         **Catch scope: ``sqlite3.DatabaseError``, not ``sqlite3.Error``.**
         ``sqlite3.InterfaceError`` (API misuse — wrong arg count, bad
         bindings, closed connection reuse) propagates bare because
@@ -6406,7 +6491,7 @@ class Store:
         audit events through :meth:`_audit_log_after_commit`):
 
         - :meth:`record` (episode writes)
-        - :meth:`supersede` (supersession links)
+        - :meth:`supersede` / :meth:`unsupersede` (supersession links)
         - :meth:`delete` (episode deletions)
         - :meth:`record_associations` / :meth:`decay_associations`
         - :meth:`wrap_completed`

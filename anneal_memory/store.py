@@ -3737,8 +3737,9 @@ class Store:
         store its operator has protected (flow spore-1169).
 
         ⚠ Enforced only by anneal versions that know this key; an older
-        anneal opening the same store ignores it. It is not carried by the
-        JSON export. Deliberate bypasses remain, by design: the raw
+        anneal opening the same store ignores it. The JSON export records it
+        and ``import`` warns when it would be lost, but never sets it on the
+        target. Deliberate bypasses remain, by design: the raw
         :meth:`save_continuity` file write, the raw wrap-lifecycle methods
         (:meth:`wrap_started` / :meth:`wrap_completed`) called directly, a
         caller that passes the holder's ``session_id`` as its own, and

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 
 import pytest
@@ -665,7 +666,34 @@ def test_policy_cli_prepare_wrap_text_downgrade_exits_3_and_empty_exits_0(tmp_pa
     )
     assert run.returncode == 3, run.stderr
     assert "Wrap token:" not in run.stdout
-    assert Store(db).status().wrap_in_progress is False
+    assert "downgraded-baton-required" in run.stderr  # the reason reaches a stderr-only caller
+    after = Store(db)
+    try:
+        assert after.status().wrap_in_progress is False
+    finally:
+        after.close()
+
+
+@pytest.mark.parametrize("reason", ["downgraded-gated-wrap-open", "downgraded-wrap-replaced"])
+@pytest.mark.parametrize("as_json", [False, True])
+def test_cli_prepare_wrap_exits_3_on_every_downgrade_reason(tmp_path, monkeypatch, capsys, reason, as_json):
+    """Every downgrade reason exits 3, not only the baton policy (L1 MED). The
+    library is stubbed: these two reasons need a live peer wrap to reach."""
+    from anneal_memory import cli
+
+    db = str(tmp_path / "cli.db")
+    Store(db).close()
+    message = f"Consolidate downgraded to capture-only ({reason}): test"
+    monkeypatch.setattr(cli, "_lib_prepare_wrap", lambda *a, **k: {
+        "status": "downgraded", "message": message, "package": None,
+        "wrap_token": None, "episode_count": 0,
+    })
+    argv = ["anneal-memory", "--db", db, "prepare-wrap"] + (["--json"] if as_json else [])
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit) as exited:
+        cli.main()
+    assert exited.value.code == 3
+    assert reason in capsys.readouterr().err
 
 
 def test_policy_rides_the_json_export_and_import_warns_when_it_is_lost(tmp_path):
@@ -695,10 +723,24 @@ def test_policy_rides_the_json_export_and_import_warns_when_it_is_lost(tmp_path)
     run = cli("--db", dst, "import", str(out))
     assert run.returncode == 0, run.stderr
     assert "required the consolidate baton" in run.stderr
-    assert Store(dst).consolidate_requires_baton() is False  # import never sets it
+    check = Store(dst)
+    try:
+        assert check.consolidate_requires_baton() is False  # import never sets it
+    finally:
+        check.close()
 
     run = cli("--db", src, "import", str(out))  # a target that has it: no warning
+    assert run.returncode == 0, run.stderr
     assert "required the consolidate baton" not in run.stderr
+
+    # An export with no episodes still warns (it returned before the check; L1 + L2).
+    empty = tmp_path / "empty.json"
+    data = json.loads(out.read_text())
+    data["episodes"] = []
+    empty.write_text(json.dumps(data))
+    run = cli("--db", dst, "import", str(empty))
+    assert run.returncode == 0, run.stderr
+    assert "required the consolidate baton" in run.stderr
 
 
 # -- L1/L2 review fixes (2026-09-24) --

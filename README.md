@@ -209,7 +209,7 @@ Most memory servers store memories and retrieve them. Few ask: *is this memory s
 anneal-memory asks the first two at the pattern level, and has started measuring the third (see *Does a recalled memory help?* below):
 
 - **Is it true?** Patterns must cite specific episode IDs as evidence to graduate. The server verifies the episodes exist and the explanation references the cited content via lexical overlap (≥2 meaningful words shared between the explanation and the episode body). Ungrounded citations demote, unless the pattern was grounded recently and carryforward holds it (see *Activation-aware carryforward*).
-- **Is it still current?** Graduated patterns whose dates fall behind the staleness threshold (default 7 days) surface in the next wrap's package as removal candidates. The agent decides whether to demote, refresh evidence, or carry forward. This is a check on age, not on truth: nothing marks a changed fact as superseded yet (see *Known gap: updated facts*).
+- **Is it still current?** Graduated patterns whose dates fall behind the staleness threshold (default 7 days) surface in the next wrap's package as removal candidates. The agent decides whether to demote, refresh evidence, or carry forward. This is a check on age, not on truth. A changed fact is handled separately, when the update names the episode it replaces (see *Updated facts: supersession*).
 - **Is the citation evidence real?** The library catches fabricated episode IDs (no matching episode → demote), suspicious reuse of the same episode across many patterns in one session (per-ID frequency ≥3 → flag), and bare graduations with no `[evidence:]` tag at all. The explanation-grounding check (≥2-word lexical overlap with episode content) raises the cost of fabricated evidence chains but is not a semantic-coherence check — see *Honest scope* below for what this catches and what it doesn't.
 
 The result: **memory as a living system, not a filing cabinet.** Episodes accumulate fast, get compressed at session boundaries — and that compression is where patterns emerge and get validated. Co-cited episodes form lateral Hebbian associations (recorded today; recall hasn't yet drawn anything useful from them). The continuity file stays bounded and always-loaded, getting denser rather than longer.
@@ -412,14 +412,24 @@ Graduation shows a pattern was earned. It doesn't show the pattern ever helped. 
 
 **This is a report. Nothing in anneal ranks, decays, re-heats or retires anything from it.** A failure after a recall is not evidence the recalled memory caused it. There is no evidence yet that the counters separate useful memory from useless; that needs real outcome labels collected over time.
 
-## Known gap: updated facts
+## Updated facts: supersession
 
-When a fact changes, the new episode sits beside the old one. Nothing marks the old one as superseded, so recall can return both, and sometimes only the old one. `scripts/stale_probe.py` measures this on a fresh temporary store (16 planted fact-and-update pairs among 120 unrelated episodes, graded mechanically, no judge model). On the 0.9.22 code:
+When a fact changes, the new episode can say which episode it replaces. Then recall stops serving the old one. Nothing is deleted: the old episode stays in the store and in exports, and `include_superseded=True` (CLI `--include-superseded`) shows it, marked with what replaced it.
 
-- Keyword recall (`Store.recall`, the CLI `search` and MCP `recall` path) puts the current fact first, but only because it sorts newest-first. It returns the stale fact beside it in 16 of 16 cases.
-- Scored recall (`retrieve_relevant`) returns the stale fact in 12 to 14 of 16 cases depending on how the update is worded. When the update is reworded rather than restated, it misses the current fact entirely in 14 of 16. (A control, a fact that never changed, stays on top in 15 of 16.)
+There are two ways to write the link. Either way it's validated like a citation: the old episode has to exist and not be newer, the link can't close a cycle, and the two texts have to share at least two meaningful words.
 
-Supersession (an update that names the episode it replaces, with recall invalidating rather than deleting the old one) is the planned fix. Until it ships, treat recalled facts that can change as possibly out of date.
+- Explicitly, when recording: `store.record(text, "observation", supersedes=[old_id])`, CLI `record --supersedes ID`, MCP `record` with `supersedes`. A link that fails validation records nothing at all.
+- In a wrap: the agent writes `[supersedes: OLD_ID by NEW_ID]` in the continuity text, where `NEW_ID` is an episode of that wrap. A bad link doesn't fail the save; it comes back in `supersessions_rejected` with the reason.
+
+A wrong link can be removed with `unsupersede` (CLI `unsupersede --old ID --new ID`).
+
+What it fixes, measured with `scripts/stale_probe.py` (16 planted fact-and-update pairs among 120 unrelated episodes, graded mechanically, no judge model):
+
+- Without a link, recall behaves as it did before. Keyword recall (`Store.recall`, CLI `search`, MCP `recall`) returns the stale fact beside the current one in 16 of 16 cases. Scored recall (`retrieve_relevant`) returns it in 12 to 14 of 16, depending on how the update is worded.
+- With the link, written either way, the stale fact is served in 0 of 16 cases on every wording and both recall paths. A fact that never changed is unaffected.
+- One gap the link doesn't close. When the update is reworded, scored recall still misses the current fact in 9 of 16 cases (14 of 16 without the link), because the question's keywords aren't in the new sentence.
+
+The catch is that all of this depends on the link being written. Nothing detects an update on its own, so an update recorded without a link still sits beside the old fact the way it always did. How often real agents write the link is something I haven't measured yet. The word-overlap check is also only a floor, not a judgment that one episode really replaces the other: two episodes that share boilerplate pass it, and a wrong link hides a still-valid episode until it's removed.
 
 ## Prospective memory — spores
 

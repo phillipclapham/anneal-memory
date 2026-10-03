@@ -61,6 +61,9 @@ _LOCK_UNAVAILABLE_ERRNOS = frozenset(
 
 logger = logging.getLogger("anneal-memory")
 
+# Set once a runtime ``flock`` degrade has been logged (AuditTrail._manifest_lock).
+_lock_degrade_warned = False
+
 # Chain anchors
 GENESIS_HASH = "sha256:GENESIS"
 
@@ -1700,17 +1703,26 @@ class AuditTrail:
         the manifest and renames only bytes it parsed as invalid while holding
         it, and a repair holds it from its first listing to its return.
 
-        The lock file is ``<stem>.audit-manifest.lock`` beside the database, in
-        the RESOLVED directory, so two spellings of one path take one lock. Its
-        name is deliberately outside ``<stem>.audit.*``, the set the CLI
-        compares before and after a read to detect a change in the trail.
+        The lock file is ``<stem>.audit-manifest.lock`` in the directory the
+        audit files live in (``flock`` keys on the file's inode, so two
+        spellings of that directory take one lock). Its name is deliberately
+        outside ``<stem>.audit.*``, the set the CLI compares before and after a
+        read to detect a change in the trail. A symlink, FIFO or directory at
+        that path is refused (``_AuditLockError``), never followed or degraded.
 
         Yields ``True`` when held. Yields ``False``, with no lock, where advisory
-        locking does not exist: no ``fcntl`` (Windows), or ``flock`` raising an
-        errno in ``_LOCK_UNAVAILABLE_ERRNOS``. That is the behaviour before the
-        lock existed. Any other failure to open or lock raises
-        ``_AuditLockError``. Blocking: a holder is a quarantine, a save or a
-        repair, none of which waits on anything else. Two ``AuditTrail``
+        locking does not exist: no ``fcntl`` (Windows, silently, as the README
+        documents), or ``flock`` raising an errno in ``_LOCK_UNAVAILABLE_ERRNOS``
+        (warned once per process). That is the behaviour before the lock
+        existed. A process forked while holding it keeps the inherited
+        descriptor, and so the lock, until the child exits or closes it. Any other failure to open or lock raises
+        ``_AuditLockError``. Who takes it: every manifest save, a quarantine,
+        a whole repair, and the load-modify-save spans of rotation, orphan
+        adoption and retention, each taken BEFORE its first irreversible step.
+        Blocking, with no timeout: a holder waits on no other lock, but a repair
+        or a rotation holds it while it reads or compresses sealed files, and a
+        stopped holder blocks other processes' rotations and quarantines until
+        it exits. Two ``AuditTrail``
         instances for one database in ONE thread must not nest it: the inner
         one opens its own descriptor and blocks on the outer (an earlier draft
         of this fix's own test did exactly that and hung).
@@ -1725,25 +1737,47 @@ class AuditTrail:
                 return
             fd: int | None = None
             if fcntl is not None:
-                lock_path = (
-                    self._db_path.parent.resolve()
-                    / f"{self._db_path.stem}.audit-manifest.lock"
-                )
+                lock_path = self._db_path.parent / f"{self._db_path.stem}.audit-manifest.lock"
+                # Read-only is enough for ``flock``, so a lock file created by
+                # another user, or under a umask that left it 0600, still locks
+                # (L1 + L2, reproduced: O_RDWR refused it and rotation then failed
+                # mid-way). O_NOFOLLOW + O_NONBLOCK + the regular-file check: a
+                # symlink, FIFO or directory planted at the path is refused, not
+                # followed, waited on, or silently degraded to no lock (L2,
+                # reproduced: a FIFO made ``flock`` report ENOTSUP).
                 try:
-                    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+                    fd = os.open(
+                        lock_path,
+                        os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                        0o644,
+                    )
                 except OSError as e:
                     raise _AuditLockError(
                         f"cannot open the audit manifest lock {lock_path.name}: {e}"
                     ) from e
                 try:
+                    if not stat.S_ISREG(os.fstat(fd).st_mode):
+                        raise _AuditLockError(
+                            f"the audit manifest lock {lock_path.name} is not a regular file"
+                        )
                     fcntl.flock(fd, fcntl.LOCK_EX)
-                except OSError as e:
+                except BaseException as e:
+                    # Any exception, an interrupt included, closes the descriptor.
                     os.close(fd)
                     fd = None
+                    if isinstance(e, _AuditLockError) or not isinstance(e, OSError):
+                        raise
                     if e.errno not in _LOCK_UNAVAILABLE_ERRNOS:
                         raise _AuditLockError(
                             f"cannot lock the audit manifest lock {lock_path.name}: {e}"
                         ) from e
+                    global _lock_degrade_warned
+                    if not _lock_degrade_warned:
+                        _lock_degrade_warned = True
+                        logger.warning(
+                            "Advisory locks are unavailable for %s (%s); audit manifest "
+                            "changes are not serialized across processes.", lock_path, e,
+                        )
             self._lock_fd = fd
             self._lock_depth = 1
             try:
@@ -1913,6 +1947,17 @@ class AuditTrail:
         )
 
     def _adopt_orphaned_files(self) -> None:
+        """Run :meth:`_adopt_locked` under the manifest lock (spore-1030): its
+        load, renames and save are one span, so a repair cannot land between its
+        load and its save. A lock that cannot be taken skips recovery, as an
+        unreadable manifest does; the next open retries."""
+        try:
+            with self._manifest_lock():
+                self._adopt_locked()
+        except _AuditLockError as exc:
+            logger.warning("Not adopting orphaned audit files: %s", exc)
+
+    def _adopt_locked(self) -> None:
         """Adopt sealed files that the manifest doesn't know about.
 
         This handles crash recovery: if the process dies between
@@ -2229,6 +2274,21 @@ class AuditTrail:
             self._last_week = current_week
             return
 
+        # ⛔ ONE LOCK FROM THE LOAD TO THE SAVE, TAKEN BEFORE THE RENAME (spore-1030,
+        # L1 reproduced): loading unlocked let a manifest read before a repair
+        # overwrite the rebuilt one afterwards. A lock that cannot be taken
+        # refuses the rotation like an unreadable manifest does.
+        try:
+            with self._manifest_lock():
+                self._rotate_locked(active, current_week)
+        except _AuditLockError as exc:
+            if not self._rotation_refusal_logged:
+                logger.warning("Not rotating the audit trail: %s", exc)
+                self._rotation_refusal_logged = True
+
+    def _rotate_locked(self, active: Path, current_week: str) -> None:
+        """:meth:`_rotate_if_needed` from the manifest load on; the caller holds
+        the manifest lock."""
         # ⛔ LOAD THE MANIFEST BEFORE THE RENAME (hybrid, 2026-09-13). If it is
         # quarantined or unreadable, do not rotate: keep appending to the active
         # file, leave ``_last_week`` alone so the next log() retries, and never
@@ -2374,8 +2434,21 @@ class AuditTrail:
             self._cleanup(manifest)
 
     def _cleanup(self, manifest: dict[str, Any] | None = None) -> int:
-        """Remove rotated files older than retention_days."""
+        """Remove rotated files older than retention_days, under the manifest
+        lock from the load to the save (spore-1030). A ``manifest`` passed in
+        must have been loaded under the lock the caller still holds (rotation)."""
         if self._retention_days is None:
+            return 0
+        try:
+            with self._manifest_lock():
+                return self._cleanup_locked(manifest)
+        except _AuditLockError as exc:
+            logger.warning("Skipping audit retention cleanup: %s", exc)
+            return 0
+
+    def _cleanup_locked(self, manifest: dict[str, Any] | None) -> int:
+        retention_days = self._retention_days
+        if retention_days is None:
             return 0
 
         if manifest is None:
@@ -2385,7 +2458,7 @@ class AuditTrail:
                 logger.warning("Skipping audit retention cleanup: %s", e)
                 return 0
 
-        cutoff = datetime.now(timezone.utc) - timedelta(days=self._retention_days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
         cutoff_str = cutoff.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
         removed = 0
@@ -2431,8 +2504,12 @@ class AuditTrail:
         (rounds 6 and 7), and a new process overwrote a corrupt manifest on open.
 
         - Quarantined (a marker is on disk) -> raises ``_ManifestQuarantined``.
-        - Invalid -> renamed to a quarantine marker (never overwritten), then
-          raises ``_ManifestQuarantined``.
+        - Invalid -> re-read under the manifest lock (spore-1030). Still invalid:
+          renamed to a quarantine marker (never overwritten), then raises
+          ``_ManifestQuarantined``. Valid by then (a repair rebuilt it): returned.
+          A marker that appeared meanwhile: raises ``_ManifestQuarantined`` with
+          nothing renamed. The lock cannot be taken: raises
+          ``_ManifestUnavailable`` with nothing renamed.
         - Unreadable right now (permission, I/O) -> raises ``_ManifestUnavailable``
           with nothing renamed, so a flaky read can neither quarantine nor
           overwrite.
@@ -2552,7 +2629,8 @@ class AuditTrail:
         }
 
     def _save_manifest(self, manifest: dict[str, Any]) -> None:
-        """Save manifest with atomic write, under the manifest lock (spore-1030)."""
+        """Save manifest with atomic write, under the manifest lock (spore-1030).
+        Raises ``_AuditLockError`` (an ``OSError``) when the lock cannot be taken."""
         path = self._manifest_path
         tmp_path = path.with_suffix(".json.tmp")
         with self._manifest_lock():

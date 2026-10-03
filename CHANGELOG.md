@@ -11,19 +11,26 @@ Reproduced with two real processes before the fix: a writer read the old invalid
 renamed the rebuilt, valid manifest to a new `.corrupt-<stamp>` marker, and `verify()` reported the
 trail quarantined. It happened both after repair had returned and inside repair's last check.
 
-Every change to the manifest path now happens under one cross-process lock, `<stem>.audit-manifest.lock`
-beside the database: a manifest save, a quarantine rename, and a whole repair. A writer that read an
-invalid manifest takes the lock, lists the markers and reads the manifest again, and renames only bytes
-it parsed as invalid while holding it; if a repair got there first it uses the rebuilt manifest. The
-lock is reentrant within one `AuditTrail` and released when its descriptor closes or the process dies.
-Where advisory locks do not exist (Windows, or a filesystem whose `flock` reports `ENOLCK`/`EOPNOTSUPP`)
-it degrades to no lock, which is the previous behaviour. Any other failure to take it is a refusal:
-the writer does not quarantine, and `audit-repair` writes nothing.
+Every change to the manifest now happens under one cross-process lock, `<stem>.audit-manifest.lock`
+beside the database: a manifest save, a quarantine rename, a whole repair, and the load-to-save span of
+rotation, orphan adoption and retention cleanup (each takes the lock before its first rename, so a lock
+that cannot be taken refuses the step with nothing sealed or moved). A writer that read an invalid
+manifest takes the lock, lists the markers and reads the manifest again, and renames only bytes it parsed
+as invalid while holding it; if a repair got there first it uses the rebuilt manifest. The lock is
+reentrant within one `AuditTrail`, released when its descriptor closes or the process dies, opened
+read-only (so a lock file another user created still locks), and a symlink, FIFO or directory at its path
+is refused rather than followed or silently ignored. It blocks with no timeout: a stopped holder delays
+other processes' rotations and quarantines until it exits.
+
+Where advisory locks do not exist it degrades to no lock, which is the previous behaviour: silently on
+Windows (no `fcntl`), and with a warning logged once per process on a filesystem whose `flock` reports
+`ENOLCK`/`EOPNOTSUPP`. Any other failure to take it is a refusal: the writer does not quarantine, rotate,
+adopt or prune, and `audit-repair` writes nothing.
 
 This replaces 0.9.10's caveat that `audit-repair` must not run while another process writes the trail,
-for the quarantine race only. Two writers appending to one trail still break its hash chain (the
-single-writer requirement in `AuditTrail`'s docstring is unchanged), and the cross-process rotation
-race is not addressed here.
+for manifest changes made by this version. Still not covered: an older anneal-memory writer takes no
+lock, so mixed-version writers stay unsupported; two writers appending to one trail still break its
+hash chain (the single-writer requirement in `AuditTrail`'s docstring is unchanged).
 
 ## [0.9.23] — 2026-10-02
 

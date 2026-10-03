@@ -8282,3 +8282,134 @@ class TestManifestLock:
 
         assert result.repaired is True, result.error
         assert probes and set(probes) == {"held"}, probes
+
+
+def _probe_lock_from_another_process(lock_path: Path) -> str:
+    """'held' when another process holds ``lock_path``, else 'acquired'."""
+    import subprocess
+
+    return subprocess.run([
+        sys.executable, "-c",
+        "import fcntl, os\n"
+        f"fd = os.open({str(lock_path)!r}, os.O_RDONLY | os.O_CREAT, 0o644)\n"
+        "try:\n"
+        "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "    print('acquired')\n"
+        "except BlockingIOError:\n"
+        "    print('held')\n",
+    ], capture_output=True, text=True, timeout=20).stdout.strip()
+
+
+@pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+class TestManifestLockSpans:
+    """L1 on spore-1030's first fix (reproduced): rotation, adoption and retention
+    loaded the manifest unlocked and saved under the lock, so a manifest loaded
+    before a repair overwrote the rebuilt one afterwards. Each span now holds the
+    lock from its load to its save; a real child process probes it at the load.
+    ⛔ MUTATION-CHECKED per span: take the lock only around the save and the
+    matching test fails."""
+
+    _two_sealed_weeks = staticmethod(TestHybridManifestQuarantine._two_sealed_weeks)
+
+    def _probe_at_load(self, trail, monkeypatch):
+        probes: list[str] = []
+        real = AuditTrail._load_manifest
+        lock_path = trail._db_path.parent / f"{trail._db_path.stem}.audit-manifest.lock"
+
+        def load_then_probe(self_):
+            m = real(self_)
+            probes.append(_probe_lock_from_another_process(lock_path))
+            return m
+
+        monkeypatch.setattr(AuditTrail, "_load_manifest", load_then_probe)
+        return probes
+
+    def test_rotation_holds_the_lock_from_load_to_save(self, tmp_path, monkeypatch):
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        trail.log("pre", {})
+        trail._last_week = "1999-W01"
+        probes = self._probe_at_load(trail, monkeypatch)
+        trail.log("rot", {})
+        monkeypatch.undo()
+        assert (tmp_path / "m.audit.1999-W01.jsonl.gz").exists()
+        assert probes and set(probes) == {"held"}, probes
+
+    def test_adoption_holds_the_lock_from_load_to_save(self, tmp_path, monkeypatch):
+        db = self._two_sealed_weeks(tmp_path)
+        manifest = json.loads((tmp_path / "m.audit.manifest.json").read_text())
+        manifest["files"] = manifest["files"][:1]  # W02 becomes an orphan
+        (tmp_path / "m.audit.manifest.json").write_text(json.dumps(manifest))
+        trail = AuditTrail(db)
+        probes = self._probe_at_load(trail, monkeypatch)
+        trail._adopt_orphaned_files()
+        monkeypatch.undo()
+        names = [f["filename"] for f in json.loads((tmp_path / "m.audit.manifest.json").read_text())["files"]]
+        assert "m.audit.1999-W02.jsonl.gz" in names
+        assert probes and set(probes) == {"held"}, probes
+
+    def test_retention_holds_the_lock_from_load_to_save(self, tmp_path, monkeypatch):
+        db = self._two_sealed_weeks(tmp_path)
+        mpath = tmp_path / "m.audit.manifest.json"
+        manifest = json.loads(mpath.read_text())
+        for f in manifest["files"]:
+            f["last_ts"] = "2000-01-01T00:00:00.000000Z"  # older than any retention
+        mpath.write_text(json.dumps(manifest))
+        trail = AuditTrail(db, retention_days=1)
+        probes = self._probe_at_load(trail, monkeypatch)
+        removed = trail._cleanup()
+        monkeypatch.undo()
+        assert removed == 2
+        assert probes and set(probes) == {"held"}, probes
+
+
+@pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+class TestManifestLockFile:
+    """L2 on spore-1030 (reproduced): what is planted at the lock path."""
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs os.mkfifo")
+    def test_a_fifo_at_the_lock_path_is_refused_not_degraded(self, tmp_path):
+        """⛔ MUTATION-CHECKED: drop the regular-file check and this fails (flock
+        on the FIFO reported ENOTSUP and the lock silently degraded)."""
+        os.mkfifo(tmp_path / "m.audit-manifest.lock")
+        trail = AuditTrail(tmp_path / "m.db")
+        with pytest.raises(audit_module._AuditLockError):
+            with trail._manifest_lock():
+                pass
+        assert trail._lock_depth == 0 and trail._lock_fd is None
+
+    def test_a_symlink_at_the_lock_path_is_refused_not_followed(self, tmp_path):
+        """⛔ MUTATION-CHECKED: drop O_NOFOLLOW and this fails."""
+        target = tmp_path / "elsewhere"
+        (tmp_path / "m.audit-manifest.lock").symlink_to(target)
+        with pytest.raises(audit_module._AuditLockError):
+            with AuditTrail(tmp_path / "m.db")._manifest_lock():
+                pass
+        assert not target.exists()
+
+    def test_a_read_only_lock_file_still_locks(self, tmp_path):
+        """A lock file another user created, or a 0444 one, must still lock.
+        ⛔ MUTATION-CHECKED: open it O_RDWR and this fails."""
+        lock = tmp_path / "m.audit-manifest.lock"
+        lock.write_bytes(b"")
+        lock.chmod(0o444)
+        try:
+            with AuditTrail(tmp_path / "m.db")._manifest_lock() as held:
+                assert held is True
+                assert _probe_lock_from_another_process(lock) == "held"
+        finally:
+            lock.chmod(0o644)
+
+    def test_a_rotation_that_cannot_lock_refuses_before_sealing(self, tmp_path):
+        """Locking before the rename: a lock fault leaves the active file in
+        place and nothing sealed (L1: the save-only lock failed after sealing)."""
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        trail.log("pre", {})
+        lock = tmp_path / "m.audit-manifest.lock"
+        lock.unlink(missing_ok=True)
+        lock.mkdir()
+        trail._last_week = "1999-W01"
+        trail.log("not-rotated", {})
+        assert not list(tmp_path.glob("m.audit.1999-W01*"))
+        assert AuditTrail.verify(db).valid

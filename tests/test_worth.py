@@ -343,3 +343,19 @@ def test_worth_counts_receipt_exposures_with_no_record(tmp_path):
     assert all("exposed_unrecorded" not in r for r in plain["crystals"])
     with pytest.raises(FileNotFoundError):
         load_receipts([tmp_path / "nope.jsonl"])
+
+
+def test_fold_on_a_store_with_no_crystal_file_does_not_create_it(tmp_path):
+    """Diogenes 10-03: the crystal file's existence is the wrap path's persistent
+    opt-in to the crystal tier, and a fold used to create it (the transaction
+    saves on clean exit). Nothing is live to count, so the fold leaves it absent."""
+    receipts = tmp_path / "receipts.jsonl"
+    receipts.write_text('{"ts":"2026-10-01T00:00:00Z","event_id":"e1","exposed":[]}\n')
+    path = tmp_path / "mem.crystal.json"
+    result = fold_surfaced(CrystalStore(path), [receipts])
+    assert not path.exists()
+    assert result.store_missing and result.mark is None and result.previous_mark is None
+    assert result.receipts_folded == 0
+    with pytest.raises(FileNotFoundError):  # a wrong receipt path still refuses
+        fold_surfaced(CrystalStore(path), [tmp_path / "nope.jsonl"])
+    assert not path.exists()

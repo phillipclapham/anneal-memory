@@ -430,7 +430,7 @@ class FoldResult:
     """What one :func:`fold_surfaced` call did."""
 
     previous_mark: str | None
-    mark: str
+    mark: str | None
     receipts_folded: int = 0
     exposures_counted: int = 0
     names_unknown: dict[str, int] = field(default_factory=dict)
@@ -439,6 +439,7 @@ class FoldResult:
     duplicates_skipped: int = 0
     paths_missing: list[str] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
+    store_missing: bool = False
 
 
 def fold_surfaced(
@@ -478,6 +479,12 @@ def fold_surfaced(
     The whole scan runs inside the crystal store's exclusive lock, so two folds
     cannot both count the same window (crystallize / touch / update wait for it;
     reads do not). ``last_activated_on`` is never written.
+
+    When the crystal store's file does not exist the fold writes nothing and
+    returns ``store_missing`` True with ``mark`` None: no crystal is live to count,
+    an absent mark already reads as never folded, and the file's existence is the
+    wrap path's opt-in to the crystal tier, so a fold must not create it. The
+    receipt paths are still checked first.
     """
     if skew_seconds < 0:
         raise ValueError("skew_seconds must be >= 0.")
@@ -488,6 +495,15 @@ def fold_surfaced(
         seconds=skew_seconds
     )
     cutoff = cutoff.replace(microsecond=0)
+    missing = [str(p) for p in paths if not p.is_file()]
+    if len(missing) == len(paths):
+        raise FileNotFoundError(
+            f"none of the receipt paths exists ({', '.join(missing)}); the fold "
+            f"mark was not moved."
+        )
+    if not crystal_store.path.exists():
+        return FoldResult(previous_mark=None, mark=None, paths_missing=missing,
+                          store_missing=True)
     with crystal_store._transaction() as data:
         state = data.get(FOLD_STATE_KEY)
         prev_mark_str: str | None = None
@@ -506,12 +522,6 @@ def fold_surfaced(
             prev_mark_str = str(raw)
         mark = cutoff if prev_mark is None or cutoff > prev_mark else prev_mark
         result = FoldResult(previous_mark=prev_mark_str, mark=_fmt_ts(mark))
-        missing = [str(p) for p in paths if not p.is_file()]
-        if len(missing) == len(paths):
-            raise FileNotFoundError(
-                f"none of the receipt paths exists ({', '.join(missing)}); the fold "
-                f"mark was not moved."
-            )
         result.paths_missing = missing
         if prev_mark is not None and cutoff <= prev_mark:
             return result

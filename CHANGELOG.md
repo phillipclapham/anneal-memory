@@ -4,6 +4,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.9.22] — 2026-10-02
+
+**Behaviour change:** a tokenless `wrap_cancelled()` / `wrap-cancel` / MCP `wrap_cancel` of a wrap another session prepared under the consolidate gate now refuses (`WrapCancelGatedError`); pass `force=True` (`--force`) to override. Details under Changed.
+
 ### Added — outcome write-back, surfaced counts, and report-only Worth counters
 
 - **`anneal_memory.worth`** (new module): `OutcomeLog` appends outcome records per exposure (the harness's id for a recall event) to `<stem>.outcomes.jsonl`, labelling each surfaced crystal or episode `followed`, `ignored` or `not_applicable`, with an optional `success` / `failure` outcome. Records for one exposure id merge when read (a later label for an item replaces its earlier one; a later outcome replaces the earlier outcome), so labels and the outcome can be written at different times. `fold_surfaced()` folds harness retrieval receipts (`exposed[].pattern`) into recall-surfaced `surfaced_count` / `last_surfaced_on` on each live crystal, intended once per wrap: de-duplicated by `event_id`, refusing (mark unmoved) when no receipt path exists, and never touching `last_activated_on` (exposure is not activation); the counts survive a retire-and-revive. `compute_worth()` reports two counters per crystal and per episode, retrieved-with-success and retrieved-with-failure, with the full label × outcome table, and credits each crystal's exposure to the episodes it cites, once per episode per exposure. **Report only:** nothing ranks, decays, re-heats or retires from it.

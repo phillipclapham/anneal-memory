@@ -8,6 +8,7 @@ than a re-run of the probe.
 from __future__ import annotations
 
 import sqlite3
+import sys
 
 import pytest
 
@@ -272,6 +273,7 @@ def test_conflicting_proposals_leave_the_survivor_citable(tmp_path):
         assert res["graduations_validated"] == 1
 
 
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="Connection.setlimit is 3.11+")
 def test_prune_under_the_traditional_sqlite_variable_limit(tmp_path):
     with Store(str(tmp_path / "m.db")) as st:
         st._conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)

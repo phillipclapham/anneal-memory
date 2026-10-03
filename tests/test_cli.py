@@ -4327,10 +4327,13 @@ class TestHybridSnapshotAuditCli:
 def test_outcome_and_worth_refuse_a_db_that_is_not_an_anneal_store(tmp_path):
     """Diogenes 2026-10-03 MED and the L3 rounds after it, each reproduced by a real
     CLI run first: `outcome`/`worth` exited 0 on a missing --db (writing an orphan
-    log and its directories), then on a directory, another program's SQLite
-    database, and an impostor whose tables are merely NAMED episodes+metadata; a
-    `mode=ro` check then refused a valid store in a read-only directory."""
+    log and its directories), then on a directory, another program's database and
+    impostors with anneal-like table names. The check is now the library's own
+    reader (Store(read_only=True) + status), so it refuses whatever no anneal
+    reader can open, with that reader's reason, and accepts a real store."""
     import sqlite3
+
+    from anneal_memory import Store
 
     def run(db, *argv):
         return subprocess.run(
@@ -4338,49 +4341,31 @@ def test_outcome_and_worth_refuse_a_db_that_is_not_an_anneal_store(tmp_path):
             capture_output=True, text=True,
         )
 
+    def make(name, *sql):
+        c = sqlite3.connect(tmp_path / name)
+        for q in sql:
+            c.execute(q)
+        c.commit()
+        c.close()
+
     (tmp_path / "d").mkdir()
-    other = sqlite3.connect(tmp_path / "other.db")
-    other.execute("CREATE TABLE t (x)")
-    other.commit()
-    other.close()
-    imp = sqlite3.connect(tmp_path / "imp.db")
-    imp.execute("CREATE TABLE episodes (x)")
-    imp.execute("CREATE TABLE metadata (y)")
-    imp.commit()
-    imp.close()
-    for wrong, said in (("nope/deep/typo.db", "database not found"), ("d", "not an anneal"),
-                        ("other.db", "not an anneal"), ("imp.db", "not an anneal")):
+    make("other.db", "CREATE TABLE t (x)")
+    make("imp.db", "CREATE TABLE episodes (x)", "CREATE TABLE metadata (key, value)",
+         "INSERT INTO metadata VALUES ('format_version', '1')")
+    future = Store(str(tmp_path / "fut.db"))
+    future.close()
+    make("fut.db", "UPDATE metadata SET value = '999' WHERE key = 'format_version'")
+    before = sorted(p.name for p in tmp_path.iterdir())
+    for wrong, said in (("nope/deep/typo.db", "database not found"), ("d", "cannot open"),
+                        ("other.db", "cannot open"), ("imp.db", "cannot open"),
+                        ("fut.db", "newer anneal-memory schema")):
         for argv in (["outcome", "--exposure-id", "ev1", "--outcome", "success"], ["worth"]):
             result = run(tmp_path / wrong, *argv)
             assert result.returncode == 1, (wrong, argv, result.stdout, result.stderr)
             assert said in result.stderr, (wrong, result.stderr)
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["d", "imp.db", "other.db"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
 
-    # A valid WAL store, checkpointed, copied alone into a read-only directory.
-    ro = tmp_path / "ro"
-    ro.mkdir()
-    assert run(tmp_path / "s.db", "init").returncode == 0
-    c = sqlite3.connect(tmp_path / "s.db")
-    c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    c.close()
-    (ro / "s.db").write_bytes((tmp_path / "s.db").read_bytes())
-    # The desk's case [run 10:24]: a fresh store whose creation is still only in its
-    # -wal, copied with it into a read-only directory, read as "not anneal".
-    from anneal_memory import Store
-    live = Store(str(tmp_path / "w.db"))
-    try:
-        live.record("hello world", episode_type="observation")
-        (ro / "w.db").write_bytes((tmp_path / "w.db").read_bytes())
-        (ro / "w.db-wal").write_bytes((tmp_path / "w.db-wal").read_bytes())
-    finally:
-        live.close()
-    ro.chmod(0o555)
-    try:
-        result = run(ro / "s.db", "worth")
-        assert result.returncode == 0, result.stderr
-        result = run(ro / "w.db", "worth")
-        assert result.returncode == 1
-        assert "cannot read the database" in result.stderr, result.stderr
-        assert sorted(p.name for p in ro.iterdir()) == ["s.db", "w.db", "w.db-wal"]
-    finally:
-        ro.chmod(0o755)
+    real = Store(str(tmp_path / "real.db"))
+    real.record("hello world", episode_type="observation")
+    real.close()
+    assert run(tmp_path / "real.db", "worth").returncode == 0

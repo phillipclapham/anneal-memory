@@ -282,69 +282,15 @@ def _json_parent() -> argparse.ArgumentParser:
 
 # -- Store factory --
 
-def _read_anneal_marker(uri: str) -> bool:
-    conn = sqlite3.connect(uri, uri=True)
-    try:
-        conn.execute("PRAGMA query_only=ON")
-        tables = {row[0] for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'")}
-        if not {"episodes", "metadata"} <= tables:
-            return False
-        if not {"key", "value"} <= {row[1] for row in conn.execute(
-                "PRAGMA table_info(metadata)")}:
-            return False
-        return conn.execute(
-            "SELECT 1 FROM metadata WHERE key = 'format_version'").fetchone() is not None
-    finally:
-        conn.close()
-
-
-def _is_anneal_db(db_path: Path) -> bool:
-    """True when ``db_path`` is an existing anneal store: a SQLite database with
-    anneal's ``episodes`` table and the ``format_version`` row anneal seeds into
-    ``metadata(key, value)`` when it creates a store. Nothing in it is written:
-    the first open is the one ``Store(read_only=True)`` uses (read-write on an
-    existing file only, URI ``mode=rw``, which never creates the file, then
-    ``PRAGMA query_only=ON``), so the WAL ``-shm`` index attaches on a live store.
-    Where that open fails (a WAL store in a read-only directory with no ``-shm``),
-    the marker is read once more with ``immutable=1``, which ignores the WAL: the
-    rows checked are written when the store is created, so this can only turn a
-    brand-new, never-checkpointed store into "cannot read", never accept a foreign
-    file. Raises ``sqlite3.OperationalError`` when neither open can read it, or when
-    the fallback finds no marker while an unapplied ``-wal`` sits beside the file."""
-    if not db_path.is_file():
-        return False
-    uri = db_path.resolve().as_uri()
-    try:
-        return _read_anneal_marker(f"{uri}?mode=rw")
-    except sqlite3.OperationalError as rw_error:
-        try:
-            found = _read_anneal_marker(f"{uri}?mode=ro&immutable=1")
-        except sqlite3.OperationalError:
-            raise  # cannot read it at all (unreadable, locked): not evidence either way
-        except sqlite3.DatabaseError:
-            return False
-        wal = db_path.with_name(db_path.name + "-wal")
-        if not found and wal.is_file() and wal.stat().st_size > 0:
-            # The immutable read ignores the WAL, and a store whose creation is
-            # still only in it reads as empty here [run 10:24: a valid store copied
-            # with its un-checkpointed -wal into a 0555 directory was refused].
-            # Not evidence either way, so say so instead of answering "not anneal".
-            raise sqlite3.OperationalError(
-                f"{rw_error}; and it has an unapplied write-ahead log (-wal), which "
-                "only a writable open can read"
-            )
-        return found
-    except sqlite3.DatabaseError:
-        return False  # "file is not a database" and the like
-
-
 def _existing_db_path(args: argparse.Namespace, *, require_anneal: bool = False) -> Path:
     """The --db path, or exit 1 when no database is there. A command that derives a
-    sibling file from --db (the outcome log) passes ``require_anneal=True``: it never
-    opens the store, so a directory, a non-SQLite file or another program's database
-    at that path must be refused here, or it would write to, or report from, an
-    orphan sibling file."""
+    sibling file from --db (the outcome log) and never otherwise opens the store
+    passes ``require_anneal=True``: the path must then open as an anneal store the
+    way every reading command opens one (``Store(read_only=True)``, then a status
+    read), so a directory, another program's database, an impostor, or a store
+    written by a newer anneal is refused with the library's own reason instead of
+    getting an orphan sibling file. Whatever that reader cannot open, this refuses;
+    nothing here judges a database the library itself would not."""
     db_path = Path(args.db).expanduser()
     if not db_path.exists():
         print(f"Error: database not found: {db_path}", file=sys.stderr)
@@ -356,12 +302,16 @@ def _existing_db_path(args: argparse.Namespace, *, require_anneal: bool = False)
         sys.exit(1)
     if require_anneal:
         try:
-            is_anneal = _is_anneal_db(db_path)
-        except sqlite3.OperationalError as exc:
-            print(f"Error: cannot read the database {db_path}: {exc}", file=sys.stderr)
-            sys.exit(1)
-        if not is_anneal:
-            print(f"Error: not an anneal-memory database: {db_path}", file=sys.stderr)
+            if not db_path.is_file():
+                raise OSError(f"{db_path} is not a file")
+            probe = Store(path=db_path, read_only=True, audit=False)
+            try:
+                probe.status()
+            finally:
+                probe.close()
+        except (StoreError, sqlite3.Error, OSError) as exc:
+            print(f"Error: cannot open {db_path} as an anneal-memory database: {exc}",
+                  file=sys.stderr)
             sys.exit(1)
     return db_path
 

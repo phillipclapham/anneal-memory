@@ -36,13 +36,16 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ### Fixed
 
-- `anneal-memory outcome` and `worth` refuse a `--db` that is not an anneal store (exit 1): missing,
-  a directory, a non-SQLite file, another program's database, or one whose tables are merely named
-  like anneal's. They exited 0 (Diogenes 2026-10-03 MED): `outcome` wrote labels to an orphan log,
-  creating its directories, and `worth` reported 0 exposures as a clean measurement. The check reads
-  anneal's `format_version` row without writing (opened as `Store(read_only=True)` opens a store,
-  falling back to an `immutable` read for a WAL store in a read-only directory); a database it
-  cannot read at all is reported with its own error.
+- `anneal-memory outcome` and `worth` refuse a `--db` that is not an anneal store (exit 1). They
+  exited 0 (Diogenes 2026-10-03 MED): `outcome` wrote labels to an orphan log, creating its
+  directories, and `worth` reported 0 exposures as a clean measurement. The check is the library's
+  own reader, `Store(read_only=True)` plus a status read, so it refuses exactly what no anneal reader
+  can open (a directory, another program's database, an impostor, a store from a newer anneal), with
+  that reader's reason.
+- Known and not fixed: a WAL store in a read-only directory with no `-shm` cannot be opened by any
+  anneal reader, so `outcome`/`worth` refuse it ("cannot open ... as an anneal-memory database") and
+  `anneal-memory status` on it raises a traceback. Making a read-only directory readable is a reader
+  change, not part of this check.
 - `fold_surfaced` / `crystal fold-surfaced` no longer creates `<stem>.crystal.json` on a store
   that has none. That file's existence is the wrap path's opt-in to the crystal tier, so a fold
   could silently opt a store in. With no crystal file the fold writes nothing and returns

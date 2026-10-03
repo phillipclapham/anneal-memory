@@ -3231,23 +3231,25 @@ def _parse_exposed(raw: str) -> ExposedRef:
     return ExposedRef(kind, ref)
 
 
-def _outcome_store_id(db_path: Path) -> str:
+def _outcome_store_id(db_path: Path, *, mint: bool) -> str | None:
     """The store id that binds ``<stem>.outcomes.jsonl`` to the store at ``db_path``,
     or exit 1. Read with a read-only open, which writes nothing and fails on a file
     that is not an anneal store. A store with no id yet (only an older anneal or a
-    read-only open has opened it since the upgrade) gets one from ONE write-capable
-    open, the same open every store command makes; that runs only after the
-    read-only open has read the store's metadata."""
+    read-only open has opened it since the upgrade) returns ``None`` unless
+    ``mint``: then ONE write-capable open, the same open every store command
+    makes, mints it, after the read-only open has read the store's metadata.
+    ``outcome`` (a write path) mints; ``worth`` (read-only, Phill 10-03) never
+    does."""
     try:
         with Store(db_path, audit=False, read_only=True) as store:
             sid = store.store_id
-        if sid is None:
+        if sid is None and mint:
             with Store(db_path, audit=False) as store:
                 sid = store.store_id
     except (StoreError, OSError) as exc:
         print(f"Error: cannot read the store id of {db_path}: {exc}", file=sys.stderr)
         sys.exit(1)
-    if sid is None:  # pragma: no cover - the write-capable open seeds it
+    if sid is None and mint:  # pragma: no cover - the write-capable open seeds it
         print(f"Error: {db_path} has no store id after a write-capable open", file=sys.stderr)
         sys.exit(1)
     return sid
@@ -3264,7 +3266,7 @@ def cmd_outcome(args: argparse.Namespace) -> None:
     elif not args.exposure_id:
         print("Error: --exposure-id is required (or pass --adopt-unbound)", file=sys.stderr)
         sys.exit(1)
-    log = OutcomeLog(outcome_log_path(db_path), store_id=_outcome_store_id(db_path))
+    log = OutcomeLog(outcome_log_path(db_path), store_id=_outcome_store_id(db_path, mint=True))
     if args.adopt_unbound:
         try:
             marker = log.adopt_unbound()
@@ -3338,7 +3340,8 @@ def cmd_worth(args: argparse.Namespace) -> None:
     try:
         if args.receipts:
             receipts, receipt_bad, receipt_missing = load_receipts(args.receipts)
-        log = OutcomeLog(outcome_log_path(db_path), store_id=_outcome_store_id(db_path))
+        log = OutcomeLog(outcome_log_path(db_path),
+                         store_id=_outcome_store_id(db_path, mint=False), bind=True)
         report = compute_worth(log, _open_crystal_store(args), receipts=receipts)
     except (CrystalError, OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -3354,11 +3357,16 @@ def cmd_worth(args: argparse.Namespace) -> None:
     b = report.binding
     if b is not None and b.all_foreign:
         print(f"!! This outcome log belongs to another store ({', '.join(b.foreign_stores)}), "
-              f"not this one ({b.store_id}): none of its {b.foreign} exposure(s) are counted.",
+              f"not this one ({b.store_id or 'no store id yet'}): none of its {b.foreign} "
+              f"exposure(s) are counted.",
               file=sys.stderr)
     print(f"Worth (report-only) from {report.exposures} exposure(s)"
           + (f", {report.lines_skipped} unreadable line(s) skipped" if report.lines_skipped else ""))
-    if b is not None and (b.unbound or b.foreign):
+    if b is not None and b.store_id is None:
+        print("store has no id yet (init, save and outcome mint one; worth writes nothing): "
+              f"{b.unbound} unbound (counted)"
+              + (f", {b.foreign} foreign (another store's; NOT counted)" if b.foreign else ""))
+    elif b is not None and (b.unbound or b.foreign):
         print(f"store {b.store_id}: {b.bound} bound"
               + (f", {b.unbound} unbound (written before store ids; counted; "
                  f"'outcome --adopt-unbound' binds them)" if b.unbound else "")

@@ -284,3 +284,58 @@ def test_prune_under_the_traditional_sqlite_variable_limit(tmp_path):
         assert st.prune(older_than_days=1) == 300
         assert st.supersession_links() == []
         assert [e.id for e in st.recall(keyword="parser").episodes] == [live.id]
+
+
+def test_open_repairs_links_an_older_version_left_dangling(tmp_path):
+    db = str(tmp_path / "m.db")
+    with Store(db) as st:
+        a = st.record(OLD, "observation", timestamp="2026-01-01T00:00:00Z")
+        b = st.record(NEW, "observation", timestamp="2026-02-01T00:00:00Z", supersedes=[a.id])
+        c = st.record("Quillmark moved its storage to duckdb." + CONTEXT, "observation",
+                      timestamp="2026-03-01T00:00:00Z", supersedes=[b.id])
+    con = sqlite3.connect(db)  # an older anneal-memory's plain delete
+    con.execute("DELETE FROM episodes WHERE id = ?", (b.id,))
+    con.commit()
+    con.close()
+    with Store(db, read_only=True) as ro:  # read-only never repairs: fail-open
+        assert {e.id for e in ro.recall(keyword="quillmark").episodes} == {a.id, c.id}
+    with Store(db) as st:
+        assert [e.id for e in st.recall(keyword="quillmark").episodes] == [c.id]
+        assert [(l["old_id"], l["new_id"]) for l in st.supersession_links()] == [(a.id, c.id)]
+
+
+def test_a_link_racing_the_save_refuses_it_and_the_wrap_survives(tmp_path):
+    db = str(tmp_path / "m.db")
+    st = Store(db)
+    try:
+        a = st.record(OLD, "observation", timestamp="2026-02-10T09:00:00Z")
+        b = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00Z")
+        assert prepare_wrap(st)["status"] == "ready"
+        real = st.superseded_by_map
+        fired: list[int] = []
+
+        def racing(ids):
+            out = real(ids)
+            if not fired:
+                fired.append(1)
+                with Store(db) as other:
+                    other.supersede(old_id=a.id, new_id=b.id)
+            return out
+
+        st.superseded_by_map = racing  # type: ignore[method-assign]
+
+        def text(ep: str, why: str) -> str:
+            return (f"## State\nx\n\n## Patterns\n- quillmark_storage | 2x (2026-02-10) "
+                    f'[evidence: {ep} "{why}"]\n\n## Decisions\n\n## Context\nx\n')
+
+        with pytest.raises(SupersessionError, match="superseded by another writer"):
+            validated_save_continuity(
+                st, text(a.id, "the database engine for Quillmark is postgres"),
+                today="2026-02-10")
+        assert st.status().wrap_in_progress
+        st.superseded_by_map = real  # type: ignore[method-assign]
+        res = validated_save_continuity(
+            st, text(b.id, "Quillmark switched its storage over to sqlite"), today="2026-02-10")
+        assert res["graduations_validated"] == 1
+    finally:
+        st.close()

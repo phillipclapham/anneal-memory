@@ -33,7 +33,11 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   or before `until` when one is given (a cutoff before the update shows the old fact).
   Deleting or pruning an episode rewires links past it (A -> B -> C, delete B:
   A -> C) and drops every row naming it, so a chain keeps hiding what it hid and a
-  later episode re-recorded under the same id is not hidden. That default
+  later episode re-recorded under the same id is not hidden. Deleting the live end of a chain
+  (C in A -> B -> C) rolls back to the previous version: B shows again. A read-write open
+  repairs links an older anneal-memory left pointing at a deleted episode; a read-only
+  open does not, and shows the older fact until then. A save refuses (wrap left open)
+  if an episode it cites is superseded by another writer while it runs. That default
   reaches CLI `search` and `episodes`, MCP `recall`, and `retrieve_relevant` (episode
   tier and the associative pass's seeds). `include_superseded=True` (CLI
   `--include-superseded`, MCP `recall.include_superseded`) returns them with

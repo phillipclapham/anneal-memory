@@ -1829,6 +1829,7 @@ class Store:
                 self._conn.execute("PRAGMA synchronous=FULL")
                 self._conn.execute("PRAGMA foreign_keys=ON")
                 self._init_schema()
+                self._repair_dangling_supersessions()
                 # 10.5c.5 L3 Fix #13: detect orphan tmp sidecars from a
                 # prior crashed pipeline before any new wrap runs. If a
                 # previous ``validated_save_continuity`` crashed between
@@ -2445,6 +2446,37 @@ class Store:
                     " ORDER BY recorded_at, old_id, new_id"
                 )
             ]
+
+    def _repair_dangling_supersessions(self) -> None:
+        """At a read-write open: rewire links past any episode that vanished
+        without :meth:`_detach_supersessions` (an older anneal-memory's delete or
+        prune), so the per-recall direct join stays exact (codex L3: an older
+        binary deleting B in A -> B -> C left A visible beside C, while the
+        annotation said A -> C). Best effort: on a busy or failing database it
+        warns and leaves the repair to the next open; read-only opens never
+        repair and stay fail-open (they show A)."""
+        try:
+            if not self._has_supersessions_table() or self._conn.execute(
+                "SELECT 1 FROM supersessions LIMIT 1"
+            ).fetchone() is None:
+                return
+            missing = [row[0] for row in self._conn.execute(
+                """SELECT id FROM (SELECT old_id AS id FROM supersessions
+                                   UNION SELECT new_id FROM supersessions)
+                   WHERE id NOT IN (SELECT id FROM episodes)"""
+            )]
+            if not missing:
+                return
+            self._conn.execute("BEGIN IMMEDIATE")
+            removed = self._detach_supersessions(missing)
+            self._conn.commit()
+            _LOG.warning(
+                "anneal-memory: repaired %d supersession link(s) naming %d episode(s) "
+                "deleted by an older version", removed, len(missing),
+            )
+        except sqlite3.Error as exc:
+            self._rollback_quietly()
+            _LOG.warning("anneal-memory: supersession link repair skipped: %s", exc)
 
     def _detach_supersessions(self, ids: list[str]) -> int:
         """Inside the caller's transaction, before ``ids`` are deleted: link each

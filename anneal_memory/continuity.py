@@ -2876,6 +2876,21 @@ def validated_save_continuity(
 
             supersessions_recorded, supersessions_rejected = \
                 _record_wrap_supersessions(store, grad_result.text, valid_ids)
+            # Re-read under the batch's write lock (codex L3, reproduced: a link
+            # another connection committed between validation and this batch
+            # let a pattern graduate on the episode it superseded). Raising
+            # here rolls the batch back: nothing saved, the wrap stays open.
+            _now_superseded = set(store.superseded_by_map(sorted(valid_ids)))
+            _late = sorted(
+                (_now_superseded - superseded_in_window) & set(grad_result.citation_counts)
+            )
+            if _late:
+                raise SupersessionError(
+                    f"validated_save_continuity: cited episode(s) {', '.join(_late)} were "
+                    f"superseded by another writer while this save ran. Nothing was "
+                    f"saved and the wrap is still open; save again (cite the replacing "
+                    f"episode instead)."
+                )
 
             wrap_result = store.wrap_completed(
                 episodes_compressed=len(episodes),

@@ -1893,8 +1893,15 @@ def cmd_import(args: argparse.Namespace) -> None:
                         _warn_if_policy_lost(probe)
                     finally:
                         probe.close()
-                except Exception:
-                    pass  # a warning must never fail the import
+                except Exception as exc:
+                    # A warning must never fail the import, and must not go quiet
+                    # either: an unverifiable policy is reported, not skipped
+                    # (L3 r2: codex MED + complement LOW).
+                    print(
+                        "Warning: the exported store required the consolidate baton, and "
+                        f"this store's policy could not be read to check it ({exc}).",
+                        file=sys.stderr,
+                    )
         if args.json:
             _print_json({"imported": 0, "skipped": 0, "errors": 0})
         else:

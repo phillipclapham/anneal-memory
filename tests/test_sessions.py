@@ -760,6 +760,13 @@ def test_policy_rides_the_json_export_and_import_warns_when_it_is_lost(tmp_path)
     assert run.returncode == 0, run.stderr
     assert "No episodes to import" in run.stdout
 
+    # A target whose policy cannot be read is reported, not skipped (L3 r2).
+    not_a_store = tmp_path / "plain.db"
+    sqlite3.connect(not_a_store).close()  # a SQLite file with no metadata table
+    run = cli("--db", str(not_a_store), "import", str(empty))
+    assert run.returncode == 0, run.stderr
+    assert "could not be read to check it" in run.stderr
+
 
 # -- L1/L2 review fixes (2026-09-24) --
 

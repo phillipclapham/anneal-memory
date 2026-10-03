@@ -62,6 +62,7 @@ from .rederive import (
     rederive_continuity,
     revoke_store,
 )
+from .durable import DurableFact, parse_durable_facts
 from .continuity import (
     felt_currency,
     format_wrap_package_text,
@@ -187,6 +188,8 @@ __all__ = [
     "sections_by_role",
     "schema_role_warning",
     "heading_marker",
+    "DurableFact",
+    "parse_durable_facts",
     "validate_structure",
     "prepare_wrap",
     "felt_currency",

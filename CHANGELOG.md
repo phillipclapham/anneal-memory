@@ -99,8 +99,9 @@ the manifest again; that re-read narrows, without closing, the window for a writ
 lock (one whose lock degraded to none, or an older anneal-memory writer, which takes no lock;
 mixed-version writers stay unsupported). The lock serializes manifest changes, not appends: two
 writer processes on one trail still fork the chain, as before, and a single writer per trail remains the
-contract. A call back into the same trail from inside one of its operations (from a logging handler) is
-refused at the top of `log()`, and that nested event is not recorded; a handler that opens a second trail
+contract. A call back into the same trail while it holds the manifest lock (from a logging handler during
+initialization, rotation, adoption or retention) is refused at the top of `log()`, and that nested event is
+not recorded; a call from `on_event`, which runs after the lock is released, is not refused; a handler that opens a second trail
 or store on the same database while an operation holds the lock waits on it with no timeout, so a handler
 must not. The lock is released
 before the entry is appended and before `on_event` runs, and when its descriptor closes or the process

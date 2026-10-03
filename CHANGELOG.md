@@ -42,7 +42,9 @@ block every write with no repair path, which round 10 ruled out.
 
 Each manifest save writes its own randomly named temp file and replaces the manifest from it, so where the
 lock degrades to none two writers no longer overwrite one shared `.json.tmp` (measured before: failed saves
-and torn manifest reads that a reader would quarantine).
+and torn manifest reads that a reader would quarantine). Known and not fixed: a crash between creating that
+temp file and the replace leaves it behind under its unique name, and nothing cleans it up; `verify()`
+ignores it.
 
 Where advisory locks do not exist it degrades to no lock, which is the previous behaviour: silently on
 Windows (no `fcntl`), and with a warning on stderr (and to the `anneal-memory` logger), once per lock

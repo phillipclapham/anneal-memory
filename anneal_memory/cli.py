@@ -1556,7 +1556,8 @@ def cmd_wrap_status(args: argparse.Namespace) -> None:
                     "wrap_started_at": started_at,
                     "error": str(exc),
                     "operation": exc.operation,
-                    "recovery": "Run `anneal-memory wrap-cancel` to clear the stale state.",
+                    "recovery": "Run `anneal-memory wrap-cancel --partial` to clear the "
+                                "stale state (it refuses if a healthy wrap has replaced it).",
                 })
                 sys.exit(1)
             print(
@@ -1567,7 +1568,8 @@ def cmd_wrap_status(args: argparse.Namespace) -> None:
                 print(f"  wrap_started_at: {started_at}", file=sys.stderr)
             print(f"  integrity error: {exc}", file=sys.stderr)
             print(
-                "  recovery: run `anneal-memory wrap-cancel` to clear the stale state.",
+                "  recovery: run `anneal-memory wrap-cancel --partial` to clear the "
+                "stale state (it refuses if a healthy wrap has replaced it).",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -1639,6 +1641,14 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+    partial = bool(getattr(args, "partial", False))
+    if partial and expect_token is not None:
+        print(
+            "Error: --partial and --wrap-token cannot be combined: --partial clears "
+            "the store only while it holds partial wrap state, whatever its token.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     with _open_store(args) as store:
         # Report from the RECEIPT, read inside the clearing transaction — which
@@ -1655,6 +1665,7 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
                 expect_token=expect_token,
                 session_id=getattr(args, "session_id", None),
                 force=bool(getattr(args, "force", False)),
+                **({"expect_partial": True} if partial else {}),
             )
         except WrapCancelGatedError as exc:
             # No recipe in this text, on purpose: the reader of a refusal is the
@@ -1671,28 +1682,26 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
             # shipped the partial-state message on the MCP side and had to fix
             # the CLI "a round later" — the same lands-somewhere-not-everywhere
             # shape. Both surfaces answer the same two facts the same way.
-            if exc.partial_state and exc.actual is not None:
-                # Partial, but a token survived: "no usable token" would be false,
-                # and a tokenless re-run would also end a healthy wrap a peer
-                # started meanwhile, so name the surviving token (L3 r2 codex, run).
+            if partial:
+                now = (
+                    "a healthy wrap is in progress now, so it was not touched"
+                    if exc.actual else "no wrap is in progress now"
+                )
                 print(
-                    "The store holds PARTIAL wrap state under a different token "
-                    "than the one you named — a crash or a hand edit left it "
-                    "half-written, and it cannot be saved. prepare-wrap will keep "
-                    "refusing until it is cleared. Nothing was changed. Re-run "
-                    f"with --wrap-token {exc.actual} to clear it; that refuses if "
-                    "it has been replaced meanwhile.",
+                    f"Nothing was changed: the store no longer holds partial wrap "
+                    f"state ({now}).",
                     file=sys.stderr,
                 )
             elif exc.partial_state:
+                # --partial, not a plain re-run: a peer may clear the state and
+                # start a healthy wrap first, and a surviving token may be one
+                # --wrap-token cannot accept (L3 r2/r3, 1003+16, run).
                 print(
-                    "The store holds PARTIAL wrap state with no usable token — "
-                    "a crash or a hand edit left it half-written. Your token "
-                    "cannot match it, so no proven cancel will ever succeed, "
-                    "and prepare-wrap will keep refusing until it is cleared. "
-                    "Nothing was changed. Re-run WITHOUT --wrap-token to clear "
-                    "the broken state — that is the recovery this command "
-                    "exists for.",
+                    "The store holds PARTIAL wrap state — a crash or a hand edit "
+                    "left it half-written, and it cannot be saved. prepare-wrap "
+                    "will keep refusing until it is cleared. Nothing was changed. "
+                    "Re-run with --partial instead of --wrap-token to clear it; "
+                    "that refuses if a healthy wrap has replaced it.",
                     file=sys.stderr,
                 )
             elif exc.actual is None:
@@ -1788,7 +1797,8 @@ def cmd_wrap_token_current(args: argparse.Namespace) -> None:
                 file=sys.stderr,
             )
             print(
-                "Run `anneal-memory wrap-cancel` to clear the stale state.",
+                "Run `anneal-memory wrap-cancel --partial` to clear the stale state "
+                "(it refuses if a healthy wrap has replaced it).",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -4086,6 +4096,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true",
         help="Cancel a gated wrap without its token or session (that session is "
              "gone). Discards its compression.",
+    )
+    sub.add_argument(
+        "--partial", action="store_true",
+        help="Clear PARTIAL (corrupt, unsaveable) wrap state, and only that: "
+             "refused with no change if a healthy wrap is in progress or the "
+             "store is idle. Needs no token; cannot be combined with --wrap-token.",
     )
     sub.set_defaults(func=cmd_wrap_cancel)
 

@@ -2113,7 +2113,7 @@ class TestWrapCancelOwnershipOverMCP:
         text = _text_from_result(result)
         assert _is_error(result)
         assert "PARTIAL" in text, text
-        assert "WITHOUT wrap_token" in text, (
+        assert "partial=true" in text, (
             "no recovery path offered for a state no token can match: " + text
         )
         assert "already completed" not in text, (

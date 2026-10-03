@@ -644,6 +644,18 @@ _WRAP_CANCEL_PATHS = (
     "cancel it (MCP: the `wrap_cancel` tool · CLI: "
     "`anneal-memory wrap-cancel` · Python: `store.wrap_cancelled()`)"
 )
+# Partial (corrupt) state is cleared by the partial-only compare-and-swap, never a
+# plain cancel: a peer may clear it and start a healthy wrap before the retry, and
+# a plain cancel would end that wrap too (L3 r2/r3, 1003+16, run). It needs no
+# token, so a surviving token the transports cannot accept is no obstacle.
+_WRAP_PARTIAL_CANCEL_PATHS = (
+    "clear the partial state (MCP: `wrap_cancel` with partial=true · CLI: "
+    "`anneal-memory wrap-cancel --partial` · Python: "
+    "`store.wrap_cancelled(expect_partial=True)`), which refuses if a healthy "
+    "wrap has replaced it"
+)
+# ``WrapOwnershipError.expected`` when the caller asked for the partial-only clear.
+_EXPECTED_PARTIAL = "(partial state)"
 
 
 class WrapCancelReceipt(NamedTuple):
@@ -899,8 +911,14 @@ class WrapOwnershipError(AnnealMemoryError):
       is nothing to do.
     * ``partial_state`` True — CORRUPT/PARTIAL state: lifecycle keys are set but
       not coherently (``wrap_started_at`` present with an empty ``wrap_token``,
-      say, after a crash or a hand edit). No token can match, so no claim can
-      ever succeed; the only way out is to cancel WITHOUT ``expect_token``.
+      say, after a crash or a hand edit). ``actual`` is ``None`` when no token
+      survived and the surviving token otherwise. The way out is
+      ``expect_partial=True``, which clears only while the state is still
+      partial; a plain cancel would also end a healthy wrap a peer started
+      after clearing it.
+    * ``expected`` is ``"(partial state)"`` — the caller asked for
+      ``expect_partial=True`` and the store is no longer partial: ``actual`` is
+      the healthy wrap now in progress, or ``None`` when idle.
 
     ⚠ The first cut collapsed the last two into ``actual is None`` and told the
     operator NO WRAP IS IN PROGRESS while ``wrap_started_at`` survived the
@@ -935,27 +953,21 @@ class WrapOwnershipError(AnnealMemoryError):
         self.session_id = session_id
         # The caller passed force=True, which is ignored when expect_token is given.
         self.force = force
-        if partial_state and actual is None:
+        if expected == _EXPECTED_PARTIAL:
+            now = f"wrap {actual!r} is in progress" if actual else "it is idle"
             super().__init__(
-                f"wrap_cancelled: caller claims wrap {expected!r}, but the store "
-                f"holds PARTIAL wrap state with no usable token (a crash or a "
-                f"manual edit). No token can match it, so no proven cancel can "
-                f"ever succeed. Nothing was changed — call without expect_token "
-                f"to clear the broken state."
+                f"wrap_cancelled(expect_partial=True): the store no longer holds "
+                f"partial wrap state ({now}). Nothing was changed."
             )
         elif partial_state:
-            # Partial, but a token survived: the right token would clear it, so
-            # "no usable token" would be false here (L3 glm, 1003+16, run). The
-            # recovery names THAT token, not a tokenless cancel: a peer may clear
-            # this state and start a healthy wrap before the retry, and a
-            # tokenless cancel would end it (L3 r2 codex, run). Partial state is
-            # never gated and cannot be saved, so naming its token bypasses nothing.
+            # Whether or not a token survived: a token may be one the transports
+            # cannot accept, and a token CAS cannot see a replacement that reused
+            # it (L3 r3, run), so the recovery is the partial-only clear.
             super().__init__(
                 f"wrap_cancelled: caller claims wrap {expected!r}, but the store "
-                f"holds PARTIAL wrap state under {actual!r} (a crash or a manual "
-                f"edit); it cannot be saved. Nothing was changed — call with "
-                f"expect_token={actual!r} to clear it; that refuses if it has been "
-                f"replaced meanwhile."
+                f"holds PARTIAL wrap state (a crash or a manual edit); it cannot "
+                f"be saved. Nothing was changed — call with expect_partial=True "
+                f"to clear it; that refuses if a healthy wrap has replaced it."
             )
         elif actual is None:
             super().__init__(
@@ -3602,7 +3614,7 @@ class Store:
                 # Observed partial, now coherent (a peer's fresh wrap) or idle:
                 # the state this caller judged is gone, so it clears nothing.
                 raise WrapOwnershipError(
-                    expected="(partial state)",
+                    expected=_EXPECTED_PARTIAL,
                     actual=(cancelled_token or None) if complete else None,
                     partial_state=False,
                 )
@@ -3987,7 +3999,7 @@ class Store:
                 "store metadata is in a partial wrap-in-progress state. "
                 "Possible causes: a v0.1.x database mid-upgrade with a "
                 "stale legacy flag, or a manual metadata edit. "
-                f"To clear the stale flag, {_WRAP_CANCEL_PATHS}, "
+                f"To clear the stale flag, {_WRAP_PARTIAL_CANCEL_PATHS}, "
                 "then re-run prepare_wrap for a clean snapshot.",
                 operation="load_wrap_snapshot",
                 path=str(self.path),
@@ -4002,7 +4014,7 @@ class Store:
                 "wrap_token is set but wrap_episode_ids is empty — "
                 "store metadata is inconsistent. This indicates a "
                 "wrap-lifecycle state machine bug or manual metadata "
-                f"edit. Either clear wrap-in-progress state — {_WRAP_CANCEL_PATHS} "
+                f"edit. Either {_WRAP_PARTIAL_CANCEL_PATHS} "
                 "— or restore the episode ID list.",
                 operation="load_wrap_snapshot",
                 path=str(self.path),
@@ -4013,7 +4025,7 @@ class Store:
         except json.JSONDecodeError as exc:
             raise StoreError(
                 f"wrap_episode_ids metadata is not valid JSON: {exc}. "
-                f"Either clear wrap-in-progress state — {_WRAP_CANCEL_PATHS} "
+                f"Either {_WRAP_PARTIAL_CANCEL_PATHS} "
                 "— or restore the snapshot.",
                 operation="load_wrap_snapshot",
                 path=str(self.path),
@@ -4025,8 +4037,8 @@ class Store:
             raise StoreError(
                 "wrap_episode_ids metadata decoded to an unexpected "
                 f"shape ({type(episode_ids).__name__}); expected a "
-                f"list of episode ID strings. Either clear wrap-in-progress "
-                f"state — {_WRAP_CANCEL_PATHS} — or restore the snapshot.",
+                f"list of episode ID strings. Either "
+                f"{_WRAP_PARTIAL_CANCEL_PATHS} — or restore the snapshot.",
                 operation="load_wrap_snapshot",
                 path=str(self.path),
             )

@@ -4037,7 +4037,7 @@ class TestWrapCancelOwnershipParityOnTheCLI:
             )
         err = capsys.readouterr().err
         assert "PARTIAL" in err, err
-        assert "WITHOUT --wrap-token" in err, (
+        assert "--partial" in err, (
             "no recovery path offered for a state no token can ever match: " + err
         )
         assert "already" not in err.lower(), (

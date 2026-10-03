@@ -16,12 +16,17 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   its own session and that a cancel without the token, keeping the session id, ends it.
 - A wrong-token cancel that also passed `force` (CLI `--force`) now says force is ignored while a
   token is given, instead of calling the end of the wrap "the operator's decision".
-- A wrong-token cancel of PARTIAL wrap state whose token survived said there was "no usable
-  token" and that no proven cancel could ever succeed, and advised a tokenless cancel. The right
-  token does succeed, and a tokenless cancel would also end a healthy wrap a peer started after
-  clearing the partial state. Library, MCP and CLI now name the surviving token for the retry,
-  which refuses if the state was replaced meanwhile. (Partial state is never gated and cannot be
-  saved, so naming its token bypasses nothing.)
+- **Partial (corrupt) wrap state now has a guarded recovery on every surface: MCP `wrap_cancel`
+  `partial: true` and CLI `wrap-cancel --partial`**, the existing `wrap_cancelled(expect_partial=
+  True)`. It clears the store only while it holds partial state, needs no token, and refuses with
+  nothing changed if a healthy wrap has replaced it or the store is idle; it cannot be combined
+  with a token. Every partial-state recovery text (the wrong-token refusals on all three
+  surfaces, the four `load_wrap_snapshot` integrity errors, CLI `wrap-status` /
+  `wrap-token-current`) now advises it instead of a plain cancel, which would also end a healthy
+  wrap a peer started after clearing the partial state. The wrong-token refusal also no longer
+  says a partial state whose token survived has "no usable token". MCP tool description and
+  schema changed; both `tool-integrity.json` manifests regenerated. The transports pass
+  `expect_partial` only when asked, so the plain call is unchanged.
 - `WrapOwnershipError` gains `gated_session` (read under the same lock as the token compare;
   `None` when the wrap was ungated), `session_id` (the caller's) and `force`; all survive
   pickling.

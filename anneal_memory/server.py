@@ -676,10 +676,24 @@ class Server:
         force = args.get("force", False)
         if not isinstance(force, bool):
             return _tool_result("force must be true or false.", is_error=True)
+        partial = args.get("partial", False)
+        if not isinstance(partial, bool):
+            return _tool_result("partial must be true or false.", is_error=True)
+        if partial and expect_token is not None:
+            return _tool_result(
+                "partial and wrap_token cannot be combined: partial clears the "
+                "store only while it holds partial wrap state, whatever its token.",
+                is_error=True,
+            )
 
         try:
+            # expect_partial only when asked, so the plain call is unchanged for a
+            # Store subclass or stub that predates the keyword.
             receipt = self._store.wrap_cancelled(
-                expect_token=expect_token, session_id=session_id, force=force
+                expect_token=expect_token,
+                session_id=session_id,
+                force=force,
+                **({"expect_partial": True} if partial else {}),
             )
         except WrapCancelGatedError as exc:
             # No recipe here, on purpose: the reader of a refusal is the caller the
@@ -696,18 +710,16 @@ class Server:
             # from "a peer owns it": the first means the caller's own wrap has
             # already finished (retry-safe, nothing to do), the second means
             # cancelling would destroy someone else's compression.
-            if exc.partial_state and exc.actual is not None:
-                # Partial, but a token survived, so "no usable token" below would
-                # be false: the right token clears it (L3 glm, 1003+16, run). Name
-                # that token, not a tokenless cancel, which would also end a
-                # healthy wrap a peer started meanwhile (L3 r2 codex, run).
+            if partial:
+                # The partial-only clear found no partial state: a healthy wrap
+                # replaced it (whatever its token) or the store went idle.
+                now = (
+                    "a healthy wrap is in progress now, so it was not touched"
+                    if exc.actual else "no wrap is in progress now"
+                )
                 return _tool_result(
-                    "The store holds PARTIAL wrap state under a different token "
-                    "than the one you named — a crash or a hand edit left it "
-                    "half-written, and it cannot be saved. prepare_wrap will keep "
-                    "refusing until it is cleared. Nothing was changed. Call "
-                    f"wrap_cancel again with wrap_token={exc.actual} to clear it; "
-                    "that refuses if it has been replaced meanwhile.",
+                    f"Nothing was changed: the store no longer holds partial wrap "
+                    f"state ({now}).",
                     is_error=True,
                 )
             if exc.partial_state:
@@ -717,14 +729,16 @@ class Server:
                 # "nothing in progress" left wrap_started_at standing and the
                 # next prepare_wrap failed — Alex's original three-day lockout,
                 # through the guard written to prevent it. L3 consensus.
+                # The recovery is partial=true, not a plain cancel: a peer may
+                # clear the state and start a healthy wrap before the retry, and
+                # a plain cancel would end it; a surviving token may be one this
+                # tool cannot accept (L3 r2/r3, 1003+16, run).
                 return _tool_result(
-                    "The store holds PARTIAL wrap state with no usable token — "
-                    "a crash or a hand edit left it half-written. Your token "
-                    "cannot match it, so no proven cancel will ever succeed, and "
-                    "prepare_wrap will keep refusing until it is cleared. "
-                    "Nothing was changed. Call wrap_cancel again WITHOUT "
-                    "wrap_token to clear the broken state — that is the recovery "
-                    "this tool exists for.",
+                    "The store holds PARTIAL wrap state — a crash or a hand edit "
+                    "left it half-written, and it cannot be saved. prepare_wrap "
+                    "will keep refusing until it is cleared. Nothing was changed. "
+                    "Call wrap_cancel again with partial=true and no wrap_token to "
+                    "clear it; that refuses if a healthy wrap has replaced it.",
                     is_error=True,
                 )
             if exc.actual is None:

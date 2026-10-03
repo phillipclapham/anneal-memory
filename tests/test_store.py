@@ -1219,7 +1219,7 @@ class TestWrapInProgressError:
             with pytest.raises(StoreError) as excinfo:
                 s.load_wrap_snapshot()
             msg = str(excinfo.value)
-            assert "MCP: the `wrap_cancel` tool" in msg
+            assert "MCP: `wrap_cancel` with partial=true" in msg
             assert "anneal-memory wrap-cancel" in msg
         finally:
             s.close()
@@ -1254,7 +1254,7 @@ class TestWrapInProgressError:
                 with pytest.raises(StoreError) as excinfo:
                     s.load_wrap_snapshot()
                 msg = str(excinfo.value)
-                assert "MCP: the `wrap_cancel` tool" in msg, (
+                assert "MCP: `wrap_cancel` with partial=true" in msg, (
                     f"{label}: integrity error names no MCP-reachable recovery path"
                 )
                 assert "anneal-memory wrap-cancel" in msg, f"{label}: no CLI path"
@@ -1568,7 +1568,7 @@ class TestWrapCancelOwnershipCAS:
                 "there is nothing to clear while wrap_started_at still stands"
             )
             assert "PARTIAL" in str(exc)
-            assert "without expect_token" in str(exc), (
+            assert "expect_partial=True" in str(exc), (
                 "no recovery path offered for a state no token can ever match"
             )
             # The refusal must not have cleared anything...

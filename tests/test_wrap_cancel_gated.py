@@ -148,39 +148,76 @@ def test_a_mismatch_refusal_never_offers_an_override_the_gate_refuses(tmp_path):
     after.close()
 
 
-def test_partial_state_with_a_surviving_token_is_not_called_tokenless(tmp_path):
-    """L3 glm (1003+16, run): a partial wrap whose token survived told a wrong-token
-    caller there was "no usable token" and that no proven cancel would ever succeed;
-    the right token does succeed. The advice given now is followed here."""
+def test_partial_state_recovery_is_the_partial_only_clear(tmp_path):
+    """L3 r1 glm / r2 codex / r3 complement+codex+glm (1003+16, each run): a partial
+    wrap's recovery advice was first false ("no usable token"), then a plain cancel
+    that ends a healthy wrap a peer starts before the retry, then a token retry
+    that fails for a non-canonical token or a replacement reusing the token. The
+    advice is now expect_partial / partial=true / --partial, followed here."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    import anneal_memory
     from anneal_memory import WrapOwnershipError
 
-    store = Store(tmp_path / "m.db")
-    _gated(store, "a" * 32)
-    store._conn.execute("UPDATE metadata SET value='' WHERE key='wrap_episode_ids'")
-    store._conn.commit()
+    def make_partial(st: Store, token: str) -> None:
+        e = st.record("x" * 90 + token, "observation")
+        st.wrap_started(token=token, episode_ids=[e.id], gated_session_id="holder")
+        st._conn.execute("UPDATE metadata SET value='' WHERE key='wrap_episode_ids'")
+        st._conn.commit()
+
+    db = tmp_path / "m.db"
+    store = Store(db)
+    make_partial(store, "Legacy-Token")  # a token no transport accepts
     with pytest.raises(WrapOwnershipError) as exc:
         store.wrap_cancelled(expect_token="0" * 32)
-    assert exc.value.partial_state and exc.value.actual == "a" * 32
-    assert "no usable token" not in str(exc.value) and "PARTIAL" in str(exc.value)
-    assert f"expect_token={'a' * 32!r}" in str(exc.value)
-    text = Server(store)._tool_wrap_cancel({"wrap_token": "0" * 32})["content"][0]["text"]
-    assert "no usable token" not in text and "WITHOUT wrap_token" not in text
-    assert f"wrap_token={'a' * 32}" in text
-    # L3 r2 codex (run): a peer clears the partial state and starts a healthy wrap
-    # before the retry. The advised token retry must refuse, not end the peer's wrap.
-    peer = Store(tmp_path / "m.db")
-    peer.wrap_cancelled()
-    _gated(peer, "b" * 32, session=None)
-    with pytest.raises(WrapOwnershipError):
-        store.wrap_cancelled(expect_token="a" * 32)
-    assert peer.wrap_cancelled(expect_token="b" * 32).token == "b" * 32  # B survived
-    # Without the peer, the advice clears it.
-    _gated(store, "c" * 32)
-    store._conn.execute("UPDATE metadata SET value='' WHERE key='wrap_episode_ids'")
-    store._conn.commit()
-    assert store.wrap_cancelled(expect_token="c" * 32).partial_state
+    assert exc.value.partial_state and "expect_partial=True" in str(exc.value)
+    assert "no usable token" not in str(exc.value)
+    server = Server(store)
+    text = server._tool_wrap_cancel({"wrap_token": "0" * 32})["content"][0]["text"]
+    assert "partial=true" in text and "WITHOUT wrap_token" not in text
+    both = server._tool_wrap_cancel({"wrap_token": "0" * 32, "partial": True})
+    assert both["isError"] and "cannot be combined" in both["content"][0]["text"]
+    assert server._tool_wrap_cancel({"partial": True})["isError"] is False  # advice works
     assert not store.status().wrap_in_progress
+
+    # The race: a peer clears the partial state and starts a healthy wrap, here
+    # REUSING the token (allow_restart), before the retry. partial=true refuses.
+    make_partial(store, "a" * 32)
+    peer = Store(db)
+    peer.wrap_cancelled(expect_partial=True)
+    e2 = peer.record("y" * 90, "observation")
+    peer.wrap_started(token="a" * 32, episode_ids=[e2.id])
+    late = server._tool_wrap_cancel({"partial": True})
+    assert late["isError"] and "not touched" in late["content"][0]["text"]
+    with pytest.raises(WrapOwnershipError) as lib:
+        store.wrap_cancelled(expect_partial=True)
+    assert "no longer holds partial" in str(lib.value)
+    assert peer.wrap_cancelled(expect_token="a" * 32).token == "a" * 32  # B survived
+    idle = server._tool_wrap_cancel({"partial": True})["content"][0]["text"]
+    assert "no wrap is in progress" in idle
+
+    # CLI parity, following its own advice.
+    make_partial(store, "a" * 32)
     peer.close()
+    store.close()
+    env = {**os.environ, "PYTHONPATH": str(Path(anneal_memory.__file__).parent.parent)}
+    cli = [sys.executable, "-m", "anneal_memory.cli", "--db", str(db), "wrap-cancel"]
+    out = subprocess.run(cli + ["--wrap-token", "0" * 32], capture_output=True, text=True, env=env)
+    assert out.returncode == 1 and "--partial" in out.stderr
+    out = subprocess.run(
+        cli + ["--wrap-token", "0" * 32, "--partial"], capture_output=True, text=True, env=env
+    )
+    assert out.returncode == 1 and "cannot be combined" in out.stderr
+    out = subprocess.run(cli + ["--partial"], capture_output=True, text=True, env=env)
+    assert out.returncode == 0, out.stderr
+    out = subprocess.run(cli + ["--partial"], capture_output=True, text=True, env=env)
+    assert out.returncode == 1 and "no longer holds partial" in out.stderr
+    after = Store(db)
+    assert not after.status().wrap_in_progress
+    after.close()
 
 
 def test_force_with_a_stale_token_says_force_was_ignored(tmp_path):

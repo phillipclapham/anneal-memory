@@ -320,7 +320,9 @@ TOOLS: list[dict[str, Any]] = [
             "which is what you want when recovering a wrap you did not open. "
             "Exception: a wrap prepared under the consolidate gate is cancelled "
             "without its token only when session_id is the session that prepared "
-            "it, or with force=true when that session is gone."
+            "it, or with force=true when that session is gone. PARTIAL "
+            "(corrupt) wrap state is cleared with partial=true, which refuses if "
+            "a healthy wrap has replaced it."
         ),
         "inputSchema": {
             "type": "object",
@@ -352,6 +354,15 @@ TOOLS: list[dict[str, Any]] = [
                         "Cancel a gated wrap without its token or session, when "
                         "the session that prepared it is gone. Discards its "
                         "compression."
+                    ),
+                },
+                "partial": {
+                    "type": "boolean",
+                    "description": (
+                        "Clear PARTIAL (corrupt, unsaveable) wrap state, and only "
+                        "that: refused with no change if a healthy wrap is in "
+                        "progress or the store is idle. Needs no token. Cannot be "
+                        "combined with wrap_token."
                     ),
                 },
             },

@@ -78,6 +78,78 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - Tests for `validated_save_continuity(compost=...)`'s `TypeError` cases (a bare string or bytes, an
   empty or padded name, a non-string), each asserting nothing was written.
 
+### Fixed — a writer can no longer quarantine the manifest `audit-repair` just rebuilt (spore-1030)
+
+Reproduced with two real processes before the fix: a writer read the old invalid manifest and paused;
+`anneal-memory audit-repair` ran in another process and returned `repaired=True`; the writer then
+renamed the rebuilt, valid manifest to a new `.corrupt-<stamp>` marker, and `verify()` reported the
+trail quarantined. It happened both after repair had returned and inside repair's last check.
+
+Every change to the manifest now happens under one cross-process lock, `<stem>.audit-manifest.lock`
+beside the database: a manifest save, a quarantine rename, a whole repair, and the load-to-save span of
+rotation, orphan adoption and retention cleanup (each takes the lock before its first rename, so a lock
+that cannot be taken refuses the step with nothing sealed or moved). A writer that read an invalid
+manifest takes the lock, lists the markers and reads the manifest again, and renames only bytes it parsed
+as invalid while holding it; if a repair got there first it uses the rebuilt manifest. The lock is
+reentrant within one `AuditTrail`, and released when its descriptor closes or the process dies. It is
+opened read-write (Linux NFS needs that for an exclusive lock), and read-only when this user may not
+write the lock file (another user's, or a restrictive umask). A symlink, FIFO or directory at its path is
+refused rather than followed or silently ignored. It blocks with no timeout: a stopped holder delays
+other processes' rotations and quarantines until it exits.
+
+Forking is not supported: do not fork a process while an `AuditTrail` in it is in use; a child must open
+its own `AuditTrail`. A child forked while the lock is held inherits the descriptor, and so the lock.
+
+A process whose orphan adoption at its first write does not finish its scan (the lock cannot be taken,
+the manifest cannot be read, or the directory cannot be listed), with no usable active file and sealed
+files on disk or a directory it cannot list, refuses that write instead of continuing the chain from the
+manifest: a crashed rotation's orphaned week could be newer than the manifest knows, and continuing past
+it forked the chain for good (measured for the lock and the unlistable directory, each with the refusal
+removed or skipped). A quarantined manifest is not refused here; it anchors on the newest sealed file on
+disk. The refusal names its cause, and the next write retries; a cause that does not clear refuses every
+write (and `audit-repair`) until it is cleared; the error names the lock path and the OS error, and
+gives no remedy, because removing a lock file another process holds would split the lock.
+
+Diagnostics in `audit.py` go through its own logger, `anneal-memory.audit` (a child of
+`anneal-memory`, so handlers and levels set there still apply by propagation; a filter on
+`anneal-memory` does not, because logging never runs a parent logger's filters, so put it on
+`anneal-memory.audit` or on the handler. Records from this module were named `anneal-memory`
+before). Every diagnostic sits on a degrade, refusal or recovery path, and an application's logging
+code that raised replaced those outcomes (L3 10-03, run), so each emission (record creation, filters,
+handlers) is one guarded call: an `Exception` from any of it is swallowed and this module writes the
+message to stderr instead, one copy of its own (a handler that wrote to stderr before raising is not
+counted). For that record, handlers after the raising one receive nothing. `BaseException` subclasses that are not `Exception` (`KeyboardInterrupt`, `SystemExit`,
+`asyncio.CancelledError`) still propagate. The registered logger itself is not re-classed or wrapped:
+two earlier shapes on this branch did that, and one made `import anneal_memory` raise `TypeError` under
+an application's slotted logger class (L3 10-03, codex HIGH, run).
+
+Known and not fixed: with an empty active file, an unreadable or corrupt newer sealed week does not stop
+the chain; it continues from the manifest past that week and `verify()` reports the week as unmanifested
+(round 10: a permanently bad orphan must not block writes).
+
+Known and not fixed: a crash during a manifest save can leave a uniquely named
+`.anneal-manifest-<hex>.tmp` beside the manifest (a fixed-length name, so a long stem cannot push it
+past the filesystem's name limit); nothing removes it. It is not a sealed-file
+name, so `verify()` and adoption ignore it, and it is safe to delete.
+
+Each manifest save writes its own randomly named temp file and replaces the manifest from it, so where the
+lock degrades to none two writers no longer overwrite one shared `.json.tmp` (measured before: failed saves
+and torn manifest reads that a reader would quarantine).
+
+Where advisory locks do not exist it degrades to no lock, which is the previous behaviour: silently on
+Windows (no `fcntl`), and with a warning on stderr (and to the `anneal-memory` logger), once per lock
+path, saying the lock is not held, on a filesystem whose `flock` reports
+`EOPNOTSUPP`, or `ENOLCK` after three short retries. `ENOLCK` is ambiguous: Linux NFS without lock support
+returns it for good, and a kernel out of lock records returns it briefly. Failing closed on it would leave
+such NFS stores unable to rotate or repair; degrading means a repair racing a writer during real
+lock-record exhaustion can still hit this race. Any other failure to take it is a refusal: the writer does not quarantine, rotate,
+adopt or prune, and `audit-repair` writes nothing.
+
+This replaces 0.9.10's caveat that `audit-repair` must not run while another process writes the trail,
+for manifest changes made by this version. Still not covered: an older anneal-memory writer takes no
+lock, so mixed-version writers stay unsupported; two writers appending to one trail still break its
+hash chain (the single-writer requirement in `AuditTrail`'s docstring is unchanged).
+
 ## [0.9.23] — 2026-10-02
 
 ### Added — supersession: an update can say which episode it replaces

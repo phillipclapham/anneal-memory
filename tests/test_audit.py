@@ -5445,7 +5445,7 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
                 raise OSError(5, "Input/output error")
             return real_fsync(fd)
 
-        def exploding_warning(msg, *a, **kw):
+        def exploding_log(level, msg, *a, **kw):
             # ⛔ SCOPED TO THE ROLLBACK WARNING. Exploding on EVERY
             # ``logger.warning`` grades more than this test claims and would
             # pass if some unrelated warning happened to fire first —
@@ -5458,9 +5458,7 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
 
         monkeypatch.setattr(builtins, "open", sick_open)
         monkeypatch.setattr(os, "fsync", sick_fsync)
-        monkeypatch.setattr(
-            audit_module.logger, "warning", exploding_warning
-        )
+        monkeypatch.setattr(audit_module.logger, "log", exploding_log)
 
         with pytest.raises(BaseException):
             trail.log("third")
@@ -5623,7 +5621,7 @@ class TestDiogenes20260909StillOpen:
         # ⚖ HYBRID (Phill, 2026-09-13): a corrupt manifest is quarantined, not
         # degraded to genesis; with no sealed file to seed from, seeding refuses.
         with pytest.raises(audit_module._ManifestQuarantined):
-            trail._seed_from_manifest()
+            trail._seed_from_manifest(adopted=True)
 
         assert trail._prev_hash == GENESIS_HASH, (
             "a manifest field containing an invalid-UTF-8-derived lone "
@@ -5703,7 +5701,7 @@ class TestDiogenes20260909StillOpen:
         # and, with no sealed tail, seeding refuses — but the dirty state must
         # already have been reset by the time it does.
         with pytest.raises(audit_module._ManifestQuarantined):
-            trail._seed_from_manifest()
+            trail._seed_from_manifest(adopted=True)
 
         assert trail._prev_hash == GENESIS_HASH, (
             "an unparseable manifest left the dirty chain state standing "
@@ -6021,7 +6019,7 @@ class TestFixDiffRound4FieldTypeCompleteness:
         # ⚖ HYBRID (Phill, 2026-09-13): rejected means quarantined; with no
         # sealed tail to seed from, seeding refuses instead of guessing genesis.
         with pytest.raises(audit_module._ManifestQuarantined):
-            trail._seed_from_manifest()
+            trail._seed_from_manifest(adopted=True)
 
         assert trail._prev_hash == GENESIS_HASH, (
             "a boolean active_last_seq should be rejected as corrupt, "
@@ -7734,20 +7732,21 @@ class TestHybridL3Fixes:
         """codex MED (input a927e791ce5df4eb), reproduced by INJECTION: repair
         quarantined the manifest, then a failed listing made it report
         "nothing was written" with the marker already on disk. Listings: repair's
-        own, the one inside _load_manifest, then the re-list this removes.
+        own, the one inside _load_manifest, the one it repeats under the manifest
+        lock before renaming (spore-1030), then the re-list this removes.
         """
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
         real = audit_module._quarantine_markers
         calls = []
 
-        def third_listing_fails(audit_dir, stem):
+        def fourth_listing_fails(audit_dir, stem):
             calls.append(stem)
-            if len(calls) == 3:
-                raise PermissionError(13, "third listing")
+            if len(calls) == 4:
+                raise PermissionError(13, "fourth listing")
             return real(audit_dir, stem)
 
-        monkeypatch.setattr(audit_module, "_quarantine_markers", third_listing_fails)
+        monkeypatch.setattr(audit_module, "_quarantine_markers", fourth_listing_fails)
         result = AuditTrail.repair_manifest(db)
 
         assert result.repaired is True, result.error
@@ -8058,7 +8057,9 @@ class TestHybridL3Fixes:
     def test_a_refusal_after_quarantining_says_so(self, tmp_path, monkeypatch):
         """codex MED (re-pass 598cd40ffcfcbc18), reproduced by INJECTION: repair
         quarantined the manifest, the listing of sealed files then failed, and
-        the refusal said "nothing was written"."""
+        the refusal said "nothing was written". Listings of the directory:
+        repair's marker check, _load_manifest's, its repeat under the manifest
+        lock (spore-1030), then the sealed-file listing this fails."""
         from pathlib import Path
 
         db = self._two_sealed_weeks(tmp_path)
@@ -8066,17 +8067,639 @@ class TestHybridL3Fixes:
         real_iterdir = Path.iterdir
         calls = []
 
-        def third_iterdir_fails(self):
+        def fourth_iterdir_fails(self):
             if self == tmp_path:
                 calls.append(1)
-                if len(calls) == 3:
+                if len(calls) == 4:
                     raise PermissionError(13, "listing sealed files")
             return real_iterdir(self)
 
-        monkeypatch.setattr(Path, "iterdir", third_iterdir_fails)
+        monkeypatch.setattr(Path, "iterdir", fourth_iterdir_fails)
         result = AuditTrail.repair_manifest(db)
         monkeypatch.setattr(Path, "iterdir", real_iterdir)
 
         assert result.repaired is False
         assert "quarantined as" in (result.error or "")
         assert "nothing was written" not in (result.error or "")
+
+
+class TestManifestLock:
+    """spore-1030: one cross-process lock around manifest saves, quarantines and
+    repair. Reproduced first with two real processes (a writer paused after
+    reading the old invalid manifest; repair run to completion in another
+    process): the writer then quarantined the rebuilt manifest, repair had
+    returned repaired=True, and verify() reported the trail quarantined."""
+
+    _two_sealed_weeks = staticmethod(TestHybridManifestQuarantine._two_sealed_weeks)
+
+    def test_a_stale_reader_does_not_quarantine_the_rebuilt_manifest(
+        self, tmp_path, monkeypatch
+    ):
+        """⛔ MUTATION-CHECKED: quarantine the unlocked read's bytes without
+        re-reading under the lock, and this fails."""
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        real = audit_module._read_regular_bytes
+        state: dict = {"fired": False, "repaired": None}
+
+        def stale_read_then_repair_elsewhere(path):
+            raw = real(path)
+            if Path(path).name == "m.audit.manifest.json" and not state["fired"]:
+                # Another trail (its own lock descriptor) repairs while this
+                # reader holds the old bytes. ``fired`` is set first: repair
+                # reads the manifest through this same hook.
+                state["fired"] = True
+                state["repaired"] = AuditTrail.repair_manifest(db)
+            return raw
+
+        monkeypatch.setattr(audit_module, "_read_regular_bytes", stale_read_then_repair_elsewhere)
+        manifest = AuditTrail(db)._load_manifest()
+        monkeypatch.setattr(audit_module, "_read_regular_bytes", real)
+
+        assert state["repaired"].repaired is True, state["repaired"].error
+        assert len(manifest["files"]) == 2
+        assert audit_module._quarantine_markers(tmp_path, "m") == []
+        assert AuditTrail.verify(db).valid
+
+    def test_a_marker_that_lands_after_the_unlocked_read_is_not_renamed_again(
+        self, tmp_path, monkeypatch
+    ):
+        """⛔ MUTATION-CHECKED: drop the marker listing under the lock and this
+        fails (the reader renames a second, unrelated generation)."""
+        db = self._two_sealed_weeks(tmp_path)
+        manifest_path = tmp_path / "m.audit.manifest.json"
+        manifest_path.write_bytes(b"{not json")
+        real = audit_module._read_regular_bytes
+        marker = "m.audit.manifest.json.corrupt-20261003T000000000001Z"
+        state = {"n": 0}
+
+        def another_process_quarantines_then_saves(path):
+            raw = real(path)
+            if Path(path).name == "m.audit.manifest.json" and state["n"] == 0:
+                state["n"] += 1
+                manifest_path.rename(tmp_path / marker)
+                manifest_path.write_bytes(b"{also not json")
+            return raw
+
+        monkeypatch.setattr(audit_module, "_read_regular_bytes", another_process_quarantines_then_saves)
+        with pytest.raises(audit_module._ManifestQuarantined) as caught:
+            AuditTrail(db)._load_manifest()
+        monkeypatch.setattr(audit_module, "_read_regular_bytes", real)
+
+        assert caught.value.markers == [marker]
+        assert audit_module._quarantine_markers(tmp_path, "m") == [marker]
+        assert manifest_path.read_bytes() == b"{also not json"
+
+    @pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+    def test_the_lock_excludes_another_process(self, tmp_path):
+        """A real second process holding the lock blocks a save here until it
+        lets go. ⛔ MUTATION-CHECKED: skip the ``flock`` and this fails."""
+        import subprocess
+
+        db = tmp_path / "m.db"
+        AuditTrail(db).log("seed", {})
+        held, release = tmp_path / "held", tmp_path / "release"
+        child = subprocess.Popen([
+            sys.executable, "-c",
+            "import sys, time; from pathlib import Path\n"
+            "from anneal_memory.audit import AuditTrail\n"
+            f"t = AuditTrail({str(db)!r})\n"
+            "with t._manifest_lock() as ok:\n"
+            f"    Path({str(held)!r}).write_text(str(ok))\n"
+            f"    while not Path({str(release)!r}).exists(): time.sleep(0.01)\n"
+            "    time.sleep(0.3)\n",
+        ], cwd=str(Path(audit_module.__file__).parent.parent))
+        try:
+            deadline = datetime.now() + timedelta(seconds=20)
+            while not held.exists():
+                assert datetime.now() < deadline, "child never took the lock"
+            assert held.read_text() == "True"
+            trail = AuditTrail(db)
+            release.write_text("x")
+            start = datetime.now()
+            trail._save_manifest(trail._fresh_manifest())
+            waited = (datetime.now() - start).total_seconds()
+        finally:
+            release.write_text("x")
+            child.wait(timeout=20)
+        assert waited >= 0.2, f"the save did not wait for the other process ({waited:.3f}s)"
+
+    def test_the_lock_is_reentrant_within_one_trail(self, tmp_path):
+        trail = AuditTrail(tmp_path / "m.db")
+        with trail._manifest_lock() as outer:
+            with trail._manifest_lock() as inner:
+                trail._save_manifest(trail._fresh_manifest())
+            assert inner == outer
+            assert trail._lock_depth == 1
+        assert trail._lock_depth == 0 and trail._lock_fd is None
+
+    def test_the_lock_file_is_outside_the_audit_name_set(self, tmp_path):
+        """The CLI compares the ``<stem>.audit.*`` names before and after a read
+        to detect a change in the trail; the lock file must not be one."""
+        from anneal_memory.cli import _audit_file_names
+
+        trail = AuditTrail(tmp_path / "m.db")
+        trail.log("seed", {})
+        with trail._manifest_lock():
+            pass
+        names = {p.name for p in tmp_path.iterdir()}
+        if audit_module.fcntl is not None:
+            assert "m.audit-manifest.lock" in names
+        assert "m.audit-manifest.lock" not in _audit_file_names(tmp_path, "m")
+
+    @pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+    def test_a_filesystem_without_locks_degrades_to_no_lock(self, tmp_path, monkeypatch):
+        import errno as errno_module
+
+        def no_locks(fd, op):
+            raise OSError(errno_module.ENOLCK, "no locks")
+
+        monkeypatch.setattr(audit_module.fcntl, "flock", no_locks)
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        AuditTrail(db).log("after", {})
+        assert len(audit_module._quarantine_markers(tmp_path, "m")) == 1
+        assert AuditTrail.repair_manifest(db).repaired is True
+        assert AuditTrail.verify(db).valid
+
+    @pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+    def test_a_lock_fault_refuses_instead_of_proceeding_unlocked(self, tmp_path, monkeypatch):
+        """⛔ MUTATION-CHECKED: degrade on every flock error and this fails."""
+        import errno as errno_module
+
+        db = self._two_sealed_weeks(tmp_path)
+        manifest_path = tmp_path / "m.audit.manifest.json"
+        manifest_path.write_bytes(b"{not json")
+
+        def faulty(fd, op):
+            raise OSError(errno_module.EIO, "I/O error")
+
+        monkeypatch.setattr(audit_module.fcntl, "flock", faulty)
+        with pytest.raises(audit_module._ManifestUnavailable) as caught:
+            AuditTrail(db)._load_manifest()
+        assert not isinstance(caught.value, audit_module._ManifestQuarantined)
+        result = AuditTrail.repair_manifest(db)
+
+        assert result.repaired is False
+        assert "nothing was written" in (result.error or "")
+        assert audit_module._quarantine_markers(tmp_path, "m") == []
+        assert manifest_path.read_bytes() == b"{not json"
+
+    @pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+    def test_repair_holds_the_lock_through_its_last_check(self, tmp_path, monkeypatch):
+        """The spore's exact window: after repair's final signature check, a
+        process holding the old bytes must not be able to take the lock. A real
+        child process probes it, non-blocking, from inside that check.
+        ⛔ MUTATION-CHECKED: run repair's body without the lock and this fails."""
+        import subprocess
+
+        db = self._two_sealed_weeks(tmp_path)
+        (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
+        lock_path = tmp_path.resolve() / "m.audit-manifest.lock"
+        real = audit_module._stat_signature
+        probes: list[str] = []
+
+        def probe_from_another_process(path):
+            sig = real(path)
+            if Path(path).name == "m.audit.manifest.json":
+                probes.append(subprocess.run([
+                    sys.executable, "-c",
+                    "import fcntl, os, sys\n"
+                    f"fd = os.open({str(lock_path)!r}, os.O_RDWR | os.O_CREAT, 0o644)\n"
+                    "try:\n"
+                    "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                    "    print('acquired')\n"
+                    "except BlockingIOError:\n"
+                    "    print('held')\n",
+                ], capture_output=True, text=True, timeout=20).stdout.strip())
+            return sig
+
+        monkeypatch.setattr(audit_module, "_stat_signature", probe_from_another_process)
+        result = AuditTrail.repair_manifest(db)
+        monkeypatch.setattr(audit_module, "_stat_signature", real)
+
+        assert result.repaired is True, result.error
+        assert probes and set(probes) == {"held"}, probes
+
+
+def _probe_lock_from_another_process(lock_path: Path) -> str:
+    """'held' when another process holds ``lock_path``, else 'acquired'."""
+    import subprocess
+
+    return subprocess.run([
+        sys.executable, "-c",
+        "import fcntl, os\n"
+        f"fd = os.open({str(lock_path)!r}, os.O_RDONLY | os.O_CREAT, 0o644)\n"
+        "try:\n"
+        "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "    print('acquired')\n"
+        "except BlockingIOError:\n"
+        "    print('held')\n",
+    ], capture_output=True, text=True, timeout=20).stdout.strip()
+
+
+@pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+class TestManifestLockSpans:
+    """L1 on spore-1030's first fix (reproduced): rotation, adoption and retention
+    loaded the manifest unlocked and saved under the lock, so a manifest loaded
+    before a repair overwrote the rebuilt one afterwards. Each span now holds the
+    lock from its load to its save; a real child process probes it at the load.
+    ⛔ MUTATION-CHECKED per span: take the lock only around the save and the
+    matching test fails."""
+
+    _two_sealed_weeks = staticmethod(TestHybridManifestQuarantine._two_sealed_weeks)
+
+    def _probe_at_load(self, trail, monkeypatch):
+        probes: list[str] = []
+        real = AuditTrail._load_manifest
+        lock_path = trail._db_path.parent / f"{trail._db_path.stem}.audit-manifest.lock"
+
+        def load_then_probe(self_):
+            m = real(self_)
+            probes.append(_probe_lock_from_another_process(lock_path))
+            return m
+
+        monkeypatch.setattr(AuditTrail, "_load_manifest", load_then_probe)
+        return probes
+
+    def test_rotation_holds_the_lock_from_load_to_save(self, tmp_path, monkeypatch):
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        trail.log("pre", {})
+        trail._last_week = "1999-W01"
+        probes = self._probe_at_load(trail, monkeypatch)
+        trail.log("rot", {})
+        monkeypatch.undo()
+        assert (tmp_path / "m.audit.1999-W01.jsonl.gz").exists()
+        assert probes and set(probes) == {"held"}, probes
+
+    def test_adoption_holds_the_lock_from_load_to_save(self, tmp_path, monkeypatch):
+        db = self._two_sealed_weeks(tmp_path)
+        manifest = json.loads((tmp_path / "m.audit.manifest.json").read_text())
+        manifest["files"] = manifest["files"][:1]  # W02 becomes an orphan
+        (tmp_path / "m.audit.manifest.json").write_text(json.dumps(manifest))
+        trail = AuditTrail(db)
+        probes = self._probe_at_load(trail, monkeypatch)
+        trail._adopt_orphaned_files()
+        monkeypatch.undo()
+        names = [f["filename"] for f in json.loads((tmp_path / "m.audit.manifest.json").read_text())["files"]]
+        assert "m.audit.1999-W02.jsonl.gz" in names
+        assert probes and set(probes) == {"held"}, probes
+
+    def test_retention_holds_the_lock_from_load_to_save(self, tmp_path, monkeypatch):
+        db = self._two_sealed_weeks(tmp_path)
+        mpath = tmp_path / "m.audit.manifest.json"
+        manifest = json.loads(mpath.read_text())
+        for f in manifest["files"]:
+            f["last_ts"] = "2000-01-01T00:00:00.000000Z"  # older than any retention
+        mpath.write_text(json.dumps(manifest))
+        trail = AuditTrail(db, retention_days=1)
+        probes = self._probe_at_load(trail, monkeypatch)
+        removed = trail._cleanup()
+        monkeypatch.undo()
+        assert removed == 2
+        assert probes and set(probes) == {"held"}, probes
+
+
+@pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+class TestManifestLockFile:
+    """L2 on spore-1030 (reproduced): what is planted at the lock path."""
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs os.mkfifo")
+    def test_a_fifo_at_the_lock_path_is_refused_not_degraded(self, tmp_path):
+        """⛔ MUTATION-CHECKED: drop the regular-file check and this fails (flock
+        on the FIFO reported ENOTSUP and the lock silently degraded)."""
+        os.mkfifo(tmp_path / "m.audit-manifest.lock")
+        trail = AuditTrail(tmp_path / "m.db")
+        with pytest.raises(audit_module._AuditLockError):
+            with trail._manifest_lock():
+                pass
+        assert trail._lock_depth == 0 and trail._lock_fd is None
+
+    def test_a_symlink_at_the_lock_path_is_refused_not_followed(self, tmp_path):
+        """⛔ MUTATION-CHECKED: drop O_NOFOLLOW and this fails."""
+        target = tmp_path / "elsewhere"
+        (tmp_path / "m.audit-manifest.lock").symlink_to(target)
+        with pytest.raises(audit_module._AuditLockError):
+            with AuditTrail(tmp_path / "m.db")._manifest_lock():
+                pass
+        assert not target.exists()
+
+    def test_a_read_only_lock_file_still_locks(self, tmp_path):
+        """A lock file another user created, or a 0444 one, must still lock.
+        ⛔ MUTATION-CHECKED: open it O_RDWR and this fails."""
+        lock = tmp_path / "m.audit-manifest.lock"
+        lock.write_bytes(b"")
+        lock.chmod(0o444)
+        try:
+            with AuditTrail(tmp_path / "m.db")._manifest_lock() as held:
+                assert held is True
+                assert _probe_lock_from_another_process(lock) == "held"
+        finally:
+            lock.chmod(0o644)
+
+    def test_a_rotation_that_cannot_lock_refuses_before_sealing(self, tmp_path):
+        """Locking before the rename: a lock fault leaves the active file in
+        place and nothing sealed (L1: the save-only lock failed after sealing)."""
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        trail.log("pre", {})
+        lock = tmp_path / "m.audit-manifest.lock"
+        lock.unlink(missing_ok=True)
+        lock.mkdir()
+        trail._last_week = "1999-W01"
+        trail.log("not-rotated", {})
+        assert not list(tmp_path.glob("m.audit.1999-W01*"))
+        assert AuditTrail.verify(db).valid
+
+
+@pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+class TestManifestLockL3:
+    """L3 round 1 on spore-1030 (complement, codex, glm slot served by gpt-oss)."""
+
+    _two_sealed_weeks = staticmethod(TestHybridManifestQuarantine._two_sealed_weeks)
+
+    def test_enolck_is_retried_before_degrading(self, tmp_path, monkeypatch):
+        """codex HIGH: ENOLCK is also a transient lock-table exhaustion. A lock
+        that succeeds on a retry is held, not degraded.
+        ⛔ MUTATION-CHECKED: no retry and this fails."""
+        import errno as errno_module
+
+        real = audit_module.fcntl.flock
+        calls = {"n": 0}
+
+        def flaky(fd, op):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise OSError(errno_module.ENOLCK, "no lock records")
+            return real(fd, op)
+
+        monkeypatch.setattr(audit_module.fcntl, "flock", flaky)
+        with AuditTrail(tmp_path / "m.db")._manifest_lock() as held:
+            assert held is True
+
+    def test_a_manifest_save_leaves_another_writers_temp_file_alone(self, tmp_path):
+        """L2 MED [run: two writers with no lock, 5-43 of 120 saves failed per
+        run and one run of eight read 139 torn manifests]: every save used one
+        fixed ``.json.tmp`` and unlinked it on failure. A save must write and
+        clean up only its own temp file. ⛔ MUTATION-CHECKED: go back to the
+        fixed name and this fails."""
+        trail = AuditTrail(tmp_path / "m.db")
+        theirs = tmp_path / "m.audit.manifest.json.tmp"
+        theirs.write_text("another writer's in-flight save")
+        trail._save_manifest(trail._fresh_manifest())
+        assert theirs.read_text() == "another writer's in-flight save"
+        leftovers = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+        assert leftovers == [theirs.name]
+
+    def test_a_raising_log_handler_cannot_replace_an_adoption_skip(self, tmp_path):
+        """L3 codex MED [run 10:2x: a directory at the lock path plus a log handler
+        whose emit() raises made log() raise RuntimeError instead of skipping
+        adoption]: diagnostics never change control flow."""
+        import logging
+
+        class Boom(logging.Handler):
+            def emit(self, record):
+                raise RuntimeError("handler exploded")
+
+        log = logging.getLogger("anneal-memory")
+        boom = Boom()
+        log.addHandler(boom)
+        try:
+            (tmp_path / "m.audit-manifest.lock").mkdir()
+            trail = AuditTrail(tmp_path / "m.db")
+            trail.log("x", {"a": 1})
+            assert (tmp_path / "m.audit.jsonl").stat().st_size > 0
+            # L3 on 81cc968 (run): a refused ROTATION with the same handler raised
+            # on every later log(), because the refusal flag was set after the
+            # warning. Every diagnostic now goes through a logger that cannot raise.
+            trail._last_week = "1999-W01"
+            before = (tmp_path / "m.audit.jsonl").stat().st_size
+            trail.log("y", {"b": 2})
+            trail.log("z", {"c": 3})
+            assert (tmp_path / "m.audit.jsonl").stat().st_size > before
+            assert trail._rotation_refusal_logged
+        finally:
+            log.removeHandler(boom)
+
+    def test_a_raising_logger_filter_cannot_replace_an_adoption_skip(self, tmp_path):
+        """L3 10-03 on a83b6a9 (codex MED + complement, run): a filter on the
+        audit logger runs in Logger.handle, before any handler, so guarding the
+        handler calls alone let it raise out of log(). The whole emission is now
+        one guarded call."""
+        import logging
+
+        class BoomFilter(logging.Filter):
+            def filter(self, record):
+                raise RuntimeError("filter exploded")
+
+        log = logging.getLogger("anneal-memory.audit")
+        boom = BoomFilter()
+        log.addFilter(boom)
+        try:
+            (tmp_path / "m.audit-manifest.lock").mkdir()
+            trail = AuditTrail(tmp_path / "m.db")
+            trail.log("x", {"a": 1})
+            assert (tmp_path / "m.audit.jsonl").stat().st_size > 0
+        finally:
+            log.removeFilter(boom)
+
+    def test_an_application_logger_class_survives_import(self):
+        """L3 10-03 on a83b6a9 (codex HIGH, run): re-classing the registered
+        logger made `import anneal_memory` raise TypeError under an application's
+        slotted logger class, and silently dropped the methods of an unslotted
+        one. The registered logger is now left exactly as logging made it."""
+        import subprocess
+        import sys as _sys
+
+        code = (
+            "import logging\n"
+            "class App(logging.Logger):\n"
+            "    __slots__ = ('extra_field',)\n"
+            "    def structured(self): return 'app'\n"
+            "logging.setLoggerClass(App)\n"
+            "import anneal_memory.audit\n"
+            "lg = logging.getLogger('anneal-memory.audit')\n"
+            "print(type(lg).__name__, lg.structured())\n"
+        )
+        result = subprocess.run(
+            [_sys.executable, "-c", code], capture_output=True, text=True,
+            stdin=subprocess.DEVNULL,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ["App", "app"]
+
+    def test_a_raising_handler_does_not_double_the_stderr_warning(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """L3 10-03 on a83b6a9 (all three seats, LOW): with stderr=True and a
+        raising handler, the fallback printed the warning and _emit_warning
+        printed it again."""
+        import errno as errno_module
+        import logging
+
+        class Boom(logging.Handler):
+            def emit(self, record):
+                raise RuntimeError("handler exploded")
+
+        def no_locks(fd, op):
+            raise OSError(errno_module.ENOLCK, "no locks")
+
+        monkeypatch.setattr(audit_module.fcntl, "flock", no_locks)
+        monkeypatch.setattr(audit_module, "_ENOLCK_RETRY_SECONDS", 0)
+        log = logging.getLogger("anneal-memory")
+        boom = Boom()
+        log.addHandler(boom)
+        try:
+            with AuditTrail(tmp_path / "d.db")._manifest_lock() as held:
+                assert held is False
+        finally:
+            log.removeHandler(boom)
+        assert capsys.readouterr().err.count("lock is NOT held") == 1
+
+    def test_a_degrade_warning_survives_a_stderr_write_that_fails_once(
+        self, tmp_path, monkeypatch
+    ):
+        """L3 r2 10-03 on 1f888cd (codex MED, reproduced with a one-shot-failing
+        stderr): a raising handler plus a failed fallback write made _log report
+        "already on stderr", so _emit_warning skipped its copy and the ENOLCK
+        degrade warned nowhere."""
+        import errno as errno_module
+        import io
+        import logging
+
+        class FlakyErr(io.StringIO):
+            failed = False
+
+            def write(self, text):
+                if not FlakyErr.failed:
+                    FlakyErr.failed = True
+                    raise BlockingIOError(errno_module.EAGAIN, "try again")
+                return super().write(text)
+
+        class Boom(logging.Handler):
+            def emit(self, record):
+                raise RuntimeError("handler exploded")
+
+        def no_locks(fd, op):
+            raise OSError(errno_module.ENOLCK, "no locks")
+
+        err = FlakyErr()
+        monkeypatch.setattr(audit_module.sys, "stderr", err)
+        monkeypatch.setattr(audit_module.fcntl, "flock", no_locks)
+        monkeypatch.setattr(audit_module, "_ENOLCK_RETRY_SECONDS", 0)
+        log = logging.getLogger("anneal-memory")
+        boom = Boom()
+        log.addHandler(boom)
+        try:
+            with AuditTrail(tmp_path / "f.db")._manifest_lock() as held:
+                assert held is False
+        finally:
+            log.removeHandler(boom)
+        assert FlakyErr.failed
+        assert err.getvalue().count("lock is NOT held") == 1
+
+    def test_a_long_stem_manifest_save_fits_the_name_limit(self, tmp_path):
+        """L3 codex HIGH [run: a 220-character stem gave a 240-byte manifest name
+        and a 261-byte temp name, and the save raised ENAMETOOLONG]: the temp
+        basename must not grow with the stem."""
+        trail = AuditTrail(tmp_path / ("s" * 220 + ".db"))
+        trail._save_manifest(trail._fresh_manifest())
+        assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+
+    def test_an_enolck_degrade_warns_on_stderr(self, tmp_path, monkeypatch, capsys):
+        """L2 MED "silent degrade", ruled 10-03: degrade with a stderr warning.
+        Reproduced first: an application logging to a file saw nothing on
+        stderr, and a second store in the process was silent (once per
+        process). ⛔ MUTATION-CHECKED: warn through the logger only and this
+        fails."""
+        import errno as errno_module
+
+        def no_locks(fd, op):
+            raise OSError(errno_module.ENOLCK, "no locks")
+
+        monkeypatch.setattr(audit_module.fcntl, "flock", no_locks)
+        monkeypatch.setattr(audit_module, "_ENOLCK_RETRY_SECONDS", 0)
+        for name in ("a", "b"):
+            with AuditTrail(tmp_path / f"{name}.db")._manifest_lock() as held:
+                assert held is False
+        err = capsys.readouterr().err
+        for name in ("a", "b"):
+            assert f"{tmp_path / name}.audit-manifest.lock" in err
+        assert err.count("lock is NOT held") == 2
+
+    def test_the_lock_opens_read_write_first(self, tmp_path, monkeypatch):
+        """complement + codex MED: on Linux NFS an exclusive flock needs a
+        descriptor open for writing. ⛔ MUTATION-CHECKED: open read-only first
+        and this fails."""
+        real = os.open
+        flags_seen: list[int] = []
+
+        def recording_open(path, flags, *a):
+            if str(path).endswith(".audit-manifest.lock"):
+                flags_seen.append(flags)
+            return real(path, flags, *a)
+
+        monkeypatch.setattr(audit_module.os, "open", recording_open)
+        with AuditTrail(tmp_path / "m.db")._manifest_lock():
+            pass
+        assert flags_seen and flags_seen[0] & os.O_ACCMODE == os.O_RDWR
+
+    def test_no_chain_start_from_the_manifest_after_a_skipped_adoption(self, tmp_path):
+        """codex MED (reasoned, then run here): an orphaned sealed week, an empty
+        active file and a lock that cannot be taken. Seeding from the manifest
+        forked the chain past the orphan for good [run with the refusal removed:
+        the locked-out write was accepted and verify() then reported W03
+        unmanifested for good]. ⛔ MUTATION-CHECKED: drop the refusal and this
+        fails."""
+        db = self._two_sealed_weeks(tmp_path)
+        t = AuditTrail(db)
+        t.log("w3", {})
+        mpath = tmp_path / "m.audit.manifest.json"
+        before_rotation = mpath.read_bytes()
+        t._last_week = "1999-W03"
+        t.log("rot3", {})
+        # A crash between rotation 3's rename and its save: the old manifest,
+        # the sealed W03 as an orphan, and an empty active file.
+        mpath.write_bytes(before_rotation)
+        (tmp_path / "m.audit.jsonl").write_bytes(b"")
+        lock = tmp_path / "m.audit-manifest.lock"
+        lock.unlink(missing_ok=True)
+        lock.mkdir()
+
+        with pytest.raises(audit_module._ManifestUnavailable):
+            AuditTrail(db).log("while-locked-out", {})
+        assert (tmp_path / "m.audit.jsonl").read_bytes() == b""
+
+        lock.rmdir()
+        AuditTrail(db).log("after", {})
+        assert AuditTrail.verify(db).valid
+
+    @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root lists a mode-300 directory")
+    def test_no_chain_start_from_the_manifest_after_an_unlisted_adoption(self, tmp_path):
+        """codex MED, L3 r2 [run before the fix]: the same crash shape as the test
+        above, with the directory unlistable instead of the lock unavailable.
+        Adoption returned before its scan yet reported success, the write was
+        accepted from the manifest anchor, and verify() then reported W03
+        unmanifested for good. ⛔ MUTATION-CHECKED: return True from
+        ``_adopt_locked``'s unlistable branch and this fails."""
+        db = self._two_sealed_weeks(tmp_path)
+        t = AuditTrail(db)
+        t.log("w3", {})
+        mpath = tmp_path / "m.audit.manifest.json"
+        before_rotation = mpath.read_bytes()
+        t._last_week = "1999-W03"
+        t.log("rot3", {})
+        mpath.write_bytes(before_rotation)
+        (tmp_path / "m.audit.jsonl").write_bytes(b"")
+
+        tmp_path.chmod(0o300)
+        try:
+            with pytest.raises(audit_module._ManifestUnavailable):
+                AuditTrail(db).log("while-unlistable", {})
+        finally:
+            tmp_path.chmod(0o700)
+        assert (tmp_path / "m.audit.jsonl").read_bytes() == b""
+
+        AuditTrail(db).log("after", {})
+        assert AuditTrail.verify(db).valid

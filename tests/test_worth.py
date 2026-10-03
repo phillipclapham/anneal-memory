@@ -14,6 +14,7 @@ import pytest
 from anneal_memory import CrystalStore, FLOW_SCHEMA, Store, prepare_wrap
 from anneal_memory.crystal import CrystalError
 from anneal_memory.worth import (
+    ExposedRef,
     ExposureLabel,
     OutcomeLog,
     compute_worth,
@@ -174,3 +175,41 @@ def test_rewarm_candidates_skip_patterns_already_in_the_working_set(tmp_path):
     assert "hot_out_of_set" in result["rewarm_candidates"]
     assert "hot_in_set" not in result["rewarm_candidates"]
     assert "2fast/név" not in result["rewarm_candidates"]
+
+
+def test_unlabelled_exposures_count_in_their_own_column(tmp_path):
+    """1002+13 flow-seat: flow labels only verbatim cites, so most real outcomes
+    carried no label and were invisible to Worth. Phill 2026-10-02: count
+    exposed + outcome + no label in a separate column, never in success/failure."""
+    crystal = CrystalStore(tmp_path / "mem.crystal.json")
+    crystal.crystallize(name="p", level=3, explanation="x", evidence=["e1"])
+    crystal.crystallize(name="q", level=2, explanation="y", evidence=["e2"])
+    log = OutcomeLog(tmp_path / "mem.outcomes.jsonl")
+    seen = [ExposedRef("crystal", "p"), ExposedRef("crystal", "q"), ExposedRef("episode", "e7")]
+    log.record("a", [], outcome="success", exposed=seen)
+    log.record("b", [ExposureLabel("crystal", "p", "followed")], outcome="failure", exposed=seen)
+    log.record("c", [ExposureLabel("crystal", "q", "ignored")])  # outcome unknown, no exposed
+    log.record("c", [], outcome="failure", exposed=[ExposedRef("crystal", "p")])
+    report = compute_worth(log, crystal)
+    rows = {r.ref: r for r in report.crystals}
+    p, q = rows["p"], rows["q"]
+    # a: p unlabelled+success. b: p labelled, so not unlabelled. c: p unlabelled+failure.
+    assert (p.unlabelled_success, p.unlabelled_failure, p.unlabelled_unknown) == (1, 1, 0)
+    assert (p.success, p.failure) == (0, 1)  # only the labelled exposure b
+    # a: q unlabelled+success. b: q unlabelled+failure. c: q labelled.
+    assert (q.unlabelled_success, q.unlabelled_failure) == (1, 1)
+    assert (q.success, q.failure) == (0, 1)
+    eps = {r.ref: r for r in report.episodes}
+    assert (eps["e7"].unlabelled_success, eps["e7"].unlabelled_failure) == (1, 1)
+    assert (eps["e7"].success, eps["e7"].failure) == (0, 0)
+    # p's evidence e1 is credited by the labelled exposure b only; the unlabelled
+    # exposures a and c credit nothing to it
+    assert (eps["e1"].credited_success, eps["e1"].credited_failure) == (0, 1)
+    assert eps["e1"].unlabelled_success == eps["e1"].unlabelled_failure == 0
+    latest, _ = log.latest()
+    assert {(e["kind"], e["ref"]) for e in latest["c"]["exposed"]} == {("crystal", "p")}
+    with pytest.raises(ValueError):
+        log.record("d", [], exposed=seen)  # exposed alone never makes a record
+    with pytest.raises(ValueError):
+        ExposedRef("note", "p")
+

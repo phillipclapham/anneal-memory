@@ -385,7 +385,9 @@ StoreOperation = Literal[
     "seed_pattern_max_level",
     "prune",
     "schema_init",
+    "batch_begin",
     "batch_commit",
+    "supersession_repair",
     "close",
 ]
 
@@ -2452,31 +2454,40 @@ class Store:
         without :meth:`_detach_supersessions` (an older anneal-memory's delete or
         prune), so the per-recall direct join stays exact (codex L3: an older
         binary deleting B in A -> B -> C left A visible beside C, while the
-        annotation said A -> C). Best effort: on a busy or failing database it
-        warns and leaves the repair to the next open; read-only opens never
-        repair and stay fail-open (they show A)."""
+        annotation said A -> C). Read-only opens never repair and stay fail-open
+        (they show A).
+
+        An unlocked hint keeps the common open free of the write lock; the ids
+        acted on are derived AGAIN under ``BEGIN IMMEDIATE``, so a writer that
+        restores an episode between the two reads keeps its links (codex L3:
+        they were read before the lock). Lock contention leaves the repair to
+        the next open; every other database error (corruption, I/O, a full
+        disk) raises out of the open (codex L3; Phill ruled 2026-10-02 that it
+        raises)."""
+        missing_sql = """SELECT id FROM (SELECT old_id AS id FROM supersessions
+                                         UNION SELECT new_id FROM supersessions)
+                         WHERE id NOT IN (SELECT id FROM episodes)"""
         try:
-            if not self._has_supersessions_table() or self._conn.execute(
-                "SELECT 1 FROM supersessions LIMIT 1"
-            ).fetchone() is None:
-                return
-            missing = [row[0] for row in self._conn.execute(
-                """SELECT id FROM (SELECT old_id AS id FROM supersessions
-                                   UNION SELECT new_id FROM supersessions)
-                   WHERE id NOT IN (SELECT id FROM episodes)"""
-            )]
-            if not missing:
-                return
-            self._conn.execute("BEGIN IMMEDIATE")
-            removed = self._detach_supersessions(missing)
-            self._conn.commit()
+            with self._db_boundary("supersession_repair"):
+                if not self._has_supersessions_table() or self._conn.execute(
+                    missing_sql + " LIMIT 1"
+                ).fetchone() is None:
+                    return
+                self._conn.execute("BEGIN IMMEDIATE")
+                missing = [row[0] for row in self._conn.execute(missing_sql)]
+                removed = self._detach_supersessions(missing)
+                self._conn.commit()
+        except StoreDatabaseError as exc:
+            if not _is_write_lock_contention(exc):
+                raise
+            _LOG.warning("anneal-memory: supersession link repair deferred to the next "
+                         "open (the database is locked): %s", exc)
+            return
+        if missing:
             _LOG.warning(
                 "anneal-memory: repaired %d supersession link(s) naming %d episode(s) "
                 "deleted by an older version", removed, len(missing),
             )
-        except sqlite3.Error as exc:
-            self._rollback_quietly()
-            _LOG.warning("anneal-memory: supersession link repair skipped: %s", exc)
 
     def _detach_supersessions(self, ids: list[str]) -> int:
         """Inside the caller's transaction, before ``ids`` are deleted: link each
@@ -6592,18 +6603,15 @@ class Store:
         outer ``except`` clause into cleaning up tmp files that
         represent committed state — a data-loss path. L2 review M2.
 
-        **Python sqlite3 stdlib implicit-BEGIN quirk:** the store uses
-        the default ``isolation_level=""`` (legacy transaction
-        control). In theory this means ``BEGIN`` only fires before
-        DML, not before SELECT, so a read-only batch could leave the
-        connection with no open transaction at exit. In practice the
-        canonical 10.5c.5 pipeline always issues DML before any point
-        where rollback matters, and the
-        ``test_batched_dml_invisible_to_other_connection_until_commit``
-        regression gate empirically verifies that batched DML is in
-        a single transaction under the Python version this ships on.
-        If you ever add a read-only batch consumer, revisit this
-        assumption explicitly.
+        **The batch opens with ``BEGIN IMMEDIATE``.** The store uses the
+        default ``isolation_level=""`` (legacy transaction control), where
+        the implicit ``BEGIN`` fires before DML only, so until 0.9.23 a read
+        inside a batch before its first DML ran unlocked. The explicit
+        ``BEGIN IMMEDIATE`` at entry makes the whole batch one write
+        transaction from its first statement, reads included. The cost: a
+        peer writer waits for the whole batch, not only from its first DML.
+        ``test_the_in_batch_recheck_holds_the_write_lock`` fails if the lock
+        moves back to the first DML.
 
         **Not reentrant. Not thread-safe. Not task-safe.** The
         ``_defer_commit`` + ``_deferred_audits`` state lives on
@@ -6663,12 +6671,12 @@ class Store:
           the uncommitted batch).
         ⚠ ``wrap_started`` and ``wrap_cancelled`` now FAIL LOUD there rather
         than corrupting quietly: they open with ``BEGIN IMMEDIATE``, so inside
-        a batch that has already issued DML they raise
-        :class:`StoreDatabaseError` (``cannot start a transaction within a
-        transaction``) and the batch rolls back. Previously they silently
-        committed the outer batch mid-flight. Sub-case, unreachable today:
-        inside a batch with NO prior DML, ``wrap_cancelled()`` still succeeds
-        and commits, ending the batch's transaction before it opened.
+        a batch they raise :class:`StoreDatabaseError` (``cannot start a
+        transaction within a transaction``) and the batch rolls back.
+        Previously they silently committed the outer batch mid-flight, and
+        with no prior DML ``wrap_cancelled()`` succeeded and committed; the
+        ``BEGIN IMMEDIATE`` at batch entry closed that sub-case
+        (``test_wrap_cancelled_inside_a_batch_fails_loud``).
         Extend this list by adding the batch-aware guard to any new
         write method that becomes part of a batched pipeline. L3
         contrarian F1 flagged this as a forward-looking hazard;
@@ -6693,6 +6701,16 @@ class Store:
         commit_succeeded = False
         try:
             try:
+                # The write lock is taken HERE, before anything in the batch
+                # reads, so every read inside the batch sees the state it then
+                # writes against. Without it the lock arrived with the first
+                # DML, and a read before that (the save's superseded-set
+                # recheck) was an unlocked read that only happened to be locked
+                # because the association decay writes first (complement L3,
+                # reproduced 1002+20 with a no-op decay). Inside this try, so a
+                # BUSY here still resets ``_defer_commit`` in the finally.
+                with self._db_boundary("batch_begin"):
+                    self._conn.execute("BEGIN IMMEDIATE")
                 yield
             except BaseException:
                 # Rollback the accumulated DML. SQLite's rollback is

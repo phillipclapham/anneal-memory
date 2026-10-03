@@ -113,6 +113,21 @@ class ExposureLabel:
             )
 
 
+@dataclass(frozen=True)
+class ExposedRef:
+    """One item an exposure surfaced, with no judgement about whether it was
+    used. The harness's receipt is the proof of exposure; an item listed here
+    and also labelled in the same exposure counts as labelled."""
+
+    kind: str
+    ref: str
+
+    def __post_init__(self) -> None:
+        if self.kind not in ITEM_KINDS:
+            raise ValueError(f"kind must be one of {ITEM_KINDS} (got {self.kind!r}).")
+        _check_id(self.ref, "ref")
+
+
 class OutcomeLog:
     """Append-only JSONL of outcome records, keyed by exposure id.
 
@@ -131,6 +146,7 @@ class OutcomeLog:
         items: Sequence[ExposureLabel],
         *,
         outcome: str | None = None,
+        exposed: Sequence[ExposedRef] = (),
         ts: datetime | None = None,
     ) -> dict[str, Any]:
         """Append the outcome for one exposure and return the stored record.
@@ -138,7 +154,11 @@ class OutcomeLog:
         ``items`` may be empty only when ``outcome`` is given (an outcome written
         after the labels); a repeated (kind, ref) keeps its last label.
         ``outcome`` is ``success``, ``failure`` or ``None`` (not known yet).
-        Records for one ``exposure_id`` merge when read (see :meth:`latest`).
+        ``exposed`` lists what the exposure surfaced, labelled or not (from the
+        harness's receipt); it is stored only when non-empty and never makes a
+        record valid on its own, so a reader older than this field still accepts
+        every record. Records for one ``exposure_id`` merge when read (see
+        :meth:`latest`).
         """
         _check_id(exposure_id, "exposure_id")
         if outcome is not None and outcome not in OUTCOME_VALUES:
@@ -152,6 +172,11 @@ class OutcomeLog:
             merged[(item.kind, item.ref)] = item
         if not merged and outcome is None:
             raise ValueError("a record needs at least one labelled item or an outcome.")
+        seen: dict[tuple[str, str], ExposedRef] = {}
+        for ex in exposed:
+            if not isinstance(ex, ExposedRef):
+                raise ValueError(f"exposed must be ExposedRef values (got {ex!r}).")
+            seen[(ex.kind, ex.ref)] = ex
         when = (ts or datetime.now(timezone.utc)).astimezone(timezone.utc)
         rec: dict[str, Any] = {
             "v": OUTCOME_LOG_VERSION,
@@ -163,6 +188,8 @@ class OutcomeLog:
                 for i in merged.values()
             ],
         }
+        if seen:
+            rec["exposed"] = [{"kind": e.kind, "ref": e.ref} for e in seen.values()]
         line = (json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
@@ -200,22 +227,27 @@ class OutcomeLog:
     def latest(self) -> tuple[dict[str, dict[str, Any]], int]:
         """The merged state per exposure id, and the count of skipped lines.
 
-        Records merge in file order: each item's last label wins, and the last
-        non-null outcome wins. The merged record carries ``items`` and ``outcome``.
+        Records merge in file order: each item's last label wins, the last
+        non-null outcome wins, and ``exposed`` is the union. The merged record
+        carries ``items``, ``exposed`` and ``outcome``.
         """
         records, bad = self.read()
         out: dict[str, dict[str, Any]] = {}
         for rec in records:
             cur = out.setdefault(
                 rec["exposure_id"],
-                {"exposure_id": rec["exposure_id"], "outcome": None, "_items": {}},
+                {"exposure_id": rec["exposure_id"], "outcome": None, "_items": {},
+                 "_exposed": {}},
             )
             for i in rec["items"]:
                 cur["_items"][(i["kind"], i["ref"])] = i
+            for e in rec.get("exposed") or ():
+                cur["_exposed"][(e["kind"], e["ref"])] = e
             if rec.get("outcome") is not None:
                 cur["outcome"] = rec["outcome"]
         for cur in out.values():
             cur["items"] = list(cur.pop("_items").values())
+            cur["exposed"] = list(cur.pop("_exposed").values())
         return out, bad
 
 
@@ -238,6 +270,13 @@ def _parse_record(line: str) -> dict[str, Any] | None:
             if not isinstance(i, dict):
                 return None
             ExposureLabel(i.get("kind"), i.get("ref"), i.get("followed"))  # type: ignore[arg-type]
+        exposed = rec.get("exposed", [])
+        if not isinstance(exposed, list):
+            return None
+        for e in exposed:
+            if not isinstance(e, dict):
+                return None
+            ExposedRef(e.get("kind"), e.get("ref"))  # type: ignore[arg-type]
     except ValueError:
         return None
     return rec
@@ -478,6 +517,13 @@ class WorthRow:
     evidence (the citation edge); those exposures carry no label of their own and
     so are not in ``table``. Evidence is read from the crystal store when the
     report runs, not as it was at exposure time.
+
+    ``unlabelled_success`` / ``unlabelled_failure`` / ``unlabelled_unknown`` count
+    exposures that listed this item in ``exposed`` without labelling it, by
+    outcome. They are a separate column on purpose and are never in ``success`` /
+    ``failure``: a label means something judged the item, an unlabelled exposure
+    only that it was surfaced. An unlabelled crystal credits nothing to the
+    episodes it cites.
     """
 
     kind: str
@@ -489,6 +535,9 @@ class WorthRow:
     not_applicable: int = 0
     credited_success: int = 0
     credited_failure: int = 0
+    unlabelled_success: int = 0
+    unlabelled_failure: int = 0
+    unlabelled_unknown: int = 0
     table: dict[str, dict[str, int]] = field(
         default_factory=lambda: {
             label: {"success": 0, "failure": 0, "unknown": 0} for label in FOLLOWED_VALUES
@@ -503,6 +552,10 @@ class WorthRow:
         d = dict(self.__dict__)
         d["table"] = {k: dict(v) for k, v in self.table.items()}
         return d
+
+    def _count_unlabelled(self, outcome: str | None) -> None:
+        name = f"unlabelled_{outcome or 'unknown'}"
+        setattr(self, name, getattr(self, name) + 1)
 
     def _count(self, label: str | None, outcome: str | None, *, credited: bool = False) -> None:
         if label is not None:
@@ -519,7 +572,8 @@ class WorthRow:
 @dataclass
 class WorthReport:
     """The full report. ``crystals`` covers every live crystal (zero rows
-    included) plus any labelled name that is no longer live (``live`` False).
+    included) plus any labelled or exposed name that is no longer live
+    (``live`` False).
     ``exposures`` counts distinct exposure ids after merging."""
 
     crystals: list[WorthRow]
@@ -603,6 +657,12 @@ def compute_worth(log: OutcomeLog, crystal_store: CrystalStore | None = None) ->
             erow(eid)._count(label, outcome)
         for eid in cited - direct.keys():
             erow(eid)._count(None, outcome, credited=True)
+        labelled = {(i["kind"], i["ref"]) for i in rec["items"]}
+        for e in rec["exposed"]:
+            if (e["kind"], e["ref"]) in labelled:
+                continue
+            row = crow(e["ref"]) if e["kind"] == "crystal" else erow(e["ref"])
+            row._count_unlabelled(outcome)
 
     return WorthReport(
         crystals=sorted(crystals.values(), key=lambda r: r.ref),

@@ -11,11 +11,18 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   validated like a citation: the old episode exists, is not newer, the link closes no
   cycle of any length, and the two texts share at least 25% of the shorter text's
   meaningful words (`SUPERSEDE_MIN_OVERLAP_RATIO`). The floor is derived, not chosen:
-  `scripts/supersede_floor.py` on a copy of a 12,489-episode store, 2026-10-02 —
-  probe update pairs 48/48 pass (minimum ratio 0.25, so no margin), random episode
-  pairs 8/500, same-topic pairs 113/500. A two-shared-words rule passed 422/500 random
-  pairs and refused 13/48 probe updates once their shared boilerplate was removed. No
-  lexical floor separates "replaces" from "same subject"; the link is the writer's call.
+  `scripts/supersede_floor.py` on copies of a ~12,500-episode store, 2026-10-02 —
+  probe update pairs 48/48 pass at a minimum ratio of exactly 0.25, so the floor is
+  tight, and `test_the_floor_is_tight_against_the_probe_minimum` fails if a tokenizer
+  change moves that boundary. The sampled pass counts are a band, not a constant:
+  random pairs 6-18/500 and same-topic pairs 113-170/500 across seeds and store
+  growth (until this release the script's same-topic sample also followed the
+  process's hash seed; it is now deterministic per store and seed, with the seed as
+  an optional second argument). Of 40 passing same-topic pairs read by hand, 5 were
+  real updates, 6 near-duplicates and 29 different facts on the same subject. A
+  two-shared-words rule passed 422/500 random pairs and refused 13/48 probe updates
+  once their shared boilerplate was removed. No lexical floor separates "replaces"
+  from "same subject"; the link is the writer's call, and `unsupersede` undoes it.
   `Store.unsupersede(old_id=..., new_id=...)` removes a wrong link (CLI `supersede` /
   `unsupersede --old ID --new ID`). On refusal (`SupersessionError`, a
   `ValueError`) nothing is written, not even the episode. The audit chain gets a
@@ -45,12 +52,39 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   `stats` and `prune --dry-run` count everything; JSON export carries every stored link
   under `supersessions`, but import restores episodes only, so re-imported superseded
   episodes come back unhidden. CLI `record --supersedes ID`; MCP `record.supersedes`.
+- One write lock for the save's database phase: `Store._batch()` opens with
+  `BEGIN IMMEDIATE`, so every read inside it, including the check that no cited
+  episode was superseded by another writer, runs under the lock. Before, the lock came
+  with the first write, and the check was locked only because the association decay
+  happens to write first (reproduced with a decay that writes nothing). A peer writer
+  now waits for the whole phase. A BUSY at that point leaves the store usable.
+  `wrap_cancelled` inside a batch now always fails loud.
+- The open-time repair of links an older version left dangling finds the ids it
+  removes again under its own write lock, so a writer that restores an episode in
+  between keeps its links. It steps aside on lock contention (repair at the next open)
+  and raises on any other database error: a read-write open that needs the repair now
+  fails on a corrupt or full disk instead of opening with a warning. Read-only opens
+  never repair and are unaffected.
 - Storage is a new `supersessions` table, created like `pattern_history`; no schema
   version change. A read-only open of a store that predates the table skips the filter
   instead of failing.
 - `scripts/stale_probe.py --supersede explicit|wrap` measures recall with the link
   recorded. On this build, both modes serve the stale fact 0 of 16 times on every update
   shape and both recall surfaces; without a link, recall serves it as before.
+
+### Added — Worth counts exposures nobody labelled, in their own column
+
+- `OutcomeLog.record(..., exposed=[ExposedRef(kind, ref), ...])` (CLI `outcome
+  --exposed KIND:REF`, repeatable) lists what an exposure surfaced, labelled or not,
+  from the harness's receipt. `WorthRow` gains `unlabelled_success`,
+  `unlabelled_failure` and `unlabelled_unknown`: an exposed item with no label in that
+  exposure counts there, never in `success` / `failure`, and an unlabelled crystal
+  credits nothing to the episodes it cites. `exposed` never makes a record valid on its
+  own (it rides with labels or an outcome), and it is written only when non-empty, so
+  the log stays version 1: anneal-memory 0.9.22 reads a record carrying it with no
+  skipped line and the same counts [run 2026-10-02]. The `worth` CLI shows them as
+  `unl+s` / `unl+f`. Prompted by flow, which labels an item only when it is cited
+  verbatim, so most of its real outcomes carried no label and were invisible.
 
 ⚠ Behaviour change: `recall` now hides superseded episodes unless asked. Known and
 not fixed: a marker left in the continuity text for a rejected or undone link is

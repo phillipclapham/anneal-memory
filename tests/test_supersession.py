@@ -341,3 +341,222 @@ def test_a_link_racing_the_save_refuses_it_and_the_wrap_survives(tmp_path):
         assert res["graduations_validated"] == 1
     finally:
         st.close()
+
+
+# --- One transaction for the save (1002+20 design, project_memory/save_txn_design_1002.md) ---
+
+
+def _text(ep: str, why: str) -> str:
+    return (f"## State\nx\n\n## Patterns\n- quillmark_storage | 2x (2026-02-10) "
+            f'[evidence: {ep} "{why}"]\n\n## Decisions\n\n## Context\nx\n')
+
+
+def test_the_in_batch_recheck_holds_the_write_lock(tmp_path, monkeypatch):
+    """complement: _batch issued no BEGIN, so the recheck was locked only if
+    some DML ran first. Measured 1002+20: today the association decay always
+    writes first, so the lock held by accident. With a decay that writes
+    nothing (a no-op stand-in for "skip decay when there is nothing to
+    decay"), a link committed right after the recheck let the pattern
+    graduate on the replaced fact."""
+    monkeypatch.setattr(Store, "decay_associations", lambda self, *a, **k: 0)
+    db = str(tmp_path / "m.db")
+    st = Store(db)
+    other = Store(db)
+    try:
+        a = st.record(OLD, "observation", timestamp="2026-02-10T09:00:00Z")
+        b = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00Z")
+        assert prepare_wrap(st)["status"] == "ready"
+        other._conn.execute("PRAGMA busy_timeout=200")
+        real = st.superseded_by_map
+        calls: list[str] = []
+
+        def racing(ids):
+            out = real(ids)
+            calls.append("x")
+            if len(calls) == 2:  # the in-batch recheck
+                try:
+                    other.supersede(old_id=a.id, new_id=b.id)
+                    calls.append("peer-linked")
+                except Exception:
+                    calls.append("peer-locked-out")
+            return out
+
+        st.superseded_by_map = racing  # type: ignore[method-assign]
+        res = validated_save_continuity(
+            st, _text(a.id, "the database engine for Quillmark is postgres"),
+            today="2026-02-10")
+        assert "peer-locked-out" in calls, calls
+        assert res["graduations_validated"] == 1
+    finally:
+        other.close()
+        st.close()
+
+
+def _dangling_store(db: str):
+    """A -> B -> D, then an older binary deletes B with a plain DELETE."""
+    with Store(db) as st:
+        a = st.record(OLD, "observation", timestamp="2026-01-01T00:00:00Z")
+        b = st.record(NEW, "observation", timestamp="2026-02-01T00:00:00Z", supersedes=[a.id])
+        d = st.record("Quillmark moved its storage to duckdb." + CONTEXT, "observation",
+                      timestamp="2026-03-01T00:00:00Z", supersedes=[b.id])
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    row = dict(con.execute("SELECT * FROM episodes WHERE id = ?", (b.id,)).fetchone())
+    con.execute("DELETE FROM episodes WHERE id = ?", (b.id,))
+    con.commit()
+    con.close()
+    return a, b, d, row
+
+
+def test_the_repair_derives_what_it_removes_under_its_lock(tmp_path, monkeypatch):
+    """codex: the missing ids were read before BEGIN IMMEDIATE. A writer that
+    restores B (same content and timestamp, so the same id) in between had
+    B's links removed although B exists again."""
+    import anneal_memory.store as store_mod
+
+    db = str(tmp_path / "m.db")
+    a, b, d, row = _dangling_store(db)
+    real_connect = sqlite3.connect
+    state = {"hint": False, "done": False}
+
+    def peer_restores_b(stmt: str) -> None:
+        if "NOT IN (SELECT id FROM episodes)" in stmt:
+            state["hint"] = True
+        elif state["hint"] and not state["done"] and stmt.strip().upper() == "BEGIN IMMEDIATE":
+            state["done"] = True
+            peer = real_connect(db)
+            cols = ",".join(row)
+            peer.execute(f"INSERT INTO episodes ({cols}) VALUES ({','.join('?' * len(row))})",
+                         list(row.values()))
+            peer.commit()
+            peer.close()
+
+    def connect(*args, **kwargs):
+        con = real_connect(*args, **kwargs)
+        con.set_trace_callback(peer_restores_b)
+        return con
+
+    monkeypatch.setattr(store_mod.sqlite3, "connect", connect)
+    with Store(db) as st:
+        st._conn.set_trace_callback(None)
+        assert state["done"]
+        links = {(l["old_id"], l["new_id"]) for l in st.supersession_links()}
+    assert (a.id, b.id) in links, links
+    assert (b.id, d.id) in links, links
+
+
+def test_the_repair_raises_on_anything_but_lock_contention(tmp_path, monkeypatch):
+    """codex: the repair swallowed every sqlite3.Error, so a corrupt or full
+    database opened read-write as if healthy (Phill: it raises)."""
+    from anneal_memory.store import StoreDatabaseError
+
+    db = str(tmp_path / "m.db")
+    _dangling_store(db)
+
+    def broken(self, ids):
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(Store, "_detach_supersessions", broken)
+    with pytest.raises(StoreDatabaseError):
+        Store(db)
+
+
+def test_the_repair_steps_aside_on_lock_contention(tmp_path, monkeypatch):
+    db = str(tmp_path / "m.db")
+    a, _b, d, _row = _dangling_store(db)
+    holder = sqlite3.connect(db, timeout=0.05)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        blocked = sqlite3.connect(db, timeout=0.05)
+        with pytest.raises(sqlite3.OperationalError) as busy:
+            blocked.execute("BEGIN IMMEDIATE")
+        blocked.close()
+    finally:
+        holder.rollback()
+        holder.close()
+
+    def contended(self, ids):
+        raise busy.value
+
+    monkeypatch.setattr(Store, "_detach_supersessions", contended)
+    with Store(db) as st:  # opens; the repair is left to the next open
+        assert st.supersession_links()
+    monkeypatch.undo()
+    with Store(db) as st:
+        assert [(l["old_id"], l["new_id"]) for l in st.supersession_links()] == [(a.id, d.id)]
+
+
+def test_wrap_cancelled_inside_a_batch_fails_loud(tmp_path):
+    """The batch docstring's 'unreachable today' sub-case: with no DML before
+    it, wrap_cancelled inside a batch committed and ended the batch."""
+    from anneal_memory.store import StoreDatabaseError
+
+    with Store(str(tmp_path / "m.db")) as st:
+        st.record(OLD, "observation")
+        assert prepare_wrap(st)["status"] == "ready"
+        token = st.load_wrap_snapshot()["token"]
+        with pytest.raises(StoreDatabaseError):
+            with st._batch():
+                st.wrap_cancelled(expect_token=token)
+        assert st.status().wrap_in_progress
+
+
+def test_a_busy_batch_entry_leaves_the_store_usable(tmp_path):
+    """Guard for the lock at batch entry: a BUSY there must not leave
+    _defer_commit set (the next save would read as a nested batch)."""
+    from anneal_memory.store import StoreDatabaseError
+
+    db = str(tmp_path / "m.db")
+    st = Store(db)
+    try:
+        a = st.record(OLD, "observation", timestamp="2026-02-10T09:00:00Z")
+        assert prepare_wrap(st)["status"] == "ready"
+        st._conn.execute("PRAGMA busy_timeout=50")
+        holder = sqlite3.connect(db, timeout=0.05)
+        holder.execute("BEGIN IMMEDIATE")
+        try:
+            with pytest.raises(StoreDatabaseError):
+                validated_save_continuity(
+                    st, _text(a.id, "the database engine for Quillmark is postgres"),
+                    today="2026-02-10")
+        finally:
+            holder.rollback()
+            holder.close()
+        assert st._defer_commit is False
+        res = validated_save_continuity(
+            st, _text(a.id, "the database engine for Quillmark is postgres"),
+            today="2026-02-10")
+        assert res["graduations_validated"] == 1
+    finally:
+        st.close()
+
+
+def test_the_floor_is_tight_against_the_probe_minimum():
+    """The floor is tight by measurement (Phill 2026-10-02: keep 0.25, enforced
+    by a test). The 48 probe update pairs all ground at the floor and a floor
+    0.05 higher refuses some, so a tokenizer or stop-word change that moves the
+    boundary fails here instead of silently. Re-derive the populations with
+    scripts/supersede_floor.py on a COPY of a store."""
+    from pathlib import Path
+
+    import anneal_memory.store as store_mod
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    import stale_probe as sp
+
+    pairs = []
+    for f in sp.FACTS:
+        s, attr, old, *_ = f
+        for ctx in (True, False):
+            o = sp._sentence(s, attr, old) if ctx else f"The {attr} for {s} is {old}."
+            for shape in ("restate", "paraphrase", "negate"):
+                u = sp._update_text(shape, f)
+                pairs.append((o, u if ctx else u.replace(sp.CONTEXT, "")))
+    assert len(pairs) == 96
+    assert all(store_mod._supersession_grounds(n, o) for o, n in pairs)
+    floor = store_mod.SUPERSEDE_MIN_OVERLAP_RATIO
+    try:
+        store_mod.SUPERSEDE_MIN_OVERLAP_RATIO = floor + 0.05
+        assert not all(store_mod._supersession_grounds(n, o) for o, n in pairs)
+    finally:
+        store_mod.SUPERSEDE_MIN_OVERLAP_RATIO = floor

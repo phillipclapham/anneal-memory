@@ -16,13 +16,14 @@ Run it against a COPY of a store, never a live one::
     PYTHONPATH=. python scripts/supersede_floor.py /path/to/copy/memory.db
 
 The shipped floor (``store.SUPERSEDE_MIN_OVERLAP_RATIO``) was chosen from this
-output on 2026-10-02; the numbers are in CHANGELOG [0.9.23].
+output on 2026-10-02; the measured band is in CHANGELOG [0.9.23]. The sampled
+counts move with the store (same seed, a few dozen more episodes, a different
+sample), so read them as a band, never a constant.
 """
 
 from __future__ import annotations
 
 import random
-import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -30,13 +31,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import stale_probe as sp  # noqa: E402
 
-from anneal_memory.graduation import _STOP_WORDS  # noqa: E402
+from anneal_memory.graduation import _meaningful_words as _words  # noqa: E402
 from anneal_memory.store import SUPERSEDE_MIN_OVERLAP_RATIO  # noqa: E402
-
-
-def _words(text: str) -> set[str]:
-    return {w for w in re.split(r"[^a-zA-Z0-9]+", text.lower())
-            if len(w) > 2 and w not in _STOP_WORDS}
 
 
 def _ratio(a: str, b: str) -> float:
@@ -45,6 +41,8 @@ def _ratio(a: str, b: str) -> float:
 
 
 def main(db: str, n: int = 500, seed: int = 7) -> None:
+    # Deterministic for a given store and seed (the word sets are walked in
+    # sorted order); a different seed or a grown store gives a different sample.
     eps = [r[0] for r in sqlite3.connect(f"file:{db}?mode=ro", uri=True)
            .execute("SELECT content FROM episodes")]
     rnd = random.Random(seed)
@@ -63,7 +61,7 @@ def main(db: str, n: int = 500, seed: int = 7) -> None:
     sets = [_words(e) for e in eps]
     df: dict[str, list[int]] = {}
     for k, s in enumerate(sets):
-        for w in s:
+        for w in sorted(s):  # a set's order follows the hash seed
             df.setdefault(w, []).append(k)
     hard = sorted({tuple(sorted(rnd.sample(ks, 2))) for ks in df.values() if 2 <= len(ks) <= 5})
     pops["same-topic"] = [_ratio(eps[i], eps[j]) for i, j in rnd.sample(hard, min(n, len(hard)))]
@@ -77,4 +75,4 @@ def main(db: str, n: int = 500, seed: int = 7) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    main(sys.argv[1], seed=int(sys.argv[2]) if len(sys.argv) > 2 else 7)

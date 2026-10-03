@@ -145,6 +145,7 @@ from .worth import (
     FOLLOWED_VALUES,
     ITEM_KINDS,
     OUTCOME_VALUES,
+    ExposedRef,
     ExposureLabel,
     OutcomeLog,
     compute_worth,
@@ -3120,13 +3121,21 @@ def _parse_label(raw: str) -> ExposureLabel:
     return ExposureLabel(kind, ref, followed)
 
 
+def _parse_exposed(raw: str) -> ExposedRef:
+    kind, sep, ref = raw.partition(":")
+    if not sep or "=" in ref:
+        raise ValueError(f"--exposed must look like KIND:REF (got {raw!r}).")
+    return ExposedRef(kind, ref)
+
+
 def cmd_outcome(args: argparse.Namespace) -> None:
     """Write back what happened after an exposure (append-only; records for one
     exposure id merge when read)."""
     try:
         items = [_parse_label(raw) for raw in (args.item or [])]
+        exposed = [_parse_exposed(raw) for raw in (args.exposed or [])]
         rec = OutcomeLog(outcome_log_path(Path(args.db).expanduser())).record(
-            args.exposure_id, items, outcome=args.outcome
+            args.exposure_id, items, outcome=args.outcome, exposed=exposed
         )
     except (ValueError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -3136,6 +3145,8 @@ def cmd_outcome(args: argparse.Namespace) -> None:
         return
     labels = ", ".join(f"{i['kind']}:{i['ref']}={i['followed']}" for i in rec["items"]) or "(outcome only)"
     print(f"Recorded outcome {rec['outcome'] or '(none)'} for {rec['exposure_id']}: {labels}")
+    if rec.get("exposed"):
+        print(f"Exposed: {', '.join(e['kind'] + ':' + e['ref'] for e in rec['exposed'])}")
 
 
 def cmd_crystal_fold_surfaced(args: argparse.Namespace) -> None:
@@ -3176,24 +3187,28 @@ def cmd_worth(args: argparse.Namespace) -> None:
     if args.json:
         _print_json(report.as_dict())
         return
-    print(f"Worth (report-only) from {report.exposures} labelled exposure(s)"
+    print(f"Worth (report-only) from {report.exposures} exposure(s)"
           + (f", {report.lines_skipped} unreadable line(s) skipped" if report.lines_skipped else ""))
     print("surf = recall-surfaced (receipt fold); the other columns come from the outcome")
     print("log and are not joined to it. succ/fail = retrieved with that outcome, any label.")
+    print("unl+s/unl+f = exposed with that outcome and never labelled (not in succ/fail).")
     print(f"{'crystal':<52} {'surf':>5} {'fol':>4} {'ign':>4} {'n/a':>4} "
-          f"{'succ':>5} {'fail':>5} {'fol+s':>6} {'fol+f':>6}")
+          f"{'succ':>5} {'fail':>5} {'fol+s':>6} {'fol+f':>6} {'unl+s':>6} {'unl+f':>6}")
     for r in report.crystals:
         name = r.ref if r.live else f"{r.ref} (not live)"
         surf = "-" if r.surfaced_count is None else str(r.surfaced_count)
         fol = r.table["followed"]
         print(f"{name[:52]:<52} {surf:>5} {r.followed:>4} {r.ignored:>4} "
               f"{r.not_applicable:>4} {r.success:>5} {r.failure:>5} "
-              f"{fol['success']:>6} {fol['failure']:>6}")
+              f"{fol['success']:>6} {fol['failure']:>6} "
+              f"{r.unlabelled_success:>6} {r.unlabelled_failure:>6}")
     if args.episodes:
-        print(f"\n{'episode':<20} {'succ':>5} {'fail':>5} {'only via citation':>18}")
+        print(f"\n{'episode':<20} {'succ':>5} {'fail':>5} {'only via citation':>18} "
+              f"{'unl+s':>6} {'unl+f':>6}")
         for r in report.episodes:
             print(f"{r.ref:<20} {r.success:>5} {r.failure:>5} "
-                  f"{r.credited_success:>9}/{r.credited_failure:<8}")
+                  f"{r.credited_success:>9}/{r.credited_failure:<8} "
+                  f"{r.unlabelled_success:>6} {r.unlabelled_failure:>6}")
 
 
 def cmd_crystal_update(args: argparse.Namespace) -> None:
@@ -3986,6 +4001,10 @@ def build_parser() -> argparse.ArgumentParser:
                           "--outcome is given: records for one exposure id merge.")
     sub.add_argument("--outcome", choices=OUTCOME_VALUES, default=None,
                      help="The turn's outcome, when known")
+    sub.add_argument("--exposed", action="append", metavar="KIND:REF",
+                     help="An item the exposure surfaced, labelled or not (repeatable; from "
+                          "the harness's receipt). Unlabelled ones are reported in their own "
+                          "columns, never in succ/fail. Needs --item or --outcome beside it.")
     sub.set_defaults(func=cmd_outcome)
 
     sub = subparsers.add_parser(

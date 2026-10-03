@@ -8718,6 +8718,38 @@ class TestOneSpanPerOperation:
 
     _two_sealed_weeks = staticmethod(TestHybridManifestQuarantine._two_sealed_weeks)
 
+    def test_a_nested_call_cannot_erase_the_outer_lock_failure(self, tmp_path):
+        """L2 10-03 (probe run on 951fefa): with the lock unavailable, a logging
+        handler calling back into the trail opened a nested span whose exit
+        popped the outer span's recorded error, so the outer log() raised
+        RuntimeError instead of refusing with _ManifestUnavailable."""
+        import logging
+
+        db = tmp_path / "m.db"
+        (tmp_path / "m.audit-manifest.lock").mkdir()  # the lock cannot be opened
+        trail = AuditTrail(db)
+        trail._manifest_path.write_text("{not json")  # invalid, no marker
+        inner: list[BaseException] = []
+
+        class Reenter(logging.Handler):
+            def emit(self, record):
+                if not inner:
+                    try:
+                        trail.log("inner", {})
+                    except BaseException as e:  # noqa: BLE001 - recorded, asserted below
+                        inner.append(e)
+
+        log = logging.getLogger("anneal-memory.audit")
+        handler = Reenter()
+        log.addHandler(handler)
+        try:
+            with pytest.raises(audit_module._ManifestUnavailable):
+                trail.log("outer", {})
+        finally:
+            log.removeHandler(handler)
+        assert inner and isinstance(inner[0], RuntimeError), inner
+        assert "not reentrant" in str(inner[0])
+
     def test_a_repair_in_another_process_cannot_land_between_adoption_and_seed(
         self, tmp_path, monkeypatch
     ):
@@ -8727,8 +8759,10 @@ class TestOneSpanPerOperation:
         the rebuilt manifest and refused this write on adoption's stale "did
         not complete", telling the operator to run the repair that had just
         succeeded. Under one span the repair waits for the whole ``log()``.
-        ⛔ MUTATION-CHECKED: drop the span in ``log()`` and the write is
-        refused."""
+        ⛔ MUTATION-CHECKED (L1 10-03, run): split the span per step (release
+        at the end of adoption, re-take before the seed) and this fails with
+        the motivating "orphan adoption did not complete" refusal. Dropping
+        the span entirely fails on a different error and proves nothing."""
         import subprocess
 
         db = self._two_sealed_weeks(tmp_path)

@@ -551,6 +551,7 @@ class AuditTrail:
         self._lock_fd: int | None = None
         self._lock_owner: int | None = None
         self._lock_failures: dict[int, _AuditLockError] = {}
+        self._span_threads: set[int] = set()  # threads inside _operation_span
         # Why the last orphan adoption did not complete, for the refusal that
         # follows it (L2: a refusal that named no cause left no way out).
         self._adoption_skip_reason = ""
@@ -1832,15 +1833,29 @@ class AuditTrail:
         took the lock itself (adoption skipped, rotation and retention not
         run, a quarantine and a save refused)."""
         me = threading.get_ident()
-        with ExitStack() as stack:
-            try:
-                stack.enter_context(self._manifest_lock())
-            except _AuditLockError as e:
-                self._lock_failures[me] = e
-            try:
-                yield
-            finally:
-                self._lock_failures.pop(me, None)
+        # ⛔ REFUSE NESTING WHETHER OR NOT THE LOCK WAS TAKEN (L2 10-03, probe
+        # run): _manifest_lock's own guard sees only an owner, so after a failed
+        # acquisition a nested span (a logging handler calling back into this
+        # trail) got through and its exit popped the outer span's recorded
+        # error, turning the outer refusal into a RuntimeError.
+        if me in self._span_threads:
+            raise RuntimeError(
+                "an audit operation is already in progress on this thread; "
+                "the trail is not reentrant (e.g. from a logging handler)"
+            )
+        self._span_threads.add(me)
+        try:
+            with ExitStack() as stack:
+                try:
+                    stack.enter_context(self._manifest_lock())
+                except _AuditLockError as e:
+                    self._lock_failures[me] = e
+                try:
+                    yield
+                finally:
+                    self._lock_failures.pop(me, None)
+        finally:
+            self._span_threads.discard(me)
 
     def _require_lock(self) -> None:
         """For an internal that changes the manifest path: the caller's
@@ -2699,12 +2714,14 @@ class AuditTrail:
         (rounds 6 and 7), and a new process overwrote a corrupt manifest on open.
 
         - Quarantined (a marker is on disk) -> raises ``_ManifestQuarantined``.
-        - Invalid -> re-read under the manifest lock (spore-1030). Still invalid:
-          renamed to a quarantine marker (never overwritten), then raises
-          ``_ManifestQuarantined``. Valid by then (a repair rebuilt it): returned.
-          A marker that appeared meanwhile: raises ``_ManifestQuarantined`` with
-          nothing renamed. The lock cannot be taken: raises
-          ``_ManifestUnavailable`` with nothing renamed.
+        - Invalid -> under the caller's operation span, the markers are listed
+          and the bytes read again (see the comment below for what that does
+          and does not cover). Still invalid: renamed to a quarantine marker
+          (never overwritten), then raises ``_ManifestQuarantined``. Valid by
+          then: returned. A marker that appeared meanwhile: raises
+          ``_ManifestQuarantined`` with nothing renamed. The span's lock could
+          not be taken: ``_ManifestUnavailable`` with nothing renamed. No span
+          at all: ``RuntimeError`` (a programming error).
         - Unreadable right now (permission, I/O) -> raises ``_ManifestUnavailable``
           with nothing renamed, so a flaky read can neither quarantine nor
           overwrite.
@@ -2743,14 +2760,16 @@ class AuditTrail:
             return _parse_manifest_bytes(raw, stem)
         except _UNPARSEABLE_JSON:
             pass
-        # ⛔ QUARANTINE ONLY WHAT WAS PARSED AS INVALID UNDER THE LOCK (spore-1030,
-        # reproduced with two processes): a rename of bytes read unlocked could
-        # quarantine a manifest a repair had just rebuilt. A quarantine requires
-        # the caller's operation span, so no writer of this version can change
-        # the path while it runs; the markers are listed and the bytes read
-        # again here, so a valid manifest read outside a span (a reader) never
-        # reaches a rename. An older anneal-memory writer takes no lock;
-        # mixed-version writers stay unsupported.
+        # ⛔ QUARANTINE ONLY UNDER THE CALLER'S OPERATION SPAN (spore-1030,
+        # reproduced with two processes: a rename of bytes read unlocked could
+        # quarantine a manifest a repair had just rebuilt). While the lock is
+        # really held, no writer of this version changes the path between the
+        # read above and the rename. The markers are listed and the bytes read
+        # again here for writers that do NOT hold it: one whose lock degraded
+        # to none (ENOLCK, ruled) or an older anneal-memory writer. That
+        # narrows their window; it does not close it, and mixed-version writers
+        # stay unsupported. The marker re-list is tested; the re-parse that
+        # returns a manifest rebuilt in between is not (L1 10-03, mutation run).
         try:
             self._require_lock()
             try:

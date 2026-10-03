@@ -9269,3 +9269,24 @@ class TestWitnessL3Round1:
         AuditTrail(db).log("after", {})
         result = AuditTrail.verify(db)
         assert result.valid and result.total_entries == 4 and result.set_aside == []
+
+
+def test_an_orphan_sharing_only_the_predecessor_hash_does_not_hide_a_loss(tmp_path):
+    """L3 r2 10-03, codex HIGH, reproduced on b14418b: a readable sealed file
+    whose first entry chained from the same hash as the deleted active file's,
+    with different content, was taken for it; repair recorded nothing and
+    verify was valid with the active file's entries gone. Identity is the first
+    entry's own hash now."""
+    db = tmp_path / "m.db"
+    trail = AuditTrail(db)
+    for i in range(3):
+        trail.log("ev", {"i": i})
+    first = json.loads(trail._active_path.read_text().splitlines()[0])
+    unrelated = dict(first, event="unrelated")
+    (tmp_path / "m.audit.2026-W39.jsonl").write_text(
+        json.dumps(unrelated, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    trail._active_path.unlink()
+    repair = AuditTrail.repair_manifest(db)
+    assert repair.repaired, repair.error
+    assert [r["set_aside_as"] for r in repair.set_aside] == [""]

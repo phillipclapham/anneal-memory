@@ -493,6 +493,7 @@ class _SealedScan:
     last_ts: str = ""
     last_hash: str = ""
     first_prev_hash: str | None = None  # prev_hash of the first valid entry
+    first_hash: str = ""  # hash of the first valid entry's line
     digest: str = ""  # sha256 of the uncompressed bytes
     error: OSError | None = None  # the read error that ended the last attempt
 
@@ -769,7 +770,8 @@ class AuditTrail:
             self._initialized = False
             raise _ManifestUnavailable(
                 f"the active audit file {active.name} this process was appending to "
-                "is gone (deleted or emptied); not continuing the chain past it. If "
+                "is gone (deleted or emptied, or sealed by another process); not "
+                "continuing the chain past it. If "
                 "it can be restored, put it back and retry; otherwise run "
                 "`anneal-memory audit-repair` to record the week as a gap"
             )
@@ -845,6 +847,7 @@ class AuditTrail:
             self._seq,
             self._dropped_since_last,
         )
+        saved_has_entry = self._active_has_entry  # L3 r2 10-03, codex MED
         try:
             with open(active, "a", encoding="utf-8") as f:
                 f.write(payload)
@@ -1134,6 +1137,7 @@ class AuditTrail:
                     self._seq,
                     self._dropped_since_last,
                 ) = saved_chain_state
+                self._active_has_entry = saved_has_entry
                 self._initialized = True
             else:
                 # Disk is the authority now — see the block above.
@@ -1933,12 +1937,12 @@ class AuditTrail:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         new: list[dict[str, str]] = []
         not_corrupt: list[str] = []
-        adoptable_starts: set[str | None] = set()
+        adoptable_starts: set[str] = set()
         for week, paths in sorted(by_week.items()):
             scans = {path: trail._scan_sealed(path) for path in paths}
             if any(scan.error is None for scan in scans.values()):
                 adoptable_starts.update(
-                    scan.first_prev_hash for scan in scans.values() if scan.error is None
+                    scan.first_hash for scan in scans.values() if scan.error is None
                 )
                 continue  # a readable copy is adoption's to take, not repair's
             if not set_aside_unreadable and not all(
@@ -1991,9 +1995,11 @@ class AuditTrail:
                 )
         vanished: dict[str, str] | None = None
         begun = vanished_active_week(manifest)
-        if begun is not None and begun["first_prev_hash"] in adoptable_starts:
-            # A readable sealed week starting where the recorded active file
-            # started is that file, renamed by a rotation that crashed before its
+        if begun is not None and begun["first_hash"] in adoptable_starts:
+            # A readable sealed week whose first entry IS the recorded active
+            # file's first entry is that file, renamed (by first entry, not by
+            # the hash it chained from: an unrelated file can share that, L3 r2
+            # 10-03, codex HIGH, run) by a rotation that crashed before its
             # manifest save; the next open adopts it, entries and all. Recording a
             # gap would be false and permanent (L3 r1 10-03, complement, run).
             begun = None
@@ -2838,7 +2844,7 @@ class AuditTrail:
             if scan.last_hash:
                 manifest["active_last_hash"] = scan.last_hash
             begun = manifest.get("active_begun")
-            if begun and scan.first_prev_hash == begun["first_prev_hash"]:
+            if begun and scan.first_hash == begun["first_hash"]:
                 # The active file the record describes, sealed by a rotation
                 # that crashed before its manifest save.
                 manifest["active_begun"] = None
@@ -2891,6 +2897,7 @@ class AuditTrail:
                     continue  # Torn or malformed — skip, same shape either way
                 if scan.entries == 0:
                     scan.first_prev_hash = e.get("prev_hash", "")
+                    scan.first_hash = self._compute_hash(text)
                 ts = e.get("ts", "")
                 if not scan.first_ts:
                     scan.first_ts = ts

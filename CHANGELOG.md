@@ -53,9 +53,21 @@ nothing. `BaseException` subclasses that are not `Exception` (`KeyboardInterrupt
 two earlier shapes on this branch did that, and one made `import anneal_memory` raise `TypeError` under
 an application's slotted logger class (L3 10-03, codex HIGH, run).
 
-Known and not fixed: with an empty active file, an unreadable or corrupt newer sealed week does not stop
-the chain; it continues from the manifest past that week and `verify()` reports the week as unmanifested
-(round 10: a permanently bad orphan must not block writes).
+An unreadable or corrupt sealed week newer than the manifest, with no usable active file, now REFUSES the
+write instead of letting the chain continue from the manifest past it (Phill, 2026-10-03; this supersedes
+round 10's "a permanently bad orphan must not block writes", which let the chain fork past history that
+only `verify()` reported). The refusal names the file and its read error, and names the way out:
+`anneal-memory audit-repair` now sets such a file aside. With a valid manifest it renames every
+unmanifested sealed week none of whose copies can be read to `<name>.unreadable-<UTC stamp>`, never
+deleting it, and records each in a new manifest field, `set_aside` (`filename`, `set_aside_as`, `period`,
+`cause`, `at`), saved BEFORE the rename so a moved file is never unrecorded. Writes then continue from the
+manifest's tip. `verify()` reports the record as `AuditVerifyResult.set_aside` and the CLI prints a `GAP:`
+line for each, on both the valid and invalid paths; `valid` stays a verdict on the chain it walked, as
+`anchor_trusted` does after a recovered anchor (ruled 2026-09-13): the chain is intact across the gap, and
+the missing week is reported beside it rather than folded into a permanent invalid. A manifest rebuilt from
+quarantine re-creates the records from the set-aside names on disk (the cause is then "not recovered").
+Older anneal-memory versions ignore the `set_aside` field and keep it on their own saves, but their
+`audit-repair` rebuild drops it and their `verify()` does not report it.
 
 Known and not fixed: a crash during a manifest save can leave a uniquely named
 `.anneal-manifest-<hex>.tmp` beside the manifest (a fixed-length name, so a long stem cannot push it

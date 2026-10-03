@@ -146,13 +146,32 @@ class OutcomeLog:
     :class:`ForeignOutcomeLogError`. An :meth:`adopt_unbound` marker binds the
     unbound records before it to the store that wrote it. Without ``store_id``
     nothing is stamped or partitioned, exactly as before.
+
+    ``bind=True`` with ``store_id=None`` is a log bound to a store that has NO id
+    yet (an id is minted only by a write-capable open): every stamped record is
+    then foreign, since only a store with an id writes one, and unstamped records
+    are unbound. Such a log can be read, never written (``ValueError``). Pass
+    ``store_id=store.store_id, bind=True`` so an id-less store is not silently
+    read as "no partition".
     """
 
     def __init__(
-        self, path: str | os.PathLike[str], *, store_id: str | None = None
+        self,
+        path: str | os.PathLike[str],
+        *,
+        store_id: str | None = None,
+        bind: bool = False,
     ) -> None:
         self.path = Path(path)
         self.store_id = None if store_id is None else _check_id(store_id, "store_id")
+        self.bound = bind or self.store_id is not None
+
+    def _writable_id(self) -> None:
+        if self.bound and self.store_id is None:
+            raise ValueError(
+                f"the store {self.path.name} belongs to has no store id yet; open it "
+                f"with a write-capable Store to mint one before writing outcomes."
+            )
 
     def record(
         self,
@@ -178,6 +197,7 @@ class OutcomeLog:
         records all belong to another store refuses
         (:class:`ForeignOutcomeLogError`).
         """
+        self._writable_id()
         rec = _build_record(exposure_id, items, outcome, exposed, ts, self.store_id)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # Read-write, not write-only: the append reads the last byte to repair a
@@ -186,7 +206,7 @@ class OutcomeLog:
         try:
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_EX)
-            if self.store_id is not None:
+            if self.bound:
                 self._refuse_foreign(_bind(_parse_entries(_read_fd(fd))[0], self.store_id)[1])
             _append(fd, rec)
         finally:
@@ -224,6 +244,7 @@ class OutcomeLog:
         it. Each call reads the whole log. With a ``store_id`` only bound and
         unbound records count as already held, and an all-foreign log refuses.
         """
+        self._writable_id()
         rec = _build_record(exposure_id, items, outcome, exposed, ts, self.store_id)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
@@ -231,7 +252,7 @@ class OutcomeLog:
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_EX)
             entries = _parse_entries(_read_fd(fd))[0]
-            if self.store_id is None:
+            if not self.bound:
                 records = [e for e in entries if not e.get("adopt")]
             else:
                 records, binding = _bind(entries, self.store_id)
@@ -316,7 +337,7 @@ class OutcomeLog:
         """The merged records this log counts, the skipped-line count and the
         binding, all from ONE read."""
         entries, bad = self._entries()
-        if self.store_id is None:
+        if not self.bound:
             records = [e for e in entries if not e.get("adopt")]
             binding = LogBinding(None, unbound=len({r["exposure_id"] for r in records}))
         else:
@@ -387,10 +408,11 @@ def _parse_entries(lines: Iterable[str]) -> tuple[list[dict[str, Any]], int]:
 
 
 def _bind(
-    entries: list[dict[str, Any]], store_id: str
+    entries: list[dict[str, Any]], store_id: str | None
 ) -> tuple[list[dict[str, Any]], LogBinding]:
     """The records ``store_id`` counts (bound + unbound) and the binding. An adopt
-    marker gives its store to the still-unbound records before it."""
+    marker gives its store to the still-unbound records before it. ``None`` is a
+    store with no id: nothing is bound to it, every stamped record is foreign."""
     records: list[dict[str, Any]] = []
     owner: list[str | None] = []
     pending: list[int] = []
@@ -414,7 +436,7 @@ def _bind(
         if who is None:
             unbound.add(eid)
             ours.append(rec)
-        elif who == store_id:
+        elif store_id is not None and who == store_id:
             bound.add(eid)
             ours.append(rec)
         else:
@@ -1065,5 +1087,5 @@ def compute_worth(
         lines_skipped=bad,
         receipts_read=receipts_read,
         receipts_skipped=receipts_skipped,
-        binding=binding if log.store_id is not None else None,
+        binding=binding if log.bound else None,
     )

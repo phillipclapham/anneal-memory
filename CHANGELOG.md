@@ -49,10 +49,15 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   readers read stamped records unchanged (measured on 0.9.23). Without `store_id`, nothing
   changes.
 - `anneal-memory outcome` and `worth` bind the log to the `--db` store: the id is read with a
-  read-only open (a file that is not an anneal store refuses, exit 1), and a store with no id yet
-  gets one from one write-capable open, as every store command makes. `worth` prints a loud line
-  for an all-foreign log and a `bound / unbound / foreign` line whenever the log is not all
-  bound; `outcome` refuses an all-foreign log.
+  read-only open (a file that is not an anneal store refuses, exit 1). `outcome`, a write path,
+  mints a missing id with one write-capable open, as every store command makes. `worth` stays
+  read-only and never mints: on a store with no id yet it reports "no id yet" and counts the
+  log's unstamped records as unbound (stamped ones are foreign), writing nothing to the store.
+  `worth` prints a loud line for an all-foreign log and a `bound / unbound / foreign` line
+  whenever the log is not all bound; `outcome` refuses an all-foreign log.
+- `OutcomeLog(..., bind=True)` with `store_id=None` reads a log bound to a store that has no id
+  yet (refusing writes), so a caller passing `store.store_id` straight through is not silently
+  read as unpartitioned when it is `None`.
 - `anneal-memory outcome --adopt-unbound` (`OutcomeLog.adopt_unbound()`): an explicit operator act
   that appends one marker `{"v": 1, "adopt": true, "store": <id>, "ts": ...}` binding the unbound
   records before it to this store. Nothing is rewritten; a second run with nothing unbound writes

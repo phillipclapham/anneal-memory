@@ -28,12 +28,24 @@ ordered list of ``(heading, role)`` pairs. Roles:
                           every line ends with ``[derive: …]`` or ``[judged: …]``
                           (see :mod:`anneal_memory.rederive` and
                           ``docs/rederive.md``). Used by :data:`PROJECT_SCHEMA`.
+  ``durable``             Facts that survive by mechanism, one ``- `` line each,
+                          carried from wrap to wrap until dropped by marker (see
+                          :mod:`anneal_memory.durable`). The section has its own
+                          char budget (:func:`durable_budget`) on top of
+                          ``max_chars``.
 
-**Backward compatibility is the load-bearing invariant.** :data:`DEFAULT_SCHEMA`
-reproduces the exact pre-0.3.4 four-section behavior, and a store with no
-persisted schema falls back to it — so every existing entity (Argus, daemon,
-anansi, diogenes, nexus, prism) is byte-for-byte unaffected and needs no
-migration.
+A section may carry ``"optional": True`` (only the ``durable`` role may): it is
+not required by ``validate_structure`` and is ignored when matching a schema to
+its registered name, so a store that persisted a schema before the section
+existed keeps its name and its exact behavior.
+
+**Backward compatibility is the load-bearing invariant.** The PERSISTED schema
+is the authority: a store that persisted the default or the partnership schema
+before ``Durable Facts`` existed keeps exactly that schema (no durable section)
+and behaves as before. :data:`DEFAULT_SCHEMA` adds only the optional
+``Durable Facts`` section to the historical four, so a text without it
+validates exactly as before; a store with no persisted schema falls back to
+:data:`DEFAULT_SCHEMA` and so gets the optional section.
 
 This module has **no internal dependencies** (imports only ``typing``) so it can
 be imported by ``store.py``, ``continuity.py``, and ``graduation.py`` without a
@@ -61,6 +73,8 @@ __all__ = [
     "required_headings",
     "sections_by_role",
     "default_max_chars",
+    "durable_budget",
+    "DURABLE_BUDGET_FRACTION",
     "schema_role_warning",
 ]
 
@@ -72,6 +86,7 @@ SectionRole = Literal[
     "narrative-timeless",
     "frozen",
     "derived-state",
+    "durable",
 ]
 
 # The roles validate_schema accepts. Kept in sync with SectionRole by the
@@ -85,22 +100,33 @@ _VALID_ROLES: frozenset[str] = frozenset(
         "narrative-timeless",
         "frozen",
         "derived-state",
+        "durable",
     }
 )
 
 
-class SectionSpec(TypedDict):
-    """One continuity section: its markdown heading (without the ``## `` prefix)
-    and the role that governs how the wrap pipeline treats it."""
-
+class _SectionSpecRequired(TypedDict):
     heading: str
     role: SectionRole
 
 
-# The canonical pre-0.3.4 four-section model. Any store without an explicit
-# persisted schema uses this -> identical behavior to <= 0.3.3.
+class SectionSpec(_SectionSpecRequired, total=False):
+    """One continuity section: its markdown heading (without the ``## `` prefix)
+    and the role that governs how the wrap pipeline treats it.
+
+    ``optional`` (absent = ``False``): the section may be left out of a
+    continuity text. Only the ``durable`` role may be optional."""
+
+    optional: bool
+
+
+# The canonical pre-0.3.4 State/Patterns/Decisions/Context model, plus the
+# optional Durable Facts section after State. Any store without an explicit
+# persisted schema uses this; a text without Durable Facts validates exactly
+# as under <= 0.3.3.
 DEFAULT_SCHEMA: list[SectionSpec] = [
     {"heading": "State", "role": "live-state"},
+    {"heading": "Durable Facts", "role": "durable", "optional": True},
     {"heading": "Patterns", "role": "graduating"},
     {"heading": "Decisions", "role": "decisions"},
     {"heading": "Context", "role": "narrative"},
@@ -110,10 +136,13 @@ DEFAULT_SCHEMA: list[SectionSpec] = [
 # TWO narrative roles: Context (work-shape, temporal) and Understanding
 # (relationship-shape, timeless). Understanding is partnership-entity-only and
 # is structurally required by validate_structure when this schema is in force,
-# making the felt layer a guarantee rather than a discipline.
+# making the felt layer a guarantee rather than a discipline. Durable Facts
+# sits after the live-state sections and is optional; a store that persisted
+# this schema before that section existed keeps the schema it persisted.
 FLOW_SCHEMA: list[SectionSpec] = [
     {"heading": "State", "role": "live-state"},
     {"heading": "Active Threads", "role": "live-state"},
+    {"heading": "Durable Facts", "role": "durable", "optional": True},
     {"heading": "Patterns", "role": "graduating"},
     {"heading": "Decisions", "role": "decisions"},
     {"heading": "Context", "role": "narrative"},
@@ -139,8 +168,9 @@ PROJECT_SCHEMA: list[SectionSpec] = [
 # AM-INITSCHEMA: named schemas for CLI / adapter selection. "default" and
 # "partnership" ARE the ops-vs-partnership fork (see the entity-architecture
 # thesis); "project" is a project's own memory (PROJECT_SCHEMA above):
-# "default" = the 4-section ops shape (byte-compatible with <= 0.3.3); the
-# selectable named schema "partnership" = the 6-section :data:`FLOW_SCHEMA` with
+# "default" = the ops shape (byte-compatible with <= 0.3.3 for a text without
+# the optional Durable Facts); the selectable named schema "partnership" =
+# :data:`FLOW_SCHEMA` with
 # the timeless ``Understanding`` (``narrative-timeless``) felt layer + the
 # ``Active Threads`` live-awareness layer. The selection is load-bearing, not
 # cosmetic: the felt-layer proportion-gate fires ONLY for a ``narrative-timeless``
@@ -186,17 +216,27 @@ def schema_by_name(name: str) -> list[SectionSpec]:
     return [dict(spec) for spec in schema]  # type: ignore[misc]
 
 
+def _core_pairs(schema: list[SectionSpec]) -> list[tuple[str, str]]:
+    """Ordered ``(heading, role)`` pairs of the non-optional sections."""
+    return [(s["heading"], s["role"]) for s in schema if s.get("optional") is not True]
+
+
 def name_for_schema(schema: list[SectionSpec]) -> str | None:
     """Reverse of :func:`schema_by_name`: the registered name whose schema
     matches ``schema`` (by ordered ``(heading, role)`` pairs), or ``None`` for a
     custom/hand-built schema that matches no named one.
 
+    Optional sections are ignored on both sides, so a store that persisted a
+    named schema before an optional section was added to it (``default`` or
+    ``partnership`` persisted before ``Durable Facts``) still reads back under
+    its name.
+
     Lets a caller answer "is this store on the partnership schema?" without
     importing the constants — the read-back complement to selection.
     """
-    target = [(s["heading"], s["role"]) for s in schema]
+    target = _core_pairs(schema)
     for nm, sch in _SCHEMAS_BY_NAME.items():
-        if [(s["heading"], s["role"]) for s in sch] == target:
+        if _core_pairs(sch) == target:
             return nm
     return None
 
@@ -212,10 +252,17 @@ def validate_schema(schema: object) -> list[SectionSpec]:
       - an empty heading,
       - a duplicate heading (case-insensitive — headings index sections),
       - an unknown role,
+      - an ``optional`` value that is not a bool, or ``optional: True`` on a
+        role other than ``durable``,
+      - more than one ``durable`` section,
       - **no ``graduating`` section** (the immune system needs somewhere to run).
 
+    An ``optional`` key is kept in the normalized copy only when the entry
+    carries one, so a schema without it normalizes exactly as before.
+
     Args:
-        schema: Candidate schema — a list of ``{"heading": str, "role": str}``.
+        schema: Candidate schema — a list of ``{"heading": str, "role": str}``,
+            optionally with ``"optional": bool``.
 
     Returns:
         A normalized ``list[SectionSpec]``.
@@ -228,6 +275,7 @@ def validate_schema(schema: object) -> list[SectionSpec]:
     normalized: list[SectionSpec] = []
     seen: set[str] = set()
     has_graduating = False
+    durable_count = 0
 
     for i, entry in enumerate(schema):
         if not isinstance(entry, dict) or "heading" not in entry or "role" not in entry:
@@ -247,14 +295,35 @@ def validate_schema(schema: object) -> list[SectionSpec]:
                 f"section schema entry {i}: unknown role {role!r} "
                 f"(valid: {', '.join(sorted(_VALID_ROLES))})"
             )
+        if "optional" in entry:
+            optional = entry["optional"]
+            if not isinstance(optional, bool):
+                raise ValueError(
+                    f"section schema entry {i}: 'optional' must be a bool, got "
+                    f"{type(optional).__name__}"
+                )
+            if optional and role != "durable":
+                raise ValueError(
+                    f"section schema entry {i}: only a 'durable' section may be "
+                    f"optional (got role {role!r})"
+                )
         seen.add(key)
         if role == "graduating":
             has_graduating = True
+        if role == "durable":
+            durable_count += 1
+            if durable_count > 1:
+                raise ValueError(
+                    "section schema: at most one 'durable' section is allowed"
+                )
         # role is a plain str at runtime but already validated against
         # _VALID_ROLES above; the Literal only narrows for type-checkers.
         # _VALID_ROLES is kept in sync with the SectionRole Literal by
         # test_section_role_literal_matches_valid_roles.
-        normalized.append(SectionSpec(heading=heading, role=role))  # type: ignore[typeddict-item]
+        spec = SectionSpec(heading=heading, role=role)  # type: ignore[typeddict-item]
+        if "optional" in entry:
+            spec["optional"] = entry["optional"]
+        normalized.append(spec)
 
     if not has_graduating:
         raise ValueError(
@@ -305,11 +374,12 @@ def graduating_headings(schema: list[SectionSpec]) -> frozenset[str]:
 def required_headings(schema: list[SectionSpec]) -> list[str]:
     """The heading texts (without ``## ``) that ``validate_structure`` requires.
 
-    Every section in the schema is required to be present, in order — which is
-    what makes a ``narrative-timeless`` section like ``Understanding`` a
-    structural guarantee for partnership entities.
+    Every non-optional section in the schema is required to be present — which
+    is what makes a ``narrative-timeless`` section like ``Understanding`` a
+    structural guarantee for partnership entities. An ``optional`` section
+    (``Durable Facts``) is not required.
     """
-    return [s["heading"] for s in schema]
+    return [s["heading"] for s in schema if s.get("optional") is not True]
 
 
 def sections_by_role(schema: list[SectionSpec], role: str) -> list[SectionSpec]:
@@ -346,6 +416,20 @@ _BUDGET_EXTRA: dict[str, int] = {
 }
 
 
+# The durable section's own budget, as a fraction of the store's max_chars. At
+# the default 20000 that is 3000 chars: room for roughly 25-35 one-line facts
+# without crowding the narrative sections, which keep all of max_chars because
+# the durable budget sits on top of it rather than inside it.
+DURABLE_BUDGET_FRACTION = 0.15
+
+
+def durable_budget(max_chars: int) -> int:
+    """The ``durable`` section's own char budget for a continuity whose other
+    sections are budgeted ``max_chars``: :data:`DURABLE_BUDGET_FRACTION` of it,
+    on top of it. Over this budget a save warns and keeps every line."""
+    return int(max_chars * DURABLE_BUDGET_FRACTION)
+
+
 def default_max_chars(schema: list[SectionSpec]) -> int:
     """Derive a default continuity-size budget (chars) from a schema's roles.
 
@@ -361,6 +445,11 @@ def default_max_chars(schema: list[SectionSpec]) -> int:
     :data:`FLOW_SCHEMA` -> larger. An explicit ``max_chars`` passed to
     ``prepare_wrap`` always overrides this default.
 
+    The ``durable`` section is not counted here: it has its own budget,
+    :func:`durable_budget` of this value, added on top, so its presence never
+    squeezes the other sections and a schema gains or loses it without
+    changing this number.
+
     Args:
         schema: A normalized section schema (list of :class:`SectionSpec`).
 
@@ -371,6 +460,8 @@ def default_max_chars(schema: list[SectionSpec]) -> int:
     free = dict(_BUDGET_BASELINE_FREE)
     for section in schema:
         role = section["role"]
+        if role == "durable":
+            continue  # budgeted separately by durable_budget()
         if free.get(role, 0) > 0:
             free[role] -= 1  # covered by the base budget
         else:
@@ -452,7 +543,15 @@ def schema_role_warning(schema: list[SectionSpec]) -> str | None:
         named_role_by_heading = {
             s["heading"].strip().lower(): s["role"] for s in named
         }
-        if target_heading_set == set(named_role_by_heading):
+        # The named schema's sections with and without its optional ones: a
+        # schema persisted before an optional section existed still has the
+        # same sections as its named schema.
+        named_core = {
+            s["heading"].strip().lower()
+            for s in named
+            if s.get("optional") is not True
+        }
+        if named_core <= target_heading_set <= set(named_role_by_heading):
             drifts = [
                 (s["heading"], s["role"], named_role_by_heading[h])
                 for s, h in zip(schema, target_headings)

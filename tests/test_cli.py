@@ -168,16 +168,17 @@ class TestCmdInit:
 
 class TestCmdInitSchema:
     def test_default_when_no_schema_attr(self, base_args):
-        # Existing callers (no `schema` field) get the byte-compatible ops schema.
+        # Existing callers (no `schema` field) get the ops schema, with the
+        # optional Durable Facts section (B1).
         cmd_init(base_args)
         headings = [s["heading"] for s in Store(base_args.db).section_schema]
-        assert headings == ["State", "Patterns", "Decisions", "Context"]
+        assert headings == ["State", "Durable Facts", "Patterns", "Decisions", "Context"]
 
     def test_explicit_default(self, base_args):
         base_args.schema = "default"
         cmd_init(base_args)
         headings = [s["heading"] for s in Store(base_args.db).section_schema]
-        assert headings == ["State", "Patterns", "Decisions", "Context"]
+        assert headings == ["State", "Durable Facts", "Patterns", "Decisions", "Context"]
 
     def test_partnership_persists_flow_schema(self, base_args):
         # The load-bearing case: a partnership store must persist FLOW_SCHEMA so
@@ -187,7 +188,7 @@ class TestCmdInitSchema:
         schema = Store(base_args.db).section_schema
         headings = [s["heading"] for s in schema]
         assert headings == [
-            "State", "Active Threads", "Patterns", "Decisions",
+            "State", "Active Threads", "Durable Facts", "Patterns", "Decisions",
             "Context", "Understanding",
         ]
         # The felt layer is present and carries the narrative-timeless role the
@@ -292,7 +293,7 @@ class TestCmdSetSchema:
                              json=False, schema="default")
         cmd_set_schema(set_args)
         headings = [s["heading"] for s in Store(base_args.db).section_schema]
-        assert headings == ["State", "Patterns", "Decisions", "Context"]
+        assert headings == ["State", "Durable Facts", "Patterns", "Decisions", "Context"]
 
     def test_json_output(self, base_args, capsys):
         cmd_init(base_args)
@@ -401,7 +402,7 @@ class TestCmdStatus:
         cmd_status(base_args)
         data = json.loads(capsys.readouterr().out)
         assert data["schema"] == "default"
-        assert data["sections"] == ["State", "Patterns", "Decisions", "Context"]
+        assert data["sections"] == ["State", "Durable Facts", "Patterns", "Decisions", "Context"]
 
     def test_status_with_data(self, base_args_with_data, capsys):
         cmd_status(base_args_with_data)

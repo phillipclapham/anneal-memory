@@ -2,6 +2,46 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — durable facts
+
+- A new section role, `durable`, and an optional `## Durable Facts` section in `DEFAULT_SCHEMA`
+  (after State) and `FLOW_SCHEMA` (after Active Threads). `SectionSpec` gains an optional
+  `optional: bool` key; only a `durable` section may be optional, and a schema may have one.
+  An optional section is not required by `validate_structure` and is ignored by
+  `name_for_schema`, so a store that persisted the default or partnership schema before this
+  release keeps its schema, its name and its exact wrap package and save behaviour (checked on a
+  copy of flow's store: package text, save result and saved bytes identical to 0.9.26). A new
+  store and a store with no persisted schema get the section; an existing store opts in by
+  re-setting its schema.
+- The save invariant (`validated_save_continuity`): every `- ` line of the prior continuity's
+  durable section must be in the new text's, compared by its whitespace-normalised fact part. A
+  missing line is re-inserted verbatim (the section is re-created at its schema position if the
+  wrap left it out) and named in a warning after the commit. It is never a refusal. The only way
+  to remove a line is a marker line in the section, `[drop-durable: <exact line text>]` (the fact
+  part or the full line); the marker is removed and the drop is recorded on the
+  `continuity_saved` audit event as `durable_dropped` (re-insertions as `durable_reinserted`). A
+  marker naming no prior line is removed with a warning. A re-inserted line that looks reworded
+  as a new one (token overlap >= 0.6) draws a warning naming the marker to use.
+- Cue words: a durable line may end with `— cues: a, b, c` (also `-- cues:` and `| cues:`). A
+  line whose fact is unchanged but whose cues changed is an update, not an omission. More than
+  eight cues on a line draws a warning. New module `anneal_memory.durable` with the one parser,
+  `parse_durable_facts(text, schema) -> list[DurableFact]` (exported from the package).
+- Size: the durable section has its own budget, 15% of `max_chars`, on top of `max_chars`
+  (`schema.durable_budget`); `default_max_chars` is unchanged for every schema. Over the budget
+  the save warns and keeps every line. Re-inserted lines only add to the new text, so they can
+  never make the catastrophic-shrink gate refuse; a wrap that left out a large durable section,
+  which that gate refused before, now saves with the lines back.
+- Wrap package guidance (only for a schema with a durable section): what belongs there (InMind's
+  keep criterion), one line per fact, cue words, the drop marker, the current-value-plus-pending-
+  transition shape, and the section's size against its budget,
+  `Durable Facts: <current> / <budget> chars`.
+- Migration manifest entry `AM-DURABLE-FACTS` (0.9.27): what the section is, that new stores get
+  it and an existing store gets it only when its operator re-sets the schema
+  (`anneal-memory --db <path> set-schema partnership`, or `store.set_section_schema(...)`), and a
+  suggested edit that points composers at the section and leaves the detail to `prepare_wrap`.
+
 ## [0.9.26] — 2026-10-03
 
 ### Removed — the Hebbian hop in pattern recall (BREAKING for code that imports the hop constants)

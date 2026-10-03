@@ -74,7 +74,8 @@ class TestNamedSchemas:
         got = schema_by_name("partnership")
         got.append({"heading": "Injected", "role": "narrative"})
         got[0]["heading"] = "MUTATED"
-        assert len(FLOW_SCHEMA) == 6
+        assert [s["heading"] for s in FLOW_SCHEMA][-1] == "Understanding"
+        assert all(s["heading"] != "Injected" for s in FLOW_SCHEMA)
         assert FLOW_SCHEMA[0]["heading"] == "State"
 
     def test_name_for_schema_roundtrip(self):
@@ -244,8 +245,16 @@ class TestSchemaModule:
         # The runtime _VALID_ROLES set must stay in sync with the Literal.
         assert set(get_args(SectionRole)) == S._VALID_ROLES
 
-    def test_default_schema_is_the_historical_four_sections(self):
+    def test_default_schema_is_the_historical_four_plus_optional_durable(self):
         assert [s["heading"] for s in DEFAULT_SCHEMA] == [
+            "State",
+            "Durable Facts",
+            "Patterns",
+            "Decisions",
+            "Context",
+        ]
+        # The historical four stay the REQUIRED sections.
+        assert required_headings(DEFAULT_SCHEMA) == [
             "State",
             "Patterns",
             "Decisions",

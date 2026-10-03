@@ -34,6 +34,31 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   log format change. `load_receipts()` reads receipt JSONL; `anneal-memory worth --receipts
   PATH...` shows it as an `unrec` column. Without receipts the output is unchanged.
 
+### Added — outcome-log store identity
+
+- Every store gets a `store_id` (`uuid4().hex`) in its metadata, seeded on write-capable opens
+  beside `format_version` and never rewritten; `Store.store_id` reads it (`None` when only a
+  read-only open has run since the upgrade). Export/import does not copy it.
+- `OutcomeLog(path, store_id=...)` stamps `"store"` on every record it writes and sorts the log
+  into bound (this store), unbound (no `store` key: everything written before this release, or by
+  a caller passing no id) and foreign (another store). `latest()` and `compute_worth()` count
+  bound and unbound as before and never foreign; `OutcomeLog.binding()` and the report's
+  `store_id` / `bound` / `unbound` / `foreign` / `foreign_stores` / `all_foreign` say how it
+  sorted. Writing to a log whose records are ALL another store's raises
+  `ForeignOutcomeLogError` (a `ValueError`) naming both ids. No log-version bump: released
+  readers read stamped records unchanged (measured on 0.9.23). Without `store_id`, nothing
+  changes.
+- `anneal-memory outcome` and `worth` bind the log to the `--db` store: the id is read with a
+  read-only open (a file that is not an anneal store refuses, exit 1), and a store with no id yet
+  gets one from one write-capable open, as every store command makes. `worth` prints a loud line
+  for an all-foreign log and a `bound / unbound / foreign` line whenever the log is not all
+  bound; `outcome` refuses an all-foreign log.
+- `anneal-memory outcome --adopt-unbound` (`OutcomeLog.adopt_unbound()`): an explicit operator act
+  that appends one marker `{"v": 1, "adopt": true, "store": <id>, "ts": ...}` binding the unbound
+  records before it to this store. Nothing is rewritten; a second run with nothing unbound writes
+  nothing. Readers older than this release skip the marker as one unreadable line and count
+  nothing from it (measured on 0.9.23).
+
 ### Fixed
 
 - `anneal-memory outcome` and `worth` refuse a `--db` that does not exist, is a directory, or
@@ -45,11 +70,11 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   location (no episodic database) is therefore refused. They exited 0 (Diogenes 2026-10-03 MED):
   `outcome` wrote labels to an orphan log, creating its directories, and `worth` reported 0
   exposures as a clean measurement.
-- Known and not fixed: an EXISTING file that is not this store (another program's database, a
-  stale path) is still accepted, and its sibling outcome log is used. Four review rounds on
-  10-03 showed that judging a file's contents either refuses real stores (older schemas,
-  read-only directories, a lock) or accepts impostors; the answer is a persisted store identity
-  that the outcome log is bound to, which is a design change of its own.
+- An EXISTING file that is not this store is answered by the store identity above, not by judging
+  the file's contents (four review rounds on 10-03 showed that refuses real stores or accepts
+  impostors). A non-anneal file refuses; a log left beside a store replaced at the same path is
+  reported as foreign and never written into. Not closed: a log whose records predate store ids
+  stays unbound, and so is still counted, until an operator adopts it or it is moved.
 - `fold_surfaced` / `crystal fold-surfaced` no longer creates `<stem>.crystal.json` on a store
   that has none. That file's existence is the wrap path's opt-in to the crystal tier, so a fold
   could silently opt a store in. With no crystal file the fold writes nothing and returns

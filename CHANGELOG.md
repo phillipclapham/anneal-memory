@@ -12,12 +12,18 @@ renamed the rebuilt, valid manifest to a new `.corrupt-<stamp>` marker, and `ver
 trail quarantined. It happened both after repair had returned and inside repair's last check.
 
 Every change to the manifest now happens under one cross-process lock, `<stem>.audit-manifest.lock`
-beside the database: a manifest save, a quarantine rename, a whole repair, and the load-to-save span of
-rotation, orphan adoption and retention cleanup (each takes the lock before its first rename, so a lock
-that cannot be taken refuses the step with nothing sealed or moved). A writer that read an invalid
-manifest takes the lock, lists the markers and reads the manifest again, and renames only bytes it parsed
-as invalid while holding it; if a repair got there first it uses the rebuilt manifest. The lock is
-reentrant within one `AuditTrail`, and released when its descriptor closes or the process dies. It is
+beside the database, taken ONCE per public operation for everything that operation does to the
+manifest: `log()` (and `stats()`) when it initializes or rotates, covering orphan adoption, the chain
+seed, rotation and retention cleanup together, and `audit-repair` from its first listing to its return.
+The internals require the lock rather than taking it, so it is never nested, and it is taken before any
+rename: a lock that cannot be taken refuses each step it would have covered, with nothing sealed or
+moved. One span closes a window the earlier per-step spans left open, reproduced with a real second
+process: adoption saw a quarantined manifest, an `audit-repair` in another process rebuilt it before the
+seed, and the seed refused the write while telling the operator to run the repair that had just
+succeeded. A quarantine lists the markers and reads the manifest again under the lock before renaming,
+so an older writer that takes no lock cannot get a rebuilt manifest quarantined. The lock is released
+before the entry is appended and before `on_event` runs, and when its descriptor closes or the process
+dies. It is
 opened read-write (Linux NFS needs that for an exclusive lock), and read-only when this user may not
 write the lock file (another user's, or a restrictive umask). A symlink, FIFO or directory at its path is
 refused rather than followed or silently ignored. It blocks with no timeout: a stopped holder delays

@@ -4386,11 +4386,13 @@ def test_outcome_log_left_beside_a_replaced_store_is_not_adopted(tmp_path):
     for p in tmp_path.glob("mem.db*"):
         p.unlink()
     assert run("init").returncode == 0
-    report = run("worth", "--json")
-    assert report.returncode == 0, report.stderr
+    report = run("worth", "--json")  # zeros from the wrong log are not clean: exit 1 (L1)
+    assert report.returncode == 1, report.stderr
     data = json.loads(report.stdout)
     assert data["exposures"] == 0 and data["all_foreign"] and data["foreign_stores"] == [a_id]
-    assert "belongs to another store" in run("worth").stderr
+    assert "belongs to another store" in data["warning"]
+    text = run("worth")
+    assert text.returncode == 1 and "belongs to another store" in text.stderr
     before = log.read_bytes()
     for argv in (["outcome", "--exposure-id", "evB", "--item", "crystal:pB=ignored"],
                  ["outcome", "--adopt-unbound"]):
@@ -4398,13 +4400,19 @@ def test_outcome_log_left_beside_a_replaced_store_is_not_adopted(tmp_path):
         assert result.returncode == 1 and a_id in result.stderr and data["store_id"] in result.stderr
     assert log.read_bytes() == before
 
-    other = tmp_path / "other.db"
-    sqlite3.connect(other).execute("CREATE TABLE t (x)").connection.commit()
-    result = subprocess.run([sys.executable, "-m", "anneal_memory.cli", "--db", str(other),
-                             "outcome", "--exposure-id", "ev", "--outcome", "success"],
-                            capture_output=True, text=True)
-    assert result.returncode == 1 and "cannot read the store id" in result.stderr
-    assert not (tmp_path / "other.outcomes.jsonl").exists()
+    # not anneal stores: no metadata table, and (L1, run 10-03) a metadata table
+    # alone, which a write-capable open used to fill with anneal's whole schema
+    for name, ddl in (("other", "CREATE TABLE t (x)"),
+                      ("imp", "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)")):
+        other = tmp_path / f"{name}.db"
+        sqlite3.connect(other).execute(ddl).connection.commit()
+        before = other.read_bytes()
+        result = subprocess.run([sys.executable, "-m", "anneal_memory.cli", "--db", str(other),
+                                 "outcome", "--exposure-id", "ev", "--outcome", "success"],
+                                capture_output=True, text=True)
+        assert result.returncode == 1 and "cannot read the store id" in result.stderr, name
+        assert other.read_bytes() == before
+        assert not (tmp_path / f"{name}.outcomes.jsonl").exists()
 
 
 def test_adopt_unbound_binds_records_written_before_store_ids(tmp_path):

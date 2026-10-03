@@ -1,7 +1,7 @@
 """Minimal OpenAI chat-completions client for the STALE harness (stdlib only).
 
 The key is read at runtime from ``OPENAI_API_KEY`` in the environment, or else from
-the ``.env`` file named by ``--env-file`` (default: flow's ``.env.flow``). It is
+the ``.env`` file named by ``$ANNEAL_BENCH_ENV_FILE``. It is
 never printed, written, or put in argv.
 
 Every response's ``usage`` goes into a :class:`Ledger`, priced from :data:`PRICES`.
@@ -18,7 +18,7 @@ import urllib.request
 from pathlib import Path
 
 API_URL = "https://api.openai.com/v1/chat/completions"
-DEFAULT_ENV_FILE = Path.home() / "Briefcase" / "flow" / ".env.flow"
+_ENV_FILE_VAR = "ANNEAL_BENCH_ENV_FILE"
 
 # USD per 1M tokens: (input, cached input, output). Standard tier, read from the
 # pricing table embedded in https://platform.openai.com/docs/pricing on 2026-10-03.
@@ -33,10 +33,17 @@ class BudgetExceeded(RuntimeError):
     pass
 
 
-def load_key(env_file: Path = DEFAULT_ENV_FILE) -> str:
+def load_key(env_file: Path | None = None) -> str:
     key = os.environ.get("OPENAI_API_KEY")
     if key:
         return key
+    if env_file is None:
+        named = os.environ.get(_ENV_FILE_VAR)
+        if not named:
+            raise RuntimeError(
+                f"OPENAI_API_KEY is not set; set it, or name a .env file in ${_ENV_FILE_VAR}"
+            )
+        env_file = Path(named).expanduser()
     for line in env_file.read_text().splitlines():
         line = line.strip()
         if line.startswith("export "):

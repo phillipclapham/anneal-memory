@@ -1468,6 +1468,7 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 "associations_strengthened": result["associations_strengthened"],
                 "associations_decayed": result["associations_decayed"],
                 "linkgate_overridden": result["linkgate_overridden"],
+                "association_warning": result["association_warning"],
                 "citation_spread": result["citation_spread"],
                 "supersessions_recorded": result["supersessions_recorded"],
                 "supersessions_rejected": result["supersessions_rejected"],

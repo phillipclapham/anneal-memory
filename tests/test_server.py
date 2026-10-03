@@ -660,6 +660,30 @@ class TestToolSaveContinuity:
         assert "Continuity saved" in output
         assert "allow_unlinked is deprecated and did nothing" in output
 
+    def test_association_warning_reaches_the_mcp_result_text(self, server, monkeypatch):
+        """AM-WARN is a post-commit UserWarning, which never reaches an MCP client;
+        the result text must carry it (codex L3 MED, 0.9.26)."""
+        import anneal_memory.server as srv
+        real = srv._lib_validated_save_continuity
+
+        def with_warning(*a, **k):
+            res = real(*a, **k)
+            res["association_warning"] = "Co-citation pairs were available this wrap but 0 associations formed"
+            return res
+
+        monkeypatch.setattr(srv, "_lib_validated_save_continuity", with_warning)
+        server._tool_record({"content": "Test obs", "episode_type": "observation"})
+        text = (
+            "# TestProject — Memory (v1)\n"
+            "## State\nActive on test\n"
+            "## Patterns\n\n"
+            "## Decisions\n\n"
+            "## Context\nFirst session.\n"
+        )
+        server._tool_prepare_wrap({})
+        output = _text_from_result(server._tool_save_continuity({"text": text}))
+        assert "Association warning: Co-citation pairs were available" in output
+
     def test_save_without_allow_unlinked_has_no_deprecation_line(self, server):
         server._tool_record({"content": "Test obs", "episode_type": "observation"})
         text = (

@@ -1097,8 +1097,9 @@ with unrelated ids. When 2+ THIS-session episodes co-support a pattern, citing t
 ONE evidence tag forms a direct Hebbian link between them (separate single-id lines
 form only a weaker session-level pair). Those links feed the association statistics
 and the `graph` export; pattern recall does not read them (it reaches a pattern
-through the episodes its evidence cites), so a wrap that forms no link is not a
-defect. Re-citing an older episode does not strengthen its links: wrapped episodes
+through the episodes its evidence cites), so a wrap that OFFERS no genuine pair
+and forms no link is not a defect; offered pairs that record no link are a write-path
+fault, which the save reports. Re-citing an older episode does not strengthen its links: wrapped episodes
 leave the current-wrap window, so the re-citation dead-ids.
 
 **Example (the first line has two genuinely supporting episodes, so it cites both):**

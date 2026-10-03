@@ -606,6 +606,12 @@ class Server:
                 f"Supersession rejected ({rej['old_id']} by {rej['new_id']}): {rej['reason']}"
             )
 
+        if result["association_warning"]:
+            # A post-commit UserWarning never reaches an MCP client, so the
+            # AM-WARN signal travels in the result text (codex L3 MED, 0.9.26:
+            # with the AM-LINKGATE refusal removed, a dead association write
+            # path would otherwise be silent over MCP).
+            lines.append(f"Association warning: {result['association_warning']}")
         if allow_unlinked:
             lines.append(
                 "allow_unlinked is deprecated and did nothing: the AM-LINKGATE save "

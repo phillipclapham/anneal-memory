@@ -559,8 +559,12 @@ class WorthRow:
         return d
 
     def _count_unlabelled(self, outcome: str | None) -> None:
-        name = f"unlabelled_{outcome or 'unknown'}"
-        setattr(self, name, getattr(self, name) + 1)
+        if outcome == "success":
+            self.unlabelled_success += 1
+        elif outcome == "failure":
+            self.unlabelled_failure += 1
+        else:
+            self.unlabelled_unknown += 1
 
     def _count(self, label: str | None, outcome: str | None, *, credited: bool = False) -> None:
         if label is not None:

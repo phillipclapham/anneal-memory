@@ -3123,7 +3123,7 @@ def _parse_label(raw: str) -> ExposureLabel:
 
 def _parse_exposed(raw: str) -> ExposedRef:
     kind, sep, ref = raw.partition(":")
-    if not sep or "=" in ref:
+    if not sep:
         raise ValueError(f"--exposed must look like KIND:REF (got {raw!r}).")
     return ExposedRef(kind, ref)
 
@@ -3195,7 +3195,7 @@ def cmd_worth(args: argparse.Namespace) -> None:
     print(f"{'crystal':<52} {'surf':>5} {'fol':>4} {'ign':>4} {'n/a':>4} "
           f"{'succ':>5} {'fail':>5} {'fol+s':>6} {'fol+f':>6} {'unl+s':>6} {'unl+f':>6}")
     for r in report.crystals:
-        name = r.ref if r.live else f"{r.ref} (not live)"
+        name = r.ref if r.live else f"{r.ref[:41]} (not live)"
         surf = "-" if r.surfaced_count is None else str(r.surfaced_count)
         fol = r.table["followed"]
         print(f"{name[:52]:<52} {surf:>5} {r.followed:>4} {r.ignored:>4} "

@@ -502,6 +502,17 @@ def test_batch_refuses_an_open_transaction_and_keeps_it(tmp_path):
         st._conn.rollback()
 
 
+def test_batch_on_a_closed_store_is_a_store_error(tmp_path):
+    from anneal_memory.store import StoreError
+
+    st = Store(str(tmp_path / "m.db"))
+    st.close()
+    with pytest.raises(StoreError):
+        with st._batch():
+            pass
+    assert st._defer_commit is False
+
+
 def test_wrap_cancelled_inside_a_batch_fails_loud(tmp_path):
     """The batch docstring's 'unreachable today' sub-case: with no DML before
     it, wrap_cancelled inside a batch committed and ended the batch."""
@@ -575,4 +586,5 @@ def test_the_floor_is_tight_against_the_probe_minimum():
 
     ratios = [len(words(o) & words(n)) / max(1, min(len(words(o)), len(words(n))))
               for o, n in pairs]
-    assert min(ratios) == store_mod.SUPERSEDE_MIN_OVERLAP_RATIO
+    assert min(ratios) == store_mod.SUPERSEDE_MIN_OVERLAP_RATIO, (
+        f"probe minimum is now {min(ratios)}: re-derive the floor")

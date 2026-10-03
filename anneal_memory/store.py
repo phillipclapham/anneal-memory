@@ -6707,7 +6707,10 @@ class Store:
                 "commit has exactly one outer transaction; nested "
                 "batches would break the commit-once invariant."
             )
-        if self._conn is not None and self._conn.in_transaction:
+        # A closed store falls through to batch_begin's _db_boundary, which
+        # raises StoreError (codex L3: in_transaction on a closed connection
+        # raised a bare ProgrammingError).
+        if not self._closed and self._conn is not None and self._conn.in_transaction:
             # A caller left a transaction open. Refuse BEFORE anything changes:
             # BEGIN IMMEDIATE would fail and its rollback would discard the
             # caller's pending DML under a misleading batch error (L2).

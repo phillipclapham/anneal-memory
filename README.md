@@ -421,7 +421,7 @@ There are two ways to write the link. Either way it's validated like a citation:
 - Explicitly, when recording: `store.record(text, "observation", supersedes=[old_id])`, CLI `record --supersedes ID`, MCP `record` with `supersedes`. A link that fails validation records nothing at all.
 - In a wrap: the agent writes `[supersedes: OLD_ID by NEW_ID]` in the continuity text, where `NEW_ID` is an episode of that wrap. A bad link doesn't fail the save; it comes back in `supersessions_rejected` with the reason.
 
-A wrong link can be removed with `unsupersede` (CLI `unsupersede --old ID --new ID`).
+A wrong link can be removed with `unsupersede` (CLI `unsupersede --old ID --new ID`). A superseded episode also stops counting as evidence: a pattern can't graduate by citing a fact that's been replaced.
 
 What it fixes, measured with `scripts/stale_probe.py` (16 planted fact-and-update pairs among 120 unrelated episodes, graded mechanically, no judge model):
 

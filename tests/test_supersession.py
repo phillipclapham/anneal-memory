@@ -167,13 +167,18 @@ def test_chains_cycles_and_undo(tmp_path):
         # Equal timestamps pass the order rule; a cycle of any length is refused.
         with pytest.raises(SupersessionError, match="cycle"):
             st.supersede(old_id=c.id, new_id=a.id)
-        # Deleting the middle keeps the oldest hidden behind the live end.
+        # The annotation names the CURRENT fact (the chain's live end), not
+        # the stale middle.
+        assert st.superseded_by_map([a.id]) == {a.id: c.id}
+        # Deleting the middle rewires the chain past it and leaves no row
+        # naming the deleted id (a re-recorded episode with the same
+        # deterministic id must not come back hidden).
         st.delete(b.id)
         assert [e.id for e in st.recall(keyword="quillmark").episodes] == [c.id]
-        assert st.superseded_by_map([a.id]) == {a.id: c.id}
+        assert [(l["old_id"], l["new_id"], l["source"]) for l in st.supersession_links()] \
+            == [(a.id, c.id, "rewired")]
         # The undo for a wrong link.
-        assert st.unsupersede(old_id=b.id, new_id=c.id) is True
-        assert st.unsupersede(old_id=a.id, new_id=b.id) is True
+        assert st.unsupersede(old_id=a.id, new_id=c.id) is True
         assert {e.id for e in st.recall(keyword="quillmark").episodes} == {a.id, c.id}
 
 
@@ -185,6 +190,26 @@ def test_record_refusal_inside_a_batch_keeps_the_batch(tmp_path):
             with pytest.raises(SupersessionError):
                 st.record("Lunch is tacos.", "observation", supersedes=[old.id])
         assert st.get(kept.id) is not None
+
+
+def test_a_superseded_episode_is_not_citable_evidence(tmp_path):
+    """codex L3: a 2x citing only the replaced fact validated, including when
+    the link was proposed in the same save."""
+    with Store(str(tmp_path / "m.db")) as st:
+        old = st.record(OLD, "observation", timestamp="2026-01-05T10:00:00Z")
+        new = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00Z")
+        assert prepare_wrap(st)["status"] == "ready"
+        line = (f"- quillmark_storage | 2x (2026-02-10) "
+                f'[evidence: {old.id} "the database engine for Quillmark is postgres"]')
+        with pytest.warns(UserWarning, match="cite only superseded episodes"):
+            res = validated_save_continuity(
+                st,
+                "## State\nx\n" + f"[supersedes: {old.id} by {new.id}]\n\n## Patterns\n"
+                + line + "\n\n## Decisions\n\n## Context\nx\n",
+                today="2026-02-10",
+            )
+        assert res["supersessions_recorded"] == 1
+        assert res["graduations_validated"] == 0
 
 
 def test_wrap_marks_superseded_and_reports_unparsed_markers(tmp_path):
@@ -205,4 +230,4 @@ def test_export_keeps_superseded_episodes(tmp_path, capsys, monkeypatch):
     cli_main()
     data = __import__("json").loads(capsys.readouterr().out)
     assert {e["id"] for e in data["episodes"]} == {old.id, new.id}
-    assert data["supersessions"] == [{"old_id": old.id, "new_id": new.id}]
+    assert [(l["old_id"], l["new_id"]) for l in data["supersessions"]] == [(old.id, new.id)]

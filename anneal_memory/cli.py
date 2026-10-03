@@ -625,7 +625,8 @@ def cmd_episodes(args: argparse.Namespace) -> None:
         for ep in result.episodes:
             age = _format_timestamp(ep.timestamp)
             content_preview = _truncate(ep.content.replace("\n", " "), 100)
-            print(f"  [{ep.id}] {ep.type.value:<12} {age}")
+            replaced = f"  (superseded by {ep.superseded_by})" if ep.superseded_by else ""
+            print(f"  [{ep.id}] {ep.type.value:<12} {age}{replaced}")
             print(f"           {content_preview}")
             if ep.source != "agent":
                 print(f"           source: {ep.source}")
@@ -878,7 +879,11 @@ def cmd_supersede(args: argparse.Namespace) -> None:
 def cmd_unsupersede(args: argparse.Namespace) -> None:
     """Remove a supersession link."""
     with _open_store(args) as store:
-        removed = store.unsupersede(old_id=args.old, new_id=args.new, source="cli")
+        try:
+            removed = store.unsupersede(old_id=args.old, new_id=args.new, source="cli")
+        except SupersessionError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
     if args.json:
         _print_json({"old_id": args.old, "new_id": args.new, "removed": removed})
     else:
@@ -1696,10 +1701,7 @@ def cmd_export(args: argparse.Namespace) -> None:
         # delete), so an export carries them, marked, plus the links.
         result = store.recall(limit=100000, include_superseded=True)
         episodes = [_episode_dict(ep) for ep in result.episodes]
-        supersessions = [
-            {"old_id": ep.id, "new_id": ep.superseded_by}
-            for ep in result.episodes if ep.superseded_by
-        ]
+        supersessions = store.supersession_links()
         continuity = store.load_continuity()
         meta = store.load_meta()
         assoc_stats = store.association_stats()

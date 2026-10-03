@@ -2640,6 +2640,17 @@ def validated_save_continuity(
     frozen_episode_ids: list[str] = snapshot["episode_ids"]
     valid_ids = {ep.id[:8].lower() for ep in episodes}
     node_content_map = {ep.id[:8].lower(): ep.content for ep in episodes}
+    # A superseded episode is not evidence. Leave out of the citable set every
+    # episode of this wrap already superseded, and every one a link proposed in
+    # THIS text would supersede once recorded (codex L3: the links are recorded
+    # after graduation runs, so a 2x citing only the replaced fact validated).
+    superseded_in_window = set(store.superseded_by_map(sorted(valid_ids)))
+    for m in _SUPERSEDES_RE.finditer(text):
+        old_id, new_id = m.group(1).lower(), m.group(2).lower()
+        if (old_id in valid_ids and new_id in valid_ids
+                and store.supersession_problem(old_id=old_id, new_id=new_id) is None):
+            superseded_in_window.add(old_id)
+    citable_ids = valid_ids - superseded_in_window
 
     # Check citation history
     meta = store.load_meta()
@@ -2651,7 +2662,7 @@ def validated_save_continuity(
     today_str = today if today is not None else date.today().isoformat()
     grad_result = validate_graduations(
         text=text,
-        valid_ids=valid_ids,
+        valid_ids=citable_ids,
         today=today_str,
         node_content_map=node_content_map,
         citations_seen=citations_seen,
@@ -3386,7 +3397,17 @@ def validated_save_continuity(
     from .graduation import extract_session_co_citations
     session_pairs = extract_session_co_citations(grad_result.all_validated_ids)
     cocitation_available = bool(grad_result.direct_co_citations) or bool(session_pairs)
-    if cited_graduations > 0 and not resolved_any:
+    cited_superseded = sorted(
+        sid for sid in superseded_in_window
+        if re.search(r"\[evidence:[^\]]*\b" + re.escape(sid) + r"\b", text, re.IGNORECASE)
+    )
+    if cited_graduations > 0 and not resolved_any and cited_superseded:
+        association_warning = (
+            f"{cited_graduations} graduated-pattern citation(s) this wrap cite only "
+            f"superseded episodes ({', '.join(cited_superseded)}); a replaced fact is "
+            f"not evidence. Cite the episode that replaced it."
+        )
+    elif cited_graduations > 0 and not resolved_any:
         association_warning = (
             f"{cited_graduations} graduated-pattern citation(s) this wrap resolved "
             f"to ZERO episodes in this store — the Hebbian association graph cannot "

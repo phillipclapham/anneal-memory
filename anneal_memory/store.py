@@ -343,6 +343,8 @@ StoreOperation = Literal[
     "unsupersede",
     "supersession_exists",
     "superseded_by_map",
+    "supersession_problem",
+    "supersession_links",
     "episodes_since_wrap",
     # Row materialization (post-SQL): a corrupt/legacy/badly-imported row whose
     # ``type`` isn't a valid EpisodeType (ValueError) surfaces here as a StoreError
@@ -1418,14 +1420,16 @@ def _hidden_by_supersession_sql(until: str | None) -> tuple[str, list[str]]:
     store at a cutoff must not hide a fact replaced after that cutoff (flow's
     per-turn hook excludes the last 45 minutes, and a just-updated fact vanished
     from it entirely before this, reproduced in review)."""
-    cut = " AND r.timestamp <= ?" if until else ""
+    # A direct join is enough, and it runs on every recall (flow's hook calls
+    # recall several times per prompt), so no recursive closure here. Two
+    # invariants make it exact: delete()/prune() rewire links THROUGH a removed
+    # episode (A->B->C, delete B: A->C), so a link's replacement is live; and a
+    # replacement is never older than what it replaces, so if the direct one is
+    # after ``until`` every later one is too. A link whose replacement vanished
+    # anyway (an older binary deleted it) simply stops hiding.
+    cut = " WHERE r.timestamp <= ?" if until else ""
     return (
-        "WITH RECURSIVE chain(old_id, cur) AS ("
-        " SELECT old_id, new_id FROM supersessions"
-        " UNION SELECT c.old_id, s.new_id FROM chain c"
-        " JOIN supersessions s ON s.old_id = c.cur)"
-        " SELECT c.old_id FROM chain c JOIN episodes r ON r.id = c.cur"
-        f" WHERE r.id != c.old_id{cut}",
+        "SELECT s.old_id FROM supersessions s JOIN episodes r ON r.id = s.new_id" + cut,
         [until] if until else [],
     )
 
@@ -2254,45 +2258,37 @@ class Store:
             session_id = self._current_session_id()
             # Validated under the same write lock as the insert, so a target
             # cannot vanish between the check and the link. ⛔ The refusal is
-            # RAISED OUTSIDE this boundary: _db_boundary rolls back on any
-            # exception, and inside a caller's _batch() that would discard the
-            # batch's earlier writes (measured on the wrap path while building
-            # this: a rejected link rolled back the link recorded before it).
+            # raised AFTER this block (see _db_boundary's docstring).
             problem = next(
                 (p for p in (self._supersession_problem(o, None, content, ts)
                              for o in old_ids) if p),
                 None,
             )
-        if problem:
-            if not self._defer_commit:
-                with self._db_boundary("record"):
-                    self._conn.commit()  # ends the empty write transaction opened above
-            raise SupersessionError(problem)
-        # Same transaction as the session read above: nothing committed in
-        # between, so spore-1233's read-and-insert atomicity holds.
-        with self._db_boundary("record"):
-            if not self._conn.in_transaction:
-                self._conn.execute("BEGIN IMMEDIATE")
-            for nonce in range(max_retries):
-                ep_id = _episode_id(content, ts, nonce)
-                try:
+            if problem is None:
+                for nonce in range(max_retries):
+                    ep_id = _episode_id(content, ts, nonce)
+                    try:
+                        self._conn.execute(
+                            """INSERT INTO episodes (id, timestamp, type, content, source, session_id, metadata)
+                               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                            (ep_id, ts, episode_type.value, content, source, session_id, meta_json),
+                        )
+                        break
+                    except sqlite3.IntegrityError:
+                        if nonce == max_retries - 1:
+                            raise
+                        continue
+                for old_id in old_ids:
                     self._conn.execute(
-                        """INSERT INTO episodes (id, timestamp, type, content, source, session_id, metadata)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (ep_id, ts, episode_type.value, content, source, session_id, meta_json),
+                        "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
+                        (old_id, ep_id, source),
                     )
-                    break
-                except sqlite3.IntegrityError:
-                    if nonce == max_retries - 1:
-                        raise
-                    continue
-            for old_id in old_ids:
-                self._conn.execute(
-                    "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
-                    (old_id, ep_id, source),
-                )
+            # On a refusal this commits an empty transaction (releasing the
+            # lock); inside a batch it leaves the batch's writes alone.
             if not self._defer_commit:
                 self._conn.commit()
+        if problem:
+            raise SupersessionError(problem)
 
         episode = Episode(
             id=ep_id,
@@ -2401,20 +2397,81 @@ class Store:
         }, method="unsupersede", committed="the link removal", actor=source)
         return True
 
+    def supersession_problem(self, *, old_id: str, new_id: str) -> str | None:
+        """Why a proposed link would be refused, or None if it would record.
+        Read-only; :meth:`supersede` re-checks under its own write lock."""
+        old_id = _normalize_supersedes([old_id])[0]
+        new_id = _normalize_supersedes([new_id])[0]
+        with self._db_boundary("supersession_problem"):
+            if not self._has_supersessions_table():
+                return "supersede: this store has no supersessions table yet"
+            row = self._conn.execute(
+                "SELECT content, timestamp FROM episodes WHERE id = ?", (new_id,)
+            ).fetchone()
+            if row is None:
+                return f"supersede: the new episode {new_id!r} does not exist"
+            return self._supersession_problem(old_id, new_id, row["content"], row["timestamp"])
+
+    def supersession_links(self) -> list[dict[str, str]]:
+        """Every recorded link as stored (``old_id``, ``new_id``, ``recorded_at``,
+        ``source``), for export. Unlike ``superseded_by`` this is lossless."""
+        with self._db_boundary("supersession_links"):
+            if not self._has_supersessions_table():
+                return []
+            return [
+                dict(row) for row in self._conn.execute(
+                    "SELECT old_id, new_id, recorded_at, source FROM supersessions"
+                    " ORDER BY recorded_at, old_id, new_id"
+                )
+            ]
+
+    def _detach_supersessions(self, ids: list[str]) -> int:
+        """Inside the caller's transaction, before ``ids`` are deleted: link each
+        surviving episode past the removed ones to the next surviving episode
+        down its chain (A -> B -> C, remove B: A -> C), then drop every link
+        touching a removed id. Keeps a chain hiding what it hid, and leaves no
+        row that would silently hide a later episode re-recorded under the same
+        deterministic id (complement L3). Returns the rows removed."""
+        if not ids or not self._has_supersessions_table():
+            return 0
+        removed = 0
+        for start in range(0, len(ids), 400):
+            chunk = ids[start:start + 400]
+            marks = ",".join("?" * len(chunk))
+            self._conn.execute(
+                f"""INSERT OR IGNORE INTO supersessions (old_id, new_id, source)
+                    WITH RECURSIVE r(start, cur) AS (
+                        SELECT old_id, new_id FROM supersessions
+                        WHERE new_id IN ({marks}) AND old_id NOT IN ({marks})
+                        UNION
+                        SELECT r.start, s.new_id FROM r
+                        JOIN supersessions s ON s.old_id = r.cur
+                        WHERE r.cur IN ({marks})
+                    )
+                    SELECT start, cur, 'rewired' FROM r WHERE cur NOT IN ({marks})""",
+                [*chunk, *chunk, *chunk, *chunk],
+            )
+            removed += self._conn.execute(
+                f"DELETE FROM supersessions WHERE old_id IN ({marks}) OR new_id IN ({marks})",
+                [*chunk, *chunk],
+            ).rowcount
+        return removed
+
     def superseded_by_map(self, episode_ids: list[str]) -> dict[str, str]:
-        """For each id hidden by a supersession, the earliest live episode
-        replacing it (following chains). Ids not hidden are absent."""
+        """For each id hidden by a supersession, the latest live episode down
+        its chain of links (the current one). Ids not hidden are absent."""
         with self._db_boundary("superseded_by_map"):
             if not episode_ids or not self._has_supersessions_table():
                 return {}
             return self._live_replacements(list(episode_ids), None)
 
     def _live_replacements(self, ids: list[str], until: str | None) -> dict[str, str]:
-        """``old_id -> the earliest live episode reachable down its chain``,
-        restricted to replacements at or before ``until``. Same reachability
-        as the recall filter, so an annotated episode is exactly a hidden one."""
+        """``old_id -> the latest live episode reachable down its chain``,
+        restricted to replacements at or before ``until``. Not on the per-turn
+        recall path (only ``include_superseded``, the wrap package, export)."""
         out: dict[str, str] = {}
         cut = " AND r.timestamp <= ?" if until else ""
+        hide_sql, hide_params = _hidden_by_supersession_sql(until)
         for start in range(0, len(ids), 500):
             chunk = ids[start:start + 500]
             marks = ",".join("?" * len(chunk))
@@ -2428,10 +2485,14 @@ class Store:
                     SELECT c.old_id, c.cur FROM chain c
                     JOIN episodes r ON r.id = c.cur
                     WHERE r.id != c.old_id{cut}
-                    ORDER BY r.timestamp DESC, r.id DESC""",
-                [*chunk, *([until] if until else [])],
+                    ORDER BY (c.cur IN ({hide_sql})) DESC, r.timestamp ASC, r.id ASC""",
+                [*chunk, *([until] if until else []), *hide_params],
             ).fetchall()
-            for row in rows:  # DESC, so the earliest is written last and wins
+            # Written in order, last wins: a replacement that is NOT itself
+            # superseded (the chain's live end) sorts last, then the latest.
+            # In A -> B -> C the current fact is C; B is stale. (glm L3 caught
+            # "earliest wins"; timestamps alone tie when they are equal.)
+            for row in rows:
                 out[row["old_id"]] = row["cur"]
         return out
 
@@ -2549,6 +2610,7 @@ class Store:
                     (row["id"], row["timestamp"], row["type"], _content_hash(row["content"])),
                 )
 
+            links_removed = self._detach_supersessions([row["id"]])
             self._conn.execute("DELETE FROM episodes WHERE id = ?", (episode_id,))
             # 10.5c.5 L4 Fix: batch-aware commit for consistency with
             # record() and the other write-path methods. No current
@@ -2565,6 +2627,7 @@ class Store:
             "episode_id": row["id"],
             "type": row["type"],
             "content_hash": _content_hash(row["content"]),
+            **({"supersession_links_removed": links_removed} if links_removed else {}),
         }, method="delete", committed="the deletion")
 
         return True
@@ -4932,6 +4995,7 @@ class Store:
                     self._prune_behind = False
                 return 0
 
+            links_removed = self._detach_supersessions([row["id"] for row in rows])
             pruned = 0
             for row in rows:
                 if self._keep_tombstones:
@@ -4962,6 +5026,7 @@ class Store:
             self._audit_log_after_commit("prune", {
                 "count": pruned,
                 "older_than_days": days,
+                **({"supersession_links_removed": links_removed} if links_removed else {}),
             }, method="prune", committed="the prune", batch_aware=False)
 
         return pruned
@@ -6287,12 +6352,11 @@ class Store:
         into multiple sub-boundaries fragments the caller-facing
         abstraction and is explicitly NOT the pattern.
 
-        ⚠ ONE EXCEPTION: a VALIDATION REFUSAL must be raised OUTSIDE the
-        boundary, because the boundary rolls back on any exception and inside a
-        caller's ``_batch()`` that discards the batch's earlier writes. So
-        :meth:`record` (with ``supersedes``) computes its refusal inside one
-        block, raises between blocks, and inserts in a second block of the same
-        transaction. Do not merge them back into one block.
+        ⚠ A VALIDATION REFUSAL is raised AFTER the block, never inside it:
+        the boundary rolls back on any exception, and inside a caller's
+        ``_batch()`` that discards the batch's earlier writes (measured while
+        building supersession). :meth:`record` and :meth:`supersede` compute
+        the refusal inside, skip the write, and raise once the block exits.
 
         **Catch scope: ``sqlite3.DatabaseError``, not ``sqlite3.Error``.**
         ``sqlite3.InterfaceError`` (API misuse — wrong arg count, bad

@@ -40,7 +40,9 @@ Zero dependencies beyond Python stdlib.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import errno
+import io
 import json
 import os
 import re
@@ -3075,14 +3077,45 @@ def cmd_crystal_crystallize(args: argparse.Namespace) -> None:
           f"{item['activation_mode']}) {_truncate(item['explanation'], 70)}")
 
 
-def cmd_crystal_get(args: argparse.Namespace) -> None:
-    """Show a single crystallized pattern by name (searches live then retired)."""
-    store = _open_crystal_store(args)
-    item = store.get(args.name)
-    if item is None:
-        print(f"Crystallized pattern {args.name!r} not found.", file=sys.stderr)
-        sys.exit(1)
-    if args.json:
+def _record_pull_label(args: argparse.Namespace, name: str) -> None:
+    """Append one ``followed`` label for a crystal pulled by name, to the outcome
+    log beside the episodic db. A pull is the one production label that is not a
+    guess: the reader asked for this pattern from the index by name.
+
+    Never fails the read and never mints a store id (``mint=False``): a store
+    with no id gets one stderr line and no record. A crystal-only deployment (no
+    episodic db file) skips quietly. Any other failure is one stderr line."""
+    try:
+        db_path = Path(args.db).expanduser()
+        if not db_path.is_file():
+            return
+    except (OSError, ValueError, RuntimeError):
+        return
+    try:
+        refusal = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(refusal):
+                sid = _outcome_store_id(db_path, mint=False)
+        except SystemExit:
+            why = " ".join(refusal.getvalue().split()) or "the store id could not be read"
+            print(f"crystal get: pull not recorded ({why})", file=sys.stderr)
+            return
+        if sid is None:
+            print(
+                "crystal get: pull not recorded (the store has no store id yet; "
+                "a read does not mint one, run 'anneal-memory outcome' once)",
+                file=sys.stderr,
+            )
+            return
+        OutcomeLog(outcome_log_path(db_path), store_id=sid).record(
+            "pull:" + uuid.uuid4().hex, [ExposureLabel("crystal", name, "followed")]
+        )
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        print(f"crystal get: pull not recorded ({exc})", file=sys.stderr)
+
+
+def _print_crystal_item(item: CrystalDict, as_json: bool) -> None:
+    if as_json:
         _print_json(item)
         return
     print(f"{item['name']} ({item.get('level')}x, status={item.get('status')}, "
@@ -3102,6 +3135,22 @@ def cmd_crystal_get(args: argparse.Namespace) -> None:
         print(f"  retired: {ret.get('kind')} on {ret.get('on')}{tail}")
     for note in item.get("notes", []):
         print(f"  note: {note}")
+
+
+def cmd_crystal_get(args: argparse.Namespace) -> None:
+    """Show a single crystallized pattern by name (searches live then retired).
+    A found pattern also records a ``followed`` label (see
+    :func:`_record_pull_label`) unless ``--no-record`` is passed."""
+    store = _open_crystal_store(args)
+    item = store.get(args.name)
+    if item is None:
+        print(f"Crystallized pattern {args.name!r} not found.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        _print_crystal_item(item, args.json)
+    finally:
+        if not args.no_record:
+            _record_pull_label(args, item["name"])
 
 
 def cmd_crystal_index(args: argparse.Namespace) -> None:
@@ -4262,6 +4311,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     cp = crystal_sub.add_parser("get", help="Show a crystallized pattern by name", parents=[json_parent])
     cp.add_argument("name", help="Pattern slug")
+    cp.add_argument("--no-record", action="store_true", dest="no_record",
+                    help="Do not record a 'followed' label for this pull in the outcome log")
     cp.set_defaults(func=cmd_crystal_get)
 
     cp = crystal_sub.add_parser("list", help="List live crystallized patterns", parents=[json_parent])

@@ -414,3 +414,122 @@ def test_released_v1_outcome_records_stay_readable(tmp_path):
     assert latest["x1"]["items"] == [{"kind": "crystal", "ref": "p", "followed": "followed"}]
     assert latest["x2"]["outcome"] == "failure"
     assert latest["x2"]["items"] == [{"kind": "episode", "ref": "e9", "followed": "ignored"}]
+
+
+# -- `crystal get` records a followed label (a pull is the one non-guessed label) --
+
+def _pull_cli(db, *args):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    env = dict(os.environ, PYTHONPATH=str(root))
+    return subprocess.run(
+        [sys.executable, "-m", "anneal_memory.cli", "--db", str(db), *args],
+        capture_output=True, text=True, env=env, timeout=60, cwd=str(root),
+    )
+
+
+def _pull_store(tmp_path, *, with_id=True):
+    db = tmp_path / "mem.db"
+    with Store(db, audit=False) as store:
+        sid = store.store_id
+    assert sid
+    if not with_id:
+        import sqlite3
+
+        conn = sqlite3.connect(str(db))
+        conn.execute("DELETE FROM metadata WHERE key = 'store_id'")
+        conn.commit()
+        conn.close()
+        sid = None
+    CrystalStore(tmp_path / "mem.crystal.json").crystallize(
+        name="derive_dont_invent", level=3, explanation="read the live surface first")
+    return db, sid
+
+
+def _log_lines(db):
+    path = outcome_log_path(db)
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def test_crystal_get_found_pull_writes_one_followed_record(tmp_path):
+    db, sid = _pull_store(tmp_path)
+    got = _pull_cli(db, "crystal", "get", "derive_dont_invent")
+    assert got.returncode == 0, got.stderr
+    assert "derive_dont_invent" in got.stdout and got.stderr == ""
+    (rec,) = _log_lines(db)
+    assert rec["exposure_id"].startswith("pull:") and len(rec["exposure_id"]) == len("pull:") + 32
+    assert rec["items"] == [{"kind": "crystal", "ref": "derive_dont_invent", "followed": "followed"}]
+    assert rec["outcome"] is None and rec["store"] == sid
+    assert "exposed" not in rec
+    # --json prints the item alone on stdout and records too
+    again = _pull_cli(db, "crystal", "get", "derive_dont_invent", "--json")
+    assert again.returncode == 0 and json.loads(again.stdout)["name"] == "derive_dont_invent"
+    assert len(_log_lines(db)) == 2
+
+
+def test_crystal_get_without_an_episodic_db_writes_nothing_and_exits_zero(tmp_path):
+    db = tmp_path / "mem.db"  # never created: a crystal-only deployment
+    CrystalStore(tmp_path / "mem.crystal.json").crystallize(
+        name="derive_dont_invent", level=3, explanation="x")
+    got = _pull_cli(db, "crystal", "get", "derive_dont_invent")
+    assert got.returncode == 0 and "derive_dont_invent" in got.stdout
+    assert got.stderr == ""
+    assert not outcome_log_path(db).exists() and not db.exists()
+    # control: the same command beside a real store does record (a guard that
+    # also holds on a build that never records would prove nothing)
+    with Store(db, audit=False):
+        pass
+    assert _pull_cli(db, "crystal", "get", "derive_dont_invent").returncode == 0
+    assert len(_log_lines(db)) == 1
+
+
+def test_crystal_get_unwritable_log_says_so_on_stderr_and_still_prints(tmp_path):
+    import os
+
+    db, _ = _pull_store(tmp_path)
+    # a directory where the log file belongs: unwritable for every uid
+    outcome_log_path(db).mkdir()
+    got = _pull_cli(db, "crystal", "get", "derive_dont_invent")
+    assert got.returncode == 0, got.stderr
+    assert "derive_dont_invent" in got.stdout
+    assert got.stderr.count("\n") == 1 and "pull not recorded" in got.stderr
+    assert os.path.isdir(outcome_log_path(db))
+
+
+def test_crystal_get_no_record_flag_writes_nothing(tmp_path):
+    db, _ = _pull_store(tmp_path)
+    got = _pull_cli(db, "crystal", "get", "derive_dont_invent", "--no-record")
+    assert got.returncode == 0 and "derive_dont_invent" in got.stdout and got.stderr == ""
+    assert _log_lines(db) == []
+
+
+def test_crystal_get_not_found_writes_nothing_and_keeps_its_exit(tmp_path):
+    db, _ = _pull_store(tmp_path)
+    got = _pull_cli(db, "crystal", "get", "no_such_pattern")
+    assert got.returncode == 1 and "not found" in got.stderr
+    assert _log_lines(db) == []
+    # control: a found name in the same store does record
+    assert _pull_cli(db, "crystal", "get", "derive_dont_invent").returncode == 0
+    assert len(_log_lines(db)) == 1
+
+
+def test_crystal_get_on_a_store_with_no_id_writes_nothing_and_never_mints_one(tmp_path):
+    import sqlite3
+
+    db, _ = _pull_store(tmp_path, with_id=False)
+    got = _pull_cli(db, "crystal", "get", "derive_dont_invent")
+    assert got.returncode == 0 and "derive_dont_invent" in got.stdout
+    assert "no store id" in got.stderr and got.stderr.count("\n") == 1
+    assert _log_lines(db) == []
+    conn = sqlite3.connect(str(db))
+    try:
+        assert conn.execute(
+            "SELECT 1 FROM metadata WHERE key = 'store_id'").fetchone() is None
+    finally:
+        conn.close()

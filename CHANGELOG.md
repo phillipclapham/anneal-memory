@@ -2,6 +2,22 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — `crystal get` records a `followed` label for the pull
+
+- `anneal-memory crystal get NAME` now appends one record to the outcome log beside the episodic
+  db (`<stem>.outcomes.jsonl`) when the pattern is found: exposure id `pull:<uuid4 hex>`, one
+  item `crystal:NAME=followed`, no outcome, stamped with the store's id. A pull by name from the
+  always-loaded cue index is the one production label that is not a guess; `worth` already counts
+  `followed`, so it reports these with no change.
+- The read never fails because of the label. A read command never mints a store id: a store with
+  none gets one stderr line and no record (run `outcome` once to mint it). A crystal-only
+  deployment (no episodic db file) records nothing and says nothing. An unwritable log or a lock
+  error prints one stderr line, exits 0 and still prints the pattern. A name that is not found
+  records nothing and exits as before. A retired pattern that is found counts as a pull.
+- New flag `--no-record` for scripted callers that read patterns without meaning to use them.
+
 ## [0.9.26] — 2026-10-03
 
 ### Removed — the Hebbian hop in pattern recall (BREAKING for code that imports the hop constants)

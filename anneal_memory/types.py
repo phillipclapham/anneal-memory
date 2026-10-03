@@ -329,8 +329,7 @@ class RelevantPattern:
     substring (``structural`` ⊂ ``structural_invariants_beat_discipline``).
 
     ``source`` names WHICH retrieval path surfaced the pattern — the per-pattern
-    provenance a receipt/baseline-isolation consumer needs (the Slice-C gain
-    instrument separates baseline (c) direct-evidence from the graph hop by it):
+    provenance a receipt/baseline-isolation consumer needs:
 
     * ``"keyword"`` — the pattern's OWN text (name/explanation/tags) matched the
       query keywords (:func:`retrieval._score_patterns`). The high-confidence path.

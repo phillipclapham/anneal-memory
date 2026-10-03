@@ -1098,10 +1098,10 @@ episodes CO-CITED in ONE evidence tag (same line, 2+ ids). (Two separate single-
 graduation lines CAN still form a weaker SESSION-level pair across the wrap — but
 rely on same-line co-citation, not that incidental path, and a single-graduation wrap
 forms nothing at all.) Otherwise the graph only decays — every wrap erodes it and
-nothing replenishes it, until the association context a wrap package shows (which
-episodes have been thought about together before) is empty. Pattern recall does not
-read these links: it reaches a pattern through the episodes its evidence cites, so a
-single genuine citation is enough for recall. So, every wrap:
+nothing replenishes it. Pattern recall does not read these links: it reaches a
+pattern through the episodes its evidence cites, so a single genuine citation is
+enough for recall. The links feed the association statistics, the `graph` export and
+the AM-WARN formation check. So, every wrap:
 - **FORM:** co-cite 2+ THIS-session episodes in a graduating pattern's evidence —
   `[evidence: <id1>, <id2> "how BOTH episodes validate the pattern"]`. Cite episodes
   that genuinely co-support the pattern; do not pad with unrelated ids. A single id
@@ -3485,8 +3485,8 @@ def validated_save_continuity(
             f"AM-LINKGATE: {grad_result.validated} graduation(s) validated this wrap "
             f"but no graduation offered a co-citation pair, so 0 Hebbian links formed. "
             f"A single-id citation validates the pattern yet wires NOTHING; the graph "
-            f"then only decays, wrap after wrap, until the wrap package's association "
-            f"context is empty (pattern recall does not read these links). "
+            f"then only decays, wrap after wrap (pattern recall does not read these "
+            f"links; they feed the association statistics and the `graph` export). "
             f"Where more than one this-session episode genuinely supports a graduating "
             f"pattern, co-cite 2+ in its evidence to FORM a link — but do NOT pad with "
             f"unrelated ids; a graduation with a single genuinely-relevant episode is "

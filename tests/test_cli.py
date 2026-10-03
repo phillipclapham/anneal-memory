@@ -3596,7 +3596,7 @@ class TestCrystalIndexAndRecallCLI:
         cmd_crystal_recall(args)
         assert 1 <= len(_json.loads(capsys.readouterr().out)) <= 2
 
-    # -- associative (Hebbian) backend parity (AM-CRYSTAL-RECALL / spore-059) --------
+    # -- associative (evidence-edge) backend parity (AM-CRYSTAL-RECALL / spore-059) --------
     # The cure: a pattern grounded in a keyword-matched EPISODE surfaces even with ZERO
     # query-keyword overlap with its OWN text. CLI default is associative;
     # --no-associative forces keyword-only; an absent episodic db auto-degrades. Mirrors

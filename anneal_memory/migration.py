@@ -332,6 +332,35 @@ MIGRATION_MANIFEST: list[MigrationEntry] = [
         # to SKIP the archive, never to over-reach onto an unlisted file.
         "files": list(CORE_FILES),
     },
+    {
+        "version": "0.9.26",
+        "feature": "AM-HOP-RETIRED",
+        "summary": (
+            "anneal-memory 0.9.26 removes the Hebbian hop from pattern recall. "
+            "`retrieve_relevant`, `crystal recall` and MCP `crystal_recall` now "
+            "reach a crystallized pattern through the evidence edge alone: the "
+            "query matches an episode, and the patterns whose evidence cites that "
+            "episode surface. Hebbian links still form at each wrap from "
+            "co-cited evidence and still decay, but recall no longer reads them; "
+            "they feed the association statistics, the `graph` export and the "
+            "AM-WARN formation check. The 0.8.2 and 0.8.3 entries described "
+            "recall as Hebbian and said single-id citations let the graph decay "
+            "\"until associative recall goes dark\"; that consequence no longer "
+            "holds. A single genuine citation is enough for a pattern to be "
+            "recallable."
+        ),
+        "suggested_edit": (
+            "If your instruction files say recall is Hebbian or associative "
+            "through links, or that co-citing episodes keeps recall alive, "
+            "correct the reason: pattern recall follows the episodes a pattern's "
+            "evidence cites, so cite every episode that genuinely supports the "
+            "pattern, and never pad citations. Co-citation still forms Hebbian "
+            "links, which feed the association statistics and graph export, "
+            "not recall. Leave the co-citation examples themselves in place if "
+            "they teach honest multi-episode evidence."
+        ),
+        "files": list(CORE_FILES),
+    },
 ]
 
 

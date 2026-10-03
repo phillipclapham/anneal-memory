@@ -985,8 +985,8 @@ class Server:
         ``retrieval.py``): a pattern
         grounded in an episode the query matched surfaces even with ZERO query-keyword
         overlap (the keyword-orthogonal miss keyword-only recall cannot reach). It
-        reuses the server's already-open episodic ``self._store`` for the association
-        graph (a read-only ACCESS PATTERN over the server's normal read-write handle —
+        reuses the server's already-open episodic ``self._store`` for the seed
+        episodes (a read-only ACCESS PATTERN over the server's normal read-write handle —
         ``retrieve_relevant`` only READS the store; the store itself is not opened
         read-only). Unlike the CLI (a cold subprocess that may have no db, hence its
         separate ``Store(read_only=True)`` open) the MCP server is the single process
@@ -1083,7 +1083,7 @@ class Server:
         only). A crystal fault (:class:`CrystalError` / file ``OSError``) raised inside
         ``retrieve_relevant`` is NOT caught here — it propagates to the caller's
         fail-closed handler. Only an episodic :class:`StoreError` degrades: the
-        association graph is then unavailable, so fall back to keyword-only
+        seed episodes are then unavailable, so fall back to keyword-only
         :func:`retrieve_patterns` and leave a breadcrumb so a genuinely broken backend
         isn't INVISIBLE (the operator who expected the associative cure but silently
         got keyword-only forever = the invisible_infrastructure_failure shape)."""
@@ -1098,7 +1098,7 @@ class Server:
             ).patterns
         except StoreError as exc:
             logger.warning(
-                "episodic association graph unavailable (%s: %s); "
+                "episodic store unavailable (%s: %s); "
                 "crystal recall degraded to keyword-only.",
                 type(exc).__name__,
                 exc,

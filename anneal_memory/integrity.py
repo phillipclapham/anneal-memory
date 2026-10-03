@@ -430,7 +430,7 @@ TOOLS: list[dict[str, Any]] = [
             "apply — recall surfaces the relevant patterns on cue (pair it with "
             "crystal_index, the always-on menu of what exists). Associative by "
             "default: a pattern grounded in an episode your query matched surfaces "
-            "even with zero keyword overlap (the Hebbian backend). Returns scored "
+            "even with zero keyword overlap (the evidence edge). Returns scored "
             "patterns (name, level, activation, explanation, tags); precision-biased "
             "— a thin query or no match returns none, by design (surface nothing "
             "rather than noise)."

@@ -4,7 +4,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
-### Removed — the Hebbian hop in pattern recall
+### Removed — the Hebbian hop in pattern recall (BREAKING for code that imports the hop constants)
 
 - `retrieve_relevant` (and so `crystal recall`, MCP `crystal_recall` and any harness hook built
   on it) no longer follows the one Hebbian hop from a query's matched episodes to their co-cited
@@ -20,11 +20,17 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   (code that set them to tune the hop should drop those lines). `ASSOC_SCORE_THRESHOLD` stays.
 - `RelevantPattern.source` is now only `"keyword"` or `"evidence_edge"`. `"graph_hop"` stays
   documented because receipts written by 0.9.6 through 0.9.25 carry it.
-- Unchanged: Hebbian links still form at each wrap, decay, and feed the wrap's association
-  context, `associations` stats and AM-WARN. The `associative` parameter keeps its meaning (the
-  evidence edge on or off). On the evidence edge the reach and scores are the same as before.
-- MCP `crystal_recall`'s `associative` description now names the evidence edge, not the Hebbian
-  backend; both `tool-integrity.json` manifests regenerated.
+- Unchanged: Hebbian links still form at each wrap and decay, and feed the `associations` stats,
+  the `graph` export and AM-WARN. The `associative` parameter keeps its meaning (the evidence edge
+  on or off). Recall results are identical wherever no link touched a pattern's evidence (as on
+  the measured store). Where one did, a pattern loses the +0.1 multiplicity bonus a hop-reached
+  evidence episode gave it, and a pattern reachable only through the hop (including one whose
+  directly matched evidence is a hub held below the bar by the evidence-IDF) no longer surfaces.
+- Descriptions that called recall Hebbian are corrected: MCP `crystal_recall`'s tool and
+  `associative` descriptions (both `tool-integrity.json` manifests regenerated), CLI `crystal
+  recall` help and its stderr breadcrumb (now "episodic store unavailable"), the server's log
+  line, and the wrap guidance and AM-LINKGATE text, which said missing links make recall go dark.
+  A 0.9.26 migration entry tells adopters whose instruction files carry that rationale.
 
 ## [0.9.25] — 2026-10-03
 

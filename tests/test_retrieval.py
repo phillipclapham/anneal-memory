@@ -453,7 +453,6 @@ class TestAssociativeRetrieval:
         )
         r = retrieve_relevant(store, crystal, self._QUERY, now=NOW, today=T0)
         assert "memory_is_governance" not in {p.name for p in r.patterns}
-        assert all(p.source != "graph_hop" for p in r.patterns)
         # Control: grounded in the matched seed itself, the same pattern surfaces.
         crystal.crystallize(
             name="memory_is_governance_seeded", level=3,

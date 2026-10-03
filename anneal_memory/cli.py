@@ -3149,7 +3149,7 @@ def cmd_crystal_recall(args: argparse.Namespace) -> None:
     same backend library consumers get from :func:`retrieve_relevant`, so a
     pattern grounded in an episode the query matched surfaces even with zero
     query-keyword overlap (the keyword-orthogonal miss the keyword-only path
-    can't reach). It needs the episodic association graph, so this opens the
+    can't reach). It needs the episodic store (the seed episodes), so this opens the
     episodic db beside the crystal store **read-only** (``Store(read_only=True)``
     — a pure reader that can't contend with a concurrent single-writer wrap).
     When no episodic db is resolvable (a crystal-only deployment) it
@@ -3198,14 +3198,14 @@ def _crystal_recall_associative(
     args: argparse.Namespace, crystal_store: CrystalStore
 ) -> list[RelevantPattern]:
     """Associative crystal recall (the evidence edge) against the episodic store,
-    degrading to keyword-only when the graph isn't reachable.
+    degrading to keyword-only when the episodic store isn't reachable.
 
     Opens the episodic db beside the crystal store as a **read-only** ``Store``
     (no per-call init writes → no contention with a concurrent single-writer wrap)
     and routes to :func:`retrieve_relevant` with ``max_episodes=0`` (patterns only,
     the same ``list[RelevantPattern]`` shape the keyword path returns). When the
     episodic db is absent / unreadable / un-migrated — or an episodic query faults
-    mid-scan — the association graph is unavailable, so this falls back to
+    mid-scan — the seed episodes are unavailable, so this falls back to
     keyword-only :func:`retrieve_patterns`: the associative tier is a best-effort
     augmentation over keyword recall. The crystal store stays the FAIL-CLOSED
     primary — a :class:`CrystalError` (crystal corruption) is NOT caught here and
@@ -3228,8 +3228,8 @@ def _crystal_recall_associative(
                 associative=True,
             ).patterns
     except FileNotFoundError:
-        # No episodic db at all — the EXPECTED crystal-only deployment. The
-        # association graph simply doesn't exist here, so degrade QUIETLY to
+        # No episodic db at all — the EXPECTED crystal-only deployment. There
+        # are no seed episodes here, so degrade QUIETLY to
         # keyword-only: this is a supported configuration, not a fault.
         return retrieve_patterns(
             crystal_store, args.query, max_patterns=args.max_patterns
@@ -3244,7 +3244,7 @@ def _crystal_recall_associative(
         # pristine; the wrapper acts on exit code + stdout, never stderr. Degrade the
         # symptom, surface the cause.
         print(
-            f"anneal: episodic association graph unavailable "
+            f"anneal: episodic store unavailable "
             f"({type(exc).__name__}: {exc}); crystal recall degraded to keyword-only.",
             file=sys.stderr,
         )
@@ -4325,7 +4325,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Retrieve crystallized patterns relevant to a free-text query",
         description="Retrieve crystallized patterns relevant to a free-text query. "
                     "Default backend (0.8.0+): associative recall (the evidence edge) against the "
-                    "episodic association graph (surfaces patterns grounded in a matched "
+                    "episodic store (surfaces patterns grounded in a matched "
                     "episode even with zero keyword overlap), auto-degrading to keyword-only "
                     "when no episodic db is resolvable. Use --no-associative for the "
                     "pre-0.8.0 keyword-only backend.",
@@ -4338,7 +4338,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help=f"Cap on patterns returned (default {MAX_PATTERNS}, precision-biased)")
     cp.add_argument("--no-associative", dest="no_associative", action="store_true",
                     help="Force the pre-0.8.0 keyword-only backend (skip the associative "
-                         "Hebbian pass and the read-only episodic Store open).")
+                         "evidence-edge pass and the read-only episodic Store open).")
     cp.set_defaults(func=cmd_crystal_recall)
 
     cp = crystal_sub.add_parser(

@@ -6872,40 +6872,130 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         "not POSIX-style access bits; a mode-000 file stays readable there, "
         "so this simulation never reaches the code path under test",
     )
-    def test_a_permanently_unreadable_orphan_refuses_writes_until_repair(self, tmp_path, monkeypatch):
-        """HIGH, complement, reproduced 3 of 3 (round 10): round 9 raised the
-        read error out of every ``log()`` with no way out. Round 10's SEAT
-        ruling then let writes continue past the orphan; Phill superseded it
-        2026-10-03. With no usable active file the write is refused, naming
-        the file and the way out, and ``audit-repair`` is that way out: it sets
-        the file aside (never deletes it) and records it, writes resume, and
-        ``verify()`` names the gap.
-
-        ⛔ MUTATION-CHECKED: let repair report "nothing to repair" on a valid
-        manifest, as before, and the write after repair is still refused.
-        """
+    def test_an_unreadable_orphan_refuses_until_access_is_fixed_with_no_gap(
+        self, tmp_path, monkeypatch
+    ):
+        """Phill 2026-10-03, "corrupt-only by default plus the flag": a week
+        that fails only to READ refuses writes, and audit-repair refuses it too,
+        naming the error and the flag, writing nothing. Fixing access resumes
+        writes with no gap: the week is adopted, nothing is set aside."""
         db, orphan = TestFixDiffRound9LoudNotSilent._failed_rotation(tmp_path, monkeypatch, segment=5)
-        original = orphan.read_bytes()
         orphan.chmod(0)
         try:
             with pytest.raises(audit_module._ManifestUnavailable) as refused:
                 AuditTrail(db).log("after", {})
-            assert orphan.name in str(refused.value)
+            assert orphan.name in str(refused.value) and "chmod" in str(refused.value)
+            names_before = sorted(p.name for p in tmp_path.iterdir())
             repair = AuditTrail.repair_manifest(db)
+            assert sorted(p.name for p in tmp_path.iterdir()) == names_before
+        finally:
+            orphan.chmod(0o600)
+        assert repair.repaired is False
+        assert orphan.name in repair.error and "--set-aside-unreadable" in repair.error
+        AuditTrail(db).log("after_chmod", {})
+        result = AuditTrail.verify(db)
+        assert result.valid is True, result.error
+        assert result.set_aside == []
+
+    def test_a_corrupt_orphan_is_set_aside_by_default_and_named_as_a_gap(
+        self, tmp_path, monkeypatch
+    ):
+        """Phill 2026-10-03: a CORRUPT newer week refuses writes, and plain
+        audit-repair sets it aside (never deleted, recorded); writes resume and
+        verify() names the gap."""
+        db, plain = TestFixDiffRound9LoudNotSilent._failed_rotation(tmp_path, monkeypatch, segment=5)
+        # Corrupt = a broken compressed stream (the only thing the reader calls
+        # corrupt): the week sealed as .gz, then truncated to half.
+        orphan = plain.with_name(plain.name + ".gz")
+        packed = gzip.compress(plain.read_bytes())
+        orphan.write_bytes(packed[: len(packed) // 2])
+        plain.unlink()
+        original = orphan.read_bytes()
+        with pytest.raises(audit_module._ManifestUnavailable):
+            AuditTrail(db).log("after", {})
+        repair = AuditTrail.repair_manifest(db)
+        assert repair.repaired is True, repair.error
+        [record] = repair.set_aside
+        assert record["filename"] == orphan.name
+        assert (tmp_path / record["set_aside_as"]).read_bytes() == original
+        AuditTrail(db).log("after_repair", {})
+        result = AuditTrail.verify(db)
+        assert result.valid is True, result.error
+        [line] = audit_module.set_aside_report_lines(result.set_aside, db)
+        assert line.startswith("GAP: ") and record["set_aside_as"] in line
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="chmod 000 does not make a file unreadable on Windows",
+    )
+    def test_the_flag_sets_aside_an_unreadable_orphan(self, tmp_path, monkeypatch):
+        """Phill 2026-10-03: `--set-aside-unreadable` is the explicit opt-in
+        for a week that only fails to read."""
+        db, orphan = TestFixDiffRound9LoudNotSilent._failed_rotation(tmp_path, monkeypatch, segment=5)
+        original = orphan.read_bytes()
+        orphan.chmod(0)
+        try:
+            repair = AuditTrail.repair_manifest(db, set_aside_unreadable=True)
             AuditTrail(db).log("after_repair", {})
-            AuditTrail(db).log("again", {})
             result = AuditTrail.verify(db)
         finally:
             for p in tmp_path.iterdir():
                 if p.name.startswith(orphan.name):
                     p.chmod(0o600)
-
         assert repair.repaired is True, repair.error
         [record] = repair.set_aside
-        assert record["filename"] == orphan.name
         assert (tmp_path / record["set_aside_as"]).read_bytes() == original
         assert result.valid is True, result.error
-        assert [r["set_aside_as"] for r in result.set_aside] == [record["set_aside_as"]]
+        assert [r["filename"] for r in result.set_aside] == [orphan.name]
+
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="chmod 000 does not make a file unreadable on Windows"
+    )
+    def test_the_same_process_cannot_write_past_an_unreadable_newer_week(
+        self, tmp_path, monkeypatch
+    ):
+        """L1 10-03 on a1c88d2 (probe run): the refusal sat only on the seed path.
+        After a failed rotation, the SAME process's next log() took the rotation
+        path, adopted nothing, kept its in-memory hash (the unreadable week's
+        tip) and wrote; after audit-repair set the week aside, verify() was
+        permanently invalid (hash mismatch). Now the rotation path refuses too,
+        and the next call re-seeds instead of trusting the cached hash."""
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        trail.log("a", {})
+        trail._last_week = "1999-W01"
+        trail.log("b", {})
+        for i in range(5):
+            trail.log("seg", {"i": i})
+        trail._last_week = "1999-W02"
+        real_gzip = audit_module.gzip.GzipFile
+
+        def full_disk(*a, **k):
+            handle = real_gzip(*a, **k)
+            handle.write = lambda data: (_ for _ in ()).throw(OSError(28, "No space left"))
+            return handle
+
+        with monkeypatch.context() as m:
+            m.setattr(audit_module.gzip, "GzipFile", full_disk)
+            with pytest.raises(OSError):
+                trail.log("rotation_fails", {})
+        orphan = tmp_path / "m.audit.1999-W02.jsonl"
+        assert orphan.exists()
+        orphan.chmod(0)
+        try:
+            for _ in range(2):  # the refusal holds on the retry too
+                with pytest.raises(audit_module._ManifestUnavailable) as refused:
+                    trail.log("same_process", {})
+                assert orphan.name in str(refused.value)
+            assert AuditTrail.repair_manifest(db, set_aside_unreadable=True).repaired is True
+            trail.log("after_repair", {})
+            result = AuditTrail.verify(db)
+        finally:
+            for p in tmp_path.iterdir():
+                if p.name.startswith(orphan.name):
+                    p.chmod(0o600)
+        assert result.valid is True, result.error
+        assert [r["filename"] for r in result.set_aside] == [orphan.name]
 
     @pytest.mark.parametrize(
         "stall_at", ["after_rename", "after_replace", "before_manifest_save", "after_manifest_save"]
@@ -7128,15 +7218,15 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         "not POSIX-style access bits; a mode-000 file stays readable there, "
         "so this simulation never reaches the code path under test",
     )
-    @pytest.mark.parametrize("rotated_past", [False, True])
     def test_an_orphan_skipped_while_unreadable_is_never_spliced_in_later(
-        self, tmp_path, monkeypatch, rotated_past
+        self, tmp_path, monkeypatch
     ):
         """HIGH, L1 + L2, round 10, reproduced. An orphan unreadable past the
         retries was skipped and writes continued from the sealed tip; once
         readable, the next open appended it after them and ``verify()``
-        reported "Hash mismatch" on every later run. ``rotated_past=True`` is
-        L1's exact repro, with a newer week sealed in between.
+        reported "Hash mismatch" on every later run. (A ``rotated_past`` case
+        here re-ran the same init path, L1 10-03; the rotation path is
+        test_the_same_process_cannot_write_past_an_unreadable_newer_week.)
 
         Round 10's answer (its SEAT ruling: writes continue, the week is never
         adopted) was superseded by Phill 2026-10-03: with no usable active
@@ -7149,10 +7239,6 @@ class TestFixDiffRound10RecoveryNeverDeletes:
             reopened = AuditTrail(db)
             with pytest.raises(audit_module._ManifestUnavailable):
                 reopened.log("while_unreadable", {})
-            if rotated_past:
-                reopened._last_week = "1999-W03"
-                with pytest.raises(audit_module._ManifestUnavailable):
-                    reopened.log("next_week", {})
         finally:
             orphan.chmod(0o600)
 

@@ -67,6 +67,7 @@ from .audit import (
     _signatures_match as _audit_signatures_match,
     _stat_signature as _audit_stat_signature,
     _unmanifested_sealed_names as _unmanifested_audit_names,
+    set_aside_report_lines,
 )
 
 
@@ -1148,13 +1149,8 @@ def cmd_verify(args: argparse.Namespace) -> None:
 
     # A sealed week audit-repair set aside is a recorded gap: printed on both
     # paths, beside the verdict, never folded into it (Phill, 2026-10-03).
-    for record in result.set_aside:
-        print(
-            f"  GAP: {record['filename']} ({record['period']}) was set aside by "
-            f"audit-repair as {record['set_aside_as']} at {record['at']}: "
-            f"{record['cause']}; its entries are not in the verified chain",
-            file=sys.stderr,
-        )
+    for line in set_aside_report_lines(result.set_aside, db_path):
+        print(f"  {line}", file=sys.stderr)
     if result.valid:
         # Ruled by Phill 2026-09-13: a recovered anchor is reported beside
         # ``valid``, on the summary line itself, never folded into it.
@@ -1194,7 +1190,9 @@ def cmd_audit_repair(args: argparse.Namespace) -> None:
     quarantine. Exits 1 when the repair refuses, having written nothing.
     """
     db_path = Path(args.db).expanduser()
-    result = AuditTrail.repair_manifest(db_path)
+    result = AuditTrail.repair_manifest(
+        db_path, set_aside_unreadable=args.set_aside_unreadable
+    )
 
     if args.json:
         _print_json({
@@ -1208,10 +1206,10 @@ def cmd_audit_repair(args: argparse.Namespace) -> None:
     elif result.repaired and result.set_aside and not result.files:
         for record in result.set_aside:
             print(
-                f"Set aside unreadable sealed file {record['filename']} as "
+                f"Set aside sealed file {record['filename']} as "
                 f"{record['set_aside_as']} ({record['cause']}); kept on disk and "
                 "recorded in the manifest. Writes continue past this gap, and "
-                "verify reports it."
+                "verify reports it. It can be renamed back only before the next write."
             )
     elif result.repaired:
         print(f"Audit manifest rebuilt from {len(result.files)} sealed file(s)")
@@ -3761,8 +3759,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = subparsers.add_parser(
         "audit-repair",
         help="Rebuild a quarantined audit manifest from the sealed files, or set aside "
-        "an unreadable or corrupt sealed week (kept on disk, recorded in the manifest)",
+        "a corrupt sealed week (kept on disk, recorded in the manifest)",
         parents=[json_parent],
+    )
+    sub.add_argument(
+        "--set-aside-unreadable", action="store_true",
+        help="also set aside a sealed week that fails only to READ (permissions, I/O); "
+        "by default repair refuses it, since fixing access resumes writes with no gap",
     )
     sub.set_defaults(func=cmd_audit_repair)
 

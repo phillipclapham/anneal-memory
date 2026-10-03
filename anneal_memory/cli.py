@@ -1689,13 +1689,25 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
                     "now. Nothing was changed.",
                     file=sys.stderr,
                 )
+            elif exc.gated_session and exc.gated_session != getattr(args, "session_id", None):
+                # Parity with the MCP handler: a re-run without --wrap-token would
+                # hit the gated refusal, so it is not offered, and no recipe.
+                print(
+                    "Refused: the wrap in progress is NOT the one you named, and "
+                    "another session prepared it under the consolidate gate. "
+                    "Cancelling it discards that session's compression, which is "
+                    "the operator's decision. Nothing was changed.",
+                    file=sys.stderr,
+                )
             else:
                 print(
                     "Refused: the wrap in progress is NOT the one you named, "
                     "so it belongs to a different session and cancelling it "
                     "would destroy its compression. Nothing was changed. Run "
                     "`anneal-memory wrap-status` to see when it started; if it "
-                    "really is abandoned, re-run without --wrap-token.",
+                    "really is abandoned, re-run without --wrap-token"
+                    + (" (keep --session-id)" if exc.gated_session else "")
+                    + ".",
                     file=sys.stderr,
                 )
             sys.exit(1)

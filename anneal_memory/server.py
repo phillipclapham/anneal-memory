@@ -720,12 +720,24 @@ class Server:
                     "was changed — prepare_wrap will start a fresh one.",
                     is_error=True,
                 )
+            if exc.gated_session and exc.gated_session != session_id:
+                # The override below would hit WrapCancelGatedError, so it is not
+                # offered; and, as there, no recipe (Diogenes 10-03, edd780d2e03e).
+                return _tool_result(
+                    "Refused: the wrap in progress is NOT the one you named, and "
+                    "another session prepared it under the consolidate gate. "
+                    "Cancelling it discards that session's compression, which is "
+                    "the operator's decision. Nothing was changed.",
+                    is_error=True,
+                )
             return _tool_result(
                 "Refused: the wrap in progress is NOT the one you named, so it "
                 "belongs to a different session and cancelling it would destroy "
                 "its compression. Nothing was changed. Call `status` to see when "
                 "that wrap started; if it really is abandoned, call wrap_cancel "
-                "again WITHOUT wrap_token to override.",
+                "again WITHOUT wrap_token to override"
+                + (" (keep session_id)" if exc.gated_session else "")
+                + ".",
                 is_error=True,
             )
         except StoreDatabaseError as exc:

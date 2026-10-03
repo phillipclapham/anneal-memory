@@ -2,6 +2,22 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed — a cancel refusal no longer points a gated wrap at a cancel the gate refuses
+
+- A wrong-token cancel of a wrap prepared under the consolidate gate by another session told the
+  caller to cancel again without a token (MCP `wrap_cancel`, CLI `wrap-cancel`, and
+  `WrapOwnershipError`'s own text). 0.9.22 refuses exactly that cancel, so the advice led only to
+  a second refusal. For a gated wrap these texts now say that ending it is that session's or the
+  operator's decision, and carry no recipe, matching `WrapCancelGatedError`. The preparing
+  session (`session_id` / `--session-id`) still gets the override text, which now tells it to
+  keep that session id, since a cancel without it is refused too.
+- `WrapOwnershipError` gains `gated_session`, read under the same lock as the token compare
+  (`None` when the wrap was ungated); it survives pickling.
+- `WrapInProgressError` adds that a plain cancel of another session's gated wrap is refused. The
+  partial-state recovery texts are unchanged: partial state is never gated.
+
 ## [0.9.24] — 2026-10-03
 
 ### Added — compare-and-mutate on `CrystalStore`

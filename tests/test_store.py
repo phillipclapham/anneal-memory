@@ -1687,12 +1687,14 @@ class TestWrapCancelOwnershipCAS:
             WrapOwnershipError(expected="a" * 32, actual="b" * 32),
             WrapOwnershipError(expected="a" * 32, actual=None),
             WrapOwnershipError(expected="a" * 32, actual=None, partial_state=True),
+            WrapOwnershipError(expected="a" * 32, actual="b" * 32, gated_session="holder"),
         ):
             for restored in (pickle.loads(pickle.dumps(exc)), copy.deepcopy(exc)):
                 assert type(restored) is WrapOwnershipError
                 assert restored.expected == exc.expected
                 assert restored.actual == exc.actual
                 assert restored.partial_state == exc.partial_state
+                assert restored.gated_session == exc.gated_session
                 assert str(restored) == str(exc)
 
     def test_a_refusal_does_not_leak_the_write_lock(self, tmp_path):

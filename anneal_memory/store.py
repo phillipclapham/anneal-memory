@@ -735,7 +735,9 @@ class WrapInProgressError(AnnealMemoryError):
         return (
             f"a wrap is already in progress{when}. Either "
             f"{_WRAP_FINISH_PATHS}, or {_WRAP_CANCEL_PATHS}, "
-            "before starting a new wrap."
+            "before starting a new wrap. If another session prepared it under "
+            "the consolidate gate, a plain cancel is refused: ending it is that "
+            "session's or the operator's decision."
         )
 
     def __reduce__(self) -> "tuple[type[WrapInProgressError], tuple[str | None]]":
@@ -805,7 +807,7 @@ def _fsync_dir(path: Path) -> None:
 
 
 def _reconstruct_wrap_ownership_error(
-    expected: str, actual: str | None, partial_state: bool
+    expected: str, actual: str | None, partial_state: bool, gated_session: str | None = None
 ) -> "WrapOwnershipError":
     """Module-level reconstructor for pickling :class:`WrapOwnershipError`.
 
@@ -817,7 +819,8 @@ def _reconstruct_wrap_ownership_error(
     it fails while HANDLING a refusal, which is the worst moment for it.
     """
     return WrapOwnershipError(
-        expected=expected, actual=actual, partial_state=partial_state
+        expected=expected, actual=actual, partial_state=partial_state,
+        gated_session=gated_session,
     )
 
 
@@ -903,11 +906,21 @@ class WrapOwnershipError(AnnealMemoryError):
     """
 
     def __init__(
-        self, *, expected: str, actual: str | None, partial_state: bool = False
+        self,
+        *,
+        expected: str,
+        actual: str | None,
+        partial_state: bool = False,
+        gated_session: str | None = None,
     ) -> None:
         self.expected = expected
         self.actual = actual
         self.partial_state = partial_state
+        # The session that prepared ``actual`` under the consolidate gate, read
+        # under the same lock as the compare; None when ``actual`` is ungated.
+        # A tokenless cancel of a gated wrap raises WrapCancelGatedError, so the
+        # "call without expect_token" override below must not be offered for it.
+        self.gated_session = gated_session
         if partial_state and actual is None:
             super().__init__(
                 f"wrap_cancelled: caller claims wrap {expected!r}, but the store "
@@ -923,6 +936,15 @@ class WrapOwnershipError(AnnealMemoryError):
                 f"was changed. Call without expect_token to clear whatever is "
                 f"current, or treat this as already-done."
             )
+        elif gated_session:
+            # No recipe, as in WrapCancelGatedError: the reader of this refusal is
+            # the caller the gate exists to stop.
+            super().__init__(
+                f"wrap_cancelled: caller claims wrap {expected!r} but the store "
+                f"holds {actual!r}, prepared under the consolidate gate by another "
+                f"session. Cancelling it discards that session's compression, "
+                f"which is the operator's decision. Nothing was changed."
+            )
         else:
             super().__init__(
                 f"wrap_cancelled: caller claims wrap {expected!r} but the store "
@@ -937,7 +959,7 @@ class WrapOwnershipError(AnnealMemoryError):
         # reconstructor rather than the default type(self)(*self.args).
         return (
             _reconstruct_wrap_ownership_error,
-            (self.expected, self.actual, self.partial_state),
+            (self.expected, self.actual, self.partial_state, self.gated_session),
         )
 
 
@@ -3538,6 +3560,7 @@ class Store:
                     expected=expect_token,
                     actual=cancelled_token or None,
                     partial_state=partial_state if had_any else False,
+                    gated_session=(cancelled_gated_raw or None) if complete else None,
                 )
 
             # spore-699 bound: a tokenless cancel may not end a coherent gated wrap

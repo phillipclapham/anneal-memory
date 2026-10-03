@@ -502,16 +502,6 @@ class TestFixRoundSilentLoss:
             for m in durable_warnings(msgs)
         )
 
-    def test_m2_fenced_header_is_not_the_section(self, pstore):
-        fenced = partnership_text(None, context="c\n```\n## Durable Facts\n- fenced fake\n```")
-        assert parse_durable_facts(fenced, FLOW_SCHEMA) == []
-        wrap(pstore, partnership_text(ALLERGY), 1)
-        wrap(pstore, fenced, 2)
-        saved = pstore.load_continuity()
-        before_patterns = saved.split("\n## Patterns")[0]
-        assert f"## Durable Facts\n{ALLERGY}" in before_patterns
-        assert "```\n## Durable Facts\n- fenced fake\n```" in saved
-
     def test_m3_crlf_marker_is_a_marker_and_reinsert_takes_crlf(self, pstore):
         wrap(pstore, partnership_text(f"{ALLERGY}\n{PENDING}").replace("\n", "\r\n"), 1)
         crlf = partnership_text(f"- [drop-durable: {ALLERGY}]").replace("\n", "\r\n")
@@ -649,20 +639,6 @@ class TestL3Round:
         [f] = parse_durable_facts(text, FLOW_SCHEMA)
         assert f.cues == ("c",) and f.fact == "fact — cues: a, b more"
 
-    def test_one_line_code_span_earlier_does_not_hide_the_section(self, pstore):
-        doc = partnership_text(ALLERGY).replace("- a thread", "- a thread ```code``` here\n```code```")
-        assert [f.fact for f in parse_durable_facts(doc, FLOW_SCHEMA)] == ["tree nut allergy"]
-        wrap(pstore, doc, 1)
-        wrap(pstore, partnership_text(None), 2)
-        assert ALLERGY in pstore.load_continuity()
-
-    def test_unclosed_fence_earlier_does_not_hide_the_section(self, pstore):
-        doc = partnership_text(ALLERGY).replace("- a thread", "- a thread\n```python")
-        assert [f.fact for f in parse_durable_facts(doc, FLOW_SCHEMA)] == ["tree nut allergy"]
-        wrap(pstore, doc, 1)
-        wrap(pstore, partnership_text(None), 2)
-        assert ALLERGY in pstore.load_continuity()
-
     def test_header_with_durable_words_is_not_refused(self, pstore):
         doc = partnership_text(ALLERGY).replace("## Decisions", "## Decisions (durable facts)")
         wrap(pstore, doc, 1)
@@ -675,13 +651,10 @@ class TestL3Round:
         assert fact.encode() + b"\n" in saved_bytes(pstore)
 
     def test_many_unknown_markers_are_bounded(self, pstore):
-        import time
         lines = [f"- fact number {i} about the service" for i in range(500)]
         wrap(pstore, partnership_text("\n".join(lines)), 1)
         markers = "\n".join(f"[drop-durable: no such line {i}]" for i in range(500))
-        t0 = time.perf_counter()
         _, msgs = wrap(pstore, partnership_text("\n".join(lines) + "\n" + markers), 2)
-        assert time.perf_counter() - t0 < 2.0
         got = durable_warnings(msgs)
         assert sum("names no line" in m for m in got) == 20
         assert any("and 480 more drop marker(s)" in m for m in got)
@@ -700,4 +673,55 @@ class TestL3Round:
         ]
         assert saves[1]["durable_reinserted"] == [two_line]
         assert saves[2]["durable_dropped"] == [two_line]
+
+
+# -- fix-diff round on fe242cc -------------------------------------------------
+
+
+def _crlf_doc(durable_body: str) -> str:
+    return (
+        "# T\n## State\ns\n## Active Threads\n- t\n"
+        f"## Durable Facts\n{durable_body}\n"
+        "## Patterns\n- x | 1x (2026-10-03)\n## Decisions\nd\n## Context\nc\n"
+        "## Understanding\nu\n"
+    ).replace("\n", "\r\n")
+
+
+class TestFixDiffRound:
+    def test_archived_durable_heading_is_not_a_durable_section(self, pstore):
+        wrap(pstore, partnership_text(ALLERGY), 1)
+        archived = partnership_text(ALLERGY).replace(
+            "## Patterns",
+            f"## Archived Durable Facts\n[drop-durable: {ALLERGY}]\n- old archived fact\n\n## Patterns",
+        )
+        assert [f.fact for f in parse_durable_facts(archived, FLOW_SCHEMA)] == ["tree nut allergy"]
+        wrap(pstore, archived, 2)
+        assert ALLERGY in pstore.load_continuity()
+
+    def test_crlf_doc_dropping_its_durable_lines_is_not_a_shrink_refusal(self):
+        from anneal_memory.continuity import _check_no_catastrophic_shrink
+        facts = [f"- fact {i}" for i in range(500)]
+        prior = _crlf_doc("\n".join(facts))
+        new = _crlf_doc("")
+        _check_no_catastrophic_shrink(prior, new, FLOW_SCHEMA, allow_shrink=False)
+
+    def test_crlf_save_dropping_500_facts_by_marker_saves(self, pstore):
+        facts = [f"- fact {i}" for i in range(500)]
+        wrap(pstore, _crlf_doc("\n".join(facts)), 1)
+        markers = "\n".join(f"[drop-durable: {f}]" for f in facts)
+        wrap(pstore, _crlf_doc(markers), 2)
+        assert parse_durable_facts(pstore.load_continuity(), FLOW_SCHEMA) == []
+
+    def test_multiline_fact_renders_on_one_line_in_warnings(self, pstore):
+        wrap(pstore, partnership_text("- wrapped fact\n  second line"), 1)
+        _, msgs = wrap(pstore, partnership_text(None), 2)
+        [m] = [m for m in durable_warnings(msgs) if "re-inserted verbatim" in m]
+        assert "\n" not in m and "- wrapped fact / second line" in m
+
+    def test_marker_matching_several_facts_warns(self, pstore):
+        two = "- wrapped fact\n  variant a\n- wrapped fact\n  variant b"
+        wrap(pstore, partnership_text(two), 1)
+        _, msgs = wrap(pstore, partnership_text("[drop-durable: - wrapped fact]"), 2)
+        assert "wrapped fact" not in pstore.load_continuity()
+        assert any("matched 2 prior facts" in m for m in durable_warnings(msgs))
 

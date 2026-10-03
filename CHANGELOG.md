@@ -4,6 +4,52 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added — compare-and-mutate on `CrystalStore`
+
+- Every crystal record carries `rev`, an opaque revision token, in what `get`, `list_crystal`,
+  `active`, `surface_rewarm_candidates` and the write methods return, and in the CLI
+  `crystal ... --json` output. It is a digest of the record's content and of whether it is live or
+  retired: computed, never stored, so the file format is unchanged. It ignores telemetry
+  (`crystal.REV_EXCLUDED_FIELDS`), so a `touch` or a surfaced-count fold does not change it.
+- `CrystalStore.crystallize(..., expect=)`, `update(..., expect=)` and `retire(..., expect=)`: a
+  compare-and-mutate under the store's file lock, so it holds across processes. Pass the `rev` you
+  read, or `None` to require that the name not exist. A mismatch raises the new
+  `CrystalConflictError` (a `CrystalError`) carrying the current record, and writes nothing.
+  Leaving `expect` out keeps the previous behaviour. Because `rev` is derived from content, a
+  content change written by an older anneal is also detected.
+- Not provided: a rollback helper. `crystallize` cannot restore a lower level or move a row back
+  into the retired list, so a caller's rollback needs its own locked restore that skips names
+  whose `rev` moved.
+
+### Added — Worth
+
+- `OutcomeLog.record_if_missing()` appends only what an exposure lacks (labels only when it has
+  none, the outcome only when it has none), reading and appending under one hold of the lock
+  `record()` takes (POSIX; without `fcntl` there is no lock). A label written concurrently by
+  another process, e.g. a human `anneal-memory outcome`, is no longer overwritten, as it could be
+  with `latest()` followed by `record()`. It never writes an `exposed`-only record (the shape
+  released readers skip) and returns `None` when nothing was missing.
+- `compute_worth(..., receipts=...)` reports `exposed_unrecorded` per crystal: receipts that
+  exposed it and have no record in the outcome log at all (keyed by `event_id`). Report-only; no
+  log format change. `load_receipts()` reads receipt JSONL; `anneal-memory worth --receipts
+  PATH...` shows it as an `unrec` column. Without receipts the output is unchanged.
+
+### Fixed
+
+- `anneal-memory outcome` and `worth` refuse a `--db` that is not an existing SQLite file (exit 1).
+  They exited 0: `outcome` wrote the labels to an orphan log (creating its directories) and
+  `worth` reported 0 exposures as a clean measurement.
+- `fold_surfaced` / `crystal fold-surfaced` no longer creates `<stem>.crystal.json` on a store
+  that has none. That file's existence is the wrap path's opt-in to the crystal tier, so a fold
+  could silently opt a store in. With no crystal file the fold writes nothing and returns
+  `store_missing=True`, `mark=None`.
+- An outcome record appended after a torn last line (a crash before the newline) was glued onto
+  it, losing both lines. Appends now start a new line, so only the torn line is lost. `record()`
+  now opens the log read-write to check the last byte, so a write-only log refuses.
+- A gated wrap's save refusals named a tokenless `wrap-cancel`, which 0.9.22 refuses for exactly
+  that wrap; they now name the token cancel. The wrap instruction no longer says a
+  `[supersedes:]` marker may go "anywhere": inside a derived-state section it refuses the save.
+
 ### Changed — 0.9.13 follow-ups (spore-1170)
 
 - **`anneal-memory prepare-wrap` exits 3 when the wrap is downgraded**, for any reason the library

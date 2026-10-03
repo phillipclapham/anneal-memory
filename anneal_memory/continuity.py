@@ -998,10 +998,9 @@ Required elements:
   the visible `Nx` is current standing, not a ratchet. The monotonic high-water mark
   is kept by the library (`max_level_reached`), not by this line.
 - For 2x and above: an `[evidence: ... "explanation"]` tag is REQUIRED (the TAG is
-  required, not a particular id count). Include 2+ episode ids when more than one
-  genuinely supports the pattern — co-citation is what FORMS the Hebbian link (see
-  "Wiring the associative graph" below). A single id is fine when only one episode
-  truly applies; do not pad to reach two.
+  required, not a particular id count). Cite every episode that genuinely supports
+  the pattern (see "Linking episodes" below). A single id is fine when only one
+  episode truly applies; do not pad to reach two.
 
 Optional FlowScript prefix. **The marker KINDS are a closed set — `!` (any run), `?`,
 `✓`, `*` — and nothing else is recognised** (a `~` or any other glyph is silently
@@ -1092,28 +1091,17 @@ names so the immune system can protect your patterns.
   shape as an INDENTED line under a pattern — any such line in this section is
   read as a pattern.
 
-### Wiring the associative graph (CO-CITATION — required to form Hebbian links)
-A lone single-id graduation wires no DIRECT link: a direct Hebbian link forms between
-episodes CO-CITED in ONE evidence tag (same line, 2+ ids). (Two separate single-id
-graduation lines CAN still form a weaker SESSION-level pair across the wrap — but
-rely on same-line co-citation, not that incidental path, and a single-graduation wrap
-forms nothing at all.) Otherwise the graph only decays — every wrap erodes it and
-nothing replenishes it. Pattern recall does not read these links: it reaches a
-pattern through the episodes its evidence cites, so a single genuine citation is
-enough for recall. The links feed the association statistics, the `graph` export and
-the AM-WARN formation check. So, every wrap:
-- **FORM:** co-cite 2+ THIS-session episodes in a graduating pattern's evidence —
-  `[evidence: <id1>, <id2> "how BOTH episodes validate the pattern"]`. Cite episodes
-  that genuinely co-support the pattern; do not pad with unrelated ids. A single id
-  is fine when only one episode truly applies — co-cite when more than one does.
-- A wrap that graduates patterns but forms ZERO links (every graduation cited a lone
-  id when pairs were available) is under-wired — the immune system flags it
-  (AM-LINKGATE). NOTE: strengthening EXISTING links against decay is NOT done by
-  re-citing in a wrap — wrapped episodes leave the current-wrap window, so a
-  re-citation dead-ids. A use-driven strengthening counterforce (strengthen the
-  pairs that get co-retrieved) is a separate arc; do not attempt it from the wrap.
+### Linking episodes (co-citation)
+Cite every episode that genuinely supports a pattern: one id is fine, and never pad
+with unrelated ids. When 2+ THIS-session episodes co-support a pattern, citing them in
+ONE evidence tag forms a direct Hebbian link between them (separate single-id lines
+form only a weaker session-level pair). Those links feed the association statistics
+and the `graph` export; pattern recall does not read them (it reaches a pattern
+through the episodes its evidence cites), so a wrap that forms no link is not a
+defect. Re-citing an older episode does not strengthen its links: wrapped episodes
+leave the current-wrap window, so the re-citation dead-ids.
 
-**Example (note the co-citation — two ids per graduation, not one):**
+**Example (the first line has two genuinely supporting episodes, so it cites both):**
 ```
 - acid_compliance_over_speed | 2x ({today}) [evidence: 4931b6a8, 7c2d1e90 "both the migration post-mortem AND the load-test trace chose PostgreSQL for ACID guarantees"]
 - connection_pooling_bottleneck | 1x ({today})
@@ -2044,69 +2032,6 @@ def _check_save_authority(
     )
 
 
-def _check_linkgate(
-    grad_result: Any,
-    formed: int,
-    strengthened: int,
-    *,
-    allow_unlinked: bool,
-) -> bool:
-    """AM-LINKGATE block (spore-721): refuse a save whose graduations offered
-    Hebbian pairs that the association write recorded none of.
-
-    Fires only when ALL hold: at least two pattern lines cited real episodes of
-    this wrap (``all_validated_ids`` entries, which include demoted-grounding
-    and carried lines, since those feed pairs too), those lines offered at
-    least one formable pair (lines that all cite the SAME lone episode offer
-    none, so they pass), and ``formed + strengthened == 0``.
-
-    What it can and cannot see: it re-derives the offered pairs from the same
-    ``grad_result`` the association write reads, so it catches a write that
-    recorded NOTHING it was handed, not a partial loss and not ids that never
-    reached ``all_validated_ids`` (Signal A's job). The one-line exemption is
-    the ruling's (spore-721: a single-graduation wrap never refuses); a single
-    line citing 2+ ids over a dead write path passes here and is warned only
-    by Signal B.
-
-    Fail-closed with a loud escape: only a literal ``allow_unlinked is True``
-    bypasses, the caller warns, and the result carries
-    ``linkgate_overridden``. A save-path gate with no override would make one
-    bad write path an unwritable store.
-
-    Returns True when the escape bypassed a refusal, False when the gate did
-    not apply. Raises ValueError when it refuses.
-    """
-    from .associations import canonical_pair
-    from .graduation import extract_session_co_citations
-
-    pair_capable = sum(1 for ids in grad_result.all_validated_ids if ids)
-    if pair_capable < 2 or formed + strengthened > 0:
-        return False
-    offered = {
-        cp
-        for pair in (
-            set(grad_result.direct_co_citations)
-            | extract_session_co_citations(grad_result.all_validated_ids)
-        )
-        if (cp := canonical_pair(*pair)) is not None
-    }
-    if not offered:
-        return False
-    if allow_unlinked is True:
-        return True
-    raise ValueError(
-        f"AM-LINKGATE refused this save: {pair_capable} pattern lines cited "
-        f"real episodes and offered {len(offered)} co-citation pair(s), but the "
-        f"association write recorded 0. That is a defect in the store's "
-        f"association write path, NOT in the continuity text: rewording or "
-        f"re-saving the same text will not clear it. Nothing was saved and the "
-        f"wrap is still in progress. Report this to the operator. Pass "
-        f"allow_unlinked=True (CLI: --allow-unlinked; MCP: \"allow_unlinked\": "
-        f"true) only with the operator's approval to save with no links "
-        f"recorded; the save result then reports linkgate_overridden."
-    )
-
-
 _SUPERSEDES_RE = re.compile(
     r"\[supersedes:\s*([0-9A-Fa-f]{8})\s+by\s+([0-9A-Fa-f]{8})\s*\]", re.IGNORECASE
 )
@@ -2285,13 +2210,13 @@ def validated_save_continuity(
             intentionally shrinks the neocortex); the override is
             surfaced on the CLI as ``--allow-shrink`` and on the MCP
             ``save_continuity`` tool as ``"allow_shrink": true``.
-        allow_unlinked: Override for the AM-LINKGATE block (spore-721). A
-            wrap in which two or more graduation lines cited real episodes
-            and offered a co-citation pair, yet 0 associations were formed
-            or strengthened, raises ``ValueError`` with nothing saved and
-            the wrap left in progress. Only a literal ``True`` bypasses it,
-            and a bypass emits an ``AM-LINKGATE override`` ``UserWarning``.
-            CLI ``--allow-unlinked``; MCP ``"allow_unlinked": true``.
+        allow_unlinked: DEPRECATED no-op, accepted for compatibility. It
+            overrode the AM-LINKGATE save refusal (spore-721), which was
+            removed in 0.9.26 because pattern recall stopped reading episode
+            links when the Hebbian hop was retired; a write path that records
+            no links is still warned by AM-WARN Signal B. A literal ``True``
+            changes nothing and emits one ``UserWarning`` after the save
+            commits. CLI ``--allow-unlinked``; MCP ``"allow_unlinked": true``.
         compost: pattern names whose concept left the working set this
             wrap. Each is severed (``sever_pattern_concept``: its pattern-graph
             edges deleted, its generation bumped) INSIDE the same transaction
@@ -2352,8 +2277,9 @@ def validated_save_continuity(
           - ``associations_decayed`` (int)
           - ``skipped_non_today`` (int): graduation-format lines whose date
             is not today, which validation skipped
-          - ``linkgate_overridden`` (bool): True when ``allow_unlinked=True``
-            saved a wrap the AM-LINKGATE block would have refused
+          - ``linkgate_overridden`` (bool): always False. Kept for
+            compatibility; the AM-LINKGATE refusal it reported was removed
+            in 0.9.26
           - ``citation_spread`` (int): distinct episode ids (8-char) cited on
             today's 2x-and-up graduation lines that belong to this wrap's
             episodes, INCLUDING lines later demoted. A report, not a check.
@@ -2372,8 +2298,7 @@ def validated_save_continuity(
             session already wrapped), a passed ``wrap_token`` does
             not match the in-progress wrap, or the wrap catastrophically
             collapses a protected memory layer and ``allow_shrink`` is
-            not set, or the AM-LINKGATE block refuses (see
-            ``allow_unlinked``).
+            not set.
         SaveAuthorityError: A ``ValueError`` subclass, raised when the
             consolidate gate refuses the save: the caller is not
             authorized to commit this wrap, or the call omits a
@@ -2839,7 +2764,6 @@ def validated_save_continuity(
     # state awaiting externalization. Cleaning them up would destroy
     # the new content permanently (L1 HIGH + L2 M2 data-loss path).
     db_committed = False
-    linkgate_overridden = False
     composted: dict[str, int] = {}
     still_graduating: list[str] = []
 
@@ -2848,16 +2772,6 @@ def validated_save_continuity(
         with store._batch():
             assoc_formed, assoc_strengthened, assoc_decayed = \
                 process_wrap_associations(store, grad_result, affective_state)
-
-            # AM-LINKGATE block. It runs HERE, inside the batch, because the
-            # counts it reads exist only after the association DML; raising
-            # before the batch commits rolls that DML back, and the outer
-            # except removes the continuity tmp, so a refusal leaves the store
-            # as prepare_wrap left it (asserted by the refusal test).
-            linkgate_overridden = _check_linkgate(
-                grad_result, assoc_formed, assoc_strengthened,
-                allow_unlinked=allow_unlinked,
-            )
 
             if grad_result.validated > 0 or grad_result.citation_counts:
                 meta["citations_seen"] = True
@@ -3369,35 +3283,22 @@ def validated_save_continuity(
         for cf in grad_result.carried_forward
     ]
 
-    # AM-WARN (v0.4.2) + AM-LINKGATE (v0.8.3): detect the dead-Hebbian-graph
-    # mis-wire. THREE signals — but they are NOT all the same kind. (A) and (B)
-    # are STRUCTURAL and false-positive-free: they fire only on a genuine
-    # mis-wire (citations that resolve to nothing / a write path that drops
-    # available pairs). (C) is a DISCIPLINE REMINDER, not a structural alarm — it
-    # has a benign case (a wrap whose graduations each had only ONE genuinely
-    # relevant episode), so it is worded as a nudge, never as a proven defect, and
-    # must not push toward padding. A wrap with NO graduations at all (a pure
-    # state/narrative wrap) stays silent on all three.
+    # AM-WARN (v0.4.2): detect the dead-Hebbian-graph mis-wire. Two STRUCTURAL,
+    # false-positive-free signals; a wrap with NO graduations at all (a pure
+    # state/narrative wrap) stays silent on both.
     #   (A) graduated patterns carried evidence citations but NONE resolved to an
     #       episode in this store (e.g. ids minted in another namespace) -> the
     #       graph cannot form and stays dead. This is the
     #       invisible_infrastructure_failure that ran silent for ~10 wraps.
     #   (B) co-citation pairs WERE available but nothing formed or strengthened
     #       -> the association write path itself is mis-wired.
-    #   (C) AM-LINKGATE: graduations validated and their citations resolved, but
-    #       NO graduation offered a co-citation pair -> 0 links form and the graph
-    #       only decays. v0.4.2 deliberately excused this as "nothing to co-cite =
-    #       healthy"; that excusal HID the dominant under-wiring habit (single-id
-    #       graduation is the minimum that passes the format yet wires nothing).
-    #       But single-id is ALSO correct when only one episode truly supports the
-    #       pattern — so (C) REMINDS the agent to co-cite 2+ when more than one
-    #       episode genuinely applies; it must NOT push toward padding with
-    #       unrelated ids (the anti-pattern the wrap instructions forbid).
-    #       NB (AM-LINKGATE-DECAY, separate arc): (C) catches under-wiring DURING
-    #       graduations; it does NOT address decay BETWEEN them. Links form only on
-    #       graduation, but decay runs every wrap, so a sparse-graduation stretch
-    #       erodes the graph even with perfect co-citation. The use-driven
-    #       strengthening counterforce is owned by that arc, not by this signal.
+    # A third signal, (C) AM-LINKGATE (v0.8.3), warned when graduations validated
+    # but none offered a co-citation pair. It went QUIET in 0.9.26, when the
+    # Hebbian hop was retired and pattern recall stopped reading episode links: a
+    # wrap that forms no link is no longer a recall problem, and single-id
+    # citation is often the honest one. That case now shows only as
+    # ``associations_formed == 0`` and ``associations_strengthened == 0`` in the
+    # save result.
     association_warning: str | None = None
     # AM-CARRYFORWARD (v0.4.6) interaction: a CITED carried-forward line is a
     # graduation that carried a citation which failed to resolve this wrap —
@@ -3466,44 +3367,15 @@ def validated_save_continuity(
             "Co-citation pairs were available this wrap but 0 associations formed "
             "or strengthened — the association write path appears mis-wired."
         )
-    elif (
-        len(episodes) >= 2
-        and grad_result.validated > 0
-        and resolved_any
-        and not cocitation_available
-        and assoc_formed == 0
-        and assoc_strengthened == 0
-    ):
-        # Signal C (AM-LINKGATE): graduations validated + citations resolved, but
-        # NO graduation offered a co-citation pair, so 0 links formed. Gated on
-        # >=2 episodes so a legitimately tiny session (nothing to co-cite WITH) is
-        # not nagged. This is USUALLY single-id under-wiring — but a multi-episode
-        # wrap whose graduations each had only one genuinely relevant episode is a
-        # BENIGN exception, so this is a discipline reminder, not a proven defect.
-        # (assoc_formed/assoc_strengthened == 0 in the guard are DEFENSIVE
-        # INVARIANTS: with `not cocitation_available` the write path has no pair to
-        # form or strengthen, so both are necessarily 0 — kept explicit so the
-        # branch reads as "no links happened" even if a future path could feed
-        # associations without going through the co-citation set.)
-        association_warning = (
-            f"AM-LINKGATE: {grad_result.validated} graduation(s) validated this wrap "
-            f"but no graduation offered a co-citation pair, so 0 Hebbian links formed. "
-            f"A single-id citation validates the pattern yet wires NOTHING; the graph "
-            f"then only decays, wrap after wrap (pattern recall does not read these "
-            f"links; they feed the association statistics and the `graph` export). "
-            f"Where more than one this-session episode genuinely supports a graduating "
-            f"pattern, co-cite 2+ in its evidence to FORM a link — but do NOT pad with "
-            f"unrelated ids; a graduation with a single genuinely-relevant episode is "
-            f"fine."
-        )
     if association_warning is not None:
         _warn_after_commit(association_warning)
-    if linkgate_overridden:
+    if allow_unlinked is True:
+        # After the commit, like every save warning: emitted before it, an
+        # error warnings-filter would turn a no-op flag into a failed save.
         _warn_after_commit(
-            "AM-LINKGATE override: allow_unlinked=True saved a wrap whose "
-            "graduations offered co-citation pairs while 0 Hebbian associations "
-            "were formed or strengthened. The association write path recorded "
-            "nothing; check it before the next wrap."
+            "allow_unlinked is deprecated and does nothing: the AM-LINKGATE save "
+            "refusal it overrode was removed in 0.9.26. Stop passing it "
+            "(CLI --allow-unlinked; MCP \"allow_unlinked\")."
         )
     if still_graduating:
         _warn_after_commit(
@@ -3594,11 +3466,13 @@ def validated_save_continuity(
         cross_session_collisions=cross_session_collisions_payload,
         proven_without_contradicts_declaration=proven_without_declaration_payload,
         carried_forward=carried_forward_payload,
+        # Both 0 on a wrap that graduated patterns is the former AM-WARN
+        # Signal C case, which went quiet in 0.9.26: these counts are its record.
         associations_formed=assoc_formed,
         associations_strengthened=assoc_strengthened,
         associations_decayed=assoc_decayed,
         association_warning=association_warning,
-        linkgate_overridden=linkgate_overridden,
+        linkgate_overridden=False,
         # AM-LINKGATE gauge (spore-721). ``citation_counts`` is filled from
         # ``cited_ids & valid_ids`` on every today-dated graduation line BEFORE
         # the grounding and cross-session checks, so this counts distinct

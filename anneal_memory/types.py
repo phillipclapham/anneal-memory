@@ -708,22 +708,19 @@ class SaveContinuityResult(_SaveContinuityOptional):
     associations_formed: int
     associations_strengthened: int
     associations_decayed: int
-    # AM-WARN (v0.4.2) + AM-LINKGATE (v0.8.3): a human-readable warning when this
-    # wrap's graduations did not wire the Hebbian graph. Three causes (see the
-    # AM-WARN block in continuity.py): (A) cited ids resolved to no episode in
+    # AM-WARN (v0.4.2): a human-readable warning when this wrap's graduations
+    # hit a dead-Hebbian-graph mis-wire: (A) cited ids resolved to no episode in
     # this store (wrong-namespace dead-graph, the invisible_infrastructure_failure
     # that can run silent for months); (B) co-citation pairs were available but
-    # the write path formed/strengthened nothing; (C) AM-LINKGATE discipline
-    # reminder — graduations validated but NO graduation offered a co-citation
-    # pair, so 0 links formed (a single genuinely-relevant episode per graduation
-    # is a benign cause — (C) nudges, it does not assert a defect). ``None`` when
-    # the write path is healthy AND there was nothing under-wired to flag. Also
-    # emitted as a ``UserWarning`` at save time. (Return shape unchanged from
-    # 0.4.2 — only the set of conditions that populate it expanded.)
+    # the write path formed/strengthened nothing. ``None`` otherwise. Also
+    # emitted as a ``UserWarning`` at save time. A third cause, (C) AM-LINKGATE
+    # (graduations validated but none offered a co-citation pair), populated it
+    # from 0.8.3 until 0.9.26, when it went quiet; that case is now visible only
+    # as ``associations_formed == 0`` and ``associations_strengthened == 0``.
     association_warning: str | None
-    # AM-LINKGATE block (spore-721): True when ``allow_unlinked=True`` saved a
-    # wrap the block would have refused. Structured so a transport can show it;
-    # the ``UserWarning`` alone never reaches an MCP client.
+    # Always False. It reported an ``allow_unlinked=True`` bypass of the
+    # AM-LINKGATE save refusal (spore-721); the refusal was removed in 0.9.26
+    # and the key was kept so existing readers of the result do not break.
     linkgate_overridden: bool
     # AM-LINKGATE gauge (spore-721, Phill 2026-09-15 "ship 721 as built with
     # the gauge"): the number of DISTINCT episode ids (8-char prefixes) cited on

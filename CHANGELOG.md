@@ -32,6 +32,28 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   line, and the wrap guidance and AM-LINKGATE text, which said missing links make recall go dark.
   A 0.9.26 migration entry tells adopters whose instruction files carry that rationale.
 
+### Removed — the AM-LINKGATE save refusal
+
+- `validated_save_continuity` no longer refuses a wrap in which two or more pattern lines offered
+  co-citation pairs and the association write formed or strengthened none (added in 0.9.11,
+  `spore-721`). That wrap now saves, and AM-WARN Signal B ("Co-citation pairs were available this
+  wrap but 0 associations formed or strengthened") still warns on it; the refusal's condition was
+  a subset of Signal B's. Why: with the hop retired above, pattern recall no longer reads episode
+  links, and blocking an identity save over a layer recall does not read cost more than it bought.
+- `allow_unlinked` is a deprecated no-op, still accepted on `validated_save_continuity`, CLI
+  `save-continuity --allow-unlinked` and MCP `"allow_unlinked"` so existing callers do not break.
+  A literal `True` emits one `UserWarning` after the save commits saying it does nothing.
+  `linkgate_overridden` stays in the save result and is always `false`; the CLI text line and the
+  MCP result line that printed an override are gone (`--json` keeps the key). The CLI help and the
+  MCP schema description say it is deprecated (both `tool-integrity.json` manifests regenerated).
+- AM-WARN Signal C (AM-LINKGATE: graduations validated but none offered a co-citation pair) is now
+  a quiet stat: it no longer sets `association_warning` or emits a warning. The case stays visible
+  as `associations_formed == 0` and `associations_strengthened == 0`. Signals A and B are unchanged.
+- The wrap guidance no longer presents co-citation as a per-wrap duty. It now says to cite every
+  episode that genuinely supports a pattern (one id is fine, never pad), that co-citing 2+ in one
+  tag forms a Hebbian link, and that those links feed the stats and `graph` export, not recall.
+  The 0.9.26 migration entry says the same for adopters' instruction files.
+
 ## [0.9.25] — 2026-10-03
 
 ### Fixed — a cancel refusal no longer points a gated wrap at a cancel the gate refuses

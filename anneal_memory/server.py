@@ -527,7 +527,8 @@ class Server:
         # must NOT silently disable the gate, so anything that is not
         # literally ``True`` leaves it enabled.
         allow_shrink = args.get("allow_shrink", False) is True
-        # AM-LINKGATE override, same strict-boolean rule as allow_shrink.
+        # Deprecated no-op since 0.9.26: the AM-LINKGATE refusal it overrode
+        # was removed. Still accepted and passed through unchanged.
         allow_unlinked = args.get("allow_unlinked", False) is True
 
         try:
@@ -598,11 +599,6 @@ class Server:
             )
         if result["associations_decayed"]:
             lines.append(f"Associations decayed: {result['associations_decayed']}")
-        if result["linkgate_overridden"]:
-            lines.append(
-                "AM-LINKGATE OVERRIDE: saved with allow_unlinked; the "
-                "association write recorded 0 of the pairs offered."
-            )
         if result["supersessions_recorded"]:
             lines.append(f"Supersessions recorded: {result['supersessions_recorded']}")
         for rej in result["supersessions_rejected"]:

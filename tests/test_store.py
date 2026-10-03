@@ -2506,9 +2506,8 @@ class TestValidatedSaveContinuity:
         prepare_wrap(store)
 
         # Build continuity with a real 2x citation so graduation fires. Co-cite
-        # BOTH episodes (the slow-load observation AND the caching decision) so the
-        # graduation forms a Hebbian link — models correct co-citation and keeps
-        # AM-LINKGATE Signal C silent (a lone-id citation here would nudge).
+        # BOTH episodes (the slow-load observation AND the caching decision), since
+        # both genuinely support it; the graduation then forms a Hebbian link.
         text = (
             f"# Test — Memory (v1)\n\n"
             f"## State\nWorking on performance.\n\n"

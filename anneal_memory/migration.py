@@ -347,7 +347,11 @@ MIGRATION_MANIFEST: list[MigrationEntry] = [
             "recall as Hebbian and said single-id citations let the graph decay "
             "\"until associative recall goes dark\"; that consequence no longer "
             "holds. A single genuine citation is enough for a pattern to be "
-            "recallable."
+            "recallable. 0.9.26 also drops the AM-LINKGATE save refusal: a wrap "
+            "whose offered co-citation pairs recorded no link now saves, and "
+            "AM-WARN Signal B still warns on it; `allow_unlinked` is a deprecated "
+            "no-op, and the AM-WARN Signal C nudge on a wrap that offered no "
+            "pair is quiet. Co-citing on every wrap is no longer required."
         ),
         "suggested_edit": (
             "If your instruction files say recall is Hebbian or associative "
@@ -357,7 +361,10 @@ MIGRATION_MANIFEST: list[MigrationEntry] = [
             "pattern, and never pad citations. Co-citation still forms Hebbian "
             "links, which feed the association statistics and graph export, "
             "not recall. Leave the co-citation examples themselves in place if "
-            "they teach honest multi-episode evidence."
+            "they teach honest multi-episode evidence, but drop any instruction "
+            "to co-cite 2+ episodes on every wrap, any statement that the save "
+            "refuses an unlinked wrap, and any use of `allow_unlinked` / "
+            "`--allow-unlinked`, which now does nothing."
         ),
         "files": list(CORE_FILES),
     },

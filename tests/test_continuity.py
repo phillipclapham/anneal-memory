@@ -441,8 +441,8 @@ class TestTypedDictReturnShapes:
                 # AM-WARN (v0.4.2): dead-Hebbian-graph mis-wire warning
                 # (str) or None when the association write path is healthy.
                 "association_warning",
-                # AM-LINKGATE block (spore-721): True only when
-                # allow_unlinked=True saved a wrap the block would refuse.
+                # Always False since 0.9.26 (the AM-LINKGATE refusal it
+                # reported was removed); kept for compatibility.
                 "linkgate_overridden",
                 # AM-LINKGATE gauge (spore-721): distinct resolved episodes
                 # cited across today's graduation lines. Report only.
@@ -4963,42 +4963,37 @@ class TestAmWarn:
         assert result["association_warning"] is None
         assert result["associations_formed"] == 0
 
-    def test_amlinkgate_warns_on_multiepisode_single_citation(self, tmp_path):
-        # Signal C (AM-LINKGATE): a multi-episode session graduates a pattern but
-        # cites a SINGLE episode -> no co-citation pair offered -> 0 links form.
-        # v0.4.2 excused this as "nothing to co-cite = healthy"; that hid the
-        # dominant under-wiring habit. Signal C surfaces it — but as a DISCIPLINE
-        # REMINDER, not a proven defect (this same shape is the benign lone-genuine-
-        # evidence case when only one episode truly applies). So the warning must
-        # fire AND be worded as a nudge with the no-padding carve-out, never as a
-        # structural defect claim.
+    def test_former_signal_c_case_is_quiet(self, tmp_path):
+        # The former Signal C (AM-LINKGATE) case: a multi-episode wrap graduates a
+        # pattern on a SINGLE citation, so no pair is offered and 0 links form.
+        # Signal C warned on it from 0.8.3; it went quiet in 0.9.26, when pattern
+        # recall stopped reading episode links. The save must warn nothing, and
+        # the fact must stay readable from the association counts.
         text = (
             "## State\nactive.\n\n"
             "## Patterns\n"
-            '- under_wired | 2x (2026-06-02) [evidence: {ep0} '
+            '- single_cited | 2x (2026-06-02) [evidence: {ep0} '
             '"single substrate observation discipline rotation citation"]\n\n'
             "## Decisions\n- d.\n\n"
             "## Context\n- c.\n"
         )
-        with pytest.warns(UserWarning, match="AM-LINKGATE"):
+        import warnings as _w
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter("always")
             result = self._save(tmp_path, text, n_episodes=2)
-        warn = result["association_warning"]
-        assert warn is not None
-        assert "AM-LINKGATE" in warn
-        # Reframed as a nudge: it must carry the no-padding carve-out + the benign
-        # exception, NOT claim the wrap is definitionally broken.
-        low = warn.lower()
-        assert "do not pad" in low
-        assert "single genuinely-relevant episode is fine" in low
-        # And it must NOT teach the unfollowable strengthen-via-wrap guidance.
-        assert "strengthen" not in low
+        assert not [w for w in caught if issubclass(w.category, UserWarning)]
+        assert result["association_warning"] is None
         assert result["associations_formed"] == 0
+        assert result["associations_strengthened"] == 0
         assert result["graduations_validated"] == 1
 
-    def test_prepare_instructions_require_co_citation(self, tmp_path):
-        # The root-cause fix: prepare_wrap's guidance now tells the agent to
-        # co-cite 2+ episodes to FORM a Hebbian link (a single citation wires
-        # nothing) — the instructions used to teach single-id evidence only.
+    def test_prepare_instructions_teach_honest_citation_not_a_linking_duty(
+        self, tmp_path,
+    ):
+        # The guidance taught co-citation as a per-wrap duty until 0.9.26, when
+        # pattern recall stopped reading episode links. It must now say one id is
+        # fine, forbid padding, say how a link forms, and say recall does not read
+        # links, without the old every-wrap instruction.
         from anneal_memory import prepare_wrap
         store = Store(tmp_path / "instr.db", project_name="Instr")
         store.record(
@@ -5008,12 +5003,12 @@ class TestAmWarn:
         pkg = prepare_wrap(store)
         store.close()
         blob = str(pkg).lower()
-        # Assert the SPECIFIC co-citation guidance, not a generic "single"
-        # substring (brittle — "single" appears in unrelated prose). The
-        # instructions must name the FORM mechanism (co-cite 2+) AND the failure
-        # mode (a lone single-id graduation wires no direct link).
-        assert "co-cite 2+" in blob
-        assert "wires no direct link" in blob
+        assert "one id is fine" in blob
+        assert "never pad" in blob
+        assert "forms a direct hebbian link" in blob
+        assert "pattern recall does not read them" in blob
+        assert "every wrap:" not in blob
+        assert "co-cite 2+" not in blob
 
     def test_silent_on_cross_session_demote_with_resolving_ids(self, tmp_path):
         """H1 regression (v0.4.2): when the ONLY graduation in a wrap is
@@ -5077,10 +5072,7 @@ class TestAmWarn:
         each citing one different real episode. Pre-fix, cocitation_available
         only saw same-line multi-id sets, so a dead write path on the session
         pair was invisible. Simulate the mis-wire (record_associations forms
-        nothing) and assert Signal B now fires.
-
-        Two lines is exactly the shape the AM-LINKGATE block refuses, so the
-        save passes the escape to reach the warning this test is about."""
+        nothing) and assert Signal B now fires."""
         monkeypatch.setattr(Store, "record_associations",
                             lambda self, *a, **k: (0, 0))
         text = (
@@ -5092,20 +5084,15 @@ class TestAmWarn:
             "## Decisions\n- d.\n\n## Context\n- c.\n"
         )
         with pytest.warns(UserWarning, match="Co-citation pairs were available"):
-            result = self._save(tmp_path, text, n_episodes=2, allow_unlinked=True)
+            result = self._save(tmp_path, text, n_episodes=2)
         assert result["association_warning"] is not None
         assert "mis-wired" in result["association_warning"]
         assert result["associations_formed"] == 0
 
-    def test_amlinkgate_silent_on_cross_line_session_pair(self, tmp_path):
-        # C-vs-B boundary lock: two graduations each cite ONE different real
-        # episode. That is NOT under-wiring — the two single-id lines form a
-        # CROSS-LINE SESSION pair (ep0, ep1), so a real Hebbian link forms.
-        # cocitation_available is True (via the session pair), so Signal C's
-        # `not cocitation_available` guard excludes it; Signal B stays silent
-        # because the link DID form. No warning — single-id-per-line is fine when
-        # the lines co-form a pair. (Without this lock, a future regression could
-        # let C misfire on the exact case B already covers.)
+    def test_silent_on_cross_line_session_pair(self, tmp_path):
+        # Two graduations each cite ONE different real episode: the two
+        # single-id lines form a CROSS-LINE SESSION pair (ep0, ep1), so a real
+        # Hebbian link forms and Signal B stays silent. No warning.
         text = (
             "## State\nactive.\n\n## Patterns\n"
             '- pattern_a | 2x (2026-06-02) [evidence: {ep0} '
@@ -5116,7 +5103,7 @@ class TestAmWarn:
         )
         import warnings as _w
         with _w.catch_warnings(record=True) as caught:
-            _w.simplefilter("always")  # any AM-WARN/AM-LINKGATE warning is recorded
+            _w.simplefilter("always")  # any AM-WARN warning is recorded
             result = self._save(tmp_path, text, n_episodes=2)
         assert not [w for w in caught if issubclass(w.category, UserWarning)]
         assert result["association_warning"] is None
@@ -5154,11 +5141,14 @@ def test_a_post_commit_warning_under_an_error_filter_does_not_fail_a_committed_s
             _w.simplefilter("error")
             result = validated_save_continuity(
                 store, text, today="2026-06-02", wrap_token=token,
+                allow_unlinked=True,
             )
-        assert result["association_warning"] is not None  # Signal C fired
+        assert result["linkgate_overridden"] is False
         assert "- solo |" in (store.load_continuity() or "")
         assert store.load_wrap_snapshot() is None
-        assert any("AM-LINKGATE" in r.getMessage() for r in caplog.records)
+        assert any(
+            "allow_unlinked is deprecated" in r.getMessage() for r in caplog.records
+        )
 
         # The fallback channel can fail too (codex HIGH, re-pass
         # fcf7898398164324): a handler whose emit() raises must not turn the
@@ -5186,6 +5176,7 @@ def test_a_post_commit_warning_under_an_error_filter_does_not_fail_a_committed_s
                 _w.simplefilter("error")
                 validated_save_continuity(
                     store, text_broken, today="2026-06-02", wrap_token=token,
+                    allow_unlinked=True,
                 )
             assert "- solo_broken |" in (store.load_continuity() or "")
             assert store.load_wrap_snapshot() is None
@@ -5193,7 +5184,6 @@ def test_a_post_commit_warning_under_an_error_filter_does_not_fail_a_committed_s
             continuity_log.removeHandler(broken)
 
         # Not swallowed: under a normal filter the same warning is still emitted.
-        # Signal C needs >= 2 episodes in the wrap, so record two and cite one.
         new_ids = [
             store.record(
                 f"substrate observation about discipline rotation memory topic {i}",
@@ -5203,9 +5193,10 @@ def test_a_post_commit_warning_under_an_error_filter_does_not_fail_a_committed_s
         ]
         token = prepare_wrap(store)["wrap_token"]
         text2 = text.replace(ids[0], new_ids[0]).replace("- solo |", "- solo_two |")
-        with pytest.warns(UserWarning, match="AM-LINKGATE"):
+        with pytest.warns(UserWarning, match="allow_unlinked is deprecated"):
             validated_save_continuity(
                 store, text2, today="2026-06-02", wrap_token=token,
+                allow_unlinked=True,
             )
     finally:
         store.close()
@@ -5279,12 +5270,14 @@ def test_citation_spread_counts_distinct_cited_episodes(
         store.close()
 
 
-class TestAmLinkgateBlock:
-    """AM-LINKGATE block (spore-721, ruled BUILD by Phill 2026-09-04): a save
-    refuses when >= 2 graduation lines cited real episodes, offered a pair, and
-    0 associations were formed or strengthened; ``allow_unlinked`` saves anyway.
-    Zero associations with a pair offered is only reachable through a write path
-    that recorded nothing, so every refusal here injects that mis-wire."""
+class TestAmLinkgateRemoved:
+    """The AM-LINKGATE save refusal (spore-721) refused a wrap when >= 2
+    graduation lines cited real episodes, offered a pair, and 0 associations
+    were formed or strengthened. It was removed in 0.9.26, after pattern recall
+    stopped reading episode links: that wrap now saves and AM-WARN Signal B
+    warns, and ``allow_unlinked`` is a deprecated no-op. Zero associations with
+    a pair offered is only reachable through a write path that recorded
+    nothing, so these tests inject that mis-wire."""
 
     TODAY = "2026-06-02"
     TWO_LINES = (
@@ -5319,9 +5312,7 @@ class TestAmLinkgateBlock:
         monkeypatch.setattr(Store, "record_associations",
                             lambda self, *a, **k: (0, 0))
 
-    def test_predicate_boundary_one_line_passes_two_lines_refuse(
-        self, tmp_path, miswired,
-    ):
+    def test_former_refusal_saves_and_signal_b_warns(self, tmp_path, miswired):
         from anneal_memory import validated_save_continuity
         import warnings as _w
         one_line = (
@@ -5331,95 +5322,71 @@ class TestAmLinkgateBlock:
             "## Decisions\n- d.\n\n## Context\n- c.\n"
         )
         same_lone_episode = self.TWO_LINES.replace("{ep1}", "{ep0}")
-        for name, template in (("one", one_line), ("same", same_lone_episode)):
+        # (shape, does it offer a pair, so Signal B fires on the mis-wire)
+        for name, template, offers_pair in (
+            ("two", self.TWO_LINES, True),
+            ("one", one_line, True),
+            ("same", same_lone_episode, False),
+        ):
             store, ids, token = self._prepared(tmp_path / name)
             try:
-                with _w.catch_warnings():
-                    _w.simplefilter("ignore")
+                with _w.catch_warnings(record=True) as caught:
+                    _w.simplefilter("always")
                     result = validated_save_continuity(
                         store, self._render(template, ids),
                         today=self.TODAY, wrap_token=token,
                     )
+                b_warned = [
+                    w for w in caught
+                    if "Co-citation pairs were available" in str(w.message)
+                ]
+                assert bool(b_warned) is offers_pair, name
+                assert (result["association_warning"] is not None) is offers_pair, name
                 assert result["associations_formed"] == 0, name
+                assert result["linkgate_overridden"] is False, name
+                assert "- pattern_a |" in (store.load_continuity() or ""), name
+                assert store.load_wrap_snapshot() is None, name
             finally:
                 store.close()
 
-        store, ids, token = self._prepared(tmp_path / "two")
-        try:
-            with pytest.raises(ValueError, match="AM-LINKGATE refused"):
-                validated_save_continuity(
-                    store, self._render(self.TWO_LINES, ids),
-                    today=self.TODAY, wrap_token=token,
-                )
-        finally:
-            store.close()
-
-    def test_refusal_saves_nothing_and_leaves_the_wrap_in_progress(
-        self, tmp_path, miswired,
-    ):
+    def test_allow_unlinked_is_a_deprecated_no_op(self, tmp_path, miswired):
         from anneal_memory import validated_save_continuity
-        from anneal_memory.associations import record_associations as raw_record
-        store, ids, token = self._prepared(tmp_path, n_episodes=3)
-        try:
-            # A link this wrap does NOT offer, so the batch's decay would
-            # weaken it; seen unchanged afterwards only if the batch rolled back.
-            raw_record(store._conn, {(ids[1][:8].lower(), ids[2][:8].lower())},
-                       set(), "2026-06-01T00:00:00.000000Z")
-            def strengths():
-                return [tuple(row) for row in store._conn.execute(
-                    "SELECT episode_a, episode_b, strength FROM associations"
-                ).fetchall()]
-            links_before = strengths()
-            assert links_before
-            audit_file = tmp_path / "linkgate.audit.jsonl"
-            assert audit_file.exists()
-            audit_lines_before = audit_file.read_text().count("\n")
-            before = store.load_continuity()
-            sessions_before = store.load_meta().get("sessions_produced", 0)
-            with pytest.raises(ValueError) as exc:
-                validated_save_continuity(
-                    store, self._render(self.TWO_LINES, ids),
-                    today=self.TODAY, wrap_token=token,
-                )
-            message = str(exc.value)
-            assert "allow_unlinked=True" in message
-            assert "--allow-unlinked" in message
-            assert '"allow_unlinked": true' in message
-            assert strengths() == links_before
-            assert audit_file.read_text().count("\n") == audit_lines_before
-            assert store.load_continuity() == before
-            assert store.load_meta().get("sessions_produced", 0) == sessions_before
-            snapshot = store.load_wrap_snapshot()
-            assert snapshot is not None and snapshot["token"] == token
-            assert not list(tmp_path.glob("*.tmp*"))
-        finally:
-            store.close()
-
-    def test_escape_saves_the_refused_wrap_and_warns(self, tmp_path, miswired):
-        from anneal_memory import validated_save_continuity
+        import warnings as _w
         store, ids, token = self._prepared(tmp_path)
-        text = self._render(self.TWO_LINES, ids)
         try:
-            with pytest.raises(ValueError, match="AM-LINKGATE refused"):
-                validated_save_continuity(
-                    store, text, today=self.TODAY, wrap_token=token,
-                )
-            for not_true in ("true", 1):
-                with pytest.raises(ValueError, match="AM-LINKGATE refused"):
-                    validated_save_continuity(
-                        store, text, today=self.TODAY, wrap_token=token,
-                        allow_unlinked=not_true,
-                    )
-            with pytest.warns(UserWarning, match="AM-LINKGATE override"):
+            with pytest.warns(UserWarning) as caught:
                 result = validated_save_continuity(
-                    store, text, today=self.TODAY, wrap_token=token,
-                    allow_unlinked=True,
+                    store, self._render(self.TWO_LINES, ids),
+                    today=self.TODAY, wrap_token=token, allow_unlinked=True,
                 )
+            notes = [
+                str(w.message) for w in caught
+                if "allow_unlinked is deprecated" in str(w.message)
+            ]
+            assert len(notes) == 1
+            assert "removed in 0.9.26" in notes[0]
+            assert result["linkgate_overridden"] is False
             assert result["graduations_validated"] == 2
-            assert result["linkgate_overridden"] is True
             assert store.load_wrap_snapshot() is None
         finally:
             store.close()
+        # Only a literal True emits the note, as only a literal True bypassed.
+        for i, not_true in enumerate(("true", 1, False)):
+            store, ids, token = self._prepared(tmp_path / f"not_true_{i}")
+            try:
+                with _w.catch_warnings(record=True) as caught:
+                    _w.simplefilter("always")
+                    validated_save_continuity(
+                        store, self._render(self.TWO_LINES, ids),
+                        today=self.TODAY, wrap_token=token,
+                        allow_unlinked=not_true,
+                    )
+                assert not [
+                    w for w in caught
+                    if "allow_unlinked is deprecated" in str(w.message)
+                ], not_true
+            finally:
+                store.close()
 
 
 class TestBulletlessUpsertIntegration:

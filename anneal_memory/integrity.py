@@ -274,15 +274,9 @@ TOOLS: list[dict[str, Any]] = [
                 "allow_unlinked": {
                     "type": "boolean",
                     "description": (
-                        "Optional (default false): override the AM-LINKGATE "
-                        "block. By default a wrap whose graduation lines "
-                        "offered co-citation pairs while 0 Hebbian "
-                        "associations were formed or strengthened is refused, "
-                        "nothing is saved, and the wrap stays in progress. "
-                        "That refusal means the store's association write "
-                        "path is broken, not your text. Set true ONLY with "
-                        "the operator's approval; the save result then "
-                        "reports the override."
+                        "Deprecated, does nothing: it overrode the "
+                        "AM-LINKGATE save refusal, which was removed in "
+                        "0.9.26. Omit it."
                     ),
                 },
             },

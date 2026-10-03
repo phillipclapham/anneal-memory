@@ -10,13 +10,20 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   caller to cancel again without a token (MCP `wrap_cancel`, CLI `wrap-cancel`, and
   `WrapOwnershipError`'s own text). 0.9.22 refuses exactly that cancel, so the advice led only to
   a second refusal. For a gated wrap these texts now say that ending it is that session's or the
-  operator's decision, and carry no recipe, matching `WrapCancelGatedError`. The preparing
-  session (`session_id` / `--session-id`) still gets the override text, which now tells it to
-  keep that session id, since a cancel without it is refused too.
-- `WrapOwnershipError` gains `gated_session`, read under the same lock as the token compare
-  (`None` when the wrap was ungated); it survives pickling.
-- `WrapInProgressError` adds that a plain cancel of another session's gated wrap is refused. The
-  partial-state recovery texts are unchanged: partial state is never gated.
+  operator's decision and point at `status` / `wrap-status`, with no recipe, matching
+  `WrapCancelGatedError`. When the caller IS the preparing session (`session_id` /
+  `--session-id`), every surface, the library included, says the wrap is a different one under
+  its own session and that a cancel without the token, keeping the session id, ends it.
+- `WrapOwnershipError` gains `gated_session` (read under the same lock as the token compare;
+  `None` when the wrap was ungated) and `session_id` (the caller's); both survive pickling.
+- `WrapInProgressError` adds that a wrap prepared under the consolidate gate is the preparing
+  session's or the operator's to end, and that a plain cancel of it is refused.
+- Three corruption errors that can fire on a complete gated wrap (an unreadable frozen section
+  schema, a pre-snapshot wrap with none, an unreadable frozen re-derive root map) said to run a
+  plain `wrap-cancel`; they now name the token cancel. The partial-state recovery texts are
+  unchanged: partial state is never gated.
+- The bundled skill (`skill/anneal-memory/SKILL.md`) no longer says a plain cancel clears a wrap
+  you did not open when that wrap is gated.
 
 ## [0.9.24] — 2026-10-03
 

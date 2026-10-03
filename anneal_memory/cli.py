@@ -1689,14 +1689,24 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
                     "now. Nothing was changed.",
                     file=sys.stderr,
                 )
-            elif exc.gated_session and exc.gated_session != getattr(args, "session_id", None):
+            elif exc.gated_session and exc.gated_session != exc.session_id:
                 # Parity with the MCP handler: a re-run without --wrap-token would
                 # hit the gated refusal, so it is not offered, and no recipe.
                 print(
                     "Refused: the wrap in progress is NOT the one you named, and "
                     "another session prepared it under the consolidate gate. "
                     "Cancelling it discards that session's compression, which is "
-                    "the operator's decision. Nothing was changed.",
+                    "the operator's decision. Nothing was changed. Run "
+                    "`anneal-memory wrap-status` to see when it started.",
+                    file=sys.stderr,
+                )
+            elif exc.gated_session:
+                print(
+                    "Refused: the wrap in progress is NOT the one you named; it is "
+                    "a different wrap prepared under your own session. Nothing was "
+                    "changed. Run `anneal-memory wrap-status` to see when it "
+                    "started; to end it, re-run without --wrap-token, keeping "
+                    "--session-id.",
                     file=sys.stderr,
                 )
             else:
@@ -1705,9 +1715,7 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
                     "so it belongs to a different session and cancelling it "
                     "would destroy its compression. Nothing was changed. Run "
                     "`anneal-memory wrap-status` to see when it started; if it "
-                    "really is abandoned, re-run without --wrap-token"
-                    + (" (keep --session-id)" if exc.gated_session else "")
-                    + ".",
+                    "really is abandoned, re-run without --wrap-token.",
                     file=sys.stderr,
                 )
             sys.exit(1)

@@ -727,7 +727,16 @@ class Server:
                     "Refused: the wrap in progress is NOT the one you named, and "
                     "another session prepared it under the consolidate gate. "
                     "Cancelling it discards that session's compression, which is "
-                    "the operator's decision. Nothing was changed.",
+                    "the operator's decision. Nothing was changed. Call `status` "
+                    "to see when that wrap started.",
+                    is_error=True,
+                )
+            if exc.gated_session:
+                return _tool_result(
+                    "Refused: the wrap in progress is NOT the one you named; it is "
+                    "a different wrap prepared under your own session. Nothing was "
+                    "changed. Call `status` to see when it started; to end it, call "
+                    "wrap_cancel again WITHOUT wrap_token, keeping session_id.",
                     is_error=True,
                 )
             return _tool_result(
@@ -735,9 +744,7 @@ class Server:
                 "belongs to a different session and cancelling it would destroy "
                 "its compression. Nothing was changed. Call `status` to see when "
                 "that wrap started; if it really is abandoned, call wrap_cancel "
-                "again WITHOUT wrap_token to override"
-                + (" (keep session_id)" if exc.gated_session else "")
-                + ".",
+                "again WITHOUT wrap_token to override.",
                 is_error=True,
             )
         except StoreDatabaseError as exc:

@@ -100,16 +100,28 @@ def test_a_mismatch_refusal_never_offers_an_override_the_gate_refuses(tmp_path):
         store.wrap_cancelled(expect_token=wrong)
     assert exc.value.gated_session == "holder"
     assert "without expect_token" not in str(exc.value)
+    # The library holder gets the override, as MCP and CLI do (L2, 1003+16).
+    with pytest.raises(WrapOwnershipError) as own:
+        store.wrap_cancelled(expect_token=wrong, session_id="holder")
+    assert "without expect_token, keeping session_id" in str(own.value)
+    assert "another session" not in str(own.value)
+    clone = pickle.loads(pickle.dumps(own.value))
+    assert (clone.session_id, clone.gated_session, str(clone)) == ("holder", "holder", str(own.value))
+
     with pytest.raises(WrapInProgressError) as wip:
         store.wrap_started(token="1" * 32, episode_ids=[])
-    assert "consolidate gate" in str(wip.value)
+    assert "a plain cancel of it is refused" in str(wip.value)
+    with pytest.raises(WrapCancelGatedError):  # true for the holder's own plain cancel too
+        store.wrap_cancelled()
 
     server = Server(store)
     text = server._tool_wrap_cancel({"wrap_token": wrong})["content"][0]["text"]
     assert "WITHOUT wrap_token" not in text and "operator's decision" in text
     # The holder's own mismatch still gets the override, and it works for the holder.
     held = server._tool_wrap_cancel({"wrap_token": wrong, "session_id": "holder"})
-    assert "WITHOUT wrap_token to override (keep session_id)" in held["content"][0]["text"]
+    held_text = held["content"][0]["text"]
+    assert "WITHOUT wrap_token, keeping session_id" in held_text
+    assert "different session" not in held_text
     store.close()
 
     import os
@@ -128,7 +140,9 @@ def test_a_mismatch_refusal_never_offers_an_override_the_gate_refuses(tmp_path):
     assert out.returncode == 1
     assert "without --wrap-token" not in out.stderr and "operator's decision" in out.stderr
     out = run("--wrap-token", wrong, "--session-id", "holder")
-    assert "re-run without --wrap-token (keep --session-id)" in out.stderr
+    assert "re-run without --wrap-token, keeping --session-id" in out.stderr
     out = run("--session-id", "holder")
     assert out.returncode == 0, out.stderr
-    assert Store(db).wrap_gated_session() is None
+    after = Store(db)
+    assert after.wrap_gated_session() is None
+    after.close()

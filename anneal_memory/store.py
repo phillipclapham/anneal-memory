@@ -735,9 +735,9 @@ class WrapInProgressError(AnnealMemoryError):
         return (
             f"a wrap is already in progress{when}. Either "
             f"{_WRAP_FINISH_PATHS}, or {_WRAP_CANCEL_PATHS}, "
-            "before starting a new wrap. If another session prepared it under "
-            "the consolidate gate, a plain cancel is refused: ending it is that "
-            "session's or the operator's decision."
+            "before starting a new wrap. A wrap prepared under the consolidate "
+            "gate is the preparing session's or the operator's to end; a plain "
+            "cancel of it is refused."
         )
 
     def __reduce__(self) -> "tuple[type[WrapInProgressError], tuple[str | None]]":
@@ -807,7 +807,11 @@ def _fsync_dir(path: Path) -> None:
 
 
 def _reconstruct_wrap_ownership_error(
-    expected: str, actual: str | None, partial_state: bool, gated_session: str | None = None
+    expected: str,
+    actual: str | None,
+    partial_state: bool,
+    gated_session: str | None = None,
+    session_id: str | None = None,
 ) -> "WrapOwnershipError":
     """Module-level reconstructor for pickling :class:`WrapOwnershipError`.
 
@@ -820,7 +824,7 @@ def _reconstruct_wrap_ownership_error(
     """
     return WrapOwnershipError(
         expected=expected, actual=actual, partial_state=partial_state,
-        gated_session=gated_session,
+        gated_session=gated_session, session_id=session_id,
     )
 
 
@@ -912,15 +916,21 @@ class WrapOwnershipError(AnnealMemoryError):
         actual: str | None,
         partial_state: bool = False,
         gated_session: str | None = None,
+        session_id: str | None = None,
     ) -> None:
         self.expected = expected
         self.actual = actual
         self.partial_state = partial_state
         # The session that prepared ``actual`` under the consolidate gate, read
         # under the same lock as the compare; None when ``actual`` is ungated.
-        # A tokenless cancel of a gated wrap raises WrapCancelGatedError, so the
-        # "call without expect_token" override below must not be offered for it.
+        # ``session_id`` is the caller's. A tokenless cancel of a gated wrap by
+        # anyone but that session raises WrapCancelGatedError, so the override
+        # below is offered to the preparing session only, with its session id.
+        # ``gated_session`` names the session a cancel would need; that is no new
+        # exposure (WrapCancelGatedError and wrap-status carry it): the bound is
+        # anti-reflex, not anti-adversary, and only the TEXT withholds the recipe.
         self.gated_session = gated_session
+        self.session_id = session_id
         if partial_state and actual is None:
             super().__init__(
                 f"wrap_cancelled: caller claims wrap {expected!r}, but the store "
@@ -936,14 +946,23 @@ class WrapOwnershipError(AnnealMemoryError):
                 f"was changed. Call without expect_token to clear whatever is "
                 f"current, or treat this as already-done."
             )
-        elif gated_session:
+        elif gated_session and gated_session != session_id:
             # No recipe, as in WrapCancelGatedError: the reader of this refusal is
-            # the caller the gate exists to stop.
+            # the caller the gate exists to stop. The status pointer is not one.
             super().__init__(
                 f"wrap_cancelled: caller claims wrap {expected!r} but the store "
                 f"holds {actual!r}, prepared under the consolidate gate by another "
                 f"session. Cancelling it discards that session's compression, "
-                f"which is the operator's decision. Nothing was changed."
+                f"which is the operator's decision. Nothing was changed. Check "
+                f"`status` for its start time."
+            )
+        elif gated_session:
+            super().__init__(
+                f"wrap_cancelled: caller claims wrap {expected!r} but the store "
+                f"holds {actual!r}, a different wrap prepared under the caller's "
+                f"own session {session_id!r}. Nothing was changed. Check `status` "
+                f"for its start time; call without expect_token, keeping "
+                f"session_id, only if you mean to end it."
             )
         else:
             super().__init__(
@@ -959,7 +978,13 @@ class WrapOwnershipError(AnnealMemoryError):
         # reconstructor rather than the default type(self)(*self.args).
         return (
             _reconstruct_wrap_ownership_error,
-            (self.expected, self.actual, self.partial_state, self.gated_session),
+            (
+                self.expected,
+                self.actual,
+                self.partial_state,
+                self.gated_session,
+                self.session_id,
+            ),
         )
 
 
@@ -3561,6 +3586,7 @@ class Store:
                     actual=cancelled_token or None,
                     partial_state=partial_state if had_any else False,
                     gated_session=(cancelled_gated_raw or None) if complete else None,
+                    session_id=session_id,
                 )
 
             # spore-699 bound: a tokenless cancel may not end a coherent gated wrap
@@ -3772,7 +3798,8 @@ class Store:
         except (ValueError, TypeError, RecursionError) as exc:
             raise StoreError(
                 "The re-derive root map frozen by the wrap in progress is unreadable. "
-                f"Run wrap-cancel and re-run prepare_wrap. ({exc})",
+                f"Cancel it with its token (wrap-cancel --wrap-token; a gated wrap "
+                f"refuses a plain cancel) and re-run prepare_wrap. ({exc})",
                 operation="wrap_derive_roots",
                 path=str(self.path),
             ) from exc
@@ -5468,8 +5495,9 @@ class Store:
             raise StoreError(
                 "Wrap in progress predates AM-SCHEMASNAPSHOT (no frozen section "
                 "schema): refusing to fall back to the live schema, which would "
-                "re-open the prepare/save split this guard closes. Run wrap-cancel "
-                "and re-run prepare_wrap to start a defended wrap.",
+                "re-open the prepare/save split this guard closes. Cancel it with "
+                "its token (wrap-cancel --wrap-token; a gated wrap refuses a plain "
+                "cancel) and re-run prepare_wrap to start a defended wrap.",
                 operation="section_schema",
             )
         try:
@@ -5479,7 +5507,8 @@ class Store:
                 "Frozen wrap section_schema is present but unreadable (corrupt). "
                 "Refusing to fall back to the live schema mid-wrap — that would "
                 "re-open the prepare/save schema split AM-SCHEMASNAPSHOT closes. "
-                "Cancel the wrap (wrap-cancel) and re-run prepare_wrap.",
+                "Cancel it with its token (wrap-cancel --wrap-token; a gated wrap "
+                "refuses a plain cancel) and re-run prepare_wrap.",
                 operation="section_schema",
             ) from exc
 

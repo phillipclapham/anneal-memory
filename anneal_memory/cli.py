@@ -1672,13 +1672,16 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
             # the CLI "a round later" — the same lands-somewhere-not-everywhere
             # shape. Both surfaces answer the same two facts the same way.
             if exc.partial_state and exc.actual is not None:
-                # Partial, but a token survived: "no usable token" would be false.
+                # Partial, but a token survived: "no usable token" would be false,
+                # and a tokenless re-run would also end a healthy wrap a peer
+                # started meanwhile, so name the surviving token (L3 r2 codex, run).
                 print(
                     "The store holds PARTIAL wrap state under a different token "
                     "than the one you named — a crash or a hand edit left it "
                     "half-written, and it cannot be saved. prepare-wrap will keep "
                     "refusing until it is cleared. Nothing was changed. Re-run "
-                    "WITHOUT --wrap-token to clear the broken state.",
+                    f"with --wrap-token {exc.actual} to clear it; that refuses if "
+                    "it has been replaced meanwhile.",
                     file=sys.stderr,
                 )
             elif exc.partial_state:

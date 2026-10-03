@@ -945,12 +945,17 @@ class WrapOwnershipError(AnnealMemoryError):
             )
         elif partial_state:
             # Partial, but a token survived: the right token would clear it, so
-            # "no usable token" would be false here (L3 glm, 1003+16, run).
+            # "no usable token" would be false here (L3 glm, 1003+16, run). The
+            # recovery names THAT token, not a tokenless cancel: a peer may clear
+            # this state and start a healthy wrap before the retry, and a
+            # tokenless cancel would end it (L3 r2 codex, run). Partial state is
+            # never gated and cannot be saved, so naming its token bypasses nothing.
             super().__init__(
                 f"wrap_cancelled: caller claims wrap {expected!r}, but the store "
                 f"holds PARTIAL wrap state under {actual!r} (a crash or a manual "
-                f"edit); it cannot be saved. Nothing was changed — call without "
-                f"expect_token to clear the broken state."
+                f"edit); it cannot be saved. Nothing was changed — call with "
+                f"expect_token={actual!r} to clear it; that refuses if it has been "
+                f"replaced meanwhile."
             )
         elif actual is None:
             super().__init__(

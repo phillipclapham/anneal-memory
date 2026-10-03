@@ -162,10 +162,25 @@ def test_partial_state_with_a_surviving_token_is_not_called_tokenless(tmp_path):
         store.wrap_cancelled(expect_token="0" * 32)
     assert exc.value.partial_state and exc.value.actual == "a" * 32
     assert "no usable token" not in str(exc.value) and "PARTIAL" in str(exc.value)
+    assert f"expect_token={'a' * 32!r}" in str(exc.value)
     text = Server(store)._tool_wrap_cancel({"wrap_token": "0" * 32})["content"][0]["text"]
-    assert "no usable token" not in text and "WITHOUT wrap_token" in text
-    assert store.wrap_cancelled().partial_state  # the advice: tokenless clears it
+    assert "no usable token" not in text and "WITHOUT wrap_token" not in text
+    assert f"wrap_token={'a' * 32}" in text
+    # L3 r2 codex (run): a peer clears the partial state and starts a healthy wrap
+    # before the retry. The advised token retry must refuse, not end the peer's wrap.
+    peer = Store(tmp_path / "m.db")
+    peer.wrap_cancelled()
+    _gated(peer, "b" * 32, session=None)
+    with pytest.raises(WrapOwnershipError):
+        store.wrap_cancelled(expect_token="a" * 32)
+    assert peer.wrap_cancelled(expect_token="b" * 32).token == "b" * 32  # B survived
+    # Without the peer, the advice clears it.
+    _gated(store, "c" * 32)
+    store._conn.execute("UPDATE metadata SET value='' WHERE key='wrap_episode_ids'")
+    store._conn.commit()
+    assert store.wrap_cancelled(expect_token="c" * 32).partial_state
     assert not store.status().wrap_in_progress
+    peer.close()
 
 
 def test_force_with_a_stale_token_says_force_was_ignored(tmp_path):

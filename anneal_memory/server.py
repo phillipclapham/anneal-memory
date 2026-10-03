@@ -698,14 +698,16 @@ class Server:
             # cancelling would destroy someone else's compression.
             if exc.partial_state and exc.actual is not None:
                 # Partial, but a token survived, so "no usable token" below would
-                # be false: the right token clears it (L3 glm, 1003+16, run).
-                # Partial state is never gated, so the tokenless clear works.
+                # be false: the right token clears it (L3 glm, 1003+16, run). Name
+                # that token, not a tokenless cancel, which would also end a
+                # healthy wrap a peer started meanwhile (L3 r2 codex, run).
                 return _tool_result(
                     "The store holds PARTIAL wrap state under a different token "
                     "than the one you named — a crash or a hand edit left it "
                     "half-written, and it cannot be saved. prepare_wrap will keep "
                     "refusing until it is cleared. Nothing was changed. Call "
-                    "wrap_cancel again WITHOUT wrap_token to clear the broken state.",
+                    f"wrap_cancel again with wrap_token={exc.actual} to clear it; "
+                    "that refuses if it has been replaced meanwhile.",
                     is_error=True,
                 )
             if exc.partial_state:

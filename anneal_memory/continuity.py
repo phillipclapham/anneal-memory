@@ -1613,8 +1613,9 @@ def prepare_wrap(
         # written to at all (there is nothing to clear, and an unconditional clear is exactly
         # what could land on a peer's fresh wrap). A store whose lifecycle metadata is
         # partial with wrap_started_at set cannot yield a snapshot; that corrupt state has no
-        # valid wrap to protect, so it is cleared unconditionally: the recovery this path
-        # exists for. (Lifecycle keys left behind with wrap_started_at empty are inert: the
+        # valid wrap to protect, so it is cleared, but only if it is STILL partial under the
+        # store's write lock (expect_partial): that is the recovery this path exists for, and
+        # the compare-and-swap keeps it off a wrap a peer started meanwhile. (Lifecycle keys left behind with wrap_started_at empty are inert: the
         # next wrap_started overwrites them, and wrap_gated_session() ignores them.)
         # A partial (corrupt) lifecycle has no valid wrap to protect, so it never blocks recovery.
         gated_by = (

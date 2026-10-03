@@ -2896,7 +2896,9 @@ class Store:
                 no token to name: if a coherent wrap replaced it meanwhile, raise
                 :class:`WrapOwnershipError` with ``actual`` = that wrap's token;
                 if the store went idle, raise it with ``actual=None``. Nothing is
-                changed in either case. Cannot be combined with ``expect_token``.
+                changed in either case. Cannot be combined with ``expect_token``;
+                ``session_id`` and ``force`` do not affect it (a partial state is
+                never gated).
 
         Returns a :class:`WrapCancelReceipt` describing **what this call
         actually cleared**, read inside the same transaction as the clear —
@@ -2969,6 +2971,10 @@ class Store:
         # partial-state cancel emitted NO audit event at all —
         # silent_error_swallowing inside the very tool that exists
         # to recover from silent error states. 10.5c.5 L1 MEDIUM.
+        if not isinstance(expect_partial, bool):  # "false" is truthy: never infer it
+            raise TypeError(
+                f"wrap_cancelled: expect_partial must be a bool, got {type(expect_partial).__name__}"
+            )
         if expect_partial and expect_token is not None:
             raise ValueError("wrap_cancelled: expect_partial and expect_token are exclusive.")
         with self._db_boundary("wrap_cancelled"):

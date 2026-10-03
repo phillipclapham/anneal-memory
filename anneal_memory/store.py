@@ -2455,9 +2455,14 @@ class Store:
         deterministic id (complement L3). Returns the rows removed."""
         if not ids or not self._has_supersessions_table():
             return 0
+        if self._conn.execute("SELECT 1 FROM supersessions LIMIT 1").fetchone() is None:
+            return 0
         removed = 0
-        for start in range(0, len(ids), 400):
-            chunk = ids[start:start + 400]
+        # The rewire binds each chunk four times: 4 x 200 = 800 stays under
+        # SQLite's traditional 999-variable limit (still the default on older
+        # builds; at 400 a 300-episode prune failed there, reproduced in review).
+        for start in range(0, len(ids), 200):
+            chunk = ids[start:start + 200]
             marks = ",".join("?" * len(chunk))
             self._conn.execute(
                 f"""INSERT OR IGNORE INTO supersessions (old_id, new_id, source)

@@ -2645,11 +2645,34 @@ def validated_save_continuity(
     # THIS text would supersede once recorded (codex L3: the links are recorded
     # after graduation runs, so a 2x citing only the replaced fact validated).
     superseded_in_window = set(store.superseded_by_map(sorted(valid_ids)))
+    # Simulated in document order, the order they are recorded in, against the
+    # store's links plus the ones accepted so far: a later proposal that closes
+    # a cycle with an earlier one is refused at record time, so it must not
+    # make its target uncitable here (reproduced: "A by B" then "B by A" left
+    # live B uncitable).
+    edges: dict[str, set[str]] = {}
+    for link in store.supersession_links():
+        edges.setdefault(link["old_id"], set()).add(link["new_id"])
+
+    def _reaches(start: str, goal: str) -> bool:
+        seen, todo = set(), [start]
+        while todo:
+            cur = todo.pop()
+            if cur == goal:
+                return True
+            if cur not in seen:
+                seen.add(cur)
+                todo.extend(edges.get(cur, ()))
+        return False
+
     for m in _SUPERSEDES_RE.finditer(text):
         old_id, new_id = m.group(1).lower(), m.group(2).lower()
-        if (old_id in valid_ids and new_id in valid_ids
-                and store.supersession_problem(old_id=old_id, new_id=new_id) is None):
-            superseded_in_window.add(old_id)
+        if new_id not in valid_ids or _reaches(new_id, old_id):
+            continue
+        if store.supersession_problem(old_id=old_id, new_id=new_id) is None:
+            edges.setdefault(old_id, set()).add(new_id)
+            if old_id in valid_ids:
+                superseded_in_window.add(old_id)
     citable_ids = valid_ids - superseded_in_window
 
     # Check citation history

@@ -254,3 +254,33 @@ def test_the_floor_is_a_ratio_not_a_word_count(tmp_path):
                 "chapters, fixed the bike chain, called family and wrote the weekly "
                 "release notes for the garden club newsletter.",
                 "observation", timestamp="2026-02-01T00:00:00Z", supersedes=[long_a.id])
+
+
+# --- built from the fix-diff L3's reproduced failures (2026-10-02 night) ---
+
+def test_conflicting_proposals_leave_the_survivor_citable(tmp_path):
+    with Store(str(tmp_path / "m.db")) as st:
+        a = st.record(OLD, "observation", timestamp="2026-02-10T10:00:00Z")
+        b = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00Z")
+        assert prepare_wrap(st)["status"] == "ready"
+        line = (f"- quillmark_storage | 2x (2026-02-10) "
+                f'[evidence: {b.id} "Quillmark switched its storage over to sqlite"]')
+        res = validated_save_continuity(
+            st, f"## State\nx\n[supersedes: {a.id} by {b.id}]\n[supersedes: {b.id} by {a.id}]\n\n"
+                f"## Patterns\n{line}\n\n## Decisions\n\n## Context\nx\n", today="2026-02-10")
+        assert (res["supersessions_recorded"], len(res["supersessions_rejected"])) == (1, 1)
+        assert res["graduations_validated"] == 1
+
+
+def test_prune_under_the_traditional_sqlite_variable_limit(tmp_path):
+    with Store(str(tmp_path / "m.db")) as st:
+        st._conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+        prev = None
+        for i in range(300):
+            prev = st.record(f"old note number {i} about the parser fixture", "observation",
+                             timestamp=f"2020-01-01T00:{i // 60:02d}:{i % 60:02d}Z",
+                             supersedes=[prev] if prev else None).id
+        live = st.record("current note about the parser fixture", "observation", supersedes=[prev])
+        assert st.prune(older_than_days=1) == 300
+        assert st.supersession_links() == []
+        assert [e.id for e in st.recall(keyword="parser").episodes] == [live.id]

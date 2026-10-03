@@ -152,7 +152,15 @@ refuses a week that only failed to read, naming the error and writing nothing. W
 renames each such unmanifested sealed week none of whose copies can be read to
 `<name>.unreadable-<UTC stamp>`, never deleting it, and records each in a new manifest field, `set_aside` (`filename`, `set_aside_as`, `period`,
 `cause`, `at`), saved BEFORE the rename so a moved file is never unrecorded. Writes then continue from the
-manifest's tip; the week can be renamed back only before the next write. `verify()` reports the record
+manifest's tip; the week can be renamed back only before the next write. Repair sets a week aside only
+when the active file holds no valid entry (the refusal's own case): with entries in it the chain may run
+through the week, and moving it would leave a gap mid-chain, so repair refuses and names it. A rotation
+that finds its active file missing re-seeds from the manifest rather than from the hash it had cached (that
+hash was the tip of a week that may since have been set aside by another instance's repair). Repair drops a
+record whose set-aside file is gone (reported as `pruned`), even when nothing else needs repair, and an
+adoption drops the record of a week it adopts. Known and not fixed: a `verify` that runs while a repair is
+between saving a record and renaming the file reports that file as unmanifested (invalid) for that
+moment; the next `verify` is valid. `verify()` reports the record
 as `AuditVerifyResult.set_aside`, and the CLI and `server.py --verify-audit` print a `GAP:` line for each
 (from one function, `set_aside_report_lines`), on both the valid and invalid paths, or, when the set-aside
 file is not on disk, a line saying so and what to do; `valid` stays a verdict on the chain it walked, as

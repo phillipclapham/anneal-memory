@@ -5760,11 +5760,10 @@ class TestDiogenes20260909StillOpen:
         with trail._operation_span():
             trail._rotate_if_needed()
 
-        assert trail._seq == 3, (
-            "the early-return rotation branch reset _seq even though it "
-            "never touches self._seq — only the sealing branch restarts "
-            "the count"
-        )
+        # Re-pinned 2026-10-03 (orphan L3 r1, codex HIGH): this branch now
+        # re-seeds from the manifest instead of keeping cached chain state, so
+        # _seq is what a fresh open of the same disk state would seed.
+        assert trail._seq == trail._load_manifest()["active_last_seq"]
 
         trail.log("next", {})
         result = AuditTrail.verify(db)
@@ -6951,6 +6950,88 @@ class TestFixDiffRound10RecoveryNeverDeletes:
     @pytest.mark.skipif(
         sys.platform == "win32", reason="chmod 000 does not make a file unreadable on Windows"
     )
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="chmod 000 does not make a file unreadable on Windows"
+    )
+    def test_a_repair_by_another_instance_before_the_retry_does_not_fork_the_chain(
+        self, tmp_path, monkeypatch
+    ):
+        """L3 r1 10-03 on 54a40c9 (codex HIGH; glm + complement on the same
+        branch): after a failed rotation, another instance set the orphan aside;
+        the original object's next log() found nothing to refuse and wrote from
+        its cached hash, the removed week's tip, and verify() broke. The
+        missing-active branch now re-seeds from the manifest."""
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        trail.log("a", {})
+        trail._last_week = "1999-W01"
+        trail.log("b", {})
+        for i in range(5):
+            trail.log("seg", {"i": i})
+        trail._last_week = "1999-W02"
+        real_gzip = audit_module.gzip.GzipFile
+
+        def full_disk(*a, **k):
+            handle = real_gzip(*a, **k)
+            handle.write = lambda data: (_ for _ in ()).throw(OSError(28, "No space left"))
+            return handle
+
+        with monkeypatch.context() as m:
+            m.setattr(audit_module.gzip, "GzipFile", full_disk)
+            with pytest.raises(OSError):
+                trail.log("rotation_fails", {})
+        orphan = tmp_path / "m.audit.1999-W02.jsonl"
+        orphan.chmod(0)
+        try:
+            assert AuditTrail.repair_manifest(db, set_aside_unreadable=True).repaired is True
+            trail.log("original_object_retries", {})
+            result = AuditTrail.verify(db)
+        finally:
+            for p in tmp_path.iterdir():
+                if p.name.startswith(orphan.name):
+                    p.chmod(0o600)
+        assert result.valid is True, result.error
+
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="chmod 000 does not make a file unreadable on Windows"
+    )
+    def test_a_week_restored_before_any_write_leaves_no_stale_record(
+        self, tmp_path, monkeypatch
+    ):
+        """L3 r1 10-03 on 54a40c9 (codex + glm): a set-aside week renamed back
+        before the next write was adopted, but its record stayed and printed a
+        stale line forever; a record whose file is gone was never dropped,
+        because repair returned "nothing to repair" first."""
+        db, orphan = TestFixDiffRound9LoudNotSilent._failed_rotation(tmp_path, monkeypatch, segment=5)
+        orphan.chmod(0)
+        try:
+            repair = AuditTrail.repair_manifest(db, set_aside_unreadable=True)
+        finally:
+            for p in tmp_path.iterdir():
+                if p.name.startswith(orphan.name):
+                    p.chmod(0o600)
+        [record] = repair.set_aside
+        (tmp_path / record["set_aside_as"]).rename(orphan)  # restored before any write
+        AuditTrail(db).log("after_restore", {})
+        result = AuditTrail.verify(db)
+        assert result.valid is True, result.error
+        assert result.set_aside == []
+
+        db2, orphan2 = TestFixDiffRound9LoudNotSilent._failed_rotation(
+            tmp_path / "two", monkeypatch, segment=5
+        )
+        orphan2.chmod(0)
+        try:
+            [gone] = AuditTrail.repair_manifest(db2, set_aside_unreadable=True).set_aside
+        finally:
+            for p in (tmp_path / "two").iterdir():
+                if p.name.startswith(orphan2.name):
+                    p.chmod(0o600)
+        (tmp_path / "two" / gone["set_aside_as"]).unlink()  # the operator removed it
+        again = AuditTrail.repair_manifest(db2)
+        assert again.repaired is True and [r["filename"] for r in again.pruned] == [orphan2.name]
+        assert AuditTrail.verify(db2).set_aside == []
+
     def test_the_same_process_cannot_write_past_an_unreadable_newer_week(
         self, tmp_path, monkeypatch
     ):

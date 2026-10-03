@@ -1191,7 +1191,7 @@ def cmd_audit_repair(args: argparse.Namespace) -> None:
     """
     db_path = Path(args.db).expanduser()
     result = AuditTrail.repair_manifest(
-        db_path, set_aside_unreadable=args.set_aside_unreadable
+        db_path, set_aside_unreadable=getattr(args, "set_aside_unreadable", False)
     )
 
     if args.json:
@@ -1201,8 +1201,15 @@ def cmd_audit_repair(args: argparse.Namespace) -> None:
             "chain_anchor_recovered": result.chain_anchor_recovered,
             "untracked": result.untracked,
             "set_aside": result.set_aside,
+            "pruned": result.pruned,
             "error": result.error,
         })
+    elif result.repaired and result.pruned and not result.set_aside and not result.files:
+        for record in result.pruned:
+            print(
+                f"Dropped the set-aside record for {record['filename']}: its set-aside "
+                f"file {record['set_aside_as']} is not on disk."
+            )
     elif result.repaired and result.set_aside and not result.files:
         for record in result.set_aside:
             print(

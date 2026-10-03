@@ -470,6 +470,9 @@ class AuditRepairResult:
     # Unreadable or corrupt sealed files this repair set aside and recorded in
     # the manifest (the same dicts as ``AuditVerifyResult.set_aside``).
     set_aside: list[dict[str, str]] = field(default_factory=list)
+    # Records this repair dropped because their set-aside file is gone (the
+    # week was renamed back, or a repair stopped before its rename).
+    pruned: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -1858,6 +1861,8 @@ class AuditTrail:
                 error=f"Cannot list the audit directory: {e}; nothing was written.",
             )
         manifested = {_week_of(f["filename"], prefix) for f in manifest["files"]}
+        existing = list(manifest.get("set_aside", []))
+        stale = [r for r in existing if r["set_aside_as"] not in names]
         by_week: dict[str, list[Path]] = {}
         for name in names:
             if _is_sealed_filename(name, stem) and _week_of(name, prefix) not in manifested:
@@ -1896,10 +1901,40 @@ class AuditTrail:
                     "--set-aside-unreadable`. Nothing was written."
                 ),
             )
-        if not new:
+        if new and trail._active_path.name in names:
+            try:
+                active_prev = _first_prev_hash(trail._active_path)
+            except OSError as e:
+                return AuditRepairResult(
+                    repaired=False,
+                    error=f"Cannot inspect the active audit file: {e}; nothing was written.",
+                )
+            if active_prev is not None:  # None: no valid entry, the refusal's own case
+                # The refusal this repair answers only fires with no usable
+                # active file. With entries in it, the chain may already run
+                # through the week, and moving it would leave a gap in the
+                # middle of the chain (L3 r1 10-03, complement).
+                return AuditRepairResult(
+                    repaired=False,
+                    error=(
+                        "The active audit file holds entries, so the chain may run "
+                        f"through {', '.join(r['filename'] for r in new)}; not setting "
+                        "it aside. verify reports it. Nothing was written."
+                    ),
+                )
+        if not new and not stale:
             return AuditRepairResult(
                 repaired=False, error="The manifest is valid; there is nothing to repair."
             )
+        if not new:
+            manifest["set_aside"] = [r for r in existing if r not in stale]
+            try:
+                trail._save_manifest(manifest)
+            except OSError as e:
+                return AuditRepairResult(
+                    repaired=False, error=f"Could not save the manifest: {e}; nothing was written."
+                )
+            return AuditRepairResult(repaired=True, pruned=stale)
         taken = [r["set_aside_as"] for r in new if os.path.lexists(audit_dir / r["set_aside_as"])]
         if taken:
             # os.rename replaces an existing file on POSIX; recovery never does.
@@ -1907,11 +1942,7 @@ class AuditTrail:
                 repaired=False,
                 error=f"A set-aside name is already taken ({taken}); nothing was written.",
             )
-        moving = {r["filename"] for r in new}
-        kept = [
-            r for r in manifest.get("set_aside", [])
-            if not (r["filename"] in moving and r["set_aside_as"] not in names)
-        ]
+        kept = [r for r in existing if r not in stale]
         manifest["set_aside"] = kept + new
         try:
             trail._save_manifest(manifest)
@@ -1919,24 +1950,27 @@ class AuditTrail:
             return AuditRepairResult(
                 repaired=False, error=f"Could not save the manifest: {e}; nothing was moved."
             )
+        moved: list[dict[str, str]] = []
         for record in new:
             try:
                 os.rename(audit_dir / record["filename"], audit_dir / record["set_aside_as"])
             except OSError as e:
+                _fsync_dir(audit_dir)
                 return AuditRepairResult(
                     repaired=False,
-                    set_aside=new,
+                    set_aside=moved,  # only what was actually moved (L3 r1, glm)
                     error=(
                         f"Recorded {record['filename']} as set aside, but could not move it: "
                         f"{e}; run `anneal-memory audit-repair` again."
                     ),
                 )
+            moved.append(record)
             _emit_warning(
                 f"Set aside unreadable audit file {record['filename']} as "
                 f"{record['set_aside_as']} ({record['cause']})"
             )
         _fsync_dir(audit_dir)
-        return AuditRepairResult(repaired=True, set_aside=new)
+        return AuditRepairResult(repaired=True, set_aside=new, pruned=stale)
 
     # -- Internal --
 
@@ -2602,6 +2636,13 @@ class AuditTrail:
             )
 
         if chain:
+            # A week renamed back and adopted is no longer set aside: its record
+            # would print a stale line forever (L3 r1 10-03, codex + glm).
+            adopted_names = {keep.name for _, keep, _, _ in chain}
+            if manifest.get("set_aside"):
+                manifest["set_aside"] = [
+                    r for r in manifest["set_aside"] if r["filename"] not in adopted_names
+                ]
             self._save_manifest(manifest)
         return True
 
@@ -2688,25 +2729,29 @@ class AuditTrail:
             # ``_initialize``. Run it here too, so the process that broke the
             # rotation is the one that repairs it rather than leaving a false
             # alarm for whoever looks next.
+            self._unreadable_newer = []
+            adopted = False
             try:
-                self._adopt_orphaned_files()
+                adopted = self._adopt_orphaned_files()
             except Exception:
-                # Adoption is best-effort recovery; failing it must not stop
-                # the caller. The orphan stays on disk and the next open
-                # retries, which is exactly the pre-existing behaviour.
+                # The orphan stays on disk; the re-seed below refuses rather
+                # than writing from a guess (adopted stays False).
                 _log(logging.WARNING,
                     "could not adopt orphaned sealed audit file(s) while "
                     "rotating; the trail may verify as broken until the store "
                     "is reopened", exc_info=True,
                 )
-            if self._unreadable_newer:
-                # ⛔ L1 10-03 (probe run): continuing here wrote from the cached
-                # hash, the unreadable week's tip, and the repair that set the
-                # week aside then left verify() permanently invalid. Refuse, and
-                # drop the cached chain state so the next call re-seeds (and
-                # refuses there until the week is readable or set aside).
-                self._initialized = False
-                self._refuse_past_unreadable_newer()
+            # ⛔ RE-SEED FROM THE MANIFEST, NEVER FROM THE CACHED HASH (L1 10-03,
+            # then L3 r1: codex HIGH, glm, complement). The cached hash is the
+            # tip of a week this branch has just found missing from the active
+            # name: it was adopted (the manifest now ends there), set aside by
+            # another instance's repair (the manifest does not), or not scanned
+            # (adoption skipped). The seed the open uses handles all three, with
+            # both refusals: an unreadable newer week, an incomplete adoption.
+            # On a refusal _initialized stays False, so the next call re-inits.
+            self._initialized = False
+            self._seed_from_manifest(adopted=adopted)
+            self._initialized = True
             self._last_week = current_week
             return
 

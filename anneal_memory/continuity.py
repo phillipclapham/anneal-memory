@@ -112,6 +112,24 @@ def _matching_required_headings(line_lower: str, required: set[str]) -> list[str
     return match_headings(line_lower, required)
 
 
+def _header_matches(line_lower: str, schema: list[SectionSpec]) -> list[str]:
+    """The schema headings (lowercased) one ``## `` header line counts for when
+    judging ambiguity: every REQUIRED heading it contains as a word-bounded
+    phrase, plus an optional heading only when the header IS that heading
+    (``## Durable Facts``). So ``## Decisions (durable facts)`` is a Decisions
+    header, not an ambiguous one, while ``## Patterns and Understanding`` is
+    still ambiguous. For a schema with no optional section this is exactly the
+    required-heading match."""
+    matched = _matching_required_headings(
+        line_lower, {h.lower() for h in required_headings(schema)}
+    )
+    title = line_lower[3:].strip() if line_lower.startswith("## ") else line_lower
+    for spec in schema:
+        if spec.get("optional") is True and title == spec["heading"].lower():
+            matched.append(title)
+    return matched
+
+
 def validate_structure(text: str, schema: list[SectionSpec] | None = None) -> bool:
     """Validate that continuity text contains all of the schema's sections.
 
@@ -145,15 +163,10 @@ def validate_structure(text: str, schema: list[SectionSpec] | None = None) -> bo
     if schema is None:
         schema = DEFAULT_SCHEMA
     required = {h.lower() for h in required_headings(schema)}
-    # Headers are matched against EVERY schema heading, optional ones included,
-    # so "## Durable Facts and Patterns" is ambiguous like any merged header;
-    # only the required ones must be found. For a schema with no optional
-    # section the two sets are the same.
-    every = {s["heading"].lower() for s in schema}
     found: set[str] = set()
     for line in text.split("\n"):
         if line.startswith("## "):
-            matched = _matching_required_headings(line.lower(), every)
+            matched = _header_matches(line.lower(), schema)
             # An ambiguous header (one line satisfying multiple required
             # sections, e.g. "## Patterns and Understanding") is malformed: it
             # merges two protected roles into one body and would defeat the
@@ -506,15 +519,23 @@ def _check_no_catastrophic_shrink(
     grad_lowers = headings_by_role.get("graduating", [])
     grad_prior = sum(prior_masses.get(h, 0) for h in grad_lowers)
     grad_new = sum(new_masses.get(h, 0) for h in grad_lowers)
-    nongrad_prior = len(prior_text) - grad_prior
-    nongrad_new = len(new_text) - grad_new
+    # The durable section is excluded the same way, on both sides: its lines
+    # leave only by an explicit drop marker (and are put back when merely left
+    # out), so a deliberate drop must never read as a collapse, and durable
+    # mass must not make an unrelated section's shrink look smaller. A schema
+    # without a durable section measures 0 here, so its gate is unchanged.
+    durable_prior = durable_section_chars(prior_text, schema)
+    durable_new = durable_section_chars(new_text, schema)
+    nongrad_prior = len(prior_text) - grad_prior - durable_prior
+    nongrad_new = len(new_text) - grad_new - durable_new
     if (
         nongrad_prior >= _SHRINK_GATE_MIN_PRIOR_CHARS
         and nongrad_new < nongrad_prior * _DOC_SHRINK_RETAIN_FRACTION
     ):
         pct = round(100 * (1 - nongrad_new / nongrad_prior))
         offenders.append(
-            f"  - whole continuity (excl. graduating): {nongrad_prior} -> "
+            f"  - whole continuity (excl. graduating"
+            f"{' and durable' if durable_prior or durable_new else ''}): {nongrad_prior} -> "
             f"{nongrad_new} chars ({pct}% smaller; must retain "
             f">={int(_DOC_SHRINK_RETAIN_FRACTION * 100)}%)"
         )
@@ -2578,11 +2599,11 @@ def validated_save_continuity(
     # with a clear message before the generic all-sections check: one header
     # satisfying two required sections would route a single body into two
     # protected roles and defeat the shrink gate (v0.3.5). Each section needs
-    # its own '## ' header line. Optional headings count here too.
-    _required_lower = {s["heading"].lower() for s in section_schema}
+    # its own '## ' header line. An optional heading counts only as an exact
+    # header (see _header_matches).
     for _line in text.split("\n"):
         if _line.startswith("## "):
-            _matched = _matching_required_headings(_line.lower(), _required_lower)
+            _matched = _header_matches(_line.lower(), section_schema)
             if len(_matched) > 1:
                 raise ValueError(
                     f"Ambiguous section heading {_line.strip()!r} satisfies "

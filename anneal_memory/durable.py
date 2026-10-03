@@ -62,8 +62,8 @@ DROP_DURABLE_RE = re.compile(
     r"^[ \t]*(?:(?:[-*]|\d+\.)[ \t]+)?\[drop-durable:[ \t]*(.*?)[ \t]*\][ \t]*$",
     re.IGNORECASE,
 )
-# A fence opener/closer (CommonMark: up to three spaces of indent).
-_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+# A fence run at the start of a stripped line.
+_FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
 _NEWLINES_RE = re.compile(r"\r\n|\r")
 # A graduation line (``name | 2x (date)``) or an evidence tag: pattern syntax.
 _PATTERN_SHAPE_RE = re.compile(r"\|[ \t]*\d+x\b|\[evidence:", re.IGNORECASE)
@@ -97,11 +97,13 @@ class DurableFact:
     """One fact of a durable section.
 
     Attributes:
-        line: the raw first line (trailing whitespace removed).
+        line: the raw first line, byte-for-byte (LF line endings).
         fact: the fact text, bullet and cue marker removed, continuation lines
             joined with single spaces.
-        cues: the lowercased, trimmed cue words; ``()`` with no cue marker.
-        continuation: the raw indented lines that continue the fact.
+        cues: the lowercased, trimmed cue words of a cue marker on the fact's
+            LAST physical line; ``()`` with none.
+        continuation: the raw indented lines that continue the fact,
+            byte-for-byte.
     """
 
     line: str
@@ -113,6 +115,11 @@ class DurableFact:
     def raw_lines(self) -> list[str]:
         """Every raw line of the fact, first line first."""
         return [self.line, *self.continuation]
+
+    @property
+    def raw(self) -> str:
+        """The whole fact as written: its raw lines joined with ``\\n``."""
+        return "\n".join(self.raw_lines)
 
 
 def match_headings(line_lower: str, headings: set[str]) -> list[str]:
@@ -148,28 +155,46 @@ def _dominant_newline(text: str) -> str:
     return max((lf, "\n"), (crlf, "\r\n"), (cr, "\r"), key=lambda p: p[0])[1]
 
 
+def _fence_opener(line: str) -> str | None:
+    """The fence run that opens a code block on this line, or ``None``. A
+    backtick fence whose info string holds another backtick is inline code
+    (CommonMark), e.g. ```` ```code``` ````, and opens nothing."""
+    m = _FENCE_RE.match(line.strip())
+    if m is None:
+        return None
+    run = m.group(1)
+    if run[0] == "`" and "`" in line.strip()[len(run):]:
+        return None
+    return run
+
+
+def _closes(line: str, run: str) -> bool:
+    stripped = line.strip()
+    return bool(stripped) and set(stripped) == {run[0]} and len(stripped) >= len(run)
+
+
 def _fenced(lines: list[str]) -> list[bool]:
-    """Per line: is it part of a fenced code block (fence lines included)?"""
-    out: list[bool] = []
-    fence: str | None = None
-    for line in lines:
-        m = _FENCE_RE.match(line)
-        if fence is None:
-            if m is not None:
-                fence = m.group(1)
-                out.append(True)
-            else:
-                out.append(False)
+    """Per line: is it part of a fenced code block (fence lines included)?
+
+    Fails CLOSED for the durable section: a fence that never closes is not a
+    fence (its lines count as ordinary lines), so an unclosed fence earlier in
+    the document cannot hide the section and leave its facts unprotected."""
+    out = [False] * len(lines)
+    i = 0
+    while i < len(lines):
+        run = _fence_opener(lines[i])
+        if run is None:
+            i += 1
             continue
-        out.append(True)
-        stripped = line.strip()
-        if (
-            m is not None
-            and stripped
-            and set(stripped) == {fence[0]}
-            and len(stripped) >= len(fence)
-        ):
-            fence = None
+        close = next(
+            (j for j in range(i + 1, len(lines)) if _closes(lines[j], run)), None
+        )
+        if close is None:
+            i += 1  # unclosed: not a fence
+            continue
+        for j in range(i, close + 1):
+            out[j] = True
+        i = close + 1
     return out
 
 
@@ -214,15 +239,20 @@ def split_cues(text: str) -> tuple[str, tuple[str, ...]]:
 
 
 def _make_fact(first: str, body: str, continuation: list[str]) -> DurableFact | None:
-    joined = " ".join([body, *(c.strip() for c in continuation)])
-    fact, cues = split_cues(joined)
+    """A fact from its raw physical lines. A cue suffix is recognised only on
+    the LAST physical line, so a continuation under a line that ends in cues
+    is part of the fact (and of its identity), never swallowed as cues. The raw
+    lines are kept byte-for-byte; only the comparison key is normalised."""
+    parts = [body, *(c.strip() for c in continuation)]
+    last_fact, cues = split_cues(parts[-1])
+    fact = _norm_ws(" ".join([*parts[:-1], last_fact]))
     if not fact:
         return None
     return DurableFact(
-        line=first.rstrip(),
-        fact=_norm_ws(fact),
+        line=first,
+        fact=fact,
         cues=cues,
-        continuation=tuple(c.rstrip() for c in continuation),
+        continuation=tuple(continuation),
     )
 
 
@@ -375,6 +405,7 @@ class DurableReport:
     reinserted: list[str]
     dropped: list[str]
     unknown_drops: list[tuple[str, str | None]]  # (target, closest prior line)
+    unknown_drops_more: int
     own_lines_dropped: list[str]
     recreated: bool
     merged_sections: int
@@ -455,7 +486,7 @@ def enforce_durable_facts(
     dropped_keys = {
         k for f, k in prior if k in marker_keys or _first_body(f) in marker_keys
     }
-    dropped = [f.line for f, k in prior if k in dropped_keys]
+    dropped = [f.raw for f, k in prior if k in dropped_keys]
     matched_targets = {
         marker_keys[key]
         for f, k in prior
@@ -472,8 +503,11 @@ def enforce_durable_facts(
     for f, k in prior:
         candidates.setdefault(k, f.line)
         candidates.setdefault(_first_body(f), f.line)
+    # Bounded: a closest-line hint for at most _PAIR_WARN_LIMIT markers (each
+    # costs a pass over the prior lines); the rest go into one summary line.
     unknown: list[tuple[str, str | None]] = []
-    for t in unknown_targets:
+    unknown_more = max(len(unknown_targets) - _PAIR_WARN_LIMIT, 0)
+    for t in unknown_targets[:_PAIR_WARN_LIMIT]:
         tb2 = _BULLET_RE.match(t)
         probe = _norm_ws(split_cues(tb2.group(1) if tb2 is not None else t)[0])
         close = difflib.get_close_matches(probe, list(candidates), n=1, cutoff=0.5)
@@ -593,9 +627,10 @@ def enforce_durable_facts(
 
     return text, DurableReport(
         heading=heading,
-        reinserted=[f.line for f in missing],
+        reinserted=[f.raw for f in missing],
         dropped=dropped,
         unknown_drops=unknown,
+        unknown_drops_more=unknown_more,
         own_lines_dropped=own_dropped,
         recreated=recreated,
         merged_sections=len(spans) if len(spans) > 1 else 0,
@@ -648,6 +683,12 @@ def report_warnings(report: DurableReport) -> list[str]:
             f"`## {h}` section; the marker was removed and nothing else changed. "
             f"Matching is exact (whitespace aside), on the fact or the whole line."
             + hint
+        )
+    if report.unknown_drops_more:
+        out.append(
+            f"Durable facts: and {report.unknown_drops_more} more drop marker(s) "
+            f"named no line of the prior `## {h}` section; they were removed and "
+            f"nothing else changed."
         )
     for line in report.own_lines_dropped:
         out.append(

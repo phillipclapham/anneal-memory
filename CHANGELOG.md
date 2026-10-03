@@ -50,6 +50,22 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   wrote; an unknown marker now names the closest prior line. `– cues:` (en dash) is accepted.
   The save result gains `durable_warnings` (present when the schema has a durable section), and
   the wrap package lists the current pending-transition lines for the composer to re-check.
+- Review round 2: the catastrophic-shrink gate's whole-document backstop leaves the durable
+  section out of both sides, as it does the graduating section, so dropping durable lines by
+  marker cannot trip it. A cue suffix is read only on a fact's last physical line, and the fact's
+  identity includes its continuation lines, so a continuation under a cue line is never swallowed
+  as cues. A backtick fence with another backtick on its line (```` ```code``` ````) opens
+  nothing, and a fence that never closes is not a fence, so neither can hide the section.
+  An optional heading counts toward header ambiguity only as an exact header, so
+  `## Decisions (durable facts)` is a Decisions header. Re-inserted lines are byte-for-byte
+  (trailing spaces kept). Closest-line hints for unknown markers are capped at 20, with one
+  summary line for the rest. The audit `durable_dropped` / `durable_reinserted` entries carry the
+  whole fact, every physical line joined with `\n`.
+- Known open: (a) a writer calling bare `Store.save_continuity()` between a validated save's read
+  and its rename is overwritten, durable lines included; this holds for all continuity content,
+  and bare save is the documented bypass of the pipeline. (b) The save-time durable budget is
+  computed from the schema's default `max_chars`, not from a `max_chars` passed to
+  `prepare_wrap`, which is not frozen into the wrap.
 - Migration manifest entry `AM-DURABLE-FACTS` (0.9.27): what the section is, that new stores get
   it and an existing store gets it only when its operator re-runs
   `anneal-memory --db <path> set-schema <its schema name>` (or `store.set_section_schema(...)`), and a

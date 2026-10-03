@@ -137,14 +137,31 @@ OFF_B = (
     'what are the rules of cricket in simple terms',
 )
 
-# name -> constants patched for the row (anneal_memory.retrieval)
+# name -> (constants patched in anneal_memory.retrieval, whether the stored inert-token set applies)
 ROWS = {
-    "(i) as first built": dict(
-        DURABLE_GENERIC_DF=2.0, DURABLE_SHORT_PROMPT_TOKENS=10**6, DURABLE_FACT_TEXT_MIN=1),
-    "(vi) two-token + fact-text rules": dict(
-        DURABLE_GENERIC_DF=2.0, DURABLE_SHORT_PROMPT_TOKENS=3, DURABLE_FACT_TEXT_MIN=2),
-    "shipped": {},
+    "(i) as first built": (
+        dict(DURABLE_SHORT_PROMPT_TOKENS=10**6, DURABLE_FACT_TEXT_MIN=1), False),
+    "(vi) two-token + fact-text rules": (
+        dict(DURABLE_SHORT_PROMPT_TOKENS=3, DURABLE_FACT_TEXT_MIN=2), False),
+    "shipped": ({}, True),
 }
+
+
+def write_inert_tokens(store: Store) -> int:
+    """Compute the store's inert tokens for its current continuity and store them under
+    the metadata key the prompt path reads (what the save path does)."""
+    facts = R.load_durable_facts(store)
+    tokens = R.compute_durable_inert_tokens(store, facts)
+    store._conn.execute(
+        "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+        (R.INERT_TOKENS_KEY, json.dumps({
+            "tokens": sorted(tokens),
+            "continuity_hash": R.continuity_hash(store.load_continuity()),
+            "episodes": store.recall(limit=0).total_matching,
+            "threshold": R.DURABLE_GENERIC_DF,
+        })))
+    store._conn.commit()
+    return len(tokens)
 
 
 def main() -> None:
@@ -170,14 +187,18 @@ def main() -> None:
         for s in timeline["sessions"]:
             RUN.record_session(st, s)
         st.save_continuity(cont)
+        write_inert_tokens(st)
         stores[tid] = st
     off_store = stores[ids[0]]
 
     def table(tids: list[int], offs: tuple[str, ...]) -> None:
-        for name, patch in ROWS.items():
+        for name, (patch, use_inert) in ROWS.items():
             saved = {k: getattr(R, k) for k in patch}
+            real_read = R._read_inert_tokens
             for k, v in patch.items():
                 setattr(R, k, v)
+            if not use_inert:
+                R._read_inert_tokens = lambda _store, _text: frozenset()
             try:
                 cells = []
                 for key in ("naive_query", "query"):
@@ -195,6 +216,7 @@ def main() -> None:
                 ms = (time.perf_counter() - t0) / len(offs) * 1000
                 print(f"  {name:34s} " + " | ".join(cells) + f" | off-topic {off}/{len(offs)} ({ms:.1f} ms/prompt)")
             finally:
+                R._read_inert_tokens = real_read
                 for k, v in saved.items():
                     setattr(R, k, v)
 

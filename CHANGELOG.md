@@ -122,24 +122,33 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - The rule, and why it is not behind the retrieval gates. The tier runs before the keyword floor
   and does not use the score bar, the distinctive anchor or the hit floor, on purpose: the
   composer wrote cue words for a fact, and a one-word prompt such as "restaurant?" must be able to
-  bring it up. It runs on every prompt, so its precision guard has five parts instead.
+  bring it up. It runs on every prompt, so its precision guard has six parts instead.
   (1) A fact surfaces when a query token equals one of its cue tokens (a cue phrase is split into
   word tokens). Equality is on whole tokens, never a substring, lowercase, after light stemming on
-  both sides (one trailing `s`, `es` or `ing` removed while three or more characters remain, so
-  `restaurants` and `recipes` match their cue and `restaurateur` does not). A token under three
-  characters or a stopword never matches. (2) A query token that is generic in this store never
-  matches: it appears in more than `DURABLE_GENERIC_DF` (10%) of the store's own episodes, counted
-  with `Store.recall` on the token's shortest stem, one count per token that could match a fact.
-  A store with fewer than `IDF_MIN_CORPUS` (50) episodes has too few to tell and applies no such
-  filter. The list is the store's own, not a shipped one: a list derived from a general chat
+  both sides (one trailing `s` removed while three or more characters remain, or `es` / `ing`
+  while four or more remain, so `restaurants` and `recipes` match their cue, and `rating`, `files`
+  and `lines` do not collide with `rat`, `fil` and `lin`; `restaurateur` matches nothing). A token
+  under three characters or a stopword never matches. (2) A cue or fact word that is inert in this
+  store never matches: it is found, as a whole word, in more than `DURABLE_GENERIC_DF` (10%) of
+  the store's own episodes. `compute_durable_inert_tokens(store, facts)` counts that in Python over
+  the episodes in pages (`cat` is not found in "category", `rent` not in "current"), and a store
+  with fewer than `IDF_MIN_CORPUS` (50) episodes gets the empty set. The prompt path never counts
+  anything: it reads the set from the metadata key `durable_inert_tokens`
+  (`{"tokens", "continuity_hash", "episodes", "threshold"}`) and uses it only when its
+  `continuity_hash` is the SHA-256 of the current continuity; with no key or a stale hash there
+  is no filter. The set is the store's own, not a shipped list: one derived from a general chat
   corpus marks "restaurant", "dinner", "recipe" and "food" generic at a 5% cut-off, which are the
   cues the tier exists for. (3) A prompt with more than `DURABLE_SHORT_PROMPT_TOKENS` (2) usable
-  tokens needs two distinct matched tokens, so one stray word in a long prompt cannot cue a fact;
-  a short prompt still cues on one. (4) The fact text alone cues a fact only through
-  `DURABLE_FACT_TEXT_MIN` (2) distinct distinctive words of it (`extract_keywords` in the call's
-  mode); a cue match is the primary path. (5) At most `MAX_DURABLE_FACTS` (2) surface per call,
-  ranked by distinct matched tokens, then section order. `source` is `"cue"` when a cue matched
-  and `"fact"` when only the fact text did. Each number is a module constant.
+  tokens needs two DISTINCT query tokens that matched: a token matching a cue and a fact word
+  counts once, and so do inflections of one token. A short prompt still cues on one. (4) The fact
+  text alone cues a fact only through `DURABLE_FACT_TEXT_MIN` (2) distinct distinctive words of it
+  (`extract_keywords` in the call's mode); a cue match is the primary path. (5) Only the first
+  `MAX_DURABLE_QUERY_TOKENS` (12) distinct usable query tokens are considered, so a pasted
+  document costs what a sentence costs, and the tier cannot raise: any failure gives an empty
+  tier. (6) At most `MAX_DURABLE_FACTS` (2) surface per call, ranked by distinct matched query
+  tokens, then section order. `source` is `"cue"` when a cue matched (`matched` holds the cue
+  words) and `"fact"` when only the fact text did (`matched` holds those words). Each number is a
+  module constant.
 - Measured on the InMind bench with all 125 cue lines in one continuity (a store larger than any
   real one), the shipped `retrieve_relevant` in prompt mode, API-free. TUNING-ONLY: the rule's
   numbers were chosen on set A (even task ids and 50 off-topic everyday prompts) and the held-out
@@ -147,20 +156,23 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   generalizes; neither is a claim about a real store, whose cues, facts and episodes differ. Set B
   (68 tasks): the tier as first built surfaced the task's own fact for 30 of 68 task-text queries,
   a wrong fact for 51 calls (mean 1.09 per call), and some fact for 31 of 50 off-topic prompts;
-  with rules (3) and (4) only, 22 own, 27 wrong calls, 7 of 50; shipped, 13 own, 15 wrong calls
-  (mean 0.31), 2 of 50. On the indirect query type: own fact 2 of 68 in each configuration, wrong
-  calls 52, 9 and 4. Set A (57 tasks), shipped: 7 own, 11 wrong calls, 4 of 50 off-topic. The rule
-  trades about half the own-fact hits of the version with rules (3) and (4) for fewer wrong
-  facts; a store with well-chosen cues and few shared words will lose less. Cost: about 8 ms per
-  prompt on a 247-episode store with 125 facts, and about 10 ms per matching token on a
-  15,000-episode store. Reproduce with
+  with rules (3) and (4) only, 22 own, 27 wrong calls, 7 of 50; shipped, 19 own, 19 wrong calls
+  (mean 0.34), 2 of 50. On the indirect query type: own fact 2 of 68 in each configuration, wrong
+  calls 52, 8 and 4. Set A (57 tasks), shipped: 8 own, 15 wrong calls, 4 of 50 off-topic. A store
+  with well-chosen cues and few shared words will lose less. Cost: about 7 ms per prompt on
+  a 247-episode store with 125 facts, and a 160-token prompt on a 12,000-episode store stays
+  under 50 ms (the metadata read is the only store access beyond the continuity). Reproduce with
   `python scripts/cue_precision.py --cue-reach <cue_reach.json> --bench-dir <inmind>/bench/inmind`.
-- MCP `recall` with a `keyword` (first page) lists the facts its words cue first, under "Durable
-  facts matching your words:", each as its line plus "(cue: word)"; a call that matched no episode
-  but cued a fact returns the facts instead of "No matching episodes found." MCP `crystal_recall`
-  does the same ahead of its patterns. Both tool descriptions say so (manifests regenerated).
+- MCP `recall` with a `keyword` (first page, `limit` above 0, and no `since` / `until` / `source` /
+  `episode_type` filter, since facts are not episodes) lists the facts its words cue first, under
+  "Durable facts matching your words:", each as the fact text (not its cue list) plus "(cue: word)"
+  for a cue match or "(matches: word)" for a fact-text match, then the episode output; a call that
+  matched no episode keeps "No matching episodes found." after the facts block. MCP `crystal_recall`
+  does the same ahead of its patterns, with its own miss line after the block. Both tool
+  descriptions say so (manifests regenerated).
 - A harness that renders `RelevantResult` must read `result.facts` to show them; `patterns` and
-  `episodes` are unchanged.
+  `episodes` are unchanged. The documented render is `Durable fact (cue: restaurant): tree nut
+  allergy`, built from `.fact` and the first of `.matched`.
 
 ## [0.9.26] — 2026-10-03
 

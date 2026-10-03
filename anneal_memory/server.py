@@ -170,13 +170,14 @@ def _as_int(value: object) -> int | None:
 
 def _durable_block(facts: list[RelevantFact]) -> str:
     """The reply block for durable facts a query cued, or ``""`` for none: each fact's
-    line as written, then the word that cued it."""
+    text (not its cue list), then the word that brought it up, labelled ``cue`` for a
+    cue match and ``matches`` for a fact-text match."""
     if not facts:
         return ""
     lines = ["Durable facts matching your words:"]
     for f in facts:
-        label = "cue" if f.source == "cue" else "fact"
-        lines.append(f"{f.line.strip()} ({label}: {', '.join(f.matched)})")
+        label = "cue" if f.source == "cue" else "matches"
+        lines.append(f"- {f.fact} ({label}: {', '.join(f.matched)})")
     return "\n".join(lines)
 
 
@@ -422,18 +423,21 @@ class Server:
         returns the facts instead of "No matching episodes found."."""
         result = self._recall_episodes(args)
         keyword = args.get("keyword")
+        # Durable facts are not episodes: they go on a plain keyword recall's first page,
+        # and not on a call that filters episodes (since/until/source/episode_type) or one
+        # that asks for none (limit 0).
         if (
             result.get("isError")
             or not isinstance(keyword, str)
             or _as_int(args.get("offset", 0)) != 0
+            or args.get("limit", _RECALL_DEFAULT_LIMIT) <= 0
+            or any(args.get(f) for f in ("since", "until", "source", "episode_type"))
         ):
             return result
         block = _durable_block(self._cued_facts(keyword, "query"))
         if not block:
             return result
         text = result["content"][0]["text"]
-        if text == "No matching episodes found.":
-            return _tool_result(block)
         return _tool_result(block + "\n\n" + text)
 
     def _cued_facts(self, query: str, mode: RetrievalMode) -> list[RelevantFact]:
@@ -1271,22 +1275,23 @@ class Server:
         facts_block = (
             _durable_block(self._cued_facts(query, mode)) if max_patterns > 0 else ""
         )
-        if not patterns and facts_block:
-            return _tool_result(facts_block)
         if not patterns:
             # Disambiguate the retry signal for an LLM consumer: a thin query (the
             # library floors recall at MIN_KEYWORDS distinctive keywords) is fixable by
             # rephrasing; a genuine miss is not. Only when we actually attempted recall
             # (max_patterns > 0) — a capped-out call isn't a "thin query".
             floor = QUERY_MIN_KEYWORDS if mode == "query" else MIN_KEYWORDS
+            miss = "No crystallized patterns matched."
             if max_patterns > 0 and len(extract_keywords(query, mode=mode)) < floor:
-                return _tool_result(
+                miss = (
                     "No crystallized patterns matched (query too thin — give it at "
                     f"least {floor} distinctive keyword{'' if floor == 1 else 's'}, "
                     "or check crystal_index "
                     "for what exists)."
                 )
-            return _tool_result("No crystallized patterns matched.")
+            # The miss line stays, after the facts block, so the caller knows no pattern
+            # matched.
+            return _tool_result(facts_block + "\n\n" + miss if facts_block else miss)
         lines = [f"Found {len(patterns)} crystallized pattern(s):"]
         for p in patterns:
             tag_info = f" [{', '.join(p.tags)}]" if p.tags else ""

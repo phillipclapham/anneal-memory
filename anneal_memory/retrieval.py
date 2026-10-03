@@ -67,10 +67,12 @@ the episodic :class:`Store` (the seed episodes live there), so the Store-free
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import sys
+from functools import lru_cache
 from collections import Counter
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from math import log
@@ -117,27 +119,37 @@ QUERY_MIN_HITS = 1
 # --- Durable facts (the continuity's ``## Durable Facts`` section) ---
 # The cue tier is deliberately NOT behind the gates above (the bar, the anchor, the hit
 # floor, the keyword floor): a durable fact is one the composer wrote cue words for, and
-# a one-word prompt ("restaurant?") must be able to bring it up. The precision guard is
-# structural instead, five parts:
+# a one-word prompt ("restaurant?") must be able to bring it up. It runs on every prompt,
+# so its precision guard is structural, six parts:
 #   1. a cue matches by WHOLE-TOKEN equality (never a substring), after light stemming;
 #      a token under three characters or a stopword never matches;
-#   2. a query token that is GENERIC IN THIS STORE never matches: it appears in more than
-#      DURABLE_GENERIC_DF of the store's own episodes (the store's document frequency, so
-#      "time" and "work" drop out of a work store while "restaurant" stays a cue; a store
-#      under IDF_MIN_CORPUS episodes has too few to tell, and applies no such filter);
+#   2. a cue or fact word that is INERT in this store never matches: it appears, as a
+#      whole word, in more than DURABLE_GENERIC_DF of the store's own episodes ("time"
+#      and "work" in a work store; "restaurant" stays a cue). The set of inert words is
+#      computed when the continuity is saved (compute_durable_inert_tokens) and stored in
+#      the metadata key INERT_TOKENS_KEY, tied to the continuity's hash; the prompt path
+#      only READS it, and with no key or a stale hash applies no such filter (it never
+#      counts document frequency itself). A store under IDF_MIN_CORPUS episodes has too
+#      few to tell and gets an empty set;
 #   3. a prompt with more than DURABLE_SHORT_PROMPT_TOKENS usable tokens needs TWO
-#      distinct matched tokens, so one stray common word in a long prompt cannot cue a
-#      fact; a short prompt ("restaurant?") still cues on one;
+#      distinct query tokens that matched (inflections of one token count once, and a
+#      token matching both a cue and a fact word counts once); a short prompt still cues
+#      on one;
 #   4. the fact text alone cues a fact only through DURABLE_FACT_TEXT_MIN distinct
 #      distinctive words of it (cue words alone are the primary path);
-#   5. at most MAX_DURABLE_FACTS surface per call, ranked by distinct matched tokens,
-#      then by section order.
+#   5. at most MAX_DURABLE_QUERY_TOKENS distinct usable query tokens are considered, so
+#      a pasted document costs what a sentence costs;
+#   6. at most MAX_DURABLE_FACTS surface per call, ranked by distinct matched query
+#      tokens, then by section order.
 MAX_DURABLE_FACTS = 2
+MAX_DURABLE_QUERY_TOKENS = 12
 DURABLE_GENERIC_DF = 0.10
 DURABLE_SHORT_PROMPT_TOKENS = 2
 DURABLE_FACT_TEXT_MIN = 2
+INERT_TOKENS_KEY = "durable_inert_tokens"
 _FACT_TOKEN_RE = re.compile(r"[a-z0-9]+")
 _FACT_MIN_TOKEN_LEN = 3
+_EPISODE_PAGE = 1000  # episodes read per page when counting document frequency
 
 # --- Associative pattern retrieval (the evidence edge; AM-CRYSTAL-RECALL backend) ---
 # The fix for keyword-ORTHOGONAL pattern relevance: a pattern whose distilled text
@@ -658,16 +670,30 @@ def _fact_tokens(text: str) -> list[str]:
     return out
 
 
+@lru_cache(maxsize=65536)
 def _token_forms(tok: str) -> frozenset[str]:
-    """The token and its light stems: one trailing ``ing``, ``es`` or ``s`` removed,
-    each only while at least three characters remain. Two tokens match when their
-    form sets intersect, so ``restaurants``/``restaurant`` and ``recipes``/``recipe``
-    agree and ``restaurateur`` agrees with neither."""
+    """The token and its light stems: one trailing ``s`` removed while at least three
+    characters remain, or one trailing ``es`` or ``ing`` removed while at least four
+    remain (so ``rating``/``rat``, ``files``/``fil`` and ``lines``/``lin`` do not
+    collide, and ``restaurants``/``restaurant`` and ``recipes``/``recipe`` agree).
+    Two tokens match when their form sets intersect, so ``restaurateur`` agrees with
+    neither."""
     forms = {tok}
-    for suffix in ("ing", "es", "s"):
-        if tok.endswith(suffix) and len(tok) - len(suffix) >= _FACT_MIN_TOKEN_LEN:
+    for suffix, keep in (("ing", 4), ("es", 4), ("s", 3)):
+        if tok.endswith(suffix) and len(tok) - len(suffix) >= keep:
             forms.add(tok[: -len(suffix)])
     return frozenset(forms)
+
+
+def _canonical(tok: str) -> str:
+    """One representative of a token's inflection family (its shortest form)."""
+    return min(_token_forms(tok), key=lambda f: (len(f), f))
+
+
+def continuity_hash(text: str | None) -> str:
+    """The hash that ties a stored inert-token set to the continuity it was computed
+    for: SHA-256 of the UTF-8 text (an empty string for no continuity)."""
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
 
 def load_durable_facts(store: Store) -> list[DurableFact]:
@@ -680,32 +706,71 @@ def load_durable_facts(store: Store) -> list[DurableFact]:
         return []
 
 
-def store_generic_filter(store: Store) -> Callable[[str], bool]:
-    """A predicate ``generic(token)`` for ``store``: whether the token appears in more than
-    :data:`DURABLE_GENERIC_DF` of the store's episodes. The document frequency is the
-    exact ``Store.recall`` match count of the token's shortest stem (a substring count, so
-    it also covers the longer forms and, if anything, over-counts), one count per distinct
-    token asked about, memoized for the predicate's lifetime. A store with fewer than
-    :data:`IDF_MIN_CORPUS` episodes, or one that cannot be read, has nothing generic."""
-    corpus: list[int] = []
-    memo: dict[str, bool] = {}
+def _durable_words(fact: DurableFact, mode: RetrievalMode) -> tuple[list[str], list[str]]:
+    """A fact's matchable words: ``(cue words, fact-text words)``, each deduplicated."""
+    cue_words = list(dict.fromkeys(w for cue in fact.cues for w in _fact_tokens(cue)))
+    fact_words = list(dict.fromkeys(
+        w for kw in extract_keywords(fact.fact, mode=mode) for w in _fact_tokens(kw)
+    ))
+    return cue_words, fact_words
 
-    def generic(token: str) -> bool:
-        if token not in memo:
-            try:
-                if not corpus:
-                    corpus.append(store.recall(limit=0).total_matching)
-                if corpus[0] < IDF_MIN_CORPUS:
-                    memo[token] = False
-                else:
-                    stem = min(_token_forms(token), key=len)
-                    df = store.recall(keyword=stem, limit=0).total_matching
-                    memo[token] = df / corpus[0] > DURABLE_GENERIC_DF
-            except Exception:  # noqa: BLE001 - a recall tier fails soft by contract
-                memo[token] = False
-        return memo[token]
 
-    return generic
+def compute_durable_inert_tokens(store: Store, facts: list[DurableFact]) -> set[str]:
+    """The cue and fact words of ``facts`` that are too common in ``store`` to cue
+    anything: those found, as WHOLE words, in more than :data:`DURABLE_GENERIC_DF` of its
+    episodes (``cat`` is not found in "category" or "concatenate"; ``rent`` is not found in
+    "current"). An episode has a word when one of its own words shares a stem with it
+    (:func:`_token_forms`), the same equality the cue match uses. The episodes are read in
+    pages and tokenized in Python, nothing is held but counters, and the result is meant
+    to be computed when a continuity is saved and stored under :data:`INERT_TOKENS_KEY`, not
+    at prompt time. A store with fewer than :data:`IDF_MIN_CORPUS` episodes has too few to
+    tell, and gets the empty set."""
+    words: set[str] = set()
+    for fact in facts:
+        for mode in RETRIEVAL_MODES:
+            cue_words, fact_words = _durable_words(fact, mode)  # type: ignore[arg-type]
+            words.update(cue_words)
+            words.update(fact_words)
+    if not words:
+        return set()
+    wanted: dict[str, set[str]] = {}  # stem form -> the fact words that carry it
+    for w in words:
+        for form in _token_forms(w):
+            wanted.setdefault(form, set()).add(w)
+    seen_in: Counter[str] = Counter()
+    total = 0
+    offset = 0
+    while True:
+        page = store.recall(limit=_EPISODE_PAGE, offset=offset).episodes
+        if not page:
+            break
+        offset += len(page)
+        for ep in page:
+            total += 1
+            hit_words: set[str] = set()
+            for tok in set(_FACT_TOKEN_RE.findall((ep.content or "").lower())):
+                for form in _token_forms(tok):
+                    if form in wanted:
+                        hit_words.update(wanted[form])
+            seen_in.update(hit_words)
+    if total < IDF_MIN_CORPUS:
+        return set()
+    return {w for w in words if seen_in[w] / total > DURABLE_GENERIC_DF}
+
+
+def _read_inert_tokens(store: Store, text: str | None) -> frozenset[str]:
+    """The stored inert-token set if it was computed for this exact continuity, else
+    empty (no filter). One metadata read; never counts anything."""
+    try:
+        raw = store._get_metadata(INERT_TOKENS_KEY)
+        if not raw:
+            return frozenset()
+        data = json.loads(raw)
+        if data.get("continuity_hash") != continuity_hash(text):
+            return frozenset()
+        return frozenset(t for t in data.get("tokens", []) if isinstance(t, str))
+    except Exception:  # noqa: BLE001 - a recall tier fails soft by contract
+        return frozenset()
 
 
 def match_durable_facts(
@@ -714,7 +779,7 @@ def match_durable_facts(
     *,
     mode: RetrievalMode = "prompt",
     max_facts: int = MAX_DURABLE_FACTS,
-    generic: Callable[[str], bool] | None = None,
+    inert: frozenset[str] | set[str] = frozenset(),
 ) -> list[RelevantFact]:
     """The facts ``query`` cues, best first, at most ``max_facts``.
 
@@ -723,64 +788,65 @@ def match_durable_facts(
     distinctive keywords of the fact text (:func:`extract_keywords` in ``mode``) match
     query tokens. Matching is whole-token equality after light stemming
     (:func:`_token_forms`), never a substring; a token under three characters or a
-    stopword never matches. The retrieval gates (score bar, anchor, hit floor, keyword
+    stopword never matches, and neither does a cue or fact word in ``inert`` (the store's
+    precomputed set, :func:`compute_durable_inert_tokens`). Only the first
+    :data:`MAX_DURABLE_QUERY_TOKENS` distinct usable query tokens are considered. A prompt
+    with more than :data:`DURABLE_SHORT_PROMPT_TOKENS` usable tokens needs matches on two
+    DISTINCT query tokens: a token matching a cue and a fact word counts once, and so do
+    inflections of one token. The retrieval gates (score bar, anchor, hit floor, keyword
     floor) do not apply to this tier, on purpose; its guard is the rule list at
-    :data:`MAX_DURABLE_FACTS`. ``generic(token)``, when given, names query tokens too
-    common in the store to cue anything (:func:`store_generic_filter`); a prompt with more
-    than :data:`DURABLE_SHORT_PROMPT_TOKENS` usable tokens (generic ones included) needs
-    two distinct matched tokens. Ranking is by distinct matched tokens, then section
-    order. ``source`` is ``"cue"`` when any cue matched, else ``"fact"``."""
+    :data:`MAX_DURABLE_FACTS`. Ranking is by distinct matched query tokens, then section
+    order. ``source`` is ``"cue"`` when any cue matched (``matched`` then holds the matched
+    cue words) and ``"fact"`` otherwise (``matched`` holds the fact-text words)."""
     _check_mode(mode)
     if max_facts <= 0 or not facts:
         return []
-    query_tokens = _fact_tokens(query)
+    query_tokens = _fact_tokens(query)[:MAX_DURABLE_QUERY_TOKENS]
     if not query_tokens:
         return []
     need = 2 if len(query_tokens) > DURABLE_SHORT_PROMPT_TOKENS else 1
+    query_forms = [(_canonical(tok), _token_forms(tok)) for tok in query_tokens]
 
-    # Each fact's words, once: (cue words, fact-text words).
-    words: list[tuple[list[str], list[str]]] = []
-    for fact in facts:
-        cue_words = list(dict.fromkeys(w for cue in fact.cues for w in _fact_tokens(cue)))
-        fact_words = list(dict.fromkeys(
-            w for kw in extract_keywords(fact.fact, mode=mode) for w in _fact_tokens(kw)
-        ))
-        words.append((cue_words, fact_words))
-
-    # Only a query token that could match some fact word is worth a document-frequency
-    # lookup; the rest cannot change the result.
-    usable = query_tokens
-    if generic is not None:
-        known: set[str] = set()
-        for cue_words, fact_words in words:
-            for w in cue_words + fact_words:
-                known |= _token_forms(w)
-        usable = [
-            tok for tok in query_tokens
-            if not (_token_forms(tok) & known) or not generic(tok)
-        ]
-    query_forms = [_token_forms(tok) for tok in usable]
-    if not query_forms:
-        return []
-
-    def hits(candidates: list[str]) -> list[str]:
-        return [w for w in candidates if any(_token_forms(w) & qf for qf in query_forms)]
+    def matches(candidates: list[str]) -> list[tuple[str, str]]:
+        """``(word, query token family)`` for each candidate that matches a query token;
+        one entry per inflection family of candidate."""
+        out: list[tuple[str, str]] = []
+        families: set[str] = set()
+        for w in candidates:
+            if w in inert:
+                continue
+            canon_w = _canonical(w)
+            if canon_w in families:
+                continue
+            forms = _token_forms(w)
+            for canon_q, qf in query_forms:
+                if forms & qf:
+                    families.add(canon_w)
+                    out.append((w, canon_q))
+                    break
+        return out
 
     ranked: list[tuple[int, int, RelevantFact]] = []
-    for position, (fact, (cue_words, fact_words)) in enumerate(zip(facts, words)):
-        cue_hits = hits(cue_words)
-        fact_hits = [w for w in hits(fact_words) if w not in cue_hits]
+    for position, fact in enumerate(facts):
+        cue_words, fact_words = _durable_words(fact, mode)
+        cue_hits = matches(cue_words)
+        cue_families = {_canonical(w) for w, _q in cue_hits}
+        fact_hits = [
+            (w, q) for w, q in matches(fact_words) if _canonical(w) not in cue_families
+        ]
         if not cue_hits and len(fact_hits) < DURABLE_FACT_TEXT_MIN:
             continue
-        if len(cue_hits) + len(fact_hits) < need:
+        distinct_query_tokens = {q for _w, q in cue_hits} | {q for _w, q in fact_hits}
+        if len(distinct_query_tokens) < need:
             continue
+        shown = [w for w, _q in (cue_hits or fact_hits)]
         ranked.append((
-            len(cue_hits) + len(fact_hits),
+            len(distinct_query_tokens),
             position,
             RelevantFact(
                 fact=fact.fact,
                 line=fact.line,
-                matched=tuple(cue_hits + fact_hits),
+                matched=tuple(shown),
                 source="cue" if cue_hits else "fact",
             ),
         ))
@@ -791,14 +857,20 @@ def match_durable_facts(
 def durable_facts_for(
     store: Store, query: str, *, mode: RetrievalMode = "prompt"
 ) -> list[RelevantFact]:
-    """The durable facts of ``store``'s continuity that ``query`` cues, with the
-    store's own generic-word filter applied. Never raises (see :func:`load_durable_facts`)."""
-    facts = load_durable_facts(store)
-    if not facts:
+    """The durable facts of ``store``'s continuity that ``query`` cues. Reads the store's
+    stored inert-token set (:data:`INERT_TOKENS_KEY`) when it matches the current
+    continuity. Structurally never raises: any failure at all gives ``[]``, because a
+    recall tier on every prompt must not be able to break the prompt."""
+    try:
+        text = store.load_continuity()
+        facts = parse_durable_facts(text, store.section_schema)
+        if not facts:
+            return []
+        return match_durable_facts(
+            facts, query, mode=mode, inert=_read_inert_tokens(store, text)
+        )
+    except Exception:  # noqa: BLE001 - see the docstring
         return []
-    return match_durable_facts(
-        facts, query, mode=mode, generic=store_generic_filter(store)
-    )
 
 
 def retrieve_relevant(

@@ -149,14 +149,15 @@ class TestMcpRecallFacts:
         _seed_episodes(store)
         text = _text(_call(server, "recall", {"keyword": "dinner plans"}))
         assert text.startswith(
-            "Durable facts matching your words:\n" + ALLERGY + " (cue: dinner)\n\n")
+            "Durable facts matching your words:\n- tree nut allergy (cue: dinner)\n\n")
         assert text.partition("\n\n")[2].startswith(
             "No episode contains the exact phrase; ranked by matching words")
 
     def test_a_fact_with_no_episode_replaces_no_matching(self, server, store):
         store.save_continuity(_continuity(ALLERGY))
         text = _text(_call(server, "recall", {"keyword": "dinner plans"}))
-        assert text == "Durable facts matching your words:\n" + ALLERGY + " (cue: dinner)"
+        assert text == ("Durable facts matching your words:\n- tree nut allergy (cue: dinner)"
+                        "\n\nNo matching episodes found.")
 
     def test_no_keyword_is_unchanged(self, server, store):
         store.save_continuity(_continuity(ALLERGY))
@@ -196,14 +197,15 @@ class TestMcpCrystalRecallFacts:
             name="dinner_menu_discipline", level=2,
             explanation="check the dinner menu against every allergy", tags=[])
         text = _text(_call(server, "crystal_recall", {"query": "dinner menu allergy check"}))
-        assert text.startswith("Durable facts matching your words:\n" + ALLERGY)
+        assert text.startswith("Durable facts matching your words:\n- tree nut allergy (cue:")
         assert "Found 1 crystallized pattern(s):" in text
         assert "dinner_menu_discipline" in text
 
     def test_a_fact_with_no_pattern_replaces_no_match(self, server, store):
         store.save_continuity(_continuity(ALLERGY))
         text = _text(_call(server, "crystal_recall", {"query": "restaurant", "mode": "query"}))
-        assert text == "Durable facts matching your words:\n" + ALLERGY + " (cue: restaurant)"
+        assert text == ("Durable facts matching your words:\n- tree nut allergy (cue: restaurant)"
+                        "\n\nNo crystallized patterns matched.")
 
     def test_no_section_is_unchanged(self, server, store):
         assert _text(_call(server, "crystal_recall", {"query": "restaurant dinner"})) == \

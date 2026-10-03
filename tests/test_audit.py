@@ -6634,27 +6634,45 @@ class TestFixDiffRound9LoudNotSilent:
         assert result.valid is False
         assert result.error is not None and "Corrupt manifest" in result.error
 
-    def test_a_corrupt_orphan_makes_verify_invalid_not_silently_valid(self, tmp_path, monkeypatch):
-        """HIGH, codex #1. A corrupt orphan was skipped, init seeded from the
-        stale manifest hash, and ``verify()`` returned valid=True over 5
-        entries while 41 were missing, measured.
+    def test_a_corrupt_orphan_refuses_writes_until_repair_sets_it_aside(self, tmp_path, monkeypatch):
+        """HIGH, codex #1 (round 9): a corrupt orphan was skipped, init seeded
+        from the stale manifest hash, and ``verify()`` returned valid=True over
+        5 entries while 41 were missing, measured. Rounds 8-10 then let writes
+        continue past it with ``verify()`` reporting the file; that was round
+        10's SEAT ruling, which Phill superseded 2026-10-03: with no usable
+        active file, the write is refused, naming the file and audit-repair;
+        repair sets the file aside (kept, recorded); writes resume; verify()
+        names the gap.
 
-        ⛔ MUTATION-CHECKED: remove the unmanifested-sealed-file check from
-        ``verify()`` and this fails — valid is True.
+        ⛔ MUTATION-CHECKED: drop the refusal in ``_seed_from_manifest`` and the
+        first ``log()`` here is accepted.
         """
         db, orphan = self._failed_rotation(tmp_path, monkeypatch)
         packed = gzip.compress(orphan.read_bytes())
         corrupt = tmp_path / "m.audit.1999-W02.jsonl.gz"
         corrupt.write_bytes(packed[: len(packed) // 2])
         orphan.unlink()
+        corrupt_bytes = corrupt.read_bytes()
 
-        reopened = AuditTrail(db)
-        reopened.log("after_reopen", {})  # writes continue (round 8)
-
+        with pytest.raises(audit_module._ManifestUnavailable) as refused:
+            AuditTrail(db).log("after_reopen", {})
+        assert corrupt.name in str(refused.value)
+        assert "anneal-memory audit-repair" in str(refused.value)
         result = AuditTrail.verify(db)
         assert result.valid is False
-        assert result.error is not None and "Unmanifested sealed audit file" in result.error
-        assert corrupt.exists(), "a corrupt orphan must be left on disk, untouched"
+        assert "Unmanifested sealed audit file" in (result.error or "")
+
+        repair = AuditTrail.repair_manifest(db)
+        assert repair.repaired is True, repair.error
+        [record] = repair.set_aside
+        assert record["filename"] == corrupt.name and record["period"] == "1999-W02"
+        assert (tmp_path / record["set_aside_as"]).read_bytes() == corrupt_bytes
+        assert not corrupt.exists()
+
+        AuditTrail(db).log("after_repair", {})
+        result = AuditTrail.verify(db)
+        assert result.valid is True, result.error
+        assert [r["filename"] for r in result.set_aside] == [corrupt.name]
 
     def test_a_transient_read_error_during_adoption_is_retried(self, tmp_path, monkeypatch):
         """HIGH, codex #1. A one-off EIO during adoption was treated like
@@ -6854,31 +6872,40 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         "not POSIX-style access bits; a mode-000 file stays readable there, "
         "so this simulation never reaches the code path under test",
     )
-    def test_a_permanently_unreadable_orphan_does_not_block_writes(self, tmp_path, monkeypatch):
-        """HIGH, complement, reproduced 3 of 3. Round 9 raised any read error
-        that was not corrupt gzip, on the theory that it was transient; a
-        ``chmod 000`` orphan ``.jsonl`` then made every ``log()`` raise.
+    def test_a_permanently_unreadable_orphan_refuses_writes_until_repair(self, tmp_path, monkeypatch):
+        """HIGH, complement, reproduced 3 of 3 (round 10): round 9 raised the
+        read error out of every ``log()`` with no way out. Round 10's SEAT
+        ruling then let writes continue past the orphan; Phill superseded it
+        2026-10-03. With no usable active file the write is refused, naming
+        the file and the way out, and ``audit-repair`` is that way out: it sets
+        the file aside (never deletes it) and records it, writes resume, and
+        ``verify()`` names the gap.
 
-        ⛔ MUTATION-CHECKED: raise a non-corrupt read error out of
-        ``_adopt_orphaned_files`` after the retries and this raises
-        ``PermissionError``.
+        ⛔ MUTATION-CHECKED: let repair report "nothing to repair" on a valid
+        manifest, as before, and the write after repair is still refused.
         """
         db, orphan = TestFixDiffRound9LoudNotSilent._failed_rotation(tmp_path, monkeypatch, segment=5)
         original = orphan.read_bytes()
         orphan.chmod(0)
         try:
-            reopened = AuditTrail(db)
-            reopened.log("after", {})  # must NOT raise
-            reopened.log("again", {})
-            names = [f["filename"] for f in reopened._load_manifest()["files"]]
+            with pytest.raises(audit_module._ManifestUnavailable) as refused:
+                AuditTrail(db).log("after", {})
+            assert orphan.name in str(refused.value)
+            repair = AuditTrail.repair_manifest(db)
+            AuditTrail(db).log("after_repair", {})
+            AuditTrail(db).log("again", {})
             result = AuditTrail.verify(db)
         finally:
-            orphan.chmod(0o600)
+            for p in tmp_path.iterdir():
+                if p.name.startswith(orphan.name):
+                    p.chmod(0o600)
 
-        assert orphan.name not in names
-        assert orphan.read_bytes() == original, "an unreadable orphan stays on disk, untouched"
-        assert result.valid is False
-        assert result.error is not None and "Unmanifested sealed audit file" in result.error
+        assert repair.repaired is True, repair.error
+        [record] = repair.set_aside
+        assert record["filename"] == orphan.name
+        assert (tmp_path / record["set_aside_as"]).read_bytes() == original
+        assert result.valid is True, result.error
+        assert [r["set_aside_as"] for r in result.set_aside] == [record["set_aside_as"]]
 
     @pytest.mark.parametrize(
         "stall_at", ["after_rename", "after_replace", "before_manifest_save", "after_manifest_save"]
@@ -7111,28 +7138,30 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         reported "Hash mismatch" on every later run. ``rotated_past=True`` is
         L1's exact repro, with a newer week sealed in between.
 
-        ⛔ MUTATION-CHECKED: drop the active-file link check and the
-        ``rotated_past=False`` case fails (the chain-tip check alone cannot
-        refuse it, because the orphan does continue the sealed chain).
+        Round 10's answer (its SEAT ruling: writes continue, the week is never
+        adopted) was superseded by Phill 2026-10-03: with no usable active
+        file the writes are refused while the orphan is unreadable, so nothing
+        is written past it, and once readable it is adopted into one chain.
         """
         db, orphan = TestFixDiffRound9LoudNotSilent._failed_rotation(tmp_path, monkeypatch, segment=5)
         orphan.chmod(0)
         try:
             reopened = AuditTrail(db)
-            reopened.log("while_unreadable", {})
+            with pytest.raises(audit_module._ManifestUnavailable):
+                reopened.log("while_unreadable", {})
             if rotated_past:
                 reopened._last_week = "1999-W03"
-                reopened.log("next_week", {})
+                with pytest.raises(audit_module._ManifestUnavailable):
+                    reopened.log("next_week", {})
         finally:
             orphan.chmod(0o600)
 
         AuditTrail(db).log("readable_again", {})
 
         names = [f["filename"] for f in AuditTrail(db)._load_manifest()["files"]]
-        assert orphan.name not in names
+        assert orphan.name in names
         result = AuditTrail.verify(db)
-        assert result.valid is False
-        assert "Unmanifested sealed audit file" in (result.error or ""), result.error
+        assert result.valid is True, result.error
 
     def test_an_orphan_that_does_not_continue_the_sealed_chain_is_not_adopted(
         self, tmp_path, monkeypatch

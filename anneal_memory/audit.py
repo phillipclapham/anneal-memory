@@ -40,7 +40,7 @@ import threading
 import time
 import zlib
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -273,6 +273,13 @@ def _fsync_dir(path: Path) -> None:
         os.close(dir_fd)
 
 
+# The fields of one record in the manifest's ``set_aside`` list.
+_SET_ASIDE_KEYS = ("filename", "set_aside_as", "period", "cause", "at")
+# The reason ``audit-repair`` sets an unreadable or corrupt sealed file aside
+# under: ``<sealed name>.unreadable-<UTC stamp>`` (see ``_set_aside``).
+_UNREADABLE_REASON = "unreadable"
+
+
 def _parse_manifest_bytes(raw: bytes, stem: str) -> dict[str, Any]:
     """Parse manifest bytes into a mapping, or raise trying.
 
@@ -371,6 +378,12 @@ def _parse_manifest_bytes(raw: bytes, stem: str) -> dict[str, Any]:
         manifest["chain_anchor_recovered"], bool
     ):
         raise TypeError("manifest field 'chain_anchor_recovered' is not a boolean")
+    set_aside = manifest.get("set_aside", [])
+    if not isinstance(set_aside, list) or not all(
+        isinstance(r, dict) and all(isinstance(r.get(k), str) for k in _SET_ASIDE_KEYS)
+        for r in set_aside
+    ):
+        raise TypeError("manifest field 'set_aside' is not a list of set-aside records")
     manifest["files"] = files
     return manifest
 
@@ -434,6 +447,12 @@ class AuditVerifyResult:
     # removed by retention, or a truncated front) cannot be verified. Ruled by
     # Phill 2026-09-13: reported alongside ``valid``, never folded into it.
     anchor_trusted: bool = True
+    # Sealed files audit-repair set aside as unreadable or corrupt, from the
+    # manifest's ``set_aside`` record (Phill, 2026-10-03): each a dict with
+    # ``filename``, ``set_aside_as``, ``period``, ``cause`` and ``at``. Their
+    # entries are a known gap the chain continues past, so ``valid`` speaks
+    # for the chain without them, reported beside it as ``anchor_trusted`` is.
+    set_aside: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -448,6 +467,9 @@ class AuditRepairResult:
     # reports them until the operator removes them.
     untracked: list[str] = field(default_factory=list)
     error: str | None = None
+    # Unreadable or corrupt sealed files this repair set aside and recorded in
+    # the manifest (the same dicts as ``AuditVerifyResult.set_aside``).
+    set_aside: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -564,6 +586,9 @@ class AuditTrail:
         # Why the last orphan adoption did not complete, for the refusal that
         # follows it (L2: a refusal that named no cause left no way out).
         self._adoption_skip_reason = ""
+        # Unmanifested sealed files newer than the manifest's last week that
+        # the last adoption could not read, as (name, cause).
+        self._unreadable_newer: list[tuple[str, str]] = []
 
     # -- Public API --
 
@@ -1255,7 +1280,21 @@ class AuditTrail:
         manifest_signature: tuple[int, int, int] | None,
     ) -> AuditVerifyResult:
         """The pass itself, against one directory listing (``names``) and the
-        manifest's signature taken before that listing."""
+        manifest's signature taken before that listing. Every result carries
+        the manifest's ``set_aside`` record when the manifest was read."""
+        set_aside: list[dict[str, str]] = []
+        result = cls._verify_pass(db_path, names, manifest_signature, set_aside)
+        return replace(result, set_aside=set_aside) if set_aside else result
+
+    @classmethod
+    def _verify_pass(
+        cls,
+        db_path: Path,
+        names: set[str],
+        manifest_signature: tuple[int, int, int] | None,
+        set_aside: list[dict[str, str]],
+    ) -> AuditVerifyResult:
+        """:meth:`_verify_listed`'s body; fills ``set_aside`` from the manifest."""
         stem = db_path.stem
         audit_dir = db_path.parent
         manifest_path = audit_dir / f"{stem}.audit.manifest.json"
@@ -1298,6 +1337,7 @@ class AuditTrail:
                 if anchor:
                     chain_anchor = anchor
                 anchor_trusted = manifest.get("chain_anchor_recovered") is not True
+                set_aside.extend(dict(r) for r in manifest.get("set_aside", []))
                 for f in manifest.get("files", []):
                     fpath = audit_dir / f["filename"]
                     # is_file(), not exists() (codex, round 6): a filename
@@ -1588,7 +1628,7 @@ class AuditTrail:
 
         if not markers and trail._manifest_path.exists():
             try:
-                trail._load_manifest()
+                current = trail._load_manifest()
             except _ManifestQuarantined as e:
                 # The markers _load_manifest saw or just created. Listing again
                 # here could fail after the rename and report "nothing was
@@ -1605,9 +1645,7 @@ class AuditTrail:
             except _ManifestUnavailable as e:
                 return AuditRepairResult(repaired=False, error=str(e))
             else:
-                return AuditRepairResult(
-                    repaired=False, error="The manifest is valid; there is nothing to repair."
-                )
+                return cls._set_aside_unreadable_locked(trail, current)
 
         try:
             by_period: dict[str, list[Path]] = {}
@@ -1700,6 +1738,17 @@ class AuditTrail:
         if recovered:
             manifest["chain_anchor"] = anchor
             manifest["chain_anchor_recovered"] = True
+        # The quarantined manifest's set_aside record is not readable here, but
+        # every file repair set aside is still on disk under its set-aside name,
+        # so the gap stays recorded through a rebuild.
+        try:
+            carried = _set_aside_records_on_disk(audit_dir, stem)
+        except OSError as e:
+            return AuditRepairResult(
+                repaired=False, error=f"Cannot list the audit directory: {e}; {nothing}"
+            )
+        if carried:
+            manifest["set_aside"] = carried
         try:
             trail._save_manifest(manifest)
             saved_signature = _stat_signature(trail._manifest_path)
@@ -1755,6 +1804,95 @@ class AuditTrail:
             chain_anchor_recovered=recovered,
             untracked=untracked,
         )
+
+    @classmethod
+    def _set_aside_unreadable_locked(
+        cls, trail: "AuditTrail", manifest: dict[str, Any]
+    ) -> AuditRepairResult:
+        """With a valid manifest: set aside every unmanifested sealed week none
+        of whose copies can be read, and record each in the manifest's
+        ``set_aside`` list (Phill, 2026-10-03). The caller holds the lock.
+
+        ⛔ RECORDED BEFORE IT IS MOVED, AND NEVER DELETED. A file renamed with
+        no record would be a gap nothing reports. So the manifest naming the
+        file's new name is saved first and the rename follows; a crash in
+        between leaves the file on its sealed name, which ``verify()`` reports
+        as unmanifested and the next repair moves (dropping the stale record
+        first). The new name, ``<name>.unreadable-<UTC stamp>``, is outside
+        the sealed-file language, so adoption and ``verify()``'s unmanifested
+        check no longer see it, and writes continue from the manifest's tip.
+        """
+        db_path = trail._db_path
+        stem = db_path.stem
+        audit_dir = db_path.parent
+        prefix = f"{stem}.audit."
+        try:
+            names = sorted(p.name for p in audit_dir.iterdir())
+        except OSError as e:
+            return AuditRepairResult(
+                repaired=False,
+                error=f"Cannot list the audit directory: {e}; nothing was written.",
+            )
+        manifested = {_week_of(f["filename"], prefix) for f in manifest["files"]}
+        by_week: dict[str, list[Path]] = {}
+        for name in names:
+            if _is_sealed_filename(name, stem) and _week_of(name, prefix) not in manifested:
+                by_week.setdefault(_week_of(name, prefix), []).append(audit_dir / name)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        new: list[dict[str, str]] = []
+        for week, paths in sorted(by_week.items()):
+            scans = {path: trail._scan_sealed(path) for path in paths}
+            if any(scan.error is None for scan in scans.values()):
+                continue  # a readable copy is adoption's to take, not repair's
+            for path in paths:
+                new.append({
+                    "filename": path.name,
+                    "set_aside_as": f"{path.name}.{_UNREADABLE_REASON}-{stamp}",
+                    "period": week,
+                    "cause": str(scans[path].error),
+                    "at": stamp,
+                })
+        if not new:
+            return AuditRepairResult(
+                repaired=False, error="The manifest is valid; there is nothing to repair."
+            )
+        taken = [r["set_aside_as"] for r in new if os.path.lexists(audit_dir / r["set_aside_as"])]
+        if taken:
+            # os.rename replaces an existing file on POSIX; recovery never does.
+            return AuditRepairResult(
+                repaired=False,
+                error=f"A set-aside name is already taken ({taken}); nothing was written.",
+            )
+        moving = {r["filename"] for r in new}
+        kept = [
+            r for r in manifest.get("set_aside", [])
+            if not (r["filename"] in moving and r["set_aside_as"] not in names)
+        ]
+        manifest["set_aside"] = kept + new
+        try:
+            trail._save_manifest(manifest)
+        except OSError as e:
+            return AuditRepairResult(
+                repaired=False, error=f"Could not save the manifest: {e}; nothing was moved."
+            )
+        for record in new:
+            try:
+                os.rename(audit_dir / record["filename"], audit_dir / record["set_aside_as"])
+            except OSError as e:
+                return AuditRepairResult(
+                    repaired=False,
+                    set_aside=new,
+                    error=(
+                        f"Recorded {record['filename']} as set aside, but could not move it: "
+                        f"{e}; run `anneal-memory audit-repair` again."
+                    ),
+                )
+            logger.info(  # the result carries it; the CLI prints it
+                "Set aside unreadable audit file %s as %s (%s)",
+                record["filename"], record["set_aside_as"], record["cause"],
+            )
+        _fsync_dir(audit_dir)
+        return AuditRepairResult(repaired=True, set_aside=new)
 
     # -- Internal --
 
@@ -2108,6 +2246,14 @@ class AuditTrail:
             return
         if not adopted:
             self._refuse_seed_after_incomplete_adoption()
+        if self._unreadable_newer:
+            bad = "; ".join(f"{name} ({cause})" for name, cause in self._unreadable_newer)
+            raise _ManifestUnavailable(
+                f"sealed audit file(s) newer than the manifest cannot be read: {bad}. "
+                "With no usable active file the chain would continue past them; "
+                "run `anneal-memory audit-repair` to set them aside (kept on disk, "
+                "recorded in the manifest, reported by verify)"
+            )
         self._prev_hash = manifest.get("active_last_hash", GENESIS_HASH)
         self._seq = manifest.get("active_last_seq", 0)
 
@@ -2149,6 +2295,7 @@ class AuditTrail:
         cannot be taken skips recovery and returns False, as
         :meth:`_adopt_locked` does on each early return."""
         self._adoption_skip_reason = ""
+        self._unreadable_newer = []
         try:
             self._require_lock()
         except _AuditLockError as exc:
@@ -2191,8 +2338,12 @@ class AuditTrail:
         - only one reads → that one is, and the unreadable copy stays on its
           name. (codex, L3 of round 10b, reproduced: setting a differing or
           unread copy aside hid entries only it held behind a valid verify.)
-        - neither reads → nothing is set aside or adopted, ``verify()``
-          reports the week, and writes continue.
+        - neither reads → nothing is set aside or adopted, and ``verify()``
+          reports the week. Where the week is newer than the manifest's last,
+          it is noted for :meth:`_seed_from_manifest`, which refuses a write
+          with no usable active file until ``audit-repair`` sets the week aside
+          (Phill, 2026-10-03, superseding round 10's seat ruling that writes
+          continue); a write the active file anchors still continues.
 
         ⛔ AND A COPY IS ADOPTED ONLY WHERE IT CHAINS (L1 + L2, round 10,
         reproduced). An orphan skipped while unreadable let writes continue
@@ -2210,10 +2361,8 @@ class AuditTrail:
 
         Returns True when the manifest loaded and the directory was listed, so
         every name in it was considered, whether or not anything was adopted.
-        An unreadable or corrupt orphan does NOT make it False (round 10's
-        ruling, kept 10-03): writes continue and ``verify()`` reports the week.
-        So with an empty active file the chain continues from the manifest past
-        such a week (a documented residue, CHANGELOG [Unreleased]). Returns
+        An unreadable or corrupt orphan does NOT make it False; a newer one is
+        reported through ``_unreadable_newer`` instead (above). Returns
         False when it returned before listing: the manifest could not be loaded
         or the directory could not be listed. A missing directory has nothing
         to adopt and returns True.
@@ -2258,6 +2407,7 @@ class AuditTrail:
         tip = files[-1].get("last_hash", "") if files else (
             manifest.get("chain_anchor") or GENESIS_HASH
         )
+        last_week = _week_of(files[-1]["filename"], prefix) if files else ""
 
         # Grouped by week and walked in sorted order, so manifest entries are
         # chronological whatever mix of .gz and .jsonl orphans there is.
@@ -2297,6 +2447,14 @@ class AuditTrail:
             all_scans.update(scans)
             readable = [path for path in paths if scans[path].error is None]
             if not readable:
+                # Newer than the manifest's last week: with an empty active
+                # file the chain would continue from the manifest past it, so
+                # _seed_from_manifest refuses until audit-repair sets it aside
+                # (Phill, 2026-10-03, superseding round 10's seat ruling).
+                if week > last_week:
+                    self._unreadable_newer.extend(
+                        (path.name, str(scans[path].error)) for path in paths
+                    )
                 # ⛔ LEFT ON DISK, UNADOPTED, AND NOT RAISED (complement, round
                 # 10). ``verify()`` reports it as unmanifested, so the gap is
                 # loud; raising made every ``log()`` fail for as long as the
@@ -3265,6 +3423,28 @@ def _first_prev_hash(path: Path) -> str | None:
 def _week_of(name: str, prefix: str) -> str:
     """The ISO week label in a sealed filename ``<prefix><week>.jsonl[.gz]``."""
     return name.removeprefix(prefix).removesuffix(".gz").removesuffix(".jsonl")
+
+
+def _set_aside_records_on_disk(audit_dir: Path, stem: str) -> list[dict[str, str]]:
+    """Set-aside records rebuilt from the names ``audit-repair`` gave the files
+    it set aside (``<sealed name>.unreadable-<stamp>``), for a manifest rebuilt
+    from quarantine. The cause was in the quarantined manifest and is not
+    recovered. A listing error is raised."""
+    pattern = re.compile(
+        rf"(?P<orig>.+)\.{_UNREADABLE_REASON}-(?P<stamp>\d{{8}}T\d{{12}}Z)"
+    )
+    records = []
+    for name in sorted(p.name for p in audit_dir.iterdir()):
+        m = pattern.fullmatch(name)
+        if m and _is_sealed_filename(m["orig"], stem):
+            records.append({
+                "filename": m["orig"],
+                "set_aside_as": name,
+                "period": _sealed_period(m["orig"], stem),
+                "cause": "not recovered: it was recorded in the quarantined manifest",
+                "at": m["stamp"],
+            })
+    return records
 
 
 def _set_aside(path: Path, reason: str) -> None:

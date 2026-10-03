@@ -1142,9 +1142,19 @@ def cmd_verify(args: argparse.Namespace) -> None:
             "skipped_lines": result.skipped_lines,
             "error": result.error,
             "anchor_trusted": result.anchor_trusted,
+            "set_aside": result.set_aside,
         })
         return
 
+    # A sealed week audit-repair set aside is a recorded gap: printed on both
+    # paths, beside the verdict, never folded into it (Phill, 2026-10-03).
+    for record in result.set_aside:
+        print(
+            f"  GAP: {record['filename']} ({record['period']}) was set aside by "
+            f"audit-repair as {record['set_aside_as']} at {record['at']}: "
+            f"{record['cause']}; its entries are not in the verified chain",
+            file=sys.stderr,
+        )
     if result.valid:
         # Ruled by Phill 2026-09-13: a recovered anchor is reported beside
         # ``valid``, on the summary line itself, never folded into it.
@@ -1192,8 +1202,17 @@ def cmd_audit_repair(args: argparse.Namespace) -> None:
             "files": result.files,
             "chain_anchor_recovered": result.chain_anchor_recovered,
             "untracked": result.untracked,
+            "set_aside": result.set_aside,
             "error": result.error,
         })
+    elif result.repaired and result.set_aside and not result.files:
+        for record in result.set_aside:
+            print(
+                f"Set aside unreadable sealed file {record['filename']} as "
+                f"{record['set_aside_as']} ({record['cause']}); kept on disk and "
+                "recorded in the manifest. Writes continue past this gap, and "
+                "verify reports it."
+            )
     elif result.repaired:
         print(f"Audit manifest rebuilt from {len(result.files)} sealed file(s)")
         if result.chain_anchor_recovered:
@@ -3741,7 +3760,8 @@ def build_parser() -> argparse.ArgumentParser:
     # -- audit-repair --
     sub = subparsers.add_parser(
         "audit-repair",
-        help="Rebuild a quarantined audit manifest from the sealed files",
+        help="Rebuild a quarantined audit manifest from the sealed files, or set aside "
+        "an unreadable or corrupt sealed week (kept on disk, recorded in the manifest)",
         parents=[json_parent],
     )
     sub.set_defaults(func=cmd_audit_repair)

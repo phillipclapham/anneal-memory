@@ -4479,6 +4479,34 @@ def test_adopt_unbound_binds_records_written_before_store_ids(tmp_path):
     assert len(log.read_text().splitlines()) == 3
 
 
+def test_adopt_without_a_file_lock_refuses_before_minting_the_store_id(tmp_path):
+    """Windows CI 10-03 (run 37159022302): on a platform with no file lock,
+    `outcome --adopt-unbound` said "nothing was written" after it had already
+    minted the store id. Simulated on every platform by removing fcntl from the
+    worth module inside the CLI process."""
+    db = tmp_path / "mem.db"
+    assert subprocess.run([sys.executable, "-m", "anneal_memory.cli", "--db", str(db), "init"],
+                          capture_output=True, text=True).returncode == 0
+    con = sqlite3.connect(db)
+    con.execute("DELETE FROM metadata WHERE key = 'store_id'")
+    con.commit()
+    con.close()
+    code = ("import sys, anneal_memory.worth as w, anneal_memory.cli as c\n"
+            "w.fcntl = None\n"
+            f"sys.argv = ['anneal-memory', '--db', {str(db)!r}, 'outcome', '--adopt-unbound']\n"
+            "c.main()\n")
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                            cwd=str(Path(__file__).resolve().parent.parent))
+    assert result.returncode == 1 and "needs a file lock" in result.stderr, result.stderr
+    con = sqlite3.connect(db)
+    try:
+        row = con.execute("SELECT value FROM metadata WHERE key = 'store_id'").fetchone()
+    finally:
+        con.close()
+    assert row is None
+    assert not (tmp_path / "mem.outcomes.jsonl").exists()
+
+
 def test_store_id_proof_and_mint_refuse_what_l3_reproduced(tmp_path):
     """L3 10-03 on e0e1dff, each reproduced by a real CLI run first: a
     metadata-only file holding a store_id row was accepted and written to by

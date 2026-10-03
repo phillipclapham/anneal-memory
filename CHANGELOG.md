@@ -2,6 +2,18 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed — `outcome --adopt-unbound` on a platform with no file lock (Windows)
+
+- It refused with "nothing was written" after it had already minted the store's id into the
+  database. The CLI now checks for the lock before minting, so the refusal writes nothing.
+  Found by Windows CI 2026-10-03 (run 37159022302).
+- Test-only: the cross-process audit-lock test raced its own marker file (the child created it
+  before writing it); CI's Linux py3.11/py3.13 failures since 13e8094 were that race, measured
+  on Linux under load (the exclusion check itself never failed). Windows tests for lock-only
+  behaviour now skip or assert the documented refusal.
+
 ## [0.9.26] — 2026-10-03
 
 ### Removed — the Hebbian hop in pattern recall (BREAKING for code that imports the hop constants)

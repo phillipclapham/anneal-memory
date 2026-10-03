@@ -154,8 +154,10 @@ from .worth import (
     OUTCOME_VALUES,
     ExposedRef,
     ExposureLabel,
+    ADOPT_UNSUPPORTED,
     OutcomeLog,
     _build_record as _build_worth_record,
+    adopt_supported,
     compute_worth,
     fold_surfaced,
     load_receipts,
@@ -3416,6 +3418,10 @@ def cmd_outcome(args: argparse.Namespace) -> None:
         if not args.adopt_unbound:
             # The whole record is validated before the id is minted (L3 r2 10-03).
             _build_worth_record(args.exposure_id, items, args.outcome, exposed, None)
+        elif not adopt_supported():
+            # Refused before the mint below, so "nothing was written" holds (Windows
+            # CI 10-03: the id had been minted, then adopt refused).
+            raise ValueError(ADOPT_UNSUPPORTED)
         log = OutcomeLog(outcome_log_path(db_path), store_id=_outcome_store_id(db_path, mint=True))
     except (ValueError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

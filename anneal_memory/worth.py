@@ -162,6 +162,8 @@ class OutcomeLog:
         """
         rec = _build_record(exposure_id, items, outcome, exposed, ts)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Read-write, not write-only: the append reads the last byte to repair a
+        # torn final line, so a write-only (0200) log now refuses.
         fd = os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
         try:
             if fcntl is not None:
@@ -194,7 +196,8 @@ class OutcomeLog:
         :meth:`record` validates them, before the log is touched.
 
         The read and the append are ONE span of the same exclusive lock
-        :meth:`record` takes, so a :meth:`record` from another process (a human
+        :meth:`record` takes (POSIX only: where ``fcntl`` is unavailable there is
+        no lock and this is a plain read-then-append, as :meth:`record` is), so a :meth:`record` from another process (a human
         correction) lands either wholly before this call's read, where it is seen
         and kept, or wholly after its append, where it wins the merge. A
         :meth:`latest` followed by :meth:`record` is two spans and can overwrite
@@ -214,6 +217,10 @@ class OutcomeLog:
                     break
                 chunks.append(chunk)
             text = b"".join(chunks).decode("utf-8", errors="replace")
+            # Split the way read()'s text-mode iteration does (universal newlines:
+            # "\r\n" and a lone "\r" end a line too), so both see the same records;
+            # not splitlines(), which would also break on U+2028 that read() keeps.
+            text = text.replace("\r\n", "\n").replace("\r", "\n")
             records = [
                 r for r in (_parse_record(line) for line in text.split("\n") if line.strip())
                 if r is not None

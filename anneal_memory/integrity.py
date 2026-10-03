@@ -90,7 +90,12 @@ TOOLS: list[dict[str, Any]] = [
             "context before making decisions, to locate specific episodes for "
             "citation during graduation, or to review recent work. Returns "
             "matching episodes ordered by timestamp (newest first). Supports "
-            "time range, type, source, and keyword filters."
+            "time range, type, source, and keyword filters. The keyword is "
+            "matched as an exact phrase first; if no episode contains the whole "
+            "phrase and it has two or more distinctive words, the call falls "
+            "back to ranking episodes by how many of those words they contain "
+            "(the reply says so and names the words each episode matched), so a "
+            "multi-word query does not need to appear verbatim."
         ),
         "inputSchema": {
             "type": "object",
@@ -121,7 +126,11 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "keyword": {
                     "type": "string",
-                    "description": "Search episode content for this keyword.",
+                    "description": (
+                        "Search episode content for this keyword or phrase. An exact "
+                        "phrase match is tried first; a multi-word phrase with no exact "
+                        "match is then matched word by word and ranked."
+                    ),
                 },
                 "limit": {
                     "type": "integer",
@@ -455,6 +464,20 @@ TOOLS: list[dict[str, Any]] = [
                         "pure keyword scoring (the pre-0.8.0 path)."
                     ),
                     "default": True,
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["prompt", "query"],
+                    "description": (
+                        "'prompt' (default) keeps the precision gates meant for an "
+                        "unasked-for per-turn injection: at least 2 distinctive "
+                        "keywords and 2 keyword hits, a score bar and a distinctive-term "
+                        "anchor, so a thin or off-topic query returns nothing. 'query' "
+                        "is for a question you are asking on purpose: one keyword and "
+                        "one hit are enough and the score bar and anchor are dropped, "
+                        "so it returns more, and weaker, matches."
+                    ),
+                    "default": "prompt",
                 },
             },
             "required": ["query"],

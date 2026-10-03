@@ -42,9 +42,13 @@ from .crystal import CrystalError, CrystalStore
 from .retrieval import (
     MAX_PATTERNS,
     MIN_KEYWORDS,
+    QUERY_MIN_KEYWORDS,
+    RETRIEVAL_MODES,
+    RetrievalMode,
     extract_keywords,
     retrieve_patterns,
     retrieve_relevant,
+    search_episodes,
 )
 from .store import (
     Store,
@@ -55,7 +59,7 @@ from .store import (
     WrapOwnershipError,
     _WRAP_TOKEN_RE,
 )
-from .types import AffectiveState, RelevantPattern
+from .types import AffectiveState, EpisodeType, RelevantPattern
 
 logger = logging.getLogger("anneal-memory")
 
@@ -365,6 +369,16 @@ class Server:
         return _tool_result(msg)
 
     def _tool_recall(self, args: dict[str, Any]) -> dict[str, Any]:
+        episode_type = args.get("episode_type")
+        if episode_type is not None and (
+            not isinstance(episode_type, str)
+            or episode_type not in {t.value for t in EpisodeType}
+        ):
+            valid = ", ".join(t.value for t in EpisodeType)
+            return _tool_result(
+                f"Error: episode_type {episode_type!r} is not one of: {valid}.",
+                is_error=True,
+            )
         result = self._store.recall(
             since=args.get("since"),
             until=args.get("until"),
@@ -377,6 +391,9 @@ class Server:
         )
 
         if not result.episodes:
+            fallback = self._recall_word_fallback(args, result.total_matching)
+            if fallback is not None:
+                return fallback
             return _tool_result("No matching episodes found.")
 
         lines = [
@@ -391,6 +408,52 @@ class Server:
                 f"{source_info}{replaced}: {ep.content}"
             )
 
+        return _tool_result("\n".join(lines))
+
+    def _recall_word_fallback(
+        self, args: dict[str, Any], total_matching: int
+    ) -> dict[str, Any] | None:
+        """Word-by-word ranking for a multi-word ``keyword`` the exact-phrase recall
+        missed, or ``None`` when the fallback does not apply (the caller then reports
+        "No matching episodes found." as before).
+
+        It applies only when the exact query matched NOTHING (``total_matching == 0`` —
+        a ``limit`` of 0 or an ``offset`` past the matches is not a miss), the first
+        page was asked for, and the ``keyword`` reduces to two or more distinctive
+        words. A one-word keyword has nothing to split, so it never falls back. The same
+        filters and ``limit`` go through, and the reply names the words so the agent can
+        tell this ranked list from an exact match."""
+        keyword = args.get("keyword")
+        if total_matching != 0 or not isinstance(keyword, str):
+            return None
+        if args.get("offset", 0) > 0:
+            return None
+        words = extract_keywords(keyword)
+        if len(words) < 2:
+            return None
+        matches = search_episodes(
+            self._store,
+            keyword,
+            episode_type=args.get("episode_type"),
+            source=args.get("source"),
+            since=args.get("since"),
+            until=args.get("until"),
+            limit=max(0, args.get("limit", 100)),
+            include_superseded=args.get("include_superseded") is True,
+        )
+        if not matches:
+            return None
+        lines = [
+            "No episode contains the exact phrase; ranked by matching words "
+            f"({', '.join(words)}). Showing {len(matches)}:"
+        ]
+        for m in matches:
+            ep = m.episode
+            source_info = f" [{ep.source}]" if ep.source != "agent" else ""
+            lines.append(
+                f"- ({ep.id}) [{ep.type}] {ep.timestamp}{source_info}"
+                f" (matched: {', '.join(m.matched)}): {ep.content}"
+            )
         return _tool_result("\n".join(lines))
 
     def _crystal_store_for_wrap(self) -> CrystalStore | None:
@@ -1033,6 +1096,13 @@ class Server:
                 "Error: associative must be a boolean", is_error=True
             )
 
+        raw_mode = args.get("mode", "prompt")
+        if not isinstance(raw_mode, str) or raw_mode not in RETRIEVAL_MODES:
+            return _tool_result(
+                f"Error: mode must be one of {list(RETRIEVAL_MODES)}", is_error=True
+            )
+        mode: RetrievalMode = "query" if raw_mode == "query" else "prompt"
+
         try:
             crystal_store = CrystalStore(self._crystal_path)
             if max_patterns <= 0:
@@ -1042,11 +1112,11 @@ class Server:
                 patterns = []
             elif not associative:
                 patterns = retrieve_patterns(
-                    crystal_store, query, max_patterns=max_patterns
+                    crystal_store, query, max_patterns=max_patterns, mode=mode
                 )
             else:
                 patterns = self._crystal_recall_associative(
-                    crystal_store, query, max_patterns
+                    crystal_store, query, max_patterns, mode
                 )
         except (CrystalError, OSError) as exc:
             # Fail-CLOSED on the crystal store (corruption / unreadable file): the
@@ -1063,10 +1133,11 @@ class Server:
             # library floors recall at MIN_KEYWORDS distinctive keywords) is fixable by
             # rephrasing; a genuine miss is not. Only when we actually attempted recall
             # (max_patterns > 0) — a capped-out call isn't a "thin query".
-            if max_patterns > 0 and len(extract_keywords(query)) < MIN_KEYWORDS:
+            floor = QUERY_MIN_KEYWORDS if mode == "query" else MIN_KEYWORDS
+            if max_patterns > 0 and len(extract_keywords(query)) < floor:
                 return _tool_result(
                     "No crystallized patterns matched (query too thin — give it at "
-                    f"least {MIN_KEYWORDS} distinctive keywords, or check crystal_index "
+                    f"least {floor} distinctive keywords, or check crystal_index "
                     "for what exists)."
                 )
             return _tool_result("No crystallized patterns matched.")
@@ -1080,7 +1151,11 @@ class Server:
         return _tool_result("\n".join(lines))
 
     def _crystal_recall_associative(
-        self, crystal_store: CrystalStore, query: str, max_patterns: int
+        self,
+        crystal_store: CrystalStore,
+        query: str,
+        max_patterns: int,
+        mode: RetrievalMode = "prompt",
     ) -> list[RelevantPattern]:
         """Associative crystal recall (the evidence edge) over the server's OPEN episodic store,
         degrading to keyword-only when an episodic query faults.
@@ -1103,6 +1178,7 @@ class Server:
                 max_patterns=max_patterns,
                 max_episodes=0,
                 associative=True,
+                mode=mode,
             ).patterns
         except StoreError as exc:
             logger.warning(
@@ -1112,7 +1188,7 @@ class Server:
                 exc,
             )
             return retrieve_patterns(
-                crystal_store, query, max_patterns=max_patterns
+                crystal_store, query, max_patterns=max_patterns, mode=mode
             )
 
     def _tool_crystal_index(self, args: dict[str, Any]) -> dict[str, Any]:

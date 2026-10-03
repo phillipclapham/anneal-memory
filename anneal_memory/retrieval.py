@@ -69,12 +69,16 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from math import log
+from typing import Any, Literal
 
 from .crystal import CrystalDict, CrystalStore, activation_tier
 from .store import Store
 from .types import Episode, EpisodeType, RelevantPattern, RelevantResult, ScoredEpisode
+
+RetrievalMode = Literal["prompt", "query"]
 
 # --- Tuning (a Levain adapter would expose these as config; defaults match the
 # flow recall-hook prototype so flow's measured keyword baseline carries over) ---
@@ -87,6 +91,17 @@ SCORE_THRESHOLD = 2.5     # weighted-overlap floor to surface at all (precision 
 MIN_HITS = 2              # require ≥ this many DISTINCT keyword hits, always
 MIN_EPISODE_LEN = 80      # skip trivially short episodes (not applied to patterns)
 CANDIDATE_LIMIT_PER_KEYWORD = 400  # per-keyword recall fetch cap before scoring
+
+# --- The two retrieval modes. "prompt" is the every-turn hook path and keeps every gate
+# above. "query" is an EXPLICIT question an agent or operator asked on purpose: it opens
+# the gates that exist to keep an unasked-for injection quiet (the keyword floor, the
+# hit floor, the weighted-overlap bar, the distinctive anchor) and keeps everything that
+# shapes the ranking (the IDF weights, the type boost, MIN_EPISODE_LEN, the caps). These
+# are the query-mode values; the prompt-mode values stay the constants above, and nothing
+# in this module rewrites a constant at call time. ---
+RETRIEVAL_MODES = ("prompt", "query")
+QUERY_MIN_KEYWORDS = 1
+QUERY_MIN_HITS = 1
 
 # --- Associative pattern retrieval (the evidence edge; AM-CRYSTAL-RECALL backend) ---
 # The fix for keyword-ORTHOGONAL pattern relevance: a pattern whose distilled text
@@ -233,6 +248,7 @@ def _query_weights(
     doc_freq: dict[str, int] | None,
     *,
     until: str | None = None,
+    filters: dict[str, Any] | None = None,
 ) -> tuple[dict[str, float], bool]:
     """The per-keyword weights for scoring, and whether corpus-IDF was applied (so the
     caller picks the matching precision bar — :data:`IDF_SCORE_THRESHOLD` vs
@@ -247,30 +263,59 @@ def _query_weights(
     ``until`` MUST match the cutoff the candidate fetch used: ``doc_freq`` is counted
     as-of that cutoff, so ``corpus_n`` is too — DF and N share one population, a valid
     frequency ratio (otherwise an ``exclude_recent_minutes`` caller would under-count DF
-    against a whole-corpus N and read terms as more distinctive than they are)."""
+    against a whole-corpus N and read terms as more distinctive than they are).
+    ``filters`` (``since`` / ``episode_type`` / ``source`` / ``include_superseded``) carries
+    the same narrowing the candidate fetch used, for the same reason: DF and N must be
+    counted over one population."""
     if doc_freq is None:
         return {kw: _keyword_weight(kw) for kw in keywords}, False
-    corpus_n = store.recall(until=until, limit=0).total_matching
+    corpus_n = store.recall(until=until, limit=0, **(filters or {})).total_matching
     if corpus_n < IDF_MIN_CORPUS:
         return {kw: _keyword_weight(kw) for kw in keywords}, False
     return {kw: _idf_weight(doc_freq.get(kw, 0), corpus_n) for kw in keywords}, True
 
 
-def _precision_bar(used_idf: bool) -> float:
+def _check_mode(mode: str) -> None:
+    """Reject anything but a known retrieval mode — a typo must not silently run the
+    precision-biased path when the caller asked for the open one (or the reverse)."""
+    if not isinstance(mode, str) or mode not in RETRIEVAL_MODES:
+        raise ValueError(
+            f"mode must be one of {list(RETRIEVAL_MODES)}, got {mode!r}"
+        )
+
+
+def _min_keywords(mode: str) -> int:
+    """The keyword floor for ``mode``, read at call time so the module constant stays
+    the one place a prompt-mode caller tunes it."""
+    return QUERY_MIN_KEYWORDS if mode == "query" else MIN_KEYWORDS
+
+
+def _min_hits(mode: str) -> int:
+    """The distinct-keyword-hit floor for ``mode`` (see :func:`_min_keywords`)."""
+    return QUERY_MIN_HITS if mode == "query" else MIN_HITS
+
+
+def _precision_bar(used_idf: bool, mode: str = "prompt") -> float:
     """The regime-matched precision threshold: the (lower) IDF bar when the weights are
     corpus-IDF, the length-proxy bar otherwise. One bar for every tier a single
     :func:`retrieve_relevant` call scores, so episodes/patterns/associative-reach are
-    gated on the same scale their weights live on."""
+    gated on the same scale their weights live on. ``0.0`` in query mode: an explicit
+    query has no score bar, only the hit floor."""
+    if mode == "query":
+        return 0.0
     return IDF_SCORE_THRESHOLD if used_idf else SCORE_THRESHOLD
 
 
-def _anchor_floor(used_idf: bool) -> float:
+def _anchor_floor(used_idf: bool, mode: str = "prompt") -> float:
     """The distinctiveness-anchor requirement for the regime: the √N
     :data:`IDF_ANCHOR_WEIGHT` under corpus-IDF (an item must match one genuinely rare
     term to surface), ``0.0`` under the length-proxy (no anchor gate — the proxy band has
     no meaningful frequency signal, and this keeps the Store-free / small-corpus / test
     paths byte-unchanged). The associative tier inherits it structurally: its seeds are
-    the anchor-gated episodes, so a no-anchor query yields no seeds and no reach."""
+    the anchor-gated episodes, so a no-anchor query yields no seeds and no reach. ``0.0``
+    in query mode: an explicit query needs no distinctive anchor."""
+    if mode == "query":
+        return 0.0
     return IDF_ANCHOR_WEIGHT if used_idf else 0.0
 
 
@@ -329,17 +374,20 @@ def _score_patterns(
     today: date,
     score_threshold: float = SCORE_THRESHOLD,
     require_anchor: float = 0.0,
+    min_hits: int | None = None,
 ) -> list[RelevantPattern]:
     """Score the live crystallized corpus against the query. Same precision bias as
     episodes (≥MIN_HITS distinct keyword hits + the bar), but NO length floor — a
     pattern's name alone can be a strong, short signal. ``score_threshold`` is the
     regime-matched bar (:data:`SCORE_THRESHOLD` proxy / :data:`IDF_SCORE_THRESHOLD` IDF);
     ``require_anchor`` (>0 only in the IDF regime) is the distinctiveness anchor — a
-    pattern surfaces only if a MATCHED keyword clears it (a pile of common words can't)."""
+    pattern surfaces only if a MATCHED keyword clears it (a pile of common words can't).
+    ``min_hits`` defaults to :data:`MIN_HITS`, read at call time."""
+    floor = MIN_HITS if min_hits is None else min_hits
     scored: list[RelevantPattern] = []
     for c in crystal_store.active():
         score, hits, top = _score_text(_pattern_text(c), keywords, weights)
-        if hits < MIN_HITS or score < score_threshold or top < require_anchor:
+        if hits < floor or score < score_threshold or top < require_anchor:
             continue
         _lvl = c.get("level")
         scored.append(
@@ -362,17 +410,25 @@ def _score_patterns(
 
 
 def _fetch_episode_candidates(
-    store: Store, keywords: list[str], *, until: str | None
+    store: Store,
+    keywords: list[str],
+    *,
+    until: str | None,
+    filters: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Episode], dict[str, int]]:
     """Per-keyword episode recall → (unioned candidate episodes, per-keyword document
     frequency). Fetch via the public ``Store.recall`` (one bounded LIKE query per
     keyword, unioned by id). ``doc_freq[kw]`` is ``RecallResult.total_matching`` — the
     EXACT, uncapped match count — captured from the SAME calls, so corpus-IDF weighting
-    (:func:`_query_weights`) costs no extra query. Reuses the public API; no new SQL."""
+    (:func:`_query_weights`) costs no extra query. Reuses the public API; no new SQL.
+    ``filters`` (``since`` / ``episode_type`` / ``source`` / ``include_superseded``) go
+    straight to ``Store.recall`` so a filtered query narrows the candidates in SQL."""
     candidates: dict[str, Episode] = {}
     doc_freq: dict[str, int] = {}
     for kw in keywords:
-        result = store.recall(keyword=kw, until=until, limit=CANDIDATE_LIMIT_PER_KEYWORD)
+        result = store.recall(
+            keyword=kw, until=until, limit=CANDIDATE_LIMIT_PER_KEYWORD, **(filters or {})
+        )
         doc_freq[kw] = result.total_matching
         for ep in result.episodes:
             candidates.setdefault(ep.id, ep)
@@ -386,6 +442,7 @@ def _score_candidate_episodes(
     *,
     score_threshold: float = SCORE_THRESHOLD,
     require_anchor: float = 0.0,
+    min_hits: int | None = None,
 ) -> list[ScoredEpisode]:
     """Score pre-fetched candidate episodes by weighted overlap — the FULL ranked set
     clearing the precision bar (NOT capped). Serves two consumers: the displayed
@@ -395,14 +452,16 @@ def _score_candidate_episodes(
     :data:`IDF_SCORE_THRESHOLD` for the lower-band corpus-IDF weights. ``require_anchor``
     (>0 only in the IDF regime) is the distinctiveness anchor: an episode must have
     MATCHED a keyword at/above it to seed — so a process-word-only query produces no
-    seeds, and the associative pass it feeds inherits that structurally."""
+    seeds, and the associative pass it feeds inherits that structurally. ``min_hits``
+    defaults to :data:`MIN_HITS`, read at call time."""
+    floor = MIN_HITS if min_hits is None else min_hits
     scored: list[ScoredEpisode] = []
     for ep in candidates.values():
         content = ep.content or ""
         if len(content) < MIN_EPISODE_LEN:
             continue
         score, hits, top = _score_text(content, keywords, weights)
-        if hits < MIN_HITS or top < require_anchor:
+        if hits < floor or top < require_anchor:
             continue
         if ep.type in _HIGH_SIGNAL_TYPES:
             score += _TYPE_BOOST
@@ -520,6 +579,7 @@ def retrieve_relevant(
     now: str | None = None,
     today: date | None = None,
     associative: bool = True,
+    mode: RetrievalMode = "prompt",
 ) -> RelevantResult:
     """Surface the memory relevant to ``query`` — crystallized patterns AND episodes
     — scored, ranked, and capped. THE on-demand recall contract a harness hook calls.
@@ -545,16 +605,29 @@ def retrieve_relevant(
             ``Store`` (the seed episodes live there) and (b) is a no-op when nothing
             keyword-matched an episode.
             Set ``False`` for pure keyword scoring (the pre-backend behavior).
+        mode: ``"prompt"`` (default) is the every-turn hook path: every precision gate
+            as documented above, unchanged. ``"query"`` is an explicit question an agent
+            or operator asked on purpose: a single distinctive keyword is enough
+            (:data:`QUERY_MIN_KEYWORDS`), one keyword hit is enough
+            (:data:`QUERY_MIN_HITS`), and neither the weighted-overlap bar nor the
+            distinctive anchor applies, for episodes, patterns and the evidence edge
+            alike. The IDF weights, the ranking, :data:`MIN_EPISODE_LEN` and the caps
+            are the same in both modes. Anything else raises ``ValueError``.
 
     Returns:
         :class:`RelevantResult` with ``patterns`` + ``episodes`` (each scored/ranked)
-        and the ``query_keywords`` the query reduced to. Empty (both lists ``[]``) when
-        the query has fewer than :data:`MIN_KEYWORDS` distinctive keywords or nothing
-        clears the precision threshold — surface nothing rather than noise.
+        and the ``query_keywords`` the query reduced to. In prompt mode, empty (both
+        lists ``[]``) when the query has fewer than :data:`MIN_KEYWORDS` distinctive
+        keywords or nothing clears the precision threshold — surface nothing rather
+        than noise.
+
+    Raises:
+        ValueError: ``mode`` is not ``"prompt"`` or ``"query"``.
     """
+    _check_mode(mode)
     today = today or date.today()
     keywords = extract_keywords(query)
-    if len(keywords) < MIN_KEYWORDS:
+    if len(keywords) < _min_keywords(mode):
         return RelevantResult(patterns=[], episodes=[], query_keywords=keywords)
 
     # The keyword-matched episode candidates are computed ONCE and serve two roles:
@@ -572,8 +645,9 @@ def retrieve_relevant(
         weights, used_idf = _query_weights(store, keywords, doc_freq, until=until)
         seed_episodes = _score_candidate_episodes(
             candidates, keywords, weights,
-            score_threshold=_precision_bar(used_idf),
-            require_anchor=_anchor_floor(used_idf),
+            score_threshold=_precision_bar(used_idf, mode),
+            require_anchor=_anchor_floor(used_idf, mode),
+            min_hits=_min_hits(mode),
         )
     else:
         # Keyword-only pattern path (no episode fetch): the length-proxy, byte-identical
@@ -583,14 +657,14 @@ def retrieve_relevant(
     # One regime-matched precision bar + anchor for every tier this call scores: the
     # lower IDF bar + the √N distinctiveness anchor when the weights are corpus-IDF, the
     # length-proxy bar + no anchor (0.0) otherwise.
-    thr = _precision_bar(used_idf)
-    anchor = _anchor_floor(used_idf)
+    thr = _precision_bar(used_idf, mode)
+    anchor = _anchor_floor(used_idf, mode)
 
     patterns: list[RelevantPattern] = []
     if crystal_store is not None and max_patterns > 0:
         patterns = _score_patterns(
             crystal_store, keywords, weights, max_patterns=max_patterns, today=today,
-            score_threshold=thr, require_anchor=anchor,
+            score_threshold=thr, require_anchor=anchor, min_hits=_min_hits(mode),
         )
         # Keyword-first: the associative pass fills only the slots the keyword pass left
         # UNUSED. A keyword hit (overlap on the pattern's OWN text) is strictly
@@ -618,6 +692,7 @@ def retrieve_patterns(
     *,
     max_patterns: int = MAX_PATTERNS,
     today: date | None = None,
+    mode: RetrievalMode = "prompt",
 ) -> list[RelevantPattern]:
     """Patterns-only on-demand recall — the crystallized tier WITHOUT an episodic Store.
 
@@ -637,15 +712,18 @@ def retrieve_patterns(
         max_patterns: cap (precision bias).
         today: logical date for crystallized-pattern activation tiers (+ determinism);
             defaults to ``date.today()``.
+        mode: ``"prompt"`` (default) or ``"query"``, with the meaning given in
+            :func:`retrieve_relevant`.
 
     Returns:
         a scored/ranked ``list[RelevantPattern]`` (best score first, a higher
         graduation level breaking ties), capped at ``max_patterns``. Empty when
         ``crystal_store`` is ``None``, ``max_patterns <= 0``, the query has fewer
-        than :data:`MIN_KEYWORDS` distinctive keywords, or nothing clears the
-        precision threshold — surface nothing rather than noise.
+        than the mode's distinctive-keyword floor, or nothing clears the mode's
+        precision gates — surface nothing rather than noise.
 
     Raises:
+        ValueError: ``mode`` is not ``"prompt"`` or ``"query"``.
         CrystalError: if the crystal store is structurally corrupt or written by a
             newer schema (``CrystalStore._load`` deliberately surfaces a corrupt store
             rather than silently treating it as empty memory).
@@ -668,16 +746,98 @@ def retrieve_patterns(
         defaults it independently, so a midnight-straddling pair can label ``activation``
         differently).
     """
+    _check_mode(mode)
     today = today or date.today()
     if crystal_store is None or max_patterns <= 0:
         return []
     keywords = extract_keywords(query)
-    if len(keywords) < MIN_KEYWORDS:
+    if len(keywords) < _min_keywords(mode):
         return []
     weights = {kw: _keyword_weight(kw) for kw in keywords}
     return _score_patterns(
-        crystal_store, keywords, weights, max_patterns=max_patterns, today=today
+        crystal_store, keywords, weights, max_patterns=max_patterns, today=today,
+        score_threshold=_precision_bar(False, mode),
+        require_anchor=_anchor_floor(False, mode),
+        min_hits=_min_hits(mode),
     )
+
+
+@dataclass(frozen=True)
+class EpisodeMatch:
+    """One episode :func:`search_episodes` returned: the scored episode and the query
+    keywords found in its content (``matched``, in query order)."""
+
+    episode: ScoredEpisode
+    matched: tuple[str, ...]
+
+
+def search_episodes(
+    store: Store,
+    query: str,
+    *,
+    episode_type: EpisodeType | str | None = None,
+    source: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int = 10,
+    include_superseded: bool = False,
+) -> list[EpisodeMatch]:
+    """Rank episodes against a free-text query, word by word — the explicit-query
+    counterpart of ``Store.recall(keyword=...)``'s whole-phrase substring match.
+
+    This is :func:`retrieve_relevant`'s episode scoring in ``"query"`` mode: the query
+    is reduced to its distinctive keywords (:func:`extract_keywords`), each is fetched
+    from the store with the filters below applied in SQL, and an episode surfaces if it
+    contains at least one of them. Episodes carrying more of the query's words, and
+    rarer words (corpus-IDF weights), rank first; a decision or outcome gets the same
+    small boost it gets in recall; recency then id break ties. Episodes shorter than
+    :data:`MIN_EPISODE_LEN` are skipped, exactly as in :func:`retrieve_relevant`.
+
+    Args:
+        store: the episodic :class:`Store`.
+        query: the text to search for; it need not appear verbatim anywhere.
+        episode_type / source / since / until / include_superseded: the same filters
+            ``Store.recall`` takes. The IDF weights are counted over the filtered
+            episodes, so a narrow filter ranks by what is distinctive inside it.
+        limit: maximum matches returned (``<= 0`` returns none).
+
+    Returns:
+        a ranked ``list`` of :class:`EpisodeMatch`, best first, at most ``limit``.
+        Empty when the query reduces to no keywords or no episode contains one.
+
+    Raises:
+        ValueError: ``episode_type`` is a string that is not an episode type.
+    """
+    if limit <= 0:
+        return []
+    keywords = extract_keywords(query)
+    if len(keywords) < QUERY_MIN_KEYWORDS:
+        return []
+    filters: dict[str, Any] = {
+        "since": since,
+        "episode_type": episode_type,
+        "source": source,
+        "include_superseded": include_superseded,
+    }
+    candidates, doc_freq = _fetch_episode_candidates(
+        store, keywords, until=until, filters=filters
+    )
+    weights, used_idf = _query_weights(
+        store, keywords, doc_freq, until=until, filters=filters
+    )
+    scored = _score_candidate_episodes(
+        candidates, keywords, weights,
+        score_threshold=_precision_bar(used_idf, "query"),
+        require_anchor=_anchor_floor(used_idf, "query"),
+        min_hits=_min_hits("query"),
+    )
+    return [
+        EpisodeMatch(
+            episode=e,
+            matched=tuple(kw for kw in keywords if kw in e.content.lower()),
+        )
+        for e in scored[:limit]
+    ]
 
 
 def _recent_cutoff(exclude_recent_minutes: int | None, now: str | None) -> str | None:

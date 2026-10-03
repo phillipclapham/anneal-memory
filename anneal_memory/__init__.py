@@ -123,7 +123,13 @@ from .crystal import (
     activation_tier,
     parse_crystal_decisions,
 )
-from .retrieval import extract_keywords, retrieve_patterns, retrieve_relevant
+from .retrieval import (
+    EpisodeMatch,
+    extract_keywords,
+    retrieve_patterns,
+    retrieve_relevant,
+    search_episodes,
+)
 from .server import Server
 
 __all__ = [
@@ -237,6 +243,8 @@ __all__ = [
     "RETIRE_KINDS",
     "retrieve_relevant",
     "retrieve_patterns",
+    "search_episodes",
+    "EpisodeMatch",
     "extract_keywords",
     "RelevantResult",
     "RelevantPattern",

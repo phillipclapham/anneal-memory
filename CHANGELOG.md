@@ -2,6 +2,40 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — typed-query recall
+
+- `retrieve_relevant(..., mode="prompt" | "query")` and `retrieve_patterns(..., mode=...)`.
+  `"prompt"` (the default) is today's behavior, unchanged: it is the path a per-turn recall hook
+  takes, and it keeps every precision gate. `"query"` is for a question an agent or operator asked
+  on purpose: one distinctive keyword is enough, one keyword hit is enough, and neither the
+  weighted-overlap bar nor the distinctive-term anchor applies, for episodes, patterns and the
+  evidence edge. The IDF weights, ranking, the 80-character episode floor and the caps are the same
+  in both modes. Any other `mode` raises `ValueError`. It returns more matches and weaker ones by
+  design. The gates are parameters, not module constants rewritten at call time.
+- Measured on the InMind bench, with no API calls (125 tasks, target episode in the top 3 for the
+  raw task text): 4 hits in prompt mode, 34 in query mode; in the top 10, 4 and 53.
+- `search_episodes(store, query, *, episode_type=None, source=None, since=None, until=None,
+  limit=10, include_superseded=False)`: word-by-word episode search (query-mode scoring with the
+  `Store.recall` filters applied in SQL). It returns `EpisodeMatch(episode, matched)` best first,
+  where `matched` is the query keywords found in that episode.
+- MCP `recall`: the exact-phrase match still runs first and answers as before. When it finds
+  nothing and the `keyword` has two or more distinctive words, the tool now ranks episodes by the
+  words they contain (same filters and `limit`) and says so in the reply, with the words each
+  episode matched. A one-word keyword, an exact hit, a `limit` of 0 and an `offset` past the matches
+  behave as before. An agent that sent `"bank export fmt_row64 CLI nightly rows"` used to get "No
+  matching episodes found" although single words from it were in the store.
+- MCP `crystal_recall` takes an optional `mode` (`"prompt"` default, `"query"`).
+- Both `tool-integrity.json` manifests are regenerated (the `recall` and `crystal_recall` hashes).
+
+### Fixed
+
+- MCP `recall` with an `episode_type` that is not an episode type returned "Error: 'message' is not
+  a valid EpisodeType" and no list of the valid values, so the caller could not correct itself. It
+  now returns an error result that names them: "episode_type 'message' is not one of: observation,
+  decision, tension, question, outcome, context."
+
 ## [0.9.26] — 2026-10-03
 
 ### Removed — the Hebbian hop in pattern recall (BREAKING for code that imports the hop constants)

@@ -374,3 +374,13 @@ def test_a_record_after_a_torn_line_starts_its_own_line(tmp_path):
     log.record_if_missing("c", [ExposureLabel("crystal", "q", "followed")])
     latest, bad = log.latest()
     assert latest.keys() == {"a", "b", "c"} and bad == 1  # only the torn line lost
+
+
+@pytest.mark.parametrize("v", [True, 1.0, "1", 2])
+def test_a_record_whose_version_is_not_the_int_1_is_skipped(tmp_path, v):
+    # True == 1 and 1.0 == 1 in Python; only the int 1 is this log's version.
+    log = OutcomeLog(tmp_path / "x.outcomes.jsonl")
+    log.path.write_text(json.dumps({
+        "v": v, "exposure_id": "e1", "ts": "2026-10-03T00:00:00Z", "outcome": "success",
+        "items": [{"kind": "crystal", "ref": "a", "followed": "followed"}]}) + "\n")
+    assert log.read() == ([], 1)

@@ -36,6 +36,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ### Fixed
 
+- The outcome log reads a record only when its `v` is the integer `1`. A line carrying `v: true`
+  or `v: 1.0` was read as a version-1 record, because both compare equal to `1` in Python; it is now
+  skipped and counted as a bad line.
 - `anneal-memory outcome` and `worth` refuse a `--db` that does not exist, is a directory, or
   cannot be inspected (exit 1), as the commands that open the store through `_open_store` refuse a
   missing path (`init`, `migrate`, `derive` and the crystal and spore commands keep their own

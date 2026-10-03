@@ -353,7 +353,10 @@ def _parse_record(line: str) -> dict[str, Any] | None:
         rec = json.loads(line)
     except ValueError:
         return None
-    if not isinstance(rec, dict) or rec.get("v") != OUTCOME_LOG_VERSION:
+    # type(...) is int: True == 1 and 1.0 == 1 in Python, so an equality test alone
+    # reads a v: true or v: 1.0 line as this version (L3 r4 10-03, codex).
+    if (not isinstance(rec, dict) or type(rec.get("v")) is not int
+            or rec["v"] != OUTCOME_LOG_VERSION):
         return None
     try:
         _check_id(rec.get("exposure_id"), "exposure_id")

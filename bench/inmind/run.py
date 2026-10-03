@@ -5,6 +5,10 @@ Conditions, all on the same tasks with the same reader and judge:
   none               reader gets no memory (floor)
   oracle             target user/assistant pair is the whole context (paper's backbone control)
   anneal-recall      every session recorded as episodes; context = retrieve_relevant(query)
+  anneal-agentic     every session recorded as episodes; NO context is preloaded. The reader gets
+                     anneal's real MCP `recall` tool (the server's own handler and schema) and may
+                     call it up to MAX_TOOL_ROUNDS times before answering, the way an MCP client
+                     uses it. The judge's context = every tool result the reader saw.
   anneal-continuity  prepare_wrap -> LLM compose -> validated_save_continuity after every
                      session; context = the continuity file, whole
   paper-probe        the paper's always-in-state probe (Appendix 17), re-implemented from its
@@ -15,6 +19,8 @@ Run from the repo root, e.g.:
   ANNEAL_BENCH_ENV_FILE=path/to/.env PYTHONPATH=. python bench/inmind/run.py \
       --n 10 --seed 0 --budget 2.0 --out RUN_DIR
 (or export OPENAI_API_KEY instead of ANNEAL_BENCH_ENV_FILE; see oai.py).
+Tuning on Ollama (no key, no cost, TUNING-ONLY numbers): add --model gpt-oss:120b-cloud.
+An Ollama usage/limit error stops the run at once (exit 3); it is never retried.
 
 The InMind repo is expected at ~/.cache/anneal-bench/inmind/InMind (git clone
 https://github.com/imlrz/InMind). Nothing from it is copied into this repo.
@@ -27,6 +33,7 @@ import concurrent.futures as cf
 import hashlib
 import importlib.util
 import json
+import os
 import random
 import re
 import shutil
@@ -37,22 +44,38 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(HERE.parents[1]))
+# Which anneal-memory is measured: $ANNEAL_SRC names a source tree to import; set it EMPTY to
+# use the installed package (e.g. a release in a clean venv); unset = this repo's tree. The run
+# records anneal_memory.__file__ and __version__ in summary.json either way.
+_src = os.environ.get("ANNEAL_SRC")
+if _src is None:
+    sys.path.insert(0, str(HERE.parents[1]))
+elif _src:
+    sys.path.insert(0, _src)
 
 import anneal_memory  # noqa: E402
 from anneal_memory import EpisodeType, Store, prepare_wrap, validated_save_continuity  # noqa: E402
 from anneal_memory.continuity import format_wrap_package_text  # noqa: E402
 from anneal_memory.retrieval import retrieve_relevant  # noqa: E402
+from anneal_memory.server import TOOLS as MCP_TOOLS, Server as McpServer  # noqa: E402
 
-from oai import PRICES, PRICES_SOURCE, BudgetExceeded, Client, Ledger  # noqa: E402
+from oai import PRICES, PRICES_SOURCE, BudgetExceeded, Client, Ledger, UsageLimit, is_ollama  # noqa: E402
 
 DEFAULT_INMIND = Path.home() / ".cache/anneal-bench/inmind/InMind"
 MODEL = "gpt-5-mini"
 ANSWER_MAX = 16384   # paper / repo protocol
 JUDGE_MAX = 4096     # paper / repo protocol
 WRAP_MAX = 16384     # the paper's updater uses 8,192; anneal's 20,000-char budget plus reasoning needs more
-CONDITIONS = ("none", "oracle", "anneal-recall", "anneal-continuity", "paper-probe")
-STATEFUL = ("anneal-recall", "anneal-continuity", "paper-probe")
+CONDITIONS = ("none", "oracle", "anneal-recall", "anneal-agentic", "anneal-continuity",
+              "paper-probe")
+STATEFUL = ("anneal-recall", "anneal-agentic", "anneal-continuity", "paper-probe")
+MAX_TOOL_ROUNDS = 6      # agentic: tool-calling turns before the reader must answer
+TOOL_RESULT_MAX = 20000  # agentic: chars of one recall result passed back (MCP recall's
+                         # default limit is 100 episodes, which can exceed a reader's window)
+AGENTIC_CONTEXT = (
+    "No memory is preloaded. You have a `recall` tool that searches the user's past "
+    "conversations with you; call it as many times as you need before answering."
+)
 PROBE_UPDATE_MAX = 8192  # paper Appendix 17
 
 # Paper Appendix 17, verbatim from the arXiv HTML (2607.24368v1).
@@ -76,6 +99,11 @@ PROBE_ANSWER_SYSTEM = (
     "--- USER\u2019S PERSONAL MEMORY ---\n{memory}\n--- END OF MEMORY ---"
 )
 PROJECT_NAME = "Assistant"
+TUNING_ONLY = (
+    "TUNING-ONLY, NOT COMPARABLE TO THE PAPER: reader, judge and composer are {model} via "
+    "Ollama, not gpt-5-mini. Use these numbers to tune and to compare conditions within one "
+    "run, never against the paper's figures."
+)
 
 COMPARABILITY = (
     "Comparability: reader and judge are gpt-5-mini with the repo's answer and judge prompts, "
@@ -280,6 +308,9 @@ def run_memory_task(cond: str, timeline: dict, task: dict, inj: int, work: Path,
                 wrap_session(store, client, stats)
                 if i == inj:
                     post_inject = store.load_continuity() or ""
+        if cond == "anneal-agentic":
+            # The reader queries the store itself at answer time (see answer_agentic).
+            return {"contexts": None, "db": tdir / "m.db", "target_ids": target_ids}
         if cond == "anneal-recall":
             ctx, diag = {}, {}
             for key in ("naive_query", "query"):
@@ -313,6 +344,65 @@ def answer(client: Client, prompts: dict, context: str, query: str, cond: str = 
     return text
 
 
+def answer_agentic(client: Client, prompts: dict, db: Path, query: str,
+                   target_ids: list[str]) -> tuple[str, str, dict]:
+    """The reader answers with anneal's MCP ``recall`` as a tool. Returns (answer, context,
+    diag), where context is every tool result the reader saw, in order (what the judge
+    grades for target-recall), and diag records each call."""
+    spec = next(t for t in MCP_TOOLS if t["name"] == "recall")
+    tools = [{"type": "function", "function": {"name": "recall",
+                                               "description": spec["description"],
+                                               "parameters": spec["inputSchema"]}}]
+    system = prompts["answer"].replace("{context}", AGENTIC_CONTEXT)
+    messages: list[dict] = [{"role": "system", "content": system},
+                            {"role": "user", "content": query}]
+    calls: list[dict] = []
+    seen: list[str] = []
+    text = ""
+    store = Store(db, project_name=PROJECT_NAME, audit=False)
+    try:
+        server = McpServer(store)
+        for rnd in range(MAX_TOOL_ROUNDS + 1):
+            offer = rnd < MAX_TOOL_ROUNDS
+            msg, _finish = client.chat_message(messages, role="answer",
+                                               max_completion_tokens=ANSWER_MAX,
+                                               tools=tools if offer else None)
+            tcs = msg.get("tool_calls") or []
+            if not tcs or not offer:
+                text = msg.get("content") or ""
+                break
+            messages.append({"role": "assistant", "content": msg.get("content") or "",
+                             "tool_calls": tcs})
+            for tc in tcs:
+                fn = tc.get("function") or {}
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                    if not isinstance(args, dict):
+                        args = {}
+                except json.JSONDecodeError:
+                    args = {}
+                if fn.get("name") == "recall":
+                    # Through the server's tools/call dispatch, so a bad argument comes
+                    # back as the MCP error result a real client sees, not an exception.
+                    res = server._handle_tools_call({"name": "recall", "arguments": args})
+                    out = "".join(c.get("text", "") for c in res.get("content", []))
+                else:
+                    out = f"Unknown tool: {fn.get('name')!r}. The only tool is `recall`."
+                if len(out) > TOOL_RESULT_MAX:
+                    out = out[:TOOL_RESULT_MAX] + "\n[truncated]"
+                calls.append({"args": args, "chars": len(out),
+                              "no_match": out.startswith("No matching")})
+                seen.append(f"[recall {json.dumps(args, ensure_ascii=False)}]\n{out}")
+                messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+                                 "content": out})
+    finally:
+        store.close()
+    context = "\n\n".join(seen)
+    diag = {"tool_calls": calls, "n_calls": len(calls),
+            "target_retrieved": any(t in context for t in target_ids)}
+    return text, context, diag
+
+
 _SCORE_RE = re.compile(r'"score"\s*:\s*([01])')
 
 
@@ -342,8 +432,16 @@ def metrics_for(cond: str) -> list[str]:
 def evaluate(cond: str, task: dict, contexts: dict, client: Client, jp, prompts: dict,
              post_inject: str | None = None) -> dict:
     row = {"task_id": task["task_id"], "system": f"anneal-memory/{cond}",
-           "config": {"answer_model": MODEL, "judge_model": MODEL,
+           "config": {"answer_model": client.model, "judge_model": client.model,
                       "anneal_memory": anneal_memory.__version__}}
+    if cond == "anneal-agentic":
+        agentic = contexts["agentic"]
+        for key, q in (("query", task["query"]), ("naive", task["naive_query"])):
+            ans, ctx, d = answer_agentic(client, prompts, agentic["db"], q, agentic["target_ids"])
+            row[key] = {"context": ctx, "answer": ans}
+            agentic.setdefault("diag", {})["naive_query" if key == "naive" else "query"] = d
+        row["judgements"] = {m: judge(client, jp, prompts, m, task, row) for m in metrics_for(cond)}
+        return row
     q_ctx = contexts["query"]
     row["query"] = {"context": q_ctx, "answer": answer(client, prompts, q_ctx, task["query"], cond)}
     if "naive" in metrics_for(cond):
@@ -386,6 +484,9 @@ def main() -> None:
     ap.add_argument("--conditions", default=",".join(CONDITIONS))
     ap.add_argument("--budget", type=float, required=True, help="hard USD ceiling for this run")
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--model", default=MODEL,
+                    help="reader/judge/composer model; an Ollama name (e.g. gpt-oss:120b-cloud) "
+                         "runs free and labels every number TUNING-ONLY")
     args = ap.parse_args()
 
     conds = [c for c in args.conditions.split(",") if c]
@@ -398,7 +499,8 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     work = out / "work"
     ledger = Ledger()
-    client = Client(MODEL, ledger, args.budget)
+    client = Client(args.model, ledger, args.budget)
+    tuning = is_ollama(args.model)
     inj = int(manifest["injection_session_index"])
     print(f"anneal_memory from {anneal_memory.__file__} ({anneal_memory.__version__})")
     print(f"tasks ({len(ids)}): {ids}", flush=True)
@@ -422,6 +524,11 @@ def main() -> None:
         else:
             timeline = tl.build_timeline(task, background, manifest)
             mem = run_memory_task(cond, timeline, task, inj, work, client)
+            if cond == "anneal-agentic":
+                agentic = {"db": mem["db"], "target_ids": mem["target_ids"]}
+                row = evaluate(cond, task, {"agentic": agentic}, client, jp, prompts)
+                row["diag"] = agentic.get("diag", {})
+                return row
             contexts, diag = mem["contexts"], mem["diag"]
         row = evaluate(cond, task, {"naive_query": contexts["naive_query"],
                                     "query": contexts["query"]}, client, jp, prompts,
@@ -430,6 +537,7 @@ def main() -> None:
         return row
 
     jobs = [(c, t) for c in conds for t in ids]
+    stopped: str | None = None
     with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = {ex.submit(one, c, t): (c, t) for c, t in jobs}
         for f in cf.as_completed(futs):
@@ -437,6 +545,15 @@ def main() -> None:
             try:
                 rows[c].append(f.result())
                 print(f"  done {c} task {t} (${ledger.total_usd():.3f})", flush=True)
+            except UsageLimit as e:
+                # Stop the whole run: cancel everything not yet started.
+                stopped = str(e)
+                errors.append({"condition": c, "task_id": t, "error": f"usage-limit: {e}"})
+                print(f"  OLLAMA USAGE LIMIT, STOPPING THE RUN: {e}", flush=True)
+                for other in futs:
+                    other.cancel()
+            except cf.CancelledError:
+                errors.append({"condition": c, "task_id": t, "error": "cancelled after usage limit"})
             except BudgetExceeded as e:
                 errors.append({"condition": c, "task_id": t, "error": f"budget: {e}"})
             except Exception as e:  # recorded, never silently dropped
@@ -455,13 +572,19 @@ def main() -> None:
         "anneal_memory_file": anneal_memory.__file__,
         "anneal_memory_version": anneal_memory.__version__,
         "inmind_tasks_sha256": tasks_sha,
-        "model": MODEL, "prices_usd_per_1M": PRICES[MODEL], "prices_source": PRICES_SOURCE,
+        "model": args.model, "prices_usd_per_1M": PRICES.get(args.model, "Ollama: $0, quota-limited"),
+        "prices_source": PRICES_SOURCE if not tuning else "Ollama cloud via the local daemon",
+        "tuning_only": tuning, "stopped_on_usage_limit": stopped,
         "cost": ledger.summary(), "prefix_wrap_stats": prefix_stats,
         "errors": errors, "elapsed_s": round(time.time() - t0, 1), "task_ids": ids,
-        "comparability": COMPARABILITY,
+        "comparability": TUNING_ONLY.format(model=args.model) if tuning else COMPARABILITY,
     })
     (out / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False))
     print_table(summary)
+    if stopped:
+        raise SystemExit(3)
+    if errors:  # a run with failed jobs must not exit in the shape of success
+        raise SystemExit(2)
 
 
 def summarize(rows: dict, conds: list[str], ids: list[int], tasks: dict) -> dict:
@@ -480,6 +603,16 @@ def summarize(rows: dict, conds: list[str], ids: list[int], tasks: dict) -> dict
                 q: sum(r["diag"][q]["target_retrieved"] for r in rs) for q in ("naive_query", "query")}
             entry["empty_context"] = {
                 q: sum(r["diag"][q]["n_episodes"] == 0 for r in rs) for q in ("naive_query", "query")}
+        if c == "anneal-agentic":
+            entry["mechanical_target_retrieved"] = {
+                q: sum(r["diag"][q]["target_retrieved"] for r in rs) for q in ("naive_query", "query")}
+            entry["tool_calls"] = {
+                q: sum(r["diag"][q]["n_calls"] for r in rs) for q in ("naive_query", "query")}
+            entry["no_call_answers"] = {
+                q: sum(r["diag"][q]["n_calls"] == 0 for r in rs) for q in ("naive_query", "query")}
+            entry["no_match_calls"] = {
+                q: sum(c["no_match"] for r in rs for c in r["diag"][q]["tool_calls"])
+                for q in ("naive_query", "query")}
         if c in ("anneal-continuity", "paper-probe"):
             w = [r["diag"]["wrap"] for r in rs]
             entry["wraps"] = {k: sum(x[k] for x in w) for k in ("compose_calls", "saved", "cancelled")}
@@ -497,6 +630,8 @@ def print_table(s: dict) -> None:
     print()
     print("InMind (arXiv 2607.24368) x anneal-memory -- dataset: released repo, NOT reconstructed")
     print(f"model {s['model']} (reader + judge); tasks {s['task_ids']}")
+    if s.get("tuning_only"):
+        print("*** TUNING-ONLY: NOT COMPARABLE TO THE PAPER ***")
     print(f"{'condition':<19}{'n':>3}  {'naive':>9}  {'target-recall':>13}  {'application':>11}  "
           f"{'answer-only':>11}  {'recall@inject':>13}")
     for c, e in s["table"].items():
@@ -511,7 +646,7 @@ def print_table(s: dict) -> None:
     tot = s["cost"]["total"]
     print(f"\ntokens: prompt {tot['prompt']:,} (cached {tot['cached']:,}), completion "
           f"{tot['completion']:,} (reasoning {tot['reasoning']:,}); cost ${tot['usd']:.3f} "
-          f"at ${s['prices_usd_per_1M']} per 1M ({s['prices_source']})")
+          f"at {s['prices_usd_per_1M']} per 1M ({s['prices_source']})")
     if s["errors"]:
         print(f"ERRORS: {len(s['errors'])} (see summary.json)")
     print(s["comparability"])

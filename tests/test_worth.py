@@ -244,3 +244,133 @@ def test_cli_exposed_records_any_ref_and_warns_on_a_label_suffix(capsys):
         assert "with --item" in capsys.readouterr().err
     with pytest.raises(ValueError):
         _parse_exposed("no-colon")
+
+
+def test_record_if_missing_keeps_a_human_label_written_mid_check(tmp_path):
+    """flow's labeller did latest() then record(): two lock spans. A human
+    correction landing between them was overwritten in the merge (1003 design (a)).
+    Reproduced first, then the same interleaving through record_if_missing."""
+    fcntl = pytest.importorskip("fcntl")
+    import os
+    import threading
+    import time
+
+    human = [ExposureLabel("crystal", "p", "ignored")]
+    machine = [ExposureLabel("crystal", "p", "followed")]
+    seen = [ExposedRef("crystal", "p"), ExposedRef("crystal", "q")]
+
+    # BEFORE: the check-then-append pattern loses the human's label
+    log = OutcomeLog(tmp_path / "before.outcomes.jsonl")
+    cur = log.latest()[0].get("ev")  # the machine checks: nothing recorded yet
+    log.record("ev", human)  # the human corrects in the gap
+    if not cur:
+        log.record("ev", machine, outcome="success", exposed=seen)
+    assert log.latest()[0]["ev"]["items"][0]["followed"] == "followed"  # human lost
+
+    # AFTER: hold the log's lock as record() does, so the human's write is in
+    # flight while record_if_missing starts; it must wait, then see and keep it
+    log = OutcomeLog(tmp_path / "after.outcomes.jsonl")
+    fd = os.open(log.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    got: list = []
+    t = threading.Thread(target=lambda: got.append(
+        log.record_if_missing("ev", machine, outcome="success", exposed=seen)))
+    t.start()
+    time.sleep(0.2)
+    assert t.is_alive()  # blocked on the lock, has not read the log yet
+    os.write(fd, (json.dumps({"v": 1, "exposure_id": "ev", "ts": "2026-10-03T00:00:00Z",
+                              "outcome": None, "items": [
+                                  {"kind": "crystal", "ref": "p", "followed": "ignored"}]})
+                  + "\n").encode())
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+    t.join(5)
+    # labels were present, so only the missing outcome (and exposed) went in
+    assert got[0]["items"] == [] and got[0]["outcome"] == "success"
+    merged = log.latest()[0]["ev"]
+    assert merged["items"] == [{"kind": "crystal", "ref": "p", "followed": "ignored"}]
+    assert merged["outcome"] == "success" and len(merged["exposed"]) == 2
+    # nothing missing now: no write, and only exposed being new never writes alone
+    size = log.path.stat().st_size
+    assert log.record_if_missing("ev", machine, outcome="failure", exposed=seen) is None
+    assert log.record_if_missing(
+        "ev", machine, outcome="success", exposed=[ExposedRef("crystal", "new")]) is None
+    assert log.path.stat().st_size == size
+    with pytest.raises(ValueError):  # validated as record() validates
+        log.record_if_missing("ev2", [])
+    # a fresh exposure gets everything
+    assert log.record_if_missing("ev2", machine)["items"] == [
+        {"kind": "crystal", "ref": "p", "followed": "followed"}]
+
+
+def test_worth_counts_receipt_exposures_with_no_record(tmp_path):
+    """Design (b), option 4b: an exposure with no cite and no outcome never
+    reaches the log; the receipts still prove it. Report-only, nothing written."""
+    from anneal_memory.worth import load_receipts
+
+    crystal = CrystalStore(tmp_path / "mem.crystal.json")
+    crystal.crystallize(name="p", level=3, explanation="x", evidence=["e1"])
+    crystal.crystallize(name="q", level=2, explanation="y", evidence=["e2"])
+    log = OutcomeLog(tmp_path / "mem.outcomes.jsonl")
+    log.record("r1", [ExposureLabel("crystal", "p", "followed")], outcome="success")
+    live = tmp_path / "receipts.jsonl"
+    rows = [
+        {"event_id": "r1", "exposed": [{"pattern": "p"}, {"pattern": "q"}]},  # recorded
+        {"event_id": "r2", "exposed": [{"pattern": "p"}, {"pattern": "q"}]},
+        {"event_id": "r3", "exposed": [{"pattern": "q"}, {"pattern": "gone"}]},
+        {"event_id": "r4", "exposed": []},  # not an exposure
+        {"exposed": [{"pattern": "p"}]},  # no event_id: cannot be matched
+    ]
+    live.write_text("\n".join(json.dumps(r) for r in rows) + "\nnot json\n")
+    backup = tmp_path / "receipts.jsonl.1"
+    backup.write_text(json.dumps(rows[1]) + "\n")  # a rotated copy of r2
+    before = log.path.read_bytes()
+
+    receipts, bad, missing = load_receipts([live, backup, tmp_path / "absent.jsonl"])
+    assert bad == 1 and missing == [str(tmp_path / "absent.jsonl")]
+    report = compute_worth(log, crystal, receipts=receipts)
+    by = {r.ref: r for r in report.crystals}
+    assert (by["p"].exposed_unrecorded, by["q"].exposed_unrecorded) == (1, 2)
+    assert by["gone"].exposed_unrecorded == 1 and by["gone"].live is False
+    assert (report.receipts_read, report.receipts_skipped) == (3, 1)
+    assert by["p"].success == 1  # the recorded counters are untouched
+    assert all(r.exposed_unrecorded is None for r in report.episodes)
+    assert log.path.read_bytes() == before
+
+    # receipts omitted: the report and its dict are exactly as before
+    plain = compute_worth(log, crystal).as_dict()
+    assert "receipts_read" not in plain
+    assert all("exposed_unrecorded" not in r for r in plain["crystals"])
+    with pytest.raises(FileNotFoundError):
+        load_receipts([tmp_path / "nope.jsonl"])
+
+
+def test_fold_on_a_store_with_no_crystal_file_does_not_create_it(tmp_path):
+    """Diogenes 10-03: the crystal file's existence is the wrap path's persistent
+    opt-in to the crystal tier, and a fold used to create it (the transaction
+    saves on clean exit). Nothing is live to count, so the fold leaves it absent."""
+    receipts = tmp_path / "receipts.jsonl"
+    receipts.write_text('{"ts":"2026-10-01T00:00:00Z","event_id":"e1","exposed":[]}\n')
+    path = tmp_path / "mem.crystal.json"
+    result = fold_surfaced(CrystalStore(path), [receipts])
+    assert not path.exists()
+    assert result.store_missing and result.mark is None and result.previous_mark is None
+    assert result.receipts_folded == 0
+    with pytest.raises(FileNotFoundError):  # a wrong receipt path still refuses
+        fold_surfaced(CrystalStore(path), [tmp_path / "nope.jsonl"])
+    assert not path.exists()
+
+
+def test_a_record_after_a_torn_line_starts_its_own_line(tmp_path):
+    """A crash can leave the last line without its newline; the next append used
+    to be glued onto it, so a good record was lost with the torn one."""
+    log = OutcomeLog(tmp_path / "mem.outcomes.jsonl")
+    log.record("a", [ExposureLabel("crystal", "p", "followed")])
+    log.path.write_bytes(log.path.read_bytes()[:-1])  # the newline never made it
+    log.record("b", [ExposureLabel("crystal", "p", "ignored")])
+    assert log.latest()[0].keys() == {"a", "b"}
+    with open(log.path, "ab") as f:
+        f.write(b'{"v": 1, "exposure_id": "torn"')  # torn mid-record
+    log.record_if_missing("c", [ExposureLabel("crystal", "q", "followed")])
+    latest, bad = log.latest()
+    assert latest.keys() == {"a", "b", "c"} and bad == 1  # only the torn line lost

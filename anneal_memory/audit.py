@@ -69,6 +69,22 @@ _lock_degrade_warned: set[str] = set()
 _ENOLCK_RETRIES = 3
 _ENOLCK_RETRY_SECONDS = 0.05
 
+
+def _emit_warning(message: str, *, stderr: bool = False) -> None:
+    """Emit a diagnostic that must never change control flow: to the logger and,
+    when ``stderr``, to standard error, each on its own. A log handler that raises
+    or a closed stderr costs this one message, never the caller's degrade or
+    refusal (L3 10-03: a raising handler replaced the refusal)."""
+    try:
+        logger.warning(message)
+    except Exception:
+        pass
+    if stderr:
+        try:
+            print(f"[anneal-memory] WARNING: {message}", file=sys.stderr)
+        except Exception:
+            pass
+
 # Chain anchors
 GENESIS_HASH = "sha256:GENESIS"
 
@@ -1818,19 +1834,17 @@ class AuditTrail:
         # its logging to a file showed nothing, and a second store in the same
         # process was silent because the warning fired once per process. Now
         # once per lock path, on stderr and to the logger.
-        # Recorded BEFORE emitting, and stderr only (no logger call): a failing
-        # emission can then cost at most this one warning, never the degrade.
+        # Recorded BEFORE emitting, then emitted to the logger AND stderr (an app
+        # may keep only one of them), each on its own so that neither a raising
+        # log handler nor a broken stderr can turn the degrade into a failure.
         if str(lock_path) not in _lock_degrade_warned:
             _lock_degrade_warned.add(str(lock_path))
-            try:
-                print(
-                    f"[anneal-memory] WARNING: Advisory locks are unavailable for "
-                    f"{lock_path}; the audit manifest lock is NOT held, so audit "
-                    "manifest changes are not serialized across processes.",
-                    file=sys.stderr,
-                )
-            except (OSError, ValueError):
-                pass  # a closed or broken stderr must not turn a degrade into a failure
+            message = (
+                f"Advisory locks are unavailable for {lock_path}; the audit manifest "
+                "lock is NOT held, so audit manifest changes are not serialized "
+                "across processes."
+            )
+            _emit_warning(message, stderr=True)
         return None
 
     def _initialize(self) -> None:
@@ -2040,7 +2054,7 @@ class AuditTrail:
                 return self._adopt_locked()
         except _AuditLockError as exc:
             self._adoption_skip_reason = str(exc)
-            logger.warning("Not adopting orphaned audit files: %s", exc)
+            _emit_warning(f"Not adopting orphaned audit files: {exc}")
             return False
 
     def _adopt_locked(self) -> bool:
@@ -2116,7 +2130,7 @@ class AuditTrail:
             manifest = self._load_manifest()
         except _ManifestUnavailable as exc:
             self._adoption_skip_reason = str(exc)
-            logger.warning("Not adopting orphaned audit files: %s", exc)
+            _emit_warning(f"Not adopting orphaned audit files: {exc}")
             return False
         try:
             names = sorted(p.name for p in audit_dir.iterdir())
@@ -2127,7 +2141,7 @@ class AuditTrail:
             # failing every write (L1, round 10, reproduced at mode 0o300);
             # verify() reports the directory itself.
             self._adoption_skip_reason = f"cannot list the audit directory: {e}"
-            logger.warning("Cannot list audit directory for recovery: %s", e)
+            _emit_warning(f"Cannot list audit directory for recovery: {e}")
             return False
 
         # A crash while compressing leaves ``<sealed>.jsonl.gz.tmp`` beside

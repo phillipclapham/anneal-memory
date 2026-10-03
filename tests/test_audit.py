@@ -8454,6 +8454,27 @@ class TestManifestLockL3:
         leftovers = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
         assert leftovers == [theirs.name]
 
+    def test_a_raising_log_handler_cannot_replace_an_adoption_skip(self, tmp_path):
+        """L3 codex MED [run 10:2x: a directory at the lock path plus a log handler
+        whose emit() raises made log() raise RuntimeError instead of skipping
+        adoption]: diagnostics never change control flow."""
+        import logging
+
+        class Boom(logging.Handler):
+            def emit(self, record):
+                raise RuntimeError("handler exploded")
+
+        log = logging.getLogger("anneal-memory")
+        boom = Boom()
+        log.addHandler(boom)
+        try:
+            (tmp_path / "m.audit-manifest.lock").mkdir()
+            trail = AuditTrail(tmp_path / "m.db")
+            trail.log("x", {"a": 1})
+            assert (tmp_path / "m.audit.jsonl").stat().st_size > 0
+        finally:
+            log.removeHandler(boom)
+
     def test_a_long_stem_manifest_save_fits_the_name_limit(self, tmp_path):
         """L3 codex HIGH [run: a 220-character stem gave a 240-byte manifest name
         and a 261-byte temp name, and the save raised ENAMETOOLONG]: the temp

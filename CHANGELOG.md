@@ -28,7 +28,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   (`store busy`), the log's write lock at most 2 seconds (`outcome log busy`); either is one
   stderr line, exit 0, the pattern still printed. The store id is read again under the log
   lock just before the append, and a store replaced in between records nothing. Any other write
-  failure is the same one line. The stderr line is best effort: a missing or closed stderr
+  failure, of any kind, is the same one line. A pull that appends nothing leaves no new, empty
+  log or directory behind. The stderr line is best effort: a missing or closed stderr
   changes nothing, and it never goes to stdout. The label write reads the outcome log once
   (to check the log belongs to this store), so its cost grows with the log.
 - New flag `--no-record` for scripted callers that read patterns without meaning to use them.
@@ -37,6 +38,12 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   touched) and raises the new `OutcomeLogBusy` (an `OSError`) when the lock is not free in time.
   It also takes `pull=` (stamps `"pull": true`) and `before_append=` (a callable run under the
   lock just before the append; what it raises aborts the write).
+
+- Known and not fixed: (a) after the bounded lock, the label write reads the whole outcome log,
+  parses it and fsyncs, with no time bound; its cost grows with the log (a pull adds one line),
+  so scripted callers should pass `--no-record`. (b) A store replaced in the instant between
+  the under-lock id re-check and the append can still receive one pull stamped with the old
+  store id; closing it needs the replacement to take the outcome-log lock.
 
 ## [0.9.26] — 2026-10-03
 

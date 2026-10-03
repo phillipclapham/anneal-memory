@@ -3137,12 +3137,12 @@ def _record_pull_label(args: argparse.Namespace, name: str) -> None:
     id re-read under the log lock no longer matches) records nothing. Any other
     failure is one stderr line."""
     try:
-        db_path = Path(args.db).expanduser()
-        if not db_path.is_file():
+        try:
+            db_path = Path(args.db).expanduser()
+            if not db_path.is_file():
+                return
+        except (OSError, ValueError, RuntimeError):
             return
-    except (OSError, ValueError, RuntimeError):
-        return
-    try:
         sid = _pull_store_id(db_path)
         if sid is None:
             raise _PullSkipped(
@@ -3165,8 +3165,8 @@ def _record_pull_label(args: argparse.Namespace, name: str) -> None:
         _pull_note(str(skip))
     except OutcomeLogBusy:
         _pull_note("outcome log busy")
-    except (OSError, ValueError, sqlite3.Error) as exc:
-        _pull_note(str(exc))
+    except Exception as exc:  # the read already succeeded: nothing here may fail it
+        _pull_note(str(exc) or type(exc).__name__)
 
 
 def _print_crystal_item(item: CrystalDict, as_json: bool) -> None:

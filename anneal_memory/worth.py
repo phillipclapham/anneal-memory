@@ -222,21 +222,46 @@ class OutcomeLog:
         raises propagates and nothing is written. ``None`` changes nothing.
         """
         timeout = _check_lock_timeout(lock_timeout)
+        if not isinstance(pull, bool):
+            raise ValueError(f"pull must be a bool (got {pull!r}).")
         self._writable_id()
         rec = _build_record(exposure_id, items, outcome, exposed, ts, self.store_id, pull)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        made_dirs = _mkdir_tracked(self.path.parent)
         # Read-write, not write-only: the append reads the last byte to repair a
         # torn final line, so a write-only (0200) log now refuses.
-        fd = os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+        flags = os.O_RDWR | os.O_APPEND | os.O_CREAT
+        created = False
+        try:
+            fd = os.open(self.path, flags | os.O_EXCL, 0o644)
+            created = True
+        except FileExistsError:
+            fd = os.open(self.path, flags, 0o644)
+        except BaseException:
+            _rmdir_tracked(made_dirs)
+            raise
+        appended = False
+        locked = False
         try:
             _lock_exclusive(fd, timeout)
+            locked = True
             if self.bound:
                 self._refuse_foreign(_bind(_parse_entries(_read_fd(fd))[0], self.store_id)[1])
             if before_append is not None:
                 before_append()
             _append(fd, rec)
+            appended = True
         finally:
+            # A write that appended nothing leaves nothing it made: the file this
+            # call created (only while it holds the lock, so no one else's append
+            # can be orphaned) and the directories it created.
+            if not appended and created and locked and os.fstat(fd).st_size == 0:
+                try:
+                    os.unlink(self.path)
+                except OSError:
+                    pass
             os.close(fd)
+            if not appended:
+                _rmdir_tracked(made_dirs)
         return rec
 
     def record_if_missing(
@@ -408,6 +433,25 @@ def _check_lock_timeout(timeout: object) -> float | None:
     return float(timeout)
 
 
+def _mkdir_tracked(directory: Path) -> list[Path]:
+    """``mkdir -p`` that returns the directories it created, deepest first."""
+    missing: list[Path] = []
+    probe = directory
+    while not probe.exists() and probe != probe.parent:
+        missing.append(probe)
+        probe = probe.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    return missing
+
+
+def _rmdir_tracked(made: list[Path]) -> None:
+    for d in made:  # deepest first; an unremovable (non-empty) one stays
+        try:
+            d.rmdir()
+        except OSError:
+            break
+
+
 def _lock_exclusive(fd: int, timeout: float | None) -> None:
     """Take the exclusive lock on ``fd``: block when ``timeout`` is None, else poll
     without blocking until the deadline and raise :class:`OutcomeLogBusy`."""
@@ -558,6 +602,8 @@ def _build_record(
         rec["exposed"] = [{"kind": e.kind, "ref": e.ref} for e in seen.values()]
     if store_id is not None:
         rec["store"] = store_id
+    if not isinstance(pull, bool):
+        raise ValueError(f"pull must be a bool (got {pull!r}).")
     if pull:
         rec["pull"] = True
     return rec

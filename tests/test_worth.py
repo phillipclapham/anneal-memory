@@ -808,3 +808,84 @@ def test_worthrow_positional_construction_keeps_its_old_arity():
     row = WorthRow("crystal", "p", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, tbl, 12, "s", "a", False)
     assert (row.exposed_unrecorded, row.surfaced_count, row.last_surfaced_on) == (11, 12, "s")
     assert row.last_activated_on == "a" and row.live is False and row.pulled == 0
+
+
+def test_any_failure_of_the_label_path_is_one_stderr_line_and_exit_zero(tmp_path, capsys):
+    from anneal_memory import cli
+
+    db, _ = _pull_store(tmp_path)
+    args = cli.build_parser().parse_args(
+        ["--db", str(db), "crystal", "get", "derive_dont_invent"])
+
+    def boom(*a, **kw):
+        raise RuntimeError("symlink loop")
+
+    real = cli._read_store_id_bounded
+    cli._read_store_id_bounded = boom
+    try:
+        args.func(args)  # a RuntimeError escaping here would be exit 1 after the print
+    finally:
+        cli._read_store_id_bounded = real
+    out, err = capsys.readouterr()
+    assert "derive_dont_invent" in out
+    assert err == "crystal get: pull not recorded (symlink loop)\n"
+    assert _log_lines(db) == []
+
+
+@pytest.mark.parametrize("bad", ["false", "true", 1, 0, None, "yes"])
+def test_record_pull_must_be_a_real_bool(tmp_path, bad):
+    log = OutcomeLog(tmp_path / "sub" / "mem.outcomes.jsonl")
+    with pytest.raises(ValueError, match="pull must be a bool"):
+        log.record("a", [ExposureLabel("crystal", "p", "followed")], pull=bad)
+    assert not (tmp_path / "sub").exists()
+
+
+@pytest.mark.parametrize("raw", ['"true"', "1", '"false"', "null", "[true]", "0"])
+def test_only_json_true_marks_a_pull_so_any_other_value_keeps_its_counts(tmp_path, raw):
+    crystal = CrystalStore(tmp_path / "mem.crystal.json")
+    crystal.crystallize(name="p", level=3, explanation="x")
+    log = OutcomeLog(tmp_path / "mem.outcomes.jsonl")
+    log.path.write_text(
+        '{"v": 1, "exposure_id": "pull:h", "ts": "2026-10-03T00:00:00Z", "outcome": "success", '
+        '"items": [{"kind": "crystal", "ref": "p", "followed": "followed"}], '
+        '"pull": ' + raw + "}\n")
+    row = {r.ref: r for r in compute_worth(log, crystal).crystals}["p"]
+    assert row.pulled == 0 and row.followed == 1 and row.success == 1
+
+
+def test_a_skipped_pull_leaves_no_new_empty_log_or_directory(tmp_path):
+    log = OutcomeLog(tmp_path / "a" / "b" / "mem.outcomes.jsonl")
+
+    def refuse():
+        raise RuntimeError("store replaced")
+
+    with pytest.raises(RuntimeError):
+        log.record("a", [ExposureLabel("crystal", "p", "followed")],
+                   pull=True, before_append=refuse)
+    assert not (tmp_path / "a").exists()
+    # an existing log is never removed, empty or not, and its directory stays
+    keep = OutcomeLog(tmp_path / "mem.outcomes.jsonl")
+    keep.path.write_text("")
+    with pytest.raises(RuntimeError):
+        keep.record("a", [ExposureLabel("crystal", "p", "followed")],
+                    pull=True, before_append=refuse)
+    assert keep.path.exists() and tmp_path.exists()
+
+
+def test_crystal_get_replaced_store_leaves_no_log_behind(tmp_path):
+    from anneal_memory import cli
+
+    db, _ = _pull_store(tmp_path)
+    real = cli._outcome_store_id
+    reads = []
+
+    def swapped(db_path, **kw):
+        reads.append(1)
+        return real(db_path, **kw) if len(reads) == 1 else "b" * 32
+
+    cli._outcome_store_id = swapped
+    try:
+        cli._record_pull_label(__import__("argparse").Namespace(db=str(db)), "derive_dont_invent")
+    finally:
+        cli._outcome_store_id = real
+    assert not outcome_log_path(db).exists()

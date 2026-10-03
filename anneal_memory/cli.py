@@ -282,21 +282,34 @@ def _json_parent() -> argparse.ArgumentParser:
 
 # -- Store factory --
 
+def _is_anneal_db(db_path: Path) -> bool:
+    """True when ``db_path`` is a SQLite database carrying anneal's own ``episodes``
+    and ``metadata`` tables. Opened read-only, so the check never creates or
+    upgrades anything; a directory, a non-SQLite file, a truncated header-only file
+    and another program's SQLite database all answer False."""
+    if not db_path.is_file():
+        return False
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            names = {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")}
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
+    return {"episodes", "metadata"} <= names
+
+
 def _existing_db_path(args: argparse.Namespace, *, require_sqlite: bool = False) -> Path:
     """The --db path, or exit 1 when no database is there. A command that derives a
     sibling file from --db (the outcome log) passes ``require_sqlite=True``: it never
     opens the database, so a directory or a non-SQLite file at that path must be
     refused here, or it would write to, or report from, an orphan sibling file."""
     db_path = Path(args.db).expanduser()
-    if require_sqlite and db_path.exists():
-        try:
-            with open(db_path, "rb") as fh:
-                is_sqlite = fh.read(16) == b"SQLite format 3\x00"
-        except OSError:
-            is_sqlite = False
-        if not is_sqlite:
-            print(f"Error: not an anneal-memory database: {db_path}", file=sys.stderr)
-            sys.exit(1)
+    if require_sqlite and db_path.exists() and not _is_anneal_db(db_path):
+        print(f"Error: not an anneal-memory database: {db_path}", file=sys.stderr)
+        sys.exit(1)
     if not db_path.exists():
         print(f"Error: database not found: {db_path}", file=sys.stderr)
         print(

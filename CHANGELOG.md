@@ -36,7 +36,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ### Fixed
 
-- `anneal-memory outcome` and `worth` refuse a `--db` that is not an existing SQLite file (exit 1).
+- `anneal-memory outcome` and `worth` refuse a `--db` that is not an anneal-memory database (exit 1):
+  missing, a directory, a non-SQLite file, or a SQLite database without anneal's own tables (checked
+  read-only).
   They exited 0: `outcome` wrote the labels to an orphan log (creating its directories) and
   `worth` reported 0 exposures as a clean measurement.
 - `fold_surfaced` / `crystal fold-surfaced` no longer creates `<stem>.crystal.json` on a store

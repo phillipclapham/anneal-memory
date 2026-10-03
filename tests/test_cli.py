@@ -4342,12 +4342,18 @@ def test_outcome_and_worth_refuse_a_missing_db(tmp_path):
         assert "database not found" in result.stderr
     assert list(tmp_path.iterdir()) == []
     # L1 (run): an EXISTING wrong path, a directory, was accepted and wrote d.outcomes.jsonl.
+    # L3 codex MED (run): another program's SQLite database passed a header-only check.
     (tmp_path / "d").mkdir()
-    for argv in (["outcome", "--exposure-id", "ev1", "--outcome", "success"], ["worth"]):
-        result = subprocess.run(
-            [sys.executable, "-m", "anneal_memory.cli", "--db", str(tmp_path / "d"), *argv],
-            capture_output=True, text=True,
-        )
-        assert result.returncode == 1, (argv, result.stdout, result.stderr)
-        assert "not an anneal-memory database" in result.stderr
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["d"]
+    import sqlite3
+    other = sqlite3.connect(tmp_path / "other.db")
+    other.execute("CREATE TABLE t (x)")
+    other.close()
+    for wrong in ("d", "other.db"):
+        for argv in (["outcome", "--exposure-id", "ev1", "--outcome", "success"], ["worth"]):
+            result = subprocess.run(
+                [sys.executable, "-m", "anneal_memory.cli", "--db", str(tmp_path / wrong), *argv],
+                capture_output=True, text=True,
+            )
+            assert result.returncode == 1, (wrong, argv, result.stdout, result.stderr)
+            assert "not an anneal-memory database" in result.stderr
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["d", "other.db"]

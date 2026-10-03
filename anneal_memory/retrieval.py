@@ -70,6 +70,7 @@ from __future__ import annotations
 import re
 import sys
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from math import log
@@ -117,11 +118,24 @@ QUERY_MIN_HITS = 1
 # The cue tier is deliberately NOT behind the gates above (the bar, the anchor, the hit
 # floor, the keyword floor): a durable fact is one the composer wrote cue words for, and
 # a one-word prompt ("restaurant?") must be able to bring it up. The precision guard is
-# structural instead: a cue matches by WHOLE-TOKEN equality (never a substring), after
-# light stemming; a token under three characters or a stopword never matches; and at
-# most MAX_DURABLE_FACTS surface per call, ranked by distinct matched tokens, then by
-# section order.
+# structural instead, five parts:
+#   1. a cue matches by WHOLE-TOKEN equality (never a substring), after light stemming;
+#      a token under three characters or a stopword never matches;
+#   2. a query token that is GENERIC IN THIS STORE never matches: it appears in more than
+#      DURABLE_GENERIC_DF of the store's own episodes (the store's document frequency, so
+#      "time" and "work" drop out of a work store while "restaurant" stays a cue; a store
+#      under IDF_MIN_CORPUS episodes has too few to tell, and applies no such filter);
+#   3. a prompt with more than DURABLE_SHORT_PROMPT_TOKENS usable tokens needs TWO
+#      distinct matched tokens, so one stray common word in a long prompt cannot cue a
+#      fact; a short prompt ("restaurant?") still cues on one;
+#   4. the fact text alone cues a fact only through DURABLE_FACT_TEXT_MIN distinct
+#      distinctive words of it (cue words alone are the primary path);
+#   5. at most MAX_DURABLE_FACTS surface per call, ranked by distinct matched tokens,
+#      then by section order.
 MAX_DURABLE_FACTS = 2
+DURABLE_GENERIC_DF = 0.10
+DURABLE_SHORT_PROMPT_TOKENS = 2
+DURABLE_FACT_TEXT_MIN = 2
 _FACT_TOKEN_RE = re.compile(r"[a-z0-9]+")
 _FACT_MIN_TOKEN_LEN = 3
 
@@ -666,47 +680,99 @@ def load_durable_facts(store: Store) -> list[DurableFact]:
         return []
 
 
+def store_generic_filter(store: Store) -> Callable[[str], bool]:
+    """A predicate ``generic(token)`` for ``store``: whether the token appears in more than
+    :data:`DURABLE_GENERIC_DF` of the store's episodes. The document frequency is the
+    exact ``Store.recall`` match count of the token's shortest stem (a substring count, so
+    it also covers the longer forms and, if anything, over-counts), one count per distinct
+    token asked about, memoized for the predicate's lifetime. A store with fewer than
+    :data:`IDF_MIN_CORPUS` episodes, or one that cannot be read, has nothing generic."""
+    corpus: list[int] = []
+    memo: dict[str, bool] = {}
+
+    def generic(token: str) -> bool:
+        if token not in memo:
+            try:
+                if not corpus:
+                    corpus.append(store.recall(limit=0).total_matching)
+                if corpus[0] < IDF_MIN_CORPUS:
+                    memo[token] = False
+                else:
+                    stem = min(_token_forms(token), key=len)
+                    df = store.recall(keyword=stem, limit=0).total_matching
+                    memo[token] = df / corpus[0] > DURABLE_GENERIC_DF
+            except Exception:  # noqa: BLE001 - a recall tier fails soft by contract
+                memo[token] = False
+        return memo[token]
+
+    return generic
+
+
 def match_durable_facts(
     facts: list[DurableFact],
     query: str,
     *,
     mode: RetrievalMode = "prompt",
     max_facts: int = MAX_DURABLE_FACTS,
+    generic: Callable[[str], bool] | None = None,
 ) -> list[RelevantFact]:
     """The facts ``query`` cues, best first, at most ``max_facts``.
 
     A fact surfaces when a query token matches one of its cue tokens (cue phrases are
-    split into word tokens), or when a distinctive keyword of the fact text
-    (:func:`extract_keywords` in ``mode``) matches a query token. Matching is whole-token
-    equality after light stemming (:func:`_token_forms`), never a substring; a token under
-    three characters or a stopword never matches. The retrieval gates (score bar, anchor,
-    hit floor, keyword floor) do not apply to this tier, on purpose: the guard is the
-    token rule above plus the cap. Ranking is by distinct matched tokens, then section
+    split into word tokens), or when at least :data:`DURABLE_FACT_TEXT_MIN` distinct
+    distinctive keywords of the fact text (:func:`extract_keywords` in ``mode``) match
+    query tokens. Matching is whole-token equality after light stemming
+    (:func:`_token_forms`), never a substring; a token under three characters or a
+    stopword never matches. The retrieval gates (score bar, anchor, hit floor, keyword
+    floor) do not apply to this tier, on purpose; its guard is the rule list at
+    :data:`MAX_DURABLE_FACTS`. ``generic(token)``, when given, names query tokens too
+    common in the store to cue anything (:func:`store_generic_filter`); a prompt with more
+    than :data:`DURABLE_SHORT_PROMPT_TOKENS` usable tokens (generic ones included) needs
+    two distinct matched tokens. Ranking is by distinct matched tokens, then section
     order. ``source`` is ``"cue"`` when any cue matched, else ``"fact"``."""
     _check_mode(mode)
     if max_facts <= 0 or not facts:
         return []
-    query_forms = [(tok, _token_forms(tok)) for tok in _fact_tokens(query)]
+    query_tokens = _fact_tokens(query)
+    if not query_tokens:
+        return []
+    need = 2 if len(query_tokens) > DURABLE_SHORT_PROMPT_TOKENS else 1
+
+    # Each fact's words, once: (cue words, fact-text words).
+    words: list[tuple[list[str], list[str]]] = []
+    for fact in facts:
+        cue_words = list(dict.fromkeys(w for cue in fact.cues for w in _fact_tokens(cue)))
+        fact_words = list(dict.fromkeys(
+            w for kw in extract_keywords(fact.fact, mode=mode) for w in _fact_tokens(kw)
+        ))
+        words.append((cue_words, fact_words))
+
+    # Only a query token that could match some fact word is worth a document-frequency
+    # lookup; the rest cannot change the result.
+    usable = query_tokens
+    if generic is not None:
+        known: set[str] = set()
+        for cue_words, fact_words in words:
+            for w in cue_words + fact_words:
+                known |= _token_forms(w)
+        usable = [
+            tok for tok in query_tokens
+            if not (_token_forms(tok) & known) or not generic(tok)
+        ]
+    query_forms = [_token_forms(tok) for tok in usable]
     if not query_forms:
         return []
 
-    def hits(words: list[str]) -> list[str]:
-        out: list[str] = []
-        for word in words:
-            forms = _token_forms(word)
-            if any(forms & qf for _tok, qf in query_forms) and word not in out:
-                out.append(word)
-        return out
+    def hits(candidates: list[str]) -> list[str]:
+        return [w for w in candidates if any(_token_forms(w) & qf for qf in query_forms)]
 
     ranked: list[tuple[int, int, RelevantFact]] = []
-    for position, fact in enumerate(facts):
-        cue_words = [w for cue in fact.cues for w in _fact_tokens(cue)]
-        cue_hits = hits(list(dict.fromkeys(cue_words)))
-        fact_words = [
-            w for kw in extract_keywords(fact.fact, mode=mode) for w in _fact_tokens(kw)
-        ]
-        fact_hits = [w for w in hits(list(dict.fromkeys(fact_words))) if w not in cue_hits]
-        if not cue_hits and not fact_hits:
+    for position, (fact, (cue_words, fact_words)) in enumerate(zip(facts, words)):
+        cue_hits = hits(cue_words)
+        fact_hits = [w for w in hits(fact_words) if w not in cue_hits]
+        if not cue_hits and len(fact_hits) < DURABLE_FACT_TEXT_MIN:
+            continue
+        if len(cue_hits) + len(fact_hits) < need:
             continue
         ranked.append((
             len(cue_hits) + len(fact_hits),
@@ -720,6 +786,19 @@ def match_durable_facts(
         ))
     ranked.sort(key=lambda r: (-r[0], r[1]))
     return [r[2] for r in ranked[:max_facts]]
+
+
+def durable_facts_for(
+    store: Store, query: str, *, mode: RetrievalMode = "prompt"
+) -> list[RelevantFact]:
+    """The durable facts of ``store``'s continuity that ``query`` cues, with the
+    store's own generic-word filter applied. Never raises (see :func:`load_durable_facts`)."""
+    facts = load_durable_facts(store)
+    if not facts:
+        return []
+    return match_durable_facts(
+        facts, query, mode=mode, generic=store_generic_filter(store)
+    )
 
 
 def retrieve_relevant(
@@ -776,10 +855,16 @@ def retrieve_relevant(
             cues, at most :data:`MAX_DURABLE_FACTS`. This tier is NOT behind the gates
             above (it runs even for a one-word query, before the keyword floor) and is
             additive: ``patterns`` and ``episodes`` are the same with it on or off. Its
-            guard is whole-token matching after light stemming, no stopwords or tokens
-            under three characters, and the cap (:func:`match_durable_facts`). Never
-            raises: a store with no continuity or no durable section gives ``[]``.
-            ``False`` leaves ``facts`` empty.
+            precision guard replaces the gates: whole-token matching after light
+            stemming (no substring, no stopword, no token under three characters); a
+            query token that appears in more than :data:`DURABLE_GENERIC_DF` of the
+            store's own episodes never matches (applied only to a store with
+            :data:`IDF_MIN_CORPUS` or more episodes); a prompt with more than
+            :data:`DURABLE_SHORT_PROMPT_TOKENS` usable tokens needs two distinct matched
+            tokens; the fact text alone cues a fact only through
+            :data:`DURABLE_FACT_TEXT_MIN` distinct words; and the cap. See
+            :func:`match_durable_facts`. Never raises: a store with no continuity or no
+            durable section gives ``[]``. ``False`` leaves ``facts`` empty.
 
     Returns:
         :class:`RelevantResult` with ``patterns`` + ``episodes`` (each scored/ranked)
@@ -793,9 +878,7 @@ def retrieve_relevant(
     """
     _check_mode(mode)
     today = today or date.today()
-    facts = (
-        match_durable_facts(load_durable_facts(store), query, mode=mode) if durable else []
-    )
+    facts = durable_facts_for(store, query, mode=mode) if durable else []
     keywords = extract_keywords(query, mode=mode)
     if len(keywords) < _min_keywords(mode):
         return RelevantResult(

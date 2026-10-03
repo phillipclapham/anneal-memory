@@ -44,8 +44,7 @@ from .retrieval import (
     MIN_KEYWORDS,
     QUERY_MIN_KEYWORDS,
     RETRIEVAL_MODES,
-    load_durable_facts,
-    match_durable_facts,
+    durable_facts_for,
     EpisodeMatch,
     RetrievalMode,
     extract_keywords,
@@ -439,7 +438,7 @@ class Server:
 
     def _cued_facts(self, query: str, mode: RetrievalMode) -> list[RelevantFact]:
         """The durable facts of this server's store that ``query`` cues."""
-        return match_durable_facts(load_durable_facts(self._store), query, mode=mode)
+        return durable_facts_for(self._store, query, mode=mode)
 
     def _recall_episodes(self, args: dict[str, Any]) -> dict[str, Any]:
         episode_type = args.get("episode_type")

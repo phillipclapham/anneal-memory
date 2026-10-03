@@ -97,10 +97,14 @@ class TestRetrieveRelevantFacts:
         assert retrieve_relevant(store, None, "the for ox").facts == []
         assert [f.matched for f in retrieve_relevant(store, None, "doors").facts] == [("door",)]
 
-    def test_fact_text_alone_cues_with_source_fact(self, store):
+    def test_fact_text_alone_cues_only_through_two_distinct_words(self, store):
         store.save_continuity(_continuity("- the bank layout fmt_row64 starts at cutover"))
-        r = retrieve_relevant(store, None, "tell me about the cutover plan")
-        assert [(f.source, f.matched) for f in r.facts] == [("fact", ("cutover",))]
+        r = retrieve_relevant(store, None, "cutover and bank layout notes")
+        assert [(f.source, f.matched) for f in r.facts] == [
+            ("fact", ("bank", "layout", "cutover"))]
+        # one word of the fact text is not enough
+        assert retrieve_relevant(store, None, "tell me about the cutover plan").facts == []
+        assert retrieve_relevant(store, None, "cutover").facts == []
 
     def test_cap_of_two_ranked_by_distinct_tokens_then_section_order(self, store):
         store.save_continuity(_continuity(

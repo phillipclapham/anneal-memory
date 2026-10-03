@@ -2098,10 +2098,15 @@ class AuditTrail:
         Every decision and every manifest field for a file come from one
         read of it (``_scan_sealed``).
 
-        Returns True when every name in the directory was considered (whether
-        or not anything was adopted), False when it returned before that: the
-        manifest could not be loaded or the directory could not be listed. A
-        missing directory has nothing to adopt and returns True.
+        Returns True when the manifest loaded and the directory was listed, so
+        every name in it was considered, whether or not anything was adopted.
+        An unreadable or corrupt orphan does NOT make it False (round 10's
+        ruling, kept 10-03): writes continue and ``verify()`` reports the week.
+        So with an empty active file the chain continues from the manifest past
+        such a week (a documented residue, CHANGELOG [Unreleased]). Returns
+        False when it returned before listing: the manifest could not be loaded
+        or the directory could not be listed. A missing directory has nothing
+        to adopt and returns True.
         """
         stem = self._db_path.stem
         audit_dir = self._db_path.parent

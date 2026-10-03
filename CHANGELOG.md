@@ -36,6 +36,10 @@ disk. The refusal names its cause, and the next write retries; a cause that does
 write (and `audit-repair`) until it is removed. For a symlink, FIFO or directory at the lock path the
 error says so and gives the way out: remove `<stem>.audit-manifest.lock`; it holds no state.
 
+Known and not fixed: an unreadable or corrupt newer sealed week with an empty active file: the chain
+continues from the manifest past it; `verify()` reports the week as unmanifested. Refusing there would
+block every write with no repair path, which round 10 ruled out.
+
 Each manifest save writes its own randomly named temp file and replaces the manifest from it, so where the
 lock degrades to none two writers no longer overwrite one shared `.json.tmp` (measured before: failed saves
 and torn manifest reads that a reader would quarantine).

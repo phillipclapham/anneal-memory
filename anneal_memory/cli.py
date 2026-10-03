@@ -1166,6 +1166,12 @@ def cmd_audit_repair(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+# prepare-wrap's exit when the consolidate gate downgraded the wrap. 3 is the
+# CLI's "nothing was done, and that is the answer" code (see cmd_status's
+# re-derive branch), distinct from 1 (error) and 2 (usage).
+_EXIT_DOWNGRADED = 3
+
+
 def cmd_prepare_wrap(args: argparse.Namespace) -> None:
     """Output the compression package for agent-driven wraps.
 
@@ -1182,6 +1188,11 @@ def cmd_prepare_wrap(args: argparse.Namespace) -> None:
     (or a wrapping script) can round-trip it to ``save-continuity``
     via ``--wrap-token`` for explicit mismatch detection across the
     CLI process boundary.
+
+    Exits 3 when the wrap was DOWNGRADED (the store requires the consolidate
+    baton and this command holds none): no wrap was opened, so it must not
+    exit like one that was (spore-1170). The status and message are still
+    printed. ``empty`` (nothing to compress) exits 0.
     """
     with _open_store(args) as store:
         try:
@@ -1217,6 +1228,8 @@ def cmd_prepare_wrap(args: argparse.Namespace) -> None:
                     "message": result["message"],
                     "wrap_token": None,
                 })
+                if result["status"] == "downgraded":
+                    sys.exit(_EXIT_DOWNGRADED)
             else:
                 # Preserve the pre-10.5c.4 JSON shape: emit the package
                 # dict so scripts scraping fields like `instructions`,
@@ -1242,6 +1255,8 @@ def cmd_prepare_wrap(args: argparse.Namespace) -> None:
             # universal parser works across both transports.
             text = f"{text}\n\n---\nWrap token: {result['wrap_token']}"
         print(text)
+        if result["status"] == "downgraded":
+            sys.exit(_EXIT_DOWNGRADED)
 
 
 def cmd_save_continuity(args: argparse.Namespace) -> None:
@@ -1743,6 +1758,9 @@ def cmd_export(args: argparse.Namespace) -> None:
                 "wraps": wraps,
                 "continuity": continuity,
                 "meta": meta,
+                # Informational, like supersessions: import never sets a policy on
+                # the target store; it warns when the source had one (spore-1170).
+                "consolidate_requires_baton": store.consolidate_requires_baton(),
             }
             if args.output:
                 out = Path(args.output)
@@ -1874,6 +1892,16 @@ def cmd_import(args: argparse.Namespace) -> None:
                 if not args.json:
                     print(f"  Error importing episode {ep_data.get('id', '?')}: {e}", file=sys.stderr)
 
+        if data.get("consolidate_requires_baton") is True and not store.consolidate_requires_baton():
+            # spore-1170 LOW: the export dropped the policy, so a store rebuilt from
+            # it silently lost its consolidate protection. Import still does not set
+            # it (a policy change on an existing target is the operator's act).
+            print(
+                "Warning: the exported store required the consolidate baton; this store "
+                "does not. Set it with Store.set_consolidate_requires_baton(True) if it "
+                "should.",
+                file=sys.stderr,
+            )
         if args.json:
             _print_json({"imported": imported, "skipped": skipped, "errors": errors})
         else:

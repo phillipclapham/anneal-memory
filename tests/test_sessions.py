@@ -633,10 +633,72 @@ def test_policy_cli_prepare_wrap_json_reports_the_downgrade(tmp_path):
         [sys.executable, "-m", "anneal_memory.cli", "--db", db, "prepare-wrap", "--json"],
         capture_output=True, text=True,
     )
-    assert run.returncode == 0, run.stderr
+    # spore-1170 LOW: a downgrade opened no wrap, so it must not exit like one that
+    # did (it exited 0, and a flow caller read the token-less package as "no new
+    # episodes"). ⛔ MUTATION-CHECKED: exit 0 on a downgrade and this fails.
+    assert run.returncode == 3, run.stderr
     payload = json.loads(run.stdout)
     assert payload["status"] == "downgraded" and payload["wrap_token"] is None
     assert "downgraded-baton-required" in payload["message"]
+
+
+def test_policy_cli_prepare_wrap_text_downgrade_exits_3_and_empty_exits_0(tmp_path):
+    import subprocess
+    import sys
+
+    plain = str(tmp_path / "plain.db")
+    Store(plain).close()
+    empty = subprocess.run(
+        [sys.executable, "-m", "anneal_memory.cli", "--db", plain, "prepare-wrap"],
+        capture_output=True, text=True,
+    )
+    assert empty.returncode == 0, empty.stderr  # nothing to compress is not a refusal
+
+    db = str(tmp_path / "cli.db")
+    s = Store(db)
+    s.record("obs", EpisodeType.OBSERVATION)
+    s.set_consolidate_requires_baton(True)
+    s.close()
+    run = subprocess.run(
+        [sys.executable, "-m", "anneal_memory.cli", "--db", db, "prepare-wrap"],
+        capture_output=True, text=True,
+    )
+    assert run.returncode == 3, run.stderr
+    assert "Wrap token:" not in run.stdout
+    assert Store(db).status().wrap_in_progress is False
+
+
+def test_policy_rides_the_json_export_and_import_warns_when_it_is_lost(tmp_path):
+    """spore-1170 LOW: the JSON export dropped the require-baton policy, so a
+    store rebuilt from it lost its protection silently. ⛔ MUTATION-CHECKED:
+    drop the export key or the import warning and this fails."""
+    import subprocess
+    import sys
+
+    src = str(tmp_path / "src.db")
+    s = Store(src)
+    s.record("obs", EpisodeType.OBSERVATION)
+    s.set_consolidate_requires_baton(True)
+    s.close()
+    out = tmp_path / "export.json"
+
+    def cli(*args):
+        return subprocess.run([sys.executable, "-m", "anneal_memory.cli", *args],
+                              capture_output=True, text=True)
+
+    run = cli("--db", src, "export", "--format", "json", "--output", str(out))
+    assert run.returncode == 0, run.stderr
+    assert json.loads(out.read_text())["consolidate_requires_baton"] is True
+
+    dst = str(tmp_path / "dst.db")
+    Store(dst).close()
+    run = cli("--db", dst, "import", str(out))
+    assert run.returncode == 0, run.stderr
+    assert "required the consolidate baton" in run.stderr
+    assert Store(dst).consolidate_requires_baton() is False  # import never sets it
+
+    run = cli("--db", src, "import", str(out))  # a target that has it: no warning
+    assert "required the consolidate baton" not in run.stderr
 
 
 # -- L1/L2 review fixes (2026-09-24) --

@@ -2,6 +2,22 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed — 0.9.13 follow-ups (spore-1170)
+
+- **`anneal-memory prepare-wrap` exits 3 when the consolidate gate downgrades the wrap** (the store
+  requires the baton and the CLI holds none). It exited 0, so a caller that checks the exit code read
+  a refused wrap as success; one caller in practice then read the token-less package as "no new
+  episodes". The status and message are still printed, in text and `--json`. An `empty` result
+  (nothing to compress) still exits 0. 3 is the CLI's existing "nothing was done, and that is the
+  answer" code.
+- **The JSON export carries `consolidate_requires_baton`**, and `anneal-memory import` warns on stderr
+  when the export's store required the baton and the target store does not. Import still never sets a
+  policy on the target; that stays the operator's act (`Store.set_consolidate_requires_baton`).
+- Tests for `validated_save_continuity(compost=...)`'s `TypeError` cases (a bare string or bytes, an
+  empty or padded name, a non-string), each asserting nothing was written.
+
 ## [0.9.23] — 2026-10-02
 
 ### Added — supersession: an update can say which episode it replaces

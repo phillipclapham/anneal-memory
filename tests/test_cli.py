@@ -4468,3 +4468,42 @@ def test_adopt_unbound_binds_records_written_before_store_ids(tmp_path):
     data = json.loads(run("worth", "--json").stdout)
     assert (data["bound"], data["unbound"], data["exposures"], data["store_id"]) == (2, 0, 2, sid)
     assert len(log.read_text().splitlines()) == 3
+
+
+def test_store_id_proof_and_mint_refuse_what_l3_reproduced(tmp_path):
+    """L3 10-03 on e0e1dff, each reproduced by a real CLI run first: a
+    metadata-only file holding a store_id row was accepted and written to by
+    `outcome` (the row counted as proof); `worth` reported zeros from a file
+    that is not an anneal store; a malformed persisted id tracebacked; a
+    rejected `outcome` still minted the id. Proof is now the schema alone, on
+    both paths, and the mint follows parsing in one transaction."""
+
+    def run(db, *argv):
+        return subprocess.run(
+            [sys.executable, "-m", "anneal_memory.cli", "--db", str(db), *argv],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        )
+
+    imp = tmp_path / "imp.db"
+    with sqlite3.connect(imp) as conn:
+        conn.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT INTO metadata VALUES ('store_id', 'deadbeef')")
+    for argv in (["outcome", "--exposure-id", "e1", "--outcome", "success"], ["worth"]):
+        result = run(imp, *argv)
+        assert result.returncode == 1 and "not an anneal store" in result.stderr, result.stderr
+    assert not (tmp_path / "imp.outcomes.jsonl").exists()
+
+    bad = tmp_path / "bad.db"
+    assert run(bad, "init").returncode == 0
+    with sqlite3.connect(bad) as conn:
+        conn.execute("UPDATE metadata SET value = 'two\nlines' WHERE key = 'store_id'")
+    result = run(bad, "outcome", "--exposure-id", "e1", "--outcome", "success")
+    assert result.returncode == 1 and "Traceback" not in result.stderr, result.stderr
+
+    idless = tmp_path / "idless.db"
+    assert run(idless, "init").returncode == 0
+    with sqlite3.connect(idless) as conn:
+        conn.execute("DELETE FROM metadata WHERE key = 'store_id'")
+    assert run(idless, "outcome", "--exposure-id", "e1", "--item", "badkind:x=maybe").returncode == 1
+    with sqlite3.connect(idless) as conn:
+        assert conn.execute("SELECT value FROM metadata WHERE key = 'store_id'").fetchall() == []

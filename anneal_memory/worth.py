@@ -282,6 +282,13 @@ class OutcomeLog:
         """
         if self.store_id is None:
             raise ValueError("adopt_unbound needs an OutcomeLog with a store_id.")
+        if fcntl is None:
+            # Without a lock, two stores adopting at once could both report success
+            # while only the first marker binds (L3 10-03, codex).
+            raise ValueError(
+                "adopt_unbound needs a file lock, which this platform does not "
+                "provide; nothing was written."
+            )
         when = (ts or datetime.now(timezone.utc)).astimezone(timezone.utc)
         marker: dict[str, Any] = {
             "v": OUTCOME_LOG_VERSION,
@@ -540,8 +547,13 @@ def _parse_record(line: str) -> dict[str, Any] | None:
     try:
         if "store" in rec:
             _check_id(rec["store"], "store")
-        if rec.get("adopt") is True:
-            if "store" not in rec:
+        if "adopt" in rec:
+            # A marker has exactly this shape; any other line carrying "adopt" is a
+            # bad line, never a record and never a marker (L3 10-03, codex + glm:
+            # "adopt": "true" crashed _bind, and a record carrying adopt + store
+            # was read as a marker and swallowed).
+            if (rec["adopt"] is not True or "store" not in rec
+                    or any(k in rec for k in ("exposure_id", "items", "outcome", "exposed"))):
                 return None
             return {"adopt": True, "store": rec["store"], "ts": rec.get("ts")}
         _check_id(rec.get("exposure_id"), "exposure_id")

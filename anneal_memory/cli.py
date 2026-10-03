@@ -47,11 +47,12 @@ import re
 import shlex
 import sqlite3
 import stat
+import uuid
 import sys
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from . import __version__
 from .audit import (
@@ -3245,43 +3246,67 @@ def _parse_exposed(raw: str) -> ExposedRef:
     return ExposedRef(kind, ref)
 
 
+def _is_anneal_schema(conn: sqlite3.Connection) -> bool:
+    """Proof that a database is an anneal store: an ``episodes`` table, and a
+    ``metadata`` table holding ``format_version``. A ``store_id`` row is not
+    proof (L3 10-03, codex: it let a metadata-only impostor through)."""
+    tables = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name IN ('episodes', 'metadata')"
+        )
+    }
+    return tables == {"episodes", "metadata"} and conn.execute(
+        "SELECT 1 FROM metadata WHERE key = 'format_version'"
+    ).fetchone() is not None
+
+
 def _outcome_store_id(db_path: Path, *, mint: bool) -> str | None:
     """The store id that binds ``<stem>.outcomes.jsonl`` to the store at ``db_path``,
-    or exit 1. Read with a read-only open, which writes nothing and fails on a file
-    that is not an anneal store. A store with no id yet (only an older anneal or a
-    read-only open has opened it since the upgrade) returns ``None`` unless
-    ``mint``: then ONE write-capable open, the same open every store command
-    makes, mints it, after the read-only open has read the store's metadata.
-    ``outcome`` (a write path) mints; ``worth`` (read-only, Phill 10-03) never
-    does."""
+    or exit 1 when the file is not an anneal store (see :func:`_is_anneal_schema`)
+    or cannot be read. ``worth`` (read-only, Phill 10-03) reads it with the
+    library's read-only open and never mints: a store with no id yet returns
+    ``None``. ``outcome`` (a write path) mints a missing id, and the proof and the
+    mint happen in ONE connection and ONE ``BEGIN IMMEDIATE`` transaction, so the
+    file proven is the file written (L3 10-03, codex HIGH: a proof on one open
+    and a write-capable ``Store`` open after it could write anneal's schema into
+    a file swapped in between). The mint writes the one metadata row and nothing
+    else."""
+    def refuse(why: object) -> NoReturn:
+        print(f"Error: cannot read the store id of {db_path}: {why}", file=sys.stderr)
+        sys.exit(1)
+
+    not_anneal = "not an anneal store (no episodes table or no format_version); nothing written"
+    if not mint:
+        try:
+            with Store(db_path, audit=False, read_only=True) as store:
+                if not _is_anneal_schema(store._conn):
+                    refuse(not_anneal)
+                return store.store_id
+        except (StoreError, OSError, sqlite3.Error) as exc:
+            refuse(exc)
     try:
-        with Store(db_path, audit=False, read_only=True) as store:
-            sid = store.store_id
-            # Mint only into a proven anneal store: a metadata table alone is not
-            # proof, and a write-capable open writes anneal's whole schema into
-            # whatever file it is given (L1 10-03, a metadata-only db).
-            anneal = sid is not None or (
-                store._conn.execute(
-                    "SELECT 1 FROM metadata WHERE key = 'format_version'"
-                ).fetchone() is not None
-                and store._conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'episodes'"
-                ).fetchone() is not None
-            )
-        if sid is None and mint:
-            if not anneal:
-                print(f"Error: cannot read the store id of {db_path}: not an anneal store "
-                      f"(no format_version or no episodes table); nothing written",
-                      file=sys.stderr)
-                sys.exit(1)
-            with Store(db_path, audit=False) as store:
-                sid = store.store_id
-    except (StoreError, OSError, sqlite3.Error) as exc:
-        print(f"Error: cannot read the store id of {db_path}: {exc}", file=sys.stderr)
-        sys.exit(1)
-    if sid is None and mint:  # pragma: no cover - the write-capable open seeds it
-        print(f"Error: {db_path} has no store id after a write-capable open", file=sys.stderr)
-        sys.exit(1)
+        conn = sqlite3.connect(str(db_path), timeout=30.0, isolation_level=None)
+    except (OSError, sqlite3.Error) as exc:
+        refuse(exc)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if not _is_anneal_schema(conn):
+            conn.execute("ROLLBACK")
+            refuse(not_anneal)
+        conn.execute(
+            "INSERT OR IGNORE INTO metadata (key, value) VALUES ('store_id', ?)",
+            (uuid.uuid4().hex,),
+        )
+        row = conn.execute("SELECT value FROM metadata WHERE key = 'store_id'").fetchone()
+        conn.execute("COMMIT")
+    except (OSError, sqlite3.Error) as exc:
+        refuse(exc)
+    finally:
+        conn.close()
+    sid = row[0] if row else None
+    if not isinstance(sid, str) or not sid:
+        refuse(f"its store_id row is empty or not text ({sid!r}); nothing written")
     return sid
 
 
@@ -3296,7 +3321,15 @@ def cmd_outcome(args: argparse.Namespace) -> None:
     elif not args.exposure_id:
         print("Error: --exposure-id is required (or pass --adopt-unbound)", file=sys.stderr)
         sys.exit(1)
-    log = OutcomeLog(outcome_log_path(db_path), store_id=_outcome_store_id(db_path, mint=True))
+    try:
+        # Parsed before the id is minted, so a rejected command writes nothing to
+        # the store (L3 10-03, complement + codex).
+        items = [_parse_label(raw) for raw in (args.item or [])]
+        exposed = [_parse_exposed(raw) for raw in (args.exposed or [])]
+        log = OutcomeLog(outcome_log_path(db_path), store_id=_outcome_store_id(db_path, mint=True))
+    except (ValueError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     if args.adopt_unbound:
         try:
             marker = log.adopt_unbound()
@@ -3312,8 +3345,6 @@ def cmd_outcome(args: argparse.Namespace) -> None:
                   f"(marker appended at {marker['ts']}; earlier records unchanged)")
         return
     try:
-        items = [_parse_label(raw) for raw in (args.item or [])]
-        exposed = [_parse_exposed(raw) for raw in (args.exposed or [])]
         rec = log.record(
             args.exposure_id, items, outcome=args.outcome, exposed=exposed
         )
@@ -3370,9 +3401,16 @@ def cmd_worth(args: argparse.Namespace) -> None:
     try:
         if args.receipts:
             receipts, receipt_bad, receipt_missing = load_receipts(args.receipts)
-        log = OutcomeLog(outcome_log_path(db_path),
-                         store_id=_outcome_store_id(db_path, mint=False), bind=True)
+        sid = _outcome_store_id(db_path, mint=False)
+        log = OutcomeLog(outcome_log_path(db_path), store_id=sid, bind=True)
         report = compute_worth(log, _open_crystal_store(args), receipts=receipts)
+        if sid is None and _outcome_store_id(db_path, mint=False) is not None:
+            # An `outcome` minted the id while this read the log, so its records
+            # may carry an id this report took as foreign (L3 10-03, codex). An
+            # id is never rewritten, so one re-read settles it.
+            sid = _outcome_store_id(db_path, mint=False)
+            log = OutcomeLog(outcome_log_path(db_path), store_id=sid, bind=True)
+            report = compute_worth(log, _open_crystal_store(args), receipts=receipts)
     except (CrystalError, OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)

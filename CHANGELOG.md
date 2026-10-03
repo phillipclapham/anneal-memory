@@ -51,17 +51,17 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   `ForeignOutcomeLogError` (a `ValueError`) naming both ids. No log-version bump: released
   readers read stamped records unchanged (measured on 0.9.23). Without `store_id`, nothing
   changes.
-- `anneal-memory outcome` and `worth` bind the log to the `--db` store: the id is read with a
-  read-only open (a file that is not an anneal store refuses, exit 1). `outcome`, a write path,
-  mints a missing id with one write-capable open, as every store command makes. `worth` stays
+- `anneal-memory outcome` and `worth` bind the log to the `--db` store. Both refuse (exit 1) a file
+  that is not an anneal store: an `episodes` table and a `format_version` row are the proof, and a
+  `store_id` row is not. `outcome`, a write path, mints a missing id in ONE transaction that proves
+  the file and writes only that row, so the file proven is the file written; it parses its
+  arguments first, so a rejected command writes nothing to the store. `worth` stays
   read-only and never mints: on a store with no id yet it reports "no id yet" and counts the
   log's unstamped records as unbound (stamped ones are foreign), writing nothing to the store.
   `worth` prints a loud line for an all-foreign log and EXITS 1 (with `--json`, a `warning`
   field and `all_foreign`), since zeros from the wrong log are not a clean measurement, and a
   `bound / unbound / foreign` line whenever the log is not all bound; `outcome` refuses an
-  all-foreign log. `outcome` mints a missing id only into a proven anneal store (a
-  `format_version` row and an `episodes` table); a file with a `metadata` table alone refuses
-  and is not written.
+  all-foreign log. A `worth` that read "no id yet" while an `outcome` minted one re-reads once.
 - `OutcomeLog(..., bind=True)` with `store_id=None` reads a log bound to a store that has no id
   yet (refusing writes), so a caller passing `store.store_id` straight through is not silently
   read as unpartitioned when it is `None`.
@@ -70,7 +70,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   records before it to this store. Nothing is rewritten; a second run with nothing unbound writes
   nothing. It binds EVERY unbound record, including any that a store replaced at the same path
   left behind, so check the log is this store's first. It changes no count (unbound records are
-  already counted), only the report and how later readers classify them. Readers older than this release skip the marker as one unreadable line and count
+  already counted), only the report and how later readers classify them. It refuses where there
+  is no file lock (Windows), since two concurrent adoptions could both report success. A line
+  carrying `adopt` is a marker only in exactly the marker's shape; any other is a skipped line. Readers older than this release skip the marker as one unreadable line and count
   nothing from it (measured on 0.9.23).
 
 ### Fixed

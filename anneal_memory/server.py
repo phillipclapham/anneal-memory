@@ -612,7 +612,7 @@ class Server:
             # with the AM-LINKGATE refusal removed, a dead association write
             # path would otherwise be silent over MCP).
             lines.append(f"Association warning: {result['association_warning']}")
-        if allow_unlinked:
+        if allow_unlinked is True:
             lines.append(
                 "allow_unlinked is deprecated and did nothing: the AM-LINKGATE save "
                 "refusal it overrode was removed in 0.9.26."

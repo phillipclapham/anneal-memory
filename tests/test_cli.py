@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -4362,3 +4363,83 @@ def test_db_path_naming_an_unknown_user_refuses_without_a_traceback():
         assert result.returncode == 1, (argv, result.stdout, result.stderr)
         assert "Traceback" not in result.stderr, result.stderr
         assert said in result.stderr, result.stderr
+
+
+def test_outcome_log_left_beside_a_replaced_store_is_not_adopted(tmp_path):
+    """Reproduced by a real CLI run first (10-03): store A recorded an outcome,
+    A's db was deleted, store B was initialised at the same path, and B's `worth`
+    reported A's exposure as its own while B's `outcome` appended into A's log.
+    Records now carry the store id: B counts none of A's, says so loudly, and
+    refuses to write into the log. A file that is not an anneal store refuses."""
+
+    def run(*argv):
+        return subprocess.run(
+            [sys.executable, "-m", "anneal_memory.cli", "--db", str(tmp_path / "mem.db"), *argv],
+            capture_output=True, text=True,
+        )
+
+    assert run("init").returncode == 0
+    assert run("outcome", "--exposure-id", "evA", "--item", "crystal:pA=followed",
+               "--outcome", "success").returncode == 0
+    log = tmp_path / "mem.outcomes.jsonl"
+    a_id = json.loads(log.read_text())["store"]
+    for p in tmp_path.glob("mem.db*"):
+        p.unlink()
+    assert run("init").returncode == 0
+    report = run("worth", "--json")
+    assert report.returncode == 0, report.stderr
+    data = json.loads(report.stdout)
+    assert data["exposures"] == 0 and data["all_foreign"] and data["foreign_stores"] == [a_id]
+    assert "belongs to another store" in run("worth").stderr
+    before = log.read_bytes()
+    for argv in (["outcome", "--exposure-id", "evB", "--item", "crystal:pB=ignored"],
+                 ["outcome", "--adopt-unbound"]):
+        result = run(*argv)
+        assert result.returncode == 1 and a_id in result.stderr and data["store_id"] in result.stderr
+    assert log.read_bytes() == before
+
+    other = tmp_path / "other.db"
+    sqlite3.connect(other).execute("CREATE TABLE t (x)").connection.commit()
+    result = subprocess.run([sys.executable, "-m", "anneal_memory.cli", "--db", str(other),
+                             "outcome", "--exposure-id", "ev", "--outcome", "success"],
+                            capture_output=True, text=True)
+    assert result.returncode == 1 and "cannot read the store id" in result.stderr
+    assert not (tmp_path / "other.outcomes.jsonl").exists()
+
+
+def test_adopt_unbound_binds_records_written_before_store_ids(tmp_path):
+    """Reproduced by a real CLI run first (10-03) on a 0.9.23 store and log: the
+    store had no id, the log's records no `store`. `worth` mints the id with one
+    write-capable open and reports the old record as unbound (still counted);
+    `--adopt-unbound` appends one marker and binds it; a second adopt writes
+    nothing; new records carry the id."""
+
+    def run(*argv):
+        return subprocess.run(
+            [sys.executable, "-m", "anneal_memory.cli", "--db", str(tmp_path / "mem.db"), *argv],
+            capture_output=True, text=True,
+        )
+
+    assert run("init").returncode == 0
+    db = sqlite3.connect(tmp_path / "mem.db")
+    db.execute("DELETE FROM metadata WHERE key = 'store_id'")  # as a 0.9.23 store
+    db.commit()
+    db.close()
+    log = tmp_path / "mem.outcomes.jsonl"
+    log.write_text(json.dumps({"v": 1, "exposure_id": "evOld", "ts": "2026-10-02T00:00:00Z",
+                               "outcome": "failure", "items": [
+                                   {"kind": "crystal", "ref": "pOld", "followed": "followed"}]})
+                   + "\n")
+    data = json.loads(run("worth", "--json").stdout)
+    assert (data["bound"], data["unbound"], data["foreign"], data["exposures"]) == (0, 1, 0, 1)
+    sid = data["store_id"]
+    adopt = run("outcome", "--adopt-unbound")
+    assert adopt.returncode == 0 and "Adopted" in adopt.stdout
+    assert json.loads(log.read_text().splitlines()[-1]) == {
+        "v": 1, "adopt": True, "store": sid, "ts": json.loads(log.read_text().splitlines()[-1])["ts"]}
+    assert "Nothing to adopt" in run("outcome", "--adopt-unbound").stdout
+    assert run("outcome", "--exposure-id", "evNew", "--outcome", "success").returncode == 0
+    assert json.loads(log.read_text().splitlines()[-1])["store"] == sid
+    data = json.loads(run("worth", "--json").stdout)
+    assert (data["bound"], data["unbound"], data["exposures"], data["store_id"]) == (2, 0, 2, sid)
+    assert len(log.read_text().splitlines()) == 3

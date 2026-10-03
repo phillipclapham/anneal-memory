@@ -296,8 +296,8 @@ def _existing_db_path(args: argparse.Namespace, *, require_file: bool = False) -
     when the command starts: a database removed after that point is not noticed.
     Whether an existing file is THIS store is not decided here: a check that guesses
     at it from the file's contents refused real stores and accepted impostors (four
-    review rounds, 10-03); binding the outcome log to a persisted store identity is
-    the design that answers it."""
+    review rounds, 10-03); :func:`_outcome_store_id` binds the outcome log to the
+    store's persisted identity instead."""
     exists = is_file = False
     db_path = Path(args.db)
     try:
@@ -3242,14 +3242,58 @@ def _parse_exposed(raw: str) -> ExposedRef:
     return ExposedRef(kind, ref)
 
 
+def _outcome_store_id(db_path: Path) -> str:
+    """The store id that binds ``<stem>.outcomes.jsonl`` to the store at ``db_path``,
+    or exit 1. Read with a read-only open, which writes nothing and fails on a file
+    that is not an anneal store. A store with no id yet (only an older anneal or a
+    read-only open has opened it since the upgrade) gets one from ONE write-capable
+    open, the same open every store command makes; that runs only after the
+    read-only open has read the store's metadata."""
+    try:
+        with Store(db_path, audit=False, read_only=True) as store:
+            sid = store.store_id
+        if sid is None:
+            with Store(db_path, audit=False) as store:
+                sid = store.store_id
+    except (StoreError, OSError) as exc:
+        print(f"Error: cannot read the store id of {db_path}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if sid is None:  # pragma: no cover - the write-capable open seeds it
+        print(f"Error: {db_path} has no store id after a write-capable open", file=sys.stderr)
+        sys.exit(1)
+    return sid
+
+
 def cmd_outcome(args: argparse.Namespace) -> None:
     """Write back what happened after an exposure (append-only; records for one
     exposure id merge when read)."""
-    log_path = outcome_log_path(_existing_db_path(args, require_file=True))
+    db_path = _existing_db_path(args, require_file=True)
+    if args.adopt_unbound:
+        if args.exposure_id or args.item or args.outcome or args.exposed:
+            print("Error: --adopt-unbound takes no other outcome flags", file=sys.stderr)
+            sys.exit(1)
+    elif not args.exposure_id:
+        print("Error: --exposure-id is required (or pass --adopt-unbound)", file=sys.stderr)
+        sys.exit(1)
+    log = OutcomeLog(outcome_log_path(db_path), store_id=_outcome_store_id(db_path))
+    if args.adopt_unbound:
+        try:
+            marker = log.adopt_unbound()
+        except (ValueError, OSError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if args.json:
+            _print_json({"adopted": marker is not None, "marker": marker})
+        elif marker is None:
+            print(f"Nothing to adopt: no unbound record in {log.path}")
+        else:
+            print(f"Adopted the unbound records in {log.path} into store {log.store_id} "
+                  f"(marker appended at {marker['ts']}; earlier records unchanged)")
+        return
     try:
         items = [_parse_label(raw) for raw in (args.item or [])]
         exposed = [_parse_exposed(raw) for raw in (args.exposed or [])]
-        rec = OutcomeLog(log_path).record(
+        rec = log.record(
             args.exposure_id, items, outcome=args.outcome, exposed=exposed
         )
     except (ValueError, OSError) as exc:
@@ -3305,8 +3349,8 @@ def cmd_worth(args: argparse.Namespace) -> None:
     try:
         if args.receipts:
             receipts, receipt_bad, receipt_missing = load_receipts(args.receipts)
-        report = compute_worth(OutcomeLog(outcome_log_path(db_path)), _open_crystal_store(args),
-                               receipts=receipts)
+        log = OutcomeLog(outcome_log_path(db_path), store_id=_outcome_store_id(db_path))
+        report = compute_worth(log, _open_crystal_store(args), receipts=receipts)
     except (CrystalError, OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -3318,8 +3362,18 @@ def cmd_worth(args: argparse.Namespace) -> None:
             out["receipt_lines_unreadable"] = receipt_bad
         _print_json(out)
         return
+    b = report.binding
+    if b is not None and b.all_foreign:
+        print(f"!! This outcome log belongs to another store ({', '.join(b.foreign_stores)}), "
+              f"not this one ({b.store_id}): none of its {b.foreign} exposure(s) are counted.",
+              file=sys.stderr)
     print(f"Worth (report-only) from {report.exposures} exposure(s)"
           + (f", {report.lines_skipped} unreadable line(s) skipped" if report.lines_skipped else ""))
+    if b is not None and (b.unbound or b.foreign):
+        print(f"store {b.store_id}: {b.bound} bound"
+              + (f", {b.unbound} unbound (written before store ids; counted; "
+                 f"'outcome --adopt-unbound' binds them)" if b.unbound else "")
+              + (f", {b.foreign} foreign (another store's; NOT counted)" if b.foreign else ""))
     print("surf = recall-surfaced (receipt fold); the other columns come from the outcome")
     print("log and are not joined to it. succ/fail = retrieved with that outcome, any label.")
     print("unl+s/unl+f = exposed with that outcome and never labelled (not in succ/fail).")
@@ -4133,7 +4187,8 @@ def build_parser() -> argparse.ArgumentParser:
                     "earlier label, a later outcome replaces the earlier outcome.",
         parents=[json_parent],
     )
-    sub.add_argument("--exposure-id", required=True, help="The harness's id for the recall event")
+    sub.add_argument("--exposure-id", help="The harness's id for the recall event (required "
+                                            "unless --adopt-unbound)")
     sub.add_argument("--item", action="append", metavar="KIND:REF=FOLLOWED",
                      help="A surfaced item and its label, e.g. crystal:my_pattern=followed "
                           "(repeatable; KIND crystal|episode; FOLLOWED "
@@ -4145,6 +4200,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="An item the exposure surfaced, labelled or not (repeatable; from "
                           "the harness's receipt). Unlabelled ones are reported in their own "
                           "columns, never in succ/fail. Needs --item or --outcome beside it.")
+    sub.add_argument("--adopt-unbound", action="store_true",
+                     help="Bind every record written before store ids to THIS store: appends "
+                          "one marker record, rewrites nothing. Takes no other outcome flags.")
     sub.set_defaults(func=cmd_outcome)
 
     sub = subparsers.add_parser(

@@ -285,6 +285,7 @@ def _json_parent() -> argparse.ArgumentParser:
 # -- Store factory --
 
 _DB_ABSENT_ERRNOS = (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP)
+_DB_ABSENT_WINERRORS = (21, 123, 1921)  # not ready, invalid name, link cycle
 
 
 def _existing_db_path(args: argparse.Namespace, *, require_file: bool = False) -> Path:
@@ -307,9 +308,11 @@ def _existing_db_path(args: argparse.Namespace, *, require_file: bool = False) -
         pass
     except OSError as exc:
         # Path.exists() reads these errnos as absent (measured on 3.13: ENOENT,
-        # ENOTDIR, ELOOP; EBADF by its source); anything else, e.g. EACCES on an
+        # ENOTDIR, ELOOP; EBADF by its source) and, on Windows, these winerrors
+        # (by its source; not run here); anything else, e.g. EACCES on an
         # unreadable parent, is an inspection failure.
-        if exc.errno not in _DB_ABSENT_ERRNOS:
+        if (exc.errno not in _DB_ABSENT_ERRNOS
+                and getattr(exc, "winerror", None) not in _DB_ABSENT_WINERRORS):
             print(f"Error: cannot inspect the database path {args.db}: {exc}", file=sys.stderr)
             sys.exit(1)
     except RuntimeError as exc:

@@ -4328,7 +4328,7 @@ def test_outcome_and_worth_refuse_a_missing_db_or_a_directory(tmp_path):
     """Diogenes 2026-10-03 MED, reproduced by a real CLI run first: `outcome` and
     `worth` exited 0 on a --db that does not exist (`outcome` writing an orphan log
     and creating its directories); L1 then ran a directory. Both now refuse, as
-    every store command refuses a missing path, and create nothing. Whether an
+    `_open_store` refuses a missing path, and create nothing. Whether an
     EXISTING file is this store is deliberately not judged here (CHANGELOG)."""
 
     def run(db, *argv):
@@ -4344,3 +4344,18 @@ def test_outcome_and_worth_refuse_a_missing_db_or_a_directory(tmp_path):
             assert result.returncode == 1, (wrong, argv, result.stdout, result.stderr)
             assert said in result.stderr, (wrong, result.stderr)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["d"]
+
+
+def test_db_path_naming_an_unknown_user_refuses_without_a_traceback():
+    """L3 10-03 (codex + complement, reproduced first by a real run): a quoted
+    `~user` path with no such user made expanduser() raise RuntimeError outside the
+    guard, so the CLI printed a traceback for a path it claims to refuse cleanly."""
+    for argv in (["worth"], ["status"]):
+        result = subprocess.run(
+            [sys.executable, "-m", "anneal_memory.cli",
+             "--db", "~anneal_no_such_user_zz/memory.db", *argv],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        )
+        assert result.returncode == 1, (argv, result.stdout, result.stderr)
+        assert "Traceback" not in result.stderr, result.stderr
+        assert "cannot inspect the database path" in result.stderr, result.stderr

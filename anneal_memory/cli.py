@@ -45,6 +45,7 @@ import os
 import re
 import shlex
 import sqlite3
+import stat
 import sys
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
@@ -283,21 +284,30 @@ def _json_parent() -> argparse.ArgumentParser:
 # -- Store factory --
 
 def _existing_db_path(args: argparse.Namespace, *, require_file: bool = False) -> Path:
-    """The --db path, or exit 1 when no database is there, as every episodic-store
-    command refuses it. ``outcome`` and ``worth`` read and write files derived from
-    this path rather than the database itself, so they pass ``require_file=True``
-    and a directory is refused too. Checked once, when the command starts: a
-    database removed after that point is not noticed. Whether an existing file is THIS store is not decided here: a check that
-    guesses at it from the file's contents refused real stores and accepted
-    impostors (four review rounds, 10-03); binding the outcome log to a persisted
-    store identity is the design that answers it."""
-    db_path = Path(args.db).expanduser()
+    """The --db path, or exit 1 when no database is there. Every command that opens
+    the episodic store through ``_open_store`` refuses a missing path here; ``init``,
+    ``migrate`` and ``derive`` do their own checks. ``outcome`` and ``worth`` read and
+    write files derived from this path rather than the database itself, so they pass
+    ``require_file=True`` and a directory is refused too. Checked once, with one stat,
+    when the command starts: a database removed after that point is not noticed.
+    Whether an existing file is THIS store is not decided here: a check that guesses
+    at it from the file's contents refused real stores and accepted impostors (four
+    review rounds, 10-03); binding the outcome log to a persisted store identity is
+    the design that answers it."""
     try:
-        exists = db_path.exists()
-        is_file = db_path.is_file()
-    except OSError as exc:  # e.g. PermissionError on an unreadable parent (Python 3.13)
-        print(f"Error: cannot inspect the database path {db_path}: {exc}", file=sys.stderr)
+        db_path = Path(args.db).expanduser()
+        st = db_path.stat()
+    except (FileNotFoundError, NotADirectoryError):  # what Path.exists() reads as absent
+        exists = False
+        is_file = False
+    except (OSError, RuntimeError) as exc:
+        # PermissionError on an unreadable parent; RuntimeError from expanduser()
+        # when "~user" names no user or no home directory can be found.
+        print(f"Error: cannot inspect the database path {args.db}: {exc}", file=sys.stderr)
         sys.exit(1)
+    else:
+        exists = True
+        is_file = stat.S_ISREG(st.st_mode)
     if not exists:
         print(f"Error: database not found: {db_path}", file=sys.stderr)
         print(

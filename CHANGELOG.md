@@ -37,8 +37,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 ### Fixed
 
 - `anneal-memory outcome` and `worth` refuse a `--db` that does not exist, is a directory, or
-  cannot be inspected (exit 1), as every episodic-store command refuses a missing path (the crystal
-  and spore commands still accept one: their files need no database). The check runs when the
+  cannot be inspected (exit 1), as the commands that open the store through `_open_store` refuse a
+  missing path (`init`, `migrate`, `derive` and the crystal and spore commands keep their own
+  handling). A `--db` naming an unknown `~user` is refused there too instead of printing a
+  traceback; other commands that expand `--db` themselves still do. The check runs once when the
   command starts; a database removed after that is not noticed. `worth` on a crystal-only
   location (no episodic database) is therefore refused. They exited 0 (Diogenes 2026-10-03 MED):
   `outcome` wrote labels to an orphan log, creating its directories, and `worth` reported 0

@@ -462,28 +462,44 @@ def test_the_repair_raises_on_anything_but_lock_contention(tmp_path, monkeypatch
 
 
 def test_the_repair_steps_aside_on_lock_contention(tmp_path, monkeypatch):
+    """A real BUSY at the repair's own BEGIN IMMEDIATE (L2's experiment): a peer
+    takes the write lock right after the schema commits. The open succeeds, the
+    links stay as they were, and the next open repairs them."""
     db = str(tmp_path / "m.db")
     a, _b, d, _row = _dangling_store(db)
-    holder = sqlite3.connect(db, timeout=0.05)
-    holder.execute("BEGIN IMMEDIATE")
+    real_init = Store._init_schema
+    peers: list[sqlite3.Connection] = []
+
+    def init_then_peer_locks(self):
+        real_init(self)
+        self._conn.execute("PRAGMA busy_timeout=50")
+        peer = sqlite3.connect(db, timeout=0.05)
+        peer.execute("BEGIN IMMEDIATE")
+        peers.append(peer)
+
+    monkeypatch.setattr(Store, "_init_schema", init_then_peer_locks)
     try:
-        blocked = sqlite3.connect(db, timeout=0.05)
-        with pytest.raises(sqlite3.OperationalError) as busy:
-            blocked.execute("BEGIN IMMEDIATE")
-        blocked.close()
+        with Store(db) as st:
+            assert not st._conn.in_transaction
+            assert len(st.supersession_links()) == 2  # left for the next open
     finally:
-        holder.rollback()
-        holder.close()
-
-    def contended(self, ids):
-        raise busy.value
-
-    monkeypatch.setattr(Store, "_detach_supersessions", contended)
-    with Store(db) as st:  # opens; the repair is left to the next open
-        assert st.supersession_links()
+        for peer in peers:
+            peer.rollback()
+            peer.close()
     monkeypatch.undo()
     with Store(db) as st:
         assert [(l["old_id"], l["new_id"]) for l in st.supersession_links()] == [(a.id, d.id)]
+
+
+def test_batch_refuses_an_open_transaction_and_keeps_it(tmp_path):
+    with Store(str(tmp_path / "m.db")) as st:
+        st._conn.execute("BEGIN")
+        st._conn.execute("INSERT INTO metadata (key, value) VALUES ('probe', 'x')")
+        with pytest.raises(RuntimeError, match="no transaction open"):
+            with st._batch():
+                pass
+        assert st._conn.in_transaction and st._defer_commit is False
+        st._conn.rollback()
 
 
 def test_wrap_cancelled_inside_a_batch_fails_loud(tmp_path):
@@ -533,10 +549,11 @@ def test_a_busy_batch_entry_leaves_the_store_usable(tmp_path):
 
 def test_the_floor_is_tight_against_the_probe_minimum():
     """The floor is tight by measurement (Phill 2026-10-02: keep 0.25, enforced
-    by a test). The 48 probe update pairs all ground at the floor and a floor
-    0.05 higher refuses some, so a tokenizer or stop-word change that moves the
-    boundary fails here instead of silently. Re-derive the populations with
-    scripts/supersede_floor.py on a COPY of a store."""
+    by a test). The probe's update pairs (48, each with and without its CONTEXT
+    sentence) have a minimum ratio EQUAL to the floor, so a tokenizer or
+    stop-word change that moves that minimum either way fails here instead of
+    silently. Re-derive the populations with scripts/supersede_floor.py on a
+    COPY of a store."""
     from pathlib import Path
 
     import anneal_memory.store as store_mod
@@ -554,9 +571,8 @@ def test_the_floor_is_tight_against_the_probe_minimum():
                 pairs.append((o, u if ctx else u.replace(sp.CONTEXT, "")))
     assert len(pairs) == 96
     assert all(store_mod._supersession_grounds(n, o) for o, n in pairs)
-    floor = store_mod.SUPERSEDE_MIN_OVERLAP_RATIO
-    try:
-        store_mod.SUPERSEDE_MIN_OVERLAP_RATIO = floor + 0.05
-        assert not all(store_mod._supersession_grounds(n, o) for o, n in pairs)
-    finally:
-        store_mod.SUPERSEDE_MIN_OVERLAP_RATIO = floor
+    from anneal_memory.graduation import _meaningful_words as words
+
+    ratios = [len(words(o) & words(n)) / max(1, min(len(words(o)), len(words(n))))
+              for o, n in pairs]
+    assert min(ratios) == store_mod.SUPERSEDE_MIN_OVERLAP_RATIO

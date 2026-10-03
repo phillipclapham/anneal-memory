@@ -206,8 +206,22 @@ def test_unlabelled_exposures_count_in_their_own_column(tmp_path):
     # exposures a and c credit nothing to it
     assert (eps["e1"].credited_success, eps["e1"].credited_failure) == (0, 1)
     assert eps["e1"].unlabelled_success == eps["e1"].unlabelled_failure == 0
+    # L1: an episode already credited through a labelled crystal's evidence in the
+    # same exposure is not also unlabelled (it was counted once, as credited)
+    log.record("f", [ExposureLabel("crystal", "p", "followed")], outcome="success",
+               exposed=[ExposedRef("crystal", "p"), ExposedRef("episode", "e1")])
+    e1 = {r.ref: r for r in compute_worth(log, crystal).episodes}["e1"]
+    assert (e1.credited_success, e1.unlabelled_success) == (1, 0)
     latest, _ = log.latest()
     assert {(e["kind"], e["ref"]) for e in latest["c"]["exposed"]} == {("crystal", "p")}
+    # an unreadable exposed entry is dropped, not the record with its labels
+    with open(log.path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"v": 1, "exposure_id": "g", "ts": "2026-10-02T00:00:00Z",
+                            "outcome": "success", "items": [],
+                            "exposed": [{"kind": "future", "ref": "x"},
+                                        {"kind": "crystal", "ref": "q"}]}) + "\n")
+    latest, bad = log.latest()
+    assert bad == 0 and latest["g"]["exposed"] == [{"kind": "crystal", "ref": "q"}]
     with pytest.raises(ValueError):
         log.record("d", [], exposed=seen)  # exposed alone never makes a record
     with pytest.raises(ValueError):

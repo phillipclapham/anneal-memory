@@ -270,15 +270,20 @@ def _parse_record(line: str) -> dict[str, Any] | None:
             if not isinstance(i, dict):
                 return None
             ExposureLabel(i.get("kind"), i.get("ref"), i.get("followed"))  # type: ignore[arg-type]
-        exposed = rec.get("exposed", [])
-        if not isinstance(exposed, list):
-            return None
-        for e in exposed:
-            if not isinstance(e, dict):
-                return None
-            ExposedRef(e.get("kind"), e.get("ref"))  # type: ignore[arg-type]
     except ValueError:
         return None
+    # ``exposed`` is advisory: an entry this version cannot read (a future kind,
+    # a malformed ref) is dropped, never the record with its labels (L1).
+    raw = rec.get("exposed")
+    kept: list[dict[str, Any]] = []
+    for e in raw if isinstance(raw, list) else ():
+        try:
+            if isinstance(e, dict):
+                ExposedRef(e.get("kind"), e.get("ref"))  # type: ignore[arg-type]
+                kept.append({"kind": e["kind"], "ref": e["ref"]})
+        except ValueError:
+            continue
+    rec["exposed"] = kept
     return rec
 
 
@@ -599,7 +604,10 @@ def compute_worth(log: OutcomeLog, crystal_store: CrystalStore | None = None) ->
     also reaches the episodes in its ``evidence``, whatever the crystal's own label
     (retrieved semantics; the crystal's ``table`` shows how it was labelled), live
     crystals only (a crystal no longer live has no evidence to walk), and each
-    episode is counted once per exposure. Nothing here writes anywhere.
+    episode is counted once per exposure. An item in the record's ``exposed``
+    list that this exposure did not label (and, for an episode, did not credit
+    through a labelled crystal) counts in the ``unlabelled_*`` columns only.
+    Nothing here writes anywhere.
     """
     latest, bad = log.latest()
     live: dict[str, dict[str, Any]] = {}
@@ -657,9 +665,12 @@ def compute_worth(log: OutcomeLog, crystal_store: CrystalStore | None = None) ->
             erow(eid)._count(label, outcome)
         for eid in cited - direct.keys():
             erow(eid)._count(None, outcome, credited=True)
-        labelled = {(i["kind"], i["ref"]) for i in rec["items"]}
+        # Counted already in this exposure: labelled directly, or (an episode)
+        # credited through a labelled crystal's evidence. Once per exposure (L1).
+        counted = {(i["kind"], i["ref"]) for i in rec["items"]}
+        counted |= {("episode", eid) for eid in cited}
         for e in rec["exposed"]:
-            if (e["kind"], e["ref"]) in labelled:
+            if (e["kind"], e["ref"]) in counted:
                 continue
             row = crow(e["ref"]) if e["kind"] == "crystal" else erow(e["ref"])
             row._count_unlabelled(outcome)

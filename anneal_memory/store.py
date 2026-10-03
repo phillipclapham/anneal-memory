@@ -1415,13 +1415,12 @@ def _today_local() -> str:
 
 # Supersession grounding floor: the meaningful words two episodes share, as a
 # fraction of the SHORTER episode's meaningful words. Derived 2026-10-02 by
-# scripts/supersede_floor.py on a copy of a 12,489-episode store: every probe
-# update pair passed (minimum 0.25, so the floor sits on it with no margin),
-# 8 of 500 random pairs passed (the old ">= 2 shared words" rule passed 422 of
-# 500, and refused 13 of the 48 probe updates once their shared boilerplate was
-# removed). Same-topic pairs that are not updates pass 113 of 500: no lexical
-# floor tells "replaces" from "is about the same thing", so the link remains the
-# writer's decision. Re-derive with the script before changing the number.
+# scripts/supersede_floor.py: it equals the probe updates' minimum ratio (tight,
+# no margin), which test_the_floor_is_tight_against_the_probe_minimum asserts.
+# The random and same-topic pass counts are a sampled band, not a constant; the
+# measured band is in CHANGELOG [0.9.23]. No lexical floor tells "replaces"
+# from "is about the same thing", so the link remains the writer's decision.
+# Re-derive with the script, on a COPY of a store, before changing the number.
 SUPERSEDE_MIN_OVERLAP_RATIO = 0.25
 
 
@@ -6452,8 +6451,14 @@ class Store:
         that raises it) and ``"batch_commit"`` for the outer commit
         of ``_batch()`` contexts (surfaces to callers through
         ``validated_save_continuity`` / ``wrap_completed``, not
-        through any method named batch_commit). Soften the "verbatim"
-        claim in caller docs if either identifier changes.
+        through any method named batch_commit). Two more name a phase
+        of those same calls: ``"batch_begin"`` (the write lock taken at
+        ``_batch()`` entry, e.g. BUSY under a peer writer) and
+        ``"supersession_repair"`` (the link repair a read-write
+        ``Store(path)`` runs; a non-contention failure there raises out
+        of the constructor under this name, nested inside schema_init).
+        Soften the "verbatim" claim in caller docs if any identifier
+        changes.
 
         New raise sites MUST add their ``operation`` identifier to the
         :data:`StoreOperation` Literal before calling this. Without
@@ -6611,7 +6616,13 @@ class Store:
         transaction from its first statement, reads included. The cost: a
         peer writer waits for the whole batch, not only from its first DML.
         ``test_the_in_batch_recheck_holds_the_write_lock`` fails if the lock
-        moves back to the first DML.
+        moves back to the first DML. Entering with a transaction already open
+        raises ``RuntimeError`` and leaves it untouched. ⚠ Because the batch's
+        transaction is open from the first statement, a boundary-wrapped method
+        that raises INSIDE its block rolls the whole batch back; a caller that
+        catches that and continues writes into a fresh, unlocked transaction.
+        Refusals must be raised after the block (as ``record`` and
+        ``supersede`` do), never caught and continued past inside a batch.
 
         **Not reentrant. Not thread-safe. Not task-safe.** The
         ``_defer_commit`` + ``_deferred_audits`` state lives on
@@ -6695,6 +6706,14 @@ class Store:
                 "Store._batch() does not support nesting. Two-phase "
                 "commit has exactly one outer transaction; nested "
                 "batches would break the commit-once invariant."
+            )
+        if self._conn is not None and self._conn.in_transaction:
+            # A caller left a transaction open. Refuse BEFORE anything changes:
+            # BEGIN IMMEDIATE would fail and its rollback would discard the
+            # caller's pending DML under a misleading batch error (L2).
+            raise RuntimeError(
+                "Store._batch() needs no transaction open on the connection; "
+                "commit or roll back the pending one first."
             )
         self._defer_commit = True
         self._deferred_audits = []

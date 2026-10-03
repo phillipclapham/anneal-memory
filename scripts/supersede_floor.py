@@ -44,7 +44,7 @@ def main(db: str, n: int = 500, seed: int = 7) -> None:
     # Deterministic for a given store and seed (the word sets are walked in
     # sorted order); a different seed or a grown store gives a different sample.
     eps = [r[0] for r in sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-           .execute("SELECT content FROM episodes")]
+           .execute("SELECT content FROM episodes ORDER BY id")]
     rnd = random.Random(seed)
     pops: dict[str, list[float]] = {}
     for ctx in (True, False):

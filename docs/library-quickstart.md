@@ -324,10 +324,12 @@ except AnnealMemoryError:
 
 ### `.operation` field
 
-The `.operation` value names the caller-facing unit of work (what you'd retry), not the individual SQL statement that failed. For most public methods it matches the method name exactly (`record`, `recall`, `wrap_completed`, `save_continuity`). Two exceptions surface internal sub-phases of `validated_save_continuity`:
+The `.operation` value names the caller-facing unit of work (what you'd retry), not the individual SQL statement that failed. For most public methods it matches the method name exactly (`record`, `recall`, `wrap_completed`, `save_continuity`). Four exceptions surface internal sub-phases of `Store(path)` and `validated_save_continuity`:
 
 - **`"schema_init"`** — a failure during `Store(path)` construction (connect, schema setup, PRAGMA configuration, or orphan-tmp detection).
 - **`"batch_commit"`** — a failure during the outer commit of the two-phase-commit wrap pipeline. Surfaces to callers through `validated_save_continuity`, not through any method named `batch_commit`.
+- **`"batch_begin"`** — the save could not take its write lock at the start of that pipeline (another writer held it past the busy timeout). Nothing was written; the wrap stays open.
+- **`"supersession_repair"`** — `Store(path)` opened read-write, needed to repair supersession links an older version left dangling, and hit a database error other than lock contention (a corrupt or full disk). Contention is not an error: the repair waits for the next open.
 
 The full list of `StoreOperation` values is exported as a `Literal` from `anneal_memory`.
 

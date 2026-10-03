@@ -141,13 +141,21 @@ an application's slotted logger class (L3 10-03, codex HIGH, run).
 An unreadable or corrupt sealed week newer than the manifest, with no usable active file, now REFUSES the
 write instead of letting the chain continue from the manifest past it (Phill, 2026-10-03; this supersedes
 round 10's "a permanently bad orphan must not block writes", which let the chain fork past history that
-only `verify()` reported). The refusal names the file and its read error, and names the way out:
-`anneal-memory audit-repair` now sets such a file aside. With a valid manifest it renames every
-unmanifested sealed week none of whose copies can be read to `<name>.unreadable-<UTC stamp>`, never
-deleting it, and records each in a new manifest field, `set_aside` (`filename`, `set_aside_as`, `period`,
+only `verify()` reported). The refusal holds on every path that would continue the chain: the open's
+seed and a same-process rotation whose active file is missing (L1 10-03, run: the second path wrote past
+the week and left `verify()` invalid after repair). It names the file and its error and the ways out, in
+order: a permission or I/O error is fixed and the write retried, and writes resume with no gap; a CORRUPT
+week (a broken compressed stream) is set aside by `anneal-memory audit-repair`; a read error that cannot
+be fixed is set aside only with `audit-repair --set-aside-unreadable` (Phill, 2026-10-03: "corrupt-only by
+default plus the flag"), because a set-aside is one-way once a write follows. Without the flag, repair
+refuses a week that only failed to read, naming the error and writing nothing. With a valid manifest it
+renames each such unmanifested sealed week none of whose copies can be read to
+`<name>.unreadable-<UTC stamp>`, never deleting it, and records each in a new manifest field, `set_aside` (`filename`, `set_aside_as`, `period`,
 `cause`, `at`), saved BEFORE the rename so a moved file is never unrecorded. Writes then continue from the
-manifest's tip. `verify()` reports the record as `AuditVerifyResult.set_aside` and the CLI prints a `GAP:`
-line for each, on both the valid and invalid paths; `valid` stays a verdict on the chain it walked, as
+manifest's tip; the week can be renamed back only before the next write. `verify()` reports the record
+as `AuditVerifyResult.set_aside`, and the CLI and `server.py --verify-audit` print a `GAP:` line for each
+(from one function, `set_aside_report_lines`), on both the valid and invalid paths, or, when the set-aside
+file is not on disk, a line saying so and what to do; `valid` stays a verdict on the chain it walked, as
 `anchor_trusted` does after a recovered anchor (ruled 2026-09-13): the chain is intact across the gap, and
 the missing week is reported beside it rather than folded into a permanent invalid. A manifest rebuilt from
 quarantine re-creates the records from the set-aside names on disk (the cause is then "not recovered").

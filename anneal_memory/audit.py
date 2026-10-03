@@ -109,8 +109,13 @@ class _GuardedLogger(logging.Logger):
                     _stderr_fallback(record)
 
 
-logger = _GuardedLogger("anneal-memory.audit")
-logger.parent = logging.getLogger("anneal-memory")
+# The REGISTERED logger, re-classed (no new state, so the swap is safe): an
+# unregistered instance is invisible to logging's manager, whose setLevel()
+# cache-clear then never reaches it, so a level changed on "anneal-memory" kept
+# filtering by the old one [run 10:5x: ERROR then WARNING on the parent left
+# warnings dropped].
+logger = logging.getLogger("anneal-memory.audit")
+logger.__class__ = _GuardedLogger
 
 # Lock paths whose runtime ``flock`` degrade has been reported in this process
 # (AuditTrail._open_and_flock).

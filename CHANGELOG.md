@@ -42,7 +42,8 @@ control flow: every emitting `Logger` method reaches handlers through `callHandl
 handler on its own. A handler that raises an `Exception` costs only its own delivery; the handlers after
 it still run, and the message also goes to stderr. `BaseException` subclasses that are not `Exception`
 (`KeyboardInterrupt`, `SystemExit`, `CancelledError`) still propagate. Records from this module are now
-named `anneal-memory.audit` instead of `anneal-memory`.
+named `anneal-memory.audit` instead of `anneal-memory`. A level set on `anneal-memory` still governs them by propagation
+(run 10:5x: ERROR then WARNING on the parent filtered, then delivered, the child's warning).
 
 Known and not fixed: with an empty active file, an unreadable or corrupt newer sealed week does not stop
 the chain; it continues from the manifest past that week and `verify()` reports the week as unmanifested

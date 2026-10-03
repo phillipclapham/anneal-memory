@@ -61,7 +61,51 @@ _LOCK_UNAVAILABLE_ERRNOS = frozenset(
     ) if e is not None
 )
 
-logger = logging.getLogger("anneal-memory")
+class _NeverRaisingLogger:
+    """The module's logger, made unable to change control flow. Every diagnostic in
+    this module sits on a degrade, refusal or recovery path, and a log handler
+    whose ``emit()`` raises replaced those outcomes at site after site (L3 10-03,
+    run). Wrapping the logger once covers every call, including future ones,
+    instead of guarding sites one by one. A message the logger cannot take goes to
+    stderr; if that fails too, it is dropped."""
+
+    def __init__(self, inner: logging.Logger) -> None:
+        self._inner = inner
+
+    def _emit(self, level: int, msg: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        kwargs.setdefault("stacklevel", 3)
+        try:
+            self._inner.log(level, msg, *args, **kwargs)
+            return
+        except Exception:
+            pass
+        try:
+            text = msg % args if args else str(msg)
+        except Exception:
+            text = str(msg)
+        try:
+            print(f"[anneal-memory] {logging.getLevelName(level)}: {text}", file=sys.stderr)
+        except Exception:
+            pass
+
+    def debug(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        self._emit(logging.DEBUG, msg, args, kwargs)
+
+    def info(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        self._emit(logging.INFO, msg, args, kwargs)
+
+    def warning(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        self._emit(logging.WARNING, msg, args, kwargs)
+
+    def error(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        self._emit(logging.ERROR, msg, args, kwargs)
+
+    def exception(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("exc_info", True)
+        self._emit(logging.ERROR, msg, args, kwargs)
+
+
+logger = _NeverRaisingLogger(logging.getLogger("anneal-memory"))
 
 # Lock paths whose runtime ``flock`` degrade has been reported in this process
 # (AuditTrail._open_and_flock).
@@ -71,14 +115,10 @@ _ENOLCK_RETRY_SECONDS = 0.05
 
 
 def _emit_warning(message: str, *, stderr: bool = False) -> None:
-    """Emit a diagnostic that must never change control flow: to the logger and,
-    when ``stderr``, to standard error, each on its own. A log handler that raises
-    or a closed stderr costs this one message, never the caller's degrade or
-    refusal (L3 10-03: a raising handler replaced the refusal)."""
-    try:
-        logger.warning(message)
-    except Exception:
-        pass
+    """A diagnostic to the logger (which cannot raise; see _NeverRaisingLogger)
+    and, when ``stderr``, a copy on standard error for an application that keeps
+    only that channel."""
+    logger.warning(message)
     if stderr:
         try:
             print(f"[anneal-memory] WARNING: {message}", file=sys.stderr)
@@ -2396,8 +2436,8 @@ class AuditTrail:
                 self._rotate_locked(active, current_week)
         except _AuditLockError as exc:
             if not self._rotation_refusal_logged:
-                logger.warning("Not rotating the audit trail: %s", exc)
                 self._rotation_refusal_logged = True
+                logger.warning("Not rotating the audit trail: %s", exc)
 
     def _rotate_locked(self, active: Path, current_week: str) -> None:
         """:meth:`_rotate_if_needed` from the manifest load on; the caller holds
@@ -2411,8 +2451,8 @@ class AuditTrail:
             manifest = self._load_manifest()
         except _ManifestUnavailable as exc:
             if not self._rotation_refusal_logged:
-                logger.warning("Not rotating the audit trail: %s", exc)
                 self._rotation_refusal_logged = True
+                logger.warning("Not rotating the audit trail: %s", exc)
             return
 
         # Seal the active file with the old week label
@@ -2434,14 +2474,15 @@ class AuditTrail:
         # neither rotation nor retention ran again (codex + complement, L3 of
         # round 10b, reproduced).
         if sealed_path.exists() or sealed_gz_path.exists() or tmp_gz_path.exists():
+            refused_week = self._last_week
+            self._last_week = current_week
             if not self._rotation_refusal_logged:
+                self._rotation_refusal_logged = True
                 logger.warning(
                     "Not rotating the audit trail: sealed week %s is already on "
                     "disk; appending to the active file instead",
-                    self._last_week,
+                    refused_week,
                 )
-                self._rotation_refusal_logged = True
-            self._last_week = current_week
             return
 
         # ⛔ THIS ORDER IS WHAT LETS verify() IN ANOTHER PROCESS TELL A ROTATION

@@ -8472,6 +8472,15 @@ class TestManifestLockL3:
             trail = AuditTrail(tmp_path / "m.db")
             trail.log("x", {"a": 1})
             assert (tmp_path / "m.audit.jsonl").stat().st_size > 0
+            # L3 on 81cc968 (run): a refused ROTATION with the same handler raised
+            # on every later log(), because the refusal flag was set after the
+            # warning. Every diagnostic now goes through a logger that cannot raise.
+            trail._last_week = "1999-W01"
+            before = (tmp_path / "m.audit.jsonl").stat().st_size
+            trail.log("y", {"b": 2})
+            trail.log("z", {"c": 3})
+            assert (tmp_path / "m.audit.jsonl").stat().st_size > before
+            assert trail._rotation_refusal_logged
         finally:
             log.removeHandler(boom)
 

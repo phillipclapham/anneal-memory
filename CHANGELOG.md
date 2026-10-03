@@ -2,7 +2,7 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.23] — 2026-10-02
 
 ### Added — supersession: an update can say which episode it replaces
 
@@ -87,6 +87,13 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   a ref ending in a label (`crystal:x=followed`, which may be `--item` syntax pasted
   by mistake) is recorded as written with a warning on stderr. Prompted by flow, which labels an item only when it is cited
   verbatim, so most of its real outcomes carried no label and were invisible.
+
+Known and not fixed in `--exposed`'s warning (L3 LOWs, routed to the next release): the
+detector matches a label case- and whitespace-insensitively, so for `crystal:z=Followed `
+or an empty name (`crystal:=followed`) the suggested `--item` form is not itself valid;
+the warning prints before the record is written, so a later failure leaves a warning
+that says "is recorded" for a record that was not; and the suggested command quotes the
+raw argument without shell quoting.
 
 ⚠ Behaviour change: `recall` now hides superseded episodes unless asked. Known and
 not fixed: a marker left in the continuity text for a rejected or undone link is

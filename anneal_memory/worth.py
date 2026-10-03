@@ -552,8 +552,9 @@ def _parse_record(line: str) -> dict[str, Any] | None:
             # bad line, never a record and never a marker (L3 10-03, codex + glm:
             # "adopt": "true" crashed _bind, and a record carrying adopt + store
             # was read as a marker and swallowed).
+            # type(...) is int: True == 1 and 1.0 == 1 in Python (L3 r3 10-03, codex).
             if (rec["adopt"] is not True or set(rec) != {"v", "adopt", "store", "ts"}
-                    or not isinstance(rec["ts"], str)):
+                    or type(rec["v"]) is not int or not isinstance(rec["ts"], str)):
                 return None
             return {"adopt": True, "store": rec["store"], "ts": rec.get("ts")}
         _check_id(rec.get("exposure_id"), "exposure_id")

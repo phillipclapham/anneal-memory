@@ -75,7 +75,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   already counted), only the report and how later readers classify them. It refuses where there
   is no file lock (Windows), since two concurrent adoptions could both report success. A line
   carrying `adopt` is a marker only in exactly the marker's shape (`v`, `adopt: true`, `store`, `ts`
-  and nothing else); any other is a skipped line. Readers older than this release skip the marker as one unreadable line and count
+  and nothing else, `v` an integer); any other is a skipped line. Readers older than this release skip the marker as one unreadable line and count
   nothing from it (measured on 0.9.23).
 
 ### Fixed

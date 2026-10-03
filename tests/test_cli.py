@@ -4552,3 +4552,14 @@ def test_store_id_mint_respects_schema_version_full_validation_and_marker_shape(
                              "ts": "2026-10-03T00:00:00Z", "extra": 1}) + "\n")
     report = json.loads(run(db, "--json", "worth").stdout)
     assert report["lines_skipped"] == 1 and report["foreign"] == 0 and report["bound"] == 1
+
+
+def test_an_adopt_marker_needs_an_integer_version():
+    """L3 r3 10-03 (codex, reproduced): {"v": true, ...} and {"v": 1.0, ...}
+    passed the marker check because True == 1 and 1.0 == 1."""
+    from anneal_memory import worth
+
+    for v in ("true", "1.0"):
+        line = '{"v": %s, "adopt": true, "store": "aaaaaaaa", "ts": "x"}' % v
+        assert worth._parse_record(line) is None, v
+    assert worth._parse_record('{"v": 1, "adopt": true, "store": "aaaaaaaa", "ts": "x"}')

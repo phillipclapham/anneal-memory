@@ -53,9 +53,11 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   changes.
 - `anneal-memory outcome` and `worth` bind the log to the `--db` store. Both refuse (exit 1) a file
   that is not an anneal store: an `episodes` table and a `format_version` row are the proof, and a
-  `store_id` row is not. `outcome`, a write path, mints a missing id in ONE transaction that proves
-  the file and writes only that row, so the file proven is the file written; it parses its
-  arguments first, so a rejected command writes nothing to the store. `worth` stays
+  `store_id` row is not; a store written by a newer anneal refuses as it does on every open.
+  `outcome`, a write path, takes the writer lock only when the id is missing, and then re-proves
+  the schema, the version and the id and writes only that row in ONE transaction, so the file
+  proven is the file written; it validates the whole record first, so a rejected command writes
+  nothing to the store. `worth` stays
   read-only and never mints: on a store with no id yet it reports "no id yet" and counts the
   log's unstamped records as unbound (stamped ones are foreign), writing nothing to the store.
   `worth` prints a loud line for an all-foreign log and EXITS 1 (with `--json`, a `warning`
@@ -72,7 +74,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   left behind, so check the log is this store's first. It changes no count (unbound records are
   already counted), only the report and how later readers classify them. It refuses where there
   is no file lock (Windows), since two concurrent adoptions could both report success. A line
-  carrying `adopt` is a marker only in exactly the marker's shape; any other is a skipped line. Readers older than this release skip the marker as one unreadable line and count
+  carrying `adopt` is a marker only in exactly the marker's shape (`v`, `adopt: true`, `store`, `ts`
+  and nothing else); any other is a skipped line. Readers older than this release skip the marker as one unreadable line and count
   nothing from it (measured on 0.9.23).
 
 ### Fixed

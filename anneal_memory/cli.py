@@ -141,6 +141,8 @@ from .store import (
     SupersessionError,
     WrapOwnershipError,
     _WRAP_TOKEN_RE,
+    _SCHEMA_VERSION,
+    _parse_format_version,
 )
 from .types import AffectiveState, AssociationStats, EpisodeType, RelevantPattern
 from .worth import (
@@ -151,6 +153,7 @@ from .worth import (
     ExposedRef,
     ExposureLabel,
     OutcomeLog,
+    _build_record as _build_worth_record,
     compute_worth,
     fold_surfaced,
     load_receipts,
@@ -3263,28 +3266,32 @@ def _is_anneal_schema(conn: sqlite3.Connection) -> bool:
 
 def _outcome_store_id(db_path: Path, *, mint: bool) -> str | None:
     """The store id that binds ``<stem>.outcomes.jsonl`` to the store at ``db_path``,
-    or exit 1 when the file is not an anneal store (see :func:`_is_anneal_schema`)
-    or cannot be read. ``worth`` (read-only, Phill 10-03) reads it with the
-    library's read-only open and never mints: a store with no id yet returns
-    ``None``. ``outcome`` (a write path) mints a missing id, and the proof and the
-    mint happen in ONE connection and ONE ``BEGIN IMMEDIATE`` transaction, so the
-    file proven is the file written (L3 10-03, codex HIGH: a proof on one open
-    and a write-capable ``Store`` open after it could write anneal's schema into
-    a file swapped in between). The mint writes the one metadata row and nothing
-    else."""
+    or exit 1. Read through the library's read-only open, which also refuses a
+    store written by a newer anneal; a file that is not an anneal store (see
+    :func:`_is_anneal_schema`) refuses too. A store with no id yet returns
+    ``None`` unless ``mint`` (``outcome``; ``worth`` never mints, Phill 10-03).
+
+    The mint takes the writer lock only when the id is missing, and re-proves
+    the schema, the version (with the store's own ``_parse_format_version`` and
+    ``_SCHEMA_VERSION``) and the id inside ONE ``BEGIN IMMEDIATE`` transaction
+    before inserting the one row, so the file proven is the file written (L3
+    10-03: a proof on one open and a write-capable ``Store`` open after it could
+    write anneal's schema into a swapped file; a raw mint that skipped the
+    version check would write into a newer anneal's store)."""
     def refuse(why: object) -> NoReturn:
         print(f"Error: cannot read the store id of {db_path}: {why}", file=sys.stderr)
         sys.exit(1)
 
     not_anneal = "not an anneal store (no episodes table or no format_version); nothing written"
-    if not mint:
-        try:
-            with Store(db_path, audit=False, read_only=True) as store:
-                if not _is_anneal_schema(store._conn):
-                    refuse(not_anneal)
-                return store.store_id
-        except (StoreError, OSError, sqlite3.Error) as exc:
-            refuse(exc)
+    try:
+        with Store(db_path, audit=False, read_only=True) as store:
+            if not _is_anneal_schema(store._conn):
+                refuse(not_anneal)
+            sid = store.store_id
+    except (StoreError, OSError, sqlite3.Error) as exc:
+        refuse(exc)
+    if sid is not None or not mint:
+        return sid
     try:
         conn = sqlite3.connect(str(db_path), timeout=30.0, isolation_level=None)
     except (OSError, sqlite3.Error) as exc:
@@ -3294,6 +3301,13 @@ def _outcome_store_id(db_path: Path, *, mint: bool) -> str | None:
         if not _is_anneal_schema(conn):
             conn.execute("ROLLBACK")
             refuse(not_anneal)
+        found = _parse_format_version(conn.execute(
+            "SELECT value FROM metadata WHERE key = 'format_version'"
+        ).fetchone()[0])
+        if found is not None and found > _SCHEMA_VERSION:
+            conn.execute("ROLLBACK")
+            refuse(f"written by a newer anneal-memory schema (format_version {found} > "
+                   f"{_SCHEMA_VERSION}); nothing written")
         conn.execute(
             "INSERT OR IGNORE INTO metadata (key, value) VALUES ('store_id', ?)",
             (uuid.uuid4().hex,),
@@ -3326,6 +3340,9 @@ def cmd_outcome(args: argparse.Namespace) -> None:
         # the store (L3 10-03, complement + codex).
         items = [_parse_label(raw) for raw in (args.item or [])]
         exposed = [_parse_exposed(raw) for raw in (args.exposed or [])]
+        if not args.adopt_unbound:
+            # The whole record is validated before the id is minted (L3 r2 10-03).
+            _build_worth_record(args.exposure_id, items, args.outcome, exposed, None)
         log = OutcomeLog(outcome_log_path(db_path), store_id=_outcome_store_id(db_path, mint=True))
     except (ValueError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -3404,11 +3421,12 @@ def cmd_worth(args: argparse.Namespace) -> None:
         sid = _outcome_store_id(db_path, mint=False)
         log = OutcomeLog(outcome_log_path(db_path), store_id=sid, bind=True)
         report = compute_worth(log, _open_crystal_store(args), receipts=receipts)
-        if sid is None and _outcome_store_id(db_path, mint=False) is not None:
+        reread = _outcome_store_id(db_path, mint=False) if sid is None else None
+        if reread is not None:
             # An `outcome` minted the id while this read the log, so its records
             # may carry an id this report took as foreign (L3 10-03, codex). An
             # id is never rewritten, so one re-read settles it.
-            sid = _outcome_store_id(db_path, mint=False)
+            sid = reread
             log = OutcomeLog(outcome_log_path(db_path), store_id=sid, bind=True)
             report = compute_worth(log, _open_crystal_store(args), receipts=receipts)
     except (CrystalError, OSError, ValueError) as exc:

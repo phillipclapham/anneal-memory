@@ -4507,3 +4507,48 @@ def test_store_id_proof_and_mint_refuse_what_l3_reproduced(tmp_path):
     assert run(idless, "outcome", "--exposure-id", "e1", "--item", "badkind:x=maybe").returncode == 1
     with sqlite3.connect(idless) as conn:
         assert conn.execute("SELECT value FROM metadata WHERE key = 'store_id'").fetchall() == []
+
+
+def test_store_id_mint_respects_schema_version_full_validation_and_marker_shape(tmp_path):
+    """L3 r2 10-03 on fefeeee, each reproduced by a real CLI run first: the raw
+    mint skipped the newer-schema refusal (an older binary appended to, and
+    minted into, a newer anneal's store); an `outcome` with neither item nor
+    outcome minted before record validation refused it; a marker with an extra
+    key rebound earlier records."""
+
+    def run(db, *argv):
+        return subprocess.run(
+            [sys.executable, "-m", "anneal_memory.cli", "--db", str(db), *argv],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        )
+
+    def store_ids(db):
+        with sqlite3.connect(db) as conn:
+            return conn.execute("SELECT value FROM metadata WHERE key = 'store_id'").fetchall()
+
+    newer = tmp_path / "newer.db"
+    assert run(newer, "init").returncode == 0
+    with sqlite3.connect(newer) as conn:
+        conn.execute("UPDATE metadata SET value = '2' WHERE key = 'format_version'")
+    assert run(newer, "outcome", "--exposure-id", "e1", "--outcome", "success").returncode == 1
+    with sqlite3.connect(newer) as conn:
+        conn.execute("DELETE FROM metadata WHERE key = 'store_id'")
+    assert run(newer, "outcome", "--exposure-id", "e1", "--outcome", "success").returncode == 1
+    assert store_ids(newer) == []
+    assert not (tmp_path / "newer.outcomes.jsonl").exists()
+
+    idless = tmp_path / "idless.db"
+    assert run(idless, "init").returncode == 0
+    with sqlite3.connect(idless) as conn:
+        conn.execute("DELETE FROM metadata WHERE key = 'store_id'")
+    assert run(idless, "outcome", "--exposure-id", "e1").returncode == 1
+    assert store_ids(idless) == []
+
+    db = tmp_path / "m.db"
+    assert run(db, "init").returncode == 0
+    assert run(db, "outcome", "--exposure-id", "e0", "--outcome", "success").returncode == 0
+    with open(tmp_path / "m.outcomes.jsonl", "a") as fh:
+        fh.write(json.dumps({"v": 1, "adopt": True, "store": "aaaaaaaa",
+                             "ts": "2026-10-03T00:00:00Z", "extra": 1}) + "\n")
+    report = json.loads(run(db, "--json", "worth").stdout)
+    assert report["lines_skipped"] == 1 and report["foreign"] == 0 and report["bound"] == 1

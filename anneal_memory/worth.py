@@ -552,8 +552,8 @@ def _parse_record(line: str) -> dict[str, Any] | None:
             # bad line, never a record and never a marker (L3 10-03, codex + glm:
             # "adopt": "true" crashed _bind, and a record carrying adopt + store
             # was read as a marker and swallowed).
-            if (rec["adopt"] is not True or "store" not in rec
-                    or any(k in rec for k in ("exposure_id", "items", "outcome", "exposed"))):
+            if (rec["adopt"] is not True or set(rec) != {"v", "adopt", "store", "ts"}
+                    or not isinstance(rec["ts"], str)):
                 return None
             return {"adopt": True, "store": rec["store"], "ts": rec.get("ts")}
         _check_id(rec.get("exposure_id"), "exposure_id")

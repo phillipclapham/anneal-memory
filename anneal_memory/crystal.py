@@ -190,13 +190,51 @@ class CrystalError(AnnealMemoryError):
     """
 
 
+class CrystalConflictError(CrystalError):
+    """A compare-and-mutate (``expect=``) found a different revision than the
+    caller expected, so NOTHING was written.
+
+    ``expected`` is the token the caller passed (``None`` = expected the name to be
+    absent). ``current`` is the record as it stands now, live or retired (``None`` =
+    the name is absent), read inside the same lock as the refused write, so a
+    caller can re-decide from it without a second read. A subclass of
+    :class:`CrystalError`, so an existing ``except CrystalError`` still catches it.
+    """
+
+    def __init__(
+        self, name: str, expected: str | None, current: CrystalDict | None
+    ) -> None:
+        self.name = name
+        self.expected = expected
+        self.current = current
+        found = None if current is None else current.get("rev")
+        super().__init__(
+            f"crystallized pattern {name!r} changed since read (expected rev "
+            f"{expected!r}, found {found!r}); nothing was written — re-read and retry."
+        )
+
+
 class _Unset:
     """Sentinel for ``update``: distinguishes "argument omitted" (leave unchanged)
     from "set to None/empty" (clear). A bare ``None`` default can't express that
-    difference for the clearable fields."""
+    difference for the clearable fields. Also the ``expect=`` default, where
+    ``None`` means "expect the name absent" and omitted means "no check"."""
 
 
 _UNSET = _Unset()
+
+# The revision a record written before ``rev`` existed reads as. Never written back
+# on a read; a row gains a stored ``rev`` only when a write touches the document.
+_INITIAL_REV = "0"
+
+
+def _next_rev(value: object) -> str:
+    """The token after ``value``. Stored as a decimal string so it stays monotonic
+    per crystal; callers treat it as opaque. A missing or hand-mangled value counts
+    as ``_INITIAL_REV`` (the next write still produces a fresh, valid token)."""
+    if isinstance(value, str) and value.isdigit():
+        return str(int(value) + 1)
+    return str(int(_INITIAL_REV) + 1)
 
 
 class RetirementDict(TypedDict):
@@ -213,9 +251,16 @@ class CrystalDict(TypedDict):
     """The stored shape of a crystallized pattern. ``activation`` is deliberately
     ABSENT — it is computed from ``last_activated_on`` at read-time via
     :func:`activation_tier`, never persisted (a stored tier would drift the moment
-    the clock moved, exactly like spores' germination)."""
+    the clock moved, exactly like spores' germination).
+
+    ``rev`` is an opaque revision token: every write to the record changes it, and it
+    follows the pattern through retire and re-crystallize. Pass it back as
+    ``expect=`` to :meth:`CrystalStore.crystallize` / :meth:`CrystalStore.retire` for
+    a compare-and-mutate. A record written before the field existed reads as
+    ``"0"``."""
 
     name: str
+    rev: str
     level: int
     explanation: str
     evidence: list[str]
@@ -329,8 +374,9 @@ class CrystalStore:
     re-cooled, or whose level/explanation sharpened), never a duplicate.
 
     Errors: operational failures (corrupt store, unknown name, already-retired name,
-    ambiguous-name drift) raise :class:`CrystalError`; malformed caller arguments
-    (bad date/level/permanence/kind) raise ``ValueError``. A corrupt store NEVER
+    ambiguous-name drift) raise :class:`CrystalError`, and a refused ``expect=``
+    raises its subclass :class:`CrystalConflictError`; malformed caller arguments
+    (bad date/level/permanence/kind/expect) raise ``ValueError``. A corrupt store NEVER
     silently re-inits (that would overwrite recoverable crystallized wisdom on the
     next save).
     """
@@ -391,6 +437,10 @@ class CrystalStore:
                 f"{self.path} has non-object rows in 'crystal'/'retired'; refusing "
                 f"to proceed — inspect it by hand."
             )
+        # In memory only: every read returns a token, including for rows an older
+        # version wrote. Persisted only if this load is a write's (a mutation saves).
+        for row in data["crystal"] + data["retired"]:
+            row.setdefault("rev", _INITIAL_REV)
         version = data["schema_version"]
         if not isinstance(version, int) or isinstance(version, bool):
             raise CrystalError(
@@ -507,6 +557,35 @@ class CrystalStore:
                 )
         raise CrystalError(f"crystallized pattern {name!r} not found.")
 
+    @staticmethod
+    def _validate_expect(expect: object) -> None:
+        if not isinstance(expect, (_Unset, str)) and expect is not None:
+            raise ValueError(
+                f"expect must be a revision string or None (got {expect!r})."
+            )
+
+    @classmethod
+    def _check_expect(
+        cls, data: dict, name: str, expect: str | None | _Unset
+    ) -> None:
+        """The compare half of compare-and-mutate. Runs inside the caller's
+        :meth:`_transaction`, so the lock that serializes the write also covers the
+        check. The current record is the one :meth:`get` would return (live first,
+        then retired), so a token read from ``get`` always compares against the
+        same row. A mismatch raises before anything mutates, so nothing is saved."""
+        if isinstance(expect, _Unset):
+            return
+        current = cls._find_live(data, name)
+        if current is None:
+            current = next(
+                (cast("CrystalDict", r) for r in data.get("retired", [])
+                 if r.get("name") == name),
+                None,
+            )
+        found = None if current is None else current.get("rev")
+        if found != expect:
+            raise CrystalConflictError(name, expect, current)
+
     # --- public API: crystallize (the membrane OUT of the working set) ------
 
     def crystallize(
@@ -521,6 +600,7 @@ class CrystalStore:
         tags: list[str] | None = None,
         source: str | None = None,
         today: date | None = None,
+        expect: str | None | _Unset = _UNSET,
     ) -> CrystalDict:
         """Crystallize a graduated pattern OUT of the working set into the on-demand
         store. UPSERT by ``name``: re-crystallizing an existing live pattern updates
@@ -544,7 +624,15 @@ class CrystalStore:
         activation window; :meth:`surface_rewarm_candidates` will surface it until it
         cools; the composer sees it listed although a wrap just routed it out of the
         working set (re-warm is propose-not-auto, so nothing re-adds it by itself).
-        Returns the stored record."""
+
+        ``expect`` makes the write a compare-and-mutate: omitted, no check (the
+        behaviour before it existed); a token, the record :meth:`get` would return
+        must still carry that ``rev`` (a retired record's token covers re-crystallizing
+        it); ``None``, the name must not exist at all, live or retired. The check and
+        the write share one lock, so it holds across processes. A mismatch raises
+        :class:`CrystalConflictError` and writes nothing.
+        Returns the stored record, carrying its new ``rev``."""
+        self._validate_expect(expect)
         name = self._validate_name(name)
         level = self._validate_level(level)
         if not isinstance(explanation, str) or not explanation.strip():
@@ -562,6 +650,7 @@ class CrystalStore:
         now = (today or date.today()).isoformat()
 
         with self._transaction() as data:
+            self._check_expect(data, name, expect)
             existing = self._find_live(data, name)
             if existing is not None:
                 # Upsert a live pattern: monotonic level, fresh content, keep origin.
@@ -581,11 +670,15 @@ class CrystalStore:
                 existing["retirement"] = None
                 if source is not None:
                     existing["source"] = source or None
+                existing["rev"] = _next_rev(existing.get("rev"))
                 return existing
 
             revived = self._pop_retired(data, name)
             item: CrystalDict = {
                 "name": name,
+                # A revived pattern continues its retired row's sequence, so a token
+                # read before the retire can never match the revived record.
+                "rev": _next_rev(revived.get("rev") if revived is not None else None),
                 "level": level,
                 "explanation": explanation,
                 "evidence": evidence_clean,
@@ -733,6 +826,7 @@ class CrystalStore:
         with self._transaction() as data:
             item = self._require_live(data, name)
             item["last_activated_on"] = now
+            item["rev"] = _next_rev(item.get("rev"))
             return item
 
     def update(
@@ -787,6 +881,7 @@ class CrystalStore:
                 if not isinstance(item.get("notes"), list):
                     item["notes"] = []
                 item["notes"].append(f"[{stamp}] {add_note}")
+            item["rev"] = _next_rev(item.get("rev"))
             return item
 
     # --- public API: retire (the membrane out — crystallized ≠ immortal) ----
@@ -799,13 +894,19 @@ class CrystalStore:
         reason: str | None = None,
         today: date | None = None,
         now: datetime | None = None,
+        expect: str | None | _Unset = _UNSET,
     ) -> CrystalDict:
         """Retire a crystallized pattern (it was falsified / superseded / merged /
         obsolete). Moves it to the ``retired`` set with a retirement record — kept for
         audit AND as the re-graduation trail (its evidence episodes still exist). NOT
         a silent delete. ``kind`` must be one of :data:`RETIRE_KINDS`. For fully
         deterministic tests pass both ``today`` (logical date) and ``now`` (the UTC
-        instant on ``retirement.at``)."""
+        instant on ``retirement.at``).
+
+        ``expect`` is the same compare-and-mutate as :meth:`crystallize`'s, checked
+        before the live-row checks: a mismatch raises :class:`CrystalConflictError`
+        and writes nothing. Returns the retired record, carrying its new ``rev``."""
+        self._validate_expect(expect)
         if kind not in RETIRE_KINDS:
             raise ValueError(f"retire kind must be one of {RETIRE_KINDS} (got {kind!r}).")
         if reason is not None and not isinstance(reason, str):
@@ -815,6 +916,7 @@ class CrystalStore:
                 raise ValueError("now must be timezone-aware (got a naive datetime).")
             now = now.astimezone(timezone.utc)
         with self._transaction() as data:
+            self._check_expect(data, name, expect)
             item = self._require_live(data, name)
             # Fail loud on a duplicate live name rather than dropping both rows
             # (name-equality removal would silently nuke the dup).
@@ -836,6 +938,7 @@ class CrystalStore:
                 "on": (today or date.today()).isoformat(),
                 "at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
             }
+            item["rev"] = _next_rev(item.get("rev"))
             data["crystal"] = [s for s in data["crystal"] if s.get("name") != name]
             data["retired"].append(item)
             return item

@@ -423,3 +423,23 @@ def test_load_present_but_unreadable_raises_crystal_error(tmp_path):
     p.mkdir()
     with pytest.raises(CrystalError):
         CrystalStore(p).active()
+
+
+def test_expect_refuses_a_stale_write_and_writes_nothing(tmp_path):
+    """The lost update codex found (2026-09-24, input 2db1236917b0cfa1): A reads, B
+    writes, A writes from its stale read. Without ``expect`` A silently overwrote B's
+    newer explanation and evidence; with it, A is refused and B's record stands."""
+    from anneal_memory import CrystalConflictError
+
+    p = tmp_path / "mem.crystal.json"
+    a, b = CrystalStore(p), CrystalStore(p)
+    a.crystallize(name="x", level=2, explanation="v1", today=date(2026, 1, 1))
+    seen = a.get("x")["rev"]
+    b.crystallize(name="x", level=3, explanation="B newer", evidence=["e1"],
+                  today=date(2026, 1, 1))
+    before = p.read_bytes()
+    with pytest.raises(CrystalConflictError) as exc:
+        a.crystallize(name="x", level=2, explanation="A stale", expect=seen,
+                      today=date(2026, 1, 1))
+    assert exc.value.current["explanation"] == "B newer"
+    assert p.read_bytes() == before

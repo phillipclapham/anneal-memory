@@ -8440,6 +8440,20 @@ class TestManifestLockL3:
         with AuditTrail(tmp_path / "m.db")._manifest_lock() as held:
             assert held is True
 
+    def test_a_manifest_save_leaves_another_writers_temp_file_alone(self, tmp_path):
+        """L2 MED [run: two writers with no lock, 5-43 of 120 saves failed per
+        run and one run of eight read 139 torn manifests]: every save used one
+        fixed ``.json.tmp`` and unlinked it on failure. A save must write and
+        clean up only its own temp file. ⛔ MUTATION-CHECKED: go back to the
+        fixed name and this fails."""
+        trail = AuditTrail(tmp_path / "m.db")
+        theirs = tmp_path / "m.audit.manifest.json.tmp"
+        theirs.write_text("another writer's in-flight save")
+        trail._save_manifest(trail._fresh_manifest())
+        assert theirs.read_text() == "another writer's in-flight save"
+        leftovers = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+        assert leftovers == [theirs.name]
+
     def test_an_enolck_degrade_warns_on_stderr(self, tmp_path, monkeypatch, capsys):
         """L2 MED "silent degrade", ruled 10-03: degrade with a stderr warning.
         Reproduced first: an application logging to a file saw nothing on

@@ -32,7 +32,13 @@ files on disk or a directory it cannot list, refuses that write instead of conti
 manifest: a crashed rotation's orphaned week could be newer than the manifest knows, and continuing past
 it forked the chain for good (measured for the lock and the unlistable directory, each with the refusal
 removed or skipped). A quarantined manifest is not refused here; it anchors on the newest sealed file on
-disk. The next write retries.
+disk. The refusal names its cause, and the next write retries; a cause that does not clear refuses every
+write (and `audit-repair`) until it is removed. For a symlink, FIFO or directory at the lock path the
+error says so and gives the way out: remove `<stem>.audit-manifest.lock`; it holds no state.
+
+Each manifest save writes its own randomly named temp file and replaces the manifest from it, so where the
+lock degrades to none two writers no longer overwrite one shared `.json.tmp` (measured before: failed saves
+and torn manifest reads that a reader would quarantine).
 
 Where advisory locks do not exist it degrades to no lock, which is the previous behaviour: silently on
 Windows (no `fcntl`), and with a warning on stderr (and to the `anneal-memory` logger), once per lock

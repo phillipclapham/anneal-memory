@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import stat
+import secrets
 import sys
 import re
 import threading
@@ -66,6 +67,9 @@ logger = logging.getLogger("anneal-memory")
 # (AuditTrail._open_and_flock).
 _lock_degrade_warned: set[str] = set()
 _ENOLCK_RETRIES = 3
+# The way out of a lock path that cannot be opened or is not a regular file
+# (L2, run: a planted symlink refused every write and every repair).
+_LOCK_WAY_OUT = "remove that lock file; it holds no state and is recreated on the next lock"
 _ENOLCK_RETRY_SECONDS = 0.05
 
 # Chain anchors
@@ -501,6 +505,9 @@ class AuditTrail:
         self._lock_mutex = threading.RLock()
         self._lock_fd: int | None = None
         self._lock_depth = 0
+        # Why the last orphan adoption did not complete, for the refusal that
+        # follows it (L2: a refusal that named no cause left no way out).
+        self._adoption_skip_reason = ""
 
     # -- Public API --
 
@@ -1704,6 +1711,10 @@ class AuditTrail:
         """Hold the cross-process lock that serializes every change to the
         manifest PATH: a save, a quarantine rename, and a whole repair.
 
+        ⛔ INVARIANT: never call a user callback (``on_event``) or
+        ``repair_manifest`` inside a locked span; a second instance in the
+        same thread would block on this lock and deadlock (L2).
+
         ⛔ WHY (spore-1030, reproduced with two real processes): a writer that
         parsed the old invalid manifest renamed whatever stood at the manifest
         path by the time it got there, which could be the manifest repair had
@@ -1777,12 +1788,14 @@ class AuditTrail:
                 fd = os.open(lock_path, os.O_RDONLY | flags, 0o644)
         except OSError as e:
             raise _AuditLockError(
-                f"cannot open the audit manifest lock {lock_path.name}: {e}"
+                f"cannot open the audit manifest lock {lock_path}: {e}; "
+                f"{_LOCK_WAY_OUT}"
             ) from e
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise _AuditLockError(
-                    f"the audit manifest lock {lock_path.name} is not a regular file"
+                    f"the audit manifest lock {lock_path} is not a regular file; "
+                    f"{_LOCK_WAY_OUT}"
                 )
             # ENOLCK is also what a lock table out of records returns, which is
             # transient; Linux NFS without lock support returns it for good. A
@@ -1907,8 +1920,10 @@ class AuditTrail:
         directory could not be listed) and sealed files may exist, a crashed
         rotation's orphan may be newer than that week: appending from the
         manifest would continue the chain past it, and adoption could never
-        reconnect it. Raising fails this write and ``_initialize`` retries on
-        the next ``log()``. A store with no sealed file has nothing to continue
+        reconnect it. Raising fails this write, naming the cause, and
+        ``_initialize`` retries on the next ``log()``; a cause that does not
+        clear (a symlink or directory at the lock path) refuses every write
+        until it is removed, which the lock error's text says how to do. A store with no sealed file has nothing to continue
         past, so it is not refused; a directory that cannot be listed may hold
         one, so it is."""
         stem = self._db_path.stem
@@ -1918,12 +1933,13 @@ class AuditTrail:
             return
         except OSError as e:
             raise _ManifestUnavailable(
-                f"orphan adoption did not complete and the audit directory cannot be listed: {e}"
+                f"orphan adoption did not complete ({self._adoption_skip_reason or 'cause not recorded'}) "
+                f"and the audit directory cannot be listed: {e}"
             ) from e
         if sealed:
             raise _ManifestUnavailable(
-                "orphan adoption did not complete; not starting the chain from a manifest "
-                "that may be missing a sealed week"
+                f"orphan adoption did not complete ({self._adoption_skip_reason or 'cause not recorded'}); "
+                "not starting the chain from a manifest that may be missing a sealed week"
             )
 
     def _seed_from_manifest(self, *, adopted: bool) -> None:
@@ -2022,11 +2038,13 @@ class AuditTrail:
         load and its save. Returns True only when the scan completed; a lock that
         cannot be taken skips recovery and returns False, as
         :meth:`_adopt_locked` does on each early return."""
+        self._adoption_skip_reason = ""
         try:
             with self._manifest_lock():
                 return self._adopt_locked()
         except _AuditLockError as exc:
             logger.warning("Not adopting orphaned audit files: %s", exc)
+            self._adoption_skip_reason = str(exc)
             return False
 
     def _adopt_locked(self) -> bool:
@@ -2097,6 +2115,7 @@ class AuditTrail:
             manifest = self._load_manifest()
         except _ManifestUnavailable as exc:
             logger.warning("Not adopting orphaned audit files: %s", exc)
+            self._adoption_skip_reason = str(exc)
             return False
         try:
             names = sorted(p.name for p in audit_dir.iterdir())
@@ -2107,6 +2126,7 @@ class AuditTrail:
             # failing every write (L1, round 10, reproduced at mode 0o300);
             # verify() reports the directory itself.
             logger.warning("Cannot list audit directory for recovery: %s", e)
+            self._adoption_skip_reason = f"cannot list the audit directory: {e}"
             return False
 
         # A crash while compressing leaves ``<sealed>.jsonl.gz.tmp`` beside
@@ -2708,19 +2728,27 @@ class AuditTrail:
 
     def _save_manifest(self, manifest: dict[str, Any]) -> None:
         """Save manifest with atomic write, under the manifest lock (spore-1030).
-        Raises ``_AuditLockError`` (an ``OSError``) when the lock cannot be taken."""
+        Raises ``_AuditLockError`` (an ``OSError``) when the lock cannot be taken.
+
+        ⛔ A TEMP NAME PER SAVE (L2, run: two writers with no lock clobbered one
+        fixed ``.json.tmp``, saves failed and a reader saw torn bytes). Where the
+        lock degrades to none, each save still writes its own file and replaces
+        the manifest atomically, and a failure unlinks only that file."""
         path = self._manifest_path
-        tmp_path = path.with_suffix(".json.tmp")
         with self._manifest_lock():
+            # O_EXCL on a random name, mode 0o666 under the umask: the manifest
+            # keeps the mode a plain ``open()`` gave it (mkstemp would make it 0600).
+            tmp_path = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
+            fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
             try:
-                with open(tmp_path, "w", encoding="utf-8") as f:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
                     json.dump(manifest, f, indent=2, sort_keys=True)
                     f.write("\n")
                     f.flush()
                     os.fsync(f.fileno())
                 tmp_path.replace(path)
                 _fsync_dir(path.parent)
-            except Exception:
+            except BaseException:
                 try:
                     tmp_path.unlink()
                 except OSError:

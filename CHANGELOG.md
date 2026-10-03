@@ -34,6 +34,55 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   log format change. `load_receipts()` reads receipt JSONL; `anneal-memory worth --receipts
   PATH...` shows it as an `unrec` column. Without receipts the output is unchanged.
 
+### Added — outcome-log store identity
+
+- Every store gets a `store_id` (`uuid4().hex`) in its metadata, seeded on write-capable opens
+  beside `format_version` and never rewritten; `Store.store_id` reads it (`None` when only a
+  read-only open has run since the upgrade). Export/import does not copy it.
+- The `store_id` mint is not under the require-baton gate: it is seeded in `Store.__init__`'s
+  schema init on every write-capable open, alongside `format_version` and the default metadata.
+  The baton guards the consolidate recompose; seeding a metadata row is an ordinary write.
+- `OutcomeLog(path, store_id=...)` stamps `"store"` on every record it writes and sorts the log
+  into bound (this store), unbound (no `store` key: everything written before this release, or by
+  a caller passing no id) and foreign (another store). `latest()` and `compute_worth()` count
+  bound and unbound as before and never foreign; `OutcomeLog.binding()` and the report's
+  `store_id` / `bound` / `unbound` / `foreign` / `foreign_stores` / `all_foreign` say how it
+  sorted. Writing to a log whose records are ALL another store's raises
+  `ForeignOutcomeLogError` (a `ValueError`) naming both ids. No log-version bump: released
+  readers read stamped records unchanged (measured on 0.9.23). Without `store_id`, nothing
+  changes.
+- `anneal-memory outcome` and `worth` bind the log to the `--db` store. Both refuse (exit 1) a file
+  that is not an anneal store: an `episodes` table and a `format_version` row are the proof, and a
+  `store_id` row is not; a store written by a newer anneal refuses as it does on every open.
+  `outcome`, a write path, takes the writer lock only when the id is missing, and then re-proves
+  the schema, the version and the id and writes only that row in ONE transaction, so the file
+  proven is the file written; it validates the whole record first, so a rejected command writes
+  nothing to the store. `worth` stays
+  read-only and never mints: on a store with no id yet it reports "no id yet" and counts the
+  log's unstamped records as unbound (stamped ones are foreign), writing nothing to the store.
+  `worth` prints a loud line for an all-foreign log and EXITS 1 (with `--json`, a `warning`
+  field and `all_foreign`), since zeros from the wrong log are not a clean measurement, and a
+  `bound / unbound / foreign` line whenever the log is not all bound; `outcome` refuses an
+  all-foreign log. A `worth` that read "no id yet" while an `outcome` minted one re-reads once.
+- `OutcomeLog(..., bind=True)` with `store_id=None` reads a log bound to a store that has no id
+  yet (refusing writes), so a caller passing `store.store_id` straight through is not silently
+  read as unpartitioned when it is `None`.
+- `anneal-memory outcome --adopt-unbound` (`OutcomeLog.adopt_unbound()`): an explicit operator act
+  that appends one marker `{"v": 1, "adopt": true, "store": <id>, "ts": ...}` binding the unbound
+  records before it to this store. Nothing is rewritten; a second run with nothing unbound writes
+  nothing. It binds EVERY unbound record, including any that a store replaced at the same path
+  left behind, so check the log is this store's first. It changes no count (unbound records are
+  already counted), only the report and how later readers classify them. It refuses where there
+  is no file lock (Windows), since two concurrent adoptions could both report success. A line
+  carrying `adopt` is a marker only in exactly the marker's shape (`v`, `adopt: true`, `store`, `ts`
+  and nothing else, `v` an integer); any other is a skipped line. Readers older than this release skip the marker as one unreadable line and count
+  nothing from it (measured on 0.9.23).
+- Known and not fixed: `outcome` checks the store's schema version and then appends to the log,
+  under different holds. If a NEWER anneal migrates the same store between those two steps, the
+  older process still appends one record in the older format. The intended rule is one anneal
+  schema per store; the class fix is designed, not built (append logs stay readable at every older
+  `v`, and SQLite writes are refused by triggers installed with the first schema bump).
+
 ### Fixed
 
 - The outcome log reads a record only when its `v` is the integer `1`. A line carrying `v: true`
@@ -48,11 +97,11 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   location (no episodic database) is therefore refused. They exited 0 (Diogenes 2026-10-03 MED):
   `outcome` wrote labels to an orphan log, creating its directories, and `worth` reported 0
   exposures as a clean measurement.
-- Known and not fixed: an EXISTING file that is not this store (another program's database, a
-  stale path) is still accepted, and its sibling outcome log is used. Four review rounds on
-  10-03 showed that judging a file's contents either refuses real stores (older schemas,
-  read-only directories, a lock) or accepts impostors; the answer is a persisted store identity
-  that the outcome log is bound to, which is a design change of its own.
+- An EXISTING file that is not this store is answered by the store identity above, not by judging
+  the file's contents (four review rounds on 10-03 showed that refuses real stores or accepts
+  impostors). A non-anneal file refuses; a log left beside a store replaced at the same path is
+  reported as foreign and never written into. Not closed: a log whose records predate store ids
+  stays unbound, and so is still counted, until an operator adopts it or it is moved.
 - `fold_surfaced` / `crystal fold-surfaced` no longer creates `<stem>.crystal.json` on a store
   that has none. That file's existence is the wrap path's opt-in to the crystal tier, so a fold
   could silently opt a store in. With no crystal file the fold writes nothing and returns

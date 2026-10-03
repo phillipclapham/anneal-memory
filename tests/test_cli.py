@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -4350,9 +4351,13 @@ def test_db_path_naming_an_unknown_user_refuses_without_a_traceback():
     """L3 10-03 (codex + complement, reproduced first by a real run): a quoted
     `~user` path with no such user made expanduser() raise RuntimeError outside the
     guard, so the CLI printed a traceback for a path it claims to refuse cleanly.
-    On Windows expanduser() guesses C:\\Users\\<name> instead of raising (L3 r2,
-    codex), so there the path is simply not found; both must exit 1 cleanly."""
-    said = "database not found" if sys.platform == "win32" else "cannot inspect the database path"
+    On Windows expanduser() guesses C:\\Users\\<name> instead of raising unless
+    the profile directory is not named after the user (L3 r2 + r3, codex), so
+    there either clean refusal is right; both must exit 1 with no traceback."""
+    if sys.platform == "win32":
+        said = ("database not found", "cannot inspect the database path")
+    else:
+        said = ("cannot inspect the database path",)
     for argv in (["worth"], ["status"]):
         result = subprocess.run(
             [sys.executable, "-m", "anneal_memory.cli",
@@ -4361,4 +4366,200 @@ def test_db_path_naming_an_unknown_user_refuses_without_a_traceback():
         )
         assert result.returncode == 1, (argv, result.stdout, result.stderr)
         assert "Traceback" not in result.stderr, result.stderr
-        assert said in result.stderr, result.stderr
+        assert any(text in result.stderr for text in said), result.stderr
+
+
+def test_outcome_log_left_beside_a_replaced_store_is_not_adopted(tmp_path):
+    """Reproduced by a real CLI run first (10-03): store A recorded an outcome,
+    A's db was deleted, store B was initialised at the same path, and B's `worth`
+    reported A's exposure as its own while B's `outcome` appended into A's log.
+    Records now carry the store id: B counts none of A's, says so loudly, and
+    refuses to write into the log. A file that is not an anneal store refuses."""
+
+    def run(*argv):
+        return subprocess.run(
+            [sys.executable, "-m", "anneal_memory.cli", "--db", str(tmp_path / "mem.db"), *argv],
+            capture_output=True, text=True,
+        )
+
+    assert run("init").returncode == 0
+    assert run("outcome", "--exposure-id", "evA", "--item", "crystal:pA=followed",
+               "--outcome", "success").returncode == 0
+    log = tmp_path / "mem.outcomes.jsonl"
+    a_id = json.loads(log.read_text())["store"]
+    for p in tmp_path.glob("mem.db*"):
+        p.unlink()
+    assert run("init").returncode == 0
+    report = run("worth", "--json")  # zeros from the wrong log are not clean: exit 1 (L1)
+    assert report.returncode == 1, report.stderr
+    data = json.loads(report.stdout)
+    assert data["exposures"] == 0 and data["all_foreign"] and data["foreign_stores"] == [a_id]
+    assert "belongs to another store" in data["warning"]
+    text = run("worth")
+    assert text.returncode == 1 and "belongs to another store" in text.stderr
+    before = log.read_bytes()
+    for argv in (["outcome", "--exposure-id", "evB", "--item", "crystal:pB=ignored"],
+                 ["outcome", "--adopt-unbound"]):
+        result = run(*argv)
+        assert result.returncode == 1 and a_id in result.stderr and data["store_id"] in result.stderr
+    assert log.read_bytes() == before
+
+    # not anneal stores: no metadata table, and (L1, run 10-03) a metadata table
+    # alone, which a write-capable open used to fill with anneal's whole schema
+    for name, ddl in (("other", "CREATE TABLE t (x)"),
+                      ("imp", "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)")):
+        other = tmp_path / f"{name}.db"
+        sqlite3.connect(other).execute(ddl).connection.commit()
+        before = other.read_bytes()
+        result = subprocess.run([sys.executable, "-m", "anneal_memory.cli", "--db", str(other),
+                                 "outcome", "--exposure-id", "ev", "--outcome", "success"],
+                                capture_output=True, text=True)
+        assert result.returncode == 1 and "cannot read the store id" in result.stderr, name
+        assert other.read_bytes() == before
+        assert not (tmp_path / f"{name}.outcomes.jsonl").exists()
+
+
+def test_adopt_unbound_binds_records_written_before_store_ids(tmp_path):
+    """Reproduced by a real CLI run first (10-03) on a 0.9.23 store and log: the
+    store had no id, the log's records no `store`. `worth` is read-only (Phill
+    10-03): it reports "no id yet" and the old record as unbound (still counted)
+    and writes nothing; `--adopt-unbound`, a write path, mints the id and appends
+    one marker binding it; a second adopt writes nothing; new records carry the
+    id."""
+
+    def run(*argv):
+        return subprocess.run(
+            [sys.executable, "-m", "anneal_memory.cli", "--db", str(tmp_path / "mem.db"), *argv],
+            capture_output=True, text=True,
+        )
+
+    assert run("init").returncode == 0
+    db = sqlite3.connect(tmp_path / "mem.db")
+    db.execute("DELETE FROM metadata WHERE key = 'store_id'")  # as a 0.9.23 store
+    db.commit()
+    db.close()
+    log = tmp_path / "mem.outcomes.jsonl"
+    log.write_text(json.dumps({"v": 1, "exposure_id": "evOld", "ts": "2026-10-02T00:00:00Z",
+                               "outcome": "failure", "items": [
+                                   {"kind": "crystal", "ref": "pOld", "followed": "followed"}]})
+                   + "\n")
+    data = json.loads(run("worth", "--json").stdout)
+    assert (data["bound"], data["unbound"], data["foreign"], data["exposures"]) == (0, 1, 0, 1)
+    assert data["store_id"] is None and "no id yet" in run("worth").stdout
+
+    def minted():
+        db = sqlite3.connect(tmp_path / "mem.db")
+        try:
+            row = db.execute("SELECT value FROM metadata WHERE key = 'store_id'").fetchone()
+        finally:
+            db.close()
+        return row[0] if row else None
+
+    assert minted() is None  # worth wrote nothing
+    adopt = run("outcome", "--adopt-unbound")
+    sid = minted()
+    assert sid
+    assert adopt.returncode == 0 and "Adopted" in adopt.stdout
+    assert json.loads(log.read_text().splitlines()[-1]) == {
+        "v": 1, "adopt": True, "store": sid, "ts": json.loads(log.read_text().splitlines()[-1])["ts"]}
+    assert "Nothing to adopt" in run("outcome", "--adopt-unbound").stdout
+    assert run("outcome", "--exposure-id", "evNew", "--outcome", "success").returncode == 0
+    assert json.loads(log.read_text().splitlines()[-1])["store"] == sid
+    data = json.loads(run("worth", "--json").stdout)
+    assert (data["bound"], data["unbound"], data["exposures"], data["store_id"]) == (2, 0, 2, sid)
+    assert len(log.read_text().splitlines()) == 3
+
+
+def test_store_id_proof_and_mint_refuse_what_l3_reproduced(tmp_path):
+    """L3 10-03 on e0e1dff, each reproduced by a real CLI run first: a
+    metadata-only file holding a store_id row was accepted and written to by
+    `outcome` (the row counted as proof); `worth` reported zeros from a file
+    that is not an anneal store; a malformed persisted id tracebacked; a
+    rejected `outcome` still minted the id. Proof is now the schema alone, on
+    both paths, and the mint follows parsing in one transaction."""
+
+    def run(db, *argv):
+        return subprocess.run(
+            [sys.executable, "-m", "anneal_memory.cli", "--db", str(db), *argv],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        )
+
+    imp = tmp_path / "imp.db"
+    with sqlite3.connect(imp) as conn:
+        conn.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT INTO metadata VALUES ('store_id', 'deadbeef')")
+    for argv in (["outcome", "--exposure-id", "e1", "--outcome", "success"], ["worth"]):
+        result = run(imp, *argv)
+        assert result.returncode == 1 and "not an anneal store" in result.stderr, result.stderr
+    assert not (tmp_path / "imp.outcomes.jsonl").exists()
+
+    bad = tmp_path / "bad.db"
+    assert run(bad, "init").returncode == 0
+    with sqlite3.connect(bad) as conn:
+        conn.execute("UPDATE metadata SET value = 'two\nlines' WHERE key = 'store_id'")
+    result = run(bad, "outcome", "--exposure-id", "e1", "--outcome", "success")
+    assert result.returncode == 1 and "Traceback" not in result.stderr, result.stderr
+
+    idless = tmp_path / "idless.db"
+    assert run(idless, "init").returncode == 0
+    with sqlite3.connect(idless) as conn:
+        conn.execute("DELETE FROM metadata WHERE key = 'store_id'")
+    assert run(idless, "outcome", "--exposure-id", "e1", "--item", "badkind:x=maybe").returncode == 1
+    with sqlite3.connect(idless) as conn:
+        assert conn.execute("SELECT value FROM metadata WHERE key = 'store_id'").fetchall() == []
+
+
+def test_store_id_mint_respects_schema_version_full_validation_and_marker_shape(tmp_path):
+    """L3 r2 10-03 on fefeeee, each reproduced by a real CLI run first: the raw
+    mint skipped the newer-schema refusal (an older binary appended to, and
+    minted into, a newer anneal's store); an `outcome` with neither item nor
+    outcome minted before record validation refused it; a marker with an extra
+    key rebound earlier records."""
+
+    def run(db, *argv):
+        return subprocess.run(
+            [sys.executable, "-m", "anneal_memory.cli", "--db", str(db), *argv],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        )
+
+    def store_ids(db):
+        with sqlite3.connect(db) as conn:
+            return conn.execute("SELECT value FROM metadata WHERE key = 'store_id'").fetchall()
+
+    newer = tmp_path / "newer.db"
+    assert run(newer, "init").returncode == 0
+    with sqlite3.connect(newer) as conn:
+        conn.execute("UPDATE metadata SET value = '2' WHERE key = 'format_version'")
+    assert run(newer, "outcome", "--exposure-id", "e1", "--outcome", "success").returncode == 1
+    with sqlite3.connect(newer) as conn:
+        conn.execute("DELETE FROM metadata WHERE key = 'store_id'")
+    assert run(newer, "outcome", "--exposure-id", "e1", "--outcome", "success").returncode == 1
+    assert store_ids(newer) == []
+    assert not (tmp_path / "newer.outcomes.jsonl").exists()
+
+    idless = tmp_path / "idless.db"
+    assert run(idless, "init").returncode == 0
+    with sqlite3.connect(idless) as conn:
+        conn.execute("DELETE FROM metadata WHERE key = 'store_id'")
+    assert run(idless, "outcome", "--exposure-id", "e1").returncode == 1
+    assert store_ids(idless) == []
+
+    db = tmp_path / "m.db"
+    assert run(db, "init").returncode == 0
+    assert run(db, "outcome", "--exposure-id", "e0", "--outcome", "success").returncode == 0
+    with open(tmp_path / "m.outcomes.jsonl", "a") as fh:
+        fh.write(json.dumps({"v": 1, "adopt": True, "store": "aaaaaaaa",
+                             "ts": "2026-10-03T00:00:00Z", "extra": 1}) + "\n")
+    report = json.loads(run(db, "--json", "worth").stdout)
+    assert report["lines_skipped"] == 1 and report["foreign"] == 0 and report["bound"] == 1
+
+
+def test_an_adopt_marker_needs_an_integer_version():
+    """L3 r3 10-03 (codex, reproduced): {"v": true, ...} and {"v": 1.0, ...}
+    passed the marker check because True == 1 and 1.0 == 1."""
+    from anneal_memory import worth
+
+    for v in ("true", "1.0"):
+        line = '{"v": %s, "adopt": true, "store": "aaaaaaaa", "ts": "x"}' % v
+        assert worth._parse_record(line) is None, v
+    assert worth._parse_record('{"v": 1, "adopt": true, "store": "aaaaaaaa", "ts": "x"}')

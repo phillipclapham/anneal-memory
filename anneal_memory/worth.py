@@ -135,10 +135,43 @@ class OutcomeLog:
     and fsynced, so concurrent harness processes do not interleave lines. Reads are
     lenient: a malformed or torn line is skipped and counted, never fatal, because
     the log is a measurement and a bad line must not take the report down.
+
+    ``store_id`` binds the log to one store (:attr:`anneal_memory.Store.store_id`).
+    With it, every record written carries ``"store": store_id``, and readers sort
+    records into BOUND (this store), UNBOUND (no ``store`` key: written before
+    store ids, or by a caller that passes none) and FOREIGN (another store's,
+    e.g. a log left beside a store that was replaced at the same path).
+    :meth:`latest` then merges bound and unbound only; :meth:`binding` reports
+    all three. Writing to a log whose records are ALL foreign raises
+    :class:`ForeignOutcomeLogError`. An :meth:`adopt_unbound` marker binds the
+    unbound records before it to the store that wrote it. Without ``store_id``
+    nothing is stamped or partitioned, exactly as before.
+
+    ``bind=True`` with ``store_id=None`` is a log bound to a store that has NO id
+    yet (an id is minted only by a write-capable open): every stamped record is
+    then foreign, since only a store with an id writes one, and unstamped records
+    are unbound. Such a log can be read, never written (``ValueError``). Pass
+    ``store_id=store.store_id, bind=True`` so an id-less store is not silently
+    read as "no partition".
     """
 
-    def __init__(self, path: str | os.PathLike[str]) -> None:
+    def __init__(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        store_id: str | None = None,
+        bind: bool = False,
+    ) -> None:
         self.path = Path(path)
+        self.store_id = None if store_id is None else _check_id(store_id, "store_id")
+        self.bound = bind or self.store_id is not None
+
+    def _writable_id(self) -> None:
+        if self.bound and self.store_id is None:
+            raise ValueError(
+                f"the store {self.path.name} belongs to has no store id yet; open it "
+                f"with a write-capable Store to mint one before writing outcomes."
+            )
 
     def record(
         self,
@@ -159,8 +192,13 @@ class OutcomeLog:
         record valid on its own, so a reader older than this field still accepts
         every record. Records for one ``exposure_id`` merge when read (see
         :meth:`latest`).
+
+        With a ``store_id`` the log is read under the lock first and a log whose
+        records all belong to another store refuses
+        (:class:`ForeignOutcomeLogError`).
         """
-        rec = _build_record(exposure_id, items, outcome, exposed, ts)
+        self._writable_id()
+        rec = _build_record(exposure_id, items, outcome, exposed, ts, self.store_id)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # Read-write, not write-only: the append reads the last byte to repair a
         # torn final line, so a write-only (0200) log now refuses.
@@ -168,6 +206,8 @@ class OutcomeLog:
         try:
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_EX)
+            if self.bound:
+                self._refuse_foreign(_bind(_parse_entries(_read_fd(fd))[0], self.store_id)[1])
             _append(fd, rec)
         finally:
             os.close(fd)
@@ -201,30 +241,22 @@ class OutcomeLog:
         correction) lands either wholly before this call's read, where it is seen
         and kept, or wholly after its append, where it wins the merge. A
         :meth:`latest` followed by :meth:`record` is two spans and can overwrite
-        it. Each call reads the whole log.
+        it. Each call reads the whole log. With a ``store_id`` only bound and
+        unbound records count as already held, and an all-foreign log refuses.
         """
-        rec = _build_record(exposure_id, items, outcome, exposed, ts)
+        self._writable_id()
+        rec = _build_record(exposure_id, items, outcome, exposed, ts, self.store_id)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
         try:
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_EX)
-            chunks: list[bytes] = []
-            os.lseek(fd, 0, os.SEEK_SET)
-            while True:
-                chunk = os.read(fd, 1 << 16)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-            text = b"".join(chunks).decode("utf-8", errors="replace")
-            # Split the way read()'s text-mode iteration does (universal newlines:
-            # "\r\n" and a lone "\r" end a line too), so both see the same records;
-            # not splitlines(), which would also break on U+2028 that read() keeps.
-            text = text.replace("\r\n", "\n").replace("\r", "\n")
-            records = [
-                r for r in (_parse_record(line) for line in text.split("\n") if line.strip())
-                if r is not None
-            ]
+            entries = _parse_entries(_read_fd(fd))[0]
+            if not self.bound:
+                records = [e for e in entries if not e.get("adopt")]
+            else:
+                records, binding = _bind(entries, self.store_id)
+                self._refuse_foreign(binding)
             cur = _merge_records(records).get(exposure_id)
             if cur and cur["items"]:
                 rec["items"] = []
@@ -237,34 +269,188 @@ class OutcomeLog:
             os.close(fd)
         return rec
 
-    def read(self) -> tuple[list[dict[str, Any]], int]:
-        """All well-formed records in file order, and the count of skipped lines."""
-        records: list[dict[str, Any]] = []
-        bad = 0
+    def adopt_unbound(self, *, ts: datetime | None = None) -> dict[str, Any] | None:
+        """Bind every unbound record in the log to this store, append-only: one
+        marker record ``{"v": 1, "adopt": true, "store": <store_id>, "ts": ...}``
+        that readers apply to the unbound records BEFORE it (later unbound records
+        stay unbound). Returns the marker, or ``None`` when no record was unbound,
+        writing nothing. An explicit operator act: nothing calls it implicitly.
+        Needs a ``store_id``; an all-foreign log refuses.
+
+        Readers older than store ids skip the marker as one unreadable line (it has
+        no ``exposure_id``), and count nothing from it.
+        """
+        if self.store_id is None:
+            raise ValueError("adopt_unbound needs an OutcomeLog with a store_id.")
+        if fcntl is None:
+            # Without a lock, two stores adopting at once could both report success
+            # while only the first marker binds (L3 10-03, codex).
+            raise ValueError(
+                "adopt_unbound needs a file lock, which this platform does not "
+                "provide; nothing was written."
+            )
+        when = (ts or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        marker: dict[str, Any] = {
+            "v": OUTCOME_LOG_VERSION,
+            "adopt": True,
+            "store": self.store_id,
+            "ts": when.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
         try:
-            f = open(self.path, "r", encoding="utf-8", errors="replace")
-        except FileNotFoundError:
-            return records, 0
-        with f:
-            for line in f:
-                if not line.strip():
-                    continue
-                rec = _parse_record(line)
-                if rec is None:
-                    bad += 1
-                else:
-                    records.append(rec)
-        return records, bad
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            binding = _bind(_parse_entries(_read_fd(fd))[0], self.store_id)[1]
+            self._refuse_foreign(binding)
+            if not binding.unbound:
+                return None
+            _append(fd, marker)
+        finally:
+            os.close(fd)
+        return marker
+
+    def read(self) -> tuple[list[dict[str, Any]], int]:
+        """All well-formed records in file order (every store's, unpartitioned;
+        adopt markers left out), and the count of skipped lines."""
+        entries, bad = self._entries()
+        return [e for e in entries if not e.get("adopt")], bad
 
     def latest(self) -> tuple[dict[str, dict[str, Any]], int]:
         """The merged state per exposure id, and the count of skipped lines.
 
         Records merge in file order: each item's last label wins, the last
         non-null outcome wins, and ``exposed`` is the union. The merged record
-        carries ``items``, ``exposed`` and ``outcome``.
+        carries ``items``, ``exposed`` and ``outcome``. With a ``store_id``, only
+        bound and unbound records are merged; foreign ones are left out (see
+        :meth:`binding`).
         """
-        records, bad = self.read()
-        return _merge_records(records), bad
+        merged, bad, _ = self._snapshot()
+        return merged, bad
+
+    def binding(self) -> LogBinding:
+        """How the log's records sort against this log's ``store_id``."""
+        return self._snapshot()[2]
+
+    def _entries(self) -> tuple[list[dict[str, Any]], int]:
+        try:
+            f = open(self.path, "r", encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            return [], 0
+        with f:
+            return _parse_entries(f)
+
+    def _snapshot(self) -> tuple[dict[str, dict[str, Any]], int, LogBinding]:
+        """The merged records this log counts, the skipped-line count and the
+        binding, all from ONE read."""
+        entries, bad = self._entries()
+        if not self.bound:
+            records = [e for e in entries if not e.get("adopt")]
+            binding = LogBinding(None, unbound=len({r["exposure_id"] for r in records}))
+        else:
+            records, binding = _bind(entries, self.store_id)
+        return _merge_records(records), bad, binding
+
+    def _refuse_foreign(self, binding: LogBinding) -> None:
+        if binding.all_foreign:
+            raise ForeignOutcomeLogError(
+                f"{self.path} belongs to another store "
+                f"({', '.join(binding.foreign_stores)}), not this one ({self.store_id}): "
+                f"every record in it is that store's. Refusing to write; a log left "
+                f"beside a store replaced at the same path is the usual cause."
+            )
+
+
+class ForeignOutcomeLogError(ValueError):
+    """Writing to an outcome log whose records all belong to another store."""
+
+
+@dataclass
+class LogBinding:
+    """How an outcome log's records sort against one store id, counted in
+    distinct exposure ids (an exposure with records in two classes counts in
+    both). ``bound`` includes unbound records adopted by this store's marker.
+    With no store id, every record is ``unbound``."""
+
+    store_id: str | None
+    bound: int = 0
+    unbound: int = 0
+    foreign: int = 0
+    foreign_stores: list[str] = field(default_factory=list)
+
+    @property
+    def all_foreign(self) -> bool:
+        return self.foreign > 0 and not self.bound and not self.unbound
+
+
+def _read_fd(fd: int) -> list[str]:
+    """The lines of the file behind ``fd``, read from the start, split the way
+    read()'s text-mode iteration splits (universal newlines: "\r\n" and a lone
+    "\r" end a line too), so both see the same records; not splitlines(), which
+    would also break on U+2028 that read() keeps."""
+    chunks: list[bytes] = []
+    os.lseek(fd, 0, os.SEEK_SET)
+    while True:
+        chunk = os.read(fd, 1 << 16)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    text = b"".join(chunks).decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+
+def _parse_entries(lines: Iterable[str]) -> tuple[list[dict[str, Any]], int]:
+    """Records and adopt markers in file order, and the count of bad lines."""
+    entries: list[dict[str, Any]] = []
+    bad = 0
+    for line in lines:
+        if not line.strip():
+            continue
+        rec = _parse_record(line)
+        if rec is None:
+            bad += 1
+        else:
+            entries.append(rec)
+    return entries, bad
+
+
+def _bind(
+    entries: list[dict[str, Any]], store_id: str | None
+) -> tuple[list[dict[str, Any]], LogBinding]:
+    """The records ``store_id`` counts (bound + unbound) and the binding. An adopt
+    marker gives its store to the still-unbound records before it. ``None`` is a
+    store with no id: nothing is bound to it, every stamped record is foreign."""
+    records: list[dict[str, Any]] = []
+    owner: list[str | None] = []
+    pending: list[int] = []
+    for e in entries:
+        if e.get("adopt"):
+            for i in pending:
+                owner[i] = e["store"]
+            pending = []
+            continue
+        records.append(e)
+        owner.append(e.get("store"))
+        if e.get("store") is None:
+            pending.append(len(records) - 1)
+    ours: list[dict[str, Any]] = []
+    bound: set[str] = set()
+    unbound: set[str] = set()
+    foreign: set[str] = set()
+    stores: list[str] = []
+    for rec, who in zip(records, owner):
+        eid = rec["exposure_id"]
+        if who is None:
+            unbound.add(eid)
+            ours.append(rec)
+        elif store_id is not None and who == store_id:
+            bound.add(eid)
+            ours.append(rec)
+        else:
+            foreign.add(eid)
+            if who not in stores:
+                stores.append(who)
+    return ours, LogBinding(store_id, len(bound), len(unbound), len(foreign), stores)
 
 
 def _build_record(
@@ -273,6 +459,7 @@ def _build_record(
     outcome: str | None,
     exposed: Sequence[ExposedRef],
     ts: datetime | None,
+    store_id: str | None = None,
 ) -> dict[str, Any]:
     """Validate one record's arguments and return the record :meth:`OutcomeLog.record`
     would store. Raises ``ValueError`` before anything is written."""
@@ -306,6 +493,8 @@ def _build_record(
     }
     if seen:
         rec["exposed"] = [{"kind": e.kind, "ref": e.ref} for e in seen.values()]
+    if store_id is not None:
+        rec["store"] = store_id
     return rec
 
 
@@ -359,6 +548,18 @@ def _parse_record(line: str) -> dict[str, Any] | None:
             or rec["v"] != OUTCOME_LOG_VERSION):
         return None
     try:
+        if "store" in rec:
+            _check_id(rec["store"], "store")
+        if "adopt" in rec:
+            # A marker has exactly this shape; any other line carrying "adopt" is a
+            # bad line, never a record and never a marker (L3 10-03, codex + glm:
+            # "adopt": "true" crashed _bind, and a record carrying adopt + store
+            # was read as a marker and swallowed).
+            # type(...) is int: True == 1 and 1.0 == 1 in Python (L3 r3 10-03, codex).
+            if (rec["adopt"] is not True or set(rec) != {"v", "adopt", "store", "ts"}
+                    or type(rec["v"]) is not int or not isinstance(rec["ts"], str)):
+                return None
+            return {"adopt": True, "store": rec["store"], "ts": rec.get("ts")}
         _check_id(rec.get("exposure_id"), "exposure_id")
         outcome = rec.get("outcome")
         if outcome is not None and outcome not in OUTCOME_VALUES:
@@ -705,7 +906,9 @@ class WorthReport:
     passed, ``receipts_read`` counts the distinct exposing receipts read and
     ``receipts_skipped`` the ones that were not a dict or carried no ``event_id``
     (they cannot be matched to the log, so they are in no row); both are ``None``
-    otherwise."""
+    otherwise. ``binding`` is how the log's records sorted against the log's
+    ``store_id`` (``None`` when it has none): the counters above come from bound
+    and unbound records only, never foreign ones."""
 
     crystals: list[WorthRow]
     episodes: list[WorthRow]
@@ -713,6 +916,7 @@ class WorthReport:
     lines_skipped: int
     receipts_read: int | None = None
     receipts_skipped: int | None = None
+    binding: LogBinding | None = None
 
     def as_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -724,6 +928,12 @@ class WorthReport:
         if self.receipts_read is not None:
             d["receipts_read"] = self.receipts_read
             d["receipts_skipped"] = self.receipts_skipped
+        if self.binding is not None:
+            b = self.binding
+            d["store_id"] = b.store_id
+            d["bound"], d["unbound"], d["foreign"] = b.bound, b.unbound, b.foreign
+            d["foreign_stores"] = list(b.foreign_stores)
+            d["all_foreign"] = b.all_foreign
         return d
 
 
@@ -792,7 +1002,7 @@ def compute_worth(
     receipt name that is not a live crystal gets a row with ``live`` False.
     Nothing here writes anywhere.
     """
-    latest, bad = log.latest()
+    latest, bad, binding = log._snapshot()
     live: dict[str, dict[str, Any]] = {}
     folded = False
     if crystal_store is not None:
@@ -893,4 +1103,5 @@ def compute_worth(
         lines_skipped=bad,
         receipts_read=receipts_read,
         receipts_skipped=receipts_skipped,
+        binding=binding if log.bound else None,
     )

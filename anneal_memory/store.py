@@ -346,6 +346,7 @@ StoreOperation = Literal[
     "supersession_problem",
     "supersession_links",
     "episodes_since_wrap",
+    "store_id",
     # Row materialization (post-SQL): a corrupt/legacy/badly-imported row whose
     # ``type`` isn't a valid EpisodeType (ValueError) surfaces here as a StoreError
     # rather than escaping the store's documented error boundary as a raw built-in.
@@ -2017,6 +2018,15 @@ class Store:
                 "INSERT OR IGNORE INTO metadata (key, value) VALUES (?, ?)",
                 (key, value),
             )
+        # The store's identity, minted once and never rewritten: the outcome log
+        # (worth.py) stamps it on each record so a log left beside a replaced
+        # store is not read as the new store's. Write-capable opens only, so an
+        # existing store gains one on its next normal open and a read-only open
+        # never mints one.
+        self._conn.execute(
+            "INSERT OR IGNORE INTO metadata (key, value) VALUES ('store_id', ?)",
+            (uuid.uuid4().hex,),
+        )
 
         # ⚖⚖ STAMP THE WRITING VERSION ON EVERY WRITE-CAPABLE OPEN (ruled
         # 2026-09-05; codex L3 HIGH, spore-747).
@@ -5312,6 +5322,20 @@ class Store:
     def project_name(self) -> str:
         """Project name for continuity file headers."""
         return self._project_name
+
+    @property
+    def store_id(self) -> str | None:
+        """This store's identity (``uuid4().hex``), or ``None`` when it has none
+        yet: it is minted on a write-capable open, so a store only ever opened
+        read-only since the upgrade has none. Raises :class:`StoreDatabaseError`
+        when the metadata cannot be read (for example a database that is not an
+        anneal store)."""
+        with self._db_boundary("store_id"):
+            row = self._conn.execute(
+                "SELECT value FROM metadata WHERE key = 'store_id'"
+            ).fetchone()
+        value = row["value"] if row else None
+        return value if isinstance(value, str) and value else None
 
     @property
     def section_schema(self) -> list[SectionSpec]:

@@ -47,11 +47,12 @@ import re
 import shlex
 import sqlite3
 import stat
+import uuid
 import sys
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from . import __version__
 from .audit import (
@@ -140,6 +141,8 @@ from .store import (
     SupersessionError,
     WrapOwnershipError,
     _WRAP_TOKEN_RE,
+    _SCHEMA_VERSION,
+    _parse_format_version,
 )
 from .types import AffectiveState, AssociationStats, EpisodeType, RelevantPattern
 from .worth import (
@@ -150,6 +153,7 @@ from .worth import (
     ExposedRef,
     ExposureLabel,
     OutcomeLog,
+    _build_record as _build_worth_record,
     compute_worth,
     fold_surfaced,
     load_receipts,
@@ -285,6 +289,7 @@ def _json_parent() -> argparse.ArgumentParser:
 # -- Store factory --
 
 _DB_ABSENT_ERRNOS = (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP)
+_DB_ABSENT_WINERRORS = (21, 123, 1921)  # not ready, invalid name, link cycle
 
 
 def _existing_db_path(args: argparse.Namespace, *, require_file: bool = False) -> Path:
@@ -296,8 +301,8 @@ def _existing_db_path(args: argparse.Namespace, *, require_file: bool = False) -
     when the command starts: a database removed after that point is not noticed.
     Whether an existing file is THIS store is not decided here: a check that guesses
     at it from the file's contents refused real stores and accepted impostors (four
-    review rounds, 10-03); binding the outcome log to a persisted store identity is
-    the design that answers it."""
+    review rounds, 10-03); :func:`_outcome_store_id` binds the outcome log to the
+    store's persisted identity instead."""
     exists = is_file = False
     db_path = Path(args.db)
     try:
@@ -307,9 +312,11 @@ def _existing_db_path(args: argparse.Namespace, *, require_file: bool = False) -
         pass
     except OSError as exc:
         # Path.exists() reads these errnos as absent (measured on 3.13: ENOENT,
-        # ENOTDIR, ELOOP; EBADF by its source); anything else, e.g. EACCES on an
+        # ENOTDIR, ELOOP; EBADF by its source) and, on Windows, these winerrors
+        # (by its source; not run here); anything else, e.g. EACCES on an
         # unreadable parent, is an inspection failure.
-        if exc.errno not in _DB_ABSENT_ERRNOS:
+        if (exc.errno not in _DB_ABSENT_ERRNOS
+                and getattr(exc, "winerror", None) not in _DB_ABSENT_WINERRORS):
             print(f"Error: cannot inspect the database path {args.db}: {exc}", file=sys.stderr)
             sys.exit(1)
     except RuntimeError as exc:
@@ -3242,14 +3249,120 @@ def _parse_exposed(raw: str) -> ExposedRef:
     return ExposedRef(kind, ref)
 
 
+def _is_anneal_schema(conn: sqlite3.Connection) -> bool:
+    """Proof that a database is an anneal store: an ``episodes`` table, and a
+    ``metadata`` table holding ``format_version``. A ``store_id`` row is not
+    proof (L3 10-03, codex: it let a metadata-only impostor through)."""
+    tables = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name IN ('episodes', 'metadata')"
+        )
+    }
+    return tables == {"episodes", "metadata"} and conn.execute(
+        "SELECT 1 FROM metadata WHERE key = 'format_version'"
+    ).fetchone() is not None
+
+
+def _outcome_store_id(db_path: Path, *, mint: bool) -> str | None:
+    """The store id that binds ``<stem>.outcomes.jsonl`` to the store at ``db_path``,
+    or exit 1. Read through the library's read-only open, which also refuses a
+    store written by a newer anneal; a file that is not an anneal store (see
+    :func:`_is_anneal_schema`) refuses too. A store with no id yet returns
+    ``None`` unless ``mint`` (``outcome``; ``worth`` never mints, Phill 10-03).
+
+    The mint takes the writer lock only when the id is missing, and re-proves
+    the schema, the version (with the store's own ``_parse_format_version`` and
+    ``_SCHEMA_VERSION``) and the id inside ONE ``BEGIN IMMEDIATE`` transaction
+    before inserting the one row, so the file proven is the file written (L3
+    10-03: a proof on one open and a write-capable ``Store`` open after it could
+    write anneal's schema into a swapped file; a raw mint that skipped the
+    version check would write into a newer anneal's store)."""
+    def refuse(why: object) -> NoReturn:
+        print(f"Error: cannot read the store id of {db_path}: {why}", file=sys.stderr)
+        sys.exit(1)
+
+    not_anneal = "not an anneal store (no episodes table or no format_version); nothing written"
+    try:
+        with Store(db_path, audit=False, read_only=True) as store:
+            if not _is_anneal_schema(store._conn):
+                refuse(not_anneal)
+            sid = store.store_id
+    except (StoreError, OSError, sqlite3.Error) as exc:
+        refuse(exc)
+    if sid is not None or not mint:
+        return sid
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=30.0, isolation_level=None)
+    except (OSError, sqlite3.Error) as exc:
+        refuse(exc)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if not _is_anneal_schema(conn):
+            conn.execute("ROLLBACK")
+            refuse(not_anneal)
+        found = _parse_format_version(conn.execute(
+            "SELECT value FROM metadata WHERE key = 'format_version'"
+        ).fetchone()[0])
+        if found is not None and found > _SCHEMA_VERSION:
+            conn.execute("ROLLBACK")
+            refuse(f"written by a newer anneal-memory schema (format_version {found} > "
+                   f"{_SCHEMA_VERSION}); nothing written")
+        conn.execute(
+            "INSERT OR IGNORE INTO metadata (key, value) VALUES ('store_id', ?)",
+            (uuid.uuid4().hex,),
+        )
+        row = conn.execute("SELECT value FROM metadata WHERE key = 'store_id'").fetchone()
+        conn.execute("COMMIT")
+    except (OSError, sqlite3.Error) as exc:
+        refuse(exc)
+    finally:
+        conn.close()
+    sid = row[0] if row else None
+    if not isinstance(sid, str) or not sid:
+        refuse(f"its store_id row is empty or not text ({sid!r}); nothing written")
+    return sid
+
+
 def cmd_outcome(args: argparse.Namespace) -> None:
     """Write back what happened after an exposure (append-only; records for one
     exposure id merge when read)."""
-    log_path = outcome_log_path(_existing_db_path(args, require_file=True))
+    db_path = _existing_db_path(args, require_file=True)
+    if args.adopt_unbound:
+        if args.exposure_id or args.item or args.outcome or args.exposed:
+            print("Error: --adopt-unbound takes no other outcome flags", file=sys.stderr)
+            sys.exit(1)
+    elif not args.exposure_id:
+        print("Error: --exposure-id is required (or pass --adopt-unbound)", file=sys.stderr)
+        sys.exit(1)
     try:
+        # Parsed before the id is minted, so a rejected command writes nothing to
+        # the store (L3 10-03, complement + codex).
         items = [_parse_label(raw) for raw in (args.item or [])]
         exposed = [_parse_exposed(raw) for raw in (args.exposed or [])]
-        rec = OutcomeLog(log_path).record(
+        if not args.adopt_unbound:
+            # The whole record is validated before the id is minted (L3 r2 10-03).
+            _build_worth_record(args.exposure_id, items, args.outcome, exposed, None)
+        log = OutcomeLog(outcome_log_path(db_path), store_id=_outcome_store_id(db_path, mint=True))
+    except (ValueError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if args.adopt_unbound:
+        try:
+            marker = log.adopt_unbound()
+        except (ValueError, OSError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if args.json:
+            _print_json({"adopted": marker is not None, "marker": marker})
+        elif marker is None:
+            print(f"Nothing to adopt: no unbound record in {log.path}")
+        else:
+            print(f"Adopted the unbound records in {log.path} into store {log.store_id} "
+                  f"(marker appended at {marker['ts']}; earlier records unchanged)")
+        return
+    try:
+        rec = log.record(
             args.exposure_id, items, outcome=args.outcome, exposed=exposed
         )
     except (ValueError, OSError) as exc:
@@ -3305,21 +3418,54 @@ def cmd_worth(args: argparse.Namespace) -> None:
     try:
         if args.receipts:
             receipts, receipt_bad, receipt_missing = load_receipts(args.receipts)
-        report = compute_worth(OutcomeLog(outcome_log_path(db_path)), _open_crystal_store(args),
-                               receipts=receipts)
+        sid = _outcome_store_id(db_path, mint=False)
+        log = OutcomeLog(outcome_log_path(db_path), store_id=sid, bind=True)
+        report = compute_worth(log, _open_crystal_store(args), receipts=receipts)
+        reread = _outcome_store_id(db_path, mint=False) if sid is None else None
+        if reread is not None:
+            # An `outcome` minted the id while this read the log, so its records
+            # may carry an id this report took as foreign (L3 10-03, codex). An
+            # id is never rewritten, so one re-read settles it.
+            sid = reread
+            log = OutcomeLog(outcome_log_path(db_path), store_id=sid, bind=True)
+            report = compute_worth(log, _open_crystal_store(args), receipts=receipts)
     except (CrystalError, OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
     if receipt_missing:
         print(f"Not found (skipped): {', '.join(receipt_missing)}", file=sys.stderr)
+    b = report.binding
+    # An all-foreign log is a wrong log, not a clean zero: exit 1 (L1 10-03, the
+    # same shape as the missing-db finding), with the report still printed.
+    foreign_warning = (
+        f"This outcome log belongs to another store ({', '.join(b.foreign_stores)}), "
+        f"not this one ({b.store_id or 'no store id yet'}): none of its {b.foreign} "
+        f"exposure(s) are counted."
+        if b is not None and b.all_foreign else None
+    )
+    if foreign_warning:
+        print(f"!! {foreign_warning}", file=sys.stderr)
     if args.json:
         out = report.as_dict()
         if receipts is not None:
             out["receipt_lines_unreadable"] = receipt_bad
+        if foreign_warning:
+            out["warning"] = foreign_warning
         _print_json(out)
+        if foreign_warning:
+            sys.exit(1)
         return
     print(f"Worth (report-only) from {report.exposures} exposure(s)"
           + (f", {report.lines_skipped} unreadable line(s) skipped" if report.lines_skipped else ""))
+    if b is not None and b.store_id is None:
+        print("store has no id yet (init, save and outcome mint one; worth writes nothing): "
+              f"{b.unbound} unbound (counted)"
+              + (f", {b.foreign} foreign (another store's; NOT counted)" if b.foreign else ""))
+    elif b is not None and (b.unbound or b.foreign):
+        print(f"store {b.store_id}: {b.bound} bound"
+              + (f", {b.unbound} unbound (written before store ids; counted; "
+                 f"'outcome --adopt-unbound' binds them)" if b.unbound else "")
+              + (f", {b.foreign} foreign (another store's; NOT counted)" if b.foreign else ""))
     print("surf = recall-surfaced (receipt fold); the other columns come from the outcome")
     print("log and are not joined to it. succ/fail = retrieved with that outcome, any label.")
     print("unl+s/unl+f = exposed with that outcome and never labelled (not in succ/fail).")
@@ -3349,6 +3495,8 @@ def cmd_worth(args: argparse.Namespace) -> None:
             print(f"{r.ref:<20} {r.success:>5} {r.failure:>5} "
                   f"{r.credited_success:>9}/{r.credited_failure:<8} "
                   f"{r.unlabelled_success:>6} {r.unlabelled_failure:>6}")
+    if foreign_warning:
+        sys.exit(1)
 
 
 def cmd_crystal_update(args: argparse.Namespace) -> None:
@@ -4133,7 +4281,8 @@ def build_parser() -> argparse.ArgumentParser:
                     "earlier label, a later outcome replaces the earlier outcome.",
         parents=[json_parent],
     )
-    sub.add_argument("--exposure-id", required=True, help="The harness's id for the recall event")
+    sub.add_argument("--exposure-id", help="The harness's id for the recall event (required "
+                                            "unless --adopt-unbound)")
     sub.add_argument("--item", action="append", metavar="KIND:REF=FOLLOWED",
                      help="A surfaced item and its label, e.g. crystal:my_pattern=followed "
                           "(repeatable; KIND crystal|episode; FOLLOWED "
@@ -4145,6 +4294,13 @@ def build_parser() -> argparse.ArgumentParser:
                      help="An item the exposure surfaced, labelled or not (repeatable; from "
                           "the harness's receipt). Unlabelled ones are reported in their own "
                           "columns, never in succ/fail. Needs --item or --outcome beside it.")
+    sub.add_argument("--adopt-unbound", action="store_true",
+                     help="Bind EVERY unbound record in the log (no store id: written before "
+                          "store ids, including any a store replaced at this path left) to THIS "
+                          "store, so check the log is this store's first. Appends one marker, "
+                          "rewrites nothing. Changes no count (unbound records are already "
+                          "counted), only the report and how a later reader classifies them. "
+                          "Takes no other outcome flags.")
     sub.set_defaults(func=cmd_outcome)
 
     sub = subparsers.add_parser(

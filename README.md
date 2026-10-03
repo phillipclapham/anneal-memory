@@ -99,7 +99,7 @@ anneal-memory stats                  # Detailed analytics
 anneal-memory graph --format dot     # Association graph (Graphviz)
 anneal-memory diff --wraps 5         # Wrap metric progression
 anneal-memory audit --since 7d       # Read audit trail
-anneal-memory audit-repair           # Rebuild a quarantined audit manifest
+anneal-memory audit-repair           # Rebuild a quarantined audit manifest, or set aside a corrupt sealed week (--set-aside-unreadable: one that only fails to read)
 anneal-memory export --format json   # Full store export
 
 # Done with the demo: return the CLI to your default store

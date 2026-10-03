@@ -1323,8 +1323,12 @@ def main() -> None:
 
     # Verify audit trail mode
     if args.verify_audit:
-        from .audit import AuditTrail as _AT
+        from .audit import AuditTrail as _AT, set_aside_report_lines
         result = _AT.verify(args.db)
+        # The CLI's gap lines, from the same function (L2 10-03: this surface
+        # printed "valid" over a set-aside week and never named it).
+        for line in set_aside_report_lines(result.set_aside, args.db):
+            print(f"  {line}", file=sys.stderr)
         if result.valid:
             anchor_note = "" if result.anchor_trusted else (
                 " (chain anchor recovered by audit-repair; entries before it "

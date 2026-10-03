@@ -1898,9 +1898,9 @@ class AuditTrail:
                         f"{e}; run `anneal-memory audit-repair` again."
                     ),
                 )
-            logger.info(  # the result carries it; the CLI prints it
-                "Set aside unreadable audit file %s as %s (%s)",
-                record["filename"], record["set_aside_as"], record["cause"],
+            _emit_warning(
+                f"Set aside unreadable audit file {record['filename']} as "
+                f"{record['set_aside_as']} ({record['cause']})"
             )
         _fsync_dir(audit_dir)
         return AuditRepairResult(repaired=True, set_aside=new)
@@ -2466,15 +2466,15 @@ class AuditTrail:
                     self._unreadable_newer.extend(
                         (path.name, str(scans[path].error)) for path in paths
                     )
-                # ⛔ LEFT ON DISK, UNADOPTED, AND NOT RAISED (complement, round
-                # 10). ``verify()`` reports it as unmanifested, so the gap is
-                # loud; raising made every ``log()`` fail for as long as the
-                # file stayed unreadable (``chmod 000``, reproduced 3 of 3).
+                # ⛔ LEFT ON DISK, UNADOPTED, AND NOT RAISED HERE (complement,
+                # round 10). ``verify()`` reports it as unmanifested. Raising
+                # here made every ``log()`` fail with no way out (``chmod 000``,
+                # reproduced 3 of 3); the refusal above is narrower (no usable
+                # active file, a newer week) and ``audit-repair`` ends it.
                 for path in paths:
-                    _log(logging.WARNING,
-                        "Not adopting unreadable orphaned audit file %s (left "
-                        "on disk; verify() reports it): %s",
-                        path.name, scans[path].error,
+                    _emit_warning(
+                        f"Not adopting unreadable orphaned audit file {path.name} "
+                        f"(left on disk; verify() reports it): {scans[path].error}"
                     )
                 continue
 

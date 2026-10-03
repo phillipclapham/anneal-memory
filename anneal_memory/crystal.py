@@ -90,6 +90,7 @@ harness owns the firing. "anneal only fully works inside a complementary harness
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -223,18 +224,31 @@ class _Unset:
 
 _UNSET = _Unset()
 
-# The revision a record written before ``rev`` existed reads as. Never written back
-# on a read; a row gains a stored ``rev`` only when a write touches the document.
-_INITIAL_REV = "0"
+# Fields the ``rev`` digest ignores: telemetry that changes without anyone deciding
+# anything about the pattern. ``last_activated_on`` is written by ``touch`` and
+# bumped by every ``crystallize``; ``surfaced_count`` / ``last_surfaced_on`` are
+# written by :func:`anneal_memory.worth.fold_surfaced`. Hashing them would make a
+# touch or a fold conflict with a caller's ``expect=`` although no content moved.
+# A new mutator that writes telemetry belongs here; one that writes content does not.
+REV_EXCLUDED_FIELDS: frozenset[str] = frozenset(
+    {"last_activated_on", "surfaced_count", "last_surfaced_on"}
+)
 
 
-def _next_rev(value: object) -> str:
-    """The token after ``value``. Stored as a decimal string so it stays monotonic
-    per crystal; callers treat it as opaque. A missing or hand-mangled value counts
-    as ``_INITIAL_REV`` (the next write still produces a fresh, valid token)."""
-    if isinstance(value, str) and value.isdigit():
-        return str(int(value) + 1)
-    return str(int(_INITIAL_REV) + 1)
+def _rev(record: dict, *, live: bool) -> str:
+    """The revision token of ``record``: a digest of its content fields plus which
+    set it sits in, COMPUTED, never stored. Because it is derived from content, any
+    writer that changes content changes it, including an older anneal that knows
+    nothing about ``rev``, and a deleted-then-recreated record only matches a stale
+    token if its content is identical."""
+    content = {
+        k: v for k, v in record.items() if k != "rev" and k not in REV_EXCLUDED_FIELDS
+    }
+    canon = json.dumps(
+        {"live": live, "record": content},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
 
 
 class RetirementDict(TypedDict):
@@ -253,11 +267,12 @@ class CrystalDict(TypedDict):
     :func:`activation_tier`, never persisted (a stored tier would drift the moment
     the clock moved, exactly like spores' germination).
 
-    ``rev`` is an opaque revision token: every write to the record changes it, and it
-    follows the pattern through retire and re-crystallize. Pass it back as
+    ``rev`` is an opaque revision token, COMPUTED on read and on write and never
+    stored: a digest of the record's content and of whether it is live or retired,
+    ignoring :data:`REV_EXCLUDED_FIELDS`. Any content change, or a retire or revive,
+    changes it; a touch or a surfaced-count fold does not. Pass it back as
     ``expect=`` to :meth:`CrystalStore.crystallize` / :meth:`CrystalStore.retire` for
-    a compare-and-mutate. A record written before the field existed reads as
-    ``"0"``."""
+    a compare-and-mutate."""
 
     name: str
     rev: str
@@ -437,10 +452,6 @@ class CrystalStore:
                 f"{self.path} has non-object rows in 'crystal'/'retired'; refusing "
                 f"to proceed — inspect it by hand."
             )
-        # In memory only: every read returns a token, including for rows an older
-        # version wrote. Persisted only if this load is a write's (a mutation saves).
-        for row in data["crystal"] + data["retired"]:
-            row.setdefault("rev", _INITIAL_REV)
         version = data["schema_version"]
         if not isinstance(version, int) or isinstance(version, bool):
             raise CrystalError(
@@ -454,9 +465,21 @@ class CrystalStore:
                 f"fields this version doesn't understand aren't silently dropped on "
                 f"the next save."
             )
+        # In memory only: :meth:`_save` strips it, so the file format is unchanged.
+        for row in data["crystal"]:
+            row["rev"] = _rev(row, live=True)
+        for row in data["retired"]:
+            row["rev"] = _rev(row, live=False)
         return data
 
     def _save(self, data: dict) -> None:
+        # ``rev`` is computed, never stored: strip it from every row, including one a
+        # caller built from a read and inserted (e.g. a rollback's preimage).
+        data = {
+            **data,
+            "crystal": [{k: v for k, v in r.items() if k != "rev"} for r in data["crystal"]],
+            "retired": [{k: v for k, v in r.items() if k != "rev"} for r in data["retired"]],
+        }
         target_dir = self.path.parent
         os.makedirs(target_dir, exist_ok=True)
         # A UNIQUE tmp sibling, never a fixed ``<name>.tmp``: two writers must not
@@ -670,15 +693,13 @@ class CrystalStore:
                 existing["retirement"] = None
                 if source is not None:
                     existing["source"] = source or None
-                existing["rev"] = _next_rev(existing.get("rev"))
+                existing["rev"] = _rev(cast(dict, existing), live=True)
                 return existing
 
             revived = self._pop_retired(data, name)
             item: CrystalDict = {
                 "name": name,
-                # A revived pattern continues its retired row's sequence, so a token
-                # read before the retire can never match the revived record.
-                "rev": _next_rev(revived.get("rev") if revived is not None else None),
+                "rev": "",  # computed below, once the row is complete
                 "level": level,
                 "explanation": explanation,
                 "evidence": evidence_clean,
@@ -704,6 +725,7 @@ class CrystalStore:
                     f"[{now}] re-crystallized after retirement "
                     f"({prior.get('kind')} on {prior.get('on')})."
                 ]
+            item["rev"] = _rev(cast(dict, item), live=True)
             data["crystal"].append(item)
             return item
 
@@ -826,7 +848,7 @@ class CrystalStore:
         with self._transaction() as data:
             item = self._require_live(data, name)
             item["last_activated_on"] = now
-            item["rev"] = _next_rev(item.get("rev"))
+            item["rev"] = _rev(cast(dict, item), live=True)
             return item
 
     def update(
@@ -881,7 +903,7 @@ class CrystalStore:
                 if not isinstance(item.get("notes"), list):
                     item["notes"] = []
                 item["notes"].append(f"[{stamp}] {add_note}")
-            item["rev"] = _next_rev(item.get("rev"))
+            item["rev"] = _rev(cast(dict, item), live=True)
             return item
 
     # --- public API: retire (the membrane out — crystallized ≠ immortal) ----
@@ -938,7 +960,7 @@ class CrystalStore:
                 "on": (today or date.today()).isoformat(),
                 "at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
             }
-            item["rev"] = _next_rev(item.get("rev"))
+            item["rev"] = _rev(cast(dict, item), live=False)
             data["crystal"] = [s for s in data["crystal"] if s.get("name") != name]
             data["retired"].append(item)
             return item

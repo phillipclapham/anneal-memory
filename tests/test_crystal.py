@@ -443,3 +443,4 @@ def test_expect_refuses_a_stale_write_and_writes_nothing(tmp_path):
                       today=date(2026, 1, 1))
     assert exc.value.current["explanation"] == "B newer"
     assert p.read_bytes() == before
+    assert all("rev" not in r for r in json.loads(before)["crystal"])  # computed, never stored

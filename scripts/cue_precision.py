@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Precision of the durable-fact cue tier on the InMind bench (API-free).
 
-Builds ONE continuity whose ``## Durable Facts`` holds every cue line of a cue-reach file
+Builds ONE continuity (saved through the real wrap pipeline, which also stores the store's
+inert-token set) whose ``## Durable Facts`` holds every cue line of a cue-reach file
 (a many-fact store, larger than a real one), then calls the shipped ``retrieve_relevant``
 (prompt mode) with each task's ``naive_query`` and ``query``, and with two sets of 50
 off-topic everyday prompts. Per query type it reports how often the task's own fact
@@ -26,10 +27,11 @@ import json
 import sys
 import tempfile
 import time
+import warnings
 from pathlib import Path
 
 import anneal_memory.retrieval as R
-from anneal_memory import Store, retrieve_relevant
+from anneal_memory import Store, prepare_wrap, retrieve_relevant, validated_save_continuity
 
 OFF_A = (
     'how do I reverse a linked list in python without recursion',
@@ -137,7 +139,7 @@ OFF_B = (
     'what are the rules of cricket in simple terms',
 )
 
-# name -> (constants patched in anneal_memory.retrieval, whether the stored inert-token set applies)
+# name -> (constants patched in anneal_memory.retrieval, whether the inert-token set the save wrote applies)
 ROWS = {
     "(i) as first built": (
         dict(DURABLE_SHORT_PROMPT_TOKENS=10**6, DURABLE_FACT_TEXT_MIN=1), False),
@@ -145,23 +147,6 @@ ROWS = {
         dict(DURABLE_SHORT_PROMPT_TOKENS=3, DURABLE_FACT_TEXT_MIN=2), False),
     "shipped": ({}, True),
 }
-
-
-def write_inert_tokens(store: Store) -> int:
-    """Compute the store's inert tokens for its current continuity and store them under
-    the metadata key the prompt path reads (what the save path does)."""
-    facts = R.load_durable_facts(store)
-    tokens = R.compute_durable_inert_tokens(store, facts)
-    store._conn.execute(
-        "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-        (R.INERT_TOKENS_KEY, json.dumps({
-            "tokens": sorted(tokens),
-            "continuity_hash": R.continuity_hash(store.load_continuity()),
-            "episodes": store.recall(limit=0).total_matching,
-            "threshold": R.DURABLE_GENERIC_DF,
-        })))
-    store._conn.commit()
-    return len(tokens)
 
 
 def main() -> None:
@@ -186,8 +171,12 @@ def main() -> None:
         st = Store(Path(tempfile.mkdtemp()) / "m.db", project_name="T", audit=False)
         for s in timeline["sessions"]:
             RUN.record_session(st, s)
-        st.save_continuity(cont)
-        write_inert_tokens(st)
+        # The real save path: it writes the store's inert-token set with the continuity.
+        if prepare_wrap(st)["status"] != "ready":
+            raise SystemExit(f"task {tid}: wrap not ready")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            validated_save_continuity(st, cont, today="2026-10-03")
         stores[tid] = st
     off_store = stores[ids[0]]
 

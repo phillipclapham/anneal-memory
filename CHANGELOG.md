@@ -192,6 +192,19 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   a 247-episode store with 125 facts, and a 160-token prompt on a 12,000-episode store stays
   under 50 ms (the metadata read is the only store access beyond the continuity). Reproduce with
   `python scripts/cue_precision.py --cue-reach <cue_reach.json> --bench-dir <inmind>/bench/inmind`.
+- `validated_save_continuity` writes that set. For a store whose schema has a durable section it
+  computes `compute_durable_inert_tokens` over the facts of the exact text being saved, before
+  the save's transaction opens (a failure there costs nothing: the key is simply not written),
+  and writes `durable_inert_tokens` inside the same transaction as the wrap row, so it commits
+  or rolls back with the save and always names the continuity it was computed for; the recall
+  path checks the hash as well, so a continuity written any other way turns the filter off. A
+  store without a durable section writes nothing. On a copy of flow's store (no durable section)
+  the wrap package, save result, warnings, saved bytes and metadata keys are identical to 0.9.26.
+  Cost: about 0.4 s on a 12,000-episode store (120 words each, 25 facts), once per wrap.
+- Two new `durable_warnings` (and `UserWarning`s) from the save: "cue 'deploy' appears in more
+  than 10% of this store's episodes, so it will not cue anything; add a more specific cue" for
+  each inert cue token, and "cue 'db' is too short to match; spell it out" for each cue token
+  under three characters, each named once per save.
 - MCP `recall` with a `keyword` (first page, `limit` above 0, and no `since` / `until` / `source` /
   `episode_type` filter, since facts are not episodes) lists the facts its words cue first, under
   "Durable facts matching your words:", each as the fact text (not its cue list) plus "(cue: word)"

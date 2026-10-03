@@ -69,9 +69,17 @@ from .crystal import CrystalError, CrystalStore
 from .durable import (
     enforce_durable_facts,
     match_headings,
+    parse_durable_facts,
     pending_transitions as durable_pending_transitions,
     report_warnings as durable_report_warnings,
     section_chars as durable_section_chars,
+)
+from .retrieval import (
+    DURABLE_GENERIC_DF,
+    INERT_TOKENS_KEY,
+    _fact_tokens,
+    compute_durable_inert_tokens,
+    continuity_hash,
 )
 from .store import (
     AnnealMemoryError,
@@ -2196,6 +2204,54 @@ def _record_wrap_supersessions(
     return recorded, rejected
 
 
+def _durable_cue_state(
+    store: Store, schema: list[SectionSpec], saved_text: str
+) -> tuple[str | None, list[str]]:
+    """The recall tier's per-store state for a saved continuity with a durable section:
+    ``(value for the ``durable_inert_tokens`` metadata key, cue warnings)``.
+
+    The value is the cue and fact words that are too common in this store's episodes to
+    cue anything (:func:`~anneal_memory.retrieval.compute_durable_inert_tokens`), tied to
+    the hash of the exact text being saved, so the per-prompt recall path only READS it
+    and ignores it the moment the continuity changes. The warnings name each inert cue
+    (it will cue nothing) and each cue token too short to match. A failure here must
+    never cost the save: it returns ``(None, [])`` and the key is simply not written."""
+    try:
+        facts = parse_durable_facts(saved_text, schema)
+        inert = compute_durable_inert_tokens(store, facts)
+        episodes = store.recall(limit=0).total_matching
+        value = json.dumps({
+            "tokens": sorted(inert),
+            "continuity_hash": continuity_hash(saved_text),
+            "episodes": episodes,
+            "threshold": DURABLE_GENERIC_DF,
+        })
+        warnings_out: list[str] = []
+        seen_inert: set[str] = set()
+        seen_short: set[str] = set()
+        percent = f"{DURABLE_GENERIC_DF:.0%}"
+        for fact in facts:
+            for cue in fact.cues:
+                for token in re.findall(r"[a-z0-9]+", cue.lower()):
+                    if len(token) < 3:
+                        if token not in seen_short:
+                            seen_short.add(token)
+                            warnings_out.append(
+                                f"cue {token!r} is too short to match; spell it out"
+                            )
+                for token in _fact_tokens(cue):
+                    if token in inert and token not in seen_inert:
+                        seen_inert.add(token)
+                        warnings_out.append(
+                            f"cue {token!r} appears in more than {percent} of this "
+                            f"store's episodes, so it will not cue anything; add a more "
+                            f"specific cue"
+                        )
+        return value, warnings_out
+    except Exception:  # noqa: BLE001 - see the docstring
+        return None, []
+
+
 def validated_save_continuity(
     store: Store,
     text: str,
@@ -2878,6 +2934,15 @@ def validated_save_continuity(
     content_hash: str = hashlib.sha256(
         grad_result.text.encode("utf-8")
     ).hexdigest()
+    # Durable cue state (cue wiring): computed here, before the batch opens, from the exact
+    # text being saved, so the recall tier's inert-token set is committed with the wrap.
+    # Only a schema with a durable section has any; others write nothing.
+    inert_value: str | None = None
+    cue_warnings: list[str] = []
+    if durable_report is not None:
+        inert_value, cue_warnings = _durable_cue_state(
+            store, section_schema, grad_result.text
+        )
     cont_tmp: Path | None = store._prepare_continuity_write(
         grad_result.text, token_hex=tmp_pair_id
     )
@@ -3071,6 +3136,15 @@ def validated_save_continuity(
             # baton flock across the commit instead was tried and withdrawn in L3: a failed
             # unlock after the commit discarded the committed tmp files, and an on_audit_event
             # callback that touches the baton would block on the lock this process holds.
+            # Durable cue state: one metadata row, in this transaction, so it commits or
+            # rolls back with the wrap row and always names the continuity it was computed
+            # for (the recall path also checks that hash, so a continuity written any other
+            # way simply turns the filter off).
+            if inert_value is not None:
+                store._conn.execute(
+                    "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                    (INERT_TOKENS_KEY, inert_value),
+                )
             _check_save_authority(store, session_id, wrap_token, allow_sole_live)
             # Batch context manager commits here on successful exit.
 
@@ -3514,7 +3588,7 @@ def validated_save_continuity(
         )
     durable_messages: list[str] = []
     if durable_report is not None:
-        durable_messages = durable_report_warnings(durable_report)
+        durable_messages = durable_report_warnings(durable_report) + cue_warnings
         for durable_message in durable_messages:
             _warn_after_commit(durable_message)
     if still_graduating:

@@ -44,6 +44,7 @@ from .retrieval import (
     MIN_KEYWORDS,
     QUERY_MIN_KEYWORDS,
     RETRIEVAL_MODES,
+    EpisodeMatch,
     RetrievalMode,
     extract_keywords,
     retrieve_patterns,
@@ -144,6 +145,38 @@ _INVALID_REQUEST = -32600
 _METHOD_NOT_FOUND = -32601
 _INVALID_PARAMS = -32602
 _INTERNAL_ERROR = -32603
+
+
+# Word-match presentation in MCP ``recall`` (see ``Server._recall_word_fallback``).
+_FALLBACK_DEFAULT_CAP = 10   # word matches listed when the caller passed no ``limit``
+_EXACT_RESULTS_ENOUGH = 3    # an exact result this small is topped up with word matches
+_ALSO_MATCHING_MAX = 5       # how many word matches are appended to such a result
+
+
+def _as_int(value: object) -> int | None:
+    """``value`` as an integer, or ``None`` if it is not one. A whole-number float
+    counts (3.0 -> 3); a bool, a fractional or non-finite float and every other type
+    do not."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
+def _word_match_line(match: EpisodeMatch, word_count: int) -> str:
+    """One ``recall`` reply line for a word-by-word match, in the exact path's shape
+    plus how many of the query's words the episode matched."""
+    ep = match.episode
+    source_info = f" [{ep.source}]" if ep.source != "agent" else ""
+    replaced = f" (superseded by {match.superseded_by})" if match.superseded_by else ""
+    return (
+        f"- ({ep.id}) [{ep.type}] {ep.timestamp}{source_info}{replaced}"
+        f" (matched {len(match.matched)}/{word_count}: {', '.join(match.matched)}):"
+        f" {ep.content}"
+    )
 
 
 class Server:
@@ -379,6 +412,18 @@ class Server:
                 f"Error: episode_type {episode_type!r} is not one of: {valid}.",
                 is_error=True,
             )
+        # ``limit`` and ``offset`` reach SQLite and slice indices: a whole-number float
+        # (a client that serializes 3 as 3.0) is read as the integer, and anything else
+        # that is not an integer is refused by name rather than by a driver error.
+        args = dict(args)
+        for name in ("limit", "offset"):
+            if name in args:
+                value = _as_int(args[name])
+                if value is None:
+                    return _tool_result(
+                        f"Error: {name} must be an integer", is_error=True
+                    )
+                args[name] = value
         result = self._store.recall(
             since=args.get("since"),
             until=args.get("until"),
@@ -408,7 +453,44 @@ class Server:
                 f"{source_info}{replaced}: {ep.content}"
             )
 
+        # A phrase that hit only a little, from a keyword with three or more words,
+        # probably missed the episode that holds most of those words. Exact results stay
+        # first and unchanged; the word matches the exact search did not already show
+        # follow them, only on the first page of an exhausted exact result.
+        keyword = args.get("keyword")
+        if (
+            isinstance(keyword, str)
+            and args.get("offset", 0) == 0
+            and result.total_matching < _EXACT_RESULTS_ENOUGH
+            and len(result.episodes) == result.total_matching
+        ):
+            words = extract_keywords(keyword, mode="query")
+            if len(words) >= 3:
+                shown = {ep.id for ep in result.episodes}
+                extra = [
+                    m for m in self._word_matches(args, keyword)
+                    if m.episode.id not in shown
+                ][:_ALSO_MATCHING_MAX]
+                if extra:
+                    lines.append("")
+                    lines.append("Also matching by words:")
+                    lines.extend(_word_match_line(m, len(words)) for m in extra)
+
         return _tool_result("\n".join(lines))
+
+    def _word_matches(self, args: dict[str, Any], keyword: str) -> list[EpisodeMatch]:
+        """Every word-by-word match for ``keyword`` under the call's filters, best
+        first, uncapped (the caller caps and counts)."""
+        return search_episodes(
+            self._store,
+            keyword,
+            episode_type=args.get("episode_type"),
+            source=args.get("source"),
+            since=args.get("since"),
+            until=args.get("until"),
+            limit=sys.maxsize,
+            include_superseded=args.get("include_superseded") is True,
+        )
 
     def _recall_word_fallback(
         self, args: dict[str, Any], total_matching: int
@@ -419,41 +501,42 @@ class Server:
 
         It applies only when the exact query matched NOTHING (``total_matching == 0`` —
         a ``limit`` of 0 or an ``offset`` past the matches is not a miss), the first
-        page was asked for, and the ``keyword`` reduces to two or more distinctive
-        words. A one-word keyword has nothing to split, so it never falls back. The same
-        filters and ``limit`` go through, and the reply names the words so the agent can
-        tell this ranked list from an exact match."""
+        page was asked for, the ``keyword`` is two or more whitespace-separated tokens,
+        and it reduces to at least one distinctive word (a phrase that reduces to one
+        word still falls back on that word). A single-token keyword has nothing to
+        split, so it never falls back. The same filters go through. The list is capped
+        at :data:`_FALLBACK_DEFAULT_CAP` unless the caller passed a ``limit``, which is
+        then honoured; when more matched than are shown the reply says so. It names the
+        words, and per episode how many matched, so the agent can tell this ranked list
+        from an exact match."""
         keyword = args.get("keyword")
         if total_matching != 0 or not isinstance(keyword, str):
             return None
-        if args.get("offset", 0) > 0:
+        if args.get("offset", 0) > 0 or len(keyword.split()) < 2:
             return None
-        words = extract_keywords(keyword)
-        if len(words) < 2:
+        words = extract_keywords(keyword, mode="query")
+        if not words:
             return None
-        matches = search_episodes(
-            self._store,
-            keyword,
-            episode_type=args.get("episode_type"),
-            source=args.get("source"),
-            since=args.get("since"),
-            until=args.get("until"),
-            limit=max(0, args.get("limit", 100)),
-            include_superseded=args.get("include_superseded") is True,
-        )
+        cap = args["limit"] if "limit" in args else _FALLBACK_DEFAULT_CAP
+        if cap <= 0:
+            return None
+        matches = self._word_matches(args, keyword)
         if not matches:
             return None
-        lines = [
+        shown = matches[:cap]
+        head = (
             "No episode contains the exact phrase; ranked by matching words "
-            f"({', '.join(words)}). Showing {len(matches)}:"
-        ]
-        for m in matches:
-            ep = m.episode
-            source_info = f" [{ep.source}]" if ep.source != "agent" else ""
-            lines.append(
-                f"- ({ep.id}) [{ep.type}] {ep.timestamp}{source_info}"
-                f" (matched: {', '.join(m.matched)}): {ep.content}"
+            f"({', '.join(words)})."
+        )
+        if len(matches) > len(shown):
+            head += (
+                f" Showing top {len(shown)} of {len(matches)} word matches; pass a "
+                "rarer word or a higher limit for more."
             )
+        else:
+            head += f" Showing {len(shown)}:"
+        lines = [head]
+        lines.extend(_word_match_line(m, len(words)) for m in shown)
         return _tool_result("\n".join(lines))
 
     def _crystal_store_for_wrap(self) -> CrystalStore | None:
@@ -1134,10 +1217,11 @@ class Server:
             # rephrasing; a genuine miss is not. Only when we actually attempted recall
             # (max_patterns > 0) — a capped-out call isn't a "thin query".
             floor = QUERY_MIN_KEYWORDS if mode == "query" else MIN_KEYWORDS
-            if max_patterns > 0 and len(extract_keywords(query)) < floor:
+            if max_patterns > 0 and len(extract_keywords(query, mode=mode)) < floor:
                 return _tool_result(
                     "No crystallized patterns matched (query too thin — give it at "
-                    f"least {floor} distinctive keywords, or check crystal_index "
+                    f"least {floor} distinctive keyword{'' if floor == 1 else 's'}, "
+                    "or check crystal_index "
                     "for what exists)."
                 )
             return _tool_result("No crystallized patterns matched.")

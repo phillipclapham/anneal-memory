@@ -96,7 +96,8 @@ CANDIDATE_LIMIT_PER_KEYWORD = 400  # per-keyword recall fetch cap before scoring
 # above. "query" is an EXPLICIT question an agent or operator asked on purpose: it opens
 # the gates that exist to keep an unasked-for injection quiet (the keyword floor, the
 # hit floor, the weighted-overlap bar, the distinctive anchor) and keeps everything that
-# shapes the ranking (the IDF weights, the type boost, MIN_EPISODE_LEN, the caps). These
+# shapes the ranking (the IDF weights, the type boost, the caps); it also drops the
+# MIN_EPISODE_LEN floor and keeps short ALL-CAPS / digit tokens as keywords. These
 # are the query-mode values; the prompt-mode values stay the constants above, and nothing
 # in this module rewrites a constant at call time. ---
 RETRIEVAL_MODES = ("prompt", "query")
@@ -138,14 +139,39 @@ me dude ok okay yeah yep nope hey hi
 
 # Tokens kept whole even though they contain punctuation (domain terms).
 _TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_\-]{2,}")
+# Query mode tokenizes the original-cased text and admits 2-character tokens (S3, k8, v2);
+# which short ones survive is decided in extract_keywords.
+_QUERY_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_\-]+")
 
 
-def extract_keywords(query: str) -> list[str]:
+def extract_keywords(query: str, *, mode: RetrievalMode = "prompt") -> list[str]:
     """Distinctive lowercased keywords from a query. Preserves snake_case /
     hyphenated domain terms whole. Stopwords + short tokens dropped, deduped, capped,
-    order-preserving (the first/most-salient terms survive the cap)."""
+    order-preserving (the first/most-salient terms survive the cap).
+
+    ``mode="query"`` additionally keeps a token shorter than :data:`MIN_KEYWORD_LEN`
+    when it is written ALL-CAPS in the query or contains a digit, ``_`` or ``-`` (``SQL``,
+    ``API``, ``S3``, ``k8s``, ``v2``): an explicit question names its short technical
+    terms on purpose. A plain lowercase short word, and any stopword however it is
+    cased, stays out. ``mode="prompt"`` (the default) is unchanged."""
+    _check_mode(mode)
     seen: set[str] = set()
     out: list[str] = []
+    if mode == "query":
+        for raw in _QUERY_TOKEN_RE.findall(query):
+            tok = raw.lower()
+            if tok in _STOPWORDS or tok in seen:
+                continue
+            if len(tok) < MIN_KEYWORD_LEN and not (
+                (raw.isalpha() and raw.isupper())
+                or any(c.isdigit() or c in "_-" for c in raw)
+            ):
+                continue
+            seen.add(tok)
+            out.append(tok)
+            if len(out) >= MAX_KEYWORDS:
+                break
+        return out
     for tok in _TOKEN_RE.findall(query.lower()):
         if len(tok) < MIN_KEYWORD_LEN or tok in _STOPWORDS or tok in seen:
             continue
@@ -293,6 +319,14 @@ def _min_keywords(mode: str) -> int:
 def _min_hits(mode: str) -> int:
     """The distinct-keyword-hit floor for ``mode`` (see :func:`_min_keywords`)."""
     return QUERY_MIN_HITS if mode == "query" else MIN_HITS
+
+
+def _min_episode_len(mode: str) -> int:
+    """The shortest episode content that can surface in ``mode``. Prompt mode skips
+    anything under :data:`MIN_EPISODE_LEN` (a hook should not inject a one-line scrap);
+    query mode has no floor, because a short episode ("User is allergic to tree nuts.")
+    is exactly what an explicit question is looking for."""
+    return 0 if mode == "query" else MIN_EPISODE_LEN
 
 
 def _precision_bar(used_idf: bool, mode: str = "prompt") -> float:
@@ -443,6 +477,7 @@ def _score_candidate_episodes(
     score_threshold: float = SCORE_THRESHOLD,
     require_anchor: float = 0.0,
     min_hits: int | None = None,
+    min_len: int | None = None,
 ) -> list[ScoredEpisode]:
     """Score pre-fetched candidate episodes by weighted overlap — the FULL ranked set
     clearing the precision bar (NOT capped). Serves two consumers: the displayed
@@ -453,12 +488,14 @@ def _score_candidate_episodes(
     (>0 only in the IDF regime) is the distinctiveness anchor: an episode must have
     MATCHED a keyword at/above it to seed — so a process-word-only query produces no
     seeds, and the associative pass it feeds inherits that structurally. ``min_hits``
-    defaults to :data:`MIN_HITS`, read at call time."""
+    defaults to :data:`MIN_HITS` and ``min_len`` to :data:`MIN_EPISODE_LEN`, both read at
+    call time."""
     floor = MIN_HITS if min_hits is None else min_hits
+    len_floor = MIN_EPISODE_LEN if min_len is None else min_len
     scored: list[ScoredEpisode] = []
     for ep in candidates.values():
         content = ep.content or ""
-        if len(content) < MIN_EPISODE_LEN:
+        if len(content) < len_floor:
             continue
         score, hits, top = _score_text(content, keywords, weights)
         if hits < floor or top < require_anchor:
@@ -611,8 +648,11 @@ def retrieve_relevant(
             (:data:`QUERY_MIN_KEYWORDS`), one keyword hit is enough
             (:data:`QUERY_MIN_HITS`), and neither the weighted-overlap bar nor the
             distinctive anchor applies, for episodes, patterns and the evidence edge
-            alike. The IDF weights, the ranking, :data:`MIN_EPISODE_LEN` and the caps
-            are the same in both modes. Anything else raises ``ValueError``.
+            alike, except that the evidence edge keeps the prompt-mode score bar. Query
+            mode also drops the :data:`MIN_EPISODE_LEN` floor and keeps short ALL-CAPS
+            or digit/``_``/``-`` tokens as keywords (:func:`extract_keywords`). The IDF
+            weights, the ranking and the caps are the same in both modes. Anything
+            else raises ``ValueError``.
 
     Returns:
         :class:`RelevantResult` with ``patterns`` + ``episodes`` (each scored/ranked)
@@ -626,7 +666,7 @@ def retrieve_relevant(
     """
     _check_mode(mode)
     today = today or date.today()
-    keywords = extract_keywords(query)
+    keywords = extract_keywords(query, mode=mode)
     if len(keywords) < _min_keywords(mode):
         return RelevantResult(patterns=[], episodes=[], query_keywords=keywords)
 
@@ -648,6 +688,7 @@ def retrieve_relevant(
             score_threshold=_precision_bar(used_idf, mode),
             require_anchor=_anchor_floor(used_idf, mode),
             min_hits=_min_hits(mode),
+            min_len=_min_episode_len(mode),
         )
     else:
         # Keyword-only pattern path (no episode fetch): the length-proxy, byte-identical
@@ -680,7 +721,10 @@ def retrieve_relevant(
                 max_patterns=remaining,
                 today=today,
                 exclude_names={p.name for p in patterns},
-                score_threshold=thr,
+                # The evidence edge keeps the PROMPT bar in query mode too: the query
+                # relaxation is for direct keyword matches, and one common word that
+                # brushed an episode must not float every pattern citing it.
+                score_threshold=_precision_bar(used_idf),
             )
 
     return RelevantResult(patterns=patterns, episodes=episodes, query_keywords=keywords)
@@ -750,7 +794,7 @@ def retrieve_patterns(
     today = today or date.today()
     if crystal_store is None or max_patterns <= 0:
         return []
-    keywords = extract_keywords(query)
+    keywords = extract_keywords(query, mode=mode)
     if len(keywords) < _min_keywords(mode):
         return []
     weights = {kw: _keyword_weight(kw) for kw in keywords}
@@ -764,11 +808,14 @@ def retrieve_patterns(
 
 @dataclass(frozen=True)
 class EpisodeMatch:
-    """One episode :func:`search_episodes` returned: the scored episode and the query
-    keywords found in its content (``matched``, in query order)."""
+    """One episode :func:`search_episodes` returned: the scored episode, the query
+    keywords found in its content (``matched``, in query order), and, when it was
+    searched with ``include_superseded=True``, the id of the episode that replaced it
+    (``superseded_by``, else ``None``)."""
 
     episode: ScoredEpisode
     matched: tuple[str, ...]
+    superseded_by: str | None = None
 
 
 def search_episodes(
@@ -790,8 +837,9 @@ def search_episodes(
     from the store with the filters below applied in SQL, and an episode surfaces if it
     contains at least one of them. Episodes carrying more of the query's words, and
     rarer words (corpus-IDF weights), rank first; a decision or outcome gets the same
-    small boost it gets in recall; recency then id break ties. Episodes shorter than
-    :data:`MIN_EPISODE_LEN` are skipped, exactly as in :func:`retrieve_relevant`.
+    small boost it gets in recall; recency then id break ties. No length floor applies
+    (a one-line episode can match), and a short token written ALL-CAPS or containing a
+    digit, ``_`` or ``-`` counts as a keyword (see :func:`extract_keywords`).
 
     Args:
         store: the episodic :class:`Store`.
@@ -806,11 +854,14 @@ def search_episodes(
         Empty when the query reduces to no keywords or no episode contains one.
 
     Raises:
-        ValueError: ``episode_type`` is a string that is not an episode type.
+        ValueError: ``episode_type`` is not an episode type (checked before anything
+            else, so a bad type fails even with ``limit <= 0``).
     """
+    if episode_type is not None:
+        episode_type = EpisodeType(episode_type)
     if limit <= 0:
         return []
-    keywords = extract_keywords(query)
+    keywords = extract_keywords(query, mode="query")
     if len(keywords) < QUERY_MIN_KEYWORDS:
         return []
     filters: dict[str, Any] = {
@@ -830,11 +881,13 @@ def search_episodes(
         score_threshold=_precision_bar(used_idf, "query"),
         require_anchor=_anchor_floor(used_idf, "query"),
         min_hits=_min_hits("query"),
+        min_len=_min_episode_len("query"),
     )
     return [
         EpisodeMatch(
             episode=e,
             matched=tuple(kw for kw in keywords if kw in e.content.lower()),
+            superseded_by=candidates[e.id].superseded_by,
         )
         for e in scored[:limit]
     ]

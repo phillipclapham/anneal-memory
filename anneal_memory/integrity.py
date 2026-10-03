@@ -95,7 +95,9 @@ TOOLS: list[dict[str, Any]] = [
             "phrase and it has two or more distinctive words, the call falls "
             "back to ranking episodes by how many of those words they contain "
             "(the reply says so and names the words each episode matched), so a "
-            "multi-word query does not need to appear verbatim."
+            "multi-word query does not need to appear verbatim. A phrase with "
+            "only one or two exact hits is followed by a few word matches, listed "
+            "under 'Also matching by words'."
         ),
         "inputSchema": {
             "type": "object",
@@ -434,9 +436,10 @@ TOOLS: list[dict[str, Any]] = [
             "crystal_index, the always-on menu of what exists). Associative by "
             "default: a pattern grounded in an episode your query matched surfaces "
             "even with zero keyword overlap (the evidence edge). Returns scored "
-            "patterns (name, level, activation, explanation, tags); precision-biased "
-            "— a thin query or no match returns none, by design (surface nothing "
-            "rather than noise)."
+            "patterns (name, level, activation, explanation, tags). In the default "
+            "'prompt' mode it is precision-biased: a thin query or no match returns "
+            "none, by design (surface nothing rather than noise). Pass mode='query' "
+            "when you are asking explicitly."
         ),
         "inputSchema": {
             "type": "object",
@@ -469,13 +472,10 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "enum": ["prompt", "query"],
                     "description": (
-                        "'prompt' (default) keeps the precision gates meant for an "
-                        "unasked-for per-turn injection: at least 2 distinctive "
-                        "keywords and 2 keyword hits, a score bar and a distinctive-term "
-                        "anchor, so a thin or off-topic query returns nothing. 'query' "
-                        "is for a question you are asking on purpose: one keyword and "
-                        "one hit are enough and the score bar and anchor are dropped, "
-                        "so it returns more, and weaker, matches."
+                        "'query': for a question you are asking on purpose; one "
+                        "keyword is enough, and weaker matches come back too. "
+                        "'prompt' (default): strict, built for automatic per-turn "
+                        "injection; may return nothing."
                     ),
                     "default": "prompt",
                 },

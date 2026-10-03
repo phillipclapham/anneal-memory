@@ -5445,7 +5445,7 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
                 raise OSError(5, "Input/output error")
             return real_fsync(fd)
 
-        def exploding_warning(msg, *a, **kw):
+        def exploding_log(level, msg, *a, **kw):
             # ⛔ SCOPED TO THE ROLLBACK WARNING. Exploding on EVERY
             # ``logger.warning`` grades more than this test claims and would
             # pass if some unrelated warning happened to fire first —
@@ -5458,9 +5458,7 @@ class TestRecoveryHasAnAnchorOrRefusesToInitialise:
 
         monkeypatch.setattr(builtins, "open", sick_open)
         monkeypatch.setattr(os, "fsync", sick_fsync)
-        monkeypatch.setattr(
-            audit_module.logger, "warning", exploding_warning
-        )
+        monkeypatch.setattr(audit_module.logger, "log", exploding_log)
 
         with pytest.raises(BaseException):
             trail.log("third")
@@ -8483,6 +8481,81 @@ class TestManifestLockL3:
             assert trail._rotation_refusal_logged
         finally:
             log.removeHandler(boom)
+
+    def test_a_raising_logger_filter_cannot_replace_an_adoption_skip(self, tmp_path):
+        """L3 10-03 on a83b6a9 (codex MED + complement, run): a filter on the
+        audit logger runs in Logger.handle, before any handler, so guarding the
+        handler calls alone let it raise out of log(). The whole emission is now
+        one guarded call."""
+        import logging
+
+        class BoomFilter(logging.Filter):
+            def filter(self, record):
+                raise RuntimeError("filter exploded")
+
+        log = logging.getLogger("anneal-memory.audit")
+        boom = BoomFilter()
+        log.addFilter(boom)
+        try:
+            (tmp_path / "m.audit-manifest.lock").mkdir()
+            trail = AuditTrail(tmp_path / "m.db")
+            trail.log("x", {"a": 1})
+            assert (tmp_path / "m.audit.jsonl").stat().st_size > 0
+        finally:
+            log.removeFilter(boom)
+
+    def test_an_application_logger_class_survives_import(self):
+        """L3 10-03 on a83b6a9 (codex HIGH, run): re-classing the registered
+        logger made `import anneal_memory` raise TypeError under an application's
+        slotted logger class, and silently dropped the methods of an unslotted
+        one. The registered logger is now left exactly as logging made it."""
+        import subprocess
+        import sys as _sys
+
+        code = (
+            "import logging\n"
+            "class App(logging.Logger):\n"
+            "    __slots__ = ('extra_field',)\n"
+            "    def structured(self): return 'app'\n"
+            "logging.setLoggerClass(App)\n"
+            "import anneal_memory.audit\n"
+            "lg = logging.getLogger('anneal-memory.audit')\n"
+            "print(type(lg).__name__, lg.structured())\n"
+        )
+        result = subprocess.run(
+            [_sys.executable, "-c", code], capture_output=True, text=True,
+            stdin=subprocess.DEVNULL,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ["App", "app"]
+
+    def test_a_raising_handler_does_not_double_the_stderr_warning(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """L3 10-03 on a83b6a9 (all three seats, LOW): with stderr=True and a
+        raising handler, the fallback printed the warning and _emit_warning
+        printed it again."""
+        import errno as errno_module
+        import logging
+
+        class Boom(logging.Handler):
+            def emit(self, record):
+                raise RuntimeError("handler exploded")
+
+        def no_locks(fd, op):
+            raise OSError(errno_module.ENOLCK, "no locks")
+
+        monkeypatch.setattr(audit_module.fcntl, "flock", no_locks)
+        monkeypatch.setattr(audit_module, "_ENOLCK_RETRY_SECONDS", 0)
+        log = logging.getLogger("anneal-memory")
+        boom = Boom()
+        log.addHandler(boom)
+        try:
+            with AuditTrail(tmp_path / "d.db")._manifest_lock() as held:
+                assert held is False
+        finally:
+            log.removeHandler(boom)
+        assert capsys.readouterr().err.count("lock is NOT held") == 1
 
     def test_a_long_stem_manifest_save_fits_the_name_limit(self, tmp_path):
         """L3 codex HIGH [run: a 220-character stem gave a 240-byte manifest name

@@ -1640,6 +1640,8 @@ def _supersession_grounds(new_text: str, old_text: str) -> bool:
 # 12,968-episode store: 407 words, 0 differences), and LOWER copied the whole content
 # column once per keyword. The pattern side is lower-cased.
 _KEYWORD_LIKE_SQL = "content LIKE ? ESCAPE '\\'"
+# Keywords per scan in Store.keyword_candidates; each adds two LIKE nodes to the query.
+_KEYWORD_SCAN_GROUP = 200
 
 
 def _keyword_like_pattern(keyword: str) -> str:
@@ -3027,12 +3029,18 @@ class Store:
         """Run the block's reads in one transaction, so they see one committed
         state. Inside a caller's open transaction (a ``_batch``) it adds nothing:
         that transaction already gives one view. Use inside ``_db_boundary``,
-        which rolls back what is open on any exception."""
+        which reports a database error; this rolls back its own transaction on any
+        exception either way."""
         if self._conn.in_transaction:
             yield
             return
         self._conn.execute("BEGIN")
-        yield
+        try:
+            yield
+        except BaseException:
+            if self._conn.in_transaction:
+                self._conn.rollback()
+            raise
         if self._conn.in_transaction:
             self._conn.execute("COMMIT")
 
@@ -3108,24 +3116,32 @@ class Store:
                 f"SELECT COUNT(*) FROM episodes WHERE {base}", params
             ).fetchone()[0]
             doc_freq = {kw: 0 for kw in kws}
-            keep: dict[str, None] = {}
+            kept: dict[str, str] = {}  # id -> timestamp, for the newest-first union
             rows: list[Any] = []
-            if kws:
-                patterns = [_keyword_like_pattern(kw) for kw in kws]
-                flags = ", ".join(_KEYWORD_LIKE_SQL for _ in kws)
-                any_kw = " OR ".join(_KEYWORD_LIKE_SQL for _ in kws)
+            # Keywords are scanned in groups: one OR chain of LIKEs per group keeps the
+            # expression under SQLite's depth limit for any number of keywords (one chain
+            # of 1,100 failed "Expression tree is too large" in review, 2026-10-04).
+            for g in range(0, len(kws), _KEYWORD_SCAN_GROUP):
+                group = kws[g:g + _KEYWORD_SCAN_GROUP]
+                patterns = [_keyword_like_pattern(kw) for kw in group]
+                flags = ", ".join(_KEYWORD_LIKE_SQL for _ in group)
+                any_kw = " OR ".join(_KEYWORD_LIKE_SQL for _ in group)
                 hits = self._conn.execute(
-                    f"""SELECT id, {flags} FROM episodes
+                    f"""SELECT id, timestamp, {flags} FROM episodes
                         WHERE {base} AND ({any_kw})
                         ORDER BY timestamp DESC""",
                     [*patterns, *params, *patterns],
                 ).fetchall()
                 for row in hits:
-                    for i, kw in enumerate(kws):
-                        if row[1 + i]:
+                    for i, kw in enumerate(group):
+                        if row[2 + i]:
                             doc_freq[kw] += 1
                             if doc_freq[kw] <= limit_per_keyword:
-                                keep[row[0]] = None
+                                kept[row[0]] = row[1]
+            keep = dict.fromkeys(
+                sorted(kept, key=lambda i: kept[i], reverse=True)
+            )
+            if keep:
                 ids = list(keep)
                 for start in range(0, len(ids), 500):
                     chunk = ids[start:start + 500]
@@ -4063,9 +4079,7 @@ class Store:
         ``None`` with ``partial_error`` set when the state is partial), ``gated_session``
         (:meth:`wrap_gated_session`) and ``bound_token`` (:meth:`wrap_bound_token`).
         Read in one transaction, so a wrap that completes and is replaced meanwhile
-        cannot lend one wrap's fields to another's. The partial-state read ends that
-        transaction (its error rolls it back), so in that case only ``started_at`` and
-        ``partial_error`` describe the same moment."""
+        cannot lend one wrap's fields to another's."""
         with self._db_boundary("wrap_status_snapshot"), self._read_snapshot():
             started_at = self.get_wrap_started_at()
             partial_error: StoreError | None = None

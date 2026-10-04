@@ -11,6 +11,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   unchanged: on a copy of a real 12,968-episode store, 8 prompts gave identical episode
   ids and scores from `retrieve_relevant` and identical ids, scores and matched words from
   `search_episodes_counted`, 0.9.30 against this release.
+- `Store.keyword_candidates` takes any number of keywords (they are scanned in groups of
+  200; a single expression of 1,100 failed SQLite's depth limit).
 - `Store.recall` matches keywords with `content LIKE` instead of `LOWER(content) LIKE`.
   SQLite's `LIKE` already ignores ASCII case and `LOWER()` folds only ASCII, so the rows
   are the same (407 words checked on that store, 0 differences); `LOWER` copied the content
@@ -30,7 +32,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - `WrapWindowMovedError` survives pickling.
 - Durable-fact save warnings quote at most 500 characters of any one fact, line or marker
   (the rest is counted). A 50,000-character fact made one warning line 150,138 characters
-  long; the audit entry still keeps every dropped and re-inserted line whole.
+  long; the audit entry still keeps every dropped and re-inserted line whole. A suggested
+  `[drop-durable: ...]` marker is printed only when the whole line fits; a longer line gets
+  a description that points to the audit entry instead, because a shortened marker names
+  no line.
 - README and the skill no longer say association links "strengthen with reuse" as if that
   happens over time: a link gains strength only when the same pair is co-cited again, and
   on a real store that is rare (594 links, strongest 1.325, none above 2.0). Recall has

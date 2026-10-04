@@ -61,6 +61,10 @@ def test_counts_and_rows_are_read_in_one_snapshot(tmp_path):
         eps, doc_freq, corpus_n = s.keyword_candidates(["zqx"], limit_per_keyword=100)
         assert doc_freq["zqx"] == len(eps) <= corpus_n
         s._conn = real
+        # Any number of keywords: one OR chain of 1,100 LIKEs failed in review.
+        many = [f"zqk{i}" for i in range(1100)] + ["zqx"]
+        one = s.keyword_candidates(["zqx"], limit_per_keyword=5)
+        assert s.keyword_candidates(many, limit_per_keyword=5)[1]["zqx"] == one[1]["zqx"]
 
 
 def test_wrap_window_moved_error_pickles():
@@ -84,6 +88,11 @@ def test_durable_warning_lines_are_bounded():
     })
     warnings = report_warnings(report)
     assert warnings and max(len(w) for w in warnings) < 5_000
+    # A suggested marker is pasted back by the writer, so it is never a clipped one
+    # (L1 0.9.31, run: a clipped marker named no line and the fact came back).
+    for w in warnings:
+        for part in w.split("[drop-durable: ")[1:]:
+            assert "… (+" not in part.split("]", 1)[0], w[:200]
 
 
 def test_wrap_status_snapshot_does_not_mix_two_wraps(tmp_path, monkeypatch):

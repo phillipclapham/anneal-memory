@@ -642,10 +642,28 @@ def _clip(text: str) -> str:
     return f"{text[:_WARN_TEXT_LIMIT]}… (+{len(text) - _WARN_TEXT_LIMIT} chars)"
 
 
+def _marker(text: str, *, reinserted: bool = False) -> str:
+    """A drop marker for ``text``: the literal marker when ``text`` fits in a warning,
+    else a description of it that is not itself a marker. A clipped literal names no
+    line (L1, 0.9.31: pasted back, it matched nothing and the fact was re-inserted
+    again). ``reinserted``: ``text`` is a re-inserted line, which the audit entry's
+    ``durable_reinserted`` keeps whole, so the description says where to copy it from."""
+    if len(text) <= _WARN_TEXT_LIMIT:
+        return f"`[drop-durable: {text}]`"
+    where = (
+        "; the audit entry's `durable_reinserted` has the whole line" if reinserted else ""
+    )
+    return f"a drop marker naming {_clip(text)!r} (too long to quote here{where})"
+
+
 def _one_line(raw: str) -> str:
     """A fact's raw lines on one line, for a warning: joined with `` / ``, then
     cut by :func:`_clip`."""
-    return _clip(" / ".join(part.strip() for part in raw.split("\n")))
+    return _clip(_one_line_raw(raw))
+
+
+def _one_line_raw(raw: str) -> str:
+    return " / ".join(part.strip() for part in raw.split("\n"))
 
 
 def _join(items: list[str], render: Callable[[str], str] = str, more: str = "") -> str:
@@ -692,6 +710,10 @@ def report_warnings(report: DurableReport) -> list[str]:
                     " (the audit entry's `durable_reinserted` lists every one)")
             + f". If a fact changed, drop the old line with the marker, {marker} "
             f"in `## {h}`; that marker is the only way a durable line is removed."
+            + (f" Lines over {_WARN_TEXT_LIMIT} characters are shortened here; the audit "
+               f"entry's `durable_reinserted` has them whole."
+               if any(len(_one_line_raw(r)) > _WARN_TEXT_LIMIT for r in report.reinserted)
+               else "")
         )
     for target, closest in report.unknown_drops:
         hint = (
@@ -700,7 +722,7 @@ def report_warnings(report: DurableReport) -> list[str]:
             else " No prior line is close to it."
         )
         out.append(
-            f"Durable facts: `[drop-durable: {_clip(target)}]` names no line of the prior "
+            f"Durable facts: {_marker(target)} names no line of the prior "
             f"`## {h}` section; the marker was removed and nothing else changed. "
             f"Matching is exact (whitespace aside), on the fact or the whole line."
             + hint
@@ -715,7 +737,7 @@ def report_warnings(report: DurableReport) -> list[str]:
           lambda raw: f"Durable facts: dropped by marker: {_one_line(raw)}",
           "fact(s) dropped by marker; the audit entry's `durable_dropped` lists every one")
     _each(out, report.multi_drops,
-          lambda m: f"Durable facts: `[drop-durable: {_clip(m[0])}]` matched {len(m[1])} prior "
+          lambda m: f"Durable facts: {_marker(m[0])} matched {len(m[1])} prior "
           f"facts and dropped them all: " + _join(m[1], _one_line)
           + ". To drop only one, name its whole fact.",
           "drop marker(s) that each matched several prior facts")
@@ -727,7 +749,7 @@ def report_warnings(report: DurableReport) -> list[str]:
         out.append(
             f"Durable facts: the re-inserted line {_clip(old)!r} looks reworded as {_clip(new)!r}: "
             f"if the new line replaces the old, drop the old with "
-            f"`[drop-durable: {_clip(old)}]`."
+            f"{_marker(old, reinserted=True)}."
         )
     if report.near_duplicates_more:
         out.append(
@@ -737,7 +759,7 @@ def report_warnings(report: DurableReport) -> list[str]:
     for old, new in report.contradictions:
         out.append(
             f"Durable facts: re-inserted {_clip(old)!r} may be superseded by {_clip(new)!r}; if the "
-            f"fact changed, drop the old line with [drop-durable: {_clip(old)}]."
+            f"fact changed, drop the old line with {_marker(old, reinserted=True)}."
         )
     if report.contradictions_more:
         out.append(

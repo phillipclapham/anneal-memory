@@ -5663,7 +5663,7 @@ class Store:
         )
         if self.get_wrap_started_at():
             raise ValueError(in_progress)
-        # Capture the prior schema for the audit record before overwriting it —
+        # The prior schema is captured for the audit record under the lock below —
         # a schema migration changes which sections are required and whether the
         # felt-layer gate fires, so it belongs in the audit chain (without this,
         # a store that later fails to validate has no trail of when it flipped).
@@ -5671,10 +5671,8 @@ class Store:
         wrap_open = False
         with self._db_boundary("set_section_schema"):
             # The check above is a lock-free fast refusal; this one, under the
-            # write lock, is the one that decides. Inside a caller's open
-            # transaction the write joins it instead.
-            if not self._conn.in_transaction:
-                self._conn.execute("BEGIN IMMEDIATE")
+            # write lock, is the one that decides.
+            self._conn.execute("BEGIN IMMEDIATE")
             wrap_open = bool(self._get_metadata("wrap_started_at"))
             old_headings = [s["heading"] for s in self._load_section_schema(strict=False)]
             if not wrap_open:

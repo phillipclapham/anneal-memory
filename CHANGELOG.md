@@ -19,6 +19,15 @@ durable facts, typed-query recall, the cue wiring and the `outcome` fixes.
   `anneal-memory --db <path> set-schema <its schema name>` (migration entry
   `AM-DURABLE-FACTS`); a new store has it from `init`.
 
+### Known open (since 0.4.4, not a regression)
+- `prepare_wrap` reads the section schema before `wrap_started` freezes it, and neither
+  `wrap_started` nor `set_section_schema` checks the other inside its write transaction. A
+  `set-schema` from another process that commits between the two freezes the OLD schema
+  into the wrap, and the save validates against it while the live schema is the new one.
+  It needs a concurrent schema change during a wrap. The fix (compare the live schema inside
+  `wrap_started`'s transaction, re-check for an open wrap inside `set_section_schema`'s) is
+  planned for the next release.
+
 ### Fixed — durable-fact save warnings are bounded, and a near-miss header is named
 - Every per-item list in the durable-fact save warnings is cut at 20 items with one line
   counting the rest: facts dropped by marker, markers that matched several facts (and the

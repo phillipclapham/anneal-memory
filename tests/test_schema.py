@@ -195,6 +195,9 @@ class TestSchemaSnapshot:
         # freeze, not leave the old wrap's schema stranded.
         store = Store(tmp_path / "s.db", section_schema=FLOW_SCHEMA)
         store.wrap_started(token="a" * 32, episode_ids=[], section_schema=FLOW_SCHEMA)
+        # wrap_started refuses a passed schema that is not the live one (0.9.29), so
+        # the live schema moves first; the restart must then freeze the new one.
+        self._raw_set_live_schema(store, DEFAULT_SCHEMA)
         store.wrap_started(token="b" * 32, episode_ids=[],
                            section_schema=DEFAULT_SCHEMA, allow_restart=True)
         assert [s["heading"] for s in store.section_schema_for_wrap()] == \

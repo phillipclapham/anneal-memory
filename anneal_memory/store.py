@@ -870,6 +870,20 @@ class WrapWindowMovedError(AnnealMemoryError):
         )
 
 
+class WrapSchemaMovedError(AnnealMemoryError):
+    """Raised by ``wrap_started(section_schema=...)`` when the store's live section
+    schema is no longer the one the caller read: a ``set_section_schema`` committed
+    between the caller's read and ``wrap_started``. Nothing is written;
+    :func:`~anneal_memory.prepare_wrap` turns it into a "retry" result.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "wrap_started: the section schema changed since prepare_wrap read it. "
+            "Re-run prepare_wrap."
+        )
+
+
 class WrapOwnershipError(AnnealMemoryError):
     """Raised when ``wrap_cancelled(expect_token=...)`` is called and the store's
     current wrap token is not the one the caller claims to own.
@@ -3249,9 +3263,10 @@ class Store:
         # AM-SCHEMASNAPSHOT: freeze the section schema for the wrap's duration.
         # prepare_wrap passes the EXACT schema it read to build the package, so
         # the frozen value is byte-identical to what the agent compresses
-        # against; a direct caller that omits it freezes the current live schema
-        # (closes the common case, not the prepare-read→here micro-window). Both
-        # are validated + normalized before encoding. section_schema_for_wrap()
+        # against; a direct caller that omits it freezes the current live schema.
+        # A passed schema is compared with the live one under the write lock
+        # below, so a set_section_schema that committed after the caller's read
+        # refuses the wrap. Both are validated + normalized before encoding. section_schema_for_wrap()
         # returns this for the rest of the wrap so save cannot read a different
         # (concurrently-changed) live schema.
         frozen_schema = (
@@ -3337,6 +3352,11 @@ class Store:
                 actual = self._last_wrap_id()
                 if actual != expect_last_wrap_id:
                     raise WrapWindowMovedError(expect_last_wrap_id, actual)
+            if (
+                section_schema is not None
+                and self._load_section_schema(strict=True) != frozen_schema
+            ):
+                raise WrapSchemaMovedError()
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_started_at", _now_utc()),
@@ -5610,17 +5630,12 @@ class Store:
         ``wrap-cancel`` has not), this raises ``ValueError``. Set the schema
         before ``prepare_wrap``.
 
-        **Scope of that guarantee (honest):** the refusal closes the common
-        single-writer case. It does NOT, by itself, defend the narrow window
-        between ``prepare_wrap`` *reading* the live schema (via
-        :meth:`section_schema_for_wrap`) and its ``wrap_started()`` — a
-        concurrent/cross-process ``set_section_schema`` committing there leaves
-        the wrap's prepared instructions on the old schema while save reads the
-        new one. The wrap reads the live schema at both prepare and save rather
-        than a frozen snapshot, so the complete fix is to freeze the schema into
-        the wrap snapshot at ``wrap_started`` (tracked as AM-SCHEMASNAPSHOT,
-        mirroring the episode-id freeze). The single-writer consolidate model
-        does not exercise that window.
+        The open-wrap check runs inside this method's write transaction, and
+        ``wrap_started`` compares the schema ``prepare_wrap`` read with the live
+        one inside its own, so the two serialise on the write lock: a change that
+        commits first makes the wrap refuse (``WrapSchemaMovedError``, which
+        ``prepare_wrap`` reports as a retry), and a wrap that starts first makes
+        this refuse.
 
         Note: passing ``section_schema=`` to the ``Store`` constructor is also a
         write and is *authoritative* — reconstructing a store with an explicit
@@ -5638,26 +5653,35 @@ class Store:
                 this event. Also counted on ``status().audit_write_failures``
                 and logged; see :meth:`_audit_log_after_commit`.
         """
+        in_progress = (
+            "Cannot change the section schema while a wrap is in progress "
+            "(prepare_wrap has run but validated_save_continuity has not). "
+            "The schema is frozen for the wrap's duration so prepare and "
+            "save agree on routing. Complete or cancel the wrap first, or "
+            "set the schema before prepare_wrap."
+        )
         if self.get_wrap_started_at():
-            raise ValueError(
-                "Cannot change the section schema while a wrap is in progress "
-                "(prepare_wrap has run but validated_save_continuity has not). "
-                "The schema is frozen for the wrap's duration so prepare and "
-                "save agree on routing. Complete or cancel the wrap first, or "
-                "set the schema before prepare_wrap."
-            )
+            raise ValueError(in_progress)
         # Capture the prior schema for the audit record before overwriting it —
         # a schema migration changes which sections are required and whether the
         # felt-layer gate fires, so it belongs in the audit chain (without this,
         # a store that later fails to validate has no trail of when it flipped).
         old_headings = [s["heading"] for s in self.section_schema]
         normalized = validate_schema(schema)
+        wrap_open = False
         with self._db_boundary("set_section_schema"):
-            self._conn.execute(
-                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-                ("section_schema", json.dumps(normalized)),
-            )
+            # The check above is a lock-free fast refusal; this one, under the
+            # write lock, is the one that decides.
+            self._conn.execute("BEGIN IMMEDIATE")
+            wrap_open = bool(self._get_metadata("wrap_started_at"))
+            if not wrap_open:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                    ("section_schema", json.dumps(normalized)),
+                )
             self._conn.commit()
+        if wrap_open:
+            raise ValueError(in_progress)
         # ⛔ POST-COMMIT: the schema is persisted. This site had a bespoke guard
         # that was narrower than the policy on BOTH axes — it caught only
         # ``OSError`` (measured 2026-09-04: a RuntimeError from the sink

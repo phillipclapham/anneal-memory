@@ -2,6 +2,21 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed — a schema change can no longer slip in between prepare_wrap's read and the wrap's freeze
+- `wrap_started(section_schema=...)` compares the passed schema with the live one under
+  its write lock and raises the new `WrapSchemaMovedError` when they differ; nothing is
+  written. `prepare_wrap` reports it as a capture-only result,
+  `downgraded-schema-changed`: retry. Reproduced on 0.9.28: a `set_section_schema` from a
+  second connection committing between the read and `wrap_started` left the wrap frozen
+  on the old schema while the live schema was the new one.
+- `set_section_schema` re-checks for an open wrap inside its own write transaction (the
+  earlier check, before the lock, stays as a fast refusal).
+- Behaviour change for direct callers: `wrap_started` no longer freezes a passed schema
+  that is not the store's live schema. Set the schema first.
+- The `set_section_schema` docstring no longer says the wrap reads the live schema at save.
+
 ## [0.9.28] — 2026-10-04
 
 **0.9.27 was tagged on GitHub but never published to PyPI.** Its `prepare_wrap` guidance

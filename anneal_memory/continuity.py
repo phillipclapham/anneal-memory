@@ -90,6 +90,7 @@ from .store import (
     WrapInProgressError,
     WrapOwnershipError,
     SupersessionError,
+    WrapSchemaMovedError,
     WrapWindowMovedError,
     _fsync_dir,
     _safe_unlink,
@@ -1924,8 +1925,8 @@ def prepare_wrap(
     # AM-SCHEMASNAPSHOT: freeze the EXACT schema we read above (line ~884) into
     # the wrap snapshot, so validated_save_continuity reads back this same schema
     # rather than re-reading a possibly-concurrently-changed live schema. Passing
-    # the already-read `schema` (not letting wrap_started re-read live) closes the
-    # read→wrap_started micro-window airtight.
+    # the already-read `schema` lets wrap_started compare it with the live one
+    # under its write lock and refuse if a set_section_schema landed in between.
     try:
         store.wrap_started(
             token=wrap_token,
@@ -1940,6 +1941,14 @@ def prepare_wrap(
             "Consolidate downgraded to capture-only (downgraded-wrap-replaced): "
             "another wrap completed while this call was preparing, so its "
             "episodes and continuity are out of date and no wrap was opened. "
+            "Retry. Capture (afferent) is unaffected.",
+            episode_count=_pending_count(store),
+        )
+    except WrapSchemaMovedError:
+        return _downgraded_empty(
+            "Consolidate downgraded to capture-only (downgraded-schema-changed): "
+            "the section schema changed while this call was preparing, so its "
+            "instructions were built for the old schema and no wrap was opened. "
             "Retry. Capture (afferent) is unaffected.",
             episode_count=_pending_count(store),
         )

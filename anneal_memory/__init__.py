@@ -14,6 +14,7 @@ from .store import (
     WrapCancelGatedError,
     SupersessionError,
     WrapOwnershipError,
+    WrapSchemaMovedError,
     WrapWindowMovedError,
     continuity_lock,
 )
@@ -146,6 +147,7 @@ __all__ = [
     "WrapCancelGatedError",
     "SupersessionError",
     "WrapOwnershipError",
+    "WrapSchemaMovedError",
     "WrapWindowMovedError",
     "continuity_lock",
     "Server",

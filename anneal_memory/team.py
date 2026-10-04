@@ -98,7 +98,7 @@ _MAX_LINES = 200_000
 _MAX_JSON_DEPTH = 32  # a ledger entry nests two levels; deeper is never an entry
 _MAX_FILE_BYTES = 64 * 1024 * 1024
 _FUTURE_SKEW = timedelta(days=1)
-_TS = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$")
+_TS = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z", re.ASCII)
 
 
 def canonical(entry: dict) -> str:
@@ -166,7 +166,10 @@ def read_ledger_lines(paths: Iterable[str | Path]) -> list[str]:
     may sit inside a JSON string). Raises ``ValueError`` for a path that cannot be read."""
     lines: list[str] = []
     for raw in paths:
-        p = Path(raw).expanduser()
+        try:
+            p = Path(raw).expanduser()
+        except RuntimeError as exc:
+            raise ValueError(f"{raw}: cannot expand the path ({exc})") from exc
         if p.is_dir():
             raise ValueError(
                 f"{p}: a directory is not read directly; pipe the ledger's exporter "
@@ -182,7 +185,7 @@ def read_ledger_lines(paths: Iterable[str | Path]) -> list[str]:
         if len(data) > _MAX_FILE_BYTES:
             raise ValueError(f"{p}: larger than {_MAX_FILE_BYTES} bytes")
         try:
-            text = data.decode("utf-8")
+            text = data.decode("utf-8-sig")
         except UnicodeDecodeError as exc:
             raise ValueError(f"{p}: not UTF-8 text ({exc.reason})") from exc
         lines.extend(ln.rstrip("\r") for ln in text.split("\n"))
@@ -190,7 +193,7 @@ def read_ledger_lines(paths: Iterable[str | Path]) -> list[str]:
 
 
 def _normalize_ts(ts: object) -> str | None:
-    if not isinstance(ts, str) or not _TS.match(ts):
+    if not isinstance(ts, str) or not _TS.fullmatch(ts):
         return None
     base = ts[:-1]
     fmt = "%Y-%m-%dT%H:%M:%S.%f" if "." in base else "%Y-%m-%dT%H:%M:%S"
@@ -208,6 +211,21 @@ def _unsafe_text(text: str) -> bool:
         unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp", "Co", "Cn") and c not in "\n\r\t"
         for c in text
     )
+
+
+_NO_RUN = object()  # no chain run has started: distinct from a root whose author is null
+
+
+def _refuse_constant(name: str) -> None:
+    """NaN and Infinity are not JSON; the entry would store as text other readers refuse."""
+    raise ValueError(f"{name} is not valid JSON")
+
+
+def _finite_float(text: str) -> float:
+    value = float(text)
+    if value in (float("inf"), float("-inf")):
+        raise ValueError("a number outside the float range is not accepted")
+    return value
 
 
 def _nests_too_deep(line: str) -> bool:
@@ -243,7 +261,7 @@ def _is_str_list(v: object) -> bool:
 
 def _entry_problem(e: dict) -> str | None:
     """Why a chain-valid entry cannot become an episode, or None."""
-    if e.get("v") != SCHEMA_VERSION:
+    if type(e.get("v")) is not int or e["v"] != SCHEMA_VERSION:
         return f"schema version {e.get('v')!r} is not {SCHEMA_VERSION}"
     for f in ("id", "author"):
         if not isinstance(e.get(f), str) or not _HANDLE.fullmatch(e[f]):
@@ -372,7 +390,7 @@ def _verified_chains(
     seen_hash: dict[str, dict] = {}
     out: list[dict] = []
     last_hash: str | None = None
-    run_author: object = None
+    run_author: object = _NO_RUN
     for n, line in enumerate(lines, 1):
         if n > _MAX_LINES:
             report.chain_problems.append(
@@ -388,7 +406,7 @@ def _verified_chains(
             report.chain_problems.append(f"line {n}: nested deeper than an entry can be")
             continue
         try:
-            e = json.loads(line)
+            e = json.loads(line, parse_constant=_refuse_constant, parse_float=_finite_float)
         except json.JSONDecodeError as exc:
             report.chain_problems.append(f"line {n}: not JSON ({exc.msg})")
             continue
@@ -422,7 +440,7 @@ def _verified_chains(
                 "another file's chain), not imported"
             )
             continue
-        if not is_root and run_author is not None and e.get("author") != run_author:
+        if not is_root and e.get("author") != run_author:
             report.chain_problems.append(
                 f"{who}: names author {e.get('author')!r} inside {run_author!r}'s "
                 "chain; the chain is cut here"
@@ -447,12 +465,18 @@ def import_ledger(
     Never raises for bad ledger content: every refusal is in the report. A store
     error (locked database, corrupt file) raises as it does everywhere else.
     """
+    if isinstance(link_authority, (str, bytes)):
+        raise TypeError("link_authority is a collection of patterns, not one string")
     report = TeamImportReport(dry_run=dry_run)
     valid: list[dict] = []
-    for e in _verified_chains(lines, report):
+    verified = _verified_chains(lines, report)
+    for e in verified:
         problem = _entry_problem(e)
         if problem:
-            report.rejected.append({"id": e.get("id"), "reason": problem})
+            rid = e.get("id")
+            report.rejected.append(
+                {"id": rid[:80] if isinstance(rid, str) else rid, "reason": problem}
+            )
         else:
             valid.append(e)
     # The same ledger id with two different hashes inside one batch (an ack and a
@@ -469,9 +493,14 @@ def import_ledger(
     # of them, as prev), so nothing is imported orphaned and nobody else's chain goes.
     dropped: set[str] = set()
     records: list[dict[str, Any]] = []
-    for e in valid:
-        if e["id"] in clash or e["prev"] in dropped:
+    valid_hashes = {e["hash"] for e in valid}
+    for e in verified:
+        # Descent is read over every chain-verified entry: a semantically rejected
+        # middle entry must not let its descendants slip past a dropped ancestor.
+        if e["hash"] in valid_hashes and e["id"] in clash or e["prev"] in dropped:
             dropped.add(e["hash"])
+            continue
+        if e["hash"] not in valid_hashes:
             continue
         if e["type"] == "ack":
             report.skipped_ack.append(e["id"])

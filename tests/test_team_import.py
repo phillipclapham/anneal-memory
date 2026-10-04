@@ -711,3 +711,71 @@ def test_a_legit_entry_quoting_brackets_and_braces_still_imports(store):
     rep = import_ledger(store, ledger("alice", [{**RULING, "words": words}]))
     assert rep.clean and len(rep.imported) == 1
     assert words.strip() in store.recall(limit=1).episodes[0].metadata["team"]["words"]
+
+
+# --- 1004+27 L3 triage (each case reproduced or traced against 0.9.36 first) ---
+
+def _finding(**kw):
+    return {"type": "finding", "summary": "s", **kw}
+
+
+def test_link_authority_must_be_a_collection_not_a_string(store):
+    with pytest.raises(TypeError):
+        import_ledger(store, ledger("alice", [_finding()]), link_authority="*")
+
+
+def test_non_finite_numbers_are_not_imported(store):
+    for value, spelled in ((float("nan"), "NaN"), (float("inf"), "Infinity"),
+                           (float("-inf"), "-Infinity"), (float("inf"), "1e999")):
+        base = {"v": 1, "id": "alice-20261004120000-00000000", "ts": "2026-10-04T12:00:00Z",
+                "author": "alice", "paths": [], "supersedes": [], "x": value, **_finding()}
+        line = json.dumps(seal(base, "")).replace(json.dumps(value), spelled)
+        assert spelled in line
+        report = import_ledger(store, [line])
+        assert report.imported == [] and report.chain_problems, spelled
+
+
+def test_schema_version_must_be_the_integer(store):
+    for v in (True, 1.0):
+        e = {"v": v, "id": "alice-20261004120000-00000000", "ts": "2026-10-04T12:00:00Z",
+             "author": "alice", "paths": [], "supersedes": [], **_finding()}
+        line = json.dumps(seal(e, ""))
+        report = import_ledger(store, [line])
+        assert report.imported == [] and report.rejected, v
+
+
+def test_a_utf8_bom_does_not_lose_the_first_chain(store, tmp_path):
+    from anneal_memory.team import read_ledger_lines
+    p = tmp_path / "bom.jsonl"
+    p.write_bytes(b"\xef\xbb\xbf" + "\n".join(ledger("alice", [_finding()])).encode())
+    assert len(import_ledger(store, read_ledger_lines([p])).imported) == 1
+
+
+def test_a_home_that_cannot_expand_is_a_value_error():
+    from anneal_memory.team import read_ledger_lines
+    with pytest.raises(ValueError):
+        read_ledger_lines(["~no-such-user-1004/ledger.jsonl"])
+
+
+def test_a_null_author_root_does_not_open_a_chain_for_another_author(store):
+    root = {"v": 1, "id": "alice-20261004120000-00000000", "ts": "2026-10-04T12:00:00Z",
+            "author": None, "paths": [], "supersedes": [], **_finding()}
+    r = seal(root, "")
+    child = seal({"v": 1, "id": "alice-20261004120000-00000001", "ts": "2026-10-04T12:00:01Z",
+                  "author": "alice", "paths": [], "supersedes": [], **_finding()}, r["hash"])
+    report = import_ledger(store, [json.dumps(r), json.dumps(child)])
+    assert report.imported == [] and report.chain_problems
+
+
+def test_a_rejected_middle_entry_does_not_free_the_descendants_of_a_clash(store):
+    a1 = {"v": 1, "id": "alice-20261004120000-00000000", "ts": "2026-10-04T12:00:00Z",
+          "author": "alice", "paths": [], "supersedes": [], **_finding(summary="one")}
+    a2 = {**a1, **_finding(summary="two")}
+    s1, s2 = seal(a1, ""), seal(a2, "")  # same id, two hashes: a clash
+    # the rejected middle: hash-valid but no summary, then a valid grandchild
+    bad = seal({"v": 1, "id": "alice-20261004120000-00000001", "ts": "2026-10-04T12:00:01Z",
+                "author": "alice", "paths": [], "supersedes": [], "type": "finding"}, s1["hash"])
+    gc = seal({"v": 1, "id": "alice-20261004120000-00000002", "ts": "2026-10-04T12:00:02Z",
+               "author": "alice", "paths": [], "supersedes": [], **_finding()}, bad["hash"])
+    report = import_ledger(store, [json.dumps(x) for x in (s1, bad, gc)] + [json.dumps(s2)])
+    assert report.conflicts and all(i["id"] != gc["id"] for i in report.imported)

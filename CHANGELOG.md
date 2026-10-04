@@ -33,8 +33,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   evaluated, so a link removed with `unsupersede` stays removed. A link whose target is
   not imported yet stays pending and is evaluated when the target arrives.
 - Hardening, each from a reproduced attack on the first builds: a chain is a contiguous
-  run (a root with `prev == ""`, then each line naming the hash of the line before it; a
-  line repeated from earlier is skipped but moves the run on), and an author change
+  run (a root with `prev == ""`, then each line naming the hash of the line before it; an
+  exact repeat of an earlier line is skipped and moves nothing), and an author change
   inside a run cuts it. Links come only from the verified batch of the call, never from
   stored rows, so a `team:` row planted with `record()` cannot drive one. Free-text
   fields are rendered as quoted, escaped strings and control, format and line-separator

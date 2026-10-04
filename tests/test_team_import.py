@@ -632,11 +632,23 @@ def test_stdin_frames_on_newline_only(tmp_path):
     assert r.returncode == 0 and json.loads(r.stdout)["imported"] == 1
 
 
-def test_a_copy_then_an_append_chains(store):
-    both = ledger("alice", [RULING, {"type": "finding", "reason": "second"},
-                            {"type": "finding", "reason": "third"}])
-    rep = import_ledger(store, both[:2] + both)  # the same entries reached twice, then one more
-    assert rep.clean and len(rep.imported) == 3
+def test_a_repeat_moves_no_state_and_a_file_given_twice_is_harmless(store):
+    both = ledger("alice", [RULING, {"type": "finding", "reason": "second"}])
+    rep = import_ledger(store, both + both)
+    assert rep.clean and len(rep.imported) == 2
+
+
+def test_copied_line_cannot_attach_a_run_after_another_authors_chain(store):
+    alice = ledger("alice", [RULING])
+    tip = json.loads(alice[0])
+    m_root = ledger("mallory", [{"type": "finding", "reason": "own root"}])
+    child = seal({"v": 1, "id": "mallory-20261004120000-00000009", "ts": "2026-10-04T13:00:00Z",
+                  "author": "mallory", "type": "finding", "reason": "child of alice's tip",
+                  "paths": [], "supersedes": []}, tip["hash"])
+    rep = import_ledger(store, alice + m_root + [alice[0], json.dumps(child)])
+    assert sorted(i["id"] for i in rep.imported) == sorted(
+        [tip["id"], json.loads(m_root[0])["id"]])
+    assert any("does not continue" in p for p in rep.chain_problems)
 
 
 def test_a_copied_line_cannot_give_another_author_a_place_in_the_chain(store):
@@ -662,3 +674,19 @@ def test_an_id_clash_drops_only_the_clashing_subtree(store):
     rep2 = import_ledger(Store(store.path.parent / "k.db", audit=False), one + twin + other)
     assert rep2.conflicts
     assert sorted(i["id"] for i in rep2.imported) == [json.loads(other[0])["id"]]
+
+
+def test_unreadable_file_is_a_clean_cli_error(tmp_path):
+    db = tmp_path / "p.db"
+    Store(db, audit=False).close()
+    f = tmp_path / "locked.jsonl"
+    f.write_text("{}\n")
+    f.chmod(0)
+    try:
+        r = subprocess.run([sys.executable, "-m", "anneal_memory", "--db", str(db), "team-import",
+                            str(f)], capture_output=True, text=True)
+    finally:
+        f.chmod(0o600)
+    if r.returncode == 0:  # running as a user that ignores file modes
+        return
+    assert r.returncode == 1 and "Traceback" not in r.stderr and "cannot be read" in r.stderr

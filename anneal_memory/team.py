@@ -173,8 +173,11 @@ def read_ledger_lines(paths: Iterable[str | Path]) -> list[str]:
             )
         if not p.is_file():
             raise ValueError(f"{p}: not a regular file")
-        with p.open("rb") as fh:
-            data = fh.read(_MAX_FILE_BYTES + 1)
+        try:
+            with p.open("rb") as fh:
+                data = fh.read(_MAX_FILE_BYTES + 1)
+        except OSError as exc:
+            raise ValueError(f"{p}: cannot be read ({exc.strerror or exc})") from exc
         if len(data) > _MAX_FILE_BYTES:
             raise ValueError(f"{p}: larger than {_MAX_FILE_BYTES} bytes")
         try:
@@ -333,9 +336,11 @@ def _verified_chains(
     run: it starts at a ``prev == ""`` root and each following line must name the
     hash of the line accepted just before it, so a line that does not continue its
     run is refused (with every later line of that run, which names it as ``prev``).
-    A line repeated from earlier in the stream (the same entry reached through two
-    files) is skipped but moves the run on, so a copy followed by an append still
-    chains. The stream carries no file names, so no author can be bound to a path."""
+    An exact repeat of an earlier line is skipped and moves nothing, so a copied line
+    cannot be used to attach a run to another author's chain; a copy of a chain's
+    prefix followed by an append is continued only when nothing else sits between the
+    copy's source and it. The stream carries no file names, so no author can be bound
+    to a path."""
     seen_hash: dict[str, dict] = {}
     out: list[dict] = []
     last_hash: str | None = None
@@ -378,9 +383,7 @@ def _verified_chains(
             # chain state, so a copied line cannot be used to carry a run across files.
             if seen_hash[e["hash"]] != e:
                 report.chain_problems.append(f"{who}: repeats a hash with different content")
-            else:
-                last_hash = e["hash"]
-            continue
+            continue  # an exact repeat moves no chain state: nothing can be carried across it
         is_root = e["prev"] == ""
         if not is_root and e["prev"] != last_hash:
             report.chain_problems.append(

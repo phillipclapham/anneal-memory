@@ -2098,6 +2098,51 @@ def cmd_import(args: argparse.Namespace) -> None:
             print(f"Import complete: {imported} imported, {skipped} skipped (already exist), {errors} errors")
 
 
+def cmd_team_import(args: argparse.Namespace) -> None:
+    """Import a team ledger as provenance-carrying episodes (see anneal_memory.team).
+
+    Exit 0 when everything verified and imported; exit 3 when something was
+    refused or in conflict (everything verifiable was still imported, and the
+    report says what was not)."""
+    from .team import import_ledger, read_ledger_lines
+
+    sources = list(args.sources or [])
+    if not sources:
+        print("Error: give a ledger file or directory, or '-' for stdin.", file=sys.stderr)
+        sys.exit(2)
+    lines: list[str] = []
+    paths: list[str] = []
+    for src in sources:
+        if src == "-":
+            lines.extend(sys.stdin.read().splitlines())
+        else:
+            if not Path(src).expanduser().exists():
+                print(f"Error: not found: {src}", file=sys.stderr)
+                sys.exit(1)
+            paths.append(src)
+    lines.extend(read_ledger_lines(paths))
+    with _open_store(args) as store:
+        report = import_ledger(store, lines, dry_run=args.dry_run)
+    data = report.to_dict()
+    if args.json:
+        _print_json(data)
+    else:
+        verb = "Would import" if args.dry_run else "Imported"
+        print(
+            f"{verb} {data['imported']} entries ({data['already_present']} already present, "
+            f"{data['skipped_ack']} acks skipped); {data['links_made']} supersession links, "
+            f"{len(data['links_pending'])} pending"
+        )
+        for key in ("rejected", "chain_problems", "conflicts", "links_refused"):
+            for item in data[key]:
+                print(f"  {key}: {item}", file=sys.stderr)
+        for item in data["cross_author_links"]:
+            print(f"  note: {item['by']} superseded {item['target']} (another author's entry)",
+                  file=sys.stderr)
+    if not report.clean:
+        sys.exit(3)
+
+
 def _read_audit_entries(
     args: argparse.Namespace, db_path: Path
 ) -> tuple[list[dict], bool, bool, list[str], bool, frozenset[str] | None]:
@@ -4171,6 +4216,16 @@ def build_parser() -> argparse.ArgumentParser:
     sub = subparsers.add_parser("import", help="Import episodes from JSON export", parents=[json_parent])
     sub.add_argument("path", help="Path to JSON export file")
     sub.set_defaults(func=cmd_import)
+
+    # -- team-import --
+    sub = subparsers.add_parser(
+        "team-import",
+        help="Import a team decision ledger (JSONL, hash-chained) with provenance",
+        parents=[json_parent],
+    )
+    sub.add_argument("sources", nargs="*", help="Ledger file(s) or directory; '-' reads stdin")
+    sub.add_argument("--dry-run", action="store_true", help="Verify and report; write nothing")
+    sub.set_defaults(func=cmd_team_import)
 
     # -- audit --
     sub = subparsers.add_parser("audit", help="Read and filter audit trail entries", parents=[json_parent])

@@ -343,6 +343,7 @@ StoreOperation = Literal[
     "wrap_status_snapshot",
     "supersede",
     "unsupersede",
+    "import_team_entries",
     "supersession_exists",
     "superseded_by_map",
     "supersession_problem",
@@ -2658,6 +2659,139 @@ class Store:
         }, method="unsupersede", committed="the link removal", actor=source)
         return True
 
+    def import_team_entries(
+        self, records: list[dict[str, Any]], *, dry_run: bool = False
+    ) -> dict[str, Any]:
+        """Import verified team-ledger entries as episodes, idempotently, in ONE
+        write transaction (so two concurrent imports cannot both insert an entry).
+
+        The caller (:mod:`anneal_memory.team`) has already verified the ledger's
+        hash chains and mapped each entry to a record dict with ``entry_id``,
+        ``hash``, ``type``, ``source``, ``timestamp``, ``content``, ``metadata``
+        (carrying ``metadata["team"]``) and ``supersedes`` (ledger entry ids).
+
+        - An entry id already in the store with the same hash is left alone; the
+          same id with a different hash is a CONFLICT, never overwritten.
+        - Links are made from the ledger's own ``supersedes`` ids, mapped to
+          episode ids through the stored entry ids, and only between team
+          entries. Existence, older-than and no-cycle are checked; the
+          word-overlap gate of :meth:`supersede` is skipped, because the ledger
+          already holds the decider's words and a replacing ruling need not
+          share wording. A target not imported yet leaves the link PENDING; every
+          later import recomputes links from all stored team entries.
+        - ``dry_run`` computes everything and writes nothing.
+        """
+        if dry_run and self._defer_commit:
+            raise ValueError("import_team_entries: dry_run cannot run inside a batch")
+        imported: list[dict[str, str]] = []
+        already: list[str] = []
+        conflicts: list[dict[str, str]] = []
+        made: list[dict[str, str]] = []
+        pending: list[dict[str, str]] = []
+        refused: list[dict[str, str]] = []
+        with self._db_boundary("import_team_entries"):
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")
+            session_id = self._current_session_id()
+            # ';' is the character after ':', so this range is every 'team:*'
+            # source and uses idx_episodes_source.
+            by_entry: dict[str, dict[str, Any]] = {}
+            for row in self._conn.execute(
+                "SELECT id, source, timestamp, content, metadata FROM episodes "
+                "WHERE source >= 'team:' AND source < 'team;'"
+            ).fetchall():
+                try:
+                    team = (json.loads(row["metadata"]) or {}).get("team") or {}
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(team, dict) and isinstance(team.get("entry_id"), str):
+                    by_entry[team["entry_id"]] = {
+                        "ep": row["id"], "hash": team.get("hash"),
+                        "supersedes": team.get("supersedes") or [],
+                        "content": row["content"], "ts": row["timestamp"],
+                        "source": row["source"],
+                    }
+            for rec in records:
+                known = by_entry.get(rec["entry_id"])
+                if known is not None:
+                    if known["hash"] == rec["hash"]:
+                        already.append(rec["entry_id"])
+                    else:
+                        conflicts.append({
+                            "id": rec["entry_id"], "stored_hash": str(known["hash"]),
+                            "offered_hash": rec["hash"],
+                        })
+                    continue
+                meta_json = json.dumps(rec["metadata"])
+                for nonce in range(3):
+                    ep_id = _episode_id(rec["content"], rec["timestamp"], nonce)
+                    try:
+                        self._conn.execute(
+                            "INSERT INTO episodes (id, timestamp, type, content, source, "
+                            "session_id, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (ep_id, rec["timestamp"], rec["type"], rec["content"],
+                             rec["source"], session_id, meta_json),
+                        )
+                        break
+                    except sqlite3.IntegrityError:
+                        if nonce == 2:
+                            raise
+                by_entry[rec["entry_id"]] = {
+                    "ep": ep_id, "hash": rec["hash"], "supersedes": rec["supersedes"],
+                    "content": rec["content"], "ts": rec["timestamp"],
+                    "source": rec["source"],
+                }
+                imported.append({"id": rec["entry_id"], "episode": ep_id,
+                                 "source": rec["source"], "type": rec["type"],
+                                 "content": rec["content"]})
+            for entry_id, new in by_entry.items():
+                for target in new["supersedes"]:
+                    old = by_entry.get(target)
+                    if old is None:
+                        pending.append({"id": entry_id, "target": target})
+                        continue
+                    if self._conn.execute(
+                        "SELECT 1 FROM supersessions WHERE old_id = ? AND new_id = ?",
+                        (old["ep"], new["ep"]),
+                    ).fetchone():
+                        continue
+                    problem = self._supersession_problem(
+                        old["ep"], new["ep"], new["content"], new["ts"],
+                        check_grounds=False,
+                    )
+                    if problem:
+                        refused.append({"id": entry_id, "target": target,
+                                        "reason": problem})
+                        continue
+                    self._conn.execute(
+                        "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
+                        (old["ep"], new["ep"], new["source"]),
+                    )
+                    made.append({"id": entry_id, "target": target, "old": old["ep"],
+                                 "new": new["ep"], "source": new["source"],
+                                 "cross_author": str(old["source"] != new["source"]).lower()})
+            if dry_run:
+                self._conn.rollback()
+            elif not self._defer_commit:
+                self._conn.commit()
+        if not dry_run:
+            for item in imported:
+                self._audit_log_after_commit("record", {
+                    "episode_id": item["episode"], "type": item["type"],
+                    "content_hash": _content_hash(item["content"]),
+                    "source": item["source"],
+                }, method="import_team_entries", committed="the episode",
+                    actor=item["source"])
+            for link in made:
+                self._audit_log_after_commit("supersede", {
+                    "old_id": link["old"], "new_id": link["new"],
+                    "source": link["source"],
+                }, method="import_team_entries", committed="the supersession",
+                    actor=link["source"])
+        return {"imported": imported, "already_present": already,
+                "conflicts": conflicts, "links_made": made,
+                "links_pending": pending, "links_refused": refused}
+
     def supersession_problem(self, *, old_id: str, new_id: str) -> str | None:
         """Why a proposed link would be refused, or None if it would record.
         Read-only; :meth:`supersede` re-checks under its own write lock."""
@@ -2813,7 +2947,8 @@ class Store:
             ).fetchone() is not None
 
     def _supersession_problem(
-        self, old_id: str, new_id: str | None, new_content: str, new_ts: str
+        self, old_id: str, new_id: str | None, new_content: str, new_ts: str,
+        *, check_grounds: bool = True,
     ) -> str | None:
         """Why one link fails validation, or None if it passes. Never raises a
         refusal (callers raise outside their ``_db_boundary``). Runs inside the
@@ -2847,7 +2982,7 @@ class Store:
                 f"supersede: {new_id!r} already leads, through recorded links, to "
                 f"{old_id!r}; this link would close a cycle and hide every episode on it"
             )
-        if not _supersession_grounds(new_content, row["content"]):
+        if check_grounds and not _supersession_grounds(new_content, row["content"]):
             return (
                 f"supersede: the new text shares too little with {old_id!r} to ground as "
                 f"an update of it (needs {SUPERSEDE_MIN_OVERLAP_RATIO:.0%} of the shorter "
@@ -7106,6 +7241,7 @@ class Store:
 
         - :meth:`record` (episode writes)
         - :meth:`supersede` / :meth:`unsupersede` (supersession links)
+        - :meth:`import_team_entries` (``dry_run`` is refused inside a batch)
         - :meth:`delete` (episode deletions)
         - :meth:`record_associations` / :meth:`decay_associations`
         - :meth:`wrap_completed`

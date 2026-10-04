@@ -4,6 +4,30 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added — team ledger import (`anneal-memory team-import`)
+- `anneal-memory team-import <file|dir|-> [--dry-run] [--json]` and
+  `anneal_memory.team.import_ledger(store, lines)` import a team decision ledger
+  (JSONL, one SHA-256 hash chain per file, written by Levain's team layer) as
+  episodes that keep who said what: `source` is `team:<author>` from the entry's own
+  author field, the decider's words are quoted in the text, and every ledger field
+  (owner, kind, paths, recheck, supersedes, refs, hash) rides in `metadata["team"]`.
+- Chain-verified: an entry is imported only when its hash and `prev` link check back to
+  the chain start; entries after a break, fork or gap are refused and reported, the
+  verified prefix imports, and a chain whose entries name different authors is cut at
+  the change. The chain proves the file was not edited, not who wrote it.
+- Idempotent by ledger id, in one write transaction (`Store.import_team_entries`). The
+  same id with a different hash is reported as a conflict and never overwritten.
+  `ack` entries are counted and skipped; a `retire` entry imports as a one-line
+  `context` episode that only anchors the supersession links.
+- Supersession maps onto the existing `supersessions` table (recall hides the old
+  entry), between team entries only. The ledger's own validated `supersedes` authorises
+  the link, so the word-overlap gate of `Store.supersede` is skipped; existence,
+  older-than and no-cycle are still checked. A link whose target is not imported yet
+  stays pending and completes on a later import. Links made by one author over
+  another's entry are listed in the report (`cross_author_links`).
+- Exit code 3 means something was refused or in conflict (everything verifiable was
+  still imported). Nothing about `record`, `save_continuity` or the hard maximum changed.
+
 ## [0.9.33] — 2026-10-04
 
 ### Added — a hard maximum on the saved continuity

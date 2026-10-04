@@ -67,6 +67,7 @@ from .rederive import (
 )
 from .durable import DurableFact, parse_durable_facts
 from .continuity import (
+    ContinuityValidationError,
     felt_currency,
     format_wrap_package_text,
     prepare_wrap,
@@ -145,6 +146,7 @@ __all__ = [
     "StoreError",
     "StoreOperation",
     "WrapInProgressError",
+    "ContinuityValidationError",
     "WrapCancelBoundError",
     "WrapCancelGatedError",
     "SupersessionError",

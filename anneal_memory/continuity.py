@@ -60,6 +60,7 @@ from .schema import (
     DEFAULT_SCHEMA,
     SectionSpec,
     default_max_chars,
+    hard_max_chars,
     schema_durable_budget,
     graduating_headings,
     required_headings,
@@ -214,6 +215,25 @@ def measure_sections(text: str) -> dict[str, int]:
         sections[current_section] = current_chars
 
     return sections
+
+
+class ContinuityValidationError(ValueError):
+    """A save refused on a size bound. A :class:`ValueError`, so every transport
+    that already surfaces a refused save (CLI, MCP) surfaces this one too; the
+    wrap stays in progress, as for any validation refusal. ``chars`` is the
+    measured size (the durable section excluded), ``bound`` the hard maximum and
+    ``target`` the schema's compose target."""
+
+    def __init__(self, message: str, *, chars: int, bound: int, target: int) -> None:
+        super().__init__(message)
+        self.chars, self.bound, self.target = chars, bound, target
+
+    def __reduce__(self):  # keyword-only fields: rebuild the same way
+        return (_rebuild_validation_error, (str(self), self.chars, self.bound, self.target))
+
+
+def _rebuild_validation_error(message, chars, bound, target):
+    return ContinuityValidationError(message, chars=chars, bound=bound, target=target)
 
 
 # --- Catastrophic-shrink gate (v0.3.5) ---------------------------------------
@@ -567,6 +587,67 @@ def _check_no_catastrophic_shrink(
         "intended (a deliberate diet / migration recompression), pass "
         'allow_shrink=True (CLI: --allow-shrink; MCP: "allow_shrink": true).'
     )
+
+
+def _check_hard_max(store: Any, text: str, schema: list[SectionSpec]) -> None:
+    """Refuse a save whose size (the durable section excluded) is above the
+    schema's hard maximum, :func:`~anneal_memory.schema.hard_max_chars`.
+
+    Fail-closed like the shrink gate and NOT lifted by ``allow_shrink``: a diet
+    flag has nothing to say about a file that is too big. An oversized continuity
+    is loaded by every session, so refusing it is cheaper than committing it. The
+    refusal is written to the audit trail (``continuity_save_refused``) before it
+    is raised, so a store nobody is watching still leaves a record, and the
+    message names what to cut by category: the sections that hold fetchable FACT
+    (``live-state``, ``narrative``), never the identity layers (``graduating``,
+    ``narrative-timeless``), which are cut only for being wrong."""
+    bound = hard_max_chars(schema)
+    chars = len(text) - durable_section_chars(text, schema)
+    if chars <= bound:
+        return
+    target = default_max_chars(schema)
+    masses = _schema_section_masses(text, schema)
+
+    def _named(roles: tuple[str, ...]) -> list[str]:
+        return [
+            f"{s['heading']} ({masses.get(s['heading'].lower(), 0)})"
+            for s in schema if s["role"] in roles
+        ]
+
+    cut_from = _named(("live-state", "narrative"))
+    keep = _named(("graduating", "narrative-timeless"))
+    message = (
+        f"Refusing to save: the continuity is {chars} chars (the durable section "
+        f"excluded), above this schema's hard maximum of {bound} (target {target}; "
+        f"over by {chars - bound}). An oversized continuity is loaded by every "
+        f"session, so it is refused rather than saved. The bound comes from the "
+        f"schema, not from the max_chars passed to prepare_wrap, and allow_shrink "
+        f"does not lift it."
+    )
+    if cut_from:
+        message += (
+            f"\n\nCut from the sections that hold FACT you can fetch again from the "
+            f"episodes or the project files: {', '.join(cut_from)}."
+        )
+    if keep:
+        message += (
+            f" Do NOT cut {', '.join(keep)} to fit: that is identity, cut only for "
+            f"being wrong, never for size."
+        )
+    message += (
+        "\nThe wrap is still in progress: re-compose under the bound and save again."
+    )
+    audit = getattr(store, "_audit_log_after_commit", None)
+    if audit is not None:
+        audit(
+            "continuity_save_refused",
+            {"reason": "hard_max", "chars": chars, "bound": bound, "target": target,
+             "over_by": chars - bound},
+            method="validated_save_continuity",
+            committed="nothing (the save was refused)",
+            batch_aware=False,
+        )
+    raise ContinuityValidationError(message, chars=chars, bound=bound, target=target)
 
 
 def format_episodes_for_wrap(episodes: list[Episode]) -> str:
@@ -964,12 +1045,17 @@ def _build_wrap_instructions(
             f"Stay within {max_chars} characters, not counting `## {durable_heading}`, "
             f"which has its own budget ({schema_durable_budget(schema)} characters)."
         )
+    hard_line = (
+        f"A save above {hard_max_chars(schema)} characters (the durable section "
+        f"excluded) is refused."
+    )
     parts: list[str] = [
         "Compress your session episodes into your continuity file.",
         "",
         f"**Output:** A markdown file starting with `# {project_name} — Memory (v1)` "
         f"containing EXACTLY these sections, in order: {section_list}.{optional_note}",
         size_line,
+        hard_line,
         "",
     ]
     if has_graduating:
@@ -2813,6 +2899,7 @@ def validated_save_continuity(
         prior_continuity, text, section_schema, allow_shrink=allow_shrink,
         crystallized_credit=crystallized_credit,
     )
+    _check_hard_max(store, text, section_schema)
 
     # Get current session's episodes for citation validation.
     # Re-fetch the full post-last-wrap set and filter down to exactly

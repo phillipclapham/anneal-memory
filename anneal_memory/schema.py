@@ -54,6 +54,7 @@ circular-import risk.
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Literal, TypedDict
 
@@ -73,6 +74,8 @@ __all__ = [
     "required_headings",
     "sections_by_role",
     "default_max_chars",
+    "HARD_MAX_FACTOR",
+    "hard_max_chars",
     "durable_budget",
     "DURABLE_BUDGET_FRACTION",
     "schema_role_warning",
@@ -476,6 +479,26 @@ def default_max_chars(schema: list[SectionSpec]) -> int:
         else:
             budget += _BUDGET_EXTRA.get(role, 0)
     return budget
+
+
+# The save-time ceiling, as a multiple of the schema's own target. The target
+# (:func:`default_max_chars`) is what a composer is ASKED to stay within; this is
+# where a save is REFUSED. The factor is the smallest round one that clears the
+# largest save measured across the stores (rationale and the measurement:
+# ``project_memory/continuity_max_design_1003.md``, CHANGELOG 0.9.33).
+HARD_MAX_FACTOR = 1.25
+
+
+def hard_max_chars(schema: list[SectionSpec]) -> int:
+    """The size above which a save is refused: ``ceil(1.25 * default_max_chars)``.
+
+    Derived from the SCHEMA only, never from a ``max_chars`` passed to
+    ``prepare_wrap`` (that argument moves the compose target, not this bound), so a
+    reader such as ``levain doctor`` can compute the same number from the same
+    schema. The ``durable`` section is outside it, as it is outside the target (it
+    has its own budget, :func:`durable_budget`).
+    """
+    return math.ceil(HARD_MAX_FACTOR * default_max_chars(schema))
 
 
 def schema_role_warning(schema: list[SectionSpec]) -> str | None:

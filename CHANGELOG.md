@@ -4,6 +4,31 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added — a hard maximum on the saved continuity
+- `anneal_memory.schema.hard_max_chars(schema)` = `ceil(1.25 * default_max_chars(schema))`
+  (25,000 for the default schema, 31,875 for `FLOW_SCHEMA`, 28,750 for the project
+  schema), public so a reader such as `levain doctor` computes the same number from the
+  same schema. `validated_save_continuity` refuses a save above it with
+  `ContinuityValidationError` (a `ValueError`, so the CLI and MCP surface it as they do
+  any refused save), fail-closed like the catastrophic-shrink gate. The Durable Facts
+  section is outside the measured size, as it is outside the target.
+- Why 1.25: across every continuity save on record in ten stores the largest was 1.19x
+  its schema's target (flow's 30,425 against 25,500); 1.2x would have passed it by 175
+  characters. Flow's 30,425-character save passes and a save measured at 31,877 is refused
+  (copy of the real store, this release).
+- The bound comes from the schema only. A `max_chars` passed to `prepare_wrap` moves
+  the compose target the guidance states, not this bound, and `allow_shrink` does not
+  lift it. The guidance now states the bound on its own line.
+- The refusal names the size, the bound and the target, and says what to cut by
+  category: the sections that hold facts fetchable again from episodes or project files
+  (`live-state`, `narrative`), and never the identity layers (`graduating`,
+  `narrative-timeless`), which are cut only for being wrong.
+- Loud where nobody is watching: a refused save writes a `continuity_save_refused` audit
+  event (`reason: "hard_max"`, `chars`, `bound`, `target`, `over_by`) before the error is
+  raised, and over MCP the refusal text is the tool result the composing agent reads. The
+  wrap stays open, as for every validation refusal, so an unattended caller that gives up
+  leaves an open wrap behind; routing that to an operator alarm is the caller's side.
+
 ## [0.9.32] — 2026-10-04
 
 ### Fixed — the remaining multi-statement reads describe one committed state

@@ -100,6 +100,37 @@ class TestQueryFetchIsBounded:
         assert "Showing top 8 of at least 8 word matches" in text
 
 
+class TestFallbackCountsNothingExtra:
+    def test_the_word_fallback_takes_no_count_beyond_the_searchs_own(self, store, monkeypatch):
+        for i in range(30):
+            store.record(f"Note {i}: the alpha thing happened in the plan again.",
+                         EpisodeType.OBSERVATION)
+        server = Server(store)
+        calls = []
+        real = store.recall
+
+        def spy(*a, **k):
+            calls.append(dict(k))
+            return real(*a, **k)
+
+        monkeypatch.setattr(store, "recall", spy)
+        text = _text(_call(server, "recall", {"keyword": "alpha plan zzzzz"}))
+        assert "ranked by matching words" in text
+        # the exact-phrase recall and the corpus count (no keyword) aside, every keyword
+        # read is the search's own fetch, never a limit-0 count
+        assert [c for c in calls if c.get("keyword") and c.get("limit") == 0] == []
+
+    def test_the_search_reports_truncation_from_its_own_counts(self, store, monkeypatch):
+        for i in range(12):
+            store.record(f"Note {i}: the alpha thing happened in the plan again.",
+                         EpisodeType.OBSERVATION)
+        matches, truncated = _retrieval.search_episodes_counted(store, "alpha plan")
+        assert len(matches) == 10 and truncated is False
+        monkeypatch.setattr(_retrieval, "QUERY_CANDIDATE_LIMIT", 5)
+        _matches, truncated = _retrieval.search_episodes_counted(store, "alpha plan")
+        assert truncated is True
+
+
 class TestCrlfContinuity:
     def test_the_hash_ignores_line_ending_style(self):
         a, b, c = "x\ny\n", "x\r\ny\r\n", "x\ry\r"
@@ -212,3 +243,33 @@ class TestCueAndFactMatchesStaySeparate:
         text = _text(_call(Server(store), "recall", {"keyword": "nightly bank layout"}))
         assert ("- the bank layout fmt_row64 starts at cutover "
                 "(cue: nightly; matches: bank, layout)") in text
+
+
+class TestInertTokensDropBeforeTheCap:
+    def test_twelve_inert_tokens_then_a_cue_still_cues(self, store):
+        save_cont(store, _continuity("- tree nut allergy — cues: restaurant"))
+        inert = {f"inert{i}" for i in range(12)}
+        write_inert_key(store, tokens=inert)
+        prompt = " ".join(f"inert{i}" for i in range(12)) + " restaurant"
+        got = retrieve_relevant(store, None, prompt, max_episodes=0).facts
+        assert [f.cue_matched for f in got] == [("restaurant",)]
+
+    def test_without_the_inert_set_the_cap_still_cuts_the_cue_off(self, store):
+        save_cont(store, _continuity("- tree nut allergy — cues: restaurant"))
+        prompt = " ".join(f"inert{i}" for i in range(12)) + " restaurant"
+        assert retrieve_relevant(store, None, prompt, max_episodes=0).facts == []
+
+
+class TestKeyFieldTypes:
+    @pytest.mark.parametrize("episodes", [True, False, -1, "5", 1.5, None])
+    def test_a_bad_episode_count_withholds_the_tier(self, store, episodes):
+        import json
+        save_cont(store, _continuity(FACT))
+        raw = json.loads(store._get_metadata(_retrieval.INERT_TOKENS_KEY))
+        assert [f.matched for f in retrieve_relevant(store, None, "rollback", max_episodes=0).facts] \
+            == [("rollback",)]
+        raw["episodes"] = episodes
+        store._conn.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                            (_retrieval.INERT_TOKENS_KEY, json.dumps(raw)))
+        store._conn.commit()
+        assert retrieve_relevant(store, None, "rollback", max_episodes=0).facts == []

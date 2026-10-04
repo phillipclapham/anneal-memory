@@ -246,7 +246,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   does the same ahead of its patterns, with its own miss line after the block. Both tool
   descriptions say so (manifests regenerated).
 - Known open: a store's inert-token set reflects its episode corpus as of the last wrap. Episodes
-  recorded, deleted or pruned between wraps are not reflected until the next wrap recomputes it.
+  recorded, deleted or pruned between wraps (including supersessions recorded by the same wrap)
+  are not reflected until the next wrap recomputes it.
 - Tool descriptions: `limit=0` (`recall`) and `max_patterns=0` (`crystal_recall`) return nothing at
   all, facts included, and both name the fact-text path (two distinctive words of a fact's text).
 - A harness that renders `RelevantResult` must read `result.facts` to show them; `patterns` and

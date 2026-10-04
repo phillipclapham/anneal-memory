@@ -39,7 +39,6 @@ from .spores import (
     germination_tier,
 )
 from .crystal import CrystalError, CrystalStore
-from . import retrieval as _retrieval_mod
 from .retrieval import (
     MAX_PATTERNS,
     MIN_KEYWORDS,
@@ -51,7 +50,7 @@ from .retrieval import (
     extract_keywords,
     retrieve_patterns,
     retrieve_relevant,
-    search_episodes,
+    search_episodes_counted,
 )
 from .store import (
     Store,
@@ -524,7 +523,7 @@ class Server:
                     _ALSO_MATCHING_MAX, args.get("limit", _RECALL_DEFAULT_LIMIT) - len(shown)
                 )
                 extra = [
-                    m for m in self._word_matches(args, keyword)
+                    m for m in self._word_matches(args, keyword)[0]
                     if m.episode.id not in shown
                 ][:max(0, room)]
                 if extra:
@@ -534,10 +533,13 @@ class Server:
 
         return _tool_result("\n".join(lines))
 
-    def _word_matches(self, args: dict[str, Any], keyword: str) -> list[EpisodeMatch]:
+    def _word_matches(
+        self, args: dict[str, Any], keyword: str
+    ) -> tuple[list[EpisodeMatch], bool]:
         """Every word-by-word match for ``keyword`` under the call's filters, best
-        first, uncapped (the caller caps and counts)."""
-        return search_episodes(
+        first, with whether the read was cut short by the per-keyword ceiling (the
+        caller caps and counts)."""
+        return search_episodes_counted(
             self._store,
             keyword,
             episode_type=args.get("episode_type"),
@@ -576,24 +578,14 @@ class Server:
         cap = args["limit"] if "limit" in args else _FALLBACK_DEFAULT_CAP
         if cap <= 0:
             return None
-        matches = self._word_matches(args, keyword)
+        matches, truncated = self._word_matches(args, keyword)
         if not matches:
             return None
         shown = matches[:cap]
-        # The candidate read per keyword has a ceiling; the exact match count of a keyword
-        # does not. When any keyword has more matches than were read, the count is a floor.
-        read_all = not any(
-            self._store.recall(
-                keyword=w,
-                since=args.get("since"),
-                until=args.get("until"),
-                episode_type=args.get("episode_type"),
-                source=args.get("source"),
-                include_superseded=args.get("include_superseded") is True,
-                limit=0,
-            ).total_matching > _retrieval_mod.QUERY_CANDIDATE_LIMIT
-            for w in words
-        )
+        # The candidate read per keyword has a ceiling; when a keyword had more matches
+        # than were read, the count is a floor. (The search reports it from the counts it
+        # already took; nothing is counted again here.)
+        read_all = not truncated
         head = (
             "No episode contains the exact phrase; ranked by matching words "
             f"({', '.join(words)})."

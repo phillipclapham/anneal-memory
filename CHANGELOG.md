@@ -5,18 +5,25 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 ## [0.9.32] — 2026-10-04
 
 ### Fixed — the remaining multi-statement reads describe one committed state
-- `Store.status()`, `Store.association_stats()`, `Store.episodes_since_wrap()` and
+- `Store.status()`, `Store.association_stats()`, `Store.get_association_context()`,
+  `Store.superseded_by_map()`, `Store.episodes_since_wrap()` and
   `Store.count_episodes_since_wrap()` each ran several statements outside one
   transaction, so a concurrent writer landing between them gave an answer no committed
-  state ever held. Measured on 0.9.31 with a second writer process recording episodes
-  while a reader called `status()` 1,500 times: total episodes disagreed with the sum of
-  the by-type counts on 335 reads, and the since-wrap count exceeded the total on 309;
-  this release, 0 and 0 on the same run (also with a writer that records associations
-  and completes wraps). The other three are pinned by a peer commit landing between two
-  of their statements (`tests/test_snapshot_reads_0932.py`, each red on 0.9.31):
-  `association_stats` returned more strongest pairs than it counted links, and
-  `episodes_since_wrap` returned episodes from two sessions, one already compressed.
-- Audited and left alone: `get_associations` and `get_association_context` are one
+  state ever held. `status()` now also reads its audit-health and baton-policy rows inside
+  the same snapshot (its continuity size and audit stats come from files and are read
+  after it). Measured on 0.9.31 with a second writer process recording episodes while a
+  reader called `status()` 1,500 times: total episodes disagreed with the sum of the
+  by-type counts on 335 reads, and the since-wrap count exceeded the total on 309; this
+  release, 0 and 0 on the same run (also with a writer that records associations and
+  completes wraps). The rest are pinned by a peer commit landing between two of their
+  statements (`tests/test_snapshot_reads_0932.py`, each red on the unfixed code):
+  `association_stats` returned more strongest pairs than it counted links;
+  `episodes_since_wrap` and `count_episodes_since_wrap` described two sessions, one
+  already compressed; `get_association_context` printed a link whose episode a peer had
+  just deleted as `"(pruned)"`, a link no committed state held.
+  `superseded_by_map` (chunks of 500 ids) has the same shape and the same one-line fix,
+  with no separate test.
+- Audited and left alone: `get_associations` and `get_pattern_associations` are one
   statement each, so already one view; the durable-fact lookups read the continuity
   text, not the database.
 
@@ -25,7 +32,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   isolated HOME (library, CLI, MCP over stdio and through `uvx`, affective state,
   schema, supersession, audit). One drift corrected: associations form from a pattern
   line that graduates (`2x` or higher), not from any multi-episode citation; a `1x`
-  first sighting forms no link.
+  first sighting forms no link, and a line that claims `2x` or higher still counts when its graduation is demoted.
 
 ## [0.9.31] — 2026-10-04
 

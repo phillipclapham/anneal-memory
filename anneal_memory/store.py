@@ -2766,7 +2766,7 @@ class Store:
     def superseded_by_map(self, episode_ids: list[str]) -> dict[str, str]:
         """For each id hidden by a supersession, the latest live episode down
         its chain of links (the current one). Ids not hidden are absent."""
-        with self._db_boundary("superseded_by_map"):
+        with self._db_boundary("superseded_by_map"), self._read_snapshot():
             if not episode_ids or not self._has_supersessions_table():
                 return {}
             return self._live_replacements(list(episode_ids), None)
@@ -3196,7 +3196,9 @@ class Store:
         return [self._row_to_episode(row) for row in rows]
 
     def status(self) -> StoreStatus:
-        """Get store status snapshot."""
+        """Get store status snapshot. The database fields (counts, wrap and
+        audit-health metadata) are one snapshot; the continuity size and audit
+        stats come from files and are read after it."""
         # One read snapshot: the counts below must describe one committed state,
         # not one per statement (0.9.32 CHANGELOG has the measured failure).
         with self._db_boundary("status"), self._read_snapshot():
@@ -3223,6 +3225,11 @@ class Store:
 
             # Association network metrics (also executes SQL)
             assoc_stats = _association_stats(self._conn, total)
+
+            # The health fields read metadata rows too: keep them in the snapshot.
+            audit_failures = self._current_audit_failures()
+            audit_last_failure = self._current_audit_last_failure()
+            requires_baton = self.consolidate_requires_baton()
 
         # Continuity file size — file read, outside the DB boundary.
         # AM-STATUS-HARDEN (spore-084): guard the read. A corrupt / non-UTF8
@@ -3289,12 +3296,12 @@ class Store:
             audit_log_path=audit_log_path,
             audit_entry_count=audit_entry_count,
             audit_retention_days=audit_retention_days,
-            audit_write_failures=self._current_audit_failures(),
-            audit_last_failure=self._current_audit_last_failure(),
+            audit_write_failures=audit_failures,
+            audit_last_failure=audit_last_failure,
             prune_failures=self._prune_failures,
             prune_last_failure=self._prune_last_failure,
             prune_behind=self._prune_behind,
-            consolidate_requires_baton=self.consolidate_requires_baton(),
+            consolidate_requires_baton=requires_baton,
         )
 
     # -- Wrap lifecycle --
@@ -5280,7 +5287,7 @@ class Store:
         Returns human-readable text describing which episodes have been
         thought about together before, or empty string if none.
         """
-        with self._db_boundary("get_association_context"):
+        with self._db_boundary("get_association_context"), self._read_snapshot():
             return _get_association_context(
                 self._conn, episode_ids, min_strength, limit
             )

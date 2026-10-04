@@ -2,7 +2,7 @@
 
 Each test fails on 0.9.31 (2026-10-04, 1004+14). ``status`` was reproduced under a
 second writer PROCESS: total episodes != the sum of the by-type counts on 335 of
-1,500 reads, and the since-wrap count exceeded the total on 309. The other three
+1,500 reads, and the since-wrap count exceeded the total on 309. The other
 reads run the same shape of statements, so each is pinned by a peer commit landing
 between two of them (the harness of ``test_snapshot_reads_0931``).
 """
@@ -71,6 +71,19 @@ def test_association_stats_describe_one_state(tmp_path):
         assert s._conn._fired
         assert len(a.strongest_pairs) == min(5, a.total_links)
 
+    # The wrap package's association context reads links, then their episodes:
+    # a peer deleting an endpoint between the two left a link with a "(pruned)" end.
+    def peer_delete():
+        with Store(str(db)) as p:
+            p.delete(ids[0])
+
+    with Store(str(db), project_name="Snap") as s:
+        real = s._conn
+        s._conn = _CommitBetween(real, "SELECT id, content FROM episodes", peer_delete)
+        text = s.get_association_context([ids[0], ids[1]], min_strength=0.0)
+        assert s._conn._fired
+        assert "(pruned)" not in text
+
 
 def test_compression_window_is_one_session(tmp_path):
     db = tmp_path / "m.db"
@@ -90,3 +103,19 @@ def test_compression_window_is_one_session(tmp_path):
         eps = s.episodes_since_wrap()
         assert s._conn._fired
         assert len({e.session_id for e in eps}) == 1
+
+    # The same wrap-then-record peer, against the count of the open window.
+    with Store(str(db), project_name="Snap") as s:
+        s.record("zqx fourth", EpisodeType.OBSERVATION)
+
+    def peer2():
+        with Store(str(db), project_name="Snap") as p:
+            _wrap(p, 3)
+            p.record("zqx fifth", EpisodeType.OBSERVATION)
+
+    with Store(str(db), project_name="Snap") as s:
+        real = s._conn
+        s._conn = _CommitBetween(real, "SELECT COUNT(*) FROM episodes", peer2)
+        n = s.count_episodes_since_wrap()
+        assert s._conn._fired
+        assert n == 2  # "third" and "fourth", the window before the peer's wrap

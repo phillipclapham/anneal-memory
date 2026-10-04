@@ -2110,19 +2110,21 @@ def cmd_team_import(args: argparse.Namespace) -> None:
     if not sources:
         print("Error: give a ledger file or directory, or '-' for stdin.", file=sys.stderr)
         sys.exit(2)
-    from .team import FileStart
-
-    lines: list[str | FileStart] = []
+    lines: list[str] = []
     paths: list[str] = []
     for src in sources:
         if src == "-":
-            lines.extend(sys.stdin.read().splitlines())
+            lines.extend(ln.rstrip("\r") for ln in sys.stdin.read().split("\n"))
         else:
             if not Path(src).expanduser().exists():
                 print(f"Error: not found: {src}", file=sys.stderr)
                 sys.exit(1)
             paths.append(src)
-    lines.extend(read_ledger_lines(paths))
+    try:
+        lines.extend(read_ledger_lines(paths))
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     with _open_store(args) as store:
         authority = [a.strip() for chunk in (args.link_authority or []) for a in chunk.split(",") if a.strip()]
         report = import_ledger(store, lines, dry_run=args.dry_run, link_authority=authority)
@@ -4225,12 +4227,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = subparsers.add_parser(
         "team-import",
         help="Import a team decision ledger (JSONL, hash-chained) with provenance. "
-             "Authors are self-declared; authentication is the git host's job (branch "
-             "protection, signed commits). A directory is read as <root>/<author>/<file>.jsonl "
-             "and each file may hold only its directory's author; '-' (stdin) binds nothing.",
+             "Pipe the ledger's exporter (levain team export --jsonl) into '-'. The input is "
+             "one trust unit the exporter vouches for: authors are self-declared and "
+             "authentication is the git host's job (branch protection, signed commits). "
+             "A directory is not read directly.",
         parents=[json_parent],
     )
-    sub.add_argument("sources", nargs="*", help="Ledger file(s) or directory; '-' reads stdin")
+    sub.add_argument("sources", nargs="*", help="Ledger file(s); '-' reads stdin (the supported path)")
     sub.add_argument("--dry-run", action="store_true", help="Verify and report; write nothing")
     sub.add_argument(
         "--link-authority", action="append", metavar="PATTERN",

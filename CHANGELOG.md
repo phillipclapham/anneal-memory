@@ -35,10 +35,11 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - Hardening, each from a reproduced attack on the first builds: a chain is ONE
   CONTIGUOUS RUN per file (a root with `prev == ""`, then each line naming the hash of
   the line before it), never stitched across files, so a line in one file cannot extend
-  another author's chain; a file read from disk holds ONE chain (a second root is refused) and only entries
-  whose author is the directory it sits in (`ledger/<author>/<device>.jsonl`); the path
-  label is an object in the line stream that only the file reader can create, never text
-  a ledger file could contain. Links come only from the
+  another author's chain; a directory is read as `<root>/<author>/<file>.jsonl` (one level, exact), a labelled
+  file holds ONE chain (a second root is refused) and only entries of the author
+  directory it sits in; the file label is an object in the line stream that only the
+  file reader can create, never text a ledger file could contain; a file that cannot be
+  read is reported and skipped, never fatal. Links come only from the
   verified batch of the call, never from stored rows, so a `team:` row planted with
   `record()` cannot drive one. Free-text fields are rendered as quoted, escaped
   strings and control, format and line-separator characters are refused; ids (and the
@@ -49,16 +50,17 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   not raised; two different entries carrying one id in a single import import neither;
   entries with identical text and timestamp no longer collide on the episode id.
 - Inherent limits, documented in `anneal_memory.team`: the author is self-declared, so
-  the git host's file permissions are the only authentication (a forged line appended to
-  a chain's own file extends it, and nothing here sees git committers, so a directory
-  read is not filtered the way Levain's `team export --jsonl` is; a stream on stdin is
-  one trust unit that binds no author to a path, so the exporter must vouch for it); an entry removed from a ledger stays in an
-  engineer's store (only a signed `retire` reaches it); authority is judged when a pair
-  first has an entry imported by the call, not retroactively; an imported episode
-  removed with `delete` comes back on the next import that carries it; authors whose
-  handles reduce to one id prefix (`pack:x`, `pack-x`) are not told apart, the second
-  to import reports a conflict; a local writer with `record()` can plant a `team:` row
-  that claims an entry id.
+  authentication is the git host's job (branch protection, signed commits) and nothing
+  here sees git committers; a forged line appended to a chain's own file extends it, and
+  a fork is frozen at the fork (reported); a directory read binds each file to the author
+  directory it sits in, a stream on stdin binds nothing and is one trust unit the
+  exporter must vouch for; an entry removed from a ledger stays in an engineer's store
+  (only a signed `retire` reaches it); an `ack` leaves no record, so a later entry
+  reusing its id in another call is not seen as a clash; authority is judged when a pair
+  first has an entry imported by the call, not retroactively; an imported episode removed
+  with `delete` comes back on the next import that carries it; authors whose handles
+  reduce to one id prefix (`pack:x`, `pack-x`) are not told apart; and a local writer
+  with `record()` can plant a `team:` row that claims an entry id.
 - Exit code 3 means something in THIS import was refused, unauthorized or in conflict
   (everything verifiable was still imported); the same line given twice is ignored. Nothing about `record`, `save_continuity` or the hard maximum changed.
 

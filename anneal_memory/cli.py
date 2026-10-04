@@ -2122,11 +2122,7 @@ def cmd_team_import(args: argparse.Namespace) -> None:
                 print(f"Error: not found: {src}", file=sys.stderr)
                 sys.exit(1)
             paths.append(src)
-    try:
-        lines.extend(read_ledger_lines(paths))
-    except ValueError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
+    lines.extend(read_ledger_lines(paths))
     with _open_store(args) as store:
         authority = [a.strip() for chunk in (args.link_authority or []) for a in chunk.split(",") if a.strip()]
         report = import_ledger(store, lines, dry_run=args.dry_run, link_authority=authority)
@@ -4229,8 +4225,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = subparsers.add_parser(
         "team-import",
         help="Import a team decision ledger (JSONL, hash-chained) with provenance. "
-             "Prefer piping Levain's `team export --jsonl` ('-'): it drops files whose git "
-             "committer does not match their author, which a directory read cannot check.",
+             "Authors are self-declared; authentication is the git host's job (branch "
+             "protection, signed commits). A directory is read as <root>/<author>/<file>.jsonl "
+             "and each file may hold only its directory's author; '-' (stdin) binds nothing.",
         parents=[json_parent],
     )
     sub.add_argument("sources", nargs="*", help="Ledger file(s) or directory; '-' reads stdin")

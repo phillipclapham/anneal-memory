@@ -498,7 +498,7 @@ def test_non_utf8_file_is_a_clean_cli_error(tmp_path):
     bad.write_bytes(b"\xff\xfe\x00bad")
     r = subprocess.run([sys.executable, "-m", "anneal_memory", "--db", str(db),
                         "team-import", str(bad)], capture_output=True, text=True)
-    assert r.returncode == 1 and "not UTF-8" in r.stderr and "Traceback" not in r.stderr
+    assert r.returncode == 3 and "not UTF-8" in r.stderr and "Traceback" not in r.stderr
 
 
 def test_id_prefix_follows_the_writers_rule(store):
@@ -531,8 +531,8 @@ def test_a_chain_cannot_be_extended_from_another_file(store):
     forged = seal({"v": 1, "id": "alice-20261004120000-0000beef", "ts": "2026-10-04T13:00:00Z",
                    "author": "alice", "type": "retire", "reason": "forged",
                    "supersedes": ["alice-20261004120000-00000000"], "paths": []}, tip)
-    stream = ([FileStart("ledger/alice/laptop.jsonl")] + alice +
-              [FileStart("ledger/bob/desk.jsonl"), json.dumps(forged)])
+    stream = ([FileStart("ledger/alice/laptop.jsonl", "alice")] + alice +
+              [FileStart("ledger/bob/desk.jsonl", "bob"), json.dumps(forged)])
     rep = import_ledger(store, stream)
     assert [i["id"] for i in rep.imported] == ["alice-20261004120000-00000000"]
     assert any("does not continue" in p for p in rep.chain_problems) and not rep.links_made
@@ -540,10 +540,10 @@ def test_a_chain_cannot_be_extended_from_another_file(store):
 
 def test_author_must_match_the_directory_of_a_labelled_file(store):
     lines = ledger("mallory", [RULING])  # an entry authored 'mallory' ...
-    stream = [FileStart("ledger/alice/laptop.jsonl")] + lines  # ... in alice's file
+    stream = [FileStart("ledger/alice/laptop.jsonl", "alice")] + lines  # ... in alice's file
     rep = import_ledger(store, stream)
-    assert not rep.imported and any("does not match the directory" in p for p in rep.chain_problems)
-    ok = import_ledger(store, [FileStart("ledger/mallory/x.jsonl")] + lines)
+    assert not rep.imported and any("is not the author this file is bound to" in p for p in rep.chain_problems)
+    ok = import_ledger(store, [FileStart("ledger/mallory/x.jsonl", "mallory")] + lines)
     assert len(ok.imported) == 1
 
 
@@ -590,8 +590,8 @@ def test_same_id_two_hashes_in_one_batch_imports_neither(store):
     for stream in (one + two, two + one):
         s = Store(store.path.parent / f"o{len(stream)}{hash(stream[0]) % 99}.db", audit=False)
         try:
-            rep = import_ledger(s, [FileStart("ledger/alice/a.jsonl")] + stream[:1]
-                                + [FileStart("ledger/alice/b.jsonl")] + stream[1:])
+            rep = import_ledger(s, [FileStart("ledger/alice/a.jsonl", "alice")] + stream[:1]
+                                + [FileStart("ledger/alice/b.jsonl", "alice")] + stream[1:])
             assert rep.conflicts and not rep.imported and s.status().total_episodes == 0
         finally:
             s.close()
@@ -617,35 +617,68 @@ def test_a_marker_shaped_line_inside_a_file_is_just_a_bad_line(tmp_path):
         rep = import_ledger(s, read_ledger_lines([tmp_path / "ledger"]))
         assert not rep.imported
         assert any("not an entry" in p for p in rep.chain_problems)
-        assert any("does not match the directory" in p for p in rep.chain_problems)
+        assert any("is not the author this file is bound to" in p for p in rep.chain_problems)
     finally:
         s.close()
 
 
-def test_a_copied_line_cannot_carry_a_run_across_files(store):
+def test_a_copied_line_cannot_give_a_file_another_authors_voice(store):
     alice = ledger("alice", [RULING])
     tip = json.loads(alice[0])
-    child = seal({"v": 1, "id": "mallory-20261004120000-00000009", "ts": "2026-10-04T13:00:00Z",
-                  "author": "mallory", "type": "finding", "reason": "child of a copied line",
-                  "paths": [], "supersedes": []}, tip["hash"])
-    stream = [FileStart("ledger/alice/a.jsonl")] + alice + [
-        FileStart("ledger/mallory/m.jsonl"), alice[0], json.dumps(child)]
+    child = seal({"v": 1, "id": "alice-20261004120000-00000009", "ts": "2026-10-04T13:00:00Z",
+                  "author": "alice", "type": "retire", "reason": "forged child of a copied line",
+                  "supersedes": [tip["id"]], "paths": []}, tip["hash"])
+    stream = [FileStart("ledger/alice/a.jsonl", "alice")] + alice + [
+        FileStart("ledger/mallory/m.jsonl", "mallory"), alice[0], json.dumps(child)]
     rep = import_ledger(store, stream)
-    assert [i["id"] for i in rep.imported] == [tip["id"]]
-    assert any("does not continue" in p for p in rep.chain_problems)
+    assert [i["id"] for i in rep.imported] == [tip["id"]] and not rep.links_made
+    assert any("is not the author this file is bound to" in p for p in rep.chain_problems)
+
+
+def test_a_file_that_starts_by_repeating_an_earlier_chain_continues_it(store):
+    both = ledger("alice", [RULING, {"type": "finding", "reason": "second"},
+                            {"type": "finding", "reason": "third"}])
+    stream = ([FileStart("ledger/alice/a.jsonl", "alice")] + both[:2] +
+              [FileStart("ledger/alice/b.jsonl", "alice")] + both)  # a copy, then an append
+    rep = import_ledger(store, stream)
+    assert rep.clean and len(rep.imported) == 3
+
+
+def test_a_copied_root_then_a_new_root_is_refused(store):
+    one = ledger("alice", [RULING])
+    two = ledger("alice", [{"type": "finding", "reason": "other", "id": "alice-20261004120000-0000aaaa"}])
+    stream = [FileStart("ledger/alice/a.jsonl", "alice")] + one + [
+        FileStart("ledger/alice/b.jsonl", "alice")] + one + two
+    rep = import_ledger(store, stream)
+    assert [i["id"] for i in rep.imported] == [json.loads(one[0])["id"]]
+    assert any("second chain root" in p for p in rep.chain_problems)
+
+
+def test_nested_author_directory_cannot_borrow_another_authors_name(tmp_path):
+    from anneal_memory.team import read_ledger_lines
+    nested = tmp_path / "ledger" / "mallory" / "lead"
+    nested.mkdir(parents=True)
+    (nested / "fake.jsonl").write_text("\n".join(ledger("lead", [RULING])) + "\n")
+    s = Store(tmp_path / "n.db", audit=False)
+    try:
+        rep = import_ledger(s, read_ledger_lines([tmp_path / "ledger"]))
+        assert not rep.imported and any("expected <author>/<file>.jsonl" in p for p in rep.chain_problems)
+    finally:
+        s.close()
 
 
 def test_a_labelled_file_holds_one_chain(store):
     two_roots = ledger("alice", [RULING]) + ledger("alice", [{"type": "finding", "reason": "second root",
                                                                "id": "alice-20261004120000-0000aaaa"}])
-    rep = import_ledger(store, [FileStart("ledger/alice/a.jsonl")] + two_roots)
+    rep = import_ledger(store, [FileStart("ledger/alice/a.jsonl", "alice")] + two_roots)
     assert len(rep.imported) == 1 and any("second chain root" in p for p in rep.chain_problems)
     # an unlabelled stream is several files concatenated, so several roots are fine
     assert len(import_ledger(Store(store.path.parent / "u.db", audit=False), two_roots).imported) == 2
 
 
 def test_labelled_file_without_an_author_directory_is_refused(store):
-    rep = import_ledger(store, [FileStart("x")] + ledger("alice", [RULING]))
+    rep = import_ledger(store, [FileStart("x", None, "expected <author>/<file>.jsonl")]
+                        + ledger("alice", [RULING]))
     assert not rep.imported and rep.chain_problems
 
 
@@ -654,28 +687,54 @@ def test_ack_and_retire_sharing_an_id_import_neither(store):
                             "id": "alice-20261004120000-0000cccc"}])
     ret = ledger("alice", [{"type": "retire", "supersedes": ["alice-20261004120000-00000009"],
                             "id": "alice-20261004120000-0000cccc"}])
-    rep = import_ledger(store, [FileStart("ledger/alice/a.jsonl")] + ack + [FileStart("ledger/alice/b.jsonl")] + ret)
+    rep = import_ledger(store, [FileStart("ledger/alice/a.jsonl", "alice")] + ack + [FileStart("ledger/alice/b.jsonl", "alice")] + ret)
     assert rep.conflicts and not rep.imported and not rep.skipped_ack
 
 
-def test_special_files_and_oversize_are_refused(tmp_path, monkeypatch):
+def test_special_files_and_oversize_are_reported_not_fatal(tmp_path, monkeypatch):
     from anneal_memory import team
     from anneal_memory.team import read_ledger_lines
-    import pytest as _pt
-    with _pt.raises(ValueError, match="regular file"):
-        read_ledger_lines(["/dev/null"])
-    big = tmp_path / "ledger" / "alice"
-    big.mkdir(parents=True)
-    (big / "x.jsonl").write_text("x" * 100)
-    monkeypatch.setattr(team, "_MAX_FILE_BYTES", 10)
-    with _pt.raises(ValueError, match="larger than"):
-        read_ledger_lines([tmp_path / "ledger"])
+    out = read_ledger_lines(["/dev/null"])
+    assert isinstance(out[0], FileStart) and "regular file" in (out[0].problem or "")
+    good = tmp_path / "ledger" / "alice"
+    good.mkdir(parents=True)
+    (good / "x.jsonl").write_text("\n".join(ledger("alice", [RULING])) + "\n")
+    (tmp_path / "ledger" / "bob").mkdir()
+    (tmp_path / "ledger" / "bob" / "big.jsonl").write_text("x" * 100)
+    monkeypatch.setattr(team, "_MAX_FILE_BYTES", 10 ** 6)
+    s = Store(tmp_path / "s.db", audit=False)
+    try:
+        monkeypatch.setattr(team, "_MAX_FILE_BYTES", 99)  # alice's file is bigger than 99, bob's is not
+        lines = read_ledger_lines([tmp_path / "ledger"])
+        problems = [l.problem for l in lines if isinstance(l, FileStart) and l.problem]
+        assert any("larger than" in p for p in problems)
+        assert all(isinstance(l, str) or l.label for l in lines)
+    finally:
+        s.close()
+
+
+def test_u2028_inside_a_line_does_not_split_it(tmp_path):
+    from anneal_memory.team import read_ledger_lines
+    d = tmp_path / "ledger" / "alice"
+    d.mkdir(parents=True)
+    (d / "x.jsonl").write_text('{"a":"b\u2028c"}\n{"d":1}\n', encoding="utf-8")
+    lines = [l for l in read_ledger_lines([tmp_path / "ledger"]) if isinstance(l, str) and l]
+    assert len(lines) == 2
 
 
 def test_handles_with_leading_dot_or_underscore_can_be_retired(store):
     first = ledger("_bot", [{"type": "finding", "reason": "a"}])
     rid = json.loads(first[0])["id"]
-    rep = import_ledger(store, [FileStart("ledger/_bot/a.jsonl")] + first + [
-        FileStart("ledger/lead/l.jsonl")] + ledger("lead", [{"type": "retire", "supersedes": [rid]}]),
+    rep = import_ledger(store, [FileStart("ledger/_bot/a.jsonl", "_bot")] + first + [
+        FileStart("ledger/lead/l.jsonl", "lead")] + ledger("lead", [{"type": "retire", "supersedes": [rid]}]),
         link_authority=["lead"])
     assert rep.clean and len(rep.links_made) == 1
+
+
+def test_an_id_clash_drops_the_whole_chain_of_the_clashing_author(store):
+    one = ledger("alice", [RULING, {"type": "finding", "reason": "child of the clashing root"}])
+    twin = ledger("alice", [{**RULING, "words": "rename it freely"}])
+    stream = ([FileStart("ledger/alice/a.jsonl", "alice")] + one +
+              [FileStart("ledger/alice/b.jsonl", "alice")] + twin)
+    rep = import_ledger(store, stream)
+    assert rep.conflicts and not rep.imported  # the child is not imported orphaned

@@ -29,12 +29,16 @@ What it guarantees:
   otherwise it is reported in full and nothing is hidden.
 
 Limits that are inherent, stated so nobody has to rediscover them: the author is
-self-declared, so the git host's access control is the only authentication; anyone
-who can write to the ledger can append a fork that freezes a teammate's chain at the
-fork point (reported, never silent); nothing here sees git committers, so a directory
-read (unlike Levain's filtered export on stdin) trusts the file permissions alone; an entry removed from the ledger stays in an
-engineer's store, because only a signed ``retire`` reaches it; and the first
-importer of an id wins, which is why an id must begin with its author's handle.
+self-declared, so authentication is the git host's job (branch protection, signed
+commits) and nothing here sees git committers; anyone who can write to the ledger can
+append a line under any author the chain of its own file allows, or a fork that freezes
+a teammate's chain at the fork point (reported, never silent); a directory read binds
+each file to the author directory it sits in, a stream on stdin binds nothing and is one
+trust unit the exporter must vouch for; an entry removed from the ledger stays in an
+engineer's store, because only a signed ``retire`` reaches it; an ``ack`` leaves no
+record, so a later entry reusing its id in another call is not seen as a clash; the
+first importer of an id wins; and a local writer with ``Store.record`` can plant a
+``team:`` row that claims an entry id.
 """
 from __future__ import annotations
 
@@ -151,32 +155,48 @@ class TeamImportReport:
 
 
 def read_ledger_lines(paths: Iterable[str | Path]) -> list[str | FileStart]:
-    """Lines of every ledger file given, each file preceded by a :class:`FileStart`
-    naming it (``<given dir>/<relative path>``, or ``<parent>/<name>`` for a
-    file given directly), which is what binds an entry's author to the directory
-    ``<author>/`` its file sits in. A directory contributes every ``*.jsonl`` under it, in
-    sorted order. A file larger than the size cap is refused with ``ValueError``."""
+    """Lines of every ledger file given, each file preceded by a :class:`FileStart`.
+
+    A directory is read as ``<root>/<author>/<file>.jsonl``: only files exactly one
+    level down are read, and each is bound to the author directory it sits in. A file
+    given directly is bound to its parent directory's name. A file that cannot be read
+    (not a regular file, wrong depth, over the size cap, not UTF-8) is reported and
+    skipped, so one odd file cannot block everyone else's entries."""
     lines: list[str | FileStart] = []
     for raw in paths:
         p = Path(raw).expanduser()
         if p.is_dir():
-            files = [(f, f"{p.resolve().name}/{f.relative_to(p).as_posix()}")
-                     for f in sorted(p.rglob("*.jsonl"))]
+            root = p.resolve()
+            files = []
+            for f in sorted(p.rglob("*.jsonl")):
+                rel = f.relative_to(p).parts
+                label = f"{root.name}/{'/'.join(rel)}"
+                files.append((f, FileStart(label, rel[0] if len(rel) == 2 else None,
+                                           None if len(rel) == 2 else "expected <author>/<file>.jsonl")))
         else:
-            files = [(p, f"{p.resolve().parent.name}/{p.name}")]
-        for f, label in files:
-            if not f.is_file():
-                raise ValueError(f"{f}: not a regular file")
-            with f.open("rb") as fh:
-                raw_bytes = fh.read(_MAX_FILE_BYTES + 1)
-            if len(raw_bytes) > _MAX_FILE_BYTES:
-                raise ValueError(f"{f}: larger than {_MAX_FILE_BYTES} bytes")
+            files = [(p, FileStart(f"{p.resolve().parent.name}/{p.name}", p.resolve().parent.name))]
+        for f, start in files:
+            if start.problem:
+                lines.append(start)
+                continue
             try:
-                text = raw_bytes.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise ValueError(f"{f}: not UTF-8 text ({exc.reason})") from exc
-            lines.append(FileStart(label))
-            lines.extend(text.splitlines())
+                if not f.is_file():
+                    raise ValueError("not a regular file")
+                with f.open("rb") as fh:
+                    raw_bytes = fh.read(_MAX_FILE_BYTES + 1)
+                if len(raw_bytes) > _MAX_FILE_BYTES:
+                    raise ValueError(f"larger than {_MAX_FILE_BYTES} bytes")
+                try:
+                    text = raw_bytes.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise ValueError(f"not UTF-8 text ({exc.reason})") from exc
+            except (OSError, ValueError) as exc:
+                lines.append(FileStart(start.label, None, str(exc)))
+                continue
+            lines.append(start)
+            # Split on newline only, as the writer frames lines: str.splitlines also
+            # breaks on U+2028, U+0085 and others that may sit inside a JSON string.
+            lines.extend(ln.rstrip("\r") for ln in text.split("\n"))
     return lines
 
 
@@ -329,17 +349,21 @@ class FileStart:
     paths, so it binds nothing and is one trust unit: the caller vouches for it."""
 
     label: str
+    # The author this file may hold entries for, taken from where the file sits
+    # (``<root>/<author>/<file>.jsonl``), not parsed back out of the label. None
+    # binds nothing.
+    author: str | None = None
+    # Set when the file was found but cannot be read as a ledger file (not a regular
+    # file, wrong depth, unreadable). It is reported and the rest of the import goes on.
+    problem: str | None = None
 
 
-def _path_author_ok(label: str | None, author: object) -> bool:
-    """With a path known, the entry's author must be the directory the file sits
-    in (``ledger/<author>/<device>.jsonl``). Without a path nothing can be bound."""
-    if label is None:
+def _path_author_ok(expected: str | None, author: object) -> bool:
+    """With an expected author known (from where the file sits), an entry's author
+    must be it. Without one nothing can be bound."""
+    if expected is None:
         return True
-    parts = [p for p in label.replace("\\", "/").split("/") if p]
-    if len(parts) < 2 or not isinstance(author, str):
-        return False  # a labelled file whose path names no author directory binds nothing: refuse
-    return parts[-2] in (author, _id_prefix(author))
+    return isinstance(author, str) and expected in (author, _id_prefix(author))
 
 
 def _verified_chains(
@@ -354,7 +378,8 @@ def _verified_chains(
     (with every later line of that run, which names it as ``prev``)."""
     seen_hash: dict[str, dict] = {}
     out: list[dict] = []
-    label: str | None = None
+    expected: str | None = None
+    labelled = False
     last_hash: str | None = None
     run_author: object = None
     file_started = False  # a labelled file may hold ONE chain: one root, then its children
@@ -365,7 +390,11 @@ def _verified_chains(
             )
             break
         if isinstance(line, FileStart):
-            label, last_hash, run_author, file_started = line.label, None, None, False
+            expected, labelled, last_hash, run_author, file_started = (
+                line.author, True, None, None, False)
+            if line.problem:
+                report.chain_problems.append(f"{line.label}: {line.problem}, not read")
+                expected, labelled = "\0skip", True  # nothing in this file can bind
             continue
         if not line.strip():
             continue
@@ -399,10 +428,16 @@ def _verified_chains(
             # chain state, so a copied line cannot be used to carry a run across files.
             if seen_hash[e["hash"]] != e:
                 report.chain_problems.append(f"{who}: repeats a hash with different content")
+            elif e["prev"] == last_hash or (e["prev"] == "" and not file_started):
+                # A file that starts by repeating an earlier chain (a copy, then an
+                # append) continues from the repeat. Authority is not at stake: an
+                # entry still has to carry the author its own file is bound to.
+                last_hash = e["hash"]
+                file_started = True
             continue
         is_root = e["prev"] == ""
         if is_root:
-            if label is not None and file_started:
+            if labelled and file_started:
                 report.chain_problems.append(
                     f"{who}: a second chain root inside one file, not imported"
                 )
@@ -419,10 +454,10 @@ def _verified_chains(
                 "chain; the chain is cut here"
             )
             continue
-        if not _path_author_ok(label, e.get("author")):
+        if not _path_author_ok(expected, e.get("author")):
             report.chain_problems.append(
-                f"{who}: author {e.get('author')!r} does not match the directory of "
-                f"{label!r}, not imported"
+                f"{who}: author {e.get('author')!r} is not the author this file is "
+                f"bound to ({expected!r}), not imported"
             )
             continue
         run_author = e.get("author")
@@ -463,9 +498,12 @@ def import_ledger(
         report.conflicts.append(
             {"id": i, "reason": "two different entries in this import carry this id"}
         )
+    # An entry dropped for a clash would leave its descendants orphaned, so every
+    # entry of an author involved in a clash is dropped with it.
+    clash_authors = {e["author"] for e in valid if e["id"] in clash}
     records: list[dict[str, Any]] = []
     for e in valid:
-        if e["id"] in clash:
+        if e["author"] in clash_authors:
             continue
         if e["type"] == "ack":
             report.skipped_ack.append(e["id"])

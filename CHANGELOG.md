@@ -31,6 +31,13 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   `wrap-status` or `wrap_bound_token()` passes, by design. A caller's cancel by its own
   token that runs while its `prepare_wrap` is still running can find nothing open and then
   see the wrap opened afterwards: cancel again once `prepare_wrap` has stopped.
+- Known open: `wrap-status` reads the snapshot, the gated session and the bound token in
+  separate queries, so a wrap replaced between them can be shown with the newer wrap's
+  gated or bound state (the bound flag is compared with the snapshot's own token, which
+  removes the false "bound" case only). The output is advisory: a printed cancel names
+  the snapshot's token and is refused by the store if that wrap is gone. The gated and
+  started-at fields have had the same race since 0.9.22; one status-snapshot read closes
+  all of them (codex L3).
 - Run on a copy of a live store before the tests were written: two processes, a
   tokenless `wrap-cancel` arriving while the caller's `prepare_wrap` had not returned
   (refused), the caller's cancel by its own token afterwards (cleared), a peer's wrap left

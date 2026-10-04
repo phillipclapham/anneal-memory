@@ -1539,11 +1539,13 @@ def cmd_wrap_status(args: argparse.Namespace) -> None:
     integrity failures with an actionable recovery hint (``wrap-cancel``).
     """
     with _open_store(args) as store:
-        started_at = store.get_wrap_started_at()
-
-        try:
-            snapshot = store.load_wrap_snapshot()
-        except StoreError as exc:
+        # One read transaction for every field below (codex L3 on 0.9.30: separate
+        # reads could pair one wrap's token with a replacement's gated/bound state).
+        status = store.wrap_status_snapshot()
+        started_at = status.started_at
+        snapshot = status.snapshot
+        if status.partial_error is not None:
+            exc = status.partial_error
             # Partial-state integrity failure (e.g. wrap_started_at set
             # but wrap_token empty). The operator surface exists
             # precisely for this case — print a clean diagnostic with
@@ -1593,20 +1595,18 @@ def cmd_wrap_status(args: argparse.Namespace) -> None:
                 "wrap_token": snapshot["token"],
                 "wrap_episode_count": len(snapshot["episode_ids"]),
                 "wrap_episode_ids": snapshot["episode_ids"],
-                "wrap_gated_session": store.wrap_gated_session(),
-                # Compared with this snapshot's token, so a wrap that replaced it
-                # since the snapshot was read cannot lend it its bound.
-                "wrap_token_bound": store.wrap_bound_token() == snapshot["token"],
+                "wrap_gated_session": status.gated_session,
+                "wrap_token_bound": status.bound_token == snapshot["token"],
             })
             return
 
         print(f"wrap in progress since {started_at or '(unknown)'}")
         print(f"  token:    {snapshot['token']}")
-        gated_by = store.wrap_gated_session()
+        gated_by = status.gated_session
         if gated_by is not None:
             print(f"  prepared under the consolidate gate by session {gated_by!r}: only that")
             print("  session can complete it (library save_continuity with that session_id)")
-        bound = store.wrap_bound_token() == snapshot["token"]
+        bound = status.bound_token == snapshot["token"]
         if bound:
             print("  opened with a token its preparer holds: a cancel without that token")
             print("  is refused")

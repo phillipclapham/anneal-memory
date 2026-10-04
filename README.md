@@ -271,7 +271,7 @@ The library *does* now catch some attacks earlier versions didn't: complete drop
 
 ### Associations through consolidation (not retrieval)
 
-During compression, when an agent cites multiple episodes to support a pattern, those episodes form lateral associations — Hebbian-style links that strengthen through repeated co-citation across wraps.
+During compression, when an agent cites multiple episodes to support a pattern, those episodes form lateral associations — Hebbian-style links. A link gains strength only when the same pair is co-cited again in a later wrap, and it decays at every wrap it is not. In practice that repetition is rare: on my own long-running store (2026-10-04), 594 links, the strongest at 1.325 and none above 2.0, where one co-citation adds 1.0. So the links mostly record single co-citations rather than build up, and since 0.9.26 recall does not read them (measurement below).
 
 This differs from how other systems form associations:
 
@@ -343,7 +343,7 @@ This is experimental infrastructure. The associations and strength model work wi
 
 1. **Episodic store** (SQLite) — timestamped, typed episodes. Fast writes, indexed queries. Cheap to accumulate. The hippocampus.
 2. **Continuity file** (Markdown) — compressed session memory. Always loaded at session start. Rewritten (not appended) at each session boundary. The neocortex's always-loaded **working set** (its long-term semantic half is the crystallized store, below). Its structure is a configurable section schema (below) — four sections by default; partnership entities add a timeless felt layer.
-3. **Hebbian associations** (SQLite) — lateral links between episodes, formed through co-citation during compression. Strengthen with reuse, decay without it. The association cortex. Recall stopped reading them in 0.9.26, after measurement showed they never changed a result (see *Associations through consolidation*).
+3. **Hebbian associations** (SQLite) — lateral links between episodes, formed through co-citation during compression. A link gains strength when the same pair is co-cited again and decays at every wrap it is not; on a real store re-co-citation is rare, so links stay weak (figures under *Associations through consolidation*). The association cortex. Recall stopped reading them in 0.9.26, after measurement showed they never changed a result (see *Associations through consolidation*).
 4. **Affective layer** (on associations) — functional state tags recorded during compression. Intensity modulates association strength. Persistent state infrastructure.
 
 These four describe how the store *works*. Two sibling stores sit alongside them (separate files, same atomic-write durability discipline) and address a different axis — *when* a thing is loaded, and whether it's retrospective or prospective:

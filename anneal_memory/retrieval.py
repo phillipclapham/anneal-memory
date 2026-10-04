@@ -324,6 +324,7 @@ def _query_weights(
     *,
     until: str | None = None,
     filters: dict[str, Any] | None = None,
+    corpus_n: int | None = None,
 ) -> tuple[dict[str, float], bool]:
     """The per-keyword weights for scoring, and whether corpus-IDF was applied (so the
     caller picks the matching precision bar — :data:`IDF_SCORE_THRESHOLD` vs
@@ -341,10 +342,13 @@ def _query_weights(
     against a whole-corpus N and read terms as more distinctive than they are).
     ``filters`` (``since`` / ``episode_type`` / ``source`` / ``include_superseded``) carries
     the same narrowing the candidate fetch used, for the same reason: DF and N must be
-    counted over one population."""
+    counted over one population. ``corpus_n``, when given, is that population's size
+    read in the same snapshot as ``doc_freq`` (:meth:`Store.keyword_candidates`), and
+    no query is made."""
     if doc_freq is None:
         return {kw: _keyword_weight(kw) for kw in keywords}, False
-    corpus_n = store.recall(until=until, limit=0, **(filters or {})).total_matching
+    if corpus_n is None:
+        corpus_n = store.recall(until=until, limit=0, **(filters or {})).total_matching
     if corpus_n < IDF_MIN_CORPUS:
         return {kw: _keyword_weight(kw) for kw in keywords}, False
     return {kw: _idf_weight(doc_freq.get(kw, 0), corpus_n) for kw in keywords}, True
@@ -499,29 +503,22 @@ def _fetch_episode_candidates(
     until: str | None,
     filters: dict[str, Any] | None = None,
     uncapped: bool = False,
-) -> tuple[dict[str, Episode], dict[str, int]]:
-    """Per-keyword episode recall → (unioned candidate episodes, per-keyword document
-    frequency). Fetch via the public ``Store.recall`` (one bounded LIKE query per
-    keyword, unioned by id). ``doc_freq[kw]`` is ``RecallResult.total_matching`` — the
-    EXACT, uncapped match count — captured from the SAME calls, so corpus-IDF weighting
-    (:func:`_query_weights`) costs no extra query. Reuses the public API; no new SQL.
+) -> tuple[dict[str, Episode], dict[str, int], int]:
+    """Per-keyword episode candidates → (unioned candidate episodes, per-keyword document
+    frequency, corpus size). One :meth:`Store.keyword_candidates` call: a single scan
+    for every keyword instead of a count and a fetch per keyword, with the corpus size
+    for corpus-IDF (:func:`_query_weights`) read in the same snapshot. ``doc_freq[kw]``
+    is the EXACT, uncapped match count, as ``RecallResult.total_matching`` reports it.
     ``filters`` (``since`` / ``episode_type`` / ``source`` / ``include_superseded``) go
     straight to ``Store.recall`` so a filtered query narrows the candidates in SQL.
     ``uncapped`` (query mode) fetches up to :data:`QUERY_CANDIDATE_LIMIT` matches of each
     keyword instead of the newest :data:`CANDIDATE_LIMIT_PER_KEYWORD`: an explicit query
     should not lose an older episode that matches several words to a modest pile of newer
     one-word matches, and the ceiling keeps a very common word from stalling the process."""
-    candidates: dict[str, Episode] = {}
-    doc_freq: dict[str, int] = {}
     fetch_limit = QUERY_CANDIDATE_LIMIT if uncapped else CANDIDATE_LIMIT_PER_KEYWORD
-    for kw in keywords:
-        result = store.recall(
-            keyword=kw, until=until, limit=fetch_limit, **(filters or {})
-        )
-        doc_freq[kw] = result.total_matching
-        for ep in result.episodes:
-            candidates.setdefault(ep.id, ep)
-    return candidates, doc_freq
+    return store.keyword_candidates(
+        keywords, limit_per_keyword=fetch_limit, until=until, **(filters or {})
+    )
 
 
 def _score_candidate_episodes(
@@ -1005,10 +1002,12 @@ def retrieve_relevant(
     seed_episodes: list[ScoredEpisode] = []
     if max_episodes > 0 or want_assoc:
         until = _recent_cutoff(exclude_recent_minutes, now)
-        candidates, doc_freq = _fetch_episode_candidates(
+        candidates, doc_freq, corpus_n = _fetch_episode_candidates(
             store, keywords, until=until, uncapped=mode == "query"
         )
-        weights, used_idf = _query_weights(store, keywords, doc_freq, until=until)
+        weights, used_idf = _query_weights(
+            store, keywords, doc_freq, until=until, corpus_n=corpus_n
+        )
         seed_episodes = _score_candidate_episodes(
             candidates, keywords, weights,
             score_threshold=_precision_bar(used_idf, mode),
@@ -1237,11 +1236,11 @@ def _search_episodes(
         "source": source,
         "include_superseded": include_superseded,
     }
-    candidates, doc_freq = _fetch_episode_candidates(
+    candidates, doc_freq, corpus_n = _fetch_episode_candidates(
         store, keywords, until=until, filters=filters, uncapped=True
     )
     weights, used_idf = _query_weights(
-        store, keywords, doc_freq, until=until, filters=filters
+        store, keywords, doc_freq, until=until, filters=filters, corpus_n=corpus_n
     )
     scored = _score_candidate_episodes(
         candidates, keywords, weights,

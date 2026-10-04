@@ -339,6 +339,8 @@ StoreOperation = Literal[
     "get",
     "delete",
     "recall",
+    "keyword_candidates",
+    "wrap_status_snapshot",
     "supersede",
     "unsupersede",
     "supersession_exists",
@@ -870,6 +872,11 @@ class WrapWindowMovedError(AnnealMemoryError):
             f"wrap_started: a wrap completed since this window was read "
             f"(last wrap {expected} when read, {actual} now). Re-run prepare_wrap."
         )
+
+    def __reduce__(self) -> tuple:
+        # Two-argument __init__, so the default reduce (which passes self.args, the
+        # one message) cannot rebuild it.
+        return (type(self), (self.expected, self.actual))
 
 
 class WrapSchemaMovedError(AnnealMemoryError):
@@ -1628,6 +1635,18 @@ def _supersession_grounds(new_text: str, old_text: str) -> bool:
     return shared >= 1 and shared / max(1, min(len(a), len(b))) >= SUPERSEDE_MIN_OVERLAP_RATIO
 
 
+# recall's keyword match. No LOWER(content): SQLite's LIKE already ignores ASCII case
+# and LOWER() folds only ASCII, so both match the same rows (checked 2026-10-04 on a
+# 12,968-episode store: 407 words, 0 differences), and LOWER copied the whole content
+# column once per keyword. The pattern side is lower-cased.
+_KEYWORD_LIKE_SQL = "content LIKE ? ESCAPE '\\'"
+
+
+def _keyword_like_pattern(keyword: str) -> str:
+    escaped = keyword.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 def _hidden_by_supersession_sql(until: str | None) -> tuple[str, list[str]]:
     """SQL selecting every episode id hidden by a supersession, and its params.
 
@@ -1731,6 +1750,16 @@ def _normalize_explanation_for_dedup(explanation: str) -> str:
     # compound punctuation+whitespace cases bypassed dedup.
     normalized = normalized.strip(".,;:!?\"'()[]{}—–-").strip()
     return normalized
+
+
+class WrapStatusSnapshot(NamedTuple):
+    """What :meth:`Store.wrap_status_snapshot` read, in one transaction."""
+
+    started_at: str | None
+    snapshot: Any
+    partial_error: "StoreError | None"
+    gated_session: str | None
+    bound_token: str | None
 
 
 class Store:
@@ -2934,46 +2963,26 @@ class Store:
         Returns:
             RecallResult with matching episodes and total count.
         """
-        conditions: list[str] = []
-        params: list[Any] = []
+        if episode_type is not None and isinstance(episode_type, str):
+            episode_type = EpisodeType(episode_type)
 
-        if since:
-            conditions.append("timestamp >= ?")
-            params.append(since)
-        if until:
-            conditions.append("timestamp <= ?")
-            params.append(until)
-        if episode_type is not None:
-            if isinstance(episode_type, str):
-                episode_type = EpisodeType(episode_type)
-            conditions.append("type = ?")
-            params.append(episode_type.value)
-        if source:
-            conditions.append("source = ?")
-            params.append(source)
-        if keyword:
-            # Escape LIKE wildcards so % and _ are treated as literals
-            # Case-insensitive via LOWER() — agents need to find episodes
-            # regardless of casing for citation during graduation
-            escaped = keyword.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            conditions.append("LOWER(content) LIKE ? ESCAPE '\\'")
-            params.append(f"%{escaped}%")
-
-        with self._db_boundary("recall"):
-            has_links = self._has_supersessions_table()
-            if has_links and not include_superseded:
-                hide_sql, hide_params = _hidden_by_supersession_sql(until)
-                conditions.append(f"id NOT IN ({hide_sql})")
-                params.extend(hide_params)
+        with self._db_boundary("recall"), self._read_snapshot():
+            conditions, params, has_links = self._recall_conditions(
+                since=since, until=until, episode_type=episode_type, source=source,
+                include_superseded=include_superseded,
+            )
+            if keyword:
+                conditions.append(_KEYWORD_LIKE_SQL)
+                params.append(_keyword_like_pattern(keyword))
             where = " AND ".join(conditions) if conditions else "1=1"
 
-            # Get total count
+            # The count and the page are read in one snapshot (_read_snapshot), so a
+            # concurrent writer cannot make total_matching disagree with the rows.
             count_row = self._conn.execute(
                 f"SELECT COUNT(*) FROM episodes WHERE {where}", params
             ).fetchone()
             total = count_row[0]
 
-            # Get episodes
             rows = self._conn.execute(
                 f"""SELECT * FROM episodes WHERE {where}
                     ORDER BY timestamp DESC LIMIT ? OFFSET ?""",
@@ -3012,6 +3021,130 @@ class Store:
                 if v is not None
             },
         )
+
+    @contextmanager
+    def _read_snapshot(self) -> Iterator[None]:
+        """Run the block's reads in one transaction, so they see one committed
+        state. Inside a caller's open transaction (a ``_batch``) it adds nothing:
+        that transaction already gives one view. Use inside ``_db_boundary``,
+        which rolls back what is open on any exception."""
+        if self._conn.in_transaction:
+            yield
+            return
+        self._conn.execute("BEGIN")
+        yield
+        if self._conn.in_transaction:
+            self._conn.execute("COMMIT")
+
+    def _recall_conditions(
+        self,
+        *,
+        since: str | None,
+        until: str | None,
+        episode_type: EpisodeType | None,
+        source: str | None,
+        include_superseded: bool,
+    ) -> tuple[list[str], list[Any], bool]:
+        """The WHERE conditions (and params) :meth:`recall`'s filters select, plus
+        whether the supersession table exists. Call inside ``_db_boundary``."""
+        conditions: list[str] = []
+        params: list[Any] = []
+        if since:
+            conditions.append("timestamp >= ?")
+            params.append(since)
+        if until:
+            conditions.append("timestamp <= ?")
+            params.append(until)
+        if episode_type is not None:
+            conditions.append("type = ?")
+            params.append(episode_type.value)
+        if source:
+            conditions.append("source = ?")
+            params.append(source)
+        has_links = self._has_supersessions_table()
+        if has_links and not include_superseded:
+            hide_sql, hide_params = _hidden_by_supersession_sql(until)
+            conditions.append(f"id NOT IN ({hide_sql})")
+            params.extend(hide_params)
+        return conditions, params, has_links
+
+    def keyword_candidates(
+        self,
+        keywords: list[str],
+        *,
+        limit_per_keyword: int,
+        since: str | None = None,
+        until: str | None = None,
+        episode_type: EpisodeType | str | None = None,
+        source: str | None = None,
+        include_superseded: bool = False,
+    ) -> tuple[dict[str, Episode], dict[str, int], int]:
+        """Several :meth:`recall` keyword queries answered by one scan.
+
+        Returns ``(episodes, doc_freq, corpus_n)``: the union of each keyword's
+        newest ``limit_per_keyword`` matches (by id), each keyword's
+        ``total_matching``, and the number of episodes the filters select with no
+        keyword. A keyword matches as in :meth:`recall`. All three are read in one
+        snapshot, so a concurrent writer cannot make the counts disagree with each
+        other or with the episodes.
+
+        Equal to ``recall(keyword=kw, limit=limit_per_keyword, ...)`` per keyword
+        plus ``recall(limit=0, ...)``, except that among episodes with an identical
+        timestamp at a keyword's cutoff the one kept may differ (SQL gives no
+        order there either).
+        """
+        if episode_type is not None and isinstance(episode_type, str):
+            episode_type = EpisodeType(episode_type)
+        if limit_per_keyword < 0:
+            raise ValueError("keyword_candidates: limit_per_keyword must be >= 0")
+        kws = list(dict.fromkeys(keywords))
+        with self._db_boundary("keyword_candidates"), self._read_snapshot():
+            conditions, params, has_links = self._recall_conditions(
+                since=since, until=until, episode_type=episode_type, source=source,
+                include_superseded=include_superseded,
+            )
+            base = " AND ".join(conditions) if conditions else "1=1"
+            corpus_n = self._conn.execute(
+                f"SELECT COUNT(*) FROM episodes WHERE {base}", params
+            ).fetchone()[0]
+            doc_freq = {kw: 0 for kw in kws}
+            keep: dict[str, None] = {}
+            rows: list[Any] = []
+            if kws:
+                patterns = [_keyword_like_pattern(kw) for kw in kws]
+                flags = ", ".join(_KEYWORD_LIKE_SQL for _ in kws)
+                any_kw = " OR ".join(_KEYWORD_LIKE_SQL for _ in kws)
+                hits = self._conn.execute(
+                    f"""SELECT id, {flags} FROM episodes
+                        WHERE {base} AND ({any_kw})
+                        ORDER BY timestamp DESC""",
+                    [*patterns, *params, *patterns],
+                ).fetchall()
+                for row in hits:
+                    for i, kw in enumerate(kws):
+                        if row[1 + i]:
+                            doc_freq[kw] += 1
+                            if doc_freq[kw] <= limit_per_keyword:
+                                keep[row[0]] = None
+                ids = list(keep)
+                for start in range(0, len(ids), 500):
+                    chunk = ids[start:start + 500]
+                    rows.extend(self._conn.execute(
+                        f"SELECT * FROM episodes WHERE id IN ({','.join('?' * len(chunk))})",
+                        chunk,
+                    ).fetchall())
+            replaced_by: dict[str, str] = {}
+            if has_links and include_superseded and rows:
+                replaced_by = self._live_replacements(
+                    [row["id"] for row in rows], until
+                )
+        by_id = {}
+        for row in rows:
+            ep = self._row_to_episode(row)
+            if ep.id in replaced_by:
+                ep = dataclasses.replace(ep, superseded_by=replaced_by[ep.id])
+            by_id[ep.id] = ep
+        return {i: by_id[i] for i in keep if i in by_id}, doc_freq, corpus_n
 
     def episodes_since_wrap(self) -> list[Episode]:
         """Get all episodes since the last completed wrap.
@@ -3923,6 +4056,28 @@ class Store:
             if not self._get_metadata("wrap_started_at"):
                 return None
             return self._get_metadata("wrap_gated_session") or None
+
+    def wrap_status_snapshot(self) -> "WrapStatusSnapshot":
+        """The wrap lifecycle as one committed state: ``started_at``
+        (:meth:`get_wrap_started_at`), ``snapshot`` (:meth:`load_wrap_snapshot`, or
+        ``None`` with ``partial_error`` set when the state is partial), ``gated_session``
+        (:meth:`wrap_gated_session`) and ``bound_token`` (:meth:`wrap_bound_token`).
+        Read in one transaction, so a wrap that completes and is replaced meanwhile
+        cannot lend one wrap's fields to another's. The partial-state read ends that
+        transaction (its error rolls it back), so in that case only ``started_at`` and
+        ``partial_error`` describe the same moment."""
+        with self._db_boundary("wrap_status_snapshot"), self._read_snapshot():
+            started_at = self.get_wrap_started_at()
+            partial_error: StoreError | None = None
+            try:
+                snapshot = self.load_wrap_snapshot()
+            except StoreDatabaseError:
+                raise
+            except StoreError as exc:
+                snapshot, partial_error = None, exc
+            gated = self.wrap_gated_session()
+            bound = self.wrap_bound_token()
+        return WrapStatusSnapshot(started_at, snapshot, partial_error, gated, bound)
 
     def wrap_bound_token(self) -> str | None:
         """The token of the wrap in progress when it was opened with a

@@ -3671,8 +3671,9 @@ class TestCrystalIndexAndRecallCLI:
             store.record(self._DRIFT_EPISODE, EpisodeType.DECISION, source="flow")
         self._crystallize(tmp_path, "structural_invariants_beat_discipline", 3,
                           "an invariant refuses; make the guard structurally unskippable")
+        # The episode tier fetches through Store.keyword_candidates (0.9.31).
         monkeypatch.setattr(
-            Store, "recall",
+            Store, "keyword_candidates",
             lambda *a, **k: (_ for _ in ()).throw(OSError("simulated episodic I/O fault")),
         )
         cmd_crystal_recall(self._recall_args(

@@ -14,7 +14,7 @@ This project uses **anneal-memory** for persistent memory across sessions. Work 
 
 - **Episodic** — raw observations you record during work. Cheap, plentiful.
 - **Continuity** — the compressed working memory episodes graduate into at wrap time. This is where identity lives.
-- **Hebbian associations** — links that form automatically between episodes you cite together in your patterns; they strengthen with repetition and decay with disuse.
+- **Hebbian associations** — links that form automatically between episodes you cite together in your patterns; a link gains strength when the same pair is cited together again and decays at every wrap it is not. Recall does not read them (since 0.9.26); they feed `status`, `associations`, the `graph` export and the association-health warnings.
 - **Affective** (the *limbic* layer in the CLS lineage this borrows from) — an optional affective tag on a wrap that modulates how strongly its associations form.
 
 You touch episodic (record) and continuity (wrap) directly. Hebbian and affective are byproducts of citing honestly and reflecting on your state — no extra bookkeeping.

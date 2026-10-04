@@ -629,9 +629,23 @@ def enforce_durable_facts(
     )
 
 
+#: The most characters of one fact, line or marker a save warning quotes; the rest is
+#: replaced by a count. Warnings go to a terminal or an MCP reply, and the audit entry
+#: keeps the whole of ``durable_dropped`` and ``durable_reinserted``.
+_WARN_TEXT_LIMIT = 500
+
+
+def _clip(text: str) -> str:
+    """``text`` cut to :data:`_WARN_TEXT_LIMIT` characters for a warning."""
+    if len(text) <= _WARN_TEXT_LIMIT:
+        return text
+    return f"{text[:_WARN_TEXT_LIMIT]}… (+{len(text) - _WARN_TEXT_LIMIT} chars)"
+
+
 def _one_line(raw: str) -> str:
-    """A fact's raw lines on one line, for a warning: joined with `` / ``."""
-    return " / ".join(part.strip() for part in raw.split("\n"))
+    """A fact's raw lines on one line, for a warning: joined with `` / ``, then
+    cut by :func:`_clip`."""
+    return _clip(" / ".join(part.strip() for part in raw.split("\n")))
 
 
 def _join(items: list[str], render: Callable[[str], str] = str, more: str = "") -> str:
@@ -681,12 +695,12 @@ def report_warnings(report: DurableReport) -> list[str]:
         )
     for target, closest in report.unknown_drops:
         hint = (
-            f" The closest prior line is {closest!r}."
+            f" The closest prior line is {_clip(closest)!r}."
             if closest is not None
             else " No prior line is close to it."
         )
         out.append(
-            f"Durable facts: `[drop-durable: {target}]` names no line of the prior "
+            f"Durable facts: `[drop-durable: {_clip(target)}]` names no line of the prior "
             f"`## {h}` section; the marker was removed and nothing else changed. "
             f"Matching is exact (whitespace aside), on the fact or the whole line."
             + hint
@@ -701,19 +715,19 @@ def report_warnings(report: DurableReport) -> list[str]:
           lambda raw: f"Durable facts: dropped by marker: {_one_line(raw)}",
           "fact(s) dropped by marker; the audit entry's `durable_dropped` lists every one")
     _each(out, report.multi_drops,
-          lambda m: f"Durable facts: `[drop-durable: {m[0]}]` matched {len(m[1])} prior "
+          lambda m: f"Durable facts: `[drop-durable: {_clip(m[0])}]` matched {len(m[1])} prior "
           f"facts and dropped them all: " + _join(m[1], _one_line)
           + ". To drop only one, name its whole fact.",
           "drop marker(s) that each matched several prior facts")
     _each(out, report.own_lines_dropped,
-          lambda line: f"Durable facts: a drop marker also removed {line!r}, which this "
+          lambda line: f"Durable facts: a drop marker also removed {_clip(line)!r}, which this "
           f"wrap wrote itself. If the fact should stay, write it again next wrap.",
           "line(s) this wrap wrote that a drop marker removed")
     for old, new in report.near_duplicates:
         out.append(
-            f"Durable facts: the re-inserted line {old!r} looks reworded as {new!r}: "
+            f"Durable facts: the re-inserted line {_clip(old)!r} looks reworded as {_clip(new)!r}: "
             f"if the new line replaces the old, drop the old with "
-            f"`[drop-durable: {old}]`."
+            f"`[drop-durable: {_clip(old)}]`."
         )
     if report.near_duplicates_more:
         out.append(
@@ -722,8 +736,8 @@ def report_warnings(report: DurableReport) -> list[str]:
         )
     for old, new in report.contradictions:
         out.append(
-            f"Durable facts: re-inserted {old!r} may be superseded by {new!r}; if the "
-            f"fact changed, drop the old line with [drop-durable: {old}]."
+            f"Durable facts: re-inserted {_clip(old)!r} may be superseded by {_clip(new)!r}; if the "
+            f"fact changed, drop the old line with [drop-durable: {_clip(old)}]."
         )
     if report.contradictions_more:
         out.append(
@@ -736,29 +750,29 @@ def report_warnings(report: DurableReport) -> list[str]:
             "large section; some pairs were not compared."
         )
     _each(out, report.untracked,
-          lambda line: f"Durable facts: {line!r} in `## {h}` is not tracked as a durable "
+          lambda line: f"Durable facts: {_clip(line)!r} in `## {h}` is not tracked as a durable "
           f"fact; write it as a `- ` line.",
           f"line(s) in `## {h}` not tracked as durable facts")
     if report.stray_markers:
         out.append(
             f"Durable facts: drop marker(s) outside `## {h}` were ignored and left "
-            f"in the text: " + _join(report.stray_markers)
+            f"in the text: " + _join(report.stray_markers, _clip)
         )
     _each(out, report.cue_sprawl,
-          lambda line: f"Durable facts: more than {MAX_CUES} cues on {line!r}. Keep the "
+          lambda line: f"Durable facts: more than {MAX_CUES} cues on {_clip(line)!r}. Keep the "
           f"situations where the fact should come to mind, not synonyms of it.",
           f"line(s) with more than {MAX_CUES} cues")
     _each(out, report.pattern_shaped,
-          lambda line: f"Durable facts: {line!r} has the shape of a pattern line; pattern "
+          lambda line: f"Durable facts: {_clip(line)!r} has the shape of a pattern line; pattern "
           f"lines belong in ## Patterns, where citations are validated.",
           "line(s) shaped like pattern lines")
     _each(out, report.shared_facts,
-          lambda sf: f"Durable facts: two lines share the fact {sf[0]!r}: " + _join(sf[1])
+          lambda sf: f"Durable facts: two lines share the fact {_clip(sf[0])!r}: " + _join(sf[1], _clip)
           + ". The save compares lines by fact, so only one of them is protected; "
           "keep one line per fact.",
           "fact(s) shared by several lines")
     _each(out, report.near_miss_headers,
-          lambda line: f"Durable facts: {line!r} is not the durable heading, so its lines "
+          lambda line: f"Durable facts: {_clip(line)!r} is not the durable heading, so its lines "
           f"are not protected. The durable section's header is exactly `## {h}`.",
           f"header(s) that name `{h}` without being exactly it")
     if report.chars > report.budget:

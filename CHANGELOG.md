@@ -2,6 +2,40 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed — recall's episode fetch is one scan, and its counts come from one snapshot
+- `retrieve_relevant` and `search_episodes` fetch episode candidates through the new
+  `Store.keyword_candidates`: one scan for every keyword instead of a count and a fetch per
+  keyword, with the corpus size for IDF read in the same transaction. Results are
+  unchanged: on a copy of a real 12,968-episode store, 8 prompts gave identical episode
+  ids and scores from `retrieve_relevant` and identical ids, scores and matched words from
+  `search_episodes_counted`, 0.9.30 against this release.
+- `Store.recall` matches keywords with `content LIKE` instead of `LOWER(content) LIKE`.
+  SQLite's `LIKE` already ignores ASCII case and `LOWER()` folds only ASCII, so the rows
+  are the same (407 words checked on that store, 0 differences); `LOWER` copied the content
+  column once per keyword.
+- Measured with flow's real `UserPromptSubmit` recall hook on that store copy, 5 prompts x 4
+  runs each: hook wall time median 0.513 s on 0.9.30, 0.380 s on this release (min 0.440 s
+  and 0.322 s). The episode fetch inside it went from 0.239 s (8 `recall` calls) to 0.140 s.
+
+### Fixed
+- `Store.recall` reads `total_matching` and its rows in one transaction. Under a concurrent
+  writer, 0.9.30 returned a count that disagreed with its own rows on 65 of 65 reads in a
+  run; this release, 0 of 72 (with `keyword_candidates`). `search_episodes_counted`'s
+  `truncated` and its IDF counts inherit the fix.
+- `wrap-status` reads every field from one transaction (`Store.wrap_status_snapshot`), so a
+  wrap replaced while it reads can no longer lend the shown wrap its gated session or bound
+  token (codex, 0.9.30 review; 0.9.30's known-open line).
+- `WrapWindowMovedError` survives pickling.
+- Durable-fact save warnings quote at most 500 characters of any one fact, line or marker
+  (the rest is counted). A 50,000-character fact made one warning line 150,138 characters
+  long; the audit entry still keeps every dropped and re-inserted line whole.
+- README and the skill no longer say association links "strengthen with reuse" as if that
+  happens over time: a link gains strength only when the same pair is co-cited again, and
+  on a real store that is rare (594 links, strongest 1.325, none above 2.0). Recall has
+  not read them since 0.9.26.
+
 ## [0.9.30] — 2026-10-04
 
 ### Added — `prepare_wrap(wrap_token=...)`: a caller-supplied token, and a wrap only that token can cancel

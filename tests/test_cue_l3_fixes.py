@@ -37,15 +37,17 @@ def _text(r):
 
 
 def _spy_limits(store, monkeypatch):
+    # The episode tier fetches through Store.keyword_candidates (0.9.31), one call
+    # carrying the per-keyword limit.
     limits = []
-    real = store.recall
+    real = store.keyword_candidates
 
-    def spy(*a, **k):
-        if k.get("keyword"):
-            limits.append(k.get("limit"))
-        return real(*a, **k)
+    def spy(keywords, **k):
+        if keywords:
+            limits.append(k.get("limit_per_keyword"))
+        return real(keywords, **k)
 
-    monkeypatch.setattr(store, "recall", spy)
+    monkeypatch.setattr(store, "keyword_candidates", spy)
     return limits
 
 

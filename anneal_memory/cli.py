@@ -4017,7 +4017,8 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[json_parent],
     )
     sub.add_argument("--max-chars", type=int, default=None,
-                     help="Max continuity size in chars. Omit for a schema-aware "
+                     help="Target continuity size in chars (a save is refused only above the "
+                          "schema's hard maximum, which this does not move). Omit for a schema-aware "
                           "default (20000 for the standard schema, larger for a "
                           "richer schema like FLOW_SCHEMA).")
     sub.add_argument("--staleness-days", type=int, default=7, help="Days before flagging stale patterns (default: 7)")

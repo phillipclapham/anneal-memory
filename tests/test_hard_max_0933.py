@@ -75,7 +75,7 @@ def test_refusal_names_size_bound_and_what_to_cut_and_audits(tmp_path):
         assert "State (" in msg and "Active Threads (" in msg and "Context (" in msg
         assert "Do NOT cut Patterns (" in msg and "Understanding (" in msg
         assert pickle.loads(pickle.dumps(err)).chars == bound + 1
-        refused = [x for x in events if x["event"] == "continuity_save_refused"]
+        refused = [x for x in events if x["event"] == "continuity_refused"]
         assert len(refused) == 1 and refused[0]["data"]["over_by"] == 1
         # The wrap is still open: the same save, now at the bound, goes through,
         # and a large Durable Facts section does not count toward it.
@@ -90,4 +90,35 @@ def test_refusal_reaches_the_agent_over_mcp(tmp_path):
         result = Server(s)._tool_save_continuity({"text": _text(hard_max_chars(FLOW_SCHEMA) + 50)})
         text = result["content"][0]["text"]
         assert result["isError"] and "hard maximum" in text and "Do NOT cut" in text
-        assert any(x["event"] == "continuity_save_refused" for x in events)
+        assert any(x["event"] == "continuity_refused" for x in events)
+
+
+_DEFAULT_TEXT = """# Grad — Memory (v1)
+
+## State
+s
+
+## Patterns
+- p | 2x (2026-10-04)
+
+## Decisions
+[decided(rationale: "x", on: "2026-10-04")] y
+
+## Context
+{pad}
+"""
+
+
+def test_the_bound_measures_the_text_that_is_written(tmp_path):
+    """Graduation can rewrite a line longer (a bare ``2x`` becomes ``1x`` plus a
+    note once the store has seen citations): a text at the bound going in was
+    25,017 coming out and was saved (codex L3 HIGH, reproduced)."""
+    bound = hard_max_chars(DEFAULT_SCHEMA)
+    with Store(str(tmp_path / "m.db"), project_name="Grad") as s:
+        s.save_meta({**s.load_meta(), "citations_seen": True})
+        s.record("grad episode", EpisodeType.OBSERVATION)
+        assert prepare_wrap(s, max_chars=bound + 5000)["status"] == "ready"
+        base = len(_DEFAULT_TEXT.format(pad=""))
+        with pytest.raises(ContinuityValidationError) as e:
+            validated_save_continuity(s, _DEFAULT_TEXT.format(pad="c" * (bound - base)))
+        assert e.value.chars > bound  # the written text, not the input

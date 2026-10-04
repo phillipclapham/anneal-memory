@@ -12,18 +12,26 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   `ContinuityValidationError` (a `ValueError`, so the CLI and MCP surface it as they do
   any refused save), fail-closed like the catastrophic-shrink gate. The Durable Facts
   section is outside the measured size, as it is outside the target.
-- Why 1.25: across every continuity save on record in ten stores the largest was 1.19x
-  its schema's target (flow's 30,425 against 25,500); 1.2x would have passed it by 175
-  characters. Flow's 30,425-character save passes and a save measured at 31,877 is refused
-  (copy of the real store, this release).
+- Why 1.25: across every continuity save on record in ten stores the largest ratios to
+  a schema's target were 1.197x (anansi, 23,935 against its 20,000) and 1.193x (flow,
+  30,425 against 25,500); 1.2x would have passed anansi by 65 characters. At 1.25 the
+  tightest store keeps 1,065 characters of headroom. The Durable Facts section is
+  outside the measured size (it keeps its own warn-only budget), so the bound caps the
+  rest of the file, not the whole file. Flow's 30,425-character save passes and a save
+  measured at 31,877 is refused (copy of the real store, this release).
+- The size is measured on the text that will be written, after graduation: a bare `2x`
+  line is rewritten longer, and a bound-sized input was saved above the bound before
+  this was fixed in review (reproduced).
 - The bound comes from the schema only. A `max_chars` passed to `prepare_wrap` moves
   the compose target the guidance states, not this bound, and `allow_shrink` does not
-  lift it. The guidance now states the bound on its own line.
+  lift it, so a caller that raised `max_chars` above the bound is now refused above the
+  bound. The guidance states the bound on its own line, and says so when `max_chars`
+  is higher.
 - The refusal names the size, the bound and the target, and says what to cut by
   category: the sections that hold facts fetchable again from episodes or project files
   (`live-state`, `narrative`), and never the identity layers (`graduating`,
   `narrative-timeless`), which are cut only for being wrong.
-- Loud where nobody is watching: a refused save writes a `continuity_save_refused` audit
+- Loud where nobody is watching: a refused save writes a `continuity_refused` audit
   event (`reason: "hard_max"`, `chars`, `bound`, `target`, `over_by`) before the error is
   raised, and over MCP the refusal text is the tool result the composing agent reads. The
   wrap stays open, as for every validation refusal, so an unattended caller that gives up

@@ -596,7 +596,7 @@ def _check_hard_max(store: Any, text: str, schema: list[SectionSpec]) -> None:
     Fail-closed like the shrink gate and NOT lifted by ``allow_shrink``: a diet
     flag has nothing to say about a file that is too big. An oversized continuity
     is loaded by every session, so refusing it is cheaper than committing it. The
-    refusal is written to the audit trail (``continuity_save_refused``) before it
+    refusal is written to the audit trail (``continuity_refused``) before it
     is raised, so a store nobody is watching still leaves a record, and the
     message names what to cut by category: the sections that hold fetchable FACT
     (``live-state``, ``narrative``), never the identity layers (``graduating``,
@@ -634,19 +634,28 @@ def _check_hard_max(store: Any, text: str, schema: list[SectionSpec]) -> None:
             f" Do NOT cut {', '.join(keep)} to fit: that is identity, cut only for "
             f"being wrong, never for size."
         )
+    others = [
+        f"{s['heading']} ({masses.get(s['heading'].lower(), 0)})"
+        for s in schema
+        if s["role"] not in ("live-state", "narrative", "graduating",
+                             "narrative-timeless", "durable")
+    ]
+    if others:
+        message += (
+            f" Other sections ({', '.join(others)}): compress entries that no "
+            f"longer hold or that are recorded elsewhere."
+        )
     message += (
         "\nThe wrap is still in progress: re-compose under the bound and save again."
     )
-    audit = getattr(store, "_audit_log_after_commit", None)
-    if audit is not None:
-        audit(
-            "continuity_save_refused",
-            {"reason": "hard_max", "chars": chars, "bound": bound, "target": target,
-             "over_by": chars - bound},
-            method="validated_save_continuity",
-            committed="nothing (the save was refused)",
-            batch_aware=False,
-        )
+    store._audit_log_after_commit(
+        "continuity_refused",
+        {"reason": "hard_max", "chars": chars, "bound": bound, "target": target,
+         "over_by": chars - bound},
+        method="validated_save_continuity",
+        committed="nothing (the save was refused)",
+        batch_aware=False,
+    )
     raise ContinuityValidationError(message, chars=chars, bound=bound, target=target)
 
 
@@ -744,7 +753,8 @@ def _build_wrap_package(
         episodes: Episodes since last wrap (the compression window).
         existing_continuity: Current continuity text, or None for first session.
         project_name: Name for the continuity file header.
-        max_chars: Maximum size of the continuity file. ``None`` derives a
+        max_chars: Target size of the continuity file (a save is refused only
+            above the schema's hard maximum, which this does not move). ``None`` derives a
             schema-aware default (see :func:`~anneal_memory.schema.default_max_chars`).
         today: Override for today's date (YYYY-MM-DD). Defaults to actual today.
         staleness_days: Days before flagging stale patterns.
@@ -1049,6 +1059,11 @@ def _build_wrap_instructions(
         f"A save above {hard_max_chars(schema)} characters (the durable section "
         f"excluded) is refused."
     )
+    if max_chars > hard_max_chars(schema):
+        hard_line += (
+            " That bound comes from the schema, so it applies even though the "
+            "target above is higher."
+        )
     parts: list[str] = [
         "Compress your session episodes into your continuity file.",
         "",
@@ -2628,6 +2643,11 @@ def validated_save_continuity(
             not match the in-progress wrap, or the wrap catastrophically
             collapses a protected memory layer and ``allow_shrink`` is
             not set.
+        ContinuityValidationError: A ``ValueError`` subclass, raised when the
+            text that would be written (the durable section excluded) is
+            above ``hard_max_chars(schema)``. It is a size refusal only; the
+            other refusals above are plain ``ValueError``. Nothing is
+            written and the wrap stays in progress.
         SaveAuthorityError: A ``ValueError`` subclass, raised when the
             consolidate gate refuses the save: the caller is not
             authorized to commit this wrap, or the call omits a
@@ -2899,7 +2919,6 @@ def validated_save_continuity(
         prior_continuity, text, section_schema, allow_shrink=allow_shrink,
         crystallized_credit=crystallized_credit,
     )
-    _check_hard_max(store, text, section_schema)
 
     # Get current session's episodes for citation validation.
     # Re-fetch the full post-last-wrap set and filter down to exactly
@@ -2981,6 +3000,11 @@ def validated_save_continuity(
         # cross-session immune demotion is untouched. None disables it.
         carryforward_cold_days=carryforward_cold_days,
     )
+
+    # The hard maximum is measured on the text that will be WRITTEN: graduation
+    # rewrites lines (a bare ``2x`` becomes ``1x`` plus a note), so the input's
+    # size is not the file's. Nothing is written or recorded before this point.
+    _check_hard_max(store, grad_result.text, section_schema)
 
     # Detect Proven-tier (2x and ABOVE — `min_level` is a FLOOR, not a range, so a
     # 4x+ pattern is covered) patterns silently dropped between the

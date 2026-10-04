@@ -5595,7 +5595,8 @@ class Store:
         return self.continuity_path.read_text(encoding="utf-8")
 
     def save_continuity(self, text: str) -> str:
-        """Low-level continuity file write. **Bypasses the immune system.**
+        """Low-level continuity file write. **Bypasses the immune system** and the
+        hard maximum on size.
 
         This method writes the continuity text to its sidecar file with
         an atomic fsync-and-rename and logs a ``continuity_saved`` audit

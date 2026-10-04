@@ -271,7 +271,7 @@ The library *does* now catch some attacks earlier versions didn't: complete drop
 
 ### Associations through consolidation (not retrieval)
 
-During compression, when an agent cites multiple episodes to support a pattern, those episodes form lateral associations — Hebbian-style links. A link gains strength only when the same pair is co-cited again in a later wrap, and it decays at every wrap it is not. In practice that repetition is rare: on my own long-running store (2026-10-04), 594 links, the strongest at 1.325 and none above 2.0, where a direct co-citation adds 1.0. So the links mostly record single co-citations rather than build up, and since 0.9.26 recall does not read them (measurement below).
+During compression, when an agent cites multiple episodes on a pattern line that graduates (`2x` or higher; a `1x` first sighting forms no link), those episodes form lateral associations — Hebbian-style links. A link gains strength only when the same pair is co-cited again in a later wrap, and it decays at every wrap it is not. In practice that repetition is rare: on my own long-running store (2026-10-04), 594 links, the strongest at 1.325 and none above 2.0, where a direct co-citation adds 1.0. So the links mostly record single co-citations rather than build up, and since 0.9.26 recall does not read them (measurement below).
 
 This differs from how other systems form associations:
 

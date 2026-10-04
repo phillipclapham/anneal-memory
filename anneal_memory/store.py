@@ -3173,7 +3173,7 @@ class Store:
         Uses session IDs (not timestamps) for precision — avoids
         same-second boundary issues.
         """
-        with self._db_boundary("episodes_since_wrap"):
+        with self._db_boundary("episodes_since_wrap"), self._read_snapshot():
             last_wrap = self._conn.execute(
                 "SELECT id FROM wraps ORDER BY id DESC LIMIT 1"
             ).fetchone()
@@ -3197,7 +3197,9 @@ class Store:
 
     def status(self) -> StoreStatus:
         """Get store status snapshot."""
-        with self._db_boundary("status"):
+        # One read snapshot: the counts below must describe one committed state
+        # (a concurrent writer made total != sum(by type) on 95 of 1,500 reads).
+        with self._db_boundary("status"), self._read_snapshot():
             total = self._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
             since_wrap = self._count_episodes_since_wrap()
             total_wraps = self._conn.execute("SELECT COUNT(*) FROM wraps").fetchone()[0]
@@ -5285,7 +5287,7 @@ class Store:
 
     def association_stats(self) -> AssociationStats:
         """Get Hebbian association network health metrics."""
-        with self._db_boundary("association_stats"):
+        with self._db_boundary("association_stats"), self._read_snapshot():
             total = self._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
             return _association_stats(self._conn, total)
 
@@ -6016,7 +6018,7 @@ class Store:
 
     def count_episodes_since_wrap(self) -> int:
         """How many episodes are in the open compression window."""
-        with self._db_boundary("count_episodes_since_wrap"):
+        with self._db_boundary("count_episodes_since_wrap"), self._read_snapshot():
             return self._count_episodes_since_wrap()
 
     def last_wrap_id(self) -> int:

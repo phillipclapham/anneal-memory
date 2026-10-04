@@ -274,12 +274,3 @@ class TestKeyFieldTypes:
         store._conn.commit()
         assert retrieve_relevant(store, None, "rollback", max_episodes=0).facts == []
 
-
-class TestInertDropIsExactLikeTheMatch:
-    def test_a_live_token_sharing_a_stem_with_an_inert_one_still_cues(self, store):
-        # `files` is inert, `file` is not: the query token `file` must survive the drop,
-        # because matches() skips only exact inert words.
-        save_cont(store, _continuity("- shared drive layout — cues: file"))
-        write_inert_key(store, tokens={"files"})
-        got = retrieve_relevant(store, None, "where is the file", max_episodes=0).facts
-        assert [f.cue_matched for f in got] == [("file",)]

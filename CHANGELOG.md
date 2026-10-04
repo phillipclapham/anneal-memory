@@ -242,9 +242,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   all, facts included, and both name the fact-text path (two distinctive words of a fact's text).
   The `recall` description says the "Also matching by words" top-up follows a phrase of three or
   more distinctive words (manifests regenerated).
-- A query token is dropped as inert only when it is itself in the store's inert set, the rule a cue
-  or fact word is skipped by, so `file` still cues a `file` fact when only `files` is inert.
-  `crystal_recall`'s associative pattern read no longer loads the continuity a second time for
+- `crystal_recall`'s associative pattern read no longer loads the continuity a second time for
   facts it discards.
 - A harness that renders `RelevantResult` must read `result.facts` to show them; `patterns` and
   `episodes` are unchanged. The documented render is `Durable fact (cue: restaurant): tree nut

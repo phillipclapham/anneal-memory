@@ -2,7 +2,7 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.31] — 2026-10-04
 
 ### Changed — recall's episode fetch is one scan, and its counts come from one snapshot
 - `retrieve_relevant` and `search_episodes` fetch episode candidates through the new

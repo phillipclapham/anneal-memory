@@ -106,12 +106,8 @@ def test_no_token_passed_keeps_the_old_behaviour(store):
     assert store.wrap_bound_token() is None
     assert store.wrap_cancelled().token == r["wrap_token"]  # tokenless clear still works
 
-    # A wrap_bound_token left behind by a binary that predates the key binds no later wrap.
-    with store._conn:
-        store._conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('wrap_bound_token', ?)",
-            (uuid.uuid4().hex,),
-        )
+    # A wrap_bound_token that does not equal the live token (left by a binary that
+    # predates the key) binds nothing.
     r = prepare_wrap(store)
     with store._conn:
         store._conn.execute(

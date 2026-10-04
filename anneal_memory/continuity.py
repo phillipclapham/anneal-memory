@@ -1250,7 +1250,7 @@ real replacement, never two facts that merely sit side by side.
 Use `[decided(rationale: "why", on: "date")] choice` markers.
 - A `[decided]` line carries the decider's own words, quoted, in its rationale. A
   paraphrase, or someone else's reading of what was decided, is not a decision: write
-  it as `[judged by <who>, <date>]`. If it stops work, name exactly what it stops
+  it as `[judged: <who>, <when>, <against what>] <reading>`. If it stops work, name exactly what it stops
   (this round, this merge, this release), never the work as a whole.
 - Existing decisions still referenced by active State/Patterns → keep
 - 3+ related decisions pointing same direction → extract principle to Patterns, archive individuals
@@ -1643,6 +1643,10 @@ def prepare_wrap(
             token downgrades instead of cancelling it. Use a fresh token per
             call. Validated before anything is read or written: a non-``str``
             raises ``TypeError``, any other form ``ValueError``.
+            ⚠ A cancel by the token that runs while this call is still running
+            (another thread, an interrupt that did not stop it) can find nothing
+            open and then see this call open the wrap afterwards. Make the final
+            cancel after this call has stopped, or cancel again then.
 
     Returns:
         :class:`PrepareWrapResult` — a :class:`TypedDict` with keys:

@@ -1126,7 +1126,13 @@ class WrapCancelBoundError(AnnealMemoryError):
     a peer's. ``force=True`` still clears it (the holder is gone).
 
     ⚠ Anti-reflex, like :class:`WrapCancelGatedError`: the token is readable by
-    anyone who can run ``wrap-status``. The refusal texts carry no recipe.
+    anyone who can run ``wrap-status``, and ``force`` is open to any caller. The
+    refusal texts carry no recipe.
+
+    ⚠ The bound is on ``wrap_cancelled`` only. ``wrap_completed`` without its
+    token, ``wrap_started(allow_restart=True)``, a binary older than the bound
+    (which does not know the key), and a cancel of a bound wrap whose lifecycle
+    state is partial (no valid wrap left to protect) all end it as before.
     """
 
     def __init__(self, *, session_id: str | None = None) -> None:
@@ -3187,7 +3193,8 @@ class Store:
         and closes ``prepare_wrap``'s own check→write window. Pass
         ``allow_restart=True`` to deliberately DISCARD the in-progress
         wrap and start fresh (equivalent to :meth:`wrap_cancelled` then
-        a new wrap, but without the separate cancel audit event).
+        a new wrap, but without the separate cancel audit event). It
+        discards a gated or token-bound wrap too: neither bound applies.
 
         Writes the ``wrap_started_at`` flag, the session-handshake
         token, the frozen episode-ID snapshot, and the frozen section

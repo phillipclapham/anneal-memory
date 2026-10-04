@@ -23,6 +23,14 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   `wrap_bound_token`; a wrap is bound only while it equals `wrap_token`, so a value left by
   an older binary binds nothing.
 - With no `wrap_token`, behaviour is unchanged.
+- Known open: the bound guards `wrap_cancelled` only. `wrap_completed` without a token,
+  `wrap_started(allow_restart=True)`, a cancel of a bound wrap whose lifecycle state is
+  partial, and any anneal older than this release on the same store still end a bound
+  wrap. `force` is open to any caller (MCP `wrap_cancel` takes it), so the bound stops a
+  reflex, not a caller set on ending the wrap. A cancel by a token the caller read from
+  `wrap-status` or `wrap_bound_token()` passes, by design. A caller's cancel by its own
+  token that runs while its `prepare_wrap` is still running can find nothing open and then
+  see the wrap opened afterwards: cancel again once `prepare_wrap` has stopped.
 - Run on a copy of a live store before the tests were written: two processes, a
   tokenless `wrap-cancel` arriving while the caller's `prepare_wrap` had not returned
   (refused), the caller's cancel by its own token afterwards (cleared), a peer's wrap left
@@ -30,8 +38,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ### Changed
 - The wrap guidance for `## Decisions` says a `[decided]` line carries the decider's own
-  words, quoted; a paraphrase or someone else's reading is written `[judged by <who>,
-  <date>]` and, if it stops work, names exactly what it stops.
+  words, quoted; a paraphrase or someone else's reading is written `[judged: <who>, <when>,
+  <against what>]` and, if it stops work, names exactly what it stops.
 
 ### Fixed
 - The `## Durable Facts` budget the wrap guidance shows is now the one the save warns

@@ -419,8 +419,9 @@ _BUDGET_EXTRA: dict[str, int] = {
 }
 
 
-# The durable section's own budget, as a fraction of the store's max_chars. At
-# the default 20000 that is 3000 chars: room for roughly 25-35 one-line facts
+# The durable section's own budget, as a fraction of the size target it is given
+# (:func:`schema_durable_budget` passes the schema's default, never a caller's
+# ``max_chars``). At the default 20000 that is 3000 chars: room for roughly 25-35 one-line facts
 # without crowding the narrative sections, which keep all of max_chars because
 # the durable budget sits on top of it rather than inside it.
 DURABLE_BUDGET_FRACTION = 0.15

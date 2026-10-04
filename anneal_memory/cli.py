@@ -1734,8 +1734,10 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
                     "Refused: the wrap in progress is NOT the one you named, and it "
                     "was opened with a token its preparer holds. Cancelling it "
                     "discards that caller's compression, which is the operator's "
-                    "decision. Nothing was changed. Run `anneal-memory wrap-status` "
-                    "to see when it started.",
+                    "decision. "
+                    + ("--force is ignored while --wrap-token is given. " if exc.force else "")
+                    + "Nothing was changed. Run `anneal-memory wrap-status` to see "
+                    "when it started.",
                     file=sys.stderr,
                 )
             elif exc.gated_session and exc.gated_session != exc.session_id and exc.force:

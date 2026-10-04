@@ -994,8 +994,9 @@ class Server:
                     "Refused: the wrap in progress is NOT the one you named, and it "
                     "was opened with a token its preparer holds. Cancelling it "
                     "discards that caller's compression, which is the operator's "
-                    "decision. Nothing was changed. Call `status` to see when it "
-                    "started.",
+                    "decision. "
+                    + ("force is ignored while wrap_token is given. " if exc.force else "")
+                    + "Nothing was changed. Call `status` to see when it started.",
                     is_error=True,
                 )
             if exc.gated_session and exc.gated_session != session_id and exc.force:

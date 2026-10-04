@@ -4,6 +4,21 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+**0.9.27 was tagged on GitHub but never published to PyPI.** Its `prepare_wrap` guidance
+could lead a composer to write `## Durable Facts (optional)`, which protects nothing (fixed
+below). This release is the first on PyPI to carry everything in the 0.9.27 entry:
+durable facts, typed-query recall, the cue wiring and the `outcome` fixes.
+
+### Compatibility — `FLOW_SCHEMA` gains an optional seventh section
+- `FLOW_SCHEMA` (and the `partnership` and `default` named schemas) include
+  `Durable Facts`, marked optional. A consumer that compares a store's persisted headings
+  to `FLOW_SCHEMA` exactly must accept a schema without it, or every store persisted
+  before 0.9.27 is refused. `name_for_schema` already ignores optional sections and is
+  the comparison to use. levain fixed its wrap guard in 0.5.6; upgrade levain with anneal.
+- An existing store gains the section only when its operator re-runs
+  `anneal-memory --db <path> set-schema <its schema name>` (migration entry
+  `AM-DURABLE-FACTS`); a new store has it from `init`.
+
 ### Fixed — durable-fact save warnings are bounded, and a near-miss header is named
 - Every per-item list in the durable-fact save warnings is cut at 20 items with one line
   counting the rest: facts dropped by marker, markers that matched several facts (and the

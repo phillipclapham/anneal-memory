@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from anneal_memory.store import Store
+from anneal_memory.team import _nests_too_deep as _nests_too_deep_probe
 from anneal_memory.team import canonical, chain_hash, import_ledger
 
 
@@ -472,8 +473,15 @@ def test_ruling_needs_a_retire_or_words_to_be_superseded(store):
 
 
 def test_deeply_nested_json_is_reported_not_raised(store):
-    rep = import_ledger(store, ["[" * 200000 + "]" * 200000] + ledger("alice", [RULING]))
+    import time
+    start = time.monotonic()
+    rep = import_ledger(store, ["[" * 200000 + "]" * 200000, '{"a":' * 5000 + "1" + "}" * 5000]
+                        + ledger("alice", [RULING]))
     assert rep.chain_problems and len(rep.imported) == 1
+    assert any("nested deeper" in p for p in rep.chain_problems)
+    assert time.monotonic() - start < 5  # the guard runs before json.loads (a Windows CI hang)
+    # brackets inside a string do not count
+    assert not _nests_too_deep_probe('{"a":"' + "[" * 100 + '"}')
 
 
 def test_the_same_line_twice_is_not_a_problem(store):

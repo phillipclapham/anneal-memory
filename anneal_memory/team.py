@@ -95,6 +95,7 @@ _TEXT_FIELDS = {"words": 4000, "summary": 2000, "reason": 4000, "recheck": 1000}
 _MAX_PATHS = 100
 _MAX_PATH_CHARS = 300
 _MAX_LINES = 200_000
+_MAX_JSON_DEPTH = 32  # a ledger entry nests two levels; deeper is never an entry
 _MAX_FILE_BYTES = 64 * 1024 * 1024
 _FUTURE_SKEW = timedelta(days=1)
 _TS = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$")
@@ -207,6 +208,33 @@ def _unsafe_text(text: str) -> bool:
         unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp", "Co", "Cn") and c not in "\n\r\t"
         for c in text
     )
+
+
+def _nests_too_deep(line: str) -> bool:
+    """True when the line's brackets nest deeper than an entry ever does. Checked
+    BEFORE ``json.loads``: on Windows a few hundred thousand open brackets made the
+    parser run for over twenty minutes (CI hang, 2026-10-04), where Linux and macOS
+    raise RecursionError at once."""
+    depth = 0
+    in_str = False
+    esc = False
+    for ch in line:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in "[{":
+            depth += 1
+            if depth > _MAX_JSON_DEPTH:
+                return True
+        elif ch in "]}":
+            depth -= 1
+    return False
 
 
 def _is_str_list(v: object) -> bool:
@@ -355,6 +383,9 @@ def _verified_chains(
             continue
         if len(line) > _MAX_LINE_CHARS:
             report.chain_problems.append(f"line {n}: longer than {_MAX_LINE_CHARS} characters")
+            continue
+        if _nests_too_deep(line):
+            report.chain_problems.append(f"line {n}: nested deeper than an entry can be")
             continue
         try:
             e = json.loads(line)

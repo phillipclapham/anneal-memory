@@ -4,7 +4,17 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
-## [0.9.34] — 2026-10-04
+## [0.9.35] — 2026-10-04
+
+### Fixed — a deeply nested line hung `team-import` on Windows
+- A line of a few hundred thousand open brackets made `json.loads` run for over twenty
+  minutes on the Windows CI runner (it raises `RecursionError` at once on Linux and
+  macOS), which hung the 0.9.34 candidate's Windows job twice. `team-import` now refuses
+  a line that nests deeper than 32 levels before parsing it (an entry nests two) and
+  reports it as a chain problem. 0.9.34 was tagged and never published; 0.9.35 is the
+  release that carries everything below.
+
+## [0.9.34] — 2026-10-04 (tagged, never published)
 
 ### Added — team ledger import (`anneal-memory team-import`)
 - `anneal-memory team-import <file...|-> [--dry-run] [--json] [--link-authority PATTERN]` and

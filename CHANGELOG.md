@@ -127,8 +127,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   whole fact, every physical line joined with `\n`; warnings show a multi-line fact on one line,
   joined with ` / `. A marker that drops more than one prior fact (a first line several facts
   share) warns, naming them; a dropped fact is attributed to the first marker that names it.
-  Every fact a marker drops is reported, `Durable facts: dropped by marker: <fact>`, in the
-  warnings and in `durable_warnings`, as well as in the audit chain. The durable section's raw
+  Every fact a marker drops is in the audit chain's `durable_dropped`; the warnings and
+  `durable_warnings` name the first 20, `Durable facts: dropped by marker: <fact>`, and one
+  summary line counts the rest. The exact-heading rule folds case with `str.lower`, as the
+  schema's duplicate-heading check does. The durable section's raw
   size is measured with lines split on `\n` only, as `measure_sections` splits them.
 - Known open: (a) a writer calling bare `Store.save_continuity()` between a validated save's read
   and its rename is overwritten, durable lines included; this holds for all continuity content,
@@ -250,6 +252,12 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   are not reflected until the next wrap recomputes it.
 - Tool descriptions: `limit=0` (`recall`) and `max_patterns=0` (`crystal_recall`) return nothing at
   all, facts included, and both name the fact-text path (two distinctive words of a fact's text).
+  The `recall` description says the "Also matching by words" top-up follows a phrase of three or
+  more distinctive words (manifests regenerated).
+- A query token is dropped as inert only when it is itself in the store's inert set, the rule a cue
+  or fact word is skipped by, so `file` still cues a `file` fact when only `files` is inert.
+  `crystal_recall`'s associative pattern read no longer loads the continuity a second time for
+  facts it discards.
 - A harness that renders `RelevantResult` must read `result.facts` to show them; `patterns` and
   `episodes` are unchanged. The documented render is `Durable fact (cue: restaurant): tree nut
   allergy`, built from `.fact` and the first of `.cue_matched` (`matches` and `.fact_matched` for a

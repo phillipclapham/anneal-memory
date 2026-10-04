@@ -41,7 +41,7 @@ import difflib
 import re
 from typing import Any, Callable
 
-from .schema import SectionSpec, default_max_chars, durable_budget
+from .schema import SectionSpec, schema_durable_budget
 
 __all__ = [
     "DurableFact",
@@ -625,7 +625,7 @@ def enforce_durable_facts(
             and not match_headings(lines[i].lower(), all_lower - {heading.lower()})
         ],
         chars=section_chars(text, schema),
-        budget=durable_budget(default_max_chars(schema)),
+        budget=schema_durable_budget(schema),
     )
 
 

@@ -60,7 +60,7 @@ from .schema import (
     DEFAULT_SCHEMA,
     SectionSpec,
     default_max_chars,
-    durable_budget,
+    schema_durable_budget,
     graduating_headings,
     required_headings,
     schema_role_warning,
@@ -962,7 +962,7 @@ def _build_wrap_instructions(
     else:
         size_line = (
             f"Stay within {max_chars} characters, not counting `## {durable_heading}`, "
-            f"which has its own budget ({durable_budget(max_chars)} characters)."
+            f"which has its own budget ({schema_durable_budget(schema)} characters)."
         )
     parts: list[str] = [
         "Compress your session episodes into your continuity file.",
@@ -1000,7 +1000,10 @@ def _build_wrap_instructions(
     if durable_heading is not None:
         parts += [
             _durable_block(
-                durable_heading, durable_chars, max_chars, durable_pending or []
+                durable_heading,
+                durable_chars,
+                schema_durable_budget(schema),
+                durable_pending or [],
             ),
             "",
         ]
@@ -1039,13 +1042,13 @@ def _build_wrap_instructions(
 
 
 def _durable_block(
-    heading: str, current_chars: int, max_chars: int, pending: list[str]
+    heading: str, current_chars: int, budget: int, pending: list[str]
 ) -> str:
     """The wrap-package guidance for a ``durable`` section (B1). The keep
     criterion is InMind's, the one its memory probe was measured with. The
     example line carries no date: refreshing a date would be a reword."""
     lines = [
-        f"**{heading}** (`{heading}: {current_chars} / {durable_budget(max_chars)} chars`)",
+        f"**{heading}** (`{heading}: {current_chars} / {budget} chars`)",
         f"- Put a fact here when it would change what advice or answer you give, or "
         f"the user would be upset or harmed if you forgot it: health, allergies, "
         f"constraints, commitments, preferences, relationships, identity facts, and "
@@ -1245,6 +1248,10 @@ real replacement, never two facts that merely sit side by side.
 
 ### Decisions (use in ## Decisions)
 Use `[decided(rationale: "why", on: "date")] choice` markers.
+- A `[decided]` line carries the decider's own words, quoted, in its rationale. A
+  paraphrase, or someone else's reading of what was decided, is not a decision: write
+  it as `[judged by <who>, <date>]`. If it stops work, name exactly what it stops
+  (this round, this merge, this release), never the work as a whole.
 - Existing decisions still referenced by active State/Patterns → keep
 - 3+ related decisions pointing same direction → extract principle to Patterns, archive individuals
 - Decisions >30 days old referencing nothing active → remove"""
@@ -1540,6 +1547,7 @@ def prepare_wrap(
     crystal_store: CrystalStore | None = None,
     session_id: str | None = None,
     allow_sole_live: bool = False,
+    wrap_token: str | None = None,
 ) -> PrepareWrapResult:
     """Run the full store-aware prepare_wrap pipeline.
 
@@ -1567,7 +1575,8 @@ def prepare_wrap(
     .. note::
         **The prepare/save window is frozen as of the 10.5c.4 fix**
         (targeted for v0.2.0). ``prepare_wrap`` mints a unique
-        ``wrap_token`` (``uuid.uuid4().hex``) and persists the frozen
+        ``wrap_token`` (``uuid.uuid4().hex``), or takes the caller's
+        ``wrap_token`` of the same form, and persists the frozen
         list of episode IDs in store metadata before returning.
         :func:`validated_save_continuity` then filters its re-fetched
         episode set down to exactly the IDs shown here, regardless of
@@ -1620,6 +1629,20 @@ def prepare_wrap(
             consolidate needs the baton (⚖ Phill, 2026-09-24, flow
             spore-1169), because sole-live is judged from a registry
             snapshot that a resume or a TTL crossing can race.
+        wrap_token: A caller-supplied token for the wrap this call opens, in
+            ``uuid.uuid4().hex`` form (32 lowercase hex characters), or ``None``
+            (default) to have one minted. A caller that mints its own holds the
+            wrap's identity before this call returns, so every cancel it makes,
+            including one on an exit while this call is still running, can be
+            ``store.wrap_cancelled(expect_token=wrap_token)``: that clears the
+            wrap only if it is this one, and raises :class:`WrapOwnershipError`
+            otherwise (``actual is None`` when nothing is open). A wrap opened
+            this way is TOKEN-BOUND: a cancel that names no token raises
+            :class:`~anneal_memory.WrapCancelBoundError` unless it passes
+            ``force=True``, and an empty-window call that does not hold the
+            token downgrades instead of cancelling it. Use a fresh token per
+            call. Validated before anything is read or written: a non-``str``
+            raises ``TypeError``, any other form ``ValueError``.
 
     Returns:
         :class:`PrepareWrapResult` — a :class:`TypedDict` with keys:
@@ -1697,6 +1720,16 @@ def prepare_wrap(
         raise TypeError(
             f"prepare_wrap: allow_sole_live must be a bool, got {type(allow_sole_live).__name__}"
         )
+    if wrap_token is not None:
+        if not isinstance(wrap_token, str):
+            raise TypeError(
+                f"prepare_wrap: wrap_token must be a str, got {type(wrap_token).__name__}"
+            )
+        if not _CALLER_TOKEN_RE.fullmatch(wrap_token):
+            raise ValueError(
+                "prepare_wrap: wrap_token must be 32 lowercase hex characters, the "
+                "form uuid.uuid4().hex produces."
+            )
     # Observe the wrap in progress (if any) BEFORE reading the episode window. The empty-window
     # path below cancels only the wrap observed here, by compare-and-swap on its token, so a
     # wrap another session starts after this point has a different token (or, if it finished
@@ -1722,6 +1755,7 @@ def prepare_wrap(
     except StoreError:
         observed, observed_partial = None, True
     observed_gated_by = store.wrap_gated_session()
+    observed_bound = store.wrap_bound_token()
     episodes = store.episodes_since_wrap()
 
     # AM-CONSOLIDATE-EFFERENT (spore-194): the efferent gate. Capture is afferent
@@ -1753,6 +1787,20 @@ def prepare_wrap(
         # the compare-and-swap keeps it off a wrap a peer started meanwhile. (Lifecycle keys left behind with wrap_started_at empty are inert: the
         # next wrap_started overwrites them, and wrap_gated_session() ignores them.)
         # A partial (corrupt) lifecycle has no valid wrap to protect, so it never blocks recovery.
+        if (
+            observed is not None
+            and observed_bound == observed["token"]
+            and wrap_token != observed["token"]
+        ):
+            # A wrap opened with a caller-supplied token ends only by that token
+            # (or the operator's force); this call does not hold it.
+            return _downgraded_empty(
+                "Consolidate downgraded to capture-only (downgraded-bound-wrap-open): "
+                "a wrap opened with a token its preparer holds is in progress, and "
+                "this call does not hold that token, so it cannot cancel it. "
+                "Abandoning it discards that caller's compression and is the "
+                "operator's decision. Capture (afferent) is unaffected."
+            )
         gated_by = (
             observed_gated_by if session_id is None and not observed_partial else None
         )
@@ -1921,7 +1969,9 @@ def prepare_wrap(
     downgraded = _consolidate_gate(store, session_id, allow_sole_live, len(episodes))
     if downgraded is not None:
         return downgraded
-    wrap_token = uuid.uuid4().hex
+    token_bound = wrap_token is not None
+    if wrap_token is None:
+        wrap_token = uuid.uuid4().hex
     # AM-SCHEMASNAPSHOT: freeze the EXACT schema we read above (line ~884) into
     # the wrap snapshot, so validated_save_continuity reads back this same schema
     # rather than re-reading a possibly-concurrently-changed live schema. Passing
@@ -1935,6 +1985,7 @@ def prepare_wrap(
             gated_session_id=session_id,
             expect_last_wrap_id=window_last_wrap_id,
             derive_roots=frozen_identities,
+            token_bound=token_bound,
         )
     except WrapWindowMovedError:
         return _downgraded_empty(
@@ -2162,6 +2213,11 @@ def _check_save_authority(
         f"Session {session_id!r} does not hold the consolidate baton: {cause}, so it may not "
         f"commit this wrap. Nothing was written."
     )
+
+
+# prepare_wrap's caller-supplied wrap_token: the shape uuid.uuid4().hex mints, so
+# a caller token is indistinguishable from a minted one wherever tokens are used.
+_CALLER_TOKEN_RE = re.compile(r"[0-9a-f]{32}")
 
 
 _SUPERSEDES_RE = re.compile(

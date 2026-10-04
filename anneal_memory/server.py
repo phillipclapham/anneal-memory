@@ -57,6 +57,7 @@ from .store import (
     StoreDatabaseError,
     _is_write_lock_contention,
     StoreError,
+    WrapCancelBoundError,
     WrapCancelGatedError,
     WrapOwnershipError,
     _WRAP_TOKEN_RE,
@@ -427,7 +428,7 @@ class Server:
         """Episode recall with the durable-fact tier on top: when a ``keyword`` is given
         on the first page, the durable facts its words cue are listed first (see
         :func:`_durable_block`), and a call that matched no episode but cued a fact
-        returns the facts instead of "No matching episodes found."."""
+        returns the facts, followed by "No matching episodes found."."""
         # ``limit`` and ``offset`` reach SQLite and slice indices: a whole-number float (a
         # client that serializes 3 as 3.0) is read as the integer, and anything else that
         # is not an integer is refused by name rather than by a driver error. A negative
@@ -924,6 +925,15 @@ class Server:
                 force=force,
                 **({"expect_partial": True} if partial else {}),
             )
+        except WrapCancelBoundError:
+            # No recipe, as for the gated refusal below.
+            return _tool_result(
+                "Refused: the wrap in progress was opened with a token its preparer "
+                "holds, and a cancel that names no token cannot end it. Cancelling "
+                "it discards that caller's compression, which is the operator's "
+                "decision. Nothing was changed.",
+                is_error=True,
+            )
         except WrapCancelGatedError as exc:
             # No recipe here, on purpose: the reader of a refusal is the caller the
             # bound exists to stop.
@@ -975,6 +985,17 @@ class Server:
                     "Nothing to cancel: the wrap you named has already completed "
                     "or been cancelled, and no wrap is in progress now. Nothing "
                     "was changed — prepare_wrap will start a fresh one.",
+                    is_error=True,
+                )
+            if exc.bound:
+                # A call without wrap_token would hit WrapCancelBoundError, so no
+                # override is offered, and no recipe.
+                return _tool_result(
+                    "Refused: the wrap in progress is NOT the one you named, and it "
+                    "was opened with a token its preparer holds. Cancelling it "
+                    "discards that caller's compression, which is the operator's "
+                    "decision. Nothing was changed. Call `status` to see when it "
+                    "started.",
                     is_error=True,
                 )
             if exc.gated_session and exc.gated_session != session_id and exc.force:

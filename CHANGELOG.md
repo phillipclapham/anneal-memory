@@ -2,6 +2,45 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — `prepare_wrap(wrap_token=...)`: a caller-supplied token, and a wrap only that token can cancel
+- `prepare_wrap` accepts `wrap_token`, a 32-character lowercase hex string (the form
+  `uuid.uuid4().hex` produces). The wrap it opens carries exactly that token. A caller
+  that mints its own token holds the wrap's identity before `prepare_wrap` returns, so a
+  cleanup on an interrupt or timeout can cancel by compare-and-swap
+  (`store.wrap_cancelled(expect_token=...)`) even when the exit lands inside
+  `prepare_wrap`. Before this, such a caller had no token at that point and could only
+  cancel without one, which ends whatever wrap is current, a peer's included (found by the
+  codex and gemini review of levain 0.5.7).
+- A wrap opened with a caller token is **token-bound**: `wrap_cancelled()` without
+  `expect_token` raises the new `WrapCancelBoundError` and changes nothing, whatever
+  `session_id` it passes; `force=True` still clears it. A `prepare_wrap` with an empty
+  window that does not hold the token returns `downgraded-bound-wrap-open` instead of
+  cancelling it. MCP `wrap_cancel` and CLI `wrap-cancel` refuse in the same way, and
+  `wrap-status` says a wrap is bound and prints no abandon command for it.
+  `WrapOwnershipError` gains `bound`. `Store.wrap_bound_token()` reads it. New metadata key
+  `wrap_bound_token`; a wrap is bound only while it equals `wrap_token`, so a value left by
+  an older binary binds nothing.
+- With no `wrap_token`, behaviour is unchanged.
+- Run on a copy of a live store before the tests were written: two processes, a
+  tokenless `wrap-cancel` arriving while the caller's `prepare_wrap` had not returned
+  (refused), the caller's cancel by its own token afterwards (cleared), a peer's wrap left
+  untouched by a cancel with the wrong token.
+
+### Changed
+- The wrap guidance for `## Decisions` says a `[decided]` line carries the decider's own
+  words, quoted; a paraphrase or someone else's reading is written `[judged by <who>,
+  <date>]` and, if it stops work, names exactly what it stops.
+
+### Fixed
+- The `## Durable Facts` budget the wrap guidance shows is now the one the save warns
+  against. With a `max_chars` passed to `prepare_wrap`, the guidance used to show a budget
+  derived from that number while the save warned against the schema default's (Diogenes
+  2026-10-04). One function, `schema_durable_budget`, now serves both.
+- The MCP `recall` docstring said a facts-only reply replaces "No matching episodes found.";
+  it is followed by it, as the code, tests and the 0.9.27 notes say (Diogenes 2026-10-04).
+
 ## [0.9.29] — 2026-10-04
 
 ### Fixed — a schema change can no longer slip in between prepare_wrap's read and the wrap's freeze

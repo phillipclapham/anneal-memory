@@ -360,6 +360,7 @@ StoreOperation = Literal[
     "consolidate_requires_baton",
     "wrap_gated_session",
     "wrap_derive_roots",
+    "wrap_bound_token",
     "set_consolidate_requires_baton",
     "get_wrap_history",
     "record_associations",
@@ -746,8 +747,8 @@ class WrapInProgressError(AnnealMemoryError):
             f"a wrap is already in progress{when}. Either "
             f"{_WRAP_FINISH_PATHS}, or {_WRAP_CANCEL_PATHS}, "
             "before starting a new wrap. If it was prepared under the consolidate "
-            "gate, it is the preparing session's or the operator's to end, and a "
-            "plain cancel of it is refused."
+            "gate, or opened with a token its preparer holds, it is the preparer's "
+            "or the operator's to end, and a plain cancel of it is refused."
         )
 
     def __reduce__(self) -> "tuple[type[WrapInProgressError], tuple[str | None]]":
@@ -824,6 +825,7 @@ def _reconstruct_wrap_ownership_error(
     session_id: str | None = None,
     force: bool = False,
     expect_partial: bool = False,
+    bound: bool = False,
 ) -> "WrapOwnershipError":
     """Module-level reconstructor for pickling :class:`WrapOwnershipError`.
 
@@ -837,7 +839,7 @@ def _reconstruct_wrap_ownership_error(
     return WrapOwnershipError(
         expected=expected, actual=actual, partial_state=partial_state,
         gated_session=gated_session, session_id=session_id, force=force,
-        expect_partial=expect_partial,
+        expect_partial=expect_partial, bound=bound,
     )
 
 
@@ -918,7 +920,8 @@ class WrapOwnershipError(AnnealMemoryError):
     **Omitting ``expect_token`` is the override** for an ungated wrap: an unproven
     cancel is a cancel with no claim. A wrap prepared under the consolidate gate
     also needs the preparing ``session_id`` or an explicit ``force`` (see
-    :class:`WrapCancelGatedError`).
+    :class:`WrapCancelGatedError`), and a wrap opened with a caller-supplied token
+    needs ``force`` (see :class:`WrapCancelBoundError`; ``bound`` is then True).
 
     ⛔ **THE STATE IS THREE-WAY AND THE THIRD ONE IS LOAD-BEARING:**
 
@@ -957,6 +960,7 @@ class WrapOwnershipError(AnnealMemoryError):
         session_id: str | None = None,
         force: bool = False,
         expect_partial: bool = False,
+        bound: bool = False,
     ) -> None:
         self.expected = expected
         self.actual = actual
@@ -976,6 +980,10 @@ class WrapOwnershipError(AnnealMemoryError):
         # Set only by the expect_partial=True refusal. ``expected`` cannot carry
         # this: a token is caller-chosen and could equal any marker string.
         self.expect_partial = expect_partial
+        # ``actual`` was opened with a caller-supplied token (prepare_wrap's
+        # ``wrap_token``), so a tokenless cancel of it raises WrapCancelBoundError
+        # and no override is offered in the text.
+        self.bound = bound
         if expect_partial:
             now = f"wrap {actual!r} is in progress" if actual else "it is idle"
             super().__init__(
@@ -998,6 +1006,17 @@ class WrapOwnershipError(AnnealMemoryError):
                 f"in progress — it already completed or was cancelled. Nothing "
                 f"was changed. Call without expect_token to clear whatever is "
                 f"current, or treat this as already-done."
+            )
+        elif bound:
+            # No recipe, as for a gated wrap: only the holder of the token, or the
+            # operator with force, may end it.
+            ignored = " force is ignored while expect_token is given." if force else ""
+            super().__init__(
+                f"wrap_cancelled: caller claims wrap {expected!r} but the store "
+                f"holds {actual!r}, opened with a token its preparer holds. "
+                f"Cancelling it discards that caller's compression, which is the "
+                f"operator's decision.{ignored} Nothing was changed. Check "
+                f"`status` for its start time."
             )
         elif gated_session and gated_session != session_id and force:
             super().__init__(
@@ -1046,6 +1065,7 @@ class WrapOwnershipError(AnnealMemoryError):
                 self.session_id,
                 self.force,
                 self.expect_partial,
+                self.bound,
             ),
         )
 
@@ -1091,6 +1111,40 @@ def _reconstruct_wrap_cancel_gated_error(
 ) -> "WrapCancelGatedError":
     """Pickle reconstructor for :class:`WrapCancelGatedError` (keyword-only init)."""
     return WrapCancelGatedError(gated_session=gated_session, session_id=session_id)
+
+
+class WrapCancelBoundError(AnnealMemoryError):
+    """Raised by ``wrap_cancelled()`` without ``expect_token`` (and without
+    ``force=True``) when the wrap in progress was opened with a caller-supplied
+    token (``prepare_wrap(wrap_token=...)``). Nothing is changed.
+
+    A caller that supplies its own token holds the wrap's identity before the wrap
+    exists, so every cancel it makes can be a compare-and-swap on that token, even
+    one made while ``prepare_wrap`` has not yet returned. This error closes the
+    other side: a cancel that names no token cannot end such a wrap, whatever
+    ``session_id`` it passes, because a tokenless cancel cannot tell that wrap from
+    a peer's. ``force=True`` still clears it (the holder is gone).
+
+    ⚠ Anti-reflex, like :class:`WrapCancelGatedError`: the token is readable by
+    anyone who can run ``wrap-status``. The refusal texts carry no recipe.
+    """
+
+    def __init__(self, *, session_id: str | None = None) -> None:
+        self.session_id = session_id
+        super().__init__(
+            "wrap_cancelled: the wrap in progress was opened with a token its "
+            "preparer holds, and a cancel that names no token cannot end it. "
+            "Cancelling it discards that caller's compression, which is the "
+            "operator's decision. Nothing was changed."
+        )
+
+    def __reduce__(self) -> tuple:
+        return (_reconstruct_wrap_cancel_bound_error, (self.session_id,))
+
+
+def _reconstruct_wrap_cancel_bound_error(session_id: str | None) -> "WrapCancelBoundError":
+    """Pickle reconstructor for :class:`WrapCancelBoundError` (keyword-only init)."""
+    return WrapCancelBoundError(session_id=session_id)
 
 
 class SupersessionError(AnnealMemoryError, ValueError):
@@ -1523,6 +1577,11 @@ _DEFAULT_METADATA = {
     # in a repo it was not written about.
     # Additive lifecycle key like wrap_gated_session, cleared on every terminal path.
     "wrap_derive_roots": "",
+    # The wrap's token again when prepare_wrap was given a caller-supplied
+    # wrap_token, else empty. The wrap is token-bound only while this EQUALS
+    # wrap_token, so a value a binary that predates the key left behind can never
+    # bind a later wrap. Additive lifecycle key, cleared on every terminal path.
+    "wrap_bound_token": "",
 }
 
 
@@ -3091,6 +3150,7 @@ class Store:
         gated_session_id: str | None = None,
         expect_last_wrap_id: int | None = None,
         derive_roots: dict[str | None, str] | None = None,
+        token_bound: bool = False,
     ) -> None:
         """Mark that a wrap has been initiated (prepare_wrap called).
 
@@ -3163,6 +3223,10 @@ class Store:
                 meanwhile (spore-1282; read back with :meth:`wrap_derive_roots`).
                 ``prepare_wrap`` freezes :func:`anneal_memory.rederive.root_identities`.
                 ``None`` freezes nothing.
+            token_bound: The token was supplied by the caller
+                (``prepare_wrap(wrap_token=...)``), so :meth:`wrap_cancelled`
+                refuses to end this wrap without ``expect_token`` or ``force``
+                (:class:`WrapCancelBoundError`). Must be a bool.
 
         Raises:
             ValueError: If ``token`` is empty. The canonical pipeline
@@ -3186,6 +3250,10 @@ class Store:
                 this event. Also counted on ``status().audit_write_failures``
                 and logged; see :meth:`_audit_log_after_commit`.
         """
+        if not isinstance(token_bound, bool):  # "false" is truthy: never infer it
+            raise TypeError(
+                f"wrap_started: token_bound must be a bool, got {type(token_bound).__name__}"
+            )
         if not token:
             raise ValueError(
                 "wrap_started: token must be non-empty. The canonical "
@@ -3382,6 +3450,10 @@ class Store:
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_derive_roots", derive_roots_json),
             )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_bound_token", token if token_bound else ""),
+            )
             self._conn.commit()
 
         if self._audit is not None:
@@ -3428,6 +3500,8 @@ class Store:
                     # Who prepared the wrap under the consolidate gate (None when
                     # ungated): the chain of custody for who may commit it.
                     "wrap_gated_session": gated_session_id,
+                    # The token came from the caller, so a tokenless cancel is refused.
+                    "wrap_token_bound": token_bound,
                     # The root map the save will compare against (spore-1282).
                     "wrap_derive_roots": (
                         None if derive_roots is None
@@ -3467,7 +3541,9 @@ class Store:
                 happens inside this method's ``BEGIN IMMEDIATE``, so it is a
                 true compare-and-swap across connections. Omitting it keeps the
                 pre-0.9.9 behaviour (clear whatever is current) EXCEPT for a
-                gated wrap; see ``session_id`` and ``force``.
+                gated wrap (see ``session_id`` and ``force``) and a wrap opened
+                with a caller-supplied token, which raises
+                :class:`WrapCancelBoundError` unless ``force`` is set.
             session_id: The caller's session. Without ``expect_token``, a
                 coherent wrap prepared under the consolidate gate
                 (:meth:`wrap_gated_session`) is cleared only when this equals the
@@ -3577,6 +3653,7 @@ class Store:
             cancelled_schema_raw = self._get_metadata("wrap_section_schema")
             cancelled_gated_raw = self._get_metadata("wrap_gated_session")
             cancelled_roots_raw = self._get_metadata("wrap_derive_roots")
+            cancelled_bound_raw = self._get_metadata("wrap_bound_token")
 
             # ⚠ PARSE AND CLASSIFY BEFORE THE COMMIT, NOT AFTER. This ran
             # after the clear at first, and codex reproduced the consequence:
@@ -3618,6 +3695,9 @@ class Store:
                 cancelled_started_at and cancelled_token and episode_ids is not None
             )
             partial_state = had_any and not complete
+            # Bound only while the key equals the live token: a value an older
+            # binary's terminal path left behind never matches a later wrap.
+            bound = complete and bool(cancelled_bound_raw) and cancelled_bound_raw == cancelled_token
 
             # AM-WRAPCANCEL-CAS: compare INSIDE the write lock, so no peer can
             # replace the token between this check and the clear below. That is
@@ -3654,7 +3734,14 @@ class Store:
                     gated_session=(cancelled_gated_raw or None) if complete else None,
                     session_id=session_id,
                     force=force is True,
+                    bound=bound,
                 )
+
+            # A wrap opened with a caller-supplied token ends only by that token or
+            # by force, whatever session_id says: a tokenless cancel cannot tell it
+            # from a peer's wrap. Checked under the same write lock as the clear.
+            if expect_token is None and force is not True and bound:
+                raise WrapCancelBoundError(session_id=session_id)
 
             # spore-699 bound: a tokenless cancel may not end a coherent gated wrap
             # unless the caller is the session that prepared it, or forces it. Read
@@ -3690,6 +3777,10 @@ class Store:
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_derive_roots", ""),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_bound_token", ""),
             )
             # AM-SCHEMASNAPSHOT: clear the frozen schema alongside the rest of
             # the wrap-in-progress state so section_schema_for_wrap() falls back
@@ -3748,6 +3839,9 @@ class Store:
                 # SAME predicate the receipt reports, never a second one.
                 if partial_state:
                     payload["partial_state"] = True
+                # A bound wrap ended here was ended by its own token or by force.
+                if bound:
+                    payload["wrap_token_bound"] = True
                 # ⛔ THE FROZEN SCHEMA COUNTS TOWARD ``had_any`` AND WAS ABSENT
                 # HERE. A store carrying ONLY a stray ``wrap_section_schema``
                 # (a crash between wrap_started's schema INSERT and its token
@@ -3822,6 +3916,19 @@ class Store:
             if not self._get_metadata("wrap_started_at"):
                 return None
             return self._get_metadata("wrap_gated_session") or None
+
+    def wrap_bound_token(self) -> str | None:
+        """The token of the wrap in progress when it was opened with a
+        caller-supplied token (``prepare_wrap(wrap_token=...)``), else ``None``
+        (idle, or the token was minted by anneal). Such a wrap is cancelled only
+        by that token or by ``force`` (:class:`WrapCancelBoundError`)."""
+        with self._db_boundary("wrap_bound_token"):
+            if not self._get_metadata("wrap_started_at"):
+                return None
+            bound = self._get_metadata("wrap_bound_token")
+            if bound and bound == self._get_metadata("wrap_token"):
+                return bound
+            return None
 
     def wrap_derive_roots(self, *, expect_token: str | None = None) -> dict[str | None, str] | None:
         """The re-derive root map frozen by the in-progress wrap (spore-1282),
@@ -4392,6 +4499,10 @@ class Store:
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_derive_roots", ""),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_bound_token", ""),
             )
             # AM-SCHEMASNAPSHOT: clear the frozen wrap schema in the same
             # transaction as the other wrap-in-progress clears, so a completed

@@ -333,7 +333,9 @@ TOOLS: list[dict[str, Any]] = [
             "which is what you want when recovering a wrap you did not open. "
             "Exception: a wrap prepared under the consolidate gate is cancelled "
             "without its token only when session_id is the session that prepared "
-            "it, or with force=true when that session is gone. PARTIAL "
+            "it, or with force=true when that session is gone; a wrap opened with "
+            "a token its preparer supplied is cancelled without that token only "
+            "with force=true. PARTIAL "
             "(corrupt) wrap state is cleared with partial=true, which refuses if "
             "a healthy wrap has replaced it."
         ),
@@ -350,7 +352,8 @@ TOOLS: list[dict[str, Any]] = [
                         "cannot swap the wrap in between. Refused with no "
                         "change if it does not match, including when the wrap "
                         "has already completed. Omit it to cancel whatever is "
-                        "in progress (a gated wrap also needs session_id or force)."
+                        "in progress (a gated wrap also needs session_id or force; "
+                        "a wrap opened with a caller-supplied token needs force)."
                     ),
                 },
                 "session_id": {
@@ -364,8 +367,9 @@ TOOLS: list[dict[str, Any]] = [
                 "force": {
                     "type": "boolean",
                     "description": (
-                        "Cancel a gated wrap without its token or session, when "
-                        "the session that prepared it is gone. Discards its "
+                        "Cancel a gated wrap without its token or session, or a "
+                        "wrap opened with a caller-supplied token without that "
+                        "token, when its preparer is gone. Discards its "
                         "compression."
                     ),
                 },

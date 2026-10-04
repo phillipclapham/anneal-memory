@@ -430,6 +430,15 @@ def durable_budget(max_chars: int) -> int:
     return int(max_chars * DURABLE_BUDGET_FRACTION)
 
 
+def schema_durable_budget(schema: list[SectionSpec]) -> int:
+    """The ``durable`` section's budget for ``schema``: :func:`durable_budget` of
+    the schema's :func:`default_max_chars`, never of a caller's ``max_chars``.
+    One function for the budget the wrap guidance shows and the budget the save's
+    durable warning checks, so a composer is warned against the number it was
+    shown (Diogenes 2026-10-04: the guidance used the caller's max_chars)."""
+    return durable_budget(default_max_chars(schema))
+
+
 def default_max_chars(schema: list[SectionSpec]) -> int:
     """Derive a default continuity-size budget (chars) from a schema's roles.
 

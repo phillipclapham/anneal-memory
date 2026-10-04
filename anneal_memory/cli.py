@@ -139,6 +139,7 @@ from .store import (
     _is_write_lock_contention,
     StoreError,
     WrapInProgressError,
+    WrapCancelBoundError,
     WrapCancelGatedError,
     SupersessionError,
     WrapOwnershipError,
@@ -1593,6 +1594,7 @@ def cmd_wrap_status(args: argparse.Namespace) -> None:
                 "wrap_episode_count": len(snapshot["episode_ids"]),
                 "wrap_episode_ids": snapshot["episode_ids"],
                 "wrap_gated_session": store.wrap_gated_session(),
+                "wrap_token_bound": store.wrap_bound_token() is not None,
             })
             return
 
@@ -1602,6 +1604,10 @@ def cmd_wrap_status(args: argparse.Namespace) -> None:
         if gated_by is not None:
             print(f"  prepared under the consolidate gate by session {gated_by!r}: only that")
             print("  session can complete it (library save_continuity with that session_id)")
+        bound = store.wrap_bound_token() is not None
+        if bound:
+            print("  opened with a token its preparer holds: a cancel without that token")
+            print("  is refused")
         print(f"  episodes: {len(snapshot['episode_ids'])}")
         print()
         # The printed commands name this store and this wrap's token, so a copy-paste
@@ -1613,7 +1619,7 @@ def cmd_wrap_status(args: argparse.Namespace) -> None:
             db_arg = shlex.quote(str(Path(args.db).expanduser().resolve()))
             print(f"  complete: anneal-memory --db {db_arg} save-continuity "
                   f"--wrap-token {token} <file>")
-            if gated_by is None:
+            if gated_by is None and not bound:
                 print(f"  abandon:  anneal-memory --db {db_arg} wrap-cancel --wrap-token {token}")
 
 
@@ -1665,6 +1671,16 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
                 force=bool(getattr(args, "force", False)),
                 **({"expect_partial": True} if partial else {}),
             )
+        except WrapCancelBoundError:
+            # No recipe, as for the gated refusal below.
+            print(
+                "Refused: the wrap in progress was opened with a token its preparer "
+                "holds, and a cancel that names no token cannot end it. Cancelling "
+                "it discards that caller's compression, which is the operator's "
+                "decision. Nothing was changed.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         except WrapCancelGatedError as exc:
             # No recipe in this text, on purpose: the reader of a refusal is the
             # caller the bound exists to stop. flow's own cancel learned the same.
@@ -1707,6 +1723,17 @@ def cmd_wrap_cancel(args: argparse.Namespace) -> None:
                     "Nothing to cancel: the wrap you named has already "
                     "completed or been cancelled, and no wrap is in progress "
                     "now. Nothing was changed.",
+                    file=sys.stderr,
+                )
+            elif exc.bound:
+                # A re-run without --wrap-token would hit WrapCancelBoundError, so no
+                # override is offered, and no recipe.
+                print(
+                    "Refused: the wrap in progress is NOT the one you named, and it "
+                    "was opened with a token its preparer holds. Cancelling it "
+                    "discards that caller's compression, which is the operator's "
+                    "decision. Nothing was changed. Run `anneal-memory wrap-status` "
+                    "to see when it started.",
                     file=sys.stderr,
                 )
             elif exc.gated_session and exc.gated_session != exc.session_id and exc.force:

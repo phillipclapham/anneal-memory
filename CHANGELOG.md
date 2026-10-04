@@ -32,18 +32,31 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   entry first arrives, only pairs involving an entry imported by that call are
   evaluated, so a link removed with `unsupersede` stays removed. A link whose target is
   not imported yet stays pending and is evaluated when the target arrives.
-- Hardening, each from a reproduced attack on the first build: free-text fields are
-  rendered as quoted, escaped strings, so a field cannot forge another entry's header;
-  agent and session must be plain handles, text fields and path lists are length-capped,
-  a timestamp more than a day ahead is refused, and an id must begin with its author's
-  handle (an id squatter's entry is refused). Entries with identical text and
-  timestamp no longer collide on the episode id.
-- Inherent limits, documented in `anneal_memory.team`: the author is self-declared (the
-  git host's access control is the authentication), a forked chain is frozen at the
-  fork and reported, an entry removed from a ledger stays in an engineer's store (only a
-  signed `retire` reaches it), authority is judged on arrival (not retroactively), an
-  imported episode removed with `delete` comes back on the next import that carries it,
-  and a local writer with `record()` can plant a `team:` row the store will accept.
+- Hardening, each from a reproduced attack on the first builds: a chain is ONE
+  CONTIGUOUS RUN per file (a root with `prev == ""`, then each line naming the hash of
+  the line before it), never stitched across files, so a line in one file cannot extend
+  another author's chain; a file read from disk or labelled with a
+  `{"levain_file": "<path>"}` marker line must hold only entries whose author is the
+  directory it sits in (`ledger/<author>/<device>.jsonl`). Links come only from the
+  verified batch of the call, never from stored rows, so a `team:` row planted with
+  `record()` cannot drive one. Free-text fields are rendered as quoted, escaped
+  strings and control, format and line-separator characters are refused; ids (and the
+  ids a `retire` or `ack` names) must have the writer's full shape
+  `<author handle>-<14 digits>-<8 hex>`; agent and session are plain handles; text,
+  path and supersedes lists are length-capped; a timestamp more than a day ahead, a
+  lone surrogate, deeply nested JSON and a non-UTF-8 or oversized file are reported,
+  not raised; two different entries carrying one id in a single import import neither;
+  entries with identical text and timestamp no longer collide on the episode id.
+- Inherent limits, documented in `anneal_memory.team`: the author is self-declared, so
+  the git host's file permissions are the only authentication (a forged line appended to
+  a chain's own file extends it, and a stream with no `levain_file` markers is one trust
+  unit that binds no author to a path); an entry removed from a ledger stays in an
+  engineer's store (only a signed `retire` reaches it); authority is judged when a pair
+  first has an entry imported by the call, not retroactively; an imported episode
+  removed with `delete` comes back on the next import that carries it; authors whose
+  handles reduce to one id prefix (`pack:x`, `pack-x`) are not told apart, the second
+  to import reports a conflict; a local writer with `record()` can plant a `team:` row
+  that claims an entry id.
 - Exit code 3 means something in THIS import was refused, unauthorized or in conflict
   (everything verifiable was still imported); the same line given twice is ignored. Nothing about `record`, `save_continuity` or the hard maximum changed.
 

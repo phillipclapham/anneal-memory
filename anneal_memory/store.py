@@ -2666,7 +2666,6 @@ class Store:
         *,
         dry_run: bool = False,
         link_authority: tuple[str, ...] = (),
-        stored_entry_ok: Callable[[dict[str, Any]], bool] | None = None,
     ) -> dict[str, Any]:
         """Import verified team-ledger entries as episodes, idempotently, in ONE
         write transaction (so two concurrent imports cannot both insert an entry).
@@ -2688,17 +2687,20 @@ class Store:
           linking author matches a ``link_authority`` pattern (``fnmatch``, on the
           handle after ``team:``). Otherwise it is returned in ``links_unauthorized``
           and nothing is hidden.
-        - Only pairs that involve an entry imported by THIS call are evaluated, so
-          a link an operator removed with :meth:`unsupersede` stays removed. A
-          target not imported yet leaves the link pending: it is evaluated when
-          the target arrives.
+        - Links come ONLY from the ``supersedes`` of the verified ``records`` of this
+          call, never from stored rows, and only for pairs where the linking entry
+          or its target was imported by this call, so a link an operator removed
+          with :meth:`unsupersede` stays removed. A target not imported yet leaves
+          the link pending: a later call that carries the linking entry again (a
+          caller imports the whole ledger each time) evaluates it when the target
+          arrives.
         - A ruling is superseded only by a ``retire`` or by an entry that carries the
           decider's own words; anything else is returned in ``links_refused``.
-        - A stored row can complete a pending link only if its ``supersedes`` is a
-          list of strings and ``stored_entry_ok`` (when given) accepts its stored
-          entry. A local writer with :meth:`record` can still plant a row that passes
-          both: the store belongs to the engineer, and that writer can already delete
-          from it.
+        - Stored rows give identity only (an entry id, its episode, source and
+          text). A local writer with :meth:`record` can plant a ``team:`` row that
+          claims an entry id: the real entry is then reported as already present or
+          in conflict. The store belongs to the engineer, and that writer can
+          already delete from it.
         - ``dry_run`` computes everything and writes nothing.
         """
         if dry_run and self._defer_commit:
@@ -2722,20 +2724,15 @@ class Store:
                 "WHERE source >= 'team:' AND source < 'team;' ORDER BY timestamp, id"
             ).fetchall():
                 try:
-                    team = (json.loads(row["metadata"]) or {}).get("team") or {}
+                    root = json.loads(row["metadata"])
                 except (TypeError, ValueError):
                     continue
+                team = root.get("team") if isinstance(root, dict) else None
                 if isinstance(team, dict) and isinstance(team.get("entry_id"), str):
-                    sup = team.get("supersedes") or []
-                    trusted = (
-                        isinstance(sup, list) and all(isinstance(x, str) for x in sup)
-                        and (stored_entry_ok is None or stored_entry_ok(team))
-                    )
+                    kind = team.get("kind")
                     by_entry[team["entry_id"]] = {
                         "ep": row["id"], "hash": team.get("hash"),
-                        "supersedes": sup if trusted else [],
-                        "kind": team.get("kind"), "words": team.get("words"),
-                        "etype": team.get("type"),
+                        "kind": kind if isinstance(kind, str) else None,
                         "content": row["content"], "ts": row["timestamp"],
                         "source": row["source"],
                     }
@@ -2770,9 +2767,7 @@ class Store:
                             raise
                 team_meta = rec["metadata"].get("team") or {}
                 by_entry[rec["entry_id"]] = {
-                    "ep": ep_id, "hash": rec["hash"], "supersedes": rec["supersedes"],
-                    "kind": team_meta.get("kind"), "words": team_meta.get("words"),
-                    "etype": team_meta.get("type"),
+                    "ep": ep_id, "hash": rec["hash"], "kind": team_meta.get("kind"),
                     "content": rec["content"], "ts": rec["timestamp"],
                     "source": rec["source"],
                 }
@@ -2780,8 +2775,13 @@ class Store:
                 imported.append({"id": rec["entry_id"], "episode": ep_id,
                                  "source": rec["source"], "type": rec["type"],
                                  "content": rec["content"]})
-            for entry_id, new in by_entry.items():
-                for target in new["supersedes"]:
+            for rec in records:
+                entry_id = rec["entry_id"]
+                new = by_entry[entry_id]
+                if new["hash"] != rec["hash"]:
+                    continue  # a conflict: the stored entry is not this one
+                team_meta = rec["metadata"].get("team") or {}
+                for target in rec["supersedes"]:
                     if entry_id not in fresh and target not in fresh:
                         continue
                     old = by_entry.get(target)
@@ -2807,7 +2807,8 @@ class Store:
                         check_grounds=False,
                     )
                     if problem is None and old["kind"] == "ruling" and not (
-                        new["etype"] == "retire" or (new["words"] or "").strip()
+                        team_meta.get("type") == "retire"
+                        or str(team_meta.get("words") or "").strip()
                     ):
                         problem = (
                             "a ruling is superseded only by a retire or by an entry "

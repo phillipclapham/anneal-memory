@@ -40,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -74,9 +75,11 @@ _MAX_LINE_CHARS = 1_000_000
 _HANDLE = re.compile(r"[A-Za-z0-9._@:+-]{1,200}")
 # Levain's writer builds an id as <P>-<stamp>-<hex> with P derived from the author
 # below; an id that does not start with its own author's P is a squatter's, and is
-# refused. (The writer also pins the rest of the shape; this reader needs only the
-# prefix to keep an id from being claimed by a second author.)
+# refused. The whole shape is checked, so an author "alice" cannot claim an id of
+# author "alice-bob". Two authors whose handles reduce to the same prefix (pack:x and
+# pack-x) are not told apart; the second to import reports a conflict.
 _ID_SAFE = re.compile(r"[^A-Za-z0-9._-]")
+_LEDGER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}-\d{14}-[0-9a-f]{8}")
 _AGENT = re.compile(r"[A-Za-z0-9._:@-]{1,128}")
 
 
@@ -87,6 +90,7 @@ _TEXT_FIELDS = {"words": 4000, "summary": 2000, "reason": 4000, "recheck": 1000}
 _MAX_PATHS = 100
 _MAX_PATH_CHARS = 300
 _MAX_LINES = 200_000
+_MAX_FILE_BYTES = 64 * 1024 * 1024
 _FUTURE_SKEW = timedelta(days=1)
 _TS = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$")
 
@@ -146,17 +150,28 @@ class TeamImportReport:
 
 
 def read_ledger_lines(paths: Iterable[str | Path]) -> list[str]:
-    """Lines of every ledger file given; a directory contributes every
-    ``*.jsonl`` under it, in sorted order."""
+    """Lines of every ledger file given, each file preceded by a ``levain_file``
+    marker naming it (``<given dir>/<relative path>``, or ``<parent>/<name>`` for a
+    file given directly), which is what binds an entry's author to the directory
+    ``<author>/`` its file sits in. A directory contributes every ``*.jsonl`` under it, in
+    sorted order. A file larger than the size cap is refused with ``ValueError``."""
     lines: list[str] = []
     for raw in paths:
         p = Path(raw).expanduser()
-        files = sorted(p.rglob("*.jsonl")) if p.is_dir() else [p]
-        for f in files:
+        if p.is_dir():
+            files = [(f, f"{p.resolve().name}/{f.relative_to(p).as_posix()}")
+                     for f in sorted(p.rglob("*.jsonl"))]
+        else:
+            files = [(p, f"{p.resolve().parent.name}/{p.name}")]
+        for f, label in files:
+            if f.stat().st_size > _MAX_FILE_BYTES:
+                raise ValueError(f"{f}: larger than {_MAX_FILE_BYTES} bytes")
             try:
-                lines.extend(f.read_text(encoding="utf-8").splitlines())
+                text = f.read_text(encoding="utf-8")
             except UnicodeDecodeError as exc:
                 raise ValueError(f"{f}: not UTF-8 text ({exc.reason})") from exc
+            lines.append(json.dumps({"levain_file": label}))
+            lines.extend(text.splitlines())
     return lines
 
 
@@ -172,6 +187,15 @@ def _normalize_ts(ts: object) -> str | None:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def _unsafe_text(text: str) -> bool:
+    """Control, format, line/paragraph-separator and unassigned characters survive
+    JSON quoting (U+2028, U+0085, bidi overrides, tag characters) and are refused."""
+    return any(
+        unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp", "Co", "Cn") and c not in "\n\r\t"
+        for c in text
+    )
+
+
 def _is_str_list(v: object) -> bool:
     return isinstance(v, list) and all(isinstance(x, str) and x.strip() for x in v)
 
@@ -183,8 +207,8 @@ def _entry_problem(e: dict) -> str | None:
     for f in ("id", "author"):
         if not isinstance(e.get(f), str) or not _HANDLE.fullmatch(e[f]):
             return f"{f} is missing or not a plain handle"
-    if not e["id"].startswith(_id_prefix(e["author"]) + "-"):
-        return "id must begin with the author's handle and a dash"
+    if not re.fullmatch(re.escape(_id_prefix(e["author"])) + r"-\d{14}-[0-9a-f]{8}", e["id"]):
+        return "id must be <author handle>-<14 digits>-<8 hex>"
     for f in ("agent", "session"):
         if e.get(f) is not None and not (
             isinstance(e[f], str) and _AGENT.fullmatch(e[f])
@@ -195,6 +219,7 @@ def _entry_problem(e: dict) -> str | None:
     if e.get("owner") is not None and not (
         isinstance(e["owner"], str) and e["owner"].strip()
         and len(e["owner"]) <= 200 and e["owner"].isprintable()
+        and not _unsafe_text(e["owner"])
     ):
         return "owner must be printable text of at most 200 characters"
     if e.get("type") not in TYPES:
@@ -215,6 +240,8 @@ def _entry_problem(e: dict) -> str | None:
                 return f"{f} must be a string"
             if len(e[f]) > cap:
                 return f"{f} is longer than {cap} characters"
+            if _unsafe_text(e[f]):
+                return f"{f} contains control, format or separator characters"
     if e.get("kind") == "ruling" and not (e.get("words") or "").strip():
         return "a ruling needs the decider's own words"
     for f in ("paths", "supersedes", "refs"):
@@ -224,8 +251,13 @@ def _entry_problem(e: dict) -> str | None:
         len(p) > _MAX_PATH_CHARS for p in e.get("paths") or []
     ):
         return f"paths: at most {_MAX_PATHS} globs of {_MAX_PATH_CHARS} characters"
+    if any(_unsafe_text(p) for p in e.get("paths") or []):
+        return "paths contain control, format or separator characters"
     if len(e.get("supersedes") or []) > _MAX_PATHS:
         return f"supersedes names more than {_MAX_PATHS} entries"
+    for f in ("supersedes", "refs"):
+        if not all(_LEDGER_ID.fullmatch(x) for x in e.get(f) or []):
+            return f"{f} must name ledger ids"
     for p in e.get("paths") or []:
         if p.startswith("/") or ".." in p.split("/"):
             return f"paths are repo-relative globs, got {p!r}"
@@ -281,16 +313,51 @@ def render_content(e: dict) -> str:
     return " ".join(parts)
 
 
+def _file_marker(line: str) -> str | None:
+    """The path a ``{"levain_file": "<path>"}`` marker line names, else None.
+
+    A marker starts a new file in a stream; :func:`read_ledger_lines` writes one
+    before each file it reads, and a writer exporting several files into one
+    stream does the same. It carries no authority of its own: it only tells the
+    reader which path to bind the authors that follow to."""
+    if not line.lstrip().startswith("{") or "levain_file" not in line:
+        return None
+    try:
+        obj = json.loads(line)
+    except (ValueError, RecursionError):
+        return None
+    if isinstance(obj, dict) and set(obj) == {"levain_file"} \
+            and isinstance(obj["levain_file"], str):
+        return obj["levain_file"]
+    return None
+
+
+def _path_author_ok(label: str | None, author: object) -> bool:
+    """With a path known, the entry's author must be the directory the file sits
+    in (``ledger/<author>/<device>.jsonl``). Without a path nothing can be bound."""
+    if label is None:
+        return True
+    parts = [p for p in label.replace("\\", "/").split("/") if p]
+    if len(parts) < 2 or not isinstance(author, str):
+        return True
+    return parts[-2] in (author, _id_prefix(author))
+
+
 def _verified_chains(
     lines: Iterable[str], report: TeamImportReport
 ) -> list[dict]:
-    """Entries that pass the chain walk, oldest first within each chain.
+    """Entries that pass the chain walk, in stream order.
 
-    Chains are rebuilt from the ``prev`` -> ``hash`` links, so the input needs no
-    file names and may be several files concatenated."""
-    by_prev: dict[str, list[dict]] = {}
+    A chain is ONE CONTIGUOUS RUN: it starts at a ``prev == ""`` root and each
+    following line must name the hash of the line accepted just before it. Lines
+    are never stitched across files or lines, so an entry cannot extend a chain
+    that lives elsewhere, and a line that does not continue the run is refused
+    (with every later line of that run, which names it as ``prev``)."""
     seen_hash: dict[str, dict] = {}
-    all_entries: list[dict] = []
+    out: list[dict] = []
+    label: str | None = None
+    last_hash: str | None = None
+    run_author: object = None
     for n, line in enumerate(lines, 1):
         if n > _MAX_LINES:
             report.chain_problems.append(
@@ -298,6 +365,10 @@ def _verified_chains(
             )
             break
         if not line.strip():
+            continue
+        marker = _file_marker(line)
+        if marker is not None:
+            label, last_hash, run_author = marker, None, None
             continue
         if len(line) > _MAX_LINE_CHARS:
             report.chain_problems.append(f"line {n}: longer than {_MAX_LINE_CHARS} characters")
@@ -314,58 +385,46 @@ def _verified_chains(
                 or not isinstance(e.get("prev"), str):
             report.chain_problems.append(f"line {n}: not an entry with prev and hash")
             continue
-        if e["hash"] in seen_hash:
-            if seen_hash[e["hash"]] != e:
-                report.chain_problems.append(
-                    f"line {n} ({e.get('id')}): repeats a hash with different content"
-                )
-            continue  # the same line twice (a file given twice) is harmless
-        if e["hash"] != chain_hash(e["prev"], e):
+        who = f"line {n} ({e.get('id')!r})"
+        try:
+            good = e["hash"] == chain_hash(e["prev"], e)
+        except (UnicodeEncodeError, ValueError, TypeError, RecursionError):
+            good = False
+        if not good:
             report.chain_problems.append(
-                f"line {n} ({e.get('id')}): hash mismatch, the entry was edited after it was written"
+                f"{who}: hash mismatch, the entry was edited after it was written"
             )
             continue
-        seen_hash[e["hash"]] = e
-        by_prev.setdefault(e["prev"], []).append(e)
-        all_entries.append(e)
-
-    out: list[dict] = []
-    reached: set[str] = set()
-    for start in by_prev.get("", []):
-        cur: dict | None = start
-        author = start.get("author")
-        while cur is not None:
-            if cur.get("author") != author:
-                report.chain_problems.append(
-                    f"chain of {author!r}: entry {cur.get('id')} names author "
-                    f"{cur.get('author')!r}; the chain is cut here"
-                )
-                break
-            nxt = by_prev.get(cur["hash"], [])
-            out.append(cur)
-            reached.add(cur["hash"])
-            if len(nxt) > 1:
-                report.chain_problems.append(
-                    f"fork after {cur.get('id')}: {len(nxt)} entries claim it as prev; "
-                    "the chain is cut here"
-                )
-                break
-            cur = nxt[0] if nxt else None
-    for e in all_entries:
-        if e["hash"] not in reached:
+        if e["hash"] in seen_hash:
+            if seen_hash[e["hash"]] != e:
+                report.chain_problems.append(f"{who}: repeats a hash with different content")
+            last_hash = e["hash"]  # the same line twice (a file given twice) is harmless
+            continue
+        if e["prev"] == "":
+            run_author = None  # a root starts a new run
+        elif e["prev"] != last_hash:
             report.chain_problems.append(
-                f"entry {e.get('id')}: not reachable from a chain start "
-                "(a gap, a fork or a cut chain), not imported"
+                f"{who}: does not continue the entry before it (a gap, a fork, or "
+                "another file's chain), not imported"
             )
+            continue
+        if run_author is not None and e.get("author") != run_author:
+            report.chain_problems.append(
+                f"{who}: names author {e.get('author')!r} inside {run_author!r}'s "
+                "chain; the chain is cut here"
+            )
+            continue
+        if not _path_author_ok(label, e.get("author")):
+            report.chain_problems.append(
+                f"{who}: author {e.get('author')!r} does not match the directory of "
+                f"{label!r}, not imported"
+            )
+            continue
+        run_author = e.get("author")
+        last_hash = e["hash"]
+        seen_hash[e["hash"]] = e
+        out.append(e)
     return out
-
-
-def _stored_entry_ok(team: dict) -> bool:
-    """A stored entry may complete a pending link only if it still hashes to the
-    hash it was imported under."""
-    entry = {k: v for k, v in team.items() if k != "entry_id"}
-    prev = entry.get("prev")
-    return isinstance(prev, str) and entry.get("hash") == chain_hash(prev, entry)
 
 
 def import_ledger(
@@ -400,13 +459,23 @@ def import_ledger(
             "metadata": {"team": {**e, "entry_id": e["id"]}},
             "supersedes": list(e.get("supersedes") or []),
         })
+    # The same ledger id with two different hashes inside one batch: import neither,
+    # so the outcome does not depend on which line came first.
+    by_id: dict[str, set[str]] = {}
+    for r in records:
+        by_id.setdefault(r["entry_id"], set()).add(r["hash"])
+    clash = {i for i, hs in by_id.items() if len(hs) > 1}
+    for i in sorted(clash):
+        report.conflicts.append(
+            {"id": i, "reason": "two different entries in this import carry this id"}
+        )
+    records = [r for r in records if r["entry_id"] not in clash]
     result = store.import_team_entries(
         records, dry_run=dry_run, link_authority=tuple(link_authority),
-        stored_entry_ok=_stored_entry_ok,
     )
     report.imported = result["imported"]
     report.already_present = result["already_present"]
-    report.conflicts = result["conflicts"]
+    report.conflicts.extend(result["conflicts"])
     report.links_made = result["links_made"]
     report.links_pending = result["links_pending"]
     report.links_refused = result["links_refused"]

@@ -16,8 +16,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   no 80-character episode floor (a one-line episode such as "User is allergic to tree nuts." can
   match); a short token counts as a keyword when it is written ALL-CAPS or contains a digit, `_` or
   `-` (`SQL`, `API`, `S3`, `k8s`, `v2`; plain lowercase short words and stopwords stay out, and
-  `extract_keywords` takes the same `mode`); every match of every keyword is fetched, with no
-  per-keyword cap; and each `search_episodes` match carries its `superseded_by`. The IDF weights,
+  `extract_keywords` takes the same `mode`); up to `QUERY_CANDIDATE_LIMIT` (5000) matches of each
+  keyword are fetched (prompt mode keeps its 400; a keyword's document frequency stays the exact
+  `total_matching`, and the MCP word-match count reads "at least" when a keyword had more matches
+  than were read); and each `search_episodes` match carries its `superseded_by`. The IDF weights,
   the ranking and the display caps are the same in both modes. Any other `mode` raises
   `ValueError`. The gates are parameters, not module constants rewritten at call time.
 - Measured on the InMind bench, with no API calls (125 tasks, target episode in the top 3 for the
@@ -174,21 +176,28 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   the episodes in pages (`cat` is not found in "category", `rent` not in "current"), and a store
   with fewer than `IDF_MIN_CORPUS` (50) episodes gets the empty set. The prompt path never counts
   anything: it reads the set from the metadata key `durable_inert_tokens`
-  (`{"tokens", "continuity_hash", "episodes", "threshold"}`) and uses it only when its
-  `continuity_hash` is the SHA-256 of the current continuity; with no key or a stale hash there
-  is no filter. The set is the store's own, not a shipped list: one derived from a general chat
+  (`{"tokens", "continuity_hash", "episodes", "threshold"}`). It fails closed: the key is valid
+  only when it parses with the expected fields and types, its `continuity_hash` is the SHA-256 of
+  the current continuity (line endings read as `\n`, which is what `load_continuity` returns, so a
+  CRLF continuity matches itself), and its `threshold` is the current `DURABLE_GENERIC_DF`. With a
+  missing, corrupt, stale or differently-tuned key the durable tier is withheld (`facts` is empty,
+  and MCP `recall` / `crystal_recall` list none) until the next wrap writes a current one. A store
+  under `IDF_MIN_CORPUS` episodes still gets a valid key, with an empty set, so a cold store keeps
+  working. If the save-time computation fails, the save removes the old key in the same
+  transaction rather than leave a stale one. The set is the store's own, not a shipped list: one derived from a general chat
   corpus marks "restaurant", "dinner", "recipe" and "food" generic at a 5% cut-off, which are the
   cues the tier exists for. (3) A prompt with more than `DURABLE_SHORT_PROMPT_TOKENS` (2) usable
-  tokens needs two DISTINCT query tokens that matched: a token matching a cue and a fact word
-  counts once, and so do inflections of one token. A short prompt still cues on one. (4) The fact
+  tokens, not counting tokens that are inert in this store, needs two DISTINCT query tokens that
+  matched: a token matching a cue and a fact word counts once, and so do inflections of one token.
+  A short prompt still cues on one. (4) The fact
   text alone cues a fact only through `DURABLE_FACT_TEXT_MIN` (2) distinct distinctive words of it
   (`extract_keywords` in the call's mode); a cue match is the primary path. (5) Only the first
   `MAX_DURABLE_QUERY_TOKENS` (12) distinct usable query tokens are considered, so a pasted
   document costs what a sentence costs, and the tier cannot raise: any failure gives an empty
   tier. (6) At most `MAX_DURABLE_FACTS` (2) surface per call, ranked by distinct matched query
-  tokens, then section order. `source` is `"cue"` when a cue matched (`matched` holds the cue
-  words) and `"fact"` when only the fact text did (`matched` holds those words). Each number is a
-  module constant.
+  tokens, then section order. `source` is `"cue"` when a cue matched and `"fact"` when only the
+  fact text did; `RelevantFact.cue_matched` and `.fact_matched` keep the two kinds of match apart
+  and `.matched` is their union. Each number is a module constant.
 - Measured on the InMind bench with all 125 cue lines in one continuity (a store larger than any
   real one), the shipped `retrieve_relevant` in prompt mode, API-free. TUNING-ONLY: the rule's
   numbers were chosen on set A (even task ids and 50 off-topic everyday prompts) and the held-out
@@ -198,7 +207,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   a wrong fact for 51 calls (mean 1.09 per call), and some fact for 31 of 50 off-topic prompts;
   with rules (3) and (4) only, 22 own, 27 wrong calls, 7 of 50; shipped, 19 own, 19 wrong calls
   (mean 0.34), 2 of 50. On the indirect query type: own fact 2 of 68 in each configuration, wrong
-  calls 52, 8 and 4. Set A (57 tasks), shipped: 8 own, 15 wrong calls, 4 of 50 off-topic. A store
+  calls 52, 8 and 4. Set A (57 tasks), shipped: 8 own, 16 wrong calls, 4 of 50 off-topic. A store
   with well-chosen cues and few shared words will lose less. Cost: about 7 ms per prompt on
   a 247-episode store with 125 facts, and a 160-token prompt on a 12,000-episode store stays
   under 50 ms (the metadata read is the only store access beyond the continuity). Reproduce with
@@ -217,15 +226,21 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   each inert cue token, and "cue 'db' is too short to match; spell it out" for each cue token
   under three characters, each named once per save.
 - MCP `recall` with a `keyword` (first page, `limit` above 0, and no `since` / `until` / `source` /
-  `episode_type` filter, since facts are not episodes) lists the facts its words cue first, under
+  `episode_type` filter, since facts are not episodes; a negative or whole-number-float `limit` /
+  `offset` is normalised once, so `offset: -3` behaves exactly like 0) lists the facts its words cue first, under
   "Durable facts matching your words:", each as the fact text (not its cue list) plus "(cue: word)"
   for a cue match or "(matches: word)" for a fact-text match, then the episode output; a call that
   matched no episode keeps "No matching episodes found." after the facts block. MCP `crystal_recall`
   does the same ahead of its patterns, with its own miss line after the block. Both tool
   descriptions say so (manifests regenerated).
+- Known open: a store's inert-token set reflects its episode corpus as of the last wrap. Episodes
+  recorded, deleted or pruned between wraps are not reflected until the next wrap recomputes it.
+- Tool descriptions: `limit=0` (`recall`) and `max_patterns=0` (`crystal_recall`) return nothing at
+  all, facts included, and both name the fact-text path (two distinctive words of a fact's text).
 - A harness that renders `RelevantResult` must read `result.facts` to show them; `patterns` and
   `episodes` are unchanged. The documented render is `Durable fact (cue: restaurant): tree nut
-  allergy`, built from `.fact` and the first of `.matched`.
+  allergy`, built from `.fact` and the first of `.cue_matched` (`matches` and `.fact_matched` for a
+  fact-text match).
 
 ## [0.9.26] — 2026-10-03
 

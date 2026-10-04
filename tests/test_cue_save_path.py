@@ -74,14 +74,14 @@ class TestKeyWrittenAtSave:
         got = retrieve_relevant(store, None, "rollback", max_episodes=0).facts
         assert [f.matched for f in got] == [("rollback",)]
 
-    def test_a_stale_hash_turns_the_filter_off(self, store):
+    def test_a_stale_hash_withholds_the_tier(self, store):
         _episodes(store)
         save(store, default_text(FACT))
-        assert retrieve_relevant(store, None, "deploy", max_episodes=0).facts == []
+        assert [f.matched for f in retrieve_relevant(store, None, "rollback", max_episodes=0).facts] \
+            == [("rollback",)]
         # the continuity changes outside the save path; the stored set no longer applies
         store.save_continuity(store.load_continuity() + "\nextra\n")
-        got = retrieve_relevant(store, None, "deploy", max_episodes=0).facts
-        assert [f.matched for f in got] == [("deploy",)]
+        assert retrieve_relevant(store, None, "rollback", max_episodes=0).facts == []
 
     def test_each_save_replaces_the_key(self, store):
         _episodes(store)

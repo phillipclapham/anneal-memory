@@ -23,6 +23,8 @@ from anneal_memory.integrity import TOOLS
 from anneal_memory.server import Server
 from anneal_memory.types import EpisodeType
 
+from .cue_helpers import save_cont, write_inert_key
+
 T0 = date(2026, 10, 3)
 ALLERGY = "- tree nut allergy — cues: restaurant, dinner, recipe, food, menu"
 
@@ -68,18 +70,19 @@ def _seed_episodes(store):
 
 class TestRetrieveRelevantFacts:
     def test_a_cue_word_in_the_prompt_surfaces_the_fact(self, store):
-        store.save_continuity(_continuity(ALLERGY))
+        save_cont(store, _continuity(ALLERGY))
         _seed_episodes(store)
         on = retrieve_relevant(store, None, "any good restaurant downtown?")
         assert on.facts == [RelevantFact(
-            fact="tree nut allergy", line=ALLERGY, matched=("restaurant",), source="cue")]
+            fact="tree nut allergy", line=ALLERGY, matched=("restaurant",), source="cue",
+            cue_matched=("restaurant",), fact_matched=())]
         off = retrieve_relevant(store, None, "any good restaurant downtown?", durable=False)
         assert off.facts == []
         assert (on.patterns, on.episodes, on.query_keywords) == (
             off.patterns, off.episodes, off.query_keywords)
 
     def test_a_one_word_prompt_still_cues_and_stems(self, store):
-        store.save_continuity(_continuity(ALLERGY))
+        save_cont(store, _continuity(ALLERGY))
         for q in ("restaurants", "restaurant?", "Recipes", "menus"):
             for mode in ("prompt", "query"):
                 r = retrieve_relevant(store, None, q, mode=mode)
@@ -88,17 +91,17 @@ class TestRetrieveRelevantFacts:
         assert retrieve_relevant(store, None, "recipes").facts[0].matched == ("recipe",)
 
     def test_whole_token_equality_not_substring(self, store):
-        store.save_continuity(_continuity(ALLERGY))
+        save_cont(store, _continuity(ALLERGY))
         for q in ("restaurateur", "menuet", "foodie", "restaurateurs"):
             assert retrieve_relevant(store, None, q).facts == [], q
 
     def test_stopwords_and_short_tokens_never_match(self, store):
-        store.save_continuity(_continuity("- a rule — cues: the, for, ox, door"))
+        save_cont(store, _continuity("- a rule — cues: the, for, ox, door"))
         assert retrieve_relevant(store, None, "the for ox").facts == []
         assert [f.matched for f in retrieve_relevant(store, None, "doors").facts] == [("door",)]
 
     def test_fact_text_alone_cues_only_through_two_distinct_words(self, store):
-        store.save_continuity(_continuity("- the bank layout fmt_row64 starts at cutover"))
+        save_cont(store, _continuity("- the bank layout fmt_row64 starts at cutover"))
         r = retrieve_relevant(store, None, "cutover and bank layout notes")
         assert [(f.source, f.matched) for f in r.facts] == [
             ("fact", ("bank", "layout", "cutover"))]
@@ -107,7 +110,7 @@ class TestRetrieveRelevantFacts:
         assert retrieve_relevant(store, None, "cutover").facts == []
 
     def test_cap_of_two_ranked_by_distinct_tokens_then_section_order(self, store):
-        store.save_continuity(_continuity(
+        save_cont(store, _continuity(
             "- first fact — cues: dinner",
             "- second fact — cues: dinner, menu",
             "- third fact — cues: dinner",
@@ -124,13 +127,13 @@ class TestRetrieveRelevantFacts:
         q = "team dinner menu at a restaurant"
         base = retrieve_relevant(store, None, q, durable=False)
         assert retrieve_relevant(store, None, q).facts == []  # no continuity at all
-        store.save_continuity(_continuity(ALLERGY, section=False))
+        save_cont(store, _continuity(ALLERGY, section=False))
         again = retrieve_relevant(store, None, q)
         assert again.facts == []
         assert again == base
 
     def test_durable_false_leaves_facts_empty(self, store):
-        store.save_continuity(_continuity(ALLERGY))
+        save_cont(store, _continuity(ALLERGY))
         assert retrieve_relevant(store, None, "restaurant", durable=False).facts == []
 
     def test_an_unreadable_continuity_gives_no_facts_and_no_exception(self, store, monkeypatch):
@@ -145,7 +148,7 @@ class TestRetrieveRelevantFacts:
 
 class TestMcpRecallFacts:
     def test_facts_block_comes_first_then_the_episodes(self, server, store):
-        store.save_continuity(_continuity(ALLERGY))
+        save_cont(store, _continuity(ALLERGY))
         _seed_episodes(store)
         text = _text(_call(server, "recall", {"keyword": "dinner plans"}))
         assert text.startswith(
@@ -154,25 +157,25 @@ class TestMcpRecallFacts:
             "No episode contains the exact phrase; ranked by matching words")
 
     def test_a_fact_with_no_episode_replaces_no_matching(self, server, store):
-        store.save_continuity(_continuity(ALLERGY))
+        save_cont(store, _continuity(ALLERGY))
         text = _text(_call(server, "recall", {"keyword": "dinner plans"}))
         assert text == ("Durable facts matching your words:\n- tree nut allergy (cue: dinner)"
                         "\n\nNo matching episodes found.")
 
     def test_no_keyword_is_unchanged(self, server, store):
-        store.save_continuity(_continuity(ALLERGY))
+        save_cont(store, _continuity(ALLERGY))
         assert _text(_call(server, "recall", {})) == "No matching episodes found."
         _seed_episodes(store)
         assert "Durable facts" not in _text(_call(server, "recall", {}))
 
     def test_a_later_page_does_not_repeat_the_facts(self, server, store):
-        store.save_continuity(_continuity(ALLERGY))
+        save_cont(store, _continuity(ALLERGY))
         _seed_episodes(store)
         text = _text(_call(server, "recall", {"keyword": "dinner", "offset": 1}))
         assert "Durable facts" not in text
 
     def test_no_section_leaves_recall_exactly_as_before(self, server, store):
-        store.save_continuity(_continuity(ALLERGY, section=False))
+        save_cont(store, _continuity(ALLERGY, section=False))
         _seed_episodes(store)
         text = _text(_call(server, "recall", {"keyword": "dinner plans"}))
         assert text.startswith("No episode contains the exact phrase; ranked by")
@@ -181,7 +184,7 @@ class TestMcpRecallFacts:
             "No matching episodes found."
 
     def test_error_results_pass_through(self, server, store):
-        store.save_continuity(_continuity(ALLERGY))
+        save_cont(store, _continuity(ALLERGY))
         r = _call(server, "recall", {"keyword": "dinner", "limit": 2.5})
         assert r.get("isError") is True
 
@@ -192,7 +195,7 @@ class TestMcpRecallFacts:
 
 class TestMcpCrystalRecallFacts:
     def test_facts_listed_first_with_patterns(self, server, store):
-        store.save_continuity(_continuity(ALLERGY))
+        save_cont(store, _continuity(ALLERGY))
         CrystalStore(server._crystal_path).crystallize(
             name="dinner_menu_discipline", level=2,
             explanation="check the dinner menu against every allergy", tags=[])
@@ -202,7 +205,7 @@ class TestMcpCrystalRecallFacts:
         assert "dinner_menu_discipline" in text
 
     def test_a_fact_with_no_pattern_replaces_no_match(self, server, store):
-        store.save_continuity(_continuity(ALLERGY))
+        save_cont(store, _continuity(ALLERGY))
         text = _text(_call(server, "crystal_recall", {"query": "restaurant", "mode": "query"}))
         assert text == ("Durable facts matching your words:\n- tree nut allergy (cue: restaurant)"
                         "\n\nNo crystallized patterns matched.")

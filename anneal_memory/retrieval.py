@@ -70,7 +70,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import sys
 from functools import lru_cache
 from collections import Counter
 from dataclasses import dataclass
@@ -103,6 +102,9 @@ SCORE_THRESHOLD = 2.5     # weighted-overlap floor to surface at all (precision 
 MIN_HITS = 2              # require ≥ this many DISTINCT keyword hits, always
 MIN_EPISODE_LEN = 80      # skip trivially short episodes (not applied to patterns)
 CANDIDATE_LIMIT_PER_KEYWORD = 400  # per-keyword recall fetch cap before scoring
+QUERY_CANDIDATE_LIMIT = 5000  # the same cap in query mode: a bound, not a convenience —
+# a common word on a large store must not materialise every episode that holds it. The
+# per-keyword document frequency (``total_matching``) stays exact whatever the cap.
 
 # --- The two retrieval modes. "prompt" is the every-turn hook path and keeps every gate
 # above. "query" is an EXPLICIT question an agent or operator asked on purpose: it opens
@@ -505,12 +507,13 @@ def _fetch_episode_candidates(
     (:func:`_query_weights`) costs no extra query. Reuses the public API; no new SQL.
     ``filters`` (``since`` / ``episode_type`` / ``source`` / ``include_superseded``) go
     straight to ``Store.recall`` so a filtered query narrows the candidates in SQL.
-    ``uncapped`` (query mode) fetches every match of each keyword instead of the newest
-    :data:`CANDIDATE_LIMIT_PER_KEYWORD`: an explicit query must not lose an older episode
-    that matches several words to a pile of newer one-word matches."""
+    ``uncapped`` (query mode) fetches up to :data:`QUERY_CANDIDATE_LIMIT` matches of each
+    keyword instead of the newest :data:`CANDIDATE_LIMIT_PER_KEYWORD`: an explicit query
+    should not lose an older episode that matches several words to a modest pile of newer
+    one-word matches, and the ceiling keeps a very common word from stalling the process."""
     candidates: dict[str, Episode] = {}
     doc_freq: dict[str, int] = {}
-    fetch_limit = sys.maxsize if uncapped else CANDIDATE_LIMIT_PER_KEYWORD
+    fetch_limit = QUERY_CANDIDATE_LIMIT if uncapped else CANDIDATE_LIMIT_PER_KEYWORD
     for kw in keywords:
         result = store.recall(
             keyword=kw, until=until, limit=fetch_limit, **(filters or {})
@@ -692,8 +695,11 @@ def _canonical(tok: str) -> str:
 
 def continuity_hash(text: str | None) -> str:
     """The hash that ties a stored inert-token set to the continuity it was computed
-    for: SHA-256 of the UTF-8 text (an empty string for no continuity)."""
-    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+    for: SHA-256 of the UTF-8 text with ``\\r\\n`` and lone ``\\r`` read as ``\\n``, which
+    is what ``Store.load_continuity`` returns (universal newlines), so a continuity saved
+    with CRLF line endings still matches itself on reload. An empty string for none."""
+    canonical = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def load_durable_facts(store: Store) -> list[DurableFact]:
@@ -758,19 +764,33 @@ def compute_durable_inert_tokens(store: Store, facts: list[DurableFact]) -> set[
     return {w for w in words if seen_in[w] / total > DURABLE_GENERIC_DF}
 
 
-def _read_inert_tokens(store: Store, text: str | None) -> frozenset[str]:
-    """The stored inert-token set if it was computed for this exact continuity, else
-    empty (no filter). One metadata read; never counts anything."""
+def _read_inert_tokens(store: Store, text: str | None) -> frozenset[str] | None:
+    """The stored inert-token set when it is valid for this exact continuity, else ``None``.
+
+    Valid means: the metadata key parses as an object, its ``continuity_hash`` is the hash
+    of ``text``, its ``tokens`` are a list of strings, and its ``threshold`` is the current
+    :data:`DURABLE_GENERIC_DF`. A missing, corrupt, stale or differently-tuned key is
+    ``None``, and the caller then withholds the durable tier rather than serve facts that
+    were never filtered (the next wrap writes a current key). One metadata read; never
+    counts anything. A store with too few episodes to tell still has a valid key, with an
+    empty set."""
     try:
         raw = store._get_metadata(INERT_TOKENS_KEY)
         if not raw:
-            return frozenset()
+            return None
         data = json.loads(raw)
-        if data.get("continuity_hash") != continuity_hash(text):
-            return frozenset()
-        return frozenset(t for t in data.get("tokens", []) if isinstance(t, str))
+        tokens = data.get("tokens")
+        if (
+            not isinstance(tokens, list)
+            or not all(isinstance(t, str) for t in tokens)
+            or data.get("continuity_hash") != continuity_hash(text)
+            or data.get("threshold") != DURABLE_GENERIC_DF
+            or not isinstance(data.get("episodes"), int)
+        ):
+            return None
+        return frozenset(tokens)
     except Exception:  # noqa: BLE001 - a recall tier fails soft by contract
-        return frozenset()
+        return None
 
 
 def match_durable_facts(
@@ -796,15 +816,22 @@ def match_durable_facts(
     inflections of one token. The retrieval gates (score bar, anchor, hit floor, keyword
     floor) do not apply to this tier, on purpose; its guard is the rule list at
     :data:`MAX_DURABLE_FACTS`. Ranking is by distinct matched query tokens, then section
-    order. ``source`` is ``"cue"`` when any cue matched (``matched`` then holds the matched
-    cue words) and ``"fact"`` otherwise (``matched`` holds the fact-text words)."""
+    order. ``source`` is ``"cue"`` when any cue matched and ``"fact"`` otherwise;
+    ``cue_matched`` and ``fact_matched`` keep the two kinds of match apart and ``matched``
+    is their union."""
     _check_mode(mode)
     if max_facts <= 0 or not facts:
         return []
     query_tokens = _fact_tokens(query)[:MAX_DURABLE_QUERY_TOKENS]
     if not query_tokens:
         return []
-    need = 2 if len(query_tokens) > DURABLE_SHORT_PROMPT_TOKENS else 1
+    # The long-prompt rule counts the usable tokens that are not inert in this store: a
+    # prompt of "time ... restaurant ... work" with time and work inert is a short prompt.
+    inert_forms: set[str] = set()
+    for w in inert:
+        inert_forms |= _token_forms(w)
+    live_tokens = [t for t in query_tokens if not (_token_forms(t) & inert_forms)]
+    need = 2 if len(live_tokens) > DURABLE_SHORT_PROMPT_TOKENS else 1
     query_forms = [(_canonical(tok), _token_forms(tok)) for tok in query_tokens]
 
     def matches(candidates: list[str]) -> list[tuple[str, str]]:
@@ -839,15 +866,18 @@ def match_durable_facts(
         distinct_query_tokens = {q for _w, q in cue_hits} | {q for _w, q in fact_hits}
         if len(distinct_query_tokens) < need:
             continue
-        shown = [w for w, _q in (cue_hits or fact_hits)]
+        cue_matched = tuple(w for w, _q in cue_hits)
+        fact_matched = tuple(w for w, _q in fact_hits)
         ranked.append((
             len(distinct_query_tokens),
             position,
             RelevantFact(
                 fact=fact.fact,
                 line=fact.line,
-                matched=tuple(shown),
+                matched=cue_matched + fact_matched,
                 source="cue" if cue_hits else "fact",
+                cue_matched=cue_matched,
+                fact_matched=fact_matched,
             ),
         ))
     ranked.sort(key=lambda r: (-r[0], r[1]))
@@ -858,17 +888,20 @@ def durable_facts_for(
     store: Store, query: str, *, mode: RetrievalMode = "prompt"
 ) -> list[RelevantFact]:
     """The durable facts of ``store``'s continuity that ``query`` cues. Reads the store's
-    stored inert-token set (:data:`INERT_TOKENS_KEY`) when it matches the current
-    continuity. Structurally never raises: any failure at all gives ``[]``, because a
+    stored inert-token set (:data:`INERT_TOKENS_KEY`); with no valid set for the current
+    continuity (none written yet, corrupt, stale, or tuned differently) the tier is
+    WITHHELD and this returns ``[]``, until the next wrap writes a current one.
+    Structurally never raises: any failure at all gives ``[]``, because a
     recall tier on every prompt must not be able to break the prompt."""
     try:
         text = store.load_continuity()
         facts = parse_durable_facts(text, store.section_schema)
         if not facts:
             return []
-        return match_durable_facts(
-            facts, query, mode=mode, inert=_read_inert_tokens(store, text)
-        )
+        inert = _read_inert_tokens(store, text)
+        if inert is None:  # fail closed: no valid set for this continuity, no facts
+            return []
+        return match_durable_facts(facts, query, mode=mode, inert=inert)
     except Exception:  # noqa: BLE001 - see the docstring
         return []
 

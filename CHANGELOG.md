@@ -13,15 +13,13 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   `search_episodes_counted`, 0.9.30 against this release.
 - `Store.keyword_candidates` takes any number of keywords (they are scanned in groups of
   100; a single expression of 1,100 failed SQLite's depth limit).
-- `Store.recall` matches keywords with `content LIKE` instead of `LOWER(content) LIKE`.
-  SQLite's `LIKE` already ignores ASCII case and `LOWER()` folds only ASCII, so the rows
-  are the same (407 words checked on that store, 0 differences); `LOWER` copied the content
-  column once per keyword. Every Store connection now sets `PRAGMA case_sensitive_like=OFF`
-  when it opens, so a SQLite built with `SQLITE_CASE_SENSITIVE_LIKE` still matches across
-  case (codex review: without it such a build lost every differently-cased match).
 - Measured with flow's real `UserPromptSubmit` recall hook on that store copy, 5 prompts x 4
-  runs each: hook wall time median 0.513 s on 0.9.30, 0.380 s on this release (min 0.440 s
-  and 0.322 s); a second run after the review fixes gave 0.501 s and 0.382 s. The episode fetch inside it went from 0.239 s (8 `recall` calls) to 0.140 s.
+  runs each, on the form released: hook wall time median 0.500 s on 0.9.30, 0.408 s on this
+  release (min 0.434 s and 0.356 s). The episode fetch inside it went from 0.239 s (8
+  `recall` calls) to 0.191 s. The keyword match keeps `LOWER(content) LIKE`: a faster
+  `content LIKE` was tried and reverted in review, because a SQLite built with
+  case-sensitive `LIKE` and without the deprecated `case_sensitive_like` pragma would
+  have missed every differently-cased match.
 
 ### Fixed
 - `Store.recall` reads `total_matching` and its rows in one transaction. Under a concurrent

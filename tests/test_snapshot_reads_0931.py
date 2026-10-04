@@ -68,8 +68,8 @@ def test_counts_and_rows_are_read_in_one_snapshot(tmp_path, monkeypatch):
         assert s.keyword_candidates(many, limit_per_keyword=5)[1]["zqx"] == one[1]["zqx"]
         s.record("ZQX upper-case writer episode", EpisodeType.OBSERVATION)
 
-    # Matching ignores ASCII case even on a SQLite whose LIKE starts case-sensitive
-    # (SQLITE_CASE_SENSITIVE_LIKE builds): every Store open pins it OFF (codex L3, run).
+    # Matching ignores ASCII case even on a SQLite whose LIKE is case-sensitive
+    # (SQLITE_CASE_SENSITIVE_LIKE builds): the match lowers the content (codex L3, run).
     real_connect = sqlite3.connect
 
     def case_sensitive_connect(*a, **k):

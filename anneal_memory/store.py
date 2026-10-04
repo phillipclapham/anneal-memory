@@ -3197,8 +3197,8 @@ class Store:
 
     def status(self) -> StoreStatus:
         """Get store status snapshot."""
-        # One read snapshot: the counts below must describe one committed state
-        # (a concurrent writer made total != sum(by type) on 95 of 1,500 reads).
+        # One read snapshot: the counts below must describe one committed state,
+        # not one per statement (0.9.32 CHANGELOG has the measured failure).
         with self._db_boundary("status"), self._read_snapshot():
             total = self._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
             since_wrap = self._count_episodes_since_wrap()

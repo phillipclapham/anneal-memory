@@ -877,11 +877,15 @@ class WrapSchemaMovedError(AnnealMemoryError):
     :func:`~anneal_memory.prepare_wrap` turns it into a "retry" result.
     """
 
-    def __init__(self) -> None:
-        super().__init__(
+    def __init__(
+        self,
+        message: str = (
             "wrap_started: the section schema changed since prepare_wrap read it. "
             "Re-run prepare_wrap."
-        )
+        ),
+    ) -> None:
+        # The message is the only argument, so pickle and copy rebuild it.
+        super().__init__(message)
 
 
 class WrapOwnershipError(AnnealMemoryError):
@@ -3266,15 +3270,12 @@ class Store:
         # against; a direct caller that omits it freezes the current live schema.
         # A passed schema is compared with the live one under the write lock
         # below, so a set_section_schema that committed after the caller's read
-        # refuses the wrap. Both are validated + normalized before encoding. section_schema_for_wrap()
+        # refuses the wrap. An omitted schema is read under that same lock. section_schema_for_wrap()
         # returns this for the rest of the wrap so save cannot read a different
         # (concurrently-changed) live schema.
-        frozen_schema = (
-            validate_schema(section_schema)
-            if section_schema is not None
-            else self._load_section_schema(strict=True)
+        passed_schema = (
+            validate_schema(section_schema) if section_schema is not None else None
         )
-        frozen_schema_json = json.dumps(frozen_schema)
         # Batch the wrap-lifecycle metadata writes into a single commit so a
         # crash mid-write cannot leave the store with a partial
         # snapshot (e.g. timestamp set but token blank, which would
@@ -3352,11 +3353,11 @@ class Store:
                 actual = self._last_wrap_id()
                 if actual != expect_last_wrap_id:
                     raise WrapWindowMovedError(expect_last_wrap_id, actual)
-            if (
-                section_schema is not None
-                and self._load_section_schema(strict=True) != frozen_schema
-            ):
+            live_schema = self._load_section_schema(strict=True)
+            if passed_schema is not None and live_schema != passed_schema:
                 raise WrapSchemaMovedError()
+            frozen_schema = live_schema
+            frozen_schema_json = json.dumps(frozen_schema)
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_started_at", _now_utc()),
@@ -5666,14 +5667,16 @@ class Store:
         # a schema migration changes which sections are required and whether the
         # felt-layer gate fires, so it belongs in the audit chain (without this,
         # a store that later fails to validate has no trail of when it flipped).
-        old_headings = [s["heading"] for s in self.section_schema]
         normalized = validate_schema(schema)
         wrap_open = False
         with self._db_boundary("set_section_schema"):
             # The check above is a lock-free fast refusal; this one, under the
-            # write lock, is the one that decides.
-            self._conn.execute("BEGIN IMMEDIATE")
+            # write lock, is the one that decides. Inside a caller's open
+            # transaction the write joins it instead.
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")
             wrap_open = bool(self._get_metadata("wrap_started_at"))
+            old_headings = [s["heading"] for s in self._load_section_schema(strict=False)]
             if not wrap_open:
                 self._conn.execute(
                     "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",

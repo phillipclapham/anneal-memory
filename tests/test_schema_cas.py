@@ -58,3 +58,28 @@ def test_set_section_schema_refuses_under_the_lock_when_the_fast_check_missed(tw
     with pytest.raises(ValueError, match="wrap is in progress"):
         b.set_section_schema(schema_by_name("project"))
     assert name_for_schema(b.section_schema) == "partnership"
+
+
+def test_an_omitted_schema_is_read_under_the_lock(two, monkeypatch):
+    # A direct caller that passes no schema freezes whatever is live once the write lock
+    # is held, so a change committed just before the lock is the one frozen.
+    a, b = two
+    real_boundary = a._db_boundary
+
+    def boundary(op):
+        if op == "wrap_started":
+            b.set_section_schema(schema_by_name("project"))
+        return real_boundary(op)
+
+    monkeypatch.setattr(a, "_db_boundary", boundary)
+    a.wrap_started(token="t" * 32, episode_ids=[])
+    assert name_for_schema(a.section_schema_for_wrap()) == "project"
+
+
+def test_the_refusal_survives_pickle_and_copy():
+    import copy
+    import pickle
+
+    err = WrapSchemaMovedError()
+    assert str(pickle.loads(pickle.dumps(err))) == str(err)
+    assert str(copy.deepcopy(err)) == str(err)

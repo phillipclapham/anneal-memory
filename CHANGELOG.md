@@ -2,7 +2,7 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.30] — 2026-10-04
 
 ### Added — `prepare_wrap(wrap_token=...)`: a caller-supplied token, and a wrap only that token can cancel
 - `prepare_wrap` accepts `wrap_token`, a 32-character lowercase hex string (the form

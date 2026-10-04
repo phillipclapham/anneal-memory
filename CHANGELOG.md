@@ -4,8 +4,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.9.34] — 2026-10-04
+
 ### Added — team ledger import (`anneal-memory team-import`)
-- `anneal-memory team-import <file|dir|-> [--dry-run] [--json]` and
+- `anneal-memory team-import <file...|-> [--dry-run] [--json] [--link-authority PATTERN]` and
   `anneal_memory.team.import_ledger(store, lines)` import a team decision ledger
   (JSONL, one SHA-256 hash chain per file, written by Levain's team layer) as
   episodes that keep who said what: `source` is `team:<author>` from the entry's own
@@ -31,7 +33,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   (`links_unauthorized`, exit 3) and nothing is hidden. Authority is judged when an
   entry first arrives, only pairs involving an entry imported by that call are
   evaluated, so a link removed with `unsupersede` stays removed. A link whose target is
-  not imported yet stays pending and is evaluated when the target arrives.
+  not imported yet stays pending: a later call that carries the linking entry again (import
+  the whole ledger each time) evaluates it when the target arrives.
 - Hardening, each from a reproduced attack on the first builds: a chain is a contiguous
   run (a root with `prev == ""`, then each line naming the hash of the line before it; an
   exact repeat of an earlier line is skipped and moves nothing), and an author change

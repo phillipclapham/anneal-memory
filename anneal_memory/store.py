@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import errno
+import fnmatch
 import inspect
 import hashlib
 import logging
@@ -2660,7 +2661,11 @@ class Store:
         return True
 
     def import_team_entries(
-        self, records: list[dict[str, Any]], *, dry_run: bool = False
+        self,
+        records: list[dict[str, Any]],
+        *,
+        dry_run: bool = False,
+        link_authority: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         """Import verified team-ledger entries as episodes, idempotently, in ONE
         write transaction (so two concurrent imports cannot both insert an entry).
@@ -2677,8 +2682,15 @@ class Store:
           entries. Existence, older-than and no-cycle are checked; the
           word-overlap gate of :meth:`supersede` is skipped, because the ledger
           already holds the decider's words and a replacing ruling need not
-          share wording. A target not imported yet leaves the link PENDING; every
-          later import recomputes links from all stored team entries.
+          share wording.
+        - A link from one author over ANOTHER author's entry is made only when the
+          linking author matches a ``link_authority`` pattern (``fnmatch``, on the
+          handle after ``team:``). Otherwise it is returned in ``links_unauthorized``
+          and nothing is hidden.
+        - Only pairs that involve an entry imported by THIS call are evaluated, so
+          a link an operator removed with :meth:`unsupersede` stays removed. A
+          target not imported yet leaves the link pending: it is evaluated when
+          the target arrives.
         - ``dry_run`` computes everything and writes nothing.
         """
         if dry_run and self._defer_commit:
@@ -2689,6 +2701,7 @@ class Store:
         made: list[dict[str, str]] = []
         pending: list[dict[str, str]] = []
         refused: list[dict[str, str]] = []
+        unauthorized: list[dict[str, str]] = []
         with self._db_boundary("import_team_entries"):
             if not self._conn.in_transaction:
                 self._conn.execute("BEGIN IMMEDIATE")
@@ -2711,6 +2724,7 @@ class Store:
                         "content": row["content"], "ts": row["timestamp"],
                         "source": row["source"],
                     }
+            fresh: set[str] = set()
             for rec in records:
                 known = by_entry.get(rec["entry_id"])
                 if known is not None:
@@ -2723,8 +2737,11 @@ class Store:
                         })
                     continue
                 meta_json = json.dumps(rec["metadata"])
-                for nonce in range(3):
-                    ep_id = _episode_id(rec["content"], rec["timestamp"], nonce)
+                # The ledger id is part of the id input, so entries with identical
+                # text and timestamp still get distinct episode ids.
+                id_input = f"{rec['entry_id']}\0{rec['content']}"
+                for nonce in range(64):
+                    ep_id = _episode_id(id_input, rec["timestamp"], nonce)
                     try:
                         self._conn.execute(
                             "INSERT INTO episodes (id, timestamp, type, content, source, "
@@ -2734,18 +2751,21 @@ class Store:
                         )
                         break
                     except sqlite3.IntegrityError:
-                        if nonce == 2:
+                        if nonce == 63:
                             raise
                 by_entry[rec["entry_id"]] = {
                     "ep": ep_id, "hash": rec["hash"], "supersedes": rec["supersedes"],
                     "content": rec["content"], "ts": rec["timestamp"],
                     "source": rec["source"],
                 }
+                fresh.add(rec["entry_id"])
                 imported.append({"id": rec["entry_id"], "episode": ep_id,
                                  "source": rec["source"], "type": rec["type"],
                                  "content": rec["content"]})
             for entry_id, new in by_entry.items():
                 for target in new["supersedes"]:
+                    if entry_id not in fresh and target not in fresh:
+                        continue
                     old = by_entry.get(target)
                     if old is None:
                         pending.append({"id": entry_id, "target": target})
@@ -2755,6 +2775,15 @@ class Store:
                         (old["ep"], new["ep"]),
                     ).fetchone():
                         continue
+                    if old["source"] != new["source"]:
+                        who = str(new["source"])[len("team:"):]
+                        if not any(fnmatch.fnmatchcase(who, pat) for pat in link_authority):
+                            unauthorized.append({
+                                "id": entry_id, "by": str(new["source"]),
+                                "target": target, "target_author": str(old["source"]),
+                                "target_text": str(old["content"])[:200],
+                            })
+                            continue
                     problem = self._supersession_problem(
                         old["ep"], new["ep"], new["content"], new["ts"],
                         check_grounds=False,
@@ -2790,7 +2819,8 @@ class Store:
                     actor=link["source"])
         return {"imported": imported, "already_present": already,
                 "conflicts": conflicts, "links_made": made,
-                "links_pending": pending, "links_refused": refused}
+                "links_pending": pending, "links_refused": refused,
+                "links_unauthorized": unauthorized}
 
     def supersession_problem(self, *, old_id: str, new_id: str) -> str | None:
         """Why a proposed link would be refused, or None if it would record.

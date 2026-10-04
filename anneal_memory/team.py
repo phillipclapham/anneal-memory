@@ -22,6 +22,17 @@ What it guarantees:
 - **Idempotent by ledger id.** Re-importing changes nothing; the same id with a
   different hash is reported as a conflict and never overwritten.
 - **Acks are not memory.** An ``ack`` entry is counted and skipped.
+- **Hiding is authorised, not assumed.** A supersession by the SAME author applies.
+  One by a different author applies only when that author matches a
+  ``link_authority`` pattern the caller names (a team lead, the pack authors);
+  otherwise it is reported in full and nothing is hidden.
+
+Limits that are inherent, stated so nobody has to rediscover them: the author is
+self-declared, so the git host's access control is the only authentication; anyone
+who can write to the ledger can append a fork that freezes a teammate's chain at the
+fork point (reported, never silent); an entry removed from the ledger stays in an
+engineer's store, because only a signed ``retire`` reaches it; and the first
+importer of an id wins, which is why an id must begin with its author's handle.
 """
 from __future__ import annotations
 
@@ -30,7 +41,7 @@ import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -59,7 +70,16 @@ _EPISODE_TYPE = {
     "retire": "context",
 }
 _MAX_LINE_CHARS = 1_000_000
-_HANDLE = re.compile(r"^[A-Za-z0-9._@:+-]{1,200}$")
+_HANDLE = re.compile(r"[A-Za-z0-9._@:+-]{1,200}")
+# A writer builds an id as <author>-<stamp>-<hex>, replacing characters outside this
+# set in the author with "-"; an id that does not start with its own author is a
+# squatter's, and is refused.
+_ID_SAFE = re.compile(r"[^A-Za-z0-9._@:-]")
+_TEXT_FIELDS = {"words": 4000, "summary": 2000, "reason": 4000, "recheck": 1000}
+_MAX_PATHS = 100
+_MAX_PATH_CHARS = 300
+_MAX_LINES = 200_000
+_FUTURE_SKEW = timedelta(days=1)
 _TS = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$")
 
 
@@ -85,6 +105,7 @@ class TeamImportReport:
     links_made: list[dict] = field(default_factory=list)
     links_pending: list[dict] = field(default_factory=list)
     links_refused: list[dict] = field(default_factory=list)
+    links_unauthorized: list[dict] = field(default_factory=list)
     dry_run: bool = False
 
     @property
@@ -92,7 +113,7 @@ class TeamImportReport:
         """True when nothing was refused or in conflict. Pending links are not a
         problem: a target not fetched yet completes on a later import."""
         return not (self.rejected or self.chain_problems or self.conflicts
-                    or self.links_refused)
+                    or self.links_refused or self.links_unauthorized)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -111,6 +132,7 @@ class TeamImportReport:
             ],
             "links_pending": self.links_pending,
             "links_refused": self.links_refused,
+            "links_unauthorized": self.links_unauthorized,
             "imported_ids": [i["id"] for i in self.imported],
         }
 
@@ -148,24 +170,51 @@ def _entry_problem(e: dict) -> str | None:
     if e.get("v") != SCHEMA_VERSION:
         return f"schema version {e.get('v')!r} is not {SCHEMA_VERSION}"
     for f in ("id", "author"):
-        if not isinstance(e.get(f), str) or not _HANDLE.match(e[f]):
+        if not isinstance(e.get(f), str) or not _HANDLE.fullmatch(e[f]):
             return f"{f} is missing or not a plain handle"
+    if not e["id"].startswith(_ID_SAFE.sub("-", e["author"]) + "-"):
+        return "id must begin with the author's handle and a dash"
+    for f in ("agent", "session"):
+        if e.get(f) is not None and not (
+            isinstance(e[f], str) and _HANDLE.fullmatch(e[f])
+        ):
+            return f"{f} must be a plain handle"
+    # An owner may be a client's display name (client:Acme Corp), so it is printable
+    # text of bounded length, and it is rendered quoted.
+    if e.get("owner") is not None and not (
+        isinstance(e["owner"], str) and e["owner"].strip()
+        and len(e["owner"]) <= 200 and e["owner"].isprintable()
+    ):
+        return "owner must be printable text of at most 200 characters"
     if e.get("type") not in TYPES:
         return f"type {e.get('type')!r} is not one of {', '.join(TYPES)}"
-    if _normalize_ts(e.get("ts")) is None:
+    ts = _normalize_ts(e.get("ts"))
+    if ts is None:
         return "ts is not an ISO-8601 UTC timestamp"
+    if datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc) \
+            > datetime.now(timezone.utc) + _FUTURE_SKEW:
+        return "ts is more than a day in the future"
     if e["type"] in ("decision", "constraint") and e.get("kind") not in KINDS:
         return f"a {e['type']} needs kind: ruling or practice"
     if e.get("kind") is not None and e["kind"] not in KINDS:
         return "kind must be ruling or practice"
-    for f in ("words", "summary", "reason", "recheck", "owner", "agent", "session"):
-        if e.get(f) is not None and not isinstance(e[f], str):
-            return f"{f} must be a string"
+    for f, cap in _TEXT_FIELDS.items():
+        if e.get(f) is not None:
+            if not isinstance(e[f], str):
+                return f"{f} must be a string"
+            if len(e[f]) > cap:
+                return f"{f} is longer than {cap} characters"
     if e.get("kind") == "ruling" and not (e.get("words") or "").strip():
         return "a ruling needs the decider's own words"
     for f in ("paths", "supersedes", "refs"):
         if e.get(f) is not None and not _is_str_list(e[f]):
             return f"{f} must be a list of non-empty strings"
+    if len(e.get("paths") or []) > _MAX_PATHS or any(
+        len(p) > _MAX_PATH_CHARS for p in e.get("paths") or []
+    ):
+        return f"paths: at most {_MAX_PATHS} globs of {_MAX_PATH_CHARS} characters"
+    if len(e.get("supersedes") or []) > _MAX_PATHS:
+        return f"supersedes names more than {_MAX_PATHS} entries"
     for p in e.get("paths") or []:
         if p.startswith("/") or ".." in p.split("/"):
             return f"paths are repo-relative globs, got {p!r}"
@@ -182,33 +231,42 @@ def _entry_problem(e: dict) -> str | None:
     return None
 
 
+def _q(text: str) -> str:
+    """A free-text field as a JSON string: quotes and newlines are escaped, so a
+    field can never close its own quote or start a line that reads as another
+    entry's header."""
+    return json.dumps(text.strip(), ensure_ascii=False)
+
+
 def render_content(e: dict) -> str:
-    """The episode text. The decider's words are quoted and attributed; a
-    summary is always labelled as the author's summary, never as the decision."""
+    """The episode text. Every free-text field is a quoted, escaped string after a
+    fixed label; the author, agent and owner are validated handles. The decider's
+    words are attributed; a summary is always labelled as the author's summary,
+    never as the decision."""
     author = e["author"]
     if e["type"] == "retire":
-        text = f"Team retire by {author}: retired {', '.join(e['supersedes'])}."
+        text = f"[team ledger] retire by {author}: retired {', '.join(e['supersedes'])}."
         if (e.get("reason") or "").strip():
-            text += f" Reason: {e['reason'].strip()}"
+            text += f" Reason: {_q(e['reason'])}"
         return text
     kind = f" ({e['kind']})" if e.get("kind") else ""
-    head = f"Team {e['type']}{kind}, entered by {author}"
+    head = f"[team ledger] {e['type']}{kind}, entered by {author}"
     if e.get("agent"):
         head += f" via {e['agent']}"
     parts = [head + "."]
     if (e.get("words") or "").strip():
-        owner = f" ({e['owner']})" if e.get("owner") else ""
-        parts.append(f"Decider's words{owner}: \"{e['words'].strip()}\".")
+        owner = f" (owner {_q(e['owner'])})" if e.get("owner") else ""
+        parts.append(f"Decider's words{owner}: {_q(e['words'])}.")
     elif e.get("owner"):
-        parts.append(f"Owner: {e['owner']}.")
+        parts.append(f"Owner: {_q(e['owner'])}.")
     if (e.get("reason") or "").strip():
-        parts.append(f"Reason: {e['reason'].strip()}")
+        parts.append(f"Reason: {_q(e['reason'])}")
     if e.get("paths"):
-        parts.append(f"Paths: {', '.join(e['paths'])}.")
+        parts.append(f"Paths: {', '.join(_q(p) for p in e['paths'])}.")
     if (e.get("recheck") or "").strip():
-        parts.append(f"Recheck: {e['recheck'].strip()}")
+        parts.append(f"Recheck: {_q(e['recheck'])}")
     if (e.get("summary") or "").strip():
-        parts.append(f"Summary by {author}: {e['summary'].strip()}")
+        parts.append(f"Summary by {author}: {_q(e['summary'])}")
     return " ".join(parts)
 
 
@@ -223,6 +281,11 @@ def _verified_chains(
     seen_hash: dict[str, dict] = {}
     all_entries: list[dict] = []
     for n, line in enumerate(lines, 1):
+        if n > _MAX_LINES:
+            report.chain_problems.append(
+                f"more than {_MAX_LINES} lines; the rest were not read"
+            )
+            break
         if not line.strip():
             continue
         if len(line) > _MAX_LINE_CHARS:
@@ -281,7 +344,11 @@ def _verified_chains(
 
 
 def import_ledger(
-    store: Store, lines: Iterable[str], *, dry_run: bool = False
+    store: Store,
+    lines: Iterable[str],
+    *,
+    dry_run: bool = False,
+    link_authority: Iterable[str] = (),
 ) -> TeamImportReport:
     """Import ledger lines into ``store``. See the module docstring.
 
@@ -308,11 +375,14 @@ def import_ledger(
             "metadata": {"team": {**e, "entry_id": e["id"]}},
             "supersedes": list(e.get("supersedes") or []),
         })
-    result = store.import_team_entries(records, dry_run=dry_run)
+    result = store.import_team_entries(
+        records, dry_run=dry_run, link_authority=tuple(link_authority)
+    )
     report.imported = result["imported"]
     report.already_present = result["already_present"]
     report.conflicts = result["conflicts"]
     report.links_made = result["links_made"]
     report.links_pending = result["links_pending"]
     report.links_refused = result["links_refused"]
+    report.links_unauthorized = result["links_unauthorized"]
     return report

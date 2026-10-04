@@ -22,9 +22,24 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - Supersession maps onto the existing `supersessions` table (recall hides the old
   entry), between team entries only. The ledger's own validated `supersedes` authorises
   the link, so the word-overlap gate of `Store.supersede` is skipped; existence,
-  older-than and no-cycle are still checked. A link whose target is not imported yet
-  stays pending and completes on a later import. Links made by one author over
-  another's entry are listed in the report (`cross_author_links`).
+  older-than and no-cycle are still checked. A link by the SAME author applies. A link
+  over ANOTHER author's entry (including every `retire` of someone else's) applies only
+  when the linking author matches `--link-authority` (an `fnmatch` pattern such as the
+  team lead's handle or `pack:*`); otherwise it is reported with the hidden entry's text
+  (`links_unauthorized`, exit 3) and nothing is hidden. Authority is judged when an
+  entry first arrives, only pairs involving an entry imported by that call are
+  evaluated, so a link removed with `unsupersede` stays removed. A link whose target is
+  not imported yet stays pending and is evaluated when the target arrives.
+- Hardening, each from a reproduced attack on the first build: free-text fields are
+  rendered as quoted, escaped strings, so a field cannot forge another entry's header;
+  agent and session must be plain handles, text fields and path lists are length-capped,
+  a timestamp more than a day ahead is refused, and an id must begin with its author's
+  handle (an id squatter's entry is refused). Entries with identical text and
+  timestamp no longer collide on the episode id.
+- Inherent limits, documented in `anneal_memory.team`: the author is self-declared (the
+  git host's access control is the authentication), a forked chain is frozen at the
+  fork and reported, an entry removed from a ledger stays in an engineer's store (only a
+  signed `retire` reaches it), and authority is judged on arrival, not retroactively.
 - Exit code 3 means something was refused or in conflict (everything verifiable was
   still imported). Nothing about `record`, `save_continuity` or the hard maximum changed.
 

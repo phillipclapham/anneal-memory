@@ -2122,7 +2122,8 @@ def cmd_team_import(args: argparse.Namespace) -> None:
             paths.append(src)
     lines.extend(read_ledger_lines(paths))
     with _open_store(args) as store:
-        report = import_ledger(store, lines, dry_run=args.dry_run)
+        authority = [a.strip() for chunk in (args.link_authority or []) for a in chunk.split(",") if a.strip()]
+        report = import_ledger(store, lines, dry_run=args.dry_run, link_authority=authority)
     data = report.to_dict()
     if args.json:
         _print_json(data)
@@ -2133,7 +2134,8 @@ def cmd_team_import(args: argparse.Namespace) -> None:
             f"{data['skipped_ack']} acks skipped); {data['links_made']} supersession links, "
             f"{len(data['links_pending'])} pending"
         )
-        for key in ("rejected", "chain_problems", "conflicts", "links_refused"):
+        for key in ("rejected", "chain_problems", "conflicts", "links_refused",
+                    "links_unauthorized"):
             for item in data[key]:
                 print(f"  {key}: {item}", file=sys.stderr)
         for item in data["cross_author_links"]:
@@ -4225,6 +4227,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub.add_argument("sources", nargs="*", help="Ledger file(s) or directory; '-' reads stdin")
     sub.add_argument("--dry-run", action="store_true", help="Verify and report; write nothing")
+    sub.add_argument(
+        "--link-authority", action="append", metavar="PATTERN",
+        help="Author handle (fnmatch pattern, comma-separated, repeatable) allowed to "
+             "supersede or retire ANOTHER author's entry, e.g. the team lead or 'pack:*'. "
+             "Without it only same-author supersession applies; other links are reported "
+             "and hide nothing.",
+    )
     sub.set_defaults(func=cmd_team_import)
 
     # -- audit --

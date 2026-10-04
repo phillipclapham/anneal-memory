@@ -475,7 +475,7 @@ def import_ledger(
         if problem:
             rid = e.get("id")
             report.rejected.append(
-                {"id": rid[:80] if isinstance(rid, str) else rid, "reason": problem}
+                {"id": rid[:100] if isinstance(rid, str) else repr(rid)[:100], "reason": problem}
             )
         else:
             valid.append(e)
@@ -497,7 +497,7 @@ def import_ledger(
     for e in verified:
         # Descent is read over every chain-verified entry: a semantically rejected
         # middle entry must not let its descendants slip past a dropped ancestor.
-        if e["hash"] in valid_hashes and e["id"] in clash or e["prev"] in dropped:
+        if (e["hash"] in valid_hashes and e["id"] in clash) or e["prev"] in dropped:
             dropped.add(e["hash"])
             continue
         if e["hash"] not in valid_hashes:

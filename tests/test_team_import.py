@@ -779,3 +779,12 @@ def test_a_rejected_middle_entry_does_not_free_the_descendants_of_a_clash(store)
                "author": "alice", "paths": [], "supersedes": [], **_finding()}, bad["hash"])
     report = import_ledger(store, [json.dumps(x) for x in (s1, bad, gc)] + [json.dumps(s2)])
     assert report.conflicts and all(i["id"] != gc["id"] for i in report.imported)
+
+
+def test_a_bom_on_piped_stdin_does_not_lose_the_first_chain(tmp_path):
+    db = tmp_path / "s.db"
+    Store(db, audit=False).close()
+    data = b"\xef\xbb\xbf" + "\n".join(ledger("alice", [_finding()])).encode("utf-8") + b"\n"
+    r = subprocess.run([sys.executable, "-m", "anneal_memory", "--db", str(db), "team-import", "-",
+                        "--json"], input=data, capture_output=True, timeout=120)
+    assert r.returncode == 0 and json.loads(r.stdout.decode("utf-8"))["imported"] == 1

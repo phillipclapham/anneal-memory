@@ -4,6 +4,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.9.37] — 2026-10-04
+
 ### Fixed — `team-import` hardening from a fresh three-lineage review of 0.9.36
 - A rejected middle entry no longer frees its descendants from a dropped (clashing)
   ancestor: descent is read over every chain-verified entry.
@@ -15,11 +17,12 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - `import_ledger(link_authority="*")` raises `TypeError` (a bare string was split into
   one-character patterns, and `*` then matched every author).
 - A UTF-8 byte-order mark on a ledger file no longer loses its first chain; an
-  unexpandable `~user` path is a `ValueError`, as documented; a rejected entry's id is
-  clipped at 80 characters in the report.
+  unexpandable `~user` path is a `ValueError`, as documented; a BOM on piped stdin is dropped too; a rejected entry's id is
+  clipped at 100 characters in the report.
 - Known-open (the stream is one trust unit the exporter vouches for): a second
   root-level entry (`prev ""`) inside one stream starts a new chain, so a retire
-  appended as a root cannot be told from a second file's root; extra fields on a
+  appended as a root cannot be told from a second file's root; a semantically rejected entry does not take its descendants with it (only a
+  clash does); extra fields on a
   chain-valid entry are stored verbatim in `metadata["team"]`; the 64 MiB limit is per
   file, not in aggregate. Closing the first needs framed input, a contract change that
   ships as a pair with Levain.

@@ -2114,7 +2114,7 @@ def cmd_team_import(args: argparse.Namespace) -> None:
     paths: list[str] = []
     for src in sources:
         if src == "-":
-            lines.extend(ln.rstrip("\r") for ln in sys.stdin.read().split("\n"))
+            lines.extend(ln.rstrip("\r") for ln in sys.stdin.read().removeprefix("\ufeff").split("\n"))
         else:
             if not Path(src).expanduser().exists():
                 print(f"Error: not found: {src}", file=sys.stderr)

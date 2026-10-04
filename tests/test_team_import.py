@@ -634,10 +634,13 @@ def test_stdin_frames_on_newline_only(tmp_path):
     entry = {k: v for k, v in line.items() if k != "hash"}
     entry["extra"] = "a\u2028b"
     sealed = seal(entry, "")
+    # bytes in, bytes out: a text-mode pipe encodes with the console code page on
+    # Windows (cp1252 cannot hold U+2028), which killed the writer thread and left
+    # the child waiting for stdin forever (the 0.9.34/0.9.35 CI hang)
     r = subprocess.run([sys.executable, "-m", "anneal_memory", "--db", str(db), "team-import", "-",
-                        "--json"], input=json.dumps(sealed, ensure_ascii=False) + "\n",
-                       capture_output=True, text=True)
-    assert r.returncode == 0 and json.loads(r.stdout)["imported"] == 1
+                        "--json"], input=(json.dumps(sealed, ensure_ascii=False) + "\n").encode("utf-8"),
+                       capture_output=True, timeout=120)
+    assert r.returncode == 0 and json.loads(r.stdout.decode("utf-8"))["imported"] == 1
 
 
 def test_a_repeat_moves_no_state_and_a_file_given_twice_is_harmless(store):
@@ -684,6 +687,7 @@ def test_an_id_clash_drops_only_the_clashing_subtree(store):
     assert sorted(i["id"] for i in rep2.imported) == [json.loads(other[0])["id"]]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a POSIX mode-0 file; Windows ignores the bit")
 def test_unreadable_file_is_a_clean_cli_error(tmp_path):
     db = tmp_path / "p.db"
     Store(db, audit=False).close()
@@ -698,3 +702,12 @@ def test_unreadable_file_is_a_clean_cli_error(tmp_path):
     if r.returncode != 1:  # this user can read a mode-0 file (root, Windows): nothing to assert
         return
     assert r.returncode == 1 and "Traceback" not in r.stderr and "cannot be read" in r.stderr
+
+
+def test_a_legit_entry_quoting_brackets_and_braces_still_imports(store):
+    """The depth guard is string-aware: brackets inside a JSON string value, escaped
+    quotes included, do not count toward nesting."""
+    words = "[[ ]] " + "[" * 500 + "{" * 500 + ' \\" ' + "]" * 500 + "} " + "{\"a\": [1, [2]]}"
+    rep = import_ledger(store, ledger("alice", [{**RULING, "words": words}]))
+    assert rep.clean and len(rep.imported) == 1
+    assert words.strip() in store.recall(limit=1).episodes[0].metadata["team"]["words"]

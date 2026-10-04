@@ -4,15 +4,26 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
-## [0.9.35] — 2026-10-04
+## [0.9.36] — 2026-10-04
 
-### Fixed — a deeply nested line hung `team-import` on Windows
-- A line of a few hundred thousand open brackets made `json.loads` run for over twenty
-  minutes on the Windows CI runner (it raises `RecursionError` at once on Linux and
-  macOS), which hung the 0.9.34 candidate's Windows job twice. `team-import` now refuses
-  a line that nests deeper than 32 levels before parsing it (an entry nests two) and
-  reports it as a chain problem. 0.9.34 was tagged and never published; 0.9.35 is the
-  release that carries everything below.
+### Fixed — the Windows CI hang of the team-import tests was a test bug
+- 0.9.34 and 0.9.35 were tagged and never published: their Windows CI job hung. The
+  cause, found by running the team tests alone on the Windows runner with a per-test
+  timeout, was `test_stdin_frames_on_newline_only`: a text-mode pipe encodes with the
+  console code page on Windows, which cannot hold the U+2028 the test sends, so the
+  writer thread died and the child waited on stdin forever. The test now sends bytes.
+  The product was not at fault; the 0.9.35 note that blamed `json.loads` was wrong.
+- `team-import` refuses a line that nests deeper than 32 levels before parsing it (an
+  entry nests two), string-aware so brackets inside a value do not count. It stays as a
+  bound on hostile input; it is not a fix for a measured hang.
+- The mode-0 unreadable-file test is skipped on Windows, which ignores the bit.
+
+## [0.9.35] — 2026-10-04 (tagged, never published)
+
+### Added — a depth bound on a ledger line (see 0.9.36: it did not cause the CI hang)
+- `team-import` refuses a line that nests deeper than 32 levels before parsing it (an
+  entry nests two). The reason given at the time, a Windows `json.loads` hang, was a
+  wrong diagnosis; see 0.9.36 for the actual cause.
 
 ## [0.9.34] — 2026-10-04 (tagged, never published)
 

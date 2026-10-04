@@ -2,7 +2,7 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.29] — 2026-10-04
 
 ### Fixed — a schema change can no longer slip in between prepare_wrap's read and the wrap's freeze
 - `wrap_started(section_schema=...)` compares the passed schema with the live one under

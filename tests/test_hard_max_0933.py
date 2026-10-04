@@ -66,7 +66,7 @@ def test_refusal_names_size_bound_and_what_to_cut_and_audits(tmp_path):
         # max_chars on prepare_wrap moves the target, never the bound.
         assert prepare_wrap(s, max_chars=999_999)["status"] == "ready"
         with pytest.raises(ContinuityValidationError) as e:
-            validated_save_continuity(s, _text(bound + 1), allow_shrink=True)
+            validated_save_continuity(s, _text(bound + 1), allow_shrink=True, today="2026-10-04")
         err = e.value
         assert (err.chars, err.bound, err.target) == (bound + 1, bound, 25_500)
         msg = str(err)
@@ -80,7 +80,7 @@ def test_refusal_names_size_bound_and_what_to_cut_and_audits(tmp_path):
         # The wrap is still open: the same save, now at the bound, goes through,
         # and a large Durable Facts section does not count toward it.
         durable = "## Durable Facts\n" + "".join(f"- fact {i}\n" for i in range(400)) + "\n"
-        assert validated_save_continuity(s, _text(bound, durable))["chars"] > bound
+        assert validated_save_continuity(s, _text(bound, durable), today="2026-10-04")["chars"] > bound
 
 
 def test_refusal_reaches_the_agent_over_mcp(tmp_path):
@@ -120,5 +120,7 @@ def test_the_bound_measures_the_text_that_is_written(tmp_path):
         assert prepare_wrap(s, max_chars=bound + 5000)["status"] == "ready"
         base = len(_DEFAULT_TEXT.format(pad=""))
         with pytest.raises(ContinuityValidationError) as e:
-            validated_save_continuity(s, _DEFAULT_TEXT.format(pad="c" * (bound - base)))
+            validated_save_continuity(
+                s, _DEFAULT_TEXT.format(pad="c" * (bound - base)), today="2026-10-04")
         assert e.value.chars > bound  # the written text, not the input
+        assert "you submitted" in str(e.value)  # the written size is not the submitted size

@@ -2382,6 +2382,9 @@ def cmd_audit(args: argparse.Namespace) -> None:
             summary = f"episodes={data.get('episodes_compressed', '?')} chars={data.get('continuity_chars', '?')}"
         elif event == "continuity_saved":
             summary = f"chars={data.get('chars', '?')}"
+        elif event == "continuity_refused":
+            summary = (f"reason={data.get('reason', '?')} chars={data.get('chars', '?')} "
+                       f"bound={data.get('bound', '?')}")
         elif event == "associations_updated":
             summary = f"formed={data.get('formed', 0)} strengthened={data.get('strengthened', 0)}"
         elif event == "associations_decayed":

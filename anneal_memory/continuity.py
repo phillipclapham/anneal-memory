@@ -589,7 +589,9 @@ def _check_no_catastrophic_shrink(
     )
 
 
-def _check_hard_max(store: Any, text: str, schema: list[SectionSpec]) -> None:
+def _check_hard_max(
+    store: Any, text: str, schema: list[SectionSpec], submitted: int
+) -> None:
     """Refuse a save whose size (the durable section excluded) is above the
     schema's hard maximum, :func:`~anneal_memory.schema.hard_max_chars`.
 
@@ -644,6 +646,12 @@ def _check_hard_max(store: Any, text: str, schema: list[SectionSpec]) -> None:
         message += (
             f" Other sections ({', '.join(others)}): compress entries that no "
             f"longer hold or that are recorded elsewhere."
+        )
+    if submitted != chars:
+        message += (
+            f"\nThe text you submitted measured {submitted}; saving rewrote it to "
+            f"{chars} (a bare or ungrounded graduation line is rewritten longer), so "
+            f"leave that much margin under the bound."
         )
     message += (
         "\nThe wrap is still in progress: re-compose under the bound and save again."
@@ -3004,7 +3012,10 @@ def validated_save_continuity(
     # The hard maximum is measured on the text that will be WRITTEN: graduation
     # rewrites lines (a bare ``2x`` becomes ``1x`` plus a note), so the input's
     # size is not the file's. Nothing is written or recorded before this point.
-    _check_hard_max(store, grad_result.text, section_schema)
+    _check_hard_max(
+        store, grad_result.text, section_schema,
+        len(text) - durable_section_chars(text, section_schema),
+    )
 
     # Detect Proven-tier (2x and ABOVE — `min_level` is a FLOOR, not a range, so a
     # 4x+ pattern is covered) patterns silently dropped between the

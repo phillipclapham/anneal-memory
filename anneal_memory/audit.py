@@ -633,7 +633,7 @@ class AuditTrail:
                    Wrap lifecycle:
                      wrap_started, wrap_cancelled, wrap_completed
                    Continuity:
-                     continuity_saved, section_schema_set
+                     continuity_saved, continuity_refused, section_schema_set
                    Consolidate policy:
                      consolidate_policy_set
                    Hebbian (episode-level) associations:

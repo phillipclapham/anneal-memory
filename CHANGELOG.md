@@ -36,6 +36,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   raised, and over MCP the refusal text is the tool result the composing agent reads. The
   wrap stays open, as for every validation refusal, so an unattended caller that gives up
   leaves an open wrap behind; routing that to an operator alarm is the caller's side.
+- Known open: the bound is checked after graduation, so an oversized text with very many
+  evidence-bearing pattern lines runs the per-line pattern-history lookups before it is
+  refused (the MCP message cap is 10 MiB); a raw-input ceiling ahead of graduation is not
+  built.
 
 ## [0.9.32] — 2026-10-04
 

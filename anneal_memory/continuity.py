@@ -3141,11 +3141,19 @@ def validated_save_continuity(
             # rolls back with the wrap row and always names the continuity it was computed
             # for (the recall path also checks that hash, so a continuity written any other
             # way simply turns the filter off).
-            if inert_value is not None:
-                store._conn.execute(
-                    "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-                    (INERT_TOKENS_KEY, inert_value),
-                )
+            # If the computation failed there is no current set, and an old one must not
+            # outlive the continuity it described: remove it in the same transaction (the
+            # recall path withholds the durable tier until a wrap writes a current key).
+            if durable_report is not None:
+                if inert_value is not None:
+                    store._conn.execute(
+                        "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                        (INERT_TOKENS_KEY, inert_value),
+                    )
+                else:
+                    store._conn.execute(
+                        "DELETE FROM metadata WHERE key = ?", (INERT_TOKENS_KEY,)
+                    )
             _check_save_authority(store, session_id, wrap_token, allow_sole_live)
             # Batch context manager commits here on successful exit.
 

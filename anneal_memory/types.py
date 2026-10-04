@@ -375,18 +375,22 @@ class RelevantFact:
     the query cued.
 
     ``fact`` is the fact text without its cue list, ``line`` the raw ``- `` line as
-    written (cues included), and ``matched`` the words that brought it up: the matched
-    CUE words when ``source`` is ``"cue"``, the matched fact-text words when it is
-    ``"fact"`` (a cue match is the primary path; the fact text alone needs two words).
+    written (cues included). ``cue_matched`` holds the cue words that matched and
+    ``fact_matched`` the distinctive words of the fact text that matched (a cue match is
+    the primary path; the fact text alone needs two words); ``matched`` is their union,
+    cue words first. ``source`` is ``"cue"`` when at least one cue matched and ``"fact"``
+    when only the fact text did.
 
     A harness hook renders one as ``Durable fact (cue: restaurant): tree nut allergy``,
-    built from ``.fact`` and the first of ``.matched`` (``cue`` for ``source == "cue"``,
-    ``matches`` otherwise)."""
+    built from ``.fact`` and the first of ``.cue_matched`` (``matches`` and
+    ``.fact_matched`` when ``source`` is ``"fact"``)."""
 
     fact: str
     line: str
     matched: tuple[str, ...]
     source: str = "cue"
+    cue_matched: tuple[str, ...] = ()
+    fact_matched: tuple[str, ...] = ()
 
 
 @dataclass

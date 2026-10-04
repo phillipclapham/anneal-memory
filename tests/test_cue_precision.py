@@ -15,6 +15,8 @@ from anneal_memory.integrity import TOOLS
 from anneal_memory.server import Server
 from anneal_memory.types import EpisodeType
 
+from .cue_helpers import save_cont, write_inert_key
+
 FACT = "- tree nut allergy — cues: restaurant, dinner, menu, time, work"
 
 
@@ -71,7 +73,7 @@ def busy(store):
     """A store past IDF_MIN_CORPUS where "time" and "work" are in every other episode,
     with its inert tokens computed and stored."""
     _fill(store, 80, every=2)
-    store.save_continuity(_continuity(FACT))
+    save_cont(store, _continuity(FACT))
     _write_inert(store)
     return store
 
@@ -94,7 +96,7 @@ class TestGenericWordsNeverCue:
             busy, _retrieval.load_durable_facts(busy))
         quiet = Store(tmp_path / "quiet.db", project_name="T")
         _fill(quiet, 80, every=None)
-        quiet.save_continuity(_continuity(FACT))
+        save_cont(quiet, _continuity(FACT))
         try:
             assert _retrieval.compute_durable_inert_tokens(
                 quiet, _retrieval.load_durable_facts(quiet)) == set()
@@ -103,11 +105,11 @@ class TestGenericWordsNeverCue:
         finally:
             quiet.close()
 
-    def test_no_stored_set_means_no_filter_and_nothing_is_counted_at_prompt_time(
+    def test_no_stored_set_withholds_the_tier_and_nothing_is_counted_at_prompt_time(
         self, store, monkeypatch
     ):
         _fill(store, 80, every=2)
-        store.save_continuity(_continuity(FACT))  # no key written
+        store.save_continuity(_continuity(FACT))  # low-level save: no key written
         real = store.recall
         calls = []
 
@@ -116,17 +118,45 @@ class TestGenericWordsNeverCue:
             return real(*a, **k)
 
         monkeypatch.setattr(store, "recall", spy)
-        assert _matched(store, "time") == [("time",)]
+        assert _matched(store, "restaurant") == []
         assert [c for c in calls if "keyword" in c and c.get("limit") == 0] == []
 
-    def test_a_stale_set_is_ignored(self, busy):
-        assert _matched(busy, "time") == []
+    def test_a_stale_set_withholds_the_tier(self, busy):
+        assert _matched(busy, "restaurant") == [("restaurant",)]
         busy.save_continuity(_continuity(FACT, "- another fact — cues: spaceship"))
-        assert _matched(busy, "time") == [("time",)]  # the key was for the old continuity
+        assert _matched(busy, "restaurant") == []  # the key was for the old continuity
+        assert _matched(busy, "spaceship") == []
+
+    def test_a_current_key_serves_facts_again(self, busy):
+        busy.save_continuity(_continuity(FACT, "- another fact — cues: spaceship"))
+        assert _matched(busy, "spaceship") == []
+        write_inert_key(busy)
+        assert _matched(busy, "spaceship") == [("spaceship",)]
+
+    def test_a_key_tuned_for_another_threshold_withholds_the_tier(self, busy, monkeypatch):
+        assert _matched(busy, "restaurant") == [("restaurant",)]
+        monkeypatch.setattr(_retrieval, "DURABLE_GENERIC_DF", 0.25)
+        assert _matched(busy, "restaurant") == []
+
+    @pytest.mark.parametrize("bad", [
+        "{not json", "[]", '{"tokens": "time"}', '{"tokens": [1]}',
+        '{"tokens": [], "continuity_hash": 5, "episodes": 1, "threshold": 0.1}',
+        '{"tokens": []}',
+    ])
+    def test_a_corrupt_key_withholds_the_tier(self, busy, bad):
+        busy._conn.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                           (_retrieval.INERT_TOKENS_KEY, bad))
+        busy._conn.commit()
+        assert _matched(busy, "restaurant") == []
+
+    def test_a_missing_key_withholds_the_tier(self, busy):
+        busy._conn.execute("DELETE FROM metadata WHERE key = ?", (_retrieval.INERT_TOKENS_KEY,))
+        busy._conn.commit()
+        assert _matched(busy, "restaurant") == []
 
     def test_a_store_too_small_to_tell_has_an_empty_set(self, store):
         _fill(store, _retrieval.IDF_MIN_CORPUS - 1, every=1)
-        store.save_continuity(_continuity(FACT))
+        save_cont(store, _continuity(FACT))
         assert _retrieval.compute_durable_inert_tokens(
             store, _retrieval.load_durable_facts(store)) == set()
         assert _matched(store, "time") == [("time",)]
@@ -139,7 +169,7 @@ class TestGenericWordsNeverCue:
             store.record(
                 f"Memo {i}: the current parent account {'pays rent' if i < 5 else 'is x'}.",
                 EpisodeType.OBSERVATION)
-        store.save_continuity(_continuity("- pet — cues: cat, category", "- lease — cues: rent, current"))
+        save_cont(store, _continuity("- pet — cues: cat, category", "- lease — cues: rent, current"))
         inert = _retrieval.compute_durable_inert_tokens(
             store, _retrieval.load_durable_facts(store))
         # "cat" is a whole word in 5 of 120 episodes (4%); a substring count would say 60+.
@@ -149,7 +179,7 @@ class TestGenericWordsNeverCue:
     def test_the_threshold_is_a_module_constant_not_a_hidden_number(self, tmp_path, monkeypatch):
         s = Store(tmp_path / "t.db", project_name="T")
         _fill(s, 80, every=2)
-        s.save_continuity(_continuity(FACT))
+        save_cont(s, _continuity(FACT))
         facts = _retrieval.load_durable_facts(s)
         try:
             assert "time" in _retrieval.compute_durable_inert_tokens(s, facts)
@@ -170,7 +200,7 @@ class TestLongPromptsNeedTwoTokens:
     FACT2 = "- tree nut allergy — cues: dinner, menu, restaurant"
 
     def _s(self, store):
-        store.save_continuity(_continuity(self.FACT2))
+        save_cont(store, _continuity(self.FACT2))
         return store
 
     def test_one_stray_cue_word_in_a_long_prompt_surfaces_nothing(self, store):
@@ -198,31 +228,32 @@ class TestLongPromptsNeedTwoTokens:
 
 class TestFactTextPath:
     def test_one_word_of_the_fact_text_does_not_cue_it(self, store):
-        store.save_continuity(_continuity("- the bank layout fmt_row64 starts at cutover"))
+        save_cont(store, _continuity("- the bank layout fmt_row64 starts at cutover"))
         assert _matched(store, "cutover") == []
         assert _matched(store, "bank notes") == []
 
     def test_two_words_of_the_fact_text_do(self, store):
-        store.save_continuity(_continuity("- the bank layout fmt_row64 starts at cutover"))
+        save_cont(store, _continuity("- the bank layout fmt_row64 starts at cutover"))
         assert _matched(store, "bank cutover") == [("bank", "cutover")]
 
-    def test_a_cue_match_is_unaffected_and_shows_only_the_cue_words(self, store):
-        store.save_continuity(_continuity(
+    def test_a_cue_match_keeps_cue_and_fact_matches_apart(self, store):
+        save_cont(store, _continuity(
             "- the bank layout fmt_row64 starts at cutover — cues: nightly"))
         r = retrieve_relevant(store, None, "nightly bank")
-        assert [(f.source, f.matched) for f in r.facts] == [("cue", ("nightly",))]
+        assert [(f.source, f.cue_matched, f.fact_matched, f.matched) for f in r.facts] == [
+            ("cue", ("nightly",), ("bank",), ("nightly", "bank"))]
 
 
 class TestDistinctQueryTokens:
     def test_a_token_matching_a_cue_and_a_fact_word_counts_once(self, store):
-        store.save_continuity(_continuity("- rotate the API tokens weekly — cues: token"))
+        save_cont(store, _continuity("- rotate the API tokens weekly — cues: token"))
         q = "explain token bucket algorithm"
         assert _matched(store, q) == []  # one query token, in a 4-token prompt
         assert _matched(store, "token") == [("token",)]  # a one-word prompt still cues
         assert _matched(store, "explain token tokens") == []  # inflections of one token
 
     def test_two_different_query_tokens_still_count(self, store):
-        store.save_continuity(_continuity("- rotate the API tokens weekly — cues: token, rotation"))
+        save_cont(store, _continuity("- rotate the API tokens weekly — cues: token, rotation"))
         assert _matched(store, "explain token rotation policy") == [("token", "rotation")]
 
 
@@ -241,7 +272,7 @@ class TestStemmingCollisions:
             assert _retrieval._token_forms(a) & _retrieval._token_forms(b), (a, b)
 
     def test_news_does_not_cue_new_because_new_is_a_stopword(self, store):
-        store.save_continuity(_continuity("- tone — cues: new, rat, fil, lin"))
+        save_cont(store, _continuity("- tone — cues: new, rat, fil, lin"))
         for q in ("news", "rating", "files", "lines"):
             assert _matched(store, q) == [], q
 
@@ -255,7 +286,7 @@ class TestCostIsBounded:
             s.record(" ".join(words[(i + j) % len(words)] for j in range(30)) + f" ep{i}",
                      EpisodeType.OBSERVATION,
                      timestamp=f"2026-0{1 + i % 9}-{1 + i % 28:02d}T10:{i % 60:02d}:00Z")
-        s.save_continuity(_continuity(FACT, "- bank — cues: cutover, nightly"))
+        save_cont(s, _continuity(FACT, "- bank — cues: cutover, nightly"))
         prompt = " ".join(f"word{i}" for i in range(20)) + " restaurant dinner " + " ".join(
             f"more{i}" for i in range(140))
         assert len(prompt.split()) == 162
@@ -270,7 +301,7 @@ class TestCostIsBounded:
             s.close()
 
     def test_only_the_first_twelve_distinct_tokens_are_considered(self, store):
-        store.save_continuity(_continuity(FACT))
+        save_cont(store, _continuity(FACT))
         early = "restaurant dinner " + " ".join(f"filler{i}" for i in range(10))
         late = " ".join(f"filler{i}" for i in range(12)) + " restaurant dinner"
         assert _matched(store, early) == [("restaurant", "dinner")]
@@ -279,18 +310,18 @@ class TestCostIsBounded:
 
 class TestTierNeverRaises:
     def test_any_failure_gives_an_empty_tier(self, store, monkeypatch):
-        store.save_continuity(_continuity(FACT))
+        save_cont(store, _continuity(FACT))
         monkeypatch.setattr(_retrieval, "match_durable_facts",
                             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
         assert retrieve_relevant(store, None, "restaurant").facts == []
         assert _retrieval.durable_facts_for(store, "restaurant") == []
 
-    def test_a_corrupt_stored_set_is_ignored(self, store):
-        store.save_continuity(_continuity(FACT))
+    def test_a_corrupt_stored_set_gives_no_facts_and_no_exception(self, store):
+        save_cont(store, _continuity(FACT))
         store._conn.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                             (_retrieval.INERT_TOKENS_KEY, "{not json"))
         store._conn.commit()
-        assert _matched(store, "restaurant") == [("restaurant",)]
+        assert _matched(store, "restaurant") == []
 
 
 def test_descriptions_still_describe_the_tier():
@@ -300,7 +331,7 @@ def test_descriptions_still_describe_the_tier():
 
 class TestMcpRecallFactsBlock:
     def _server(self, store):
-        store.save_continuity(_continuity(
+        save_cont(store, _continuity(
             "- tree nut allergy — cues: restaurant, restaurants, dinner",
             "- the bank layout fmt_row64 starts at cutover"))
         store.record("Booked the Friday restaurant for the team dinner with a long menu "

@@ -98,7 +98,9 @@ TOOLS: list[dict[str, Any]] = [
             "multi-word query does not need to appear verbatim. A phrase with "
             "only one or two exact hits is followed by a few word matches, listed "
             "under 'Also matching by words'. A durable fact whose cue words appear in the "
-            "keyword is listed first, under 'Durable facts matching your words'."
+            "keyword (or two distinctive words of its text) is listed first, under "
+            "'Durable facts matching your words'. limit=0 returns nothing at all, "
+            "facts included."
         ),
         "inputSchema": {
             "type": "object",
@@ -445,7 +447,9 @@ TOOLS: list[dict[str, Any]] = [
             "'prompt' mode it is precision-biased: a thin query or no match returns "
             "none, by design (surface nothing rather than noise). Pass mode='query' "
             "when you are asking explicitly. Durable facts whose cue words appear in the "
-            "query are listed first, under 'Durable facts matching your words'."
+            "query (or two distinctive words of its text) are listed first, under "
+            "'Durable facts matching your words'. max_patterns=0 returns nothing at "
+            "all, facts included."
         ),
         "inputSchema": {
             "type": "object",

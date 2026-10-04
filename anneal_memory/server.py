@@ -39,6 +39,7 @@ from .spores import (
     germination_tier,
 )
 from .crystal import CrystalError, CrystalStore
+from . import retrieval as _retrieval_mod
 from .retrieval import (
     MAX_PATTERNS,
     MIN_KEYWORDS,
@@ -170,14 +171,21 @@ def _as_int(value: object) -> int | None:
 
 def _durable_block(facts: list[RelevantFact]) -> str:
     """The reply block for durable facts a query cued, or ``""`` for none: each fact's
-    text (not its cue list), then the word that brought it up, labelled ``cue`` for a
-    cue match and ``matches`` for a fact-text match."""
+    text (not its cue list), then the words that brought it up: ``cue: ...`` for matched
+    cue words and ``matches: ...`` for matched words of the fact text, both when both
+    took part."""
     if not facts:
         return ""
     lines = ["Durable facts matching your words:"]
     for f in facts:
-        label = "cue" if f.source == "cue" else "matches"
-        lines.append(f"- {f.fact} ({label}: {', '.join(f.matched)})")
+        parts = []
+        if f.cue_matched:
+            parts.append(f"cue: {', '.join(f.cue_matched)}")
+        if f.fact_matched:
+            parts.append(f"matches: {', '.join(f.fact_matched)}")
+        if not parts:  # a RelevantFact built without the split fields
+            parts.append(f"{'cue' if f.source == 'cue' else 'matches'}: {', '.join(f.matched)}")
+        lines.append(f"- {f.fact} ({'; '.join(parts)})")
     return "\n".join(lines)
 
 
@@ -421,15 +429,29 @@ class Server:
         on the first page, the durable facts its words cue are listed first (see
         :func:`_durable_block`), and a call that matched no episode but cued a fact
         returns the facts instead of "No matching episodes found."."""
+        # ``limit`` and ``offset`` reach SQLite and slice indices: a whole-number float (a
+        # client that serializes 3 as 3.0) is read as the integer, and anything else that
+        # is not an integer is refused by name rather than by a driver error. A negative
+        # value reads as 0. Normalised ONCE, here, so the episode tier and the facts gate
+        # below see the same numbers.
+        args = dict(args)
+        for name in ("limit", "offset"):
+            if name in args:
+                value = _as_int(args[name])
+                if value is None:
+                    return _tool_result(
+                        f"Error: {name} must be an integer", is_error=True
+                    )
+                args[name] = max(0, value)
         result = self._recall_episodes(args)
         keyword = args.get("keyword")
         # Durable facts are not episodes: they go on a plain keyword recall's first page,
         # and not on a call that filters episodes (since/until/source/episode_type) or one
-        # that asks for none (limit 0).
+        # that asks for none (limit 0, which returns nothing at all, facts included).
         if (
             result.get("isError")
             or not isinstance(keyword, str)
-            or _as_int(args.get("offset", 0)) != 0
+            or args.get("offset", 0) != 0
             or args.get("limit", _RECALL_DEFAULT_LIMIT) <= 0
             or any(args.get(f) for f in ("since", "until", "source", "episode_type"))
         ):
@@ -455,19 +477,6 @@ class Server:
                 f"Error: episode_type {episode_type!r} is not one of: {valid}.",
                 is_error=True,
             )
-        # ``limit`` and ``offset`` reach SQLite and slice indices: a whole-number float
-        # (a client that serializes 3 as 3.0) is read as the integer, and anything else
-        # that is not an integer is refused by name rather than by a driver error.
-        args = dict(args)
-        for name in ("limit", "offset"):
-            if name in args:
-                value = _as_int(args[name])
-                if value is None:
-                    return _tool_result(
-                        f"Error: {name} must be an integer", is_error=True
-                    )
-                # Negative reads as 0 on every path (the exact path always clamped it).
-                args[name] = max(0, value)
         result = self._store.recall(
             since=args.get("since"),
             until=args.get("until"),
@@ -571,13 +580,28 @@ class Server:
         if not matches:
             return None
         shown = matches[:cap]
+        # The candidate read per keyword has a ceiling; the exact match count of a keyword
+        # does not. When any keyword has more matches than were read, the count is a floor.
+        read_all = not any(
+            self._store.recall(
+                keyword=w,
+                since=args.get("since"),
+                until=args.get("until"),
+                episode_type=args.get("episode_type"),
+                source=args.get("source"),
+                include_superseded=args.get("include_superseded") is True,
+                limit=0,
+            ).total_matching > _retrieval_mod.QUERY_CANDIDATE_LIMIT
+            for w in words
+        )
         head = (
             "No episode contains the exact phrase; ranked by matching words "
             f"({', '.join(words)})."
         )
-        if len(matches) > len(shown):
+        if len(matches) > len(shown) or not read_all:
+            count = f"{len(matches)}" if read_all else f"at least {len(matches)}"
             head += (
-                f" Showing top {len(shown)} of {len(matches)} word matches; pass a "
+                f" Showing top {len(shown)} of {count} word matches; pass a "
                 "rarer word or a higher limit for more."
             )
         else:

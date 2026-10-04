@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import pickle
+import sqlite3
 import uuid
 
 from anneal_memory import Store, prepare_wrap
@@ -43,7 +44,7 @@ def _seed(path, n):
             s.record(f"zqx snapshot episode {i}", EpisodeType.OBSERVATION)
 
 
-def test_counts_and_rows_are_read_in_one_snapshot(tmp_path):
+def test_counts_and_rows_are_read_in_one_snapshot(tmp_path, monkeypatch):
     db = tmp_path / "m.db"
     _seed(db, 5)
 
@@ -55,16 +56,30 @@ def test_counts_and_rows_are_read_in_one_snapshot(tmp_path):
         real = s._conn
         s._conn = _CommitBetween(real, "SELECT * FROM episodes", peer_insert)
         r = s.recall(keyword="zqx", limit=100)
-        assert r.total_matching == len(r.episodes)
+        assert s._conn._fired and r.total_matching == len(r.episodes)
 
         s._conn = _CommitBetween(real, "SELECT id,", peer_insert)
         eps, doc_freq, corpus_n = s.keyword_candidates(["zqx"], limit_per_keyword=100)
-        assert doc_freq["zqx"] == len(eps) <= corpus_n
+        assert s._conn._fired and doc_freq["zqx"] == len(eps) <= corpus_n
         s._conn = real
         # Any number of keywords: one OR chain of 1,100 LIKEs failed in review.
         many = [f"zqk{i}" for i in range(1100)] + ["zqx"]
         one = s.keyword_candidates(["zqx"], limit_per_keyword=5)
         assert s.keyword_candidates(many, limit_per_keyword=5)[1]["zqx"] == one[1]["zqx"]
+        s.record("ZQX upper-case writer episode", EpisodeType.OBSERVATION)
+
+    # Matching ignores ASCII case even on a SQLite whose LIKE starts case-sensitive
+    # (SQLITE_CASE_SENSITIVE_LIKE builds): every Store open pins it OFF (codex L3, run).
+    real_connect = sqlite3.connect
+
+    def case_sensitive_connect(*a, **k):
+        conn = real_connect(*a, **k)
+        conn.execute("PRAGMA case_sensitive_like=ON")
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", case_sensitive_connect)
+    with Store(str(db), read_only=True) as reader:
+        assert reader.recall(keyword="zqx").total_matching == one[1]["zqx"] + 1
 
 
 def test_wrap_window_moved_error_pickles():

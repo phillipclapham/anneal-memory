@@ -1635,13 +1635,16 @@ def _supersession_grounds(new_text: str, old_text: str) -> bool:
     return shared >= 1 and shared / max(1, min(len(a), len(b))) >= SUPERSEDE_MIN_OVERLAP_RATIO
 
 
-# recall's keyword match. No LOWER(content): SQLite's LIKE already ignores ASCII case
-# and LOWER() folds only ASCII, so both match the same rows (checked 2026-10-04 on a
-# 12,968-episode store: 407 words, 0 differences), and LOWER copied the whole content
-# column once per keyword. The pattern side is lower-cased.
+# recall's keyword match. No LOWER(content): with case_sensitive_like OFF (set on every
+# Store connection) SQLite's LIKE ignores ASCII case and LOWER() folds only ASCII, so both
+# match the same rows (checked 2026-10-04 on a 12,968-episode store: 407 words, 0
+# differences), and LOWER copied the whole content column once per keyword. The pattern
+# side is lower-cased.
 _KEYWORD_LIKE_SQL = "content LIKE ? ESCAPE '\\'"
-# Keywords per scan in Store.keyword_candidates; each adds two LIKE nodes to the query.
-_KEYWORD_SCAN_GROUP = 200
+# Keywords per scan in Store.keyword_candidates; each adds two LIKE nodes and two bound
+# parameters, so 100 stays under the 999-parameter limit of SQLite before 3.32 with room
+# for the filter and supersession parameters.
+_KEYWORD_SCAN_GROUP = 100
 
 
 def _keyword_like_pattern(keyword: str) -> str:
@@ -2023,6 +2026,12 @@ class Store:
                 # ``_init_schema`` was never CALLED, which was true and
                 # insufficient: the pragma is not inside ``_init_schema``.
                 self._refuse_a_newer_schema()
+                # recall matches keywords with `content LIKE` (no LOWER), which is
+                # case-insensitive for ASCII only while this is OFF. A SQLite build
+                # compiled with SQLITE_CASE_SENSITIVE_LIKE would otherwise miss every
+                # differently-cased match (codex L3, 0.9.31, run). Set on every open,
+                # reader included: it is a connection setting, not a write.
+                self._conn.execute("PRAGMA case_sensitive_like=OFF")
                 if self._read_only:
                     # Pure-reader open (per-turn recall): reject writes via query_only
                     # and SKIP every init write below (WAL/synchronous pragmas,
@@ -3131,7 +3140,7 @@ class Store:
                         WHERE {base} AND ({any_kw})
                         ORDER BY timestamp DESC""",
                     [*patterns, *params, *patterns],
-                ).fetchall()
+                )
                 for row in hits:
                     for i, kw in enumerate(group):
                         if row[2 + i]:

@@ -712,7 +712,8 @@ def report_warnings(report: DurableReport) -> list[str]:
             f"in `## {h}`; that marker is the only way a durable line is removed."
             + (f" Lines over {_WARN_TEXT_LIMIT} characters are shortened here; the audit "
                f"entry's `durable_reinserted` has them whole."
-               if any(len(_one_line_raw(r)) > _WARN_TEXT_LIMIT for r in report.reinserted)
+               if any(len(_one_line_raw(r)) > _WARN_TEXT_LIMIT
+                      for r in report.reinserted[:_PAIR_WARN_LIMIT])
                else "")
         )
     for target, closest in report.unknown_drops:

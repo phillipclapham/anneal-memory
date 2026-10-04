@@ -620,7 +620,7 @@ def enforce_durable_facts(
         shared_facts=shared,
         near_miss_headers=[
             lines[i] for i in _headers(lines)
-            if heading.lower() in lines[i][3:].lower()
+            if match_headings(lines[i].lower(), {heading.lower()})
             and not is_exact_heading(lines[i][3:], heading)
             and not match_headings(lines[i].lower(), all_lower - {heading.lower()})
         ],
@@ -634,12 +634,12 @@ def _one_line(raw: str) -> str:
     return " / ".join(part.strip() for part in raw.split("\n"))
 
 
-def _join(items: list[str]) -> str:
-    """``items`` joined with `` | ``, at most :data:`_PAIR_WARN_LIMIT` of them, then a count
-    of the rest."""
-    head = " | ".join(items[:_PAIR_WARN_LIMIT])
+def _join(items: list[str], render: Callable[[str], str] = str, more: str = "") -> str:
+    """At most :data:`_PAIR_WARN_LIMIT` of ``items``, each rendered, joined with `` | ``,
+    then a count of the rest (``more`` follows it). Only the items shown are rendered."""
+    head = " | ".join(render(i) for i in items[:_PAIR_WARN_LIMIT])
     rest = len(items) - _PAIR_WARN_LIMIT
-    return head + (f" | and {rest} more" if rest > 0 else "")
+    return head + (f" | and {rest} more{more}" if rest > 0 else "")
 
 
 def _each(out: list[str], items: list[Any], render: Callable[[Any], str], what: str) -> None:
@@ -674,7 +674,8 @@ def report_warnings(report: DurableReport) -> list[str]:
         out.append(
             f"Durable facts: {where} {len(report.reinserted)} line(s) of the prior "
             f"continuity, re-inserted verbatim: "
-            + _join([_one_line(r) for r in report.reinserted])
+            + _join(report.reinserted, _one_line,
+                    " (the audit entry's `durable_reinserted` lists every one)")
             + f". If a fact changed, drop the old line with the marker, {marker} "
             f"in `## {h}`; that marker is the only way a durable line is removed."
         )
@@ -701,7 +702,7 @@ def report_warnings(report: DurableReport) -> list[str]:
           "fact(s) dropped by marker; the audit entry's `durable_dropped` lists every one")
     _each(out, report.multi_drops,
           lambda m: f"Durable facts: `[drop-durable: {m[0]}]` matched {len(m[1])} prior "
-          f"facts and dropped them all: " + _join([_one_line(r) for r in m[1]])
+          f"facts and dropped them all: " + _join(m[1], _one_line)
           + ". To drop only one, name its whole fact.",
           "drop marker(s) that each matched several prior facts")
     _each(out, report.own_lines_dropped,

@@ -329,7 +329,8 @@ class TestPackage:
         assert "[drop-durable: <exact line text>]" in text
         assert "would change what advice or answer you give" in text
         assert "cutover, bank, export, nightly, formatter" in text
-        assert "`## Durable Facts` (optional)" in text
+        assert "`## Durable Facts` may be left out." in text
+        assert "(optional)" not in text
         assert (
             f"Stay within {default_max_chars(FLOW_SCHEMA)} characters, not counting "
             f"`## Durable Facts`"
@@ -814,5 +815,28 @@ class TestBoundedWarningsAndNearMiss:
 
     def test_a_schema_header_naming_durable_facts_is_not_a_near_miss(self, pstore):
         text = partnership_text(ALLERGY).replace("## Decisions", "## Decisions (durable facts)")
+        result, _ = wrap(pstore, text, 1)
+        assert not any("is not the durable heading" in m for m in result["durable_warnings"])
+
+
+class TestGuidanceHeadingsParse:
+    def test_every_heading_in_the_section_list_parses_when_copied(self, pstore):
+        # A composer copies the section list; each item, backticks stripped, must be a
+        # header the parser accepts, or the durable section silently parses to nothing.
+        pstore.record("e", "observation")
+        text = format_wrap_package_text(prepare_wrap(pstore))
+        [line] = [ln for ln in text.splitlines() if "EXACTLY these sections" in ln]
+        listed = line.split("in order: ", 1)[1].split(".", 1)[0].split(", ")
+        headers = [item.replace("`", "") for item in listed]
+        assert all(h.startswith("## ") for h in headers)
+        doc = "# T — Memory (v1)\n\n" + "\n\n".join(
+            h + ("\n- tree nut allergy" if h == "## Durable Facts" else "\nx") for h in headers
+        ) + "\n"
+        assert "## Durable Facts" in headers
+        assert [f.fact for f in parse_durable_facts(doc, FLOW_SCHEMA)] == ["tree nut allergy"]
+
+    def test_archived_durable_facts_header_is_named_but_durable_factsheet_is_not(self, pstore):
+        text = partnership_text(ALLERGY).replace(
+            "## Patterns", "## Durable Factsheet\n\nnotes\n\n## Patterns")
         result, _ = wrap(pstore, text, 1)
         assert not any("is not the durable heading" in m for m in result["durable_warnings"])

@@ -874,9 +874,11 @@ def _build_wrap_instructions(
     ]
     marker_ref = _marker_reference(today, graduating_section_names)
 
-    section_list = ", ".join(
-        f"`## {s['heading']}`" + (" (optional)" if s.get("optional") is True else "")
-        for s in schema
+    # Each heading is written bare: a composer copies what it is shown, and an optional
+    # heading is matched exactly, so "(optional)" beside it would become part of the header.
+    section_list = ", ".join(f"`## {s['heading']}`" for s in schema)
+    optional_note = "".join(
+        f" `## {s['heading']}` may be left out." for s in schema if s.get("optional") is True
     )
     durable_heading = next(
         (s["heading"] for s in schema if s["role"] == "durable"), None
@@ -965,7 +967,7 @@ def _build_wrap_instructions(
         "Compress your session episodes into your continuity file.",
         "",
         f"**Output:** A markdown file starting with `# {project_name} — Memory (v1)` "
-        f"containing EXACTLY these sections, in order: {section_list}.",
+        f"containing EXACTLY these sections, in order: {section_list}.{optional_note}",
         size_line,
         "",
     ]

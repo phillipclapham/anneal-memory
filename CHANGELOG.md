@@ -16,6 +16,11 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   another section of the schema (`## Durable Facts (pinned)`, `## Durable Facts:`), draws a
   warning that its lines are not protected. In 0.9.27 such a header was silent, so a
   later wrap could drop its lines with no durable warning.
+- `prepare_wrap` lists every section heading bare and says in its own sentence that
+  `## Durable Facts` may be left out. 0.9.27 wrote "`## Durable Facts` (optional)" in the
+  list, and a composer that copied the item without its backticks wrote
+  `## Durable Facts (optional)`, which is not the durable heading, so the section parsed to
+  no facts (measured on 0.9.27).
 
 ## [0.9.27] — 2026-10-03
 

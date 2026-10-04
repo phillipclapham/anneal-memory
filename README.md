@@ -148,6 +148,8 @@ args = ["anneal-memory", "--project-name", "MyProject", "serve"]
 }
 ```
 
+Gemini CLI starts MCP servers only from a folder it trusts: in an untrusted folder `gemini mcp list` shows the server as `Disconnected` even though the config is right (trust the folder, or set `GEMINI_CLI_TRUST_WORKSPACE=true`).
+
 Then add the agent-instructions snippet — [`agent-instructions.lean.example`](examples/agent-instructions.lean.example) (the always-loaded baseline) or the [`.full.example`](examples/agent-instructions.full.example) reference — to the harness's instructions file (`CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, `GEMINI.md` for Gemini CLI). It teaches the agent *when* and *how* to use the memory tools; without it the tools are available but the agent won't know the cognitive workflow. (See [Claude Code / agent-harness adopters](#claude-code--agent-harness-adopters-skill--snippet) below for the lean/Skill/full layering.)
 
 > **Pinned install:** `uvx` fetches the latest published version on each run. For a pinned install, `pip install anneal-memory`, then set `"command": "anneal-memory"` with `"args": ["--project-name", "MyProject", "serve"]` — or point `command` at an absolute path to the installed binary.

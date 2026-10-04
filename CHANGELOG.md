@@ -5,6 +5,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 ## [Unreleased]
 
 ## [0.9.33] — 2026-10-04
+
 ### Added — a hard maximum on the saved continuity
 - `anneal_memory.schema.hard_max_chars(schema)` = `ceil(1.25 * default_max_chars(schema))`
   (25,000 for the default schema, 31,875 for `FLOW_SCHEMA`, 28,750 for the project

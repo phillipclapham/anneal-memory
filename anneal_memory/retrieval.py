@@ -785,7 +785,8 @@ def _read_inert_tokens(store: Store, text: str | None) -> frozenset[str] | None:
             or not all(isinstance(t, str) for t in tokens)
             or data.get("continuity_hash") != continuity_hash(text)
             or data.get("threshold") != DURABLE_GENERIC_DF
-            or not isinstance(data.get("episodes"), int)
+            or type(data.get("episodes")) is not int
+            or data["episodes"] < 0
         ):
             return None
         return frozenset(tokens)
@@ -822,16 +823,19 @@ def match_durable_facts(
     _check_mode(mode)
     if max_facts <= 0 or not facts:
         return []
-    query_tokens = _fact_tokens(query)[:MAX_DURABLE_QUERY_TOKENS]
-    if not query_tokens:
-        return []
-    # The long-prompt rule counts the usable tokens that are not inert in this store: a
-    # prompt of "time ... restaurant ... work" with time and work inert is a short prompt.
+    # Tokens that are inert in this store are dropped BEFORE the cap, so a prompt that opens
+    # with a dozen of them still reaches the cue behind them. What is left is the prompt for
+    # the long-prompt rule: "time ... restaurant ... work" with time and work inert is a
+    # short prompt.
     inert_forms: set[str] = set()
     for w in inert:
         inert_forms |= _token_forms(w)
-    live_tokens = [t for t in query_tokens if not (_token_forms(t) & inert_forms)]
-    need = 2 if len(live_tokens) > DURABLE_SHORT_PROMPT_TOKENS else 1
+    query_tokens = [
+        t for t in _fact_tokens(query) if not (_token_forms(t) & inert_forms)
+    ][:MAX_DURABLE_QUERY_TOKENS]
+    if not query_tokens:
+        return []
+    need = 2 if len(query_tokens) > DURABLE_SHORT_PROMPT_TOKENS else 1
     query_forms = [(_canonical(tok), _token_forms(tok)) for tok in query_tokens]
 
     def matches(candidates: list[str]) -> list[tuple[str, str]]:
@@ -1181,13 +1185,52 @@ def search_episodes(
         ValueError: ``episode_type`` is not an episode type (checked before anything
             else, so a bad type fails even with ``limit <= 0``).
     """
+    return _search_episodes(
+        store, query, episode_type=episode_type, source=source, since=since,
+        until=until, limit=limit, include_superseded=include_superseded,
+    )[0]
+
+
+def search_episodes_counted(
+    store: Store,
+    query: str,
+    *,
+    episode_type: EpisodeType | str | None = None,
+    source: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int = 10,
+    include_superseded: bool = False,
+) -> tuple[list[EpisodeMatch], bool]:
+    """:func:`search_episodes` plus whether the read was cut short: ``(matches, truncated)``.
+    ``truncated`` is true when some keyword has more matching episodes than
+    :data:`QUERY_CANDIDATE_LIMIT`, so the ranking considered only the newest of them. It is
+    taken from the exact per-keyword match counts the search already computed, so it costs
+    no extra query."""
+    return _search_episodes(
+        store, query, episode_type=episode_type, source=source, since=since,
+        until=until, limit=limit, include_superseded=include_superseded,
+    )
+
+
+def _search_episodes(
+    store: Store,
+    query: str,
+    *,
+    episode_type: EpisodeType | str | None,
+    source: str | None,
+    since: str | None,
+    until: str | None,
+    limit: int,
+    include_superseded: bool,
+) -> tuple[list[EpisodeMatch], bool]:
     if episode_type is not None:
         episode_type = EpisodeType(episode_type)
     if limit <= 0:
-        return []
+        return [], False
     keywords = extract_keywords(query, mode="query")
     if len(keywords) < QUERY_MIN_KEYWORDS:
-        return []
+        return [], False
     filters: dict[str, Any] = {
         "since": since,
         "episode_type": episode_type,
@@ -1207,7 +1250,7 @@ def search_episodes(
         min_hits=_min_hits("query"),
         min_len=_min_episode_len("query"),
     )
-    return [
+    matches = [
         EpisodeMatch(
             episode=e,
             matched=tuple(kw for kw in keywords if kw in e.content.lower()),
@@ -1215,6 +1258,7 @@ def search_episodes(
         )
         for e in scored[:limit]
     ]
+    return matches, any(n > QUERY_CANDIDATE_LIMIT for n in doc_freq.values())
 
 
 def _recent_cutoff(exclude_recent_minutes: int | None, now: str | None) -> str | None:

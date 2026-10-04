@@ -1594,7 +1594,9 @@ def cmd_wrap_status(args: argparse.Namespace) -> None:
                 "wrap_episode_count": len(snapshot["episode_ids"]),
                 "wrap_episode_ids": snapshot["episode_ids"],
                 "wrap_gated_session": store.wrap_gated_session(),
-                "wrap_token_bound": store.wrap_bound_token() is not None,
+                # Compared with this snapshot's token, so a wrap that replaced it
+                # since the snapshot was read cannot lend it its bound.
+                "wrap_token_bound": store.wrap_bound_token() == snapshot["token"],
             })
             return
 
@@ -1604,7 +1606,7 @@ def cmd_wrap_status(args: argparse.Namespace) -> None:
         if gated_by is not None:
             print(f"  prepared under the consolidate gate by session {gated_by!r}: only that")
             print("  session can complete it (library save_continuity with that session_id)")
-        bound = store.wrap_bound_token() is not None
+        bound = store.wrap_bound_token() == snapshot["token"]
         if bound:
             print("  opened with a token its preparer holds: a cancel without that token")
             print("  is refused")

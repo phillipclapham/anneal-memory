@@ -3930,12 +3930,16 @@ class Store:
         (idle, or the token was minted by anneal). Such a wrap is cancelled only
         by that token or by ``force`` (:class:`WrapCancelBoundError`)."""
         with self._db_boundary("wrap_bound_token"):
-            if not self._get_metadata("wrap_started_at"):
-                return None
-            bound = self._get_metadata("wrap_bound_token")
-            if bound and bound == self._get_metadata("wrap_token"):
-                return bound
-            return None
+            # One SELECT, so the three keys come from one committed state.
+            rows = self._conn.execute(
+                "SELECT key, value FROM metadata WHERE key IN (?, ?, ?)",
+                ("wrap_started_at", "wrap_token", "wrap_bound_token"),
+            ).fetchall()
+        meta = {row["key"]: row["value"] for row in rows}
+        bound = meta.get("wrap_bound_token") or ""
+        if meta.get("wrap_started_at") and bound and bound == meta.get("wrap_token"):
+            return bound
+        return None
 
     def wrap_derive_roots(self, *, expect_token: str | None = None) -> dict[str | None, str] | None:
         """The re-derive root map frozen by the in-progress wrap (spore-1282),

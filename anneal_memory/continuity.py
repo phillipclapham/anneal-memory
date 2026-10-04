@@ -1989,7 +1989,10 @@ def prepare_wrap(
             gated_session_id=session_id,
             expect_last_wrap_id=window_last_wrap_id,
             derive_roots=frozen_identities,
-            token_bound=token_bound,
+            # Only when the caller supplied the token, so a Store subclass that
+            # overrides wrap_started with the pre-0.9.30 signature still works for
+            # every call that does not use the new feature (codex L3, run).
+            **({"token_bound": True} if token_bound else {}),
         )
     except WrapWindowMovedError:
         return _downgraded_empty(

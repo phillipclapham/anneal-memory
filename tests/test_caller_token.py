@@ -116,3 +116,22 @@ def test_no_token_passed_keeps_the_old_behaviour(store):
         )
     assert store.wrap_bound_token() is None
     assert store.wrap_cancelled().token == r["wrap_token"]
+
+
+def test_a_pre_0930_wrap_started_override_still_works_without_a_token(tmp_path):
+    # codex L3 r1 (reproduced): passing token_bound unconditionally broke a Store
+    # subclass whose wrap_started override predates the keyword.
+    class Old(Store):
+        def wrap_started(self, *, token, episode_ids, section_schema=None,
+                         allow_restart=False, gated_session_id=None,
+                         expect_last_wrap_id=None, derive_roots=None):
+            return super().wrap_started(
+                token=token, episode_ids=episode_ids, section_schema=section_schema,
+                allow_restart=allow_restart, gated_session_id=gated_session_id,
+                expect_last_wrap_id=expect_last_wrap_id, derive_roots=derive_roots,
+            )
+
+    s = Old(str(tmp_path / "old.db"), project_name="Old")
+    s.record("obs", EpisodeType.OBSERVATION)
+    assert prepare_wrap(s)["status"] == "ready"
+    s.close()

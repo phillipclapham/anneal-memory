@@ -764,3 +764,30 @@ class TestScopedRound:
         assert "wrapped fact" not in pstore.load_continuity()
         assert not any("matched 2 prior facts" in m for m in got)
         assert not any("names no line" in m for m in got)
+
+
+# -- three-lineage round on f89470d ---------------------------------------------
+
+
+class TestThreeLineageRound:
+    def test_heading_fold_matches_the_schema_duplicate_check(self):
+        # validate_schema folds with lower(), so it accepts these as distinct headings;
+        # the exact-heading rule must fold the same way or every document is ambiguous.
+        sch = validate_schema([
+            {"heading": "State", "role": "live-state"},
+            {"heading": "STRASSE", "role": "graduating"},
+            {"heading": "Straße", "role": "durable", "optional": True},
+        ])
+        doc = "## State\nx\n\n## STRASSE\ny\n\n## Straße\n- fact\n"
+        assert validate_structure(doc, sch)
+        assert [f.fact for f in parse_durable_facts(doc, sch)] == ["fact"]
+
+    def test_marker_drop_warnings_are_capped_and_summarised(self, pstore):
+        facts = [f"- fact {i}" for i in range(25)]
+        wrap(pstore, partnership_text("\n".join(facts)), 1)
+        markers = "\n".join(f"[drop-durable: {f}]" for f in facts)
+        result, msgs = wrap(pstore, partnership_text(markers), 2)
+        got = [m for m in result["durable_warnings"] if "dropped by marker" in m]
+        assert len(got) == 21
+        assert got[-1].startswith("Durable facts: and 5 more fact(s) dropped by marker")
+        assert parse_durable_facts(pstore.load_continuity(), FLOW_SCHEMA) == []

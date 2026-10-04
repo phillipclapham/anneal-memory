@@ -159,10 +159,11 @@ def _headers(lines: list[str]) -> list[int]:
 
 def is_exact_heading(title: str, heading: str) -> bool:
     """The one rule for an optional heading: the header's stripped text equals
-    the heading, case-insensitively (casefold). ``## durable facts`` is the
+    the heading, case-insensitively (``str.lower``, the fold every other heading
+    lookup and the schema's duplicate check use). ``## durable facts`` is the
     durable heading; ``## Archived Durable Facts`` and
     ``## Decisions (durable facts)`` are not."""
-    return title.strip().casefold() == heading.strip().casefold()
+    return title.strip().lower() == heading.strip().lower()
 
 
 def _is_durable_header(line: str, heading: str) -> bool:
@@ -667,8 +668,13 @@ def report_warnings(report: DurableReport) -> list[str]:
             f"named no line of the prior `## {h}` section; they were removed and "
             f"nothing else changed."
         )
-    for raw in report.dropped:
+    for raw in report.dropped[:_PAIR_WARN_LIMIT]:
         out.append(f"Durable facts: dropped by marker: {_one_line(raw)}")
+    if len(report.dropped) > _PAIR_WARN_LIMIT:
+        out.append(
+            f"Durable facts: and {len(report.dropped) - _PAIR_WARN_LIMIT} more fact(s) "
+            f"dropped by marker; the audit entry's `durable_dropped` lists every one."
+        )
     for target, raws in report.multi_drops:
         out.append(
             f"Durable facts: `[drop-durable: {target}]` matched {len(raws)} prior "

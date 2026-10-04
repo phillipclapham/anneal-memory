@@ -791,3 +791,28 @@ class TestThreeLineageRound:
         assert len(got) == 21
         assert got[-1].startswith("Durable facts: and 5 more fact(s) dropped by marker")
         assert parse_durable_facts(pstore.load_continuity(), FLOW_SCHEMA) == []
+
+
+# -- 0.9.28: every per-item warning list is bounded; near-miss headers are named ---------
+
+
+class TestBoundedWarningsAndNearMiss:
+    def test_one_marker_matching_25_facts_names_at_most_20(self, pstore):
+        facts = "\n".join(f"- shared\n  variant {i}" for i in range(25))
+        wrap(pstore, partnership_text(facts), 1)
+        result, _ = wrap(pstore, partnership_text("[drop-durable: - shared]"), 2)
+        [multi] = [m for m in result["durable_warnings"] if "matched 25 prior facts" in m]
+        assert multi.count("variant") == 20 and "| and 5 more" in multi
+        assert parse_durable_facts(pstore.load_continuity(), FLOW_SCHEMA) == []
+
+    def test_decorated_durable_header_is_named(self, pstore):
+        text = partnership_text(None).replace(
+            "## Patterns", "## Durable Facts (pinned)\n\n- tree nut allergy\n\n## Patterns")
+        result, _ = wrap(pstore, text, 1)
+        assert any("'## Durable Facts (pinned)' is not the durable heading" in m
+                   for m in result["durable_warnings"])
+
+    def test_a_schema_header_naming_durable_facts_is_not_a_near_miss(self, pstore):
+        text = partnership_text(ALLERGY).replace("## Decisions", "## Decisions (durable facts)")
+        result, _ = wrap(pstore, text, 1)
+        assert not any("is not the durable heading" in m for m in result["durable_warnings"])

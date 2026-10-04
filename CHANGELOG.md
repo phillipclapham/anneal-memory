@@ -2,6 +2,21 @@
 
 All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed — durable-fact save warnings are bounded, and a near-miss header is named
+- Every per-item list in the durable-fact save warnings is cut at 20 items with one line
+  counting the rest: facts dropped by marker, markers that matched several facts (and the
+  facts each one lists), lines a marker removed that the wrap wrote, untracked lines,
+  over-cued and pattern-shaped lines, shared facts, and the re-inserted and stray-marker
+  lists. In 0.9.27 only the dropped-by-marker lines were cut, so one marker matching 500
+  facts still rendered all 500. The audit chain's `durable_dropped` and
+  `durable_reinserted` still hold every fact.
+- A `## ` header that contains the durable heading without being exactly it, and is not
+  another section of the schema (`## Durable Facts (pinned)`, `## Durable Facts:`), draws a
+  warning that its lines are not protected. In 0.9.27 such a header was silent, so a
+  later wrap could drop its lines with no durable warning.
+
 ## [0.9.27] — 2026-10-03
 
 ### Fixed — `outcome --adopt-unbound` on a platform with no file lock (Windows)

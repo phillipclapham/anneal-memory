@@ -39,6 +39,7 @@ from __future__ import annotations
 import dataclasses
 import difflib
 import re
+from typing import Any, Callable
 
 from .schema import SectionSpec, default_max_chars, durable_budget
 
@@ -381,6 +382,7 @@ class DurableReport:
     cue_sprawl: list[str]
     pattern_shaped: list[str]
     shared_facts: list[tuple[str, list[str]]]
+    near_miss_headers: list[str]
     chars: int
     budget: int
 
@@ -616,6 +618,12 @@ def enforce_durable_facts(
         cue_sprawl=[f.line for f in final if len(f.cues) > MAX_CUES],
         pattern_shaped=[f.line for f in final if _PATTERN_SHAPE_RE.search(f.line)],
         shared_facts=shared,
+        near_miss_headers=[
+            lines[i] for i in _headers(lines)
+            if heading.lower() in lines[i][3:].lower()
+            and not is_exact_heading(lines[i][3:], heading)
+            and not match_headings(lines[i].lower(), all_lower - {heading.lower()})
+        ],
         chars=section_chars(text, schema),
         budget=durable_budget(default_max_chars(schema)),
     )
@@ -626,9 +634,29 @@ def _one_line(raw: str) -> str:
     return " / ".join(part.strip() for part in raw.split("\n"))
 
 
+def _join(items: list[str]) -> str:
+    """``items`` joined with `` | ``, at most :data:`_PAIR_WARN_LIMIT` of them, then a count
+    of the rest."""
+    head = " | ".join(items[:_PAIR_WARN_LIMIT])
+    rest = len(items) - _PAIR_WARN_LIMIT
+    return head + (f" | and {rest} more" if rest > 0 else "")
+
+
+def _each(out: list[str], items: list[Any], render: Callable[[Any], str], what: str) -> None:
+    """One warning per item for at most :data:`_PAIR_WARN_LIMIT` items, then one line that
+    counts the rest (``what`` names them)."""
+    for item in items[:_PAIR_WARN_LIMIT]:
+        out.append(render(item))
+    rest = len(items) - _PAIR_WARN_LIMIT
+    if rest > 0:
+        out.append(f"Durable facts: and {rest} more {what}.")
+
+
 def report_warnings(report: DurableReport) -> list[str]:
     """The post-commit warning texts for one save's :class:`DurableReport`.
-    A multi-line fact is shown on one line, its lines joined with `` / ``."""
+    A multi-line fact is shown on one line, its lines joined with `` / ``. Every per-item
+    list is cut at :data:`_PAIR_WARN_LIMIT` items with a count of the rest; the audit
+    entry keeps the whole of ``durable_dropped`` and ``durable_reinserted``."""
     h = report.heading
     marker = "`[drop-durable: <exact line text>]`"
     out: list[str] = []
@@ -646,7 +674,7 @@ def report_warnings(report: DurableReport) -> list[str]:
         out.append(
             f"Durable facts: {where} {len(report.reinserted)} line(s) of the prior "
             f"continuity, re-inserted verbatim: "
-            + " | ".join(_one_line(r) for r in report.reinserted)
+            + _join([_one_line(r) for r in report.reinserted])
             + f". If a fact changed, drop the old line with the marker, {marker} "
             f"in `## {h}`; that marker is the only way a durable line is removed."
         )
@@ -668,25 +696,18 @@ def report_warnings(report: DurableReport) -> list[str]:
             f"named no line of the prior `## {h}` section; they were removed and "
             f"nothing else changed."
         )
-    for raw in report.dropped[:_PAIR_WARN_LIMIT]:
-        out.append(f"Durable facts: dropped by marker: {_one_line(raw)}")
-    if len(report.dropped) > _PAIR_WARN_LIMIT:
-        out.append(
-            f"Durable facts: and {len(report.dropped) - _PAIR_WARN_LIMIT} more fact(s) "
-            f"dropped by marker; the audit entry's `durable_dropped` lists every one."
-        )
-    for target, raws in report.multi_drops:
-        out.append(
-            f"Durable facts: `[drop-durable: {target}]` matched {len(raws)} prior "
-            f"facts and dropped them all: "
-            + " | ".join(_one_line(r) for r in raws)
-            + ". To drop only one, name its whole fact."
-        )
-    for line in report.own_lines_dropped:
-        out.append(
-            f"Durable facts: a drop marker also removed {line!r}, which this wrap "
-            f"wrote itself. If the fact should stay, write it again next wrap."
-        )
+    _each(out, report.dropped,
+          lambda raw: f"Durable facts: dropped by marker: {_one_line(raw)}",
+          "fact(s) dropped by marker; the audit entry's `durable_dropped` lists every one")
+    _each(out, report.multi_drops,
+          lambda m: f"Durable facts: `[drop-durable: {m[0]}]` matched {len(m[1])} prior "
+          f"facts and dropped them all: " + _join([_one_line(r) for r in m[1]])
+          + ". To drop only one, name its whole fact.",
+          "drop marker(s) that each matched several prior facts")
+    _each(out, report.own_lines_dropped,
+          lambda line: f"Durable facts: a drop marker also removed {line!r}, which this "
+          f"wrap wrote itself. If the fact should stay, write it again next wrap.",
+          "line(s) this wrap wrote that a drop marker removed")
     for old, new in report.near_duplicates:
         out.append(
             f"Durable facts: the re-inserted line {old!r} looks reworded as {new!r}: "
@@ -713,33 +734,32 @@ def report_warnings(report: DurableReport) -> list[str]:
             "Durable facts: the reword / supersede check stopped early on a very "
             "large section; some pairs were not compared."
         )
-    for line in report.untracked:
-        out.append(
-            f"Durable facts: {line!r} in `## {h}` is not tracked as a durable fact; "
-            f"write it as a `- ` line."
-        )
+    _each(out, report.untracked,
+          lambda line: f"Durable facts: {line!r} in `## {h}` is not tracked as a durable "
+          f"fact; write it as a `- ` line.",
+          f"line(s) in `## {h}` not tracked as durable facts")
     if report.stray_markers:
         out.append(
             f"Durable facts: drop marker(s) outside `## {h}` were ignored and left "
-            f"in the text: " + " | ".join(report.stray_markers)
+            f"in the text: " + _join(report.stray_markers)
         )
-    for line in report.cue_sprawl:
-        out.append(
-            f"Durable facts: more than {MAX_CUES} cues on {line!r}. Keep the "
-            f"situations where the fact should come to mind, not synonyms of it."
-        )
-    for line in report.pattern_shaped:
-        out.append(
-            f"Durable facts: {line!r} has the shape of a pattern line; pattern lines "
-            f"belong in ## Patterns, where citations are validated."
-        )
-    for fact, lines in report.shared_facts:
-        out.append(
-            f"Durable facts: two lines share the fact {fact!r}: "
-            + " | ".join(lines)
-            + ". The save compares lines by fact, so only one of them is protected; "
-            "keep one line per fact."
-        )
+    _each(out, report.cue_sprawl,
+          lambda line: f"Durable facts: more than {MAX_CUES} cues on {line!r}. Keep the "
+          f"situations where the fact should come to mind, not synonyms of it.",
+          f"line(s) with more than {MAX_CUES} cues")
+    _each(out, report.pattern_shaped,
+          lambda line: f"Durable facts: {line!r} has the shape of a pattern line; pattern "
+          f"lines belong in ## Patterns, where citations are validated.",
+          "line(s) shaped like pattern lines")
+    _each(out, report.shared_facts,
+          lambda sf: f"Durable facts: two lines share the fact {sf[0]!r}: " + _join(sf[1])
+          + ". The save compares lines by fact, so only one of them is protected; "
+          "keep one line per fact.",
+          "fact(s) shared by several lines")
+    _each(out, report.near_miss_headers,
+          lambda line: f"Durable facts: {line!r} is not the durable heading, so its lines "
+          f"are not protected. The durable section's header is exactly `## {h}`.",
+          f"header(s) that name `{h}` without being exactly it")
     if report.chars > report.budget:
         out.append(
             f"Durable facts: `## {h}` is {report.chars} chars, over its "

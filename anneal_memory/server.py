@@ -1348,6 +1348,7 @@ class Server:
                 max_episodes=0,
                 associative=True,
                 mode=mode,
+                durable=False,
             ).patterns
         except StoreError as exc:
             logger.warning(

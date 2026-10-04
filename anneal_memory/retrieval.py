@@ -811,7 +811,8 @@ def match_durable_facts(
     (:func:`_token_forms`), never a substring; a token under three characters or a
     stopword never matches, and neither does a cue or fact word in ``inert`` (the store's
     precomputed set, :func:`compute_durable_inert_tokens`). Only the first
-    :data:`MAX_DURABLE_QUERY_TOKENS` distinct usable query tokens are considered. A prompt
+    :data:`MAX_DURABLE_QUERY_TOKENS` distinct usable query tokens that are not in ``inert``
+    are considered. A prompt
     with more than :data:`DURABLE_SHORT_PROMPT_TOKENS` usable tokens needs matches on two
     DISTINCT query tokens: a token matching a cue and a fact word counts once, and so do
     inflections of one token. The retrieval gates (score bar, anchor, hit floor, keyword
@@ -826,13 +827,11 @@ def match_durable_facts(
     # Tokens that are inert in this store are dropped BEFORE the cap, so a prompt that opens
     # with a dozen of them still reaches the cue behind them. What is left is the prompt for
     # the long-prompt rule: "time ... restaurant ... work" with time and work inert is a
-    # short prompt.
-    inert_forms: set[str] = set()
-    for w in inert:
-        inert_forms |= _token_forms(w)
-    query_tokens = [
-        t for t in _fact_tokens(query) if not (_token_forms(t) & inert_forms)
-    ][:MAX_DURABLE_QUERY_TOKENS]
+    # short prompt. The drop is exact membership, the rule matches() applies to a candidate
+    # word, so a live token that shares a stem with an inert one is kept.
+    query_tokens = [t for t in _fact_tokens(query) if t not in inert][
+        :MAX_DURABLE_QUERY_TOKENS
+    ]
     if not query_tokens:
         return []
     need = 2 if len(query_tokens) > DURABLE_SHORT_PROMPT_TOKENS else 1

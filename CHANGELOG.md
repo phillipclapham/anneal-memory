@@ -51,6 +51,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   of guarded a fourth time: the supported input is the exporter's stream on stdin
   (`levain team export --jsonl | anneal-memory team-import -`), one trust unit the
   exporter vouches for. Named files are read as plain streams; a directory is refused.
+- Known open, fails closed: an exact repeat of an earlier line moves nothing, so when two
+  files of one stream interleave with another author's lines between a copied prefix and
+  its append, the append is refused as `does not continue` and reported. An exporter that
+  emits each entry once never produces it.
 - Inherent limits, documented in `anneal_memory.team`: the author is self-declared, so
   authentication is the git host's job (branch protection, signed commits) and nothing
   here sees git committers or file paths; a forged line appended to a chain extends it,

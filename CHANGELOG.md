@@ -115,8 +115,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   whole fact, every physical line joined with `\n`; warnings show a multi-line fact on one line,
   joined with ` / `. A marker that drops more than one prior fact (a first line several facts
   share) warns, naming them; a dropped fact is attributed to the first marker that names it.
-  Every fact a marker drops is reported, `Durable facts: dropped by marker: <fact>`, in the
-  warnings and in `durable_warnings`, as well as in the audit chain. The durable section's raw
+  Every fact a marker drops is in the audit chain's `durable_dropped`; the warnings and
+  `durable_warnings` name the first 20, `Durable facts: dropped by marker: <fact>`, and one
+  summary line counts the rest. The exact-heading rule folds case with `str.lower`, as the
+  schema's duplicate-heading check does. The durable section's raw
   size is measured with lines split on `\n` only, as `measure_sections` splits them.
 - Known open: (a) a writer calling bare `Store.save_continuity()` between a validated save's read
   and its rename is overwritten, durable lines included; this holds for all continuity content,

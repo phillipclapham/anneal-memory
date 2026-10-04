@@ -20,9 +20,11 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   `ack` entries are counted and skipped; a `retire` entry imports as a one-line
   `context` episode that only anchors the supersession links.
 - Supersession maps onto the existing `supersessions` table (recall hides the old
-  entry), between team entries only. The ledger's own validated `supersedes` authorises
-  the link, so the word-overlap gate of `Store.supersede` is skipped; existence,
-  older-than and no-cycle are still checked. A link by the SAME author applies. A link
+  entry), between team entries only. The word-overlap gate of `Store.supersede` is
+  skipped for these links, because the ledger names its targets by id and a replacing
+  ruling need not share wording; existence, older-than and no-cycle are still checked,
+  and a ruling is superseded only by a `retire` or an entry carrying the decider's own
+  words. A link by the SAME author applies. A link
   over ANOTHER author's entry (including every `retire` of someone else's) applies only
   when the linking author matches `--link-authority` (an `fnmatch` pattern such as the
   team lead's handle or `pack:*`); otherwise it is reported with the hidden entry's text
@@ -39,9 +41,11 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - Inherent limits, documented in `anneal_memory.team`: the author is self-declared (the
   git host's access control is the authentication), a forked chain is frozen at the
   fork and reported, an entry removed from a ledger stays in an engineer's store (only a
-  signed `retire` reaches it), and authority is judged on arrival, not retroactively.
-- Exit code 3 means something was refused or in conflict (everything verifiable was
-  still imported). Nothing about `record`, `save_continuity` or the hard maximum changed.
+  signed `retire` reaches it), authority is judged on arrival (not retroactively), an
+  imported episode removed with `delete` comes back on the next import that carries it,
+  and a local writer with `record()` can plant a `team:` row the store will accept.
+- Exit code 3 means something in THIS import was refused, unauthorized or in conflict
+  (everything verifiable was still imported); the same line given twice is ignored. Nothing about `record`, `save_continuity` or the hard maximum changed.
 
 ## [0.9.33] — 2026-10-04
 

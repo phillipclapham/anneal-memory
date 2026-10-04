@@ -3,7 +3,8 @@ provenance-carrying episodes.
 
 A team ledger is a set of append-only JSONL files, one hash chain per file; the
 writer is Levain's team layer, and :func:`canonical` / :func:`chain_hash` here are the
-rule it hashes by (a golden-vector test pins the bytes). This
+rule it hashes by (``test_golden_vector`` in this repo pins the bytes; a copy of that
+vector in Levain's tests is what would tie the two packages together). This
 module is the READ side: it re-verifies every chain, maps each entry to an
 episode that names its author, and hands the batch to
 :meth:`Store.import_team_entries`, which inserts idempotently in one
@@ -71,10 +72,17 @@ _EPISODE_TYPE = {
 }
 _MAX_LINE_CHARS = 1_000_000
 _HANDLE = re.compile(r"[A-Za-z0-9._@:+-]{1,200}")
-# A writer builds an id as <author>-<stamp>-<hex>, replacing characters outside this
-# set in the author with "-"; an id that does not start with its own author is a
-# squatter's, and is refused.
-_ID_SAFE = re.compile(r"[^A-Za-z0-9._@:-]")
+# Levain's writer builds an id as <P>-<stamp>-<hex> with P derived from the author
+# below; an id that does not start with its own author's P is a squatter's, and is
+# refused. (The writer also pins the rest of the shape; this reader needs only the
+# prefix to keep an id from being claimed by a second author.)
+_ID_SAFE = re.compile(r"[^A-Za-z0-9._-]")
+_AGENT = re.compile(r"[A-Za-z0-9._:@-]{1,128}")
+
+
+def _id_prefix(author: str) -> str:
+    return _ID_SAFE.sub("-", author).strip("-.")[:64] or "x"
+
 _TEXT_FIELDS = {"words": 4000, "summary": 2000, "reason": 4000, "recheck": 1000}
 _MAX_PATHS = 100
 _MAX_PATH_CHARS = 300
@@ -145,7 +153,10 @@ def read_ledger_lines(paths: Iterable[str | Path]) -> list[str]:
         p = Path(raw).expanduser()
         files = sorted(p.rglob("*.jsonl")) if p.is_dir() else [p]
         for f in files:
-            lines.extend(f.read_text(encoding="utf-8").splitlines())
+            try:
+                lines.extend(f.read_text(encoding="utf-8").splitlines())
+            except UnicodeDecodeError as exc:
+                raise ValueError(f"{f}: not UTF-8 text ({exc.reason})") from exc
     return lines
 
 
@@ -172,11 +183,11 @@ def _entry_problem(e: dict) -> str | None:
     for f in ("id", "author"):
         if not isinstance(e.get(f), str) or not _HANDLE.fullmatch(e[f]):
             return f"{f} is missing or not a plain handle"
-    if not e["id"].startswith(_ID_SAFE.sub("-", e["author"]) + "-"):
+    if not e["id"].startswith(_id_prefix(e["author"]) + "-"):
         return "id must begin with the author's handle and a dash"
     for f in ("agent", "session"):
         if e.get(f) is not None and not (
-            isinstance(e[f], str) and _HANDLE.fullmatch(e[f])
+            isinstance(e[f], str) and _AGENT.fullmatch(e[f])
         ):
             return f"{f} must be a plain handle"
     # An owner may be a client's display name (client:Acme Corp), so it is printable
@@ -296,13 +307,19 @@ def _verified_chains(
         except json.JSONDecodeError as exc:
             report.chain_problems.append(f"line {n}: not JSON ({exc.msg})")
             continue
+        except (RecursionError, ValueError):
+            report.chain_problems.append(f"line {n}: not parseable as an entry")
+            continue
         if not isinstance(e, dict) or not isinstance(e.get("hash"), str) \
                 or not isinstance(e.get("prev"), str):
             report.chain_problems.append(f"line {n}: not an entry with prev and hash")
             continue
         if e["hash"] in seen_hash:
-            report.chain_problems.append(f"line {n} ({e.get('id')}): repeats a hash already seen")
-            continue
+            if seen_hash[e["hash"]] != e:
+                report.chain_problems.append(
+                    f"line {n} ({e.get('id')}): repeats a hash with different content"
+                )
+            continue  # the same line twice (a file given twice) is harmless
         if e["hash"] != chain_hash(e["prev"], e):
             report.chain_problems.append(
                 f"line {n} ({e.get('id')}): hash mismatch, the entry was edited after it was written"
@@ -343,6 +360,14 @@ def _verified_chains(
     return out
 
 
+def _stored_entry_ok(team: dict) -> bool:
+    """A stored entry may complete a pending link only if it still hashes to the
+    hash it was imported under."""
+    entry = {k: v for k, v in team.items() if k != "entry_id"}
+    prev = entry.get("prev")
+    return isinstance(prev, str) and entry.get("hash") == chain_hash(prev, entry)
+
+
 def import_ledger(
     store: Store,
     lines: Iterable[str],
@@ -376,7 +401,8 @@ def import_ledger(
             "supersedes": list(e.get("supersedes") or []),
         })
     result = store.import_team_entries(
-        records, dry_run=dry_run, link_authority=tuple(link_authority)
+        records, dry_run=dry_run, link_authority=tuple(link_authority),
+        stored_entry_ok=_stored_entry_ok,
     )
     report.imported = result["imported"]
     report.already_present = result["already_present"]

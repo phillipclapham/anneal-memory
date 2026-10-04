@@ -2666,6 +2666,7 @@ class Store:
         *,
         dry_run: bool = False,
         link_authority: tuple[str, ...] = (),
+        stored_entry_ok: Callable[[dict[str, Any]], bool] | None = None,
     ) -> dict[str, Any]:
         """Import verified team-ledger entries as episodes, idempotently, in ONE
         write transaction (so two concurrent imports cannot both insert an entry).
@@ -2691,6 +2692,13 @@ class Store:
           a link an operator removed with :meth:`unsupersede` stays removed. A
           target not imported yet leaves the link pending: it is evaluated when
           the target arrives.
+        - A ruling is superseded only by a ``retire`` or by an entry that carries the
+          decider's own words; anything else is returned in ``links_refused``.
+        - A stored row can complete a pending link only if its ``supersedes`` is a
+          list of strings and ``stored_entry_ok`` (when given) accepts its stored
+          entry. A local writer with :meth:`record` can still plant a row that passes
+          both: the store belongs to the engineer, and that writer can already delete
+          from it.
         - ``dry_run`` computes everything and writes nothing.
         """
         if dry_run and self._defer_commit:
@@ -2711,16 +2719,23 @@ class Store:
             by_entry: dict[str, dict[str, Any]] = {}
             for row in self._conn.execute(
                 "SELECT id, source, timestamp, content, metadata FROM episodes "
-                "WHERE source >= 'team:' AND source < 'team;'"
+                "WHERE source >= 'team:' AND source < 'team;' ORDER BY timestamp, id"
             ).fetchall():
                 try:
                     team = (json.loads(row["metadata"]) or {}).get("team") or {}
                 except (TypeError, ValueError):
                     continue
                 if isinstance(team, dict) and isinstance(team.get("entry_id"), str):
+                    sup = team.get("supersedes") or []
+                    trusted = (
+                        isinstance(sup, list) and all(isinstance(x, str) for x in sup)
+                        and (stored_entry_ok is None or stored_entry_ok(team))
+                    )
                     by_entry[team["entry_id"]] = {
                         "ep": row["id"], "hash": team.get("hash"),
-                        "supersedes": team.get("supersedes") or [],
+                        "supersedes": sup if trusted else [],
+                        "kind": team.get("kind"), "words": team.get("words"),
+                        "etype": team.get("type"),
                         "content": row["content"], "ts": row["timestamp"],
                         "source": row["source"],
                     }
@@ -2753,8 +2768,11 @@ class Store:
                     except sqlite3.IntegrityError:
                         if nonce == 63:
                             raise
+                team_meta = rec["metadata"].get("team") or {}
                 by_entry[rec["entry_id"]] = {
                     "ep": ep_id, "hash": rec["hash"], "supersedes": rec["supersedes"],
+                    "kind": team_meta.get("kind"), "words": team_meta.get("words"),
+                    "etype": team_meta.get("type"),
                     "content": rec["content"], "ts": rec["timestamp"],
                     "source": rec["source"],
                 }
@@ -2788,6 +2806,13 @@ class Store:
                         old["ep"], new["ep"], new["content"], new["ts"],
                         check_grounds=False,
                     )
+                    if problem is None and old["kind"] == "ruling" and not (
+                        new["etype"] == "retire" or (new["words"] or "").strip()
+                    ):
+                        problem = (
+                            "a ruling is superseded only by a retire or by an entry "
+                            "that carries the decider's own words"
+                        )
                     if problem:
                         refused.append({"id": entry_id, "target": target,
                                         "reason": problem})

@@ -2120,7 +2120,11 @@ def cmd_team_import(args: argparse.Namespace) -> None:
                 print(f"Error: not found: {src}", file=sys.stderr)
                 sys.exit(1)
             paths.append(src)
-    lines.extend(read_ledger_lines(paths))
+    try:
+        lines.extend(read_ledger_lines(paths))
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     with _open_store(args) as store:
         authority = [a.strip() for chunk in (args.link_authority or []) for a in chunk.split(",") if a.strip()]
         report = import_ledger(store, lines, dry_run=args.dry_run, link_authority=authority)

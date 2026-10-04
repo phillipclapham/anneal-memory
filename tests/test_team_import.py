@@ -1,8 +1,9 @@
 """Team ledger import (anneal_memory.team + Store.import_team_entries).
 
-The ledger writer lives in Levain; ``seal`` below is the same chain rule
-(``sha256(prev + canonical-json-without-hash)``) so a ledger built here is a
-ledger Levain's reader would accept, and ``test_golden_vector`` pins the bytes.
+The ledger writer lives in Levain; ``seal`` below applies the same chain rule
+(``sha256(prev + canonical-json-without-hash)``) and ``test_golden_vector`` pins the
+bytes. These fixtures are minimal entries for THIS reader, not a claim that Levain's
+stricter writer-side validation would accept them.
 """
 from __future__ import annotations
 
@@ -176,9 +177,9 @@ def test_supersession_hides_old_without_word_overlap(store):
     from anneal_memory.store import _supersession_grounds
 
     reason = ("zebra kayak glacier lantern orchid violin harbor meadow thunder compass "
-              "saddle ferry anchor biscuit canyon falcon granite juniper mosaic nectar")
-    new = {"type": "decision", "kind": "practice", "reason": reason,
-           "supersedes": ["alice-000"]}
+              "saddle ferry anchor biscuit canyon falcon granite juniper mosaic nectar "
+              "obsidian pelican quartz rhubarb sparrow tundra umber velvet walnut yonder")
+    new = {"type": "retire", "reason": reason, "supersedes": ["alice-000"]}
     lines = ledger("alice", [RULING]) + ledger("bob", [new])
     rep = import_ledger(store, lines, link_authority=["bob"])
     eps = {e.metadata["team"]["entry_id"]: e
@@ -194,7 +195,7 @@ def test_supersession_hides_old_without_word_overlap(store):
 
 def test_pending_link_completes_on_later_import(store):
     new = {"type": "decision", "kind": "practice", "reason": "export naming is flexible now",
-           "supersedes": ["alice-000"]}
+           "words": "rename it if you must", "supersedes": ["alice-000"]}
     bob = ledger("bob", [new])
     first = import_ledger(store, bob, link_authority=["bob"])
     assert first.links_pending == [{"id": "bob-000", "target": "alice-000"}] and first.clean
@@ -330,8 +331,8 @@ def test_cross_author_retire_hides_nothing_without_authority(store):
 
 
 def test_link_authority_patterns(store):
-    lines = ledger("alice", [RULING]) + ledger("pack:acme@2", [
-        {"type": "retire", "supersedes": ["alice-000"]}])
+    lines = ledger("alice", [RULING]) + ledger("pack:acme", [
+        {"type": "retire", "supersedes": ["alice-000"], "id": "pack-acme-000"}])
     assert not import_ledger(store, lines, link_authority=["lead"]).links_made
     other = Store(store.path.parent / "other.db", audit=False)
     try:
@@ -344,7 +345,7 @@ def test_link_authority_patterns(store):
 
 def test_same_author_supersession_needs_no_authority(store):
     new = {"type": "decision", "kind": "practice", "reason": "export naming moved on",
-           "supersedes": ["alice-000"]}
+           "words": "export naming moved on", "supersedes": ["alice-000"]}
     rep = import_ledger(store, ledger("alice", [RULING, new]))
     assert len(rep.links_made) == 1 and rep.clean
 
@@ -436,3 +437,81 @@ def test_mass_retire_cap(store):
 def test_owner_may_be_a_client_display_name(store):
     rep = import_ledger(store, ledger("alice", [{**RULING, "owner": "client:Acme Corp"}]))
     assert rep.clean and 'owner "client:Acme Corp"' in store.recall(limit=1).episodes[0].content
+
+
+# -- the L1 findings of 1004+23 -------------------------------------------------------
+
+def test_planted_row_with_bad_supersedes_cannot_crash_import(store):
+    store.record("planted", "observation", source="team:z",
+                 metadata={"team": {"entry_id": "z-1", "supersedes": 5}})
+    store.record("planted two", "observation", source="team:y",
+                 metadata={"team": {"entry_id": "y-1", "supersedes": [["x"]]}})
+    assert import_ledger(store, ledger("alice", [RULING])).clean
+
+
+def test_planted_row_cannot_hide_a_real_entry(store):
+    store.record("unrelated words xyz", "observation", source="team:mallory",
+                 metadata={"team": {"entry_id": "m-1", "hash": "h", "supersedes": ["alice-000"]}})
+    assert import_ledger(store, []).links_made == []
+    rep = import_ledger(store, ledger("alice", [RULING]), link_authority=["mallory"])
+    assert rep.links_made == [] and "alice-000" in _visible(store)
+
+
+def test_ruling_needs_a_retire_or_words_to_be_superseded(store):
+    weak = {"type": "finding", "reason": "lol", "supersedes": ["alice-000"]}
+    rep = import_ledger(store, ledger("alice", [RULING]) + ledger("lead", [weak]),
+                        link_authority=["lead"])
+    assert rep.links_refused and "decider's own words" in rep.links_refused[0]["reason"]
+    assert "alice-000" in _visible(store)
+
+
+def test_deeply_nested_json_is_reported_not_raised(store):
+    rep = import_ledger(store, ["[" * 200000 + "]" * 200000] + ledger("alice", [RULING]))
+    assert rep.chain_problems and len(rep.imported) == 1
+
+
+def test_the_same_line_twice_is_not_a_problem(store):
+    lines = ledger("alice", [RULING])
+    assert import_ledger(store, lines + lines).clean
+
+
+def test_refusals_are_not_reported_again_by_unrelated_imports(store):
+    back = {"type": "finding", "reason": "claims to replace it", "ts": "2026-10-04T11:00:00Z",
+            "supersedes": ["alice-000"]}
+    first = import_ledger(store, ledger("alice", [RULING]) + ledger("bob", [back]),
+                          link_authority=["bob"])
+    assert first.links_refused
+    later = import_ledger(store, ledger("carol", [{"type": "finding", "reason": "x"}]))
+    assert later.clean and not later.links_refused
+
+
+def test_non_utf8_file_is_a_clean_cli_error(tmp_path):
+    db = tmp_path / "u.db"
+    Store(db, audit=False).close()
+    bad = tmp_path / "bad.jsonl"
+    bad.write_bytes(b"\xff\xfe\x00bad")
+    r = subprocess.run([sys.executable, "-m", "anneal_memory", "--db", str(db),
+                        "team-import", str(bad)], capture_output=True, text=True)
+    assert r.returncode == 1 and "not UTF-8" in r.stderr and "Traceback" not in r.stderr
+
+
+def test_id_prefix_follows_the_writers_rule(store):
+    # ':' and '@' in an author become '-' in the id prefix, as the writer builds it
+    ok = ledger("pack:ledgerline", [])  # empty: just prove the helper below
+    from anneal_memory.team import _id_prefix
+    assert _id_prefix("pack:ledgerline") == "pack-ledgerline"
+    assert _id_prefix("..x..") == "x" and _id_prefix("") == "x"
+    entry = {"type": "finding", "reason": "r", "id": "pack-ledgerline-20261004120000-0a1b2c3d"}
+    assert import_ledger(store, ledger("pack:ledgerline", [entry])).clean
+    squat = {"type": "finding", "reason": "r", "id": "alice-20261004120000-0a1b2c3d"}
+    assert import_ledger(store, ledger("pack:ledgerline", [squat])).rejected
+
+
+def test_pack_may_supersede_its_own_rules_without_authority(store):
+    old = {"type": "decision", "kind": "ruling", "owner": "lead", "words": "rule v1",
+           "id": "pack-x-20261004120000-00000001"}
+    new = {"type": "decision", "kind": "ruling", "owner": "lead", "words": "rule v2",
+           "id": "pack-x-20261004120001-00000002", "ts": "2026-10-04T12:00:09Z",
+           "supersedes": ["pack-x-20261004120000-00000001"]}
+    rep = import_ledger(store, ledger("pack:x", [old, new]))
+    assert len(rep.links_made) == 1 and rep.clean

@@ -35,9 +35,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - Hardening, each from a reproduced attack on the first builds: a chain is ONE
   CONTIGUOUS RUN per file (a root with `prev == ""`, then each line naming the hash of
   the line before it), never stitched across files, so a line in one file cannot extend
-  another author's chain; a file read from disk or labelled with a
-  `{"levain_file": "<path>"}` marker line must hold only entries whose author is the
-  directory it sits in (`ledger/<author>/<device>.jsonl`). Links come only from the
+  another author's chain; a file read from disk holds ONE chain (a second root is refused) and only entries
+  whose author is the directory it sits in (`ledger/<author>/<device>.jsonl`); the path
+  label is an object in the line stream that only the file reader can create, never text
+  a ledger file could contain. Links come only from the
   verified batch of the call, never from stored rows, so a `team:` row planted with
   `record()` cannot drive one. Free-text fields are rendered as quoted, escaped
   strings and control, format and line-separator characters are refused; ids (and the
@@ -49,8 +50,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   entries with identical text and timestamp no longer collide on the episode id.
 - Inherent limits, documented in `anneal_memory.team`: the author is self-declared, so
   the git host's file permissions are the only authentication (a forged line appended to
-  a chain's own file extends it, and a stream with no `levain_file` markers is one trust
-  unit that binds no author to a path); an entry removed from a ledger stays in an
+  a chain's own file extends it, and nothing here sees git committers, so a directory
+  read is not filtered the way Levain's `team export --jsonl` is; a stream on stdin is
+  one trust unit that binds no author to a path, so the exporter must vouch for it); an entry removed from a ledger stays in an
   engineer's store (only a signed `retire` reaches it); authority is judged when a pair
   first has an entry imported by the call, not retroactively; an imported episode
   removed with `delete` comes back on the next import that carries it; authors whose

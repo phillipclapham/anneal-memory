@@ -31,7 +31,8 @@ What it guarantees:
 Limits that are inherent, stated so nobody has to rediscover them: the author is
 self-declared, so the git host's access control is the only authentication; anyone
 who can write to the ledger can append a fork that freezes a teammate's chain at the
-fork point (reported, never silent); an entry removed from the ledger stays in an
+fork point (reported, never silent); nothing here sees git committers, so a directory
+read (unlike Levain's filtered export on stdin) trusts the file permissions alone; an entry removed from the ledger stays in an
 engineer's store, because only a signed ``retire`` reaches it; and the first
 importer of an id wins, which is why an id must begin with its author's handle.
 """
@@ -79,7 +80,7 @@ _HANDLE = re.compile(r"[A-Za-z0-9._@:+-]{1,200}")
 # author "alice-bob". Two authors whose handles reduce to the same prefix (pack:x and
 # pack-x) are not told apart; the second to import reports a conflict.
 _ID_SAFE = re.compile(r"[^A-Za-z0-9._-]")
-_LEDGER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}-\d{14}-[0-9a-f]{8}")
+_LEDGER_ID = re.compile(r"[A-Za-z0-9._-]{1,64}-[0-9]{14}-[0-9a-f]{8}", re.ASCII)
 _AGENT = re.compile(r"[A-Za-z0-9._:@-]{1,128}")
 
 
@@ -149,13 +150,13 @@ class TeamImportReport:
         }
 
 
-def read_ledger_lines(paths: Iterable[str | Path]) -> list[str]:
-    """Lines of every ledger file given, each file preceded by a ``levain_file``
-    marker naming it (``<given dir>/<relative path>``, or ``<parent>/<name>`` for a
+def read_ledger_lines(paths: Iterable[str | Path]) -> list[str | FileStart]:
+    """Lines of every ledger file given, each file preceded by a :class:`FileStart`
+    naming it (``<given dir>/<relative path>``, or ``<parent>/<name>`` for a
     file given directly), which is what binds an entry's author to the directory
     ``<author>/`` its file sits in. A directory contributes every ``*.jsonl`` under it, in
     sorted order. A file larger than the size cap is refused with ``ValueError``."""
-    lines: list[str] = []
+    lines: list[str | FileStart] = []
     for raw in paths:
         p = Path(raw).expanduser()
         if p.is_dir():
@@ -164,13 +165,17 @@ def read_ledger_lines(paths: Iterable[str | Path]) -> list[str]:
         else:
             files = [(p, f"{p.resolve().parent.name}/{p.name}")]
         for f, label in files:
-            if f.stat().st_size > _MAX_FILE_BYTES:
+            if not f.is_file():
+                raise ValueError(f"{f}: not a regular file")
+            with f.open("rb") as fh:
+                raw_bytes = fh.read(_MAX_FILE_BYTES + 1)
+            if len(raw_bytes) > _MAX_FILE_BYTES:
                 raise ValueError(f"{f}: larger than {_MAX_FILE_BYTES} bytes")
             try:
-                text = f.read_text(encoding="utf-8")
+                text = raw_bytes.decode("utf-8")
             except UnicodeDecodeError as exc:
                 raise ValueError(f"{f}: not UTF-8 text ({exc.reason})") from exc
-            lines.append(json.dumps({"levain_file": label}))
+            lines.append(FileStart(label))
             lines.extend(text.splitlines())
     return lines
 
@@ -207,7 +212,7 @@ def _entry_problem(e: dict) -> str | None:
     for f in ("id", "author"):
         if not isinstance(e.get(f), str) or not _HANDLE.fullmatch(e[f]):
             return f"{f} is missing or not a plain handle"
-    if not re.fullmatch(re.escape(_id_prefix(e["author"])) + r"-\d{14}-[0-9a-f]{8}", e["id"]):
+    if not re.fullmatch(re.escape(_id_prefix(e["author"])) + r"-[0-9]{14}-[0-9a-f]{8}", e["id"], re.ASCII):
         return "id must be <author handle>-<14 digits>-<8 hex>"
     for f in ("agent", "session"):
         if e.get(f) is not None and not (
@@ -313,23 +318,17 @@ def render_content(e: dict) -> str:
     return " ".join(parts)
 
 
-def _file_marker(line: str) -> str | None:
-    """The path a ``{"levain_file": "<path>"}`` marker line names, else None.
+@dataclass(frozen=True)
+class FileStart:
+    """Starts a new file in a stream of lines, naming its path.
 
-    A marker starts a new file in a stream; :func:`read_ledger_lines` writes one
-    before each file it reads, and a writer exporting several files into one
-    stream does the same. It carries no authority of its own: it only tells the
-    reader which path to bind the authors that follow to."""
-    if not line.lstrip().startswith("{") or "levain_file" not in line:
-        return None
-    try:
-        obj = json.loads(line)
-    except (ValueError, RecursionError):
-        return None
-    if isinstance(obj, dict) and set(obj) == {"levain_file"} \
-            and isinstance(obj["levain_file"], str):
-        return obj["levain_file"]
-    return None
+    Only :func:`read_ledger_lines` makes one, and it is an OBJECT in the stream, not
+    text, so the contents of a ledger file can never produce one: a line that merely
+    looks like a marker is just a line that is not an entry. It binds the authors that
+    follow to the directory the path sits in. A stream of plain strings (stdin) has no
+    paths, so it binds nothing and is one trust unit: the caller vouches for it."""
+
+    label: str
 
 
 def _path_author_ok(label: str | None, author: object) -> bool:
@@ -339,12 +338,12 @@ def _path_author_ok(label: str | None, author: object) -> bool:
         return True
     parts = [p for p in label.replace("\\", "/").split("/") if p]
     if len(parts) < 2 or not isinstance(author, str):
-        return True
+        return False  # a labelled file whose path names no author directory binds nothing: refuse
     return parts[-2] in (author, _id_prefix(author))
 
 
 def _verified_chains(
-    lines: Iterable[str], report: TeamImportReport
+    lines: Iterable[str | FileStart], report: TeamImportReport
 ) -> list[dict]:
     """Entries that pass the chain walk, in stream order.
 
@@ -358,17 +357,17 @@ def _verified_chains(
     label: str | None = None
     last_hash: str | None = None
     run_author: object = None
+    file_started = False  # a labelled file may hold ONE chain: one root, then its children
     for n, line in enumerate(lines, 1):
         if n > _MAX_LINES:
             report.chain_problems.append(
                 f"more than {_MAX_LINES} lines; the rest were not read"
             )
             break
-        if not line.strip():
+        if isinstance(line, FileStart):
+            label, last_hash, run_author, file_started = line.label, None, None, False
             continue
-        marker = _file_marker(line)
-        if marker is not None:
-            label, last_hash, run_author = marker, None, None
+        if not line.strip():
             continue
         if len(line) > _MAX_LINE_CHARS:
             report.chain_problems.append(f"line {n}: longer than {_MAX_LINE_CHARS} characters")
@@ -396,19 +395,25 @@ def _verified_chains(
             )
             continue
         if e["hash"] in seen_hash:
+            # The same line twice (a file given twice) is harmless. A repeat moves no
+            # chain state, so a copied line cannot be used to carry a run across files.
             if seen_hash[e["hash"]] != e:
                 report.chain_problems.append(f"{who}: repeats a hash with different content")
-            last_hash = e["hash"]  # the same line twice (a file given twice) is harmless
             continue
-        if e["prev"] == "":
-            run_author = None  # a root starts a new run
+        is_root = e["prev"] == ""
+        if is_root:
+            if label is not None and file_started:
+                report.chain_problems.append(
+                    f"{who}: a second chain root inside one file, not imported"
+                )
+                continue
         elif e["prev"] != last_hash:
             report.chain_problems.append(
                 f"{who}: does not continue the entry before it (a gap, a fork, or "
                 "another file's chain), not imported"
             )
             continue
-        if run_author is not None and e.get("author") != run_author:
+        if not is_root and run_author is not None and e.get("author") != run_author:
             report.chain_problems.append(
                 f"{who}: names author {e.get('author')!r} inside {run_author!r}'s "
                 "chain; the chain is cut here"
@@ -422,6 +427,7 @@ def _verified_chains(
             continue
         run_author = e.get("author")
         last_hash = e["hash"]
+        file_started = True
         seen_hash[e["hash"]] = e
         out.append(e)
     return out
@@ -429,7 +435,7 @@ def _verified_chains(
 
 def import_ledger(
     store: Store,
-    lines: Iterable[str],
+    lines: Iterable[str | FileStart],
     *,
     dry_run: bool = False,
     link_authority: Iterable[str] = (),
@@ -440,11 +446,26 @@ def import_ledger(
     error (locked database, corrupt file) raises as it does everywhere else.
     """
     report = TeamImportReport(dry_run=dry_run)
-    records: list[dict[str, Any]] = []
+    valid: list[dict] = []
     for e in _verified_chains(lines, report):
         problem = _entry_problem(e)
         if problem:
             report.rejected.append({"id": e.get("id"), "reason": problem})
+        else:
+            valid.append(e)
+    # The same ledger id with two different hashes inside one batch (an ack and a
+    # retire included): import neither, so the outcome does not depend on line order.
+    by_id: dict[str, set[str]] = {}
+    for e in valid:
+        by_id.setdefault(e["id"], set()).add(e["hash"])
+    clash = {i for i, hs in by_id.items() if len(hs) > 1}
+    for i in sorted(clash):
+        report.conflicts.append(
+            {"id": i, "reason": "two different entries in this import carry this id"}
+        )
+    records: list[dict[str, Any]] = []
+    for e in valid:
+        if e["id"] in clash:
             continue
         if e["type"] == "ack":
             report.skipped_ack.append(e["id"])
@@ -459,17 +480,6 @@ def import_ledger(
             "metadata": {"team": {**e, "entry_id": e["id"]}},
             "supersedes": list(e.get("supersedes") or []),
         })
-    # The same ledger id with two different hashes inside one batch: import neither,
-    # so the outcome does not depend on which line came first.
-    by_id: dict[str, set[str]] = {}
-    for r in records:
-        by_id.setdefault(r["entry_id"], set()).add(r["hash"])
-    clash = {i for i, hs in by_id.items() if len(hs) > 1}
-    for i in sorted(clash):
-        report.conflicts.append(
-            {"id": i, "reason": "two different entries in this import carry this id"}
-        )
-    records = [r for r in records if r["entry_id"] not in clash]
     result = store.import_team_entries(
         records, dry_run=dry_run, link_authority=tuple(link_authority),
     )

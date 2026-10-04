@@ -2110,7 +2110,9 @@ def cmd_team_import(args: argparse.Namespace) -> None:
     if not sources:
         print("Error: give a ledger file or directory, or '-' for stdin.", file=sys.stderr)
         sys.exit(2)
-    lines: list[str] = []
+    from .team import FileStart
+
+    lines: list[str | FileStart] = []
     paths: list[str] = []
     for src in sources:
         if src == "-":
@@ -4226,7 +4228,9 @@ def build_parser() -> argparse.ArgumentParser:
     # -- team-import --
     sub = subparsers.add_parser(
         "team-import",
-        help="Import a team decision ledger (JSONL, hash-chained) with provenance",
+        help="Import a team decision ledger (JSONL, hash-chained) with provenance. "
+             "Prefer piping Levain's `team export --jsonl` ('-'): it drops files whose git "
+             "committer does not match their author, which a directory read cannot check.",
         parents=[json_parent],
     )
     sub.add_argument("sources", nargs="*", help="Ledger file(s) or directory; '-' reads stdin")

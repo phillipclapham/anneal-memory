@@ -31,6 +31,13 @@ def test_import_prune_import_is_stable(tmp_path):
             assert again.links_to_removed == []
             assert s.prune() == 0
         assert s._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0] == 0
+        # an unrelated episode that reuses the pruned episode's 32-bit id changes nothing
+        reused = s._conn.execute("SELECT episode_id FROM team_entries").fetchone()[0]
+        s._conn.execute("INSERT INTO episodes (id, timestamp, type, content, source) "
+                        "VALUES (?, '2026-10-05T00:00:00.000000Z', 'observation', 'x', 'agent')",
+                        (reused,))
+        s._conn.commit()
+        assert not import_ledger(s, lines).imported
         # the same id with another hash is a conflict, not a fresh entry
         forged = seal({**{k: v for k, v in old.items() if k not in ("hash", "prev")},
                        "words": "use spaces"}, "")

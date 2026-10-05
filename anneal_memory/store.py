@@ -2673,14 +2673,16 @@ class Store:
         return True
 
     def _remember_team_entries(self, items: Iterable[tuple[Any, Any, Any]]) -> None:
-        """Record ``(entry_id, hash, episode_id)`` in ``team_entries``; the newest
-        write for an entry id wins. Items whose fields are not all strings are
-        skipped. Runs inside the caller's transaction."""
+        """Record ``(entry_id, hash, episode_id)`` in ``team_entries``. The first
+        hash recorded for an entry id is kept (the first importer of an id wins);
+        a later write with the same hash only moves ``episode_id``. Items whose
+        fields are not all strings are skipped. Runs inside the caller's
+        transaction."""
         self._conn.executemany(
             "INSERT INTO team_entries (entry_id, hash, episode_id) VALUES (?, ?, ?) "
-            "ON CONFLICT(entry_id) DO UPDATE SET hash = excluded.hash, "
-            "episode_id = excluded.episode_id WHERE team_entries.hash != excluded.hash "
-            "OR team_entries.episode_id != excluded.episode_id",
+            "ON CONFLICT(entry_id) DO UPDATE SET episode_id = excluded.episode_id "
+            "WHERE team_entries.hash = excluded.hash "
+            "AND team_entries.episode_id != excluded.episode_id",
             [t for t in items if all(isinstance(v, str) for v in t)],
         )
 
@@ -2795,17 +2797,17 @@ class Store:
                         "content": row["content"], "ts": row["timestamp"],
                         "source": row["source"],
                     }
-            # A stored row is the truth for its entry id (entries imported before
-            # 0.9.40 have no team_entries row yet).
+            # Entries imported before 0.9.40 have no team_entries row yet.
             self._remember_team_entries(
                 (eid, k["hash"], k["ep"]) for eid, k in by_entry.items()
             )
-            # Imported once, episode since pruned or deleted: ledger id -> hash.
+            # Imported once and no stored team row carries it now (pruned, deleted,
+            # or its row altered): ledger id -> first hash. Judged by entry id, never
+            # by episode id, which is 32 bits and can be reused by another episode.
             gone: dict[str, str] = {
                 r["entry_id"]: r["hash"]
                 for r in self._conn.execute(
-                    "SELECT entry_id, hash FROM team_entries t WHERE NOT EXISTS "
-                    "(SELECT 1 FROM episodes e WHERE e.id = t.episode_id)"
+                    "SELECT entry_id, hash FROM team_entries"
                 ).fetchall()
                 if r["entry_id"] not in by_entry
             }

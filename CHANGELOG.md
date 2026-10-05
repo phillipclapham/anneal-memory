@@ -4,6 +4,24 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
+- `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one
+  ledger clone's complete verdict, with each line marked `enforced` and the links it `honours`.
+  A complete, full, newer stream REPLACES the team links that clone's key owns: links levain no
+  longer honours are removed, newly honoured ones added, and operator links are never touched.
+  This closes spore-1344 on the anneal side: a link pinned by a forged owner flip is removed by the
+  first v3 import after the revert (run on a real stuck store: `project_memory/seam_v3_1005/`).
+- New additive tables `team_snapshot`, `team_snapshot_rows`, `team_overrides`, `rewire_origin`.
+- `supersede` / `unsupersede` leave a team-owned link alone (they return False) unless called with
+  `team_override=True`; the CLI asks on a terminal, or takes `ANNEAL_TEAM_OVERRIDE=1` for one
+  command. A removal through any version is recorded as the operator's and never re-added.
+- Retention `prune` keeps a team episode that links an owned team link; an explicit `delete` of
+  one is allowed and logged. A rewired link carries the ownership and the pair it stands in for.
+- `anneal-memory team-status`, `anneal-memory team-forget-key KEY`.
+- Known limits (design §5): episodes are never retracted; one store fed by several clones follows
+  the last; an older binary's rewired rows are never adopted (`team-status` counts them).
+
+
 ## [0.9.41] — 2026-10-05
 
 - 0.9.40 was tagged and never published: its Windows CI job failed on a test that read

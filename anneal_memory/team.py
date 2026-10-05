@@ -59,6 +59,7 @@ plant a ``team:`` row that claims an entry id.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import re
 import unicodedata
@@ -84,6 +85,10 @@ __all__ = [
 SCHEMA_VERSION = 1
 STREAM_VERSION = 2
 _STREAM_KEY = "anneal_team_stream"
+_STREAM_END = "anneal_team_stream_end"
+SNAPSHOT_STREAM_VERSION = 3
+_V3_HEADER = {_STREAM_KEY, "key", "root", "epoch", "repin_n", "pos", "seq", "judged"}
+_V3_ENVELOPE = {"frame", "n", "line", "enforced", "honours"}
 _FRAME_LABEL = re.compile(r"[A-Za-z0-9._@:+/=-]{1,200}", re.ASCII)
 TYPES = ("decision", "constraint", "finding", "question", "tension", "ack", "retire")
 KINDS = ("ruling", "practice")
@@ -151,7 +156,14 @@ class TeamImportReport:
     already_removed: list[str] = field(default_factory=list)
     links_to_removed: list[dict] = field(default_factory=list)
     dry_run: bool = False
-    framing: str = "none"  # "v2" when the stream carried the frame header
+    framing: str = "none"  # "v2" / "v3" when the stream carried that header
+    # v3 only: "replaced", "stale_stream", "partial_stream" or "incomplete_stream"
+    snapshot: str | None = None
+    links_added: list[dict] = field(default_factory=list)
+    links_added_legacy: list[dict] = field(default_factory=list)
+    links_removed: list[dict] = field(default_factory=list)
+    links_adopted: int = 0
+    overrides_recorded: list[dict] = field(default_factory=list)
 
     @property
     def clean(self) -> bool:
@@ -183,6 +195,13 @@ class TeamImportReport:
             "links_unauthorized": self.links_unauthorized,
             "links_to_removed": self.links_to_removed,
             "imported_ids": [i["id"] for i in self.imported],
+            **({"snapshot": self.snapshot,
+                "links_added": self.links_added,
+                "links_added_legacy": self.links_added_legacy,
+                "links_removed": self.links_removed,
+                "links_adopted": self.links_adopted,
+                "overrides_recorded": self.overrides_recorded}
+               if self.framing == "v3" else {}),
         }
 
 
@@ -461,7 +480,27 @@ def _stream_header(raw: str) -> object:
         return _NO_RUN
     if isinstance(obj, _Pairs) and obj and all(k == _STREAM_KEY for k, _ in obj):
         return obj[0][1] if len(obj) == 1 else _UNKNOWN_VERSION
+    if isinstance(obj, _Pairs) and len(obj) == len(_V3_HEADER) \
+            and {k for k, _ in obj} == _V3_HEADER:
+        head = dict(obj)
+        if type(head[_STREAM_KEY]) is int and head[_STREAM_KEY] == SNAPSHOT_STREAM_VERSION:
+            return head
+        return _UNKNOWN_VERSION
     return _NO_RUN
+
+
+def _v3_header_problem(head: dict) -> str | None:
+    for name in ("key", "root", "epoch"):
+        v = head.get(name)
+        if not isinstance(v, str) or not v or len(v) > 200 or _unsafe_text(v):
+            return f"{name} is not a short text"
+    for name in ("repin_n", "pos", "seq"):
+        v = head.get(name)
+        if type(v) is not int or v < 0:
+            return f"{name} is not a whole number"
+    if head.get("judged") not in ("full", "partial"):
+        return "judged is neither full nor partial"
+    return None
 
 
 def stream_framing(lines: Iterable[str]) -> str:
@@ -473,6 +512,8 @@ def stream_framing(lines: Iterable[str]) -> str:
         head = _stream_header(raw)
         if head is _NO_RUN:
             return "none"
+        if isinstance(head, dict):
+            return "v3"
         return "v2" if type(head) is int and head == STREAM_VERSION else "unknown"
     return "none"
 
@@ -524,8 +565,8 @@ def _units(lines: Iterable[str], report: TeamImportReport):
             else:
                 report.framing = "unknown"
                 report.chain_problems.append(
-                    f"line {k}: unknown stream header (this reader takes version "
-                    f"{STREAM_VERSION}); nothing was imported"
+                    f"line {k}: unknown stream header (this reader takes versions "
+                    f"{STREAM_VERSION} and {SNAPSHOT_STREAM_VERSION}); nothing was imported"
                 )
                 return
             report.framing = mode
@@ -677,6 +718,143 @@ def _verified_chains(
     return out
 
 
+def _record_of(e: dict) -> dict[str, Any]:
+    return {
+        "entry_id": e["id"],
+        "hash": e["hash"],
+        "type": _EPISODE_TYPE[e["type"]],
+        "source": f"team:{e['author']}",
+        "timestamp": _normalize_ts(e["ts"]),
+        "content": render_content(e),
+        "metadata": {"team": {**e, "entry_id": e["id"]}},
+        "supersedes": list(e.get("supersedes") or []),
+    }
+
+
+def _import_v3(store: Store, lines: Iterable[str], report: TeamImportReport,
+               dry_run: bool) -> TeamImportReport:
+    """A v3 stream: one clone's complete verdict (contract in
+    ``project_memory/team_frame_contract_v3.md``). The exporter judged the chains, so
+    no chain-linkage walk runs here; each line's own hash and fields are still
+    checked, and a failure on an ENFORCED line makes the stream incomplete (its
+    episodes import, nothing is replaced) rather than narrowing the verdict."""
+    report.framing = "v3"
+    head: dict | None = None
+    complete = True
+    envelopes = 0
+    trailer: int | None = None
+    enforced: dict[str, str] = {}
+    honours: list[tuple[str, str]] = []
+    records: list[dict[str, Any]] = []
+    content = blanks = 0
+
+    def broken(msg: str) -> None:
+        nonlocal complete
+        complete = False
+        report.chain_problems.append(msg)
+
+    for k, raw in enumerate(lines, 1):
+        if not raw.strip():
+            blanks += 1
+            if blanks > _MAX_LINES:
+                broken(f"more than {_MAX_LINES} blank lines; the rest were not read")
+                break
+            continue
+        content += 1
+        if content > _MAX_LINES + 2:
+            broken(f"more than {_MAX_LINES} lines; the rest were not read")
+            break
+        if head is None:
+            got = _stream_header(raw)
+            problem = (_v3_header_problem(got) if isinstance(got, dict)
+                       else "not a v3 header")
+            if problem:
+                report.framing = "unknown"
+                report.chain_problems.append(
+                    f"line {k}: the v3 stream header is not valid ({problem}); "
+                    "nothing was imported")
+                return report
+            head = got if isinstance(got, dict) else None
+            continue
+        if trailer is not None:
+            broken(f"line {k}: content after the stream's end line; the rest was not read")
+            break
+        if len(raw) > _ENVELOPE_CHARS:
+            broken(f"line {k}: longer than a frame envelope can be; the rest was not read")
+            break
+        env = _load_json(raw, f"line {k}", report, "a frame envelope")
+        if env is _NO_RUN:
+            complete = False
+            break
+        if isinstance(env, dict) and set(env) == {_STREAM_END}:
+            if type(env[_STREAM_END]) is not int:
+                broken(f"line {k}: the end line's count is not a whole number")
+                break
+            trailer = env[_STREAM_END]
+            continue
+        if not (
+            isinstance(env, dict) and set(env) == _V3_ENVELOPE
+            and isinstance(env["frame"], str) and _FRAME_LABEL.fullmatch(env["frame"])
+            and type(env["n"]) is int and env["n"] >= 1 and isinstance(env["line"], str)
+            and type(env["enforced"]) is bool and _is_str_list(env["honours"])
+        ):
+            broken(f"line {k}: not a v3 frame envelope; the rest was not read")
+            break
+        envelopes += 1
+        is_enforced = env["enforced"]
+        if env["honours"] and not is_enforced:
+            broken(f"line {k}: an unenforced line honours links")
+        pos = f"{env['frame']}:{env['n']}"
+        e = _line_entry(env["line"], pos, report if is_enforced else TeamImportReport())
+        problem = None if e is None else _entry_problem(e)
+        if e is None or problem:
+            if is_enforced:
+                if problem:
+                    report.rejected.append({"id": str(e.get("id"))[:100] if e else pos,
+                                            "reason": problem})
+                broken(f"{pos}: an enforced line failed its own check")
+            continue
+        if not set(env["honours"]) <= set(e.get("supersedes") or []):
+            broken(f"{pos}: honours names an id the line does not supersede")
+            continue
+        if not is_enforced:
+            continue
+        if e["id"] in enforced:
+            broken(f"{pos}: two enforced lines carry the id {e['id']!r}")
+            continue
+        enforced[e["id"]] = e["hash"]
+        honours.extend((t, e["id"]) for t in env["honours"])
+        if e["type"] == "ack":
+            report.skipped_ack.append(e["id"])
+            continue
+        records.append(_record_of(e))
+    if trailer is None:
+        broken("the stream has no end line; it is incomplete")
+    elif trailer != envelopes:
+        broken(f"the end line counts {trailer} envelopes, the stream carried {envelopes}")
+    if head is None:
+        report.chain_problems.append("an empty v3 stream")
+        return report
+    result = store.import_team_snapshot(
+        records, key=head["key"], root=head["root"], epoch=head["epoch"],
+        repin_n=head["repin_n"], pos=head["pos"], seq=head["seq"],
+        judged=head["judged"], complete=complete, enforced=enforced,
+        honours=honours, dry_run=dry_run,
+    )
+    report.snapshot = result["snapshot"]
+    report.imported = result["imported"]
+    report.already_present = result["already_present"]
+    report.already_removed = result["already_removed"]
+    report.conflicts.extend(result["conflicts"])
+    report.links_added = result["links_added"]
+    report.links_added_legacy = result["links_added_legacy"]
+    report.links_removed = result["links_removed"]
+    report.links_refused = result["links_refused"]
+    report.links_adopted = result["links_adopted"]
+    report.overrides_recorded = result["overrides_recorded"]
+    return report
+
+
 def import_ledger(
     store: Store,
     lines: Iterable[str],
@@ -698,6 +876,20 @@ def import_ledger(
     if isinstance(call_owners, (str, bytes)):
         raise TypeError("call_owners is a collection of handles, not one string")
     report = TeamImportReport(dry_run=dry_run)
+    # Peek at the first content line without reading the input whole: a lazy source
+    # of endless blank lines must stay bounded (0.9.39).
+    it = iter(lines)
+    head: list[str] = []
+    for raw in it:
+        head.append(raw)
+        if raw.strip() or len(head) > _MAX_LINES:
+            break
+    lines = itertools.chain(head, it)
+    if stream_framing(head[-1:]) == "v3":
+        if tuple(link_authority) or tuple(call_owners):
+            raise ValueError("link_authority and call_owners apply to v1/v2 input only; "
+                             "a v3 stream carries the exporter's verdict")
+        return _import_v3(store, lines, report, dry_run)
     valid: list[dict] = []
     verified = _verified_chains(lines, report)
     for e in verified:
@@ -735,16 +927,7 @@ def import_ledger(
         if e["type"] == "ack":
             report.skipped_ack.append(e["id"])
             continue
-        records.append({
-            "entry_id": e["id"],
-            "hash": e["hash"],
-            "type": _EPISODE_TYPE[e["type"]],
-            "source": f"team:{e['author']}",
-            "timestamp": _normalize_ts(e["ts"]),
-            "content": render_content(e),
-            "metadata": {"team": {**e, "entry_id": e["id"]}},
-            "supersedes": list(e.get("supersedes") or []),
-        })
+        records.append(_record_of(e))
     result = store.import_team_entries(
         records, dry_run=dry_run, link_authority=tuple(link_authority),
         call_owners=tuple(call_owners),

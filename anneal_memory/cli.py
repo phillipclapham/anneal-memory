@@ -919,11 +919,29 @@ def cmd_search(args: argparse.Namespace) -> None:
             print()
 
 
+def _team_override_ok(store: Any, args: argparse.Namespace) -> bool:
+    """For a link a team snapshot owns: True when this command may change it here
+    (ANNEAL_TEAM_OVERRIDE=1, or a yes on a terminal). Otherwise says so and exits."""
+    if not store.team_owned(old_id=args.old, new_id=args.new):
+        return False
+    if os.environ.get("ANNEAL_TEAM_OVERRIDE") == "1":
+        return True
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        answer = input("This link mirrors the team ledger; change it in your store "
+                       "only? [y/N] ").strip().lower()
+        if answer in ("y", "yes"):
+            return True
+    print("Unchanged: this link mirrors the team ledger.", file=sys.stderr)
+    sys.exit(1)
+
+
 def cmd_supersede(args: argparse.Namespace) -> None:
     """Record a supersession link between two existing episodes."""
     with _open_store(args) as store:
+        override = _team_override_ok(store, args)
         try:
-            added = store.supersede(old_id=args.old, new_id=args.new, source="cli")
+            added = store.supersede(old_id=args.old, new_id=args.new, source="cli",
+                                    team_override=override)
         except SupersessionError as exc:
             print(f"Error: {exc}. Nothing was recorded.", file=sys.stderr)
             sys.exit(1)
@@ -936,8 +954,10 @@ def cmd_supersede(args: argparse.Namespace) -> None:
 def cmd_unsupersede(args: argparse.Namespace) -> None:
     """Remove a supersession link."""
     with _open_store(args) as store:
+        override = _team_override_ok(store, args)
         try:
-            removed = store.unsupersede(old_id=args.old, new_id=args.new, source="cli")
+            removed = store.unsupersede(old_id=args.old, new_id=args.new, source="cli",
+                                        team_override=override)
         except SupersessionError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -2134,9 +2154,13 @@ def cmd_team_import(args: argparse.Namespace) -> None:
         print("Error: framed input (a header line, then envelopes) is one source; "
               "do not combine it with other files or stdin.", file=sys.stderr)
         sys.exit(2)
+    authority = [a.strip() for chunk in (args.link_authority or []) for a in chunk.split(",") if a.strip()]
+    owners = [a.strip() for chunk in (args.call_owner or []) for a in chunk.split(",") if a.strip()]
+    if (authority or owners) and any(stream_framing(c) == "v3" for c in live):
+        print("Error: --link-authority and --call-owner apply to v1/v2 input; a v3 stream "
+              "carries the exporter's verdict.", file=sys.stderr)
+        sys.exit(2)
     with _open_store(args) as store:
-        authority = [a.strip() for chunk in (args.link_authority or []) for a in chunk.split(",") if a.strip()]
-        owners = [a.strip() for chunk in (args.call_owner or []) for a in chunk.split(",") if a.strip()]
         report = import_ledger(store, lines, dry_run=args.dry_run, link_authority=authority,
                                call_owners=owners)
     data = report.to_dict()
@@ -2166,12 +2190,47 @@ def cmd_team_import(args: argparse.Namespace) -> None:
         for item in data["cross_author_links"]:
             print(f"  note: {item['by']} superseded {item['target']} (another author's entry)",
                   file=sys.stderr)
+        if data["framing"] == "v3":
+            print(f"  team links: {data['snapshot']}; {len(data['links_added'])} added, "
+                  f"{len(data['links_added_legacy'])} added on first import, "
+                  f"{len(data['links_removed'])} removed to match the ledger, "
+                  f"{data['links_adopted']} adopted, "
+                  f"{len(data['overrides_recorded'])} operator removal(s) recorded",
+                  file=sys.stderr)
         for key in ("rejected", "chain_problems", "conflicts", "links_refused",
                     "links_unauthorized"):
             for item in data[key]:
                 print(f"  {key}: {item}", file=sys.stderr)
     if not report.clean:
         sys.exit(3)
+
+
+def cmd_team_status(args: argparse.Namespace) -> None:
+    """Show the team link snapshots in this store."""
+    with _open_store(args) as store:
+        data = store.team_snapshot_status()
+    if args.json:
+        _print_json(data)
+        return
+    if not data["keys"]:
+        print("No team snapshot (no v3 team-import has replaced links here).")
+    for k in data["keys"]:
+        print(f"key {k['key']}  root {k['root']}  {'active' if k['active'] else 'inactive'}  "
+              f"pos {k['pos']} seq {k['seq']}  owns {k['owned']} link(s)")
+    print(f"Operator overrides: {data['overrides']}")
+    if data["unmanaged_rewired"]:
+        print(f"Rewired links between team entries no snapshot manages (an older "
+              f"version's): {data['unmanaged_rewired']}")
+
+
+def cmd_team_forget_key(args: argparse.Namespace) -> None:
+    """Release a team snapshot key."""
+    with _open_store(args) as store:
+        n = store.team_forget_key(args.key)
+    if args.json:
+        _print_json({"key": args.key, "released": n})
+    else:
+        print(f"Released {args.key}: {n} link(s) no longer owned.")
 
 
 def _read_audit_entries(
@@ -3947,7 +4006,11 @@ def build_parser() -> argparse.ArgumentParser:
         ("supersede", "Record that a newer episode replaces an older one (validated)"),
         ("unsupersede", "Remove a recorded supersession link (the undo for a wrong one)"),
     ):
-        sub = subparsers.add_parser(_verb, help=_help, parents=[json_parent])
+        sub = subparsers.add_parser(
+            _verb, help=_help, parents=[json_parent],
+            description=_help + ". A link that mirrors a team ledger (see team-status) is "
+            "changed only after a yes on a terminal, or with ANNEAL_TEAM_OVERRIDE=1 set "
+            "for one command; it is then yours, and no team import changes it again.")
         sub.add_argument("--old", required=True, metavar="ID", help="The replaced episode")
         sub.add_argument("--new", required=True, metavar="ID", help="The replacing episode")
         sub.set_defaults(func=cmd_supersede if _verb == "supersede" else cmd_unsupersede)
@@ -4281,6 +4344,18 @@ def build_parser() -> argparse.ArgumentParser:
              "never matches here; name the team owner with --link-authority for those.",
     )
     sub.set_defaults(func=cmd_team_import)
+
+    # -- team-status / team-forget-key --
+    sub = subparsers.add_parser(
+        "team-status", parents=[json_parent],
+        help="Team link snapshots: each ledger clone's key, what it owns, operator overrides")
+    sub.set_defaults(func=cmd_team_status)
+    sub = subparsers.add_parser(
+        "team-forget-key", parents=[json_parent],
+        help="Release a team snapshot key whose clone is gone; its links stay until "
+             "another key of that ledger adopts or drops them")
+    sub.add_argument("key", help="The key, as team-status lists it")
+    sub.set_defaults(func=cmd_team_forget_key)
 
     # -- audit --
     sub = subparsers.add_parser("audit", help="Read and filter audit trail entries", parents=[json_parent])

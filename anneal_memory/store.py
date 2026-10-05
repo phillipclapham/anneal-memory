@@ -21,7 +21,7 @@ import re
 import sqlite3
 import uuid
 import warnings
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1466,7 +1466,9 @@ CREATE INDEX IF NOT EXISTS idx_supersessions_new ON supersessions(new_id);
 
 -- Team ledger entries this store imported (0.9.40): the ledger id and hash outlive
 -- the episode, so a whole-ledger re-import after a prune or delete does not bring
--- the entry back. No content. Additive: an older binary ignores the table.
+-- the entry back. No content: both values are in the shared ledger already, so a
+-- delete keeps the row whatever keep_tombstones says. Additive: an older binary
+-- ignores the table.
 CREATE TABLE IF NOT EXISTS team_entries (
     entry_id TEXT PRIMARY KEY,
     hash TEXT NOT NULL,
@@ -2669,6 +2671,34 @@ class Store:
         }, method="unsupersede", committed="the link removal", actor=source)
         return True
 
+    def _remember_team_entries(self, items: Iterable[tuple[Any, Any, Any]]) -> None:
+        """Record ``(entry_id, hash, episode_id)`` in ``team_entries``; the newest
+        write for an entry id wins. Items whose fields are not all strings are
+        skipped. Runs inside the caller's transaction."""
+        self._conn.executemany(
+            "INSERT INTO team_entries (entry_id, hash, episode_id) VALUES (?, ?, ?) "
+            "ON CONFLICT(entry_id) DO UPDATE SET hash = excluded.hash, "
+            "episode_id = excluded.episode_id WHERE team_entries.hash != excluded.hash "
+            "OR team_entries.episode_id != excluded.episode_id",
+            [t for t in items if all(isinstance(v, str) for v in t)],
+        )
+
+    def _remember_team_rows(self, rows: Iterable[sqlite3.Row]) -> None:
+        """Before episodes are removed: record the ledger id of each imported team
+        row among them, so a later import does not bring it back."""
+        items = []
+        for row in rows:
+            if not str(row["source"]).startswith("team:"):
+                continue
+            try:
+                team = json.loads(row["metadata"]).get("team")
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if isinstance(team, dict):
+                items.append((team.get("entry_id"), team.get("hash"), row["id"]))
+        if items:
+            self._remember_team_entries(items)
+
     def import_team_entries(
         self,
         records: list[dict[str, Any]],
@@ -2697,16 +2727,17 @@ class Store:
           episode id; no content), which outlives the episode. An entry whose episode
           this store pruned or deleted is returned in ``already_removed`` and NOT
           imported again; the same id offered with a different hash is a conflict.
-          A store opened with ``keep_tombstones=False`` drops that record with the
-          episode, so there a re-import brings the entry back. A link from an entry
+          :meth:`prune` and :meth:`delete` record a team episode's ledger id before
+          removing it. A link from an entry
           imported by this call onto a removed entry is returned in
           ``links_to_removed`` (nothing is hidden).
         - A link from one author over ANOTHER author's entry is made only when the
           linking author matches a ``link_authority`` pattern (``fnmatch``, on the
           handle after ``team:``), or when the linking author's handle is EXACTLY in
           ``call_owners`` AND equals the target entry's own ``owner`` (the owner of
-          the call). ``lead`` and ``client:...`` owners never match ``call_owners``: they
-          resolve to the team owner, whom the caller names in ``link_authority``.
+          the call). ``lead`` and any owner with a ``:`` (``client:...``; a member
+          handle never has one) never match ``call_owners``: they resolve to the team
+          owner, whom the caller names in ``link_authority``.
           Otherwise the link is returned in ``links_unauthorized`` and nothing is
           hidden.
         - Links come ONLY from the ``supersedes`` of the verified ``records`` of this
@@ -2736,6 +2767,7 @@ class Store:
         unauthorized: list[dict[str, Any]] = []
         removed: list[str] = []
         to_removed: list[dict[str, str]] = []
+        to_removed_seen: set[tuple[str, str]] = set()
         with self._db_boundary("import_team_entries"):
             if not self._conn.in_transaction:
                 self._conn.execute("BEGIN IMMEDIATE")
@@ -2762,18 +2794,17 @@ class Store:
                         "content": row["content"], "ts": row["timestamp"],
                         "source": row["source"],
                     }
-            # Entries imported before 0.9.40 have no team_entries row yet.
-            self._conn.executemany(
-                "INSERT OR IGNORE INTO team_entries (entry_id, hash, episode_id) "
-                "VALUES (?, ?, ?)",
-                [(eid, k["hash"], k["ep"]) for eid, k in by_entry.items()
-                 if isinstance(k["hash"], str)],
+            # A stored row is the truth for its entry id (entries imported before
+            # 0.9.40 have no team_entries row yet).
+            self._remember_team_entries(
+                (eid, k["hash"], k["ep"]) for eid, k in by_entry.items()
             )
             # Imported once, episode since pruned or deleted: ledger id -> hash.
             gone: dict[str, str] = {
                 r["entry_id"]: r["hash"]
                 for r in self._conn.execute(
-                    "SELECT entry_id, hash FROM team_entries"
+                    "SELECT entry_id, hash FROM team_entries t WHERE NOT EXISTS "
+                    "(SELECT 1 FROM episodes e WHERE e.id = t.episode_id)"
                 ).fetchall()
                 if r["entry_id"] not in by_entry
             }
@@ -2816,10 +2847,7 @@ class Store:
                     except sqlite3.IntegrityError:
                         if nonce == 63:
                             raise
-                self._conn.execute(
-                    "INSERT OR REPLACE INTO team_entries (entry_id, hash, episode_id) "
-                    "VALUES (?, ?, ?)", (rec["entry_id"], rec["hash"], ep_id),
-                )
+                self._remember_team_entries([(rec["entry_id"], rec["hash"], ep_id)])
                 team_meta = rec["metadata"].get("team") or {}
                 owner = team_meta.get("owner")
                 by_entry[rec["entry_id"]] = {
@@ -2845,7 +2873,8 @@ class Store:
                         continue
                     if target in gone:
                         # nothing left to hide; reported so the ledger's link is not lost
-                        if {"id": entry_id, "target": target} not in to_removed:
+                        if (entry_id, target) not in to_removed_seen:
+                            to_removed_seen.add((entry_id, target))
                             to_removed.append({"id": entry_id, "target": target})
                         continue
                     old = by_entry.get(target)
@@ -2864,7 +2893,7 @@ class Store:
                         if any(fnmatch.fnmatchcase(who, pat) for pat in link_authority):
                             authority = "link_authority"
                         elif (call is not None and call == who and who in call_owners
-                              and call != "lead" and not call.startswith("client:")):
+                              and call != "lead" and ":" not in call):
                             authority = "call_owner"
                         else:
                             unauthorized.append({
@@ -3183,9 +3212,7 @@ class Store:
                 )
 
             links_removed = self._detach_supersessions([row["id"]])
-            if not self._keep_tombstones:
-                self._conn.execute(
-                    "DELETE FROM team_entries WHERE episode_id = ?", (episode_id,))
+            self._remember_team_rows([row])
             self._conn.execute("DELETE FROM episodes WHERE id = ?", (episode_id,))
             # 10.5c.5 L4 Fix: batch-aware commit for consistency with
             # record() and the other write-path methods. No current
@@ -5784,6 +5811,7 @@ class Store:
                 return 0
 
             links_removed = self._detach_supersessions([row["id"] for row in rows])
+            self._remember_team_rows(rows)
             pruned = 0
             for row in rows:
                 if self._keep_tombstones:
@@ -5798,9 +5826,6 @@ class Store:
                             _content_hash(row["content"]),
                         ),
                     )
-                else:
-                    self._conn.execute(
-                        "DELETE FROM team_entries WHERE episode_id = ?", (row["id"],))
                 self._conn.execute("DELETE FROM episodes WHERE id = ?", (row["id"],))
                 pruned += 1
 

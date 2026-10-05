@@ -46,16 +46,23 @@ def test_import_prune_import_is_stable(tmp_path):
                                        "target": f"{_prefix('bo')}-20261004120000-00000000"}]
     finally:
         s.close()
-    # keep_tombstones=False erases the record with the episode: the entry comes back
+    # keep_tombstones=False keeps the ledger id too (no content), and an entry
+    # imported before 0.9.40 (no team_entries row) is recorded when pruned
     e = Store(tmp_path / "e.db", project_name="p", retention_days=30, audit=False,
               keep_tombstones=False)
     try:
         import_ledger(e, lines)
+        e._conn.execute("DELETE FROM team_entries")
+        e._conn.commit()
         assert e.prune() == 1
-        back = import_ledger(e, lines).imported
-        assert len(back) == 1
-        assert e.delete(back[0]["episode"])
-        assert len(import_ledger(e, lines).imported) == 1
+        again = import_ledger(e, lines)
+        assert not again.imported and again.already_removed == [old["id"]]
+        r = ledger("cy", [RULING])
+        ep = import_ledger(e, r).imported[0]["episode"]
+        e._conn.execute("DELETE FROM team_entries")
+        e._conn.commit()
+        assert e.delete(ep)
+        assert not import_ledger(e, r).imported
     finally:
         e.close()
 

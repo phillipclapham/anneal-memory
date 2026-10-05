@@ -23,8 +23,8 @@ What it guarantees:
 - **Idempotent by ledger id.** Re-importing changes nothing; the same id with a
   different hash is reported as a conflict and never overwritten. An entry the store
   held and then pruned (retention) or deleted stays removed: the store keeps its ledger
-  id and hash, and reports it in ``already_removed``. A store opened with
-  ``keep_tombstones=False`` drops that record too, so there a re-import brings it back.
+  id and hash (no content; both are in the shared ledger), and reports it in
+  ``already_removed``.
 - **Acks are not memory.** An ``ack`` entry is counted and skipped.
 - **Hiding is authorised, not assumed.** A supersession by the SAME author applies.
   One by a different author applies only when that author matches a

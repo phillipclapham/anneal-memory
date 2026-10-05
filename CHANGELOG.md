@@ -14,7 +14,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - Unframed (v1) input is accepted as before; the second-root limit applies to it and the
   CLI prints a stderr note. A header is exactly a single-key object; version != 2 refuses
   the whole input; framed input must be the only CLI source (exit 2); stdin is read as
-  UTF-8 bytes with an aggregate cap. A v1 stream whose first file line is the exact header
+  UTF-8 bytes with an aggregate cap. An envelope that cannot be read ends the read (nothing is skipped between frames); a
+  line break inside a ledger line is judged by position. A v1 stream whose first file line is the exact header
   object fails closed (an availability limit of v1). Named files are not framed by the CLI.
 
 ## [0.9.37] — 2026-10-04

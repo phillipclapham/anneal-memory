@@ -2128,7 +2128,8 @@ def cmd_team_import(args: argparse.Namespace) -> None:
                 print(f"Error: {exc}", file=sys.stderr)
                 sys.exit(1)
     lines = [ln for chunk in chunks for ln in chunk]
-    if sum(1 for c in chunks if any(ln.strip() for ln in c)) > 1 and stream_framing(lines) != "none":
+    live = [c for c in chunks if any(ln.strip() for ln in c)]
+    if len(live) > 1 and any(stream_framing(c) != "none" for c in live):
         print("Error: framed input (a header line, then envelopes) is one source; "
               "do not combine it with other files or stdin.", file=sys.stderr)
         sys.exit(2)

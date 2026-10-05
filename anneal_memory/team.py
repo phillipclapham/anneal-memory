@@ -113,7 +113,7 @@ _MAX_PATH_CHARS = 300
 _MAX_LINES = 200_000
 _MAX_JSON_DEPTH = 32  # a ledger entry nests two levels; deeper is never an entry
 _MAX_FILE_BYTES = 64 * 1024 * 1024
-MAX_STREAM_BYTES = 512 * 1024 * 1024  # a framed stream carries many files, so its cap is not a file's
+MAX_STREAM_BYTES = 256 * 1024 * 1024  # a framed stream carries many files, so its cap is not a file's
 _FUTURE_SKEW = timedelta(days=1)
 _TS = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z", re.ASCII)
 
@@ -232,6 +232,7 @@ def _unsafe_text(text: str) -> bool:
     )
 
 
+_UNKNOWN_VERSION = object()  # a header that repeats its key: never a supported version
 _NO_RUN = object()  # no chain run has started: distinct from a root whose author is null
 
 
@@ -426,15 +427,26 @@ def frame_stream(files: Iterable[tuple[str, Iterable[str]]]) -> Iterable[str]:
             yield json.dumps({"frame": label, "n": n, "line": line}, separators=(",", ":"))
 
 
+class _Pairs(list):
+    """A JSON object kept as its (key, value) pairs, so a duplicated key survives."""
+
+
 def _stream_header(raw: str) -> object:
-    """The header's version value when ``raw`` is exactly a single-key object
-    ``{"anneal_team_stream": <value>}``; ``_NO_RUN`` for any other line. Any other
-    object (more keys, even this one) is an ordinary v1 line, never a header."""
-    if _STREAM_KEY not in raw or len(raw) > _MAX_LINE_CHARS:
+    """The header's version value when ``raw`` is a JSON object whose only member is
+    ``anneal_team_stream``; ``_UNKNOWN_VERSION`` when that member is repeated (never a
+    supported version); ``_NO_RUN`` for any other line. An object with another member,
+    even this one, is an ordinary v1 line. Every first line is parsed, with no substring
+    test, so an escaped key is the same key."""
+    if len(raw) > _MAX_LINE_CHARS or _nests_too_deep(raw):
         return _NO_RUN
-    obj = _load_json(raw, "", None)
-    if isinstance(obj, dict) and set(obj) == {_STREAM_KEY}:
-        return obj[_STREAM_KEY]
+    try:
+        obj = json.loads(raw, object_pairs_hook=_Pairs, parse_constant=_refuse_constant,
+                         parse_float=_finite_float,
+                         parse_int=lambda s: int(s) if len(s) <= 20 else s)
+    except (ValueError, RecursionError):
+        return _NO_RUN
+    if isinstance(obj, _Pairs) and obj and all(k == _STREAM_KEY for k, _ in obj):
+        return obj[0][1] if len(obj) == 1 else _UNKNOWN_VERSION
     return _NO_RUN
 
 
@@ -457,6 +469,8 @@ def read_stream_lines(fh: Any) -> list[str]:
     data = fh.read(MAX_STREAM_BYTES + 1)
     if len(data) > MAX_STREAM_BYTES:
         raise ValueError(f"input is larger than {MAX_STREAM_BYTES} bytes")
+    if data.count(b"\n") > _MAX_LINES:
+        raise ValueError(f"input has more than {_MAX_LINES} lines")
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
@@ -498,23 +512,26 @@ def _units(lines: Iterable[str], report: TeamImportReport):
         if mode == "none":
             yield None, k, raw
             continue
+        # Nothing is dropped silently between frames: a frame's position is judged over
+        # every line it has, so an envelope that cannot be read ends the read.
         if len(raw) > _ENVELOPE_CHARS:
-            report.chain_problems.append(f"line {k}: longer than a frame envelope can be")
-            continue
+            report.chain_problems.append(
+                f"line {k}: longer than a frame envelope can be; the rest was not read"
+            )
+            return
         env = _load_json(raw, f"line {k}", report, "a frame envelope")
         if env is _NO_RUN:
-            continue
+            return
         if not (
             isinstance(env, dict) and set(env) == {"frame", "n", "line"}
             and isinstance(env["frame"], str) and _FRAME_LABEL.fullmatch(env["frame"])
             and type(env["n"]) is int and env["n"] >= 1 and isinstance(env["line"], str)
-            and "\n" not in env["line"] and "\r" not in env["line"]
         ):
             report.chain_problems.append(
                 f"line {k}: not a frame envelope (a framed stream carries one ledger "
-                "line per envelope and nothing else)"
+                "line per envelope and nothing else); the rest was not read"
             )
-            continue
+            return
         yield env["frame"], env["n"], env["line"]
 
 
@@ -522,6 +539,9 @@ def _line_entry(line: str, pos: str, report: TeamImportReport) -> dict | None:
     """The line as a hash-verified entry dict, or None with the problem reported."""
     if len(line) > _MAX_LINE_CHARS:
         report.chain_problems.append(f"{pos}: longer than {_MAX_LINE_CHARS} characters")
+        return None
+    if "\n" in line or "\r" in line:
+        report.chain_problems.append(f"{pos}: a ledger line carries a line break")
         return None
     e = _load_json(line, pos, report)
     if e is _NO_RUN:

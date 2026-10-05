@@ -908,12 +908,36 @@ def test_a_header_is_exactly_a_single_key_object(store):
     assert rep.framing == "unknown" and not rep.imported
 
 
-def test_an_envelope_line_may_not_carry_a_newline(store):
+def test_an_envelope_line_with_a_line_break_is_judged_by_position(store):
     a = ledger("alice", [RULING])
+    m = ledger("mallory", [{"type": "finding", "reason": "r"}])
     pretty = json.dumps(json.loads(a[0]), indent=1)
-    rep = import_ledger(store, ['{"anneal_team_stream":2}',
-                                json.dumps({"frame": "a", "n": 1, "line": pretty})])
-    assert not rep.imported and len(rep.chain_problems) == 1
+    rep = import_ledger(store, _framed(("a", [pretty])))
+    assert not rep.imported and any("line break" in p for p in rep.chain_problems)
+    # as the FIRST line it refuses the whole file: the root after it does not become first
+    rep = import_ledger(store, _framed(("a", ["x\ry"] + m)))
+    assert not rep.imported and any("whole file is refused" in p for p in rep.chain_problems)
+    rep = import_ledger(store, _framed(("a", ["x\ny"] + m)))
+    assert not rep.imported
+
+
+def test_header_parsing_is_semantic_not_textual(store):
+    alice = ledger("alice", [RULING])
+    for hdr in ('{"anneal_team_strea\\u006d":3}', '{"anneal_team_stream":3,"anneal_team_stream":2}',
+                '{"anneal_team_stream":' + "9" * 5000 + '}'.replace("5000", "")):
+        rep = import_ledger(store, [hdr] + alice)
+        assert not rep.imported and rep.framing == "unknown", hdr[:40]
+    rep = import_ledger(store, ['{"anneal_team_strea\\u006d":2}'] + alice[:0] + list(_framed(("a", alice)))[1:])
+    assert len(rep.imported) == 1 and rep.framing == "v2"
+
+
+def test_an_unreadable_envelope_ends_the_read(store):
+    a = ledger("alice", [RULING])
+    m = ledger("mallory", [{"type": "finding", "reason": "r"}])
+    stream = _framed(("a", a)) + ["not json"] + _framed(("b", m))[1:]
+    rep = import_ledger(store, stream)
+    assert [i["id"][:6] for i in rep.imported] == ["alice-"]
+    assert any("not JSON" in p for p in rep.chain_problems)
 
 
 def test_read_stream_lines_decodes_bytes_and_caps(monkeypatch):
@@ -925,6 +949,10 @@ def test_read_stream_lines_decodes_bytes_and_caps(monkeypatch):
     monkeypatch.setattr(team, "MAX_STREAM_BYTES", 8)
     with pytest.raises(ValueError):
         team.read_stream_lines(io.BytesIO(b"123456789"))
+    monkeypatch.setattr(team, "MAX_STREAM_BYTES", 10_000)
+    monkeypatch.setattr(team, "_MAX_LINES", 3)
+    with pytest.raises(ValueError):
+        team.read_stream_lines(io.BytesIO(b"\n" * 4))
     assert team.stream_framing(["", '{"anneal_team_stream":2}']) == "v2"
     assert team.stream_framing(['{"anneal_team_stream":9}']) == "unknown"
     assert team.stream_framing(ledger("alice", [RULING])) == "none"
@@ -939,6 +967,8 @@ def test_framed_input_is_one_source_in_the_cli(tmp_path):
     g = tmp_path / "raw.jsonl"
     g.write_text("\n".join(ledger("bob", [{"type": "finding", "reason": "r"}])) + "\n")
     r = subprocess.run(base + ["team-import", str(f), str(g)], capture_output=True)
+    assert r.returncode == 2 and b"one source" in r.stderr
+    r = subprocess.run(base + ["team-import", str(g), str(f)], capture_output=True)
     assert r.returncode == 2 and b"one source" in r.stderr
     r = subprocess.run(base + ["team-import", "-", str(g), "--json"],
                        input=f.read_bytes(), capture_output=True)

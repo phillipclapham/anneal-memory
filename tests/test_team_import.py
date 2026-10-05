@@ -1054,3 +1054,16 @@ def test_exactly_the_line_cap_of_terminated_lines_is_not_over_it(store, monkeypa
     lines = ledger("alice", [RULING]) + [""]  # one entry plus the split artifact after a final newline
     rep = import_ledger(store, lines + [""])
     assert rep.clean and len(rep.imported) == 1
+
+
+def test_an_endless_run_of_blank_lines_ends_the_read(store, monkeypatch):
+    """Round-residue consensus: skipping blanks before the cap let a lazy iterable of
+    blank lines loop forever; blanks and content lines are now bounded separately."""
+    import itertools
+    from anneal_memory import team
+    monkeypatch.setattr(team, "_MAX_LINES", 5)
+    rep = import_ledger(store, itertools.repeat(""))
+    assert not rep.imported and any("blank lines" in p for p in rep.chain_problems)
+    entries = ledger("alice", [RULING] + [{"type": "finding", "reason": f"r{i}"} for i in range(5)])
+    rep = import_ledger(store, entries)  # six content lines, cap five
+    assert len(rep.imported) == 5 and any("more than 5 lines" in p for p in rep.chain_problems)

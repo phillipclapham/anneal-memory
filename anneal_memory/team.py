@@ -485,10 +485,18 @@ def _units(lines: Iterable[str], report: TeamImportReport):
     FIRST non-blank line only, so ledger content that appears later can never switch
     it; in framed mode every line must be an envelope."""
     mode: str | None = None
+    content = blanks = 0  # each bounded on its own, so an endless run of either ends the read
     for k, raw in enumerate(lines, 1):
         if not raw.strip():
+            blanks += 1
+            if blanks > _MAX_LINES:
+                report.chain_problems.append(
+                    f"more than {_MAX_LINES} blank lines; the rest were not read"
+                )
+                return
             continue
-        if k > _MAX_LINES:
+        content += 1
+        if content > _MAX_LINES:
             report.chain_problems.append(
                 f"more than {_MAX_LINES} lines; the rest were not read"
             )
@@ -662,9 +670,10 @@ def import_ledger(
     dry_run: bool = False,
     link_authority: Iterable[str] = (),
 ) -> TeamImportReport:
-    """Import ledger lines into ``store``. See the module docstring. Each line carries
-    no line terminator (strip ``\\n`` and ``\\r``, as :func:`read_stream_lines` does): a
-    line break inside a line is refused.
+    """Import ledger lines into ``store``. See the module docstring. ``lines`` is split on
+    ``\\n`` with a trailing ``\\r`` dropped, as :func:`read_stream_lines` does. A
+    whitespace-only line is blank and skipped; a line with other content that still
+    carries a line break is refused.
 
     Never raises for bad ledger content: every refusal is in the report. A store
     error (locked database, corrupt file) raises as it does everywhere else.

@@ -4,6 +4,12 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — `import_ledger` could loop forever on an endless run of blank lines (a 0.9.38 regression)
+- 0.9.38 skipped blank lines before the line-cap check, so a lazy iterable of blank lines passed
+  straight to `import_ledger` never ended. Blank lines and content lines are now bounded separately
+  (each at the line cap); the CLI was never exposed (its readers return bounded lists). The
+  `import_ledger` docstring now says what a line may carry.
+
 ## [0.9.38] — 2026-10-04
 
 ### Added — framed `team-import` input (contract v2), closing the second-root known-open

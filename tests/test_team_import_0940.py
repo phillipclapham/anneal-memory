@@ -31,8 +31,33 @@ def test_import_prune_import_is_stable(tmp_path):
             assert again.links_to_removed == []
             assert s.prune() == 0
         assert s._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0] == 0
+        # the same id with another hash is a conflict, not a fresh entry
+        forged = seal({**{k: v for k, v in old.items() if k not in ("hash", "prev")},
+                       "words": "use spaces"}, "")
+        clash = import_ledger(s, [json.dumps(forged)])
+        assert not clash.imported and clash.conflicts[0]["stored_hash"] == old["hash"]
+        # a delete holds too, and a link onto the removed entry is reported
+        rul = ledger("bo", [RULING, {"type": "retire", "supersedes": [f"{_prefix('bo')}-20261004120000-00000000"]}])
+        r = import_ledger(s, rul[:1])
+        assert s.delete(r.imported[0]["episode"])
+        r = import_ledger(s, rul)
+        assert len(r.imported) == 1 and r.already_removed and r.clean
+        assert r.links_to_removed == [{"id": f"{_prefix('bo')}-20261004120000-00000001",
+                                       "target": f"{_prefix('bo')}-20261004120000-00000000"}]
     finally:
         s.close()
+    # keep_tombstones=False erases the record with the episode: the entry comes back
+    e = Store(tmp_path / "e.db", project_name="p", retention_days=30, audit=False,
+              keep_tombstones=False)
+    try:
+        import_ledger(e, lines)
+        assert e.prune() == 1
+        back = import_ledger(e, lines).imported
+        assert len(back) == 1
+        assert e.delete(back[0]["episode"])
+        assert len(import_ledger(e, lines).imported) == 1
+    finally:
+        e.close()
 
 
 def test_owner_of_the_call_may_link(tmp_path):

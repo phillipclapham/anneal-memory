@@ -9,17 +9,19 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 ### Fixed — a pruned or deleted team entry came back on the next `team-import`
 - An imported entry keeps the ledger's timestamp, so retention (`Store(retention_days=N)`,
   `prune --older-than N`) could prune it, and the next whole-ledger import found no stored
-  row and imported it again as fresh, every cycle (Diogenes 2026-10-05). The import now
-  consults tombstones: an entry whose tombstone matches the episode id, timestamp and content
-  hash it would write is reported in `already_removed` (JSON count; the CLI line says "pruned
-  or deleted here earlier") and is not imported. A `delete` of a team episode now holds too.
-  A link the ledger makes onto a removed entry is reported in `links_to_removed` (nothing is
-  hidden, the import stays clean).
-- Known limits: there is no command to take a removed entry back (import into a fresh store);
-  a store with `keep_tombstones=False` keeps no record and still re-imports; on a store with
-  retention, an entry already older than the window when it first arrives is pruned at the next
-  save and then stays removed; an entry id that comes back with a different hash after its
-  episode was removed imports as new, not as a conflict.
+  row and imported it again as fresh, every cycle (Diogenes 2026-10-05). Each imported entry
+  is now recorded in a new additive `team_entries` table (ledger id, hash, episode id; no
+  content), which outlives the episode. An entry whose episode was pruned or deleted is
+  reported in `already_removed` (JSON count; the CLI line says "pruned or deleted here
+  earlier") and is not imported again; the same id offered with a different hash is a
+  conflict. A link from a newly imported entry onto a removed one is reported in
+  `links_to_removed` (nothing is hidden, the import stays clean).
+- Known limits: there is no command to take a removed entry back (import into a fresh
+  store); `keep_tombstones=False` drops the record with the episode, so there a re-import
+  brings the entry back; an entry pruned or deleted under 0.9.39 or earlier has no record
+  and comes back once more, then holds; on a store with retention, an entry already older
+  than the window when it first arrives is pruned at the next save and then stays removed;
+  deleting a superseding entry un-hides what it superseded.
 
 ### Added — the owner of the call may supersede (`--call-owner`, `call_owners=`)
 - A cross-author link is also honoured when the linker's handle is listed in `--call-owner`

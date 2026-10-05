@@ -1820,7 +1820,8 @@ class Store:
         keep_tombstones: When pruning or deleting, preserve a tombstone row
             (episode ID, original timestamp, episode type, SHA-256 content hash)
             as an existence proof for the audit trail. Original text is erased.
-            Default True.
+            Default True. Either way, an imported team entry's ledger id and hash
+            stay in ``team_entries`` (see :meth:`import_team_entries`).
         project_name: Name for the continuity file header. Default "Agent".
         audit: Enable hash-chained JSONL audit trail. Default True.
         audit_retention_days: Auto-cleanup for rotated audit files. None = keep forever.
@@ -3183,6 +3184,8 @@ class Store:
         inserted recording the episode ID, original timestamp, episode
         type, and SHA-256 content hash — the text itself is gone but the
         audit trail retains enough metadata to prove the episode existed.
+        An imported team entry's ledger id and hash stay in ``team_entries`` either
+        way, so a later team import does not bring it back.
 
         Args:
             episode_id: The 8-char hex episode ID.

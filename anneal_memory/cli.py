@@ -2150,19 +2150,26 @@ def cmd_team_import(args: argparse.Namespace) -> None:
             f"{data['skipped_ack']} acks skipped); {data['links_made']} supersession links, "
             f"{len(data['links_pending'])} pending"
         )
-        for key in ("rejected", "chain_problems", "conflicts", "links_refused",
-                    "links_unauthorized"):
-            for item in data[key]:
-                print(f"  {key}: {item}", file=sys.stderr)
+        # Every note goes before the findings: a caller showing only the last stderr line
+        # (levain's SessionStart seam) then shows a finding, not a note.
         if data["links_unauthorized"]:
             print("  note: a link is judged only on the import that first brings in either "
-                  "entry; re-running with more authority will not make these links", file=sys.stderr)
+                  "entry, so re-running with more authority will not make the links below; "
+                  "someone with authority can record a new entry that supersedes the target",
+                  file=sys.stderr)
+        if data["links_to_removed"]:
+            print(f"  note: {len(data['links_to_removed'])} link(s) name an entry pruned or "
+                  "deleted here; nothing is hidden", file=sys.stderr)
         if data["framing"] == "none" and data["imported"] + data["already_present"]:
             print("  note: unframed input; a second root inside one file is not detected "
                   "(an exporter that frames its output closes this)", file=sys.stderr)
         for item in data["cross_author_links"]:
             print(f"  note: {item['by']} superseded {item['target']} (another author's entry)",
                   file=sys.stderr)
+        for key in ("rejected", "chain_problems", "conflicts", "links_refused",
+                    "links_unauthorized"):
+            for item in data[key]:
+                print(f"  {key}: {item}", file=sys.stderr)
     if not report.clean:
         sys.exit(3)
 

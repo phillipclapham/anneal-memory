@@ -149,6 +149,7 @@ class TeamImportReport:
     links_refused: list[dict] = field(default_factory=list)
     links_unauthorized: list[dict] = field(default_factory=list)
     already_removed: list[str] = field(default_factory=list)
+    links_to_removed: list[dict] = field(default_factory=list)
     dry_run: bool = False
     framing: str = "none"  # "v2" when the stream carried the frame header
 
@@ -180,6 +181,7 @@ class TeamImportReport:
             "links_pending": self.links_pending,
             "links_refused": self.links_refused,
             "links_unauthorized": self.links_unauthorized,
+            "links_to_removed": self.links_to_removed,
             "imported_ids": [i["id"] for i in self.imported],
         }
 
@@ -755,4 +757,5 @@ def import_ledger(
     report.links_refused = result["links_refused"]
     report.links_unauthorized = result["links_unauthorized"]
     report.already_removed = result["already_removed"]
+    report.links_to_removed = result["links_to_removed"]
     return report

@@ -2688,7 +2688,8 @@ class Store:
           names the episode id, timestamp and content hash this import would write)
           is returned in ``already_removed`` and NOT imported again, so a whole-ledger
           re-import after a retention prune changes nothing. A store opened with
-          ``keep_tombstones=False`` keeps no such record and re-imports it.
+          ``keep_tombstones=False`` keeps no such record and re-imports it. A link
+          whose target was removed this way is returned in ``links_to_removed``.
         - A link from one author over ANOTHER author's entry is made only when the
           linking author matches a ``link_authority`` pattern (``fnmatch``, on the
           handle after ``team:``), or when the linking author's handle is EXACTLY in
@@ -2723,6 +2724,7 @@ class Store:
         refused: list[dict[str, str]] = []
         unauthorized: list[dict[str, Any]] = []
         removed: list[str] = []
+        to_removed: list[dict[str, str]] = []
         with self._db_boundary("import_team_entries"):
             if not self._conn.in_transaction:
                 self._conn.execute("BEGIN IMMEDIATE")
@@ -2824,6 +2826,8 @@ class Store:
                     if entry_id not in fresh and target not in fresh:
                         continue
                     if target in gone:
+                        # nothing left to hide; reported so the ledger's link is not lost
+                        to_removed.append({"id": entry_id, "target": target})
                         continue
                     old = by_entry.get(target)
                     if old is None:
@@ -2896,7 +2900,8 @@ class Store:
         return {"imported": imported, "already_present": already,
                 "conflicts": conflicts, "links_made": made,
                 "links_pending": pending, "links_refused": refused,
-                "links_unauthorized": unauthorized, "already_removed": removed}
+                "links_unauthorized": unauthorized, "already_removed": removed,
+                "links_to_removed": to_removed}
 
     def supersession_problem(self, *, old_id: str, new_id: str) -> str | None:
         """Why a proposed link would be refused, or None if it would record.

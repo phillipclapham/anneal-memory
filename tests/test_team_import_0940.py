@@ -28,6 +28,7 @@ def test_import_prune_import_is_stable(tmp_path):
             assert not again.imported and again.clean
             assert again.already_removed == [old["id"]]
             assert again.to_dict()["already_removed"] == 1
+            assert again.links_to_removed == []
             assert s.prune() == 0
         assert s._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0] == 0
     finally:

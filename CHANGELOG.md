@@ -13,9 +13,13 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   consults tombstones: an entry whose tombstone matches the episode id, timestamp and content
   hash it would write is reported in `already_removed` (JSON count; the CLI line says "pruned
   or deleted here earlier") and is not imported. A `delete` of a team episode now holds too.
-- Known limits: a store with `keep_tombstones=False` keeps no record and still re-imports; on
-  a store with retention, an entry already older than the window when it first arrives is
-  pruned at the next save and then stays removed.
+  A link the ledger makes onto a removed entry is reported in `links_to_removed` (nothing is
+  hidden, the import stays clean).
+- Known limits: there is no command to take a removed entry back (import into a fresh store);
+  a store with `keep_tombstones=False` keeps no record and still re-imports; on a store with
+  retention, an entry already older than the window when it first arrives is pruned at the next
+  save and then stays removed; an entry id that comes back with a different hash after its
+  episode was removed imports as new, not as a conflict.
 
 ### Added — the owner of the call may supersede (`--call-owner`, `call_owners=`)
 - A cross-author link is also honoured when the linker's handle is listed in `--call-owner`

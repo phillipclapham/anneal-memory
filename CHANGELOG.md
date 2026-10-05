@@ -4,7 +4,14 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
-## [0.9.40] — 2026-10-05
+## [0.9.41] — 2026-10-05
+
+- 0.9.40 was tagged and never published: its Windows CI job failed on a test that read
+  `/dev/null`, which Windows does not have (the new "not found" message fired first). The
+  test now names a missing file and checks `/dev/null` only where it exists. 0.9.41 carries
+  everything listed under 0.9.40.
+
+## [0.9.40] — 2026-10-05 (tagged, never published)
 
 ### Fixed — a pruned or deleted team entry came back on the next `team-import`
 - An imported entry keeps the ledger's timestamp, so retention (`Store(retention_days=N)`,

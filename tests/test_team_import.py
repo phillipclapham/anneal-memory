@@ -615,8 +615,11 @@ def test_a_directory_is_refused_not_read(tmp_path):
     (tmp_path / "ledger" / "alice").mkdir(parents=True)
     with pytest.raises(ValueError, match="not read directly"):
         read_ledger_lines([tmp_path / "ledger"])
-    with pytest.raises(ValueError, match="regular file"):
-        read_ledger_lines(["/dev/null"])
+    with pytest.raises(ValueError, match="not found"):
+        read_ledger_lines([tmp_path / "missing.jsonl"])
+    if Path("/dev/null").exists():  # absent on Windows
+        with pytest.raises(ValueError, match="regular file"):
+            read_ledger_lines(["/dev/null"])
 
 
 def test_named_file_is_read_with_newline_framing(tmp_path):

@@ -4,6 +4,37 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.9.40] — 2026-10-05
+
+### Fixed — a pruned or deleted team entry came back on the next `team-import`
+- An imported entry keeps the ledger's timestamp, so retention (`Store(retention_days=N)`,
+  `prune --older-than N`) could prune it, and the next whole-ledger import found no stored
+  row and imported it again as fresh, every cycle (Diogenes 2026-10-05). The import now
+  consults tombstones: an entry whose tombstone matches the episode id, timestamp and content
+  hash it would write is reported in `already_removed` (JSON count; the CLI line says "pruned
+  or deleted here earlier") and is not imported. A `delete` of a team episode now holds too.
+- Known limits: a store with `keep_tombstones=False` keeps no record and still re-imports; on
+  a store with retention, an entry already older than the window when it first arrives is
+  pruned at the next save and then stays removed.
+
+### Added — the owner of the call may supersede (`--call-owner`, `call_owners=`)
+- A cross-author link is also honoured when the linker's handle is listed in `--call-owner`
+  (exact, comma-separated, repeatable; the caller passes the team's current members) AND equals
+  the target entry's own `owner`. A target owner of `lead` or `client:...` never matches; the
+  team owner, named with `--link-authority`, acts for those. Without `--call-owner` behaviour is
+  0.9.39's. Each made link reports its `authority` (`same_author`, `link_authority`,
+  `call_owner`); each unauthorized link reports `target_owner`.
+- Unchanged and now stated where the operator acts (`--link-authority` help, a stderr note on
+  any unauthorized link): a link is judged once, on the import that first brings in either
+  entry, so authority passed on a later import does not link entries the store already holds.
+
+### Fixed — CLI wording (Diogenes 2026-10-05 LOWs)
+- `team-import '~unknownuser/x'` printed a traceback: the CLI's own path pre-check is gone and
+  `read_ledger_lines` reports a missing file, a directory and an unexpandable path itself.
+- `team-import` with no source named a directory as an input; it now names the exporter pipe.
+- `wrap-cancel --wrap-token` / `--force` help now names the caller-token wrap (which needs
+  `--force`), matching the MCP `wrap_cancel` description.
+
 ## [0.9.39] — 2026-10-04
 
 ### Fixed — `import_ledger` could loop forever on an endless run of blank lines (a 0.9.38 regression)

@@ -2108,7 +2108,9 @@ def cmd_team_import(args: argparse.Namespace) -> None:
 
     sources = list(args.sources or [])
     if not sources:
-        print("Error: give a ledger file or directory, or '-' for stdin.", file=sys.stderr)
+        print("Error: pipe the ledger's exporter into '-' "
+              "(levain team export --jsonl | anneal-memory team-import -), "
+              "or give ledger file(s).", file=sys.stderr)
         sys.exit(2)
     chunks: list[list[str]] = []
     for src in sources:
@@ -2119,9 +2121,8 @@ def cmd_team_import(args: argparse.Namespace) -> None:
                 print(f"Error: {exc}", file=sys.stderr)
                 sys.exit(1)
         else:
-            if not Path(src).expanduser().exists():
-                print(f"Error: not found: {src}", file=sys.stderr)
-                sys.exit(1)
+            # read_ledger_lines names a missing file, a directory and an
+            # unexpandable ~user path itself, as a ValueError.
             try:
                 chunks.append(read_ledger_lines([src]))
             except ValueError as exc:
@@ -2135,7 +2136,9 @@ def cmd_team_import(args: argparse.Namespace) -> None:
         sys.exit(2)
     with _open_store(args) as store:
         authority = [a.strip() for chunk in (args.link_authority or []) for a in chunk.split(",") if a.strip()]
-        report = import_ledger(store, lines, dry_run=args.dry_run, link_authority=authority)
+        owners = [a.strip() for chunk in (args.call_owner or []) for a in chunk.split(",") if a.strip()]
+        report = import_ledger(store, lines, dry_run=args.dry_run, link_authority=authority,
+                               call_owners=owners)
     data = report.to_dict()
     if args.json:
         _print_json(data)
@@ -2143,6 +2146,7 @@ def cmd_team_import(args: argparse.Namespace) -> None:
         verb = "Would import" if args.dry_run else "Imported"
         print(
             f"{verb} {data['imported']} entries ({data['already_present']} already present, "
+            f"{data['already_removed']} pruned or deleted here earlier, "
             f"{data['skipped_ack']} acks skipped); {data['links_made']} supersession links, "
             f"{len(data['links_pending'])} pending"
         )
@@ -2150,6 +2154,9 @@ def cmd_team_import(args: argparse.Namespace) -> None:
                     "links_unauthorized"):
             for item in data[key]:
                 print(f"  {key}: {item}", file=sys.stderr)
+        if data["links_unauthorized"]:
+            print("  note: a link is judged only on the import that first brings in either "
+                  "entry; re-running with more authority will not make these links", file=sys.stderr)
         if data["framing"] == "none" and data["imported"] + data["already_present"]:
             print("  note: unframed input; a second root inside one file is not detected "
                   "(an exporter that frames its output closes this)", file=sys.stderr)
@@ -4180,7 +4187,8 @@ def build_parser() -> argparse.ArgumentParser:
             "refused WITHOUT changing anything if a peer replaced it or it "
             "already completed. Omit to cancel whatever is current, which is "
             "what you want when clearing a wrap you did not open (a gated wrap "
-            "also needs --session-id or --force)."
+            "also needs --session-id or --force; a wrap opened with a token its "
+            "preparer supplied needs --force)."
         ),
     )
     sub.add_argument(
@@ -4190,8 +4198,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub.add_argument(
         "--force", action="store_true",
-        help="Cancel a gated wrap without its token or session (that session is "
-             "gone). Discards its compression.",
+        help="Cancel a gated or caller-token wrap without its token or session "
+             "(that session is gone). Discards its compression.",
     )
     sub.add_argument(
         "--partial", action="store_true",
@@ -4253,8 +4261,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--link-authority", action="append", metavar="PATTERN",
         help="Author handle (fnmatch pattern, comma-separated, repeatable) allowed to "
              "supersede or retire ANOTHER author's entry, e.g. the team lead or 'pack:*'. "
-             "Without it only same-author supersession applies; other links are reported "
-             "and hide nothing.",
+             "Without it (or --call-owner) only same-author supersession applies; other "
+             "links are reported and hide nothing. A link is judged once, on the import "
+             "that first brings in either entry: authority passed on a later import does "
+             "not link entries the store already holds.",
+    )
+    sub.add_argument(
+        "--call-owner", action="append", metavar="HANDLES",
+        help="Author handles (exact, comma-separated, repeatable; normally the team's "
+             "current members) who may supersede or retire ANOTHER author's entry whose "
+             "own owner of the call is that handle. An owner of 'lead' or 'client:...' "
+             "never matches here; name the team owner with --link-authority for those.",
     )
     sub.set_defaults(func=cmd_team_import)
 

@@ -2666,6 +2666,7 @@ class Store:
         *,
         dry_run: bool = False,
         link_authority: tuple[str, ...] = (),
+        call_owners: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         """Import verified team-ledger entries as episodes, idempotently, in ONE
         write transaction (so two concurrent imports cannot both insert an entry).
@@ -2683,10 +2684,19 @@ class Store:
           word-overlap gate of :meth:`supersede` is skipped, because the ledger
           already holds the decider's words and a replacing ruling need not
           share wording.
+        - An entry this store held once and then pruned or deleted (its tombstone
+          names the episode id, timestamp and content hash this import would write)
+          is returned in ``already_removed`` and NOT imported again, so a whole-ledger
+          re-import after a retention prune changes nothing. A store opened with
+          ``keep_tombstones=False`` keeps no such record and re-imports it.
         - A link from one author over ANOTHER author's entry is made only when the
           linking author matches a ``link_authority`` pattern (``fnmatch``, on the
-          handle after ``team:``). Otherwise it is returned in ``links_unauthorized``
-          and nothing is hidden.
+          handle after ``team:``), or when the linking author's handle is EXACTLY in
+          ``call_owners`` AND equals the target entry's own ``owner`` (the owner of
+          the call). ``lead`` and ``client:`` owners never match ``call_owners``: they
+          resolve to the team owner, whom the caller names in ``link_authority``.
+          Otherwise the link is returned in ``links_unauthorized`` and nothing is
+          hidden.
         - Links come ONLY from the ``supersedes`` of the verified ``records`` of this
           call, never from stored rows, and only for pairs where the linking entry
           or its target was imported by this call, so a link an operator removed
@@ -2711,7 +2721,8 @@ class Store:
         made: list[dict[str, str]] = []
         pending: list[dict[str, str]] = []
         refused: list[dict[str, str]] = []
-        unauthorized: list[dict[str, str]] = []
+        unauthorized: list[dict[str, Any]] = []
+        removed: list[str] = []
         with self._db_boundary("import_team_entries"):
             if not self._conn.in_transaction:
                 self._conn.execute("BEGIN IMMEDIATE")
@@ -2730,12 +2741,25 @@ class Store:
                 team = root.get("team") if isinstance(root, dict) else None
                 if isinstance(team, dict) and isinstance(team.get("entry_id"), str):
                     kind = team.get("kind")
+                    owner = team.get("owner")
                     by_entry[team["entry_id"]] = {
                         "ep": row["id"], "hash": team.get("hash"),
                         "kind": kind if isinstance(kind, str) else None,
+                        "owner": owner if isinstance(owner, str) else None,
                         "content": row["content"], "ts": row["timestamp"],
                         "source": row["source"],
                     }
+            # Tombstones are read only when some record is not stored: a store that
+            # pruned or deleted an entry must not take it back on the next import.
+            tombs: dict[str, tuple[str, str]] = {}
+            if any(rec["entry_id"] not in by_entry for rec in records):
+                tombs = {
+                    r["id"]: (r["timestamp"], r["content_hash"])
+                    for r in self._conn.execute(
+                        "SELECT id, timestamp, content_hash FROM tombstones"
+                    ).fetchall()
+                }
+            gone: set[str] = set()
             fresh: set[str] = set()
             for rec in records:
                 known = by_entry.get(rec["entry_id"])
@@ -2748,10 +2772,21 @@ class Store:
                             "offered_hash": rec["hash"],
                         })
                     continue
+                if rec["entry_id"] in gone:
+                    continue
                 meta_json = json.dumps(rec["metadata"])
                 # The ledger id is part of the id input, so entries with identical
                 # text and timestamp still get distinct episode ids.
                 id_input = f"{rec['entry_id']}\0{rec['content']}"
+                if tombs:
+                    # Any nonce the insert below could have used: a tombstone with
+                    # this id, timestamp and content hash is this entry, removed here.
+                    held = (rec["timestamp"], _content_hash(rec["content"]))
+                    if any(tombs.get(_episode_id(id_input, rec["timestamp"], n)) == held
+                           for n in range(64)):
+                        gone.add(rec["entry_id"])
+                        removed.append(rec["entry_id"])
+                        continue
                 for nonce in range(64):
                     ep_id = _episode_id(id_input, rec["timestamp"], nonce)
                     try:
@@ -2766,8 +2801,10 @@ class Store:
                         if nonce == 63:
                             raise
                 team_meta = rec["metadata"].get("team") or {}
+                owner = team_meta.get("owner")
                 by_entry[rec["entry_id"]] = {
                     "ep": ep_id, "hash": rec["hash"], "kind": team_meta.get("kind"),
+                    "owner": owner if isinstance(owner, str) else None,
                     "content": rec["content"], "ts": rec["timestamp"],
                     "source": rec["source"],
                 }
@@ -2777,12 +2814,16 @@ class Store:
                                  "content": rec["content"]})
             for rec in records:
                 entry_id = rec["entry_id"]
+                if entry_id in gone:
+                    continue  # removed here earlier; its links went with it
                 new = by_entry[entry_id]
                 if new["hash"] != rec["hash"]:
                     continue  # a conflict: the stored entry is not this one
                 team_meta = rec["metadata"].get("team") or {}
                 for target in rec["supersedes"]:
                     if entry_id not in fresh and target not in fresh:
+                        continue
+                    if target in gone:
                         continue
                     old = by_entry.get(target)
                     if old is None:
@@ -2793,12 +2834,20 @@ class Store:
                         (old["ep"], new["ep"]),
                     ).fetchone():
                         continue
+                    authority = "same_author"
                     if old["source"] != new["source"]:
                         who = str(new["source"])[len("team:"):]
-                        if not any(fnmatch.fnmatchcase(who, pat) for pat in link_authority):
+                        call = old.get("owner")
+                        if any(fnmatch.fnmatchcase(who, pat) for pat in link_authority):
+                            authority = "link_authority"
+                        elif (call is not None and call == who and who in call_owners
+                              and call != "lead" and ":" not in call):
+                            authority = "call_owner"
+                        else:
                             unauthorized.append({
                                 "id": entry_id, "by": str(new["source"]),
                                 "target": target, "target_author": str(old["source"]),
+                                "target_owner": call,
                                 "target_text": str(old["content"])[:200],
                             })
                             continue
@@ -2824,7 +2873,8 @@ class Store:
                     )
                     made.append({"id": entry_id, "target": target, "old": old["ep"],
                                  "new": new["ep"], "source": new["source"],
-                                 "cross_author": str(old["source"] != new["source"]).lower()})
+                                 "cross_author": str(old["source"] != new["source"]).lower(),
+                                 "authority": authority})
             if dry_run:
                 self._conn.rollback()
             elif not self._defer_commit:
@@ -2846,7 +2896,7 @@ class Store:
         return {"imported": imported, "already_present": already,
                 "conflicts": conflicts, "links_made": made,
                 "links_pending": pending, "links_refused": refused,
-                "links_unauthorized": unauthorized}
+                "links_unauthorized": unauthorized, "already_removed": removed}
 
     def supersession_problem(self, *, old_id: str, new_id: str) -> str | None:
         """Why a proposed link would be refused, or None if it would record.

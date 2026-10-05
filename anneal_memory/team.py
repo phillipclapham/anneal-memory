@@ -21,12 +21,19 @@ What it guarantees:
   the first change. The chain proves the file was not edited after the fact; it
   does not prove who wrote it (the git host's access control does that).
 - **Idempotent by ledger id.** Re-importing changes nothing; the same id with a
-  different hash is reported as a conflict and never overwritten.
+  different hash is reported as a conflict and never overwritten. An entry the store
+  held and then pruned (retention) or deleted stays removed: its tombstone is
+  consulted and the entry is reported in ``already_removed``. A store opened with
+  ``keep_tombstones=False`` keeps no such record, so there a re-import brings it back.
 - **Acks are not memory.** An ``ack`` entry is counted and skipped.
 - **Hiding is authorised, not assumed.** A supersession by the SAME author applies.
   One by a different author applies only when that author matches a
-  ``link_authority`` pattern the caller names (a team lead, the pack authors);
-  otherwise it is reported in full and nothing is hidden.
+  ``link_authority`` pattern the caller names (a team lead, the pack authors), or
+  when that author's handle is in ``call_owners`` (exact) and is the target entry's own
+  ``owner`` (the owner of the call); otherwise it is reported in full and nothing is
+  hidden. A link is judged once, on the import that first brings in the linking entry
+  or its target: passing more authority on a later import does not link entries the
+  store already holds.
 
 - **Framed input checks each file.** A stream that opens with the header
   ``{"anneal_team_stream":2}`` carries every ledger line as a STRING inside an
@@ -141,6 +148,7 @@ class TeamImportReport:
     links_pending: list[dict] = field(default_factory=list)
     links_refused: list[dict] = field(default_factory=list)
     links_unauthorized: list[dict] = field(default_factory=list)
+    already_removed: list[str] = field(default_factory=list)
     dry_run: bool = False
     framing: str = "none"  # "v2" when the stream carried the frame header
 
@@ -158,13 +166,15 @@ class TeamImportReport:
             "clean": self.clean,
             "imported": len(self.imported),
             "already_present": len(self.already_present),
+            "already_removed": len(self.already_removed),
             "skipped_ack": len(self.skipped_ack),
             "rejected": self.rejected,
             "chain_problems": self.chain_problems,
             "conflicts": self.conflicts,
             "links_made": len(self.links_made),
             "cross_author_links": [
-                {"id": l["id"], "target": l["target"], "by": l["source"]}
+                {"id": l["id"], "target": l["target"], "by": l["source"],
+                 "authority": l["authority"]}
                 for l in self.links_made if l["cross_author"] == "true"
             ],
             "links_pending": self.links_pending,
@@ -194,6 +204,8 @@ def read_ledger_lines(paths: Iterable[str | Path]) -> list[str]:
                 f"{p}: a directory is not read directly; pipe the ledger's exporter "
                 "(`levain team export --jsonl`) into team-import -"
             )
+        if not p.exists():
+            raise ValueError(f"{p}: not found")
         if not p.is_file():
             raise ValueError(f"{p}: not a regular file")
         try:
@@ -669,6 +681,7 @@ def import_ledger(
     *,
     dry_run: bool = False,
     link_authority: Iterable[str] = (),
+    call_owners: Iterable[str] = (),
 ) -> TeamImportReport:
     """Import ledger lines into ``store``. See the module docstring. ``lines`` is split on
     ``\\n`` with a trailing ``\\r`` dropped, as :func:`read_stream_lines` does. A
@@ -680,6 +693,8 @@ def import_ledger(
     """
     if isinstance(link_authority, (str, bytes)):
         raise TypeError("link_authority is a collection of patterns, not one string")
+    if isinstance(call_owners, (str, bytes)):
+        raise TypeError("call_owners is a collection of handles, not one string")
     report = TeamImportReport(dry_run=dry_run)
     valid: list[dict] = []
     verified = _verified_chains(lines, report)
@@ -730,6 +745,7 @@ def import_ledger(
         })
     result = store.import_team_entries(
         records, dry_run=dry_run, link_authority=tuple(link_authority),
+        call_owners=tuple(call_owners),
     )
     report.imported = result["imported"]
     report.already_present = result["already_present"]
@@ -738,4 +754,5 @@ def import_ledger(
     report.links_pending = result["links_pending"]
     report.links_refused = result["links_refused"]
     report.links_unauthorized = result["links_unauthorized"]
+    report.already_removed = result["already_removed"]
     return report

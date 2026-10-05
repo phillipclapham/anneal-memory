@@ -441,7 +441,7 @@ def _stream_header(raw: str) -> object:
         return _NO_RUN
     try:
         obj = json.loads(raw, object_pairs_hook=_Pairs, parse_constant=_refuse_constant,
-                         parse_float=_finite_float,
+                         parse_float=str,
                          parse_int=lambda s: int(s) if len(s) <= 20 else s)
     except (ValueError, RecursionError):
         return _NO_RUN
@@ -486,13 +486,13 @@ def _units(lines: Iterable[str], report: TeamImportReport):
     it; in framed mode every line must be an envelope."""
     mode: str | None = None
     for k, raw in enumerate(lines, 1):
+        if not raw.strip():
+            continue
         if k > _MAX_LINES:
             report.chain_problems.append(
                 f"more than {_MAX_LINES} lines; the rest were not read"
             )
             return
-        if not raw.strip():
-            continue
         if mode is None:
             head = _stream_header(raw)
             if head is _NO_RUN:
@@ -662,7 +662,9 @@ def import_ledger(
     dry_run: bool = False,
     link_authority: Iterable[str] = (),
 ) -> TeamImportReport:
-    """Import ledger lines into ``store``. See the module docstring.
+    """Import ledger lines into ``store``. See the module docstring. Each line carries
+    no line terminator (strip ``\\n`` and ``\\r``, as :func:`read_stream_lines` does): a
+    line break inside a line is refused.
 
     Never raises for bad ledger content: every refusal is in the report. A store
     error (locked database, corrupt file) raises as it does everywhere else.

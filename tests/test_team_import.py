@@ -923,7 +923,7 @@ def test_an_envelope_line_with_a_line_break_is_judged_by_position(store):
 
 def test_header_parsing_is_semantic_not_textual(store):
     alice = ledger("alice", [RULING])
-    for hdr in ('{"anneal_team_strea\\u006d":3}', '{"anneal_team_stream":3,"anneal_team_stream":2}',
+    for hdr in ('{"anneal_team_stream":1e999}', '{"anneal_team_strea\\u006d":3}', '{"anneal_team_stream":3,"anneal_team_stream":2}',
                 '{"anneal_team_stream":' + "9" * 5000 + '}'.replace("5000", "")):
         rep = import_ledger(store, [hdr] + alice)
         assert not rep.imported and rep.framing == "unknown", hdr[:40]
@@ -1046,3 +1046,11 @@ def test_framed_stdin_through_the_cli(tmp_path):
     r = subprocess.run(base + ["team-import", "-"], input=("\n".join(alice) + "\n").encode(),
                        capture_output=True)
     assert r.returncode == 0 and b"unframed input" in r.stderr
+
+
+def test_exactly_the_line_cap_of_terminated_lines_is_not_over_it(store, monkeypatch):
+    from anneal_memory import team
+    monkeypatch.setattr(team, "_MAX_LINES", 2)
+    lines = ledger("alice", [RULING]) + [""]  # one entry plus the split artifact after a final newline
+    rep = import_ledger(store, lines + [""])
+    assert rep.clean and len(rep.imported) == 1

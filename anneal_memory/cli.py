@@ -2142,6 +2142,9 @@ def cmd_team_import(args: argparse.Namespace) -> None:
                     "links_unauthorized"):
             for item in data[key]:
                 print(f"  {key}: {item}", file=sys.stderr)
+        if data["framing"] == "none":
+            print("  note: unframed input; a second root inside one file is not detected "
+                  "(an exporter that frames its output closes this)", file=sys.stderr)
         for item in data["cross_author_links"]:
             print(f"  note: {item['by']} superseded {item['target']} (another author's entry)",
                   file=sys.stderr)
@@ -4230,6 +4233,8 @@ def build_parser() -> argparse.ArgumentParser:
              "Pipe the ledger's exporter (levain team export --jsonl) into '-'. The input is "
              "one trust unit the exporter vouches for: authors are self-declared and "
              "authentication is the git host's job (branch protection, signed commits). "
+             "Framed input (a header line, then one envelope per ledger line) also checks "
+             "one root and one author per file; framed stdin is read alone. "
              "A directory is not read directly.",
         parents=[json_parent],
     )

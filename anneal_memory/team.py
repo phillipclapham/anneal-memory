@@ -28,6 +28,15 @@ What it guarantees:
   ``link_authority`` pattern the caller names (a team lead, the pack authors);
   otherwise it is reported in full and nothing is hidden.
 
+- **Framed input checks each file.** A stream that opens with the header
+  ``{"anneal_team_stream":2}`` carries every ledger line as a STRING inside an
+  exporter-built envelope (:func:`frame_stream`; contract in
+  ``project_memory/team_frame_contract_v2.md``), so file content can never become
+  structure. Each frame is one file: it starts at a root, holds exactly one root and one
+  author, and shares no chain state with another frame. Unframed (v1) input is still
+  accepted; it cannot see file boundaries, so a second root in it starts a new chain
+  (``report.framing`` says which applied).
+
 Limits that are inherent, stated so nobody has to rediscover them: the author is
 self-declared, so authentication is the git host's job (branch protection, signed
 commits) and nothing here sees git committers or file paths; the input is one trust
@@ -57,12 +66,16 @@ from .store import Store
 __all__ = [
     "canonical",
     "chain_hash",
+    "frame_stream",
     "import_ledger",
     "read_ledger_lines",
     "TeamImportReport",
 ]
 
 SCHEMA_VERSION = 1
+STREAM_VERSION = 2
+_STREAM_KEY = "anneal_team_stream"
+_FRAME_LABEL = re.compile(r"[A-Za-z0-9._@:+/=-]{1,200}", re.ASCII)
 TYPES = ("decision", "constraint", "finding", "question", "tension", "ack", "retire")
 KINDS = ("ruling", "practice")
 # decision/constraint need a kind; finding/question/tension take their own episode type.
@@ -77,6 +90,7 @@ _EPISODE_TYPE = {
     "retire": "context",
 }
 _MAX_LINE_CHARS = 1_000_000
+_ENVELOPE_CHARS = 12 * _MAX_LINE_CHARS + 512  # ensure_ascii escapes an astral character as 12 chars
 _HANDLE = re.compile(r"[A-Za-z0-9._@:+-]{1,200}")
 # Levain's writer builds an id as <P>-<stamp>-<hex> with P derived from the author
 # below; an id that does not start with its own author's P is a squatter's, and is
@@ -125,6 +139,7 @@ class TeamImportReport:
     links_refused: list[dict] = field(default_factory=list)
     links_unauthorized: list[dict] = field(default_factory=list)
     dry_run: bool = False
+    framing: str = "none"  # "v2" when the stream carried the frame header
 
     @property
     def clean(self) -> bool:
@@ -136,6 +151,7 @@ class TeamImportReport:
     def to_dict(self) -> dict[str, Any]:
         return {
             "dry_run": self.dry_run,
+            "framing": self.framing,
             "clean": self.clean,
             "imported": len(self.imported),
             "already_present": len(self.already_present),
@@ -372,52 +388,141 @@ def render_content(e: dict) -> str:
     return " ".join(parts)
 
 
+def _load_json(line: str, where: str, report: TeamImportReport, what: str = "an entry") -> object:
+    """``json.loads`` with the importer's bounds; a refusal goes in the report and
+    returns ``_NO_RUN`` (so a legitimate JSON ``null`` stays distinguishable)."""
+    if _nests_too_deep(line):
+        report.chain_problems.append(f"{where}: nested deeper than {what} can be")
+        return _NO_RUN
+    try:
+        return json.loads(line, parse_constant=_refuse_constant, parse_float=_finite_float)
+    except json.JSONDecodeError as exc:
+        report.chain_problems.append(f"{where}: not JSON ({exc.msg})")
+    except (RecursionError, ValueError):
+        report.chain_problems.append(f"{where}: not parseable as {what}")
+    return _NO_RUN
+
+
+def frame_stream(files: Iterable[tuple[str, Iterable[str]]]) -> Iterable[str]:
+    """The framed (v2) stream for ``files`` = ``(label, lines)`` pairs: the header,
+    then one envelope per ledger line. Each envelope is a serialized dict whose
+    ``line`` value is the ledger line as a STRING, so ledger content can never become
+    structure. This is the reference builder for the contract in
+    ``project_memory/team_frame_contract_v2.md``; an exporter may reimplement the format."""
+    yield json.dumps({_STREAM_KEY: STREAM_VERSION}, separators=(",", ":"))
+    for label, lines in files:
+        if not isinstance(label, str) or not _FRAME_LABEL.fullmatch(label):
+            raise ValueError(f"frame label {label!r} is not [A-Za-z0-9._@:+/=-]{{1,200}}")
+        for n, line in enumerate(lines, 1):
+            yield json.dumps({"frame": label, "n": n, "line": line}, separators=(",", ":"))
+
+
+def _units(lines: Iterable[str], report: TeamImportReport):
+    """``(frame, n, line)`` for every ledger line: ``frame`` is None and ``n`` the
+    stream line number for unframed (v1) input, the exporter's label and the file's
+    line number for framed input. Sets ``report.framing``. The mode is decided by the
+    FIRST non-blank line only (a header, or not), so ledger content that appears later
+    can never switch it; in framed mode every line must be an envelope."""
+    mode: str | None = None
+    for k, raw in enumerate(lines, 1):
+        if k > _MAX_LINES:
+            report.chain_problems.append(
+                f"more than {_MAX_LINES} lines; the rest were not read"
+            )
+            return
+        if not raw.strip():
+            continue
+        if mode is None:
+            head: object = _NO_RUN
+            if _STREAM_KEY in raw and len(raw) <= 200:
+                head = _load_json(raw, f"line {k}", report, "a header")
+            if isinstance(head, dict) and _STREAM_KEY in head:
+                if head == {_STREAM_KEY: STREAM_VERSION} and type(head[_STREAM_KEY]) is int:
+                    mode = "v2"
+                    report.framing = "v2"
+                    continue
+                report.chain_problems.append(
+                    f"line {k}: unknown stream header (this reader takes version "
+                    f"{STREAM_VERSION}); nothing was imported"
+                )
+                return
+            mode = "none"
+            report.framing = "none"
+        if mode == "none":
+            yield None, k, raw
+            continue
+        if len(raw) > _ENVELOPE_CHARS:
+            report.chain_problems.append(f"line {k}: longer than a frame envelope can be")
+            continue
+        env = _load_json(raw, f"line {k}", report, "a frame envelope")
+        if env is _NO_RUN:
+            continue
+        if not (
+            isinstance(env, dict) and set(env) == {"frame", "n", "line"}
+            and isinstance(env["frame"], str) and _FRAME_LABEL.fullmatch(env["frame"])
+            and type(env["n"]) is int and env["n"] >= 1 and isinstance(env["line"], str)
+        ):
+            report.chain_problems.append(
+                f"line {k}: not a frame envelope (a framed stream carries nothing else)"
+            )
+            continue
+        yield env["frame"], env["n"], env["line"]
+
+
 def _verified_chains(
     lines: Iterable[str], report: TeamImportReport
 ) -> list[dict]:
     """Entries that pass the chain walk, in stream order.
 
     The input is ONE TRUST UNIT: a stream the caller vouches for (Levain's export on
-    stdin), with the files of a ledger one after another. A chain is a contiguous
-    run: it starts at a ``prev == ""`` root and each following line must name the
-    hash of the line accepted just before it, so a line that does not continue its
-    run is refused (with every later line of that run, which names it as ``prev``).
-    An exact repeat of an earlier line is skipped and moves nothing, so a copied line
-    cannot be used to attach a run to another author's chain; a copy of a chain's
-    prefix followed by an append is continued only when nothing else sits between the
-    copy's source and it. The stream carries no file names, so no author can be bound
-    to a path."""
+    stdin). A chain is a contiguous run: it starts at a ``prev == ""`` root and each
+    following line must name the hash of the line accepted just before it, so a line
+    that does not continue its run is refused (with every later line of that run,
+    which names it as ``prev``). An exact repeat of an earlier line is skipped and
+    moves nothing, so a copied line cannot be used to attach a run to another author's
+    chain; a copy of a chain's prefix followed by an append is continued only when
+    nothing else sits between the copy's source and it.
+
+    UNFRAMED input carries no file boundaries, so a second root simply starts a new
+    run (stated as a limit in the module docstring). FRAMED input (v2, see
+    :func:`frame_stream`) makes each file a unit: chain state resets at a frame start,
+    the first line must be the frame's root, and a second root inside one frame is
+    refused."""
     seen_hash: dict[str, dict] = {}
     out: list[dict] = []
     last_hash: str | None = None
     run_author: object = _NO_RUN
-    for n, line in enumerate(lines, 1):
-        if n > _MAX_LINES:
-            report.chain_problems.append(
-                f"more than {_MAX_LINES} lines; the rest were not read"
-            )
-            break
+    frame: str | None = None
+    frames_done: set[str] = set()
+    frame_refused = False
+    frame_root = False
+    for label, n, line in _units(lines, report):
+        if label is not None and (label != frame or frame is None):
+            if frame is not None:
+                frames_done.add(frame)
+            frame, frame_refused, frame_root = label, label in frames_done, False
+            last_hash, run_author = None, _NO_RUN
+            if frame_refused:
+                report.chain_problems.append(
+                    f"{label}: the file's lines come back after another file began; "
+                    "the second run is not imported"
+                )
+        if frame_refused:
+            continue
+        pos = f"line {n}" if label is None else f"{label}:{n}"
         if not line.strip():
             continue
         if len(line) > _MAX_LINE_CHARS:
-            report.chain_problems.append(f"line {n}: longer than {_MAX_LINE_CHARS} characters")
+            report.chain_problems.append(f"{pos}: longer than {_MAX_LINE_CHARS} characters")
             continue
-        if _nests_too_deep(line):
-            report.chain_problems.append(f"line {n}: nested deeper than an entry can be")
-            continue
-        try:
-            e = json.loads(line, parse_constant=_refuse_constant, parse_float=_finite_float)
-        except json.JSONDecodeError as exc:
-            report.chain_problems.append(f"line {n}: not JSON ({exc.msg})")
-            continue
-        except (RecursionError, ValueError):
-            report.chain_problems.append(f"line {n}: not parseable as an entry")
+        e = _load_json(line, pos, report)
+        if e is _NO_RUN:
             continue
         if not isinstance(e, dict) or not isinstance(e.get("hash"), str) \
                 or not isinstance(e.get("prev"), str):
-            report.chain_problems.append(f"line {n}: not an entry with prev and hash")
+            report.chain_problems.append(f"{pos}: not an entry with prev and hash")
             continue
-        who = f"line {n} ({e.get('id')!r})"
+        who = f"{pos} ({e.get('id')!r})"
         try:
             good = e["hash"] == chain_hash(e["prev"], e)
         except (UnicodeEncodeError, ValueError, TypeError, RecursionError):
@@ -434,6 +539,11 @@ def _verified_chains(
                 report.chain_problems.append(f"{who}: repeats a hash with different content")
             continue  # an exact repeat moves no chain state: nothing can be carried across it
         is_root = e["prev"] == ""
+        if is_root and label is not None and frame_root:
+            report.chain_problems.append(
+                f"{who}: a second root in one file; the file's chain restarted here, not imported"
+            )
+            continue
         if not is_root and e["prev"] != last_hash:
             report.chain_problems.append(
                 f"{who}: does not continue the entry before it (a gap, a fork, or "
@@ -446,6 +556,7 @@ def _verified_chains(
                 "chain; the chain is cut here"
             )
             continue
+        frame_root = frame_root or is_root
         run_author = e.get("author")
         last_hash = e["hash"]
         seen_hash[e["hash"]] = e

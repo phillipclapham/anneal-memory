@@ -788,3 +788,149 @@ def test_a_bom_on_piped_stdin_does_not_lose_the_first_chain(tmp_path):
     r = subprocess.run([sys.executable, "-m", "anneal_memory", "--db", str(db), "team-import", "-",
                         "--json"], input=data, capture_output=True, timeout=120)
     assert r.returncode == 0 and json.loads(r.stdout.decode("utf-8"))["imported"] == 1
+
+
+# ---- framed input (v2), 1004+28 ---------------------------------------------
+
+def _framed(*files: tuple[str, list[str]]) -> list[str]:
+    from anneal_memory.team import frame_stream
+    return list(frame_stream(files))
+
+
+def test_framed_stream_imports_and_reports_framing(store):
+    a = ledger("alice", [RULING, {"type": "finding", "reason": "two"}])
+    b = ledger("bob", [{"type": "finding", "reason": "bob's"}])
+    rep = import_ledger(store, _framed(("team/alice.jsonl", a), ("team/bob.jsonl", b)))
+    assert rep.clean and len(rep.imported) == 3 and rep.framing == "v2"
+    assert rep.to_dict()["framing"] == "v2"
+
+
+def test_unframed_stream_still_imports_and_says_so(store):
+    rep = import_ledger(store, ledger("alice", [RULING]))
+    assert rep.clean and len(rep.imported) == 1 and rep.framing == "none"
+
+
+def test_second_root_in_one_frame_is_refused_but_unframed_it_is_not(store, tmp_path):
+    """The known-open of 0.9.37: a root appended to alice's file (here under another
+    author, with a child) was indistinguishable from a second file's root."""
+    alice = ledger("alice", [RULING])
+    mallory = ledger("mallory", [{"type": "finding", "reason": "planted root"},
+                                 {"type": "finding", "reason": "planted child"}])
+    rep = import_ledger(store, _framed(("a.jsonl", alice + mallory)))
+    assert len(rep.imported) == 1 and not rep.clean
+    assert any("second root" in p for p in rep.chain_problems)
+    assert all(i["id"].startswith("alice-") for i in rep.imported)
+    # the same bytes with no framing are accepted: the stated v1 limit
+    s2 = Store(tmp_path / "v1.db", project_name="proj", audit=False)
+    try:
+        rep1 = import_ledger(s2, alice + mallory)
+        assert len(rep1.imported) == 3 and rep1.framing == "none"
+    finally:
+        s2.close()
+
+
+def test_one_root_per_file_across_two_frames_both_import(store):
+    rep = import_ledger(store, _framed(
+        ("a.jsonl", ledger("alice", [RULING])),
+        ("b.jsonl", ledger("bob", [{"type": "finding", "reason": "r"}]))))
+    assert rep.clean and len(rep.imported) == 2
+
+
+def test_chain_state_does_not_cross_a_frame(store):
+    alice = ledger("alice", [RULING, {"type": "finding", "reason": "two"}])
+    # frame b starts mid-chain (alice's second entry): refused, not attached to a's tip
+    rep = import_ledger(store, _framed(("a.jsonl", alice[:1]), ("b.jsonl", alice[1:])))
+    assert len(rep.imported) == 1 and rep.chain_problems
+
+
+def test_a_frame_label_coming_back_is_refused(store):
+    a = ledger("alice", [RULING])
+    b = ledger("bob", [{"type": "finding", "reason": "r"}])
+    c = ledger("carol", [{"type": "finding", "reason": "r"}])
+    rep = import_ledger(store, _framed(("a", a), ("b", b), ("a", c)))
+    assert len(rep.imported) == 2
+    assert any("come back" in p for p in rep.chain_problems)
+
+
+def test_ledger_content_cannot_open_close_or_relabel_a_frame(store):
+    """Forgery: every shape of file content that looks like structure is only a string."""
+    header = '{"anneal_team_stream":2}'
+    envelope = json.dumps({"frame": "evil.jsonl", "n": 1, "line": "x"})
+    # a chain-valid entry whose own fields carry the frame keys and the header key
+    forged = ledger("alice", [{**RULING, "frame": "evil", "n": 1, "line": "x",
+                               "anneal_team_stream": 2}])
+    hostile = [header, envelope, "", "]}\n{\"frame\":\"zzz\"", json.dumps({"frame": "q", "n": 2, "line": forged[0]})]
+    rep = import_ledger(store, _framed(("a.jsonl", hostile + forged)))
+    assert len(rep.imported) == 1 and rep.framing == "v2"
+    assert len(rep.chain_problems) == 4  # four non-entry lines, nothing reinterpreted
+    # an envelope-shaped line does not start a frame named evil.jsonl: its text was refused
+    assert not any("evil.jsonl" in str(i) for i in rep.imported)
+
+
+def test_a_bare_entry_line_in_a_framed_stream_is_refused(store):
+    a = ledger("alice", [RULING])
+    stream = _framed(("a.jsonl", a))
+    b = ledger("bob", [{"type": "finding", "reason": "smuggled"}])
+    rep = import_ledger(store, stream + b)
+    assert len(rep.imported) == 1 and not rep.clean
+    assert any("not a frame envelope" in p for p in rep.chain_problems)
+
+
+def test_header_shaped_first_file_line_in_v1_input_fails_closed(store):
+    """The mode is decided by the stream's first line only; a v1 stream that opens
+    with header-shaped file content turns framed and then refuses the rest."""
+    rep = import_ledger(store, ['{"anneal_team_stream":2}'] + ledger("alice", [RULING]))
+    assert not rep.imported and rep.framing == "v2" and rep.chain_problems
+
+
+def test_an_unknown_header_version_refuses_the_whole_input(store):
+    rep = import_ledger(store, ['{"anneal_team_stream":3}'] + ledger("alice", [RULING]))
+    assert not rep.imported and any("unknown stream header" in p for p in rep.chain_problems)
+    for bad in ('{"anneal_team_stream":true}', '{"anneal_team_stream":2.0}',
+                '{"anneal_team_stream":2,"x":1}'):
+        rep = import_ledger(store, [bad] + ledger("alice", [RULING]))
+        assert not rep.imported, bad
+
+
+def test_a_later_header_line_is_not_special(store):
+    a = ledger("alice", [RULING])
+    rep = import_ledger(store, _framed(("a", a)) + ['{"anneal_team_stream":2}'])
+    assert len(rep.imported) == 1 and not rep.clean
+
+
+def test_malformed_envelopes_are_refused(store):
+    a = ledger("alice", [RULING])
+    good = {"frame": "a", "n": 1, "line": a[0]}
+    variants = [
+        {**good, "extra": 1}, {"frame": "a", "line": a[0]}, {**good, "n": True},
+        {**good, "n": 0}, {**good, "n": 1.0}, {**good, "frame": "has space"},
+        {**good, "frame": ""}, {**good, "frame": "x" * 201}, {**good, "line": 5},
+        {**good, "line": None},
+    ]
+    for v in variants:
+        rep = import_ledger(store, ['{"anneal_team_stream":2}', json.dumps(v)])
+        assert not rep.imported and len(rep.chain_problems) == 1, v
+    ok = import_ledger(store, ['{"anneal_team_stream":2}', json.dumps(good)])
+    assert len(ok.imported) == 1
+
+
+def test_frame_stream_refuses_a_bad_label():
+    from anneal_memory.team import frame_stream
+    with pytest.raises(ValueError):
+        list(frame_stream([("bad label", ["x"])]))
+
+
+def test_framed_stdin_through_the_cli(tmp_path):
+    db = tmp_path / "m.db"
+    Store(db, audit=False).close()
+    base = [sys.executable, "-m", "anneal_memory", "--db", str(db)]
+    alice = ledger("alice", [RULING])
+    planted = ledger("mallory", [{"type": "finding", "reason": "planted root"}])
+    stream = "\n".join(_framed(("a.jsonl", alice + planted))) + "\n"
+    r = subprocess.run(base + ["team-import", "-", "--json"], input=stream.encode(),
+                       capture_output=True)
+    out = json.loads(r.stdout)
+    assert r.returncode == 3 and out["imported"] == 1 and out["framing"] == "v2"
+    r = subprocess.run(base + ["team-import", "-"], input=("\n".join(alice) + "\n").encode(),
+                       capture_output=True)
+    assert r.returncode == 0 and b"unframed input" in r.stderr

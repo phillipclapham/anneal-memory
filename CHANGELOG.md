@@ -4,6 +4,17 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added — framed `team-import` input (contract v2), closing the second-root known-open
+- A stream opening with `{"anneal_team_stream":2}` carries each ledger line as a string
+  value in an exporter-built envelope `{"frame","n","line"}`, so ledger content can never
+  open, close or relabel a frame. Per frame the reader requires a root first, exactly one
+  root, one author, and resets chain state; a second root in one file is refused (the
+  verified prefix still imports). `anneal_memory.team.frame_stream` is the reference
+  builder; `TeamImportReport.framing` / the JSON `framing` say `v2` or `none`.
+- Unframed (v1) input is accepted as before; the second-root limit applies to it and the
+  CLI prints a stderr note. An unknown header version refuses the whole input. Named files
+  on the command line stay unframed in this release.
+
 ## [0.9.37] — 2026-10-04
 
 ### Fixed — `team-import` hardening from a fresh three-lineage review of 0.9.36

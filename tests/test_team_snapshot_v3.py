@@ -335,3 +335,21 @@ def test_l1_same_key_older_repin_is_stale_and_override_of_missing_owned_row(stor
     assert not store.team_owned(old_id=pair[0], new_id=pair[1])
     import_ledger(store, v3([(a, True, []), (b, True, [])], epoch="e2", repin_n=1, pos=3))
     assert pair in links(store)
+
+
+def test_l3r1_replay_after_epoch_change_and_takeover_override(store):
+    a, b = lines()
+    on = v3([(a, True, []), (b, True, [A0])], key="k1", epoch="e1", pos=5, seq=10)
+    import_ledger(store, on)
+    pair = (ep(store, A0), ep(store, B0))
+    import_ledger(store, v3([(a, True, []), (b, True, [])], key="k2", epoch="e2", pos=1, seq=1))
+    assert pair not in links(store)
+    # k1 replays the exact view it already sent: stale, the revoked link stays revoked
+    assert import_ledger(store, on).snapshot == "stale_stream"
+    assert pair not in links(store)
+    # takeover by supersede, then an ordinary unsupersede: no snapshot re-adds it
+    import_ledger(store, v3([(a, True, []), (b, True, [A0])], key="k2", epoch="e2", pos=2, seq=2))
+    assert store.supersede(old_id=pair[0], new_id=pair[1], source="me", team_override=True)
+    assert store.unsupersede(old_id=pair[0], new_id=pair[1]) is True
+    import_ledger(store, v3([(a, True, []), (b, True, [A0])], key="k2", epoch="e2", pos=3, seq=3))
+    assert pair not in links(store)

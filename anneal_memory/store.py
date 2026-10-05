@@ -2679,14 +2679,18 @@ class Store:
                     "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
                     (old_id, new_id, source),
                 )
-            owned_override = team_override and self._team_owned(old_id, new_id)
-            took = exists and owned_override
+            owned = self._team_owned(old_id, new_id)
+            took = exists and owned and team_override
             if took:
                 self._conn.execute(
                     "UPDATE supersessions SET source = ? WHERE old_id = ? AND new_id = ?",
                     (source, old_id, new_id))
-            if owned_override and (took or problem is None):
-                self._drop_ownership(old_id, new_id)  # the operator's from now on
+            if owned and (took or (not exists and problem is None)):
+                # The caller's link from now on: no snapshot adds or removes it again.
+                self._drop_ownership(old_id, new_id)
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO team_overrides (old_id, new_id) VALUES (?, ?)",
+                    (old_id, new_id))
             if not self._defer_commit:
                 self._conn.commit()
         if problem:
@@ -2715,8 +2719,12 @@ class Store:
         with self._db_boundary("unsupersede"):
             if not self._has_supersessions_table():
                 return False
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")  # check and delete under one lock
             if self._team_owned(old_id, new_id):
                 if not team_override:
+                    if not self._defer_commit:
+                        self._conn.commit()
                     return False
                 self._conn.execute(
                     "INSERT OR IGNORE INTO team_overrides (old_id, new_id) VALUES (?, ?)",
@@ -2880,6 +2888,9 @@ class Store:
             return True
         if mine is not None and repin_n < mine["repin_n"]:
             return False  # repin_n is this clone's own monotone count: lower is an older view
+        if mine is not None and mine["epoch"] == epoch and repin_n == mine["repin_n"] \
+                and (pos, seq) <= (mine["pos"], mine["seq"]):
+            return False  # this key already sent this view or a later one (codex L3 r1)
         active = [r for r in same_root if r["active"]] or same_root
         if all(r["epoch"] != epoch for r in active):
             return True
@@ -6267,7 +6278,11 @@ class Store:
         )
 
         with self._db_boundary("prune"):
-            # Find episodes to prune
+            # The write lock before the candidate read: a team import between them
+            # could make a candidate the linker of an owned row (codex L3 r1).
+            began = not self._conn.in_transaction
+            if began:
+                self._conn.execute("BEGIN IMMEDIATE")
             # A team episode that links an owned team row carries a levain verdict:
             # retention keeps it (an explicit delete stays the operator's act).
             rows = self._conn.execute(
@@ -6276,6 +6291,8 @@ class Store:
             ).fetchall()
 
             if not rows:
+                if began:
+                    self._conn.commit()
                 if covers_retention:
                     self._prune_behind = False
                 return 0

@@ -922,18 +922,26 @@ def cmd_search(args: argparse.Namespace) -> None:
 def _team_override_ok(store: Any, args: argparse.Namespace) -> bool:
     """For a link a team snapshot owns: True when this command may change it here
     (ANNEAL_TEAM_OVERRIDE=1, or a yes on a terminal). Otherwise says so and exits."""
-    if not store.team_owned(old_id=args.old, new_id=args.new):
+    try:
+        owned = store.team_owned(old_id=args.old, new_id=args.new)
+    except SupersessionError as exc:
+        print(f"Error: {exc}. Nothing was recorded.", file=sys.stderr)
+        sys.exit(1)
+    if not owned:
         return False
     if os.environ.get("ANNEAL_TEAM_OVERRIDE") == "1":
         return True
-    if sys.stdin.isatty() and sys.stdout.isatty():
+    if sys.stdin.isatty() and sys.stderr.isatty():
+        print("This link mirrors the team ledger; change it in your store only? [y/N] ",
+              end="", file=sys.stderr, flush=True)
         try:
-            answer = input("This link mirrors the team ledger; change it in your store "
-                           "only? [y/N] ").strip().lower()
-        except EOFError:
+            answer = sys.stdin.readline().strip().lower()
+        except (EOFError, OSError):
             answer = ""
         if answer in ("y", "yes"):
             return True
+    if args.func is cmd_supersede:
+        return False  # the link is already there: an idempotent supersede succeeds
     print("Unchanged: this link mirrors the team ledger.", file=sys.stderr)
     sys.exit(1)
 
@@ -2217,6 +2225,7 @@ def cmd_team_status(args: argparse.Namespace) -> None:
         return
     if not data["keys"]:
         print("No team snapshot (no v3 team-import has replaced links here).")
+        return
     for k in data["keys"]:
         print(f"key {k['key']}  root {k['root']}  {'active' if k['active'] else 'inactive'}  "
               f"pos {k['pos']} seq {k['seq']}  owns {k['owned']} link(s)")

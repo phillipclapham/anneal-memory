@@ -2104,27 +2104,34 @@ def cmd_team_import(args: argparse.Namespace) -> None:
     Exit 0 when everything verified and imported; exit 3 when something was
     refused or in conflict (everything verifiable was still imported, and the
     report says what was not)."""
-    from .team import import_ledger, read_ledger_lines
+    from .team import import_ledger, read_ledger_lines, read_stream_lines, stream_framing
 
     sources = list(args.sources or [])
     if not sources:
         print("Error: give a ledger file or directory, or '-' for stdin.", file=sys.stderr)
         sys.exit(2)
-    lines: list[str] = []
-    paths: list[str] = []
+    chunks: list[list[str]] = []
     for src in sources:
         if src == "-":
-            lines.extend(ln.rstrip("\r") for ln in sys.stdin.read().removeprefix("\ufeff").split("\n"))
+            try:
+                chunks.append(read_stream_lines(sys.stdin.buffer))
+            except ValueError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
         else:
             if not Path(src).expanduser().exists():
                 print(f"Error: not found: {src}", file=sys.stderr)
                 sys.exit(1)
-            paths.append(src)
-    try:
-        lines.extend(read_ledger_lines(paths))
-    except ValueError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
+            try:
+                chunks.append(read_ledger_lines([src]))
+            except ValueError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
+    lines = [ln for chunk in chunks for ln in chunk]
+    if sum(1 for c in chunks if any(ln.strip() for ln in c)) > 1 and stream_framing(lines) != "none":
+        print("Error: framed input (a header line, then envelopes) is one source; "
+              "do not combine it with other files or stdin.", file=sys.stderr)
+        sys.exit(2)
     with _open_store(args) as store:
         authority = [a.strip() for chunk in (args.link_authority or []) for a in chunk.split(",") if a.strip()]
         report = import_ledger(store, lines, dry_run=args.dry_run, link_authority=authority)
@@ -2142,7 +2149,7 @@ def cmd_team_import(args: argparse.Namespace) -> None:
                     "links_unauthorized"):
             for item in data[key]:
                 print(f"  {key}: {item}", file=sys.stderr)
-        if data["framing"] == "none":
+        if data["framing"] == "none" and data["imported"] + data["already_present"]:
             print("  note: unframed input; a second root inside one file is not detected "
                   "(an exporter that frames its output closes this)", file=sys.stderr)
         for item in data["cross_author_links"]:
@@ -4234,7 +4241,8 @@ def build_parser() -> argparse.ArgumentParser:
              "one trust unit the exporter vouches for: authors are self-declared and "
              "authentication is the git host's job (branch protection, signed commits). "
              "Framed input (a header line, then one envelope per ledger line) also checks "
-             "one root and one author per file; framed stdin is read alone. "
+             "one root and one author per file; the first line of the input decides, and framed "
+             "input is read as the only source. "
              "A directory is not read directly.",
         parents=[json_parent],
     )

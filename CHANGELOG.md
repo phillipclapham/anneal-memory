@@ -4,6 +4,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.9.38] — 2026-10-04
+
 ### Added — framed `team-import` input (contract v2), closing the second-root known-open
 - A stream opening with `{"anneal_team_stream":2}` carries each ledger line as a string
   value in an exporter-built envelope `{"frame","n","line"}`, so ledger content can never
@@ -12,7 +14,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   verified prefix still imports). `anneal_memory.team.frame_stream` is the reference
   builder; `TeamImportReport.framing` / the JSON `framing` say `v2` or `none`.
 - Unframed (v1) input is accepted as before; the second-root limit applies to it and the
-  CLI prints a stderr note. A header is exactly a single-key object; version != 2 refuses
+  CLI prints a stderr note. A header is an object whose only member is the stream key; version != 2 refuses
   the whole input; framed input must be the only CLI source (exit 2); stdin is read as
   UTF-8 bytes with an aggregate cap. An envelope that cannot be read ends the read (nothing is skipped between frames); a
   line break inside a ledger line is judged by position. A v1 stream whose first file line is the exact header
@@ -34,7 +36,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   unexpandable `~user` path is a `ValueError`, as documented; a BOM on piped stdin is dropped too; a rejected entry's id is
   clipped at 100 characters in the report.
 - Known-open (the stream is one trust unit the exporter vouches for): a second
-  root-level entry (`prev ""`) inside one stream starts a new chain, so a retire
+  root-level entry (`prev ""`) inside one UNFRAMED stream starts a new chain (closed for framed input in 0.9.38), so a retire
   appended as a root cannot be told from a second file's root; a semantically rejected entry does not take its descendants with it (only a
   clash does); extra fields on a
   chain-valid entry are stored verbatim in `metadata["team"]`; the 64 MiB limit is per

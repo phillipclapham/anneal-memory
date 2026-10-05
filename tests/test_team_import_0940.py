@@ -37,7 +37,11 @@ def test_import_prune_import_is_stable(tmp_path):
                         "VALUES (?, '2026-10-05T00:00:00.000000Z', 'observation', 'x', 'agent')",
                         (reused,))
         s._conn.commit()
-        assert not import_ledger(s, lines).imported
+        reuse = import_ledger(s, lines)
+        assert not reuse.imported and not reuse.conflicts
+        assert reuse.already_removed == [old["id"]]
+        assert s._conn.execute("SELECT source FROM episodes WHERE id = ?",
+                               (reused,)).fetchone()[0] == "agent"
         # the same id with another hash is a conflict, not a fresh entry
         forged = seal({**{k: v for k, v in old.items() if k not in ("hash", "prev")},
                        "words": "use spaces"}, "")

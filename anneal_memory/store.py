@@ -2755,7 +2755,9 @@ class Store:
         - Stored rows give identity only (an entry id, its episode, source and
           text). A local writer with :meth:`record` can plant a ``team:`` row that
           claims an entry id: the real entry is then reported as already present or
-          in conflict. The store belongs to the engineer, and that writer can
+          in conflict, and a planted row's hash can become the one ``team_entries``
+          keeps. A stored team row whose metadata no longer names its entry is
+          treated as removed. The store belongs to the engineer, and that writer can
           already delete from it.
         - ``dry_run`` computes everything and writes nothing.
         """

@@ -4,6 +4,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.9.39] — 2026-10-04
+
 ### Fixed — `import_ledger` could loop forever on an endless run of blank lines (a 0.9.38 regression)
 - 0.9.38 skipped blank lines before the line-cap check, so a lazy iterable of blank lines passed
   straight to `import_ledger` never ended. Blank lines and content lines are now bounded separately

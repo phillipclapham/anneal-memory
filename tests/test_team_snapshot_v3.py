@@ -228,3 +228,110 @@ def test_cli_refuses_authority_flags_with_v3(tmp_path, capsys, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         main()
     assert exc.value.code == 2
+
+
+def test_degenerate_profile_without_tenure(store):
+    """Phill 2026-10-05 (seam first): levain exports with a TOFU root, epoch =
+    digest(root), repin_n = 0 and a first-parent pos. Successive syncs replace in order."""
+    import hashlib
+    a, b = lines()
+    prof = dict(key="clone-a", root="genesis-sha", repin_n=0,
+                epoch=hashlib.sha256(b"genesis-sha").hexdigest())
+    r = import_ledger(store, v3([(a, True, []), (b, True, [A0])], pos=2, seq=10, **prof))
+    assert r.snapshot == "replaced" and len(r.links_added_legacy) == 1
+    r = import_ledger(store, v3([(a, True, []), (b, True, [])], pos=3, seq=11, **prof))
+    assert r.snapshot == "replaced" and len(r.links_removed) == 1
+    # the same view again, and an older one, change nothing
+    assert import_ledger(store, v3([(a, True, []), (b, True, [])], pos=3, seq=11,
+                                   **prof)).snapshot == "stale_stream"
+    assert import_ledger(store, v3([(a, True, []), (b, True, [A0])], pos=2, seq=12,
+                                   **prof)).snapshot == "stale_stream"
+    assert not links(store)
+
+
+def test_review_gaps_twins_roots_trailer_rewired(tmp_path):
+    a, b = lines()
+    b_twin = ledger("bob", [{**RETIRE, "reason": "twin"}])[0]   # same id B0, other bytes
+    # S8: two enforced lines with one id make the stream incomplete
+    s = Store(tmp_path / "t.db", audit=False)
+    try:
+        r = import_ledger(s, v3([(a, True, []), (b, True, [A0]), (b_twin, True, [A0])]))
+        assert r.snapshot == "incomplete_stream" and not links(s)
+    finally:
+        s.close()
+    # S6: a malformed trailer, a count mismatch, content after the end line
+    for stream in (
+        v3([(a, True, []), (b, True, [A0])], end=False) + ['{"anneal_team_stream_end": "2"}'],
+        v3([(a, True, []), (b, True, [A0])], end=False) + ['{"anneal_team_stream_end": 3}'],
+        v3([(a, True, []), (b, True, [A0])]) + [json.dumps({"x": 1})],
+    ):
+        s = Store(tmp_path / f"m{id(stream)}.db", audit=False)
+        try:
+            assert import_ledger(s, stream).snapshot == "incomplete_stream" and not links(s)
+        finally:
+            s.close()
+    s = Store(tmp_path / "x.db", audit=False)
+    try:
+        # S5: a second ledger (other root) is untouched by the first one's replaces
+        import_ledger(s, v3([(a, True, []), (b, True, [A0])], key="k1", root="r1"))
+        pair = (ep(s, A0), ep(s, B0))
+        import_ledger(s, v3([(a, True, []), (b, True, [A0])], key="x", root="r2"))
+        import_ledger(s, v3([(a, True, []), (b, True, [])], key="k1", root="r1", seq=2))
+        # pair is owned by both keys; r1 dropping it keeps the row while r2 owns it
+        assert pair in links(s)
+        import_ledger(s, v3([(a, True, []), (b, True, [])], key="x", root="r2", seq=2))
+        assert pair not in links(s)
+    finally:
+        s.close()
+    # S16: an operator's rewired row stays the operator's; an old binary's is never removed
+    c0 = f"{_prefix('cy')}-20261004120000-00000000"
+    c = ledger("cy", [{"type": "retire", "supersedes": [B0]}])[0]
+    s = Store(tmp_path / "o.db", audit=False)
+    try:
+        import_ledger(s, v3([(a, True, []), (b, True, []), (c, True, [])]))
+        ea, eb, ec = ep(s, A0), ep(s, B0), ep(s, c0)
+        s.supersede(old_id=ea, new_id=eb, source="me")          # operator links
+        s.supersede(old_id=eb, new_id=ec, source="me")
+        s.delete(eb)                                            # -> rewired A -> C, operator's
+        assert (ea, ec) in links(s) and not s.team_owned(old_id=ea, new_id=ec)
+        import_ledger(s, v3([(a, True, []), (b, True, []), (c, True, [])], seq=2))
+        assert (ea, ec) in links(s)
+        # an old binary's rewired row: no rewire_origin, never adopted or removed
+        s._conn.execute("DELETE FROM rewire_origin")
+        s._conn.execute("UPDATE supersessions SET source='rewired'")
+        s._conn.commit()
+        s.team_forget_key("k1")                                 # next import runs legacy
+        import_ledger(s, v3([(a, True, []), (b, True, []), (c, True, [])], seq=3))
+        assert (ea, ec) in links(s)
+        assert s.team_snapshot_status()["unmanaged_rewired"] == 1
+    finally:
+        s.close()
+    # S7: legacy adopts a team:-labelled row whose linker never appears in any v3 stream
+    e0 = f"{_prefix('eve')}-20261004120000-00000000"
+    e = ledger("eve", [RETIRE])[0]
+    s = Store(tmp_path / "e.db", audit=False)
+    try:
+        import_ledger(s, [a, e], link_authority=["eve"])
+        assert (ep(s, A0), ep(s, e0)) in links(s)
+        r = import_ledger(s, v3([(a, True, [])]))
+        assert r.links_adopted == 1 and not links(s)
+    finally:
+        s.close()
+
+
+def test_l1_same_key_older_repin_is_stale_and_override_of_missing_owned_row(store):
+    a, b = lines()
+    import_ledger(store, v3([(a, True, []), (b, True, [A0])], epoch="e1", repin_n=0, pos=5))
+    pair = (ep(store, A0), ep(store, B0))
+    import_ledger(store, v3([(a, True, []), (b, True, [])], epoch="e2", repin_n=1, pos=1))
+    assert pair not in links(store)
+    # the clone's own older view (lower repin_n) replayed: stale, the link stays gone
+    r = import_ledger(store, v3([(a, True, []), (b, True, [A0])], epoch="e1", repin_n=0, pos=9))
+    assert r.snapshot == "stale_stream" and pair not in links(store)
+    # an override supersede over an owned row that went missing makes it the operator's
+    import_ledger(store, v3([(a, True, []), (b, True, [A0])], epoch="e2", repin_n=1, pos=2))
+    store._conn.execute("DELETE FROM supersessions"); store._conn.commit()
+    assert store.supersede(old_id=pair[0], new_id=pair[1], source="me", team_override=True)
+    assert not store.team_owned(old_id=pair[0], new_id=pair[1])
+    import_ledger(store, v3([(a, True, []), (b, True, [])], epoch="e2", repin_n=1, pos=3))
+    assert pair in links(store)

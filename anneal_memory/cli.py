@@ -927,8 +927,11 @@ def _team_override_ok(store: Any, args: argparse.Namespace) -> bool:
     if os.environ.get("ANNEAL_TEAM_OVERRIDE") == "1":
         return True
     if sys.stdin.isatty() and sys.stdout.isatty():
-        answer = input("This link mirrors the team ledger; change it in your store "
-                       "only? [y/N] ").strip().lower()
+        try:
+            answer = input("This link mirrors the team ledger; change it in your store "
+                           "only? [y/N] ").strip().lower()
+        except EOFError:
+            answer = ""
         if answer in ("y", "yes"):
             return True
     print("Unchanged: this link mirrors the team ledger.", file=sys.stderr)

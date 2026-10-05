@@ -2679,12 +2679,14 @@ class Store:
                     "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
                     (old_id, new_id, source),
                 )
-            took = exists and team_override and self._team_owned(old_id, new_id)
+            owned_override = team_override and self._team_owned(old_id, new_id)
+            took = exists and owned_override
             if took:
                 self._conn.execute(
                     "UPDATE supersessions SET source = ? WHERE old_id = ? AND new_id = ?",
                     (source, old_id, new_id))
-                self._drop_ownership(old_id, new_id)
+            if owned_override and (took or problem is None):
+                self._drop_ownership(old_id, new_id)  # the operator's from now on
             if not self._defer_commit:
                 self._conn.commit()
         if problem:
@@ -2876,6 +2878,8 @@ class Store:
     ) -> bool:
         if not same_root:
             return True
+        if mine is not None and repin_n < mine["repin_n"]:
+            return False  # repin_n is this clone's own monotone count: lower is an older view
         active = [r for r in same_root if r["active"]] or same_root
         if all(r["epoch"] != epoch for r in active):
             return True
@@ -3040,10 +3044,10 @@ class Store:
                                          "target": ep_entry.get(old),
                                          "linker": ep_entry.get(new)})
         for (old, new), (target, linker) in sorted(wanted.items()):
-            if (old, new) in owned and conn.execute(
+            if conn.execute(
                     "SELECT 1 FROM team_snapshot_rows WHERE key = ? AND old_id = ? "
                     "AND new_id = ?", (key, old, new)).fetchone():
-                continue
+                continue  # owned and wanted: stays
             row = conn.execute("SELECT 1 FROM supersessions WHERE old_id = ? AND new_id = ?",
                                (old, new)).fetchone()
             if row is not None:

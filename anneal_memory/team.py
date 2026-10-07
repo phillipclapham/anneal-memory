@@ -169,6 +169,7 @@ class TeamImportReport:
     sanitised: list[str] = field(default_factory=list)
     reimported: list[str] = field(default_factory=list)
     replaced_in_place: list[str] = field(default_factory=list)
+    snapshot_notes: list[str] = field(default_factory=list)  # informational, not a problem
 
     @property
     def clean(self) -> bool:
@@ -209,7 +210,8 @@ class TeamImportReport:
                 "unmappable": self.unmappable,
                 "sanitised": self.sanitised,
                 "reimported": self.reimported,
-                "replaced_in_place": self.replaced_in_place}
+                "replaced_in_place": self.replaced_in_place,
+                "snapshot_notes": self.snapshot_notes}
                if self.framing == "v3" else {}),
         }
 
@@ -781,7 +783,6 @@ def _import_v3(store: Store, lines: Iterable[str], report: TeamImportReport,
     honours: list[tuple[str, str]] = []
     records: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()   # (id, hash) of every verified line, any envelope
-    authors: set[str] = set()
     unmappable: list[dict[str, str]] = []
     content = blanks = 0
 
@@ -846,9 +847,8 @@ def _import_v3(store: Store, lines: Iterable[str], report: TeamImportReport,
         # A per-line problem is reported through ``unmappable``, never as a chain
         # problem: it does not make the stream incomplete.
         e = _line_entry(env["line"], pos, TeamImportReport())
-        if e is not None and isinstance(e.get("id"), str) and isinstance(e.get("author"), str):
+        if e is not None and isinstance(e.get("id"), str):
             seen.add((e["id"], e["hash"]))
-            authors.add(e["author"])
         if e is not None and not set(env["honours"]) <= set(
                 x for x in (e.get("supersedes") or []) if isinstance(x, str)):
             broken(f"{pos}: honours names an id the line does not supersede")
@@ -872,7 +872,9 @@ def _import_v3(store: Store, lines: Iterable[str], report: TeamImportReport,
                 "reason": problem})
             continue
         assert e is not None
-        enforced.setdefault(e["id"], []).append(e["hash"])
+        hashes = enforced.setdefault(e["id"], [])
+        if e["hash"] not in hashes:  # the same line twice is one line, not a twin
+            hashes.append(e["hash"])
         honours.extend((t, e["id"]) for t in env["honours"])
         if e["type"] == "ack":
             report.skipped_ack.append(e["id"])
@@ -889,11 +891,12 @@ def _import_v3(store: Store, lines: Iterable[str], report: TeamImportReport,
         records, key=head["key"], root=head["root"], prev_root=head["prev_root"],
         epoch=head["epoch"], repin_n=head["repin_n"], pos=head["pos"], seq=head["seq"],
         judged=head["judged"], complete=complete, enforced=enforced,
-        honours=honours, seen=seen, authors=authors, unmappable=unmappable,
+        honours=honours, seen=seen, unmappable=unmappable,
         dry_run=dry_run,
     )
     report.snapshot = result["snapshot"]
     report.chain_problems.extend(result["stream_problems"])
+    report.snapshot_notes.extend(result["stream_notes"])
     report.imported = result["imported"]
     report.already_present = result["already_present"]
     report.already_removed = result["already_removed"]

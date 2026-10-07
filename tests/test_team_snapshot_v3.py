@@ -433,7 +433,7 @@ def test_s35_stale_twin_of_an_unmappable_line_is_flagged(store):
     b_bad = ledger("bob", [{**RETIRE, "v": True}])[0]
     r = import_ledger(store, v3([(a, True, []), (b_bad, True, [A0])], seq=2))
     assert r.unmappable and r.unmappable[0]["stale_twin"] == pair[1]
-    assert pair not in links(store)  # the twin's hash is not enforced: not wanted
+    assert pair in links(store)  # design §3b.1: rows an unmappable linker made stay
     text = store.get(pair[1]).content
     assert text.startswith("[stale:")
     import_ledger(store, v3([(a, True, []), (b_bad, True, [A0])], seq=3))
@@ -580,3 +580,31 @@ def test_operator_supersede_relabels_to_operator_and_rotation_is_not_legacy(stor
     r = import_ledger(store, v3([(a, True, []), (b, True, [])], key="k2"))
     assert r.snapshot == "replaced" and r.links_adopted == 0
     assert not r.links_added_legacy and pair in links(store)
+
+
+def test_l1_l2_round_fixes(store):
+    a, b = lines()
+    import_ledger(store, v3([(a, True, []), (b, True, [A0])]))
+    pair = (ep(store, A0), ep(store, B0))
+    # L1-2: the same line enforced twice is one line, not a live twin
+    r = import_ledger(store, v3([(a, True, []), (b, True, [A0]), (b, True, [A0])], seq=2))
+    assert r.snapshot == "replaced" and not r.links_removed and pair in links(store)
+    # L2-1: a stale stream behind an active key names it, as a note (not a problem)
+    r = import_ledger(store, v3([(a, True, []), (b, True, [])], key="k2", pos=9, seq=9))
+    assert r.snapshot == "replaced"
+    r = import_ledger(store, v3([(a, True, []), (b, True, [A0])], key="k1", pos=2, seq=1))
+    assert r.snapshot == "stale_stream" and "team-forget-key k2" in r.snapshot_notes[0]
+    assert not r.chain_problems
+
+
+def test_l1_handle_alone_never_adopts(store):
+    # ledger 1: bob's B0 links over alice's A0 (a v2 import, operator-authorised)
+    a, b = lines()
+    import_ledger(store, [a, b], link_authority=["bob"])
+    pair = (ep(store, A0), ep(store, B0))
+    # ledger 2's first stream: a copy of A0 and ANOTHER bob line, B0 not in it
+    other_bob = ledger("bob", [{"type": "finding", "summary": "first"},
+                               {"type": "finding", "summary": "unrelated note"}])[1]
+    assert json.loads(other_bob)["id"] != B0
+    r = import_ledger(store, v3([(a, True, []), (other_bob, True, [])], key="z", root="r9"))
+    assert r.links_adopted == 0 and pair in links(store)

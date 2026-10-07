@@ -1142,11 +1142,13 @@ def cmd_delete(args: argparse.Namespace) -> None:
         store.delete(args.episode_id, team_operator=operator)
         if episode.source.startswith("team:") and not operator:
             print("Note: this team entry comes back at the next v3 team import while the "
-                  "ledger enforces it (confirm on a terminal, or set "
-                  "ANNEAL_TEAM_OVERRIDE=1, to make it final).", file=sys.stderr)
+                  "ledger enforces it. To make it final, delete it without --force and "
+                  "confirm on a terminal, or set ANNEAL_TEAM_OVERRIDE=1.", file=sys.stderr)
 
         if args.json:
-            _print_json({"deleted": args.episode_id})
+            _print_json({"deleted": args.episode_id,
+                         **({"final": operator} if episode.source.startswith("team:")
+                            else {})})
         else:
             print(f"Deleted episode {args.episode_id}")
 
@@ -2221,6 +2223,8 @@ def cmd_team_import(args: argparse.Namespace) -> None:
                   file=sys.stderr)
             for item in data["unmappable"]:
                 print(f"  unmappable: {item['id']}: {item['reason']}", file=sys.stderr)
+            for note in data["snapshot_notes"]:
+                print(f"  note: {note}", file=sys.stderr)
         for key in ("rejected", "chain_problems", "conflicts", "links_refused",
                     "links_unauthorized"):
             for item in data[key]:
@@ -2241,7 +2245,8 @@ def cmd_team_status(args: argparse.Namespace) -> None:
         return
     for k in data["keys"]:
         print(f"key {k['key']}  root {k['root']}  {'active' if k['active'] else 'inactive'}  "
-              f"pos {k['pos']} seq {k['seq']}  owns {k['owned']} link(s)")
+              f"epoch {k['epoch'][:12]} repin {k['repin_n']} pos {k['pos']} seq {k['seq']}  "
+              f"owns {k['owned']} link(s)")
     print(f"Operator overrides: {data['overrides']}")
     print(f"Team episodes retention keeps (enforced by an active key): "
           f"{data['protected_episodes']}")
@@ -4381,8 +4386,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.set_defaults(func=cmd_team_status)
     sub = subparsers.add_parser(
         "team-forget-key", parents=[json_parent],
-        help="Release a team snapshot key whose clone is gone; its links stay until "
-             "another key of that ledger adopts or drops them")
+        help="Release a team snapshot key whose clone is gone (or that holds a later view "
+             "than a live clone after a host rewrite); its links stay hidden and unowned until a first "
+             "import on a ledger root with no remaining key adopts them by their linker")
     sub.add_argument("key", help="The key, as team-status lists it")
     sub.set_defaults(func=cmd_team_forget_key)
 

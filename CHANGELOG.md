@@ -21,7 +21,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   line of the stream.
 - A per-line problem never breaks the stream: an enforced line with unsafe text is imported with
   the characters escaped (flagged `sanitised`), and any other refusal makes the line
-  `unmappable` (reported, listed in `team-status`). Links are added after existence and cycle
+  `unmappable` (reported, listed in `team-status`); links it made stay as they are. Links are added after existence and cycle
   checks only; levain's history order and its link rule already ruled.
 - Team episodes follow the verdict too: an entry the stream enforces that was pruned or deleted
   by a library or MCP call comes back at the next replace; only a delete the CLI confirmed (on a
@@ -41,8 +41,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   it back and reports it in `links_added_legacy`; remove it once more through the CLI confirm and
   it stays removed.
 - The first replace on a ledger root adopts existing `team:` links whose target the stream
-  enforces and whose linker, or `team:<handle>` label, belongs to the stream; a target alone
-  never adopts a link (rulings are copied between ledgers).
+  enforces and whose linker's entry is a line of the stream; neither a target nor a
+  `team:<handle>` label alone adopts a link (rulings are copied between ledgers, and one author
+  writes in several).
 - `anneal-memory team-status`, `anneal-memory team-forget-key KEY`.
 - Known limits (design §5): episodes are never retracted; one store fed by several clones follows
   the last; a verbatim copy of a linker line into another ledger in one store is a takeover; an

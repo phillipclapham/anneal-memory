@@ -737,3 +737,37 @@ def test_unowned_rewired_row_is_never_adopted_and_is_counted(tmp_path):
         assert s.team_snapshot_status()["unmanaged_rewired"] == 1
     finally:
         s.close()
+
+
+def test_seam_doc_l3_1006_unmanaged_rewired_counted_and_never_owned(tmp_path):
+    a = ledger("alice", [{**RULING, "ts": "2026-01-01T00:00:00Z"}])[0]
+    b = ledger("bob", [{"type": "retire", "supersedes": [A0], "ts": "2026-01-02T00:00:00Z"}])[0]
+    s = Store(tmp_path / "um.db", audit=False)
+    try:
+        import_ledger(s, v3([(a, True, []), (b, True, [A0])], key="x", root="r1"))
+        ea, eb = ep(s, A0), ep(s, B0)
+        c = s.record("a local note that replaces bob's retire", "observation")
+        s._conn.execute("INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, 'me')",
+                        (eb, c.id))
+        s._conn.commit()
+        assert s.delete(eb, team_operator=True)        # A -> C (C local), owned by x
+        s.team_forget_key("x")                         # now unmanaged
+        # codex: an unowned rewired row hiding a team episode is counted even when its
+        # linker is local
+        assert s.team_snapshot_status()["unmanaged_rewired"] == 1
+        # complement: a later rewire that COLLIDES into the same pair (A, C) never
+        # makes the unmanaged row owned
+        b2 = ledger("bob", [{"type": "finding", "summary": "x"},
+                            {"type": "retire", "supersedes": [A0],
+                             "ts": "2026-01-03T00:00:00Z"}])[1]
+        b2_id = json.loads(b2)["id"]
+        import_ledger(s, v3([(a, True, []), (b2, True, [A0])], key="y", root="r1"))
+        eb2 = ep(s, b2_id)
+        assert s.team_owned(old_id=ea, new_id=eb2)
+        s._conn.execute("INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, 'me')",
+                        (eb2, c.id))
+        s._conn.commit()
+        assert s.delete(eb2, team_operator=True)       # rewire A -> C collides
+        assert (ea, c.id) in links(s) and not s.team_owned(old_id=ea, new_id=c.id)
+    finally:
+        s.close()

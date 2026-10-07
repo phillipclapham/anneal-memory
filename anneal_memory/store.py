@@ -3127,8 +3127,8 @@ class Store:
         """The team snapshot keys and what they own; what each key's last stream
         could not mirror (``notes``: unmappable lines, refused cycles, target ids held
         by several episodes); how many team episodes retention keeps for an active
-        key; and 'rewired' rows between two team episodes that no snapshot owns
-        (never adopted, so they stay as they are until removed by hand). Read-only."""
+        key; and 'rewired' rows hiding a team episode that no snapshot owns (never
+        adopted, so they stay as they are until removed by hand). Read-only."""
         empty = {"keys": [], "overrides": 0, "unmanaged_rewired": 0, "notes": [],
                  "protected_episodes": 0}
         with self._db_boundary("status"), self._read_snapshot():
@@ -3142,12 +3142,13 @@ class Store:
                 overrides = self._conn.execute(
                     "SELECT COUNT(*) FROM team_overrides").fetchone()[0]
                 unmanaged = self._conn.execute(
+                    # Any unowned rewired row that hides a TEAM episode, whatever
+                    # its linker is (seam doc L3 1006, codex: A(team) -> C(local)
+                    # was uncounted).
                     """SELECT COUNT(*) FROM supersessions s WHERE s.source = 'rewired'
                        AND NOT EXISTS (SELECT 1 FROM team_snapshot_rows o
                                        WHERE o.old_id = s.old_id AND o.new_id = s.new_id)
                        AND EXISTS (SELECT 1 FROM episodes e WHERE e.id = s.old_id
-                                   AND e.source >= 'team:' AND e.source < 'team;')
-                       AND EXISTS (SELECT 1 FROM episodes e WHERE e.id = s.new_id
                                    AND e.source >= 'team:' AND e.source < 'team;')"""
                 ).fetchone()[0]
                 notes = [dict(r) for r in self._conn.execute(
@@ -3784,10 +3785,11 @@ class Store:
             (start, first)).fetchall()]
         if existed and not conn.execute(
                 "SELECT 1 FROM team_snapshot_rows WHERE old_id = ? AND new_id = ?",
-                (start, cur)).fetchone() and conn.execute(
-                "SELECT 1 FROM rewire_origin WHERE old_id = ? AND new_id = ?",
-                (start, cur)).fetchone() is None:
-            return  # an operator's (or a non-team) row already there
+                (start, cur)).fetchone():
+            # An operator's row, a non-team row, or an UNMANAGED rewired row already
+            # there: untouched. A rewired row is never adopted, this way included
+            # (seam doc L3 1006, complement: a later rewire made one owned).
+            return
         if not existed:
             conn.execute("INSERT INTO supersessions (old_id, new_id, source) "
                          "VALUES (?, ?, 'rewired')", (start, cur))

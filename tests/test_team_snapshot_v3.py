@@ -608,3 +608,82 @@ def test_l1_handle_alone_never_adopts(store):
     assert json.loads(other_bob)["id"] != B0
     r = import_ledger(store, v3([(a, True, []), (other_bob, True, [])], key="z", root="r9"))
     assert r.links_adopted == 0 and pair in links(store)
+
+
+def test_l3r1_1006_fixes(store, tmp_path):
+    a, b = lines()
+    # codex #3: an enforced linker whose line fails its hash check keeps its id, and
+    # the row it linked stays (design §3b.1)
+    import_ledger(store, v3([(a, True, []), (b, True, [A0])]))
+    pair = (ep(store, A0), ep(store, B0))
+    bad = json.loads(b); bad["reason"] = "edited"; b_edit = json.dumps(bad)  # stale hash
+    r = import_ledger(store, v3([(a, True, []), (b_edit, True, [A0])], seq=2))
+    assert r.snapshot == "replaced" and [u["id"] for u in r.unmappable] == [B0]
+    assert pair in links(store) and not r.links_removed
+    # codex #7: a library supersede over an owned row that went missing writes nothing
+    store._conn.execute("DELETE FROM supersessions"); store._conn.commit()
+    assert store.supersede(old_id=pair[0], new_id=pair[1], source="agent") is False
+    assert pair not in links(store) and store.team_owned(old_id=pair[0], new_id=pair[1])
+    assert not store._conn.execute("SELECT 1 FROM team_overrides").fetchone()
+    # codex #9: header values SQLite cannot bind are refused, never a crash
+    for bad_head in ({"seq": 2 ** 64}, {"key": "\ud800"}):
+        stream = v3([(a, True, [])], **{k: v for k, v in bad_head.items()})
+        r = import_ledger(store, stream)
+        assert r.framing == "unknown" and r.chain_problems
+
+
+def test_l3r1_1006_twin_adoption_and_cross_root_rewrite(tmp_path):
+    a, b = lines()
+    b_twin = ledger("bob", [{**RETIRE, "reason": "twin"}])[0]   # same id B0, other bytes
+    # codex #1 (consensus): an unenforced TWIN of the legacy linker is not provenance
+    s = Store(tmp_path / "tw.db", audit=False)
+    try:
+        import_ledger(s, [a, b], link_authority=["bob"])
+        pair = (ep(s, A0), ep(s, B0))
+        r = import_ledger(s, v3([(a, True, []), (b_twin, False, [])], key="z", root="r9"))
+        assert r.links_adopted == 0 and pair in links(s)
+    finally:
+        s.close()
+    # gemini HIGH: a stream of another root never rewrites a copy that an active key
+    # of another ledger enforces
+    s = Store(tmp_path / "xr.db", audit=False)
+    try:
+        import_ledger(s, v3([(a, True, []), (b, True, [A0])], key="k1", root="r1"))
+        before = s.get(ep(s, B0)).content
+        r = import_ledger(s, v3([(a, True, []), (b_twin, True, [A0])], key="k2", root="r2"))
+        assert not r.replaced_in_place and r.conflicts
+        assert s.get(ep(s, B0)).content == before
+    finally:
+        s.close()
+    # codex #6: two enforced twins, neither the stored hash: the stored copy stays
+    s = Store(tmp_path / "tt.db", audit=False)
+    try:
+        import_ledger(s, v3([(a, True, []), (b, True, [A0])]))
+        before = s.get(ep(s, B0)).content
+        b_twin2 = ledger("bob", [{**RETIRE, "reason": "twin two"}])[0]
+        r = import_ledger(s, v3([(a, True, []), (b_twin, True, [A0]), (b_twin2, True, [A0])],
+                                seq=2))
+        assert not r.replaced_in_place and s.get(ep(s, B0)).content == before
+    finally:
+        s.close()
+
+
+def test_l3r1_1006_rewired_row_takeover_through_its_standin(tmp_path):
+    a = ledger("alice", [{**RULING, "ts": "2026-01-01T00:00:00Z"}])[0]
+    b = ledger("bob", [{"type": "retire", "supersedes": [A0], "ts": "2026-01-02T00:00:00Z"}])[0]
+    s = Store(tmp_path / "rw.db", audit=False)
+    try:
+        import_ledger(s, v3([(a, True, []), (b, True, [A0])], key="x", root="r1"))
+        ea, eb = ep(s, A0), ep(s, B0)
+        c = s.record("a local note that replaces bob's retire", "observation")
+        s._conn.execute("INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, 'me')",
+                        (eb, c.id))
+        s._conn.commit()
+        assert s.delete(eb, team_operator=True)        # A -> C rewired, owned by x
+        assert s.team_owned(old_id=ea, new_id=c.id)
+        # a new key of ANOTHER root whose stream carries the exact line B takes x over
+        r = import_ledger(s, v3([(a, True, []), (b, True, [])], key="y", root="r2"))
+        st = {k["key"]: k for k in s.team_snapshot_status()["keys"]}
+        assert not st["x"]["active"] and (ea, c.id) not in links(s)
+    finally:
+        s.close()

@@ -503,11 +503,12 @@ def _stream_header(raw: str) -> object:
 def _v3_header_problem(head: dict) -> str | None:
     for name in ("key", "root", "prev_root", "epoch"):
         v = head.get(name)
-        if not isinstance(v, str) or not v or len(v) > 200 or _unsafe_text(v):
+        if not isinstance(v, str) or not v or len(v) > 200 or _unsafe_text(v) \
+                or any(0xD800 <= ord(c) <= 0xDFFF for c in v):
             return f"{name} is not a short text"
     for name in ("repin_n", "pos", "seq"):
         v = head.get(name)
-        if type(v) is not int or v < 0:
+        if type(v) is not int or not 0 <= v < 2 ** 63:  # SQLite's INTEGER range
             return f"{name} is not a whole number"
     if head.get("judged") not in ("full", "partial"):
         return "judged is neither full nor partial"
@@ -742,6 +743,20 @@ def _record_of(e: dict) -> dict[str, Any]:
     }
 
 
+def _unverified_ids(line: str) -> dict | None:
+    """``{"id", "hash"}`` read from a line that failed verification, for reporting
+    and the unmappable hold only; None when it does not parse as an entry."""
+    if len(line) > _MAX_LINE_CHARS or _nests_too_deep(line):
+        return None
+    try:
+        obj = json.loads(line, parse_constant=_refuse_constant)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(obj, dict) or not isinstance(obj.get("id"), str):
+        return None
+    return {"id": obj["id"], "hash": obj.get("hash")}
+
+
 def _sanitised(e: dict) -> dict | None:
     """``e`` with every unsafe character in its free text escaped as a ``\\u``
     sequence, flagged; None when the escaped entry still fails its own check. The
@@ -864,8 +879,12 @@ def _import_v3(store: Store, lines: Iterable[str], report: TeamImportReport,
         if problem and e is not None and e.get("type") == "ack":
             continue  # an ack carries no links: exempt from the unmappable rule
         if problem:
-            # The hash is the line's own, and may be absent on a line that is not an entry.
-            rid = e.get("id") if e is not None else None
+            # The hash is the line's own, and may be absent on a line that is not an
+            # entry. A line that fails its hash check still names its id, so the
+            # rows it linked are held (codex L3 1006 r1); it is never "seen".
+            got = e if e is not None else _unverified_ids(env["line"])
+            rid = got.get("id") if got is not None else None
+            e = got
             unmappable.append({
                 "id": rid[:100] if isinstance(rid, str) else pos,
                 "hash": str(e.get("hash"))[:100] if e is not None else "",

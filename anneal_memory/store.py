@@ -1836,6 +1836,8 @@ class WrapStatusSnapshot(NamedTuple):
 
 # Team episodes retention keeps: the copy (entry id AND hash) of an entry that an
 # ACTIVE snapshot key's last complete stream enforces (flow seam design §3b.7).
+_STALE_TWIN_MARK = ("[stale: the team ledger's current entry with this id could not be "
+                    "imported; see team-status] ")
 _PROTECTED_TEAM_EPISODES = (
     "SELECT te.episode_id FROM team_entries te "
     "JOIN team_snapshot_enforced se ON se.entry_id = te.entry_id AND se.hash = te.hash "
@@ -2714,6 +2716,13 @@ class Store:
                     old_id, new_id, row["content"], row["timestamp"]
                 )
             owned = self._team_owned(old_id, new_id)
+            if owned and not team_override and problem is None:
+                # A link a team snapshot owns, present or not: only an override
+                # changes it (codex L3 1006 r1: a missing owned row was re-inserted
+                # as the operator's, making a non-confirmed path final).
+                if not self._defer_commit:
+                    self._conn.commit()
+                return False
             if not exists and problem is None:
                 self._conn.execute(
                     "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
@@ -2816,9 +2825,11 @@ class Store:
                 items.append((team.get("entry_id"), team.get("hash"), row["id"]))
         if items:
             self._remember_team_entries(items)
+            # By entry id: the kind is read only once no stored copy of the entry
+            # remains, whichever copy team_entries.episode_id last named.
             self._conn.executemany(
-                "UPDATE team_entries SET removal = ? WHERE entry_id = ? AND episode_id = ?",
-                [(removal, t[0], t[2]) for t in items if all(isinstance(v, str) for v in t)])
+                "UPDATE team_entries SET removal = ? WHERE entry_id = ?",
+                [(removal, t[0]) for t in items if all(isinstance(v, str) for v in t)])
 
     def import_team_snapshot(
         self,
@@ -2922,18 +2933,19 @@ class Store:
                 final = {r[0] for r in self._conn.execute(
                     "SELECT entry_id FROM team_entries WHERE removal = 'operator'")}
                 ins = self._insert_team_episodes(
-                    records, by_entry, gone, session_id, replace=enforced, final=final)
+                    records, by_entry, gone, session_id, replace=enforced, final=final,
+                    root=root)
                 rep["reimported"] = ins["reimported"]
                 rep["replaced_in_place"] = ins["replaced"]
                 for u in unmappable:
                     twin = by_entry.get(u["id"])
-                    if twin is not None and (twin["hash"] == u["hash"]
-                                             or twin["hash"] in enforced.get(u["id"], ())):
-                        continue  # a stored copy of this line, or of an enforced twin
+                    stale = twin is not None and twin["hash"] != u["hash"] \
+                        and twin["hash"] not in enforced.get(u["id"], ()) \
+                        and not self._enforced_elsewhere(u["id"], twin["hash"], root)
                     rep["unmappable"].append({**u, **({"stale_twin": twin["ep"]}
-                                                      if twin is not None else {})})
+                                                      if stale and twin else {})})
                     notes.append(("unmappable", u["id"], u["reason"][:200]))
-                    if twin is not None:
+                    if stale and twin is not None:
                         self._flag_stale_twin(twin)
                 self._snapshot_replace(
                     rep, notes, by_entry, key,
@@ -3034,17 +3046,40 @@ class Store:
         out = {r["key"] for r in same_root}
         line_of = {v["ep"]: (e, v["hash"]) for e, v in by_entry.items()}
         for r in self._conn.execute(
-                "SELECT DISTINCT key, new_id FROM team_snapshot_rows WHERE key != ?",
+                "SELECT DISTINCT key, old_id, new_id FROM team_snapshot_rows WHERE key != ?",
                 (key,)).fetchall():
-            if r["key"] not in out and line_of.get(r["new_id"]) in seen:
+            if r["key"] not in out and self._row_linkers(
+                    r["old_id"], r["new_id"], line_of) & seen:
                 out.add(r["key"])
         return sorted(out)
+
+    def _row_linkers(self, old_id: str, new_id: str,
+                     line_of: dict[str, tuple[str, Any]]) -> set[tuple[str, Any]]:
+        """The ledger linker(s) a supersessions row stands for, as ``(entry_id,
+        hash)``: the physical linker episode's, and for a rewired row each stand-in
+        linker's, with the hash team_entries recorded for it (codex L3 1006 r1: a
+        rewired A->C must be matched through the B it stands in for)."""
+        out = {line_of[new_id]} if new_id in line_of else set()
+        for r in self._conn.execute(
+                "SELECT ro.standin_new, te.hash FROM rewire_origin ro "
+                "LEFT JOIN team_entries te ON te.entry_id = ro.standin_new "
+                "WHERE ro.old_id = ? AND ro.new_id = ?", (old_id, new_id)).fetchall():
+            out.add((r[0], r[1]))
+        return out
+
+    def _enforced_elsewhere(self, entry_id: str, hash_: Any, root: str) -> bool:
+        """True when an ACTIVE key of another ledger root enforces this exact copy:
+        a stream must never rewrite or flag another ledger's current entry."""
+        return self._conn.execute(
+            "SELECT 1 FROM team_snapshot_enforced se JOIN team_snapshot ts "
+            "ON ts.key = se.key AND ts.active = 1 AND ts.root != ? "
+            "WHERE se.entry_id = ? AND se.hash = ?", (root, entry_id, hash_)
+        ).fetchone() is not None
 
     def _flag_stale_twin(self, twin: dict[str, Any]) -> None:
         """A stored copy of an id whose enforced line cannot be mapped: say so in its
         text, once, so it does not read as the ledger's current entry."""
-        mark = ("[stale: the team ledger's current entry with this id could not be "
-                "imported; see team-status] ")
+        mark = _STALE_TWIN_MARK
         row = self._conn.execute(
             "SELECT content FROM episodes WHERE id = ?", (twin["ep"],)).fetchone()
         if row is not None and not str(row["content"]).startswith(mark):
@@ -3168,13 +3203,14 @@ class Store:
                 [key, *takers])
             conn.execute(f"DELETE FROM team_snapshot_rows WHERE key IN ({marks})", takers)
         ep_entry = {v["ep"]: e for e, v in by_entry.items()}
-        stream_ids = {i for i, _ in seen}
+        line_of = {v["ep"]: (e, v["hash"]) for e, v in by_entry.items()}
 
-        def of_stream(linker_ep: str) -> bool:
-            # The linker's entry is a line of this stream (enforced or not). A
-            # ``team:<handle>`` label alone is a name, not provenance: one author
-            # writes in several ledgers, and rulings are copied between them.
-            return ep_entry.get(linker_ep) in stream_ids
+        def of_stream(old_id: str, linker_ep: str) -> bool:
+            # The linker (or, for a rewired row, a linker it stands in for) is a line
+            # of this stream by (entry_id, hash), enforced or not. A ``team:<handle>``
+            # label alone is a name, not provenance, and an id alone matches a
+            # twin: one author writes in several ledgers, rulings are copied.
+            return bool(self._row_linkers(old_id, linker_ep, line_of) & seen)
 
         if legacy:
             adopt = set()
@@ -3186,7 +3222,7 @@ class Store:
                 if ep_entry.get(r["old_id"]) not in enforced:
                     continue
                 src = str(r["source"])
-                if not of_stream(r["new_id"]):
+                if not of_stream(r["old_id"], r["new_id"]):
                     continue
                 if src.startswith("team:") or (src == "rewired" and conn.execute(
                     "SELECT 1 FROM rewire_origin WHERE old_id = ? AND new_id = ? "
@@ -3221,7 +3257,7 @@ class Store:
         for old, new in sorted(owned):
             if (old, new) in wanted or ep_entry.get(old) not in enforced:
                 continue
-            if ep_entry.get(new) in unmappable_ids:
+            if {i for i, _ in self._row_linkers(old, new, line_of)} & unmappable_ids:
                 continue  # its linker's verdict cannot be read: rows it linked stay
             if any((so, sn) in honoured for so, sn in conn.execute(
                     "SELECT standin_old, standin_new FROM rewire_origin "
@@ -3321,6 +3357,7 @@ class Store:
         self, records: list[dict[str, Any]], by_entry: dict[str, dict[str, Any]],
         gone: dict[str, str], session_id: str | None, *,
         replace: dict[str, list[str]] | None = None, final: frozenset[str] | set[str] = frozenset(),
+        root: str = "",
     ) -> dict[str, Any]:
         """Inside the caller's write transaction: insert each record not held, keyed by
         ledger id (a held id with another hash is a conflict; a removed id stays
@@ -3347,13 +3384,15 @@ class Store:
                 if known["hash"] == rec["hash"]:
                     already.append(rec["entry_id"])
                     if replace is not None and known.get("n", 1) == 1 \
-                            and known["content"] != rec["content"]:
-                        # e.g. a stale-twin flag on a copy that is current again
+                            and str(known["content"]).startswith(_STALE_TWIN_MARK):
+                        # the copy is current again: the stale-twin flag goes
                         self._conn.execute("UPDATE episodes SET content = ? WHERE id = ?",
                                            (rec["content"], known["ep"]))
                         known["content"] = rec["content"]
                 elif (replace is not None and known.get("n", 1) == 1
-                      and known["hash"] not in replace.get(rec["entry_id"], ())):
+                      and replace.get(rec["entry_id"]) == [rec["hash"]]
+                      and not self._enforced_elsewhere(rec["entry_id"], known["hash"], root)):
+                    # one authoritative hash, and no other ledger enforces the stored copy
                     old_hash = _content_hash(known["content"])
                     self._replace_team_episode(rec, known)
                     replaced.append(rec["entry_id"])
@@ -3433,6 +3472,13 @@ class Store:
         self._conn.execute(
             "UPDATE team_entries SET hash = ?, episode_id = ?, removal = NULL "
             "WHERE entry_id = ?", (rec["hash"], known["ep"], rec["entry_id"]))
+        # Associations were derived from the old text: they do not carry over.
+        try:
+            self._conn.execute(
+                "DELETE FROM associations WHERE episode_a = ? OR episode_b = ?",
+                (known["ep"], known["ep"]))
+        except sqlite3.OperationalError:  # no associations table in this store
+            pass
         team_meta = rec["metadata"].get("team") or {}
         owner = team_meta.get("owner")
         known.update({

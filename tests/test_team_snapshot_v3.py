@@ -687,3 +687,55 @@ def test_l3r1_1006_rewired_row_takeover_through_its_standin(tmp_path):
         assert not st["x"]["active"] and (ea, c.id) not in links(s)
     finally:
         s.close()
+
+
+def test_l3r2_1006_named_fixes(store, tmp_path):
+    a, b = lines()
+    import_ledger(store, v3([(a, True, []), (b, True, [A0])]))
+    # codex r2 #1: an unverifiable enforced line with a surrogate id is reported by
+    # position, never bound; the import completes and no transaction is left open
+    bad = '{"id":"\\ud800x","hash":"x","prev":"","type":"x"}'
+    r = import_ledger(store, v3([(a, True, []), (b, True, [A0]), (bad, True, [])], seq=2))
+    assert r.snapshot == "replaced" and r.unmappable[0]["id"] == "f:3"
+    assert not store._conn.in_transaction
+    # codex r2 #3: an unmappable line naming an id blocks replace-in-place of it
+    b2 = ledger("bob", [{**RETIRE, "reason": "second copy"}])[0]
+    b_bad = ledger("bob", [{**RETIRE, "v": True}])[0]
+    before = store.get(ep(store, B0)).content
+    r = import_ledger(store, v3([(a, True, []), (b2, True, [A0]), (b_bad, True, [])], seq=3))
+    assert not r.replaced_in_place and store.get(ep(store, B0)).content.endswith(before)
+    # complement r2 #4: an operator removal is never downgraded by a later auto one
+    store._conn.execute("UPDATE team_entries SET removal = 'operator' WHERE entry_id = ?",
+                        (B0,))
+    row = store._conn.execute("SELECT * FROM episodes WHERE id = ?",
+                              (ep(store, B0),)).fetchone()
+    store._remember_team_rows([row], "auto")
+    assert store._conn.execute("SELECT removal FROM team_entries WHERE entry_id = ?",
+                               (B0,)).fetchone()[0] == "operator"
+
+
+def test_l3r2_1006_standin_hash_is_fixed_at_rewire(tmp_path):
+    a = ledger("alice", [{**RULING, "ts": "2026-01-01T00:00:00Z"}])[0]
+    b = ledger("bob", [{"type": "retire", "supersedes": [A0], "ts": "2026-01-02T00:00:00Z"}])[0]
+    s = Store(tmp_path / "sh.db", audit=False)
+    try:
+        import_ledger(s, [a, b], link_authority=["bob"])         # unowned team:bob row
+        ea, eb = ep(s, A0), ep(s, B0)
+        c = s.record("a local note that replaces bob's retire", "observation")
+        s._conn.execute("INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, 'me')",
+                        (eb, c.id))
+        s._conn.commit()
+        assert s.delete(eb)                                       # A -> C rewired
+        h = s._conn.execute("SELECT standin_hash FROM rewire_origin WHERE old_id = ? "
+                            "AND new_id = ?", (ea, c.id)).fetchone()[0]
+        assert h == json.loads(b)["hash"]
+        # a twin of B (other hash) is NOT provenance for the rewired row, even after
+        # team_entries' hash for B moves to the twin's
+        b_twin = ledger("bob", [{**RETIRE, "reason": "twin", "ts": "2026-01-02T00:00:00Z"}])[0]
+        s._conn.execute("UPDATE team_entries SET hash = ? WHERE entry_id = ?",
+                        (json.loads(b_twin)["hash"], B0))
+        s._conn.commit()
+        r = import_ledger(s, v3([(a, True, []), (b_twin, False, [])], key="z", root="r9"))
+        assert r.links_adopted == 0 and (ea, c.id) in links(s)
+    finally:
+        s.close()

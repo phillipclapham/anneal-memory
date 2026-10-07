@@ -752,9 +752,14 @@ def _unverified_ids(line: str) -> dict | None:
         obj = json.loads(line, parse_constant=_refuse_constant)
     except (ValueError, RecursionError):
         return None
-    if not isinstance(obj, dict) or not isinstance(obj.get("id"), str):
+    # Only well-formed values leave here: they reach SQLite binds, reports and the
+    # terminal (codex L3 1006 r2: a lone surrogate id crashed the import).
+    if not isinstance(obj, dict) or not isinstance(obj.get("id"), str) \
+            or not _LEDGER_ID.fullmatch(obj["id"]):
         return None
-    return {"id": obj["id"], "hash": obj.get("hash")}
+    h = obj.get("hash")
+    return {"id": obj["id"],
+            "hash": h if isinstance(h, str) and re.fullmatch(r"[0-9a-f]{64}", h) else ""}
 
 
 def _sanitised(e: dict) -> dict | None:
@@ -798,7 +803,7 @@ def _import_v3(store: Store, lines: Iterable[str], report: TeamImportReport,
     honours: list[tuple[str, str]] = []
     records: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()   # (id, hash) of every verified line, any envelope
-    unmappable: list[dict[str, str]] = []
+    unmappable: list[dict[str, Any]] = []
     content = blanks = 0
 
     def broken(msg: str) -> None:
@@ -882,13 +887,15 @@ def _import_v3(store: Store, lines: Iterable[str], report: TeamImportReport,
             # The hash is the line's own, and may be absent on a line that is not an
             # entry. A line that fails its hash check still names its id, so the
             # rows it linked are held (codex L3 1006 r1); it is never "seen".
+            verified = e is not None
             got = e if e is not None else _unverified_ids(env["line"])
             rid = got.get("id") if got is not None else None
-            e = got
+            ok_id = isinstance(rid, str) and _LEDGER_ID.fullmatch(rid)
             unmappable.append({
-                "id": rid[:100] if isinstance(rid, str) else pos,
-                "hash": str(e.get("hash"))[:100] if e is not None else "",
-                "reason": problem})
+                "id": str(rid) if ok_id else pos,
+                "hash": str(got.get("hash")) if ok_id and got is not None else "",
+                "reason": problem,
+                "verified": verified})
             continue
         assert e is not None
         hashes = enforced.setdefault(e["id"], [])

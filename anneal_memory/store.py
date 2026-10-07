@@ -1527,6 +1527,7 @@ CREATE TABLE IF NOT EXISTS rewire_origin (
     standin_old TEXT NOT NULL,
     standin_new TEXT NOT NULL,
     standin_source TEXT NOT NULL,
+    standin_hash TEXT,
     PRIMARY KEY (old_id, new_id, standin_old, standin_new)
 );
 
@@ -2523,6 +2524,11 @@ class Store:
         cols = {row[1] for row in self._conn.execute("PRAGMA table_info(team_entries)")}
         if "removal" not in cols:
             self._conn.execute("ALTER TABLE team_entries ADD COLUMN removal TEXT")
+        # The stand-in linker's hash, fixed when the rewire happens (NULL = unknown:
+        # never matches a stream, so provenance fails closed).
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(rewire_origin)")}
+        if "standin_hash" not in cols:
+            self._conn.execute("ALTER TABLE rewire_origin ADD COLUMN standin_hash TEXT")
         if commit:
             self._conn.commit()
 
@@ -2828,7 +2834,8 @@ class Store:
             # By entry id: the kind is read only once no stored copy of the entry
             # remains, whichever copy team_entries.episode_id last named.
             self._conn.executemany(
-                "UPDATE team_entries SET removal = ? WHERE entry_id = ?",
+                "UPDATE team_entries SET removal = CASE WHEN removal = 'operator' "
+                "THEN removal ELSE ? END WHERE entry_id = ?",
                 [(removal, t[0]) for t in items if all(isinstance(v, str) for v in t)])
 
     def import_team_snapshot(
@@ -2847,7 +2854,7 @@ class Store:
         enforced: dict[str, list[str]],
         honours: list[tuple[str, str]],
         seen: Iterable[tuple[str, str]] = (),
-        unmappable: Iterable[dict[str, str]] = (),
+        unmappable: Iterable[dict[str, Any]] = (),
         dry_run: bool = False,
     ) -> dict[str, Any]:
         """Import a v3 team stream (flow seam design §3b): the episodes, then, when
@@ -2934,14 +2941,15 @@ class Store:
                     "SELECT entry_id FROM team_entries WHERE removal = 'operator'")}
                 ins = self._insert_team_episodes(
                     records, by_entry, gone, session_id, replace=enforced, final=final,
-                    root=root)
+                    root=root, takers=takers, blocked={u["id"] for u in unmappable})
                 rep["reimported"] = ins["reimported"]
                 rep["replaced_in_place"] = ins["replaced"]
                 for u in unmappable:
                     twin = by_entry.get(u["id"])
-                    stale = twin is not None and twin["hash"] != u["hash"] \
+                    stale = twin is not None and u.get("verified", True) \
+                        and twin["hash"] != u["hash"] \
                         and twin["hash"] not in enforced.get(u["id"], ()) \
-                        and not self._enforced_elsewhere(u["id"], twin["hash"], root)
+                        and not self._enforced_elsewhere(u["id"], twin["hash"], root, takers)
                     rep["unmappable"].append({**u, **({"stale_twin": twin["ep"]}
                                                       if stale and twin else {})})
                     notes.append(("unmappable", u["id"], u["reason"][:200]))
@@ -3058,23 +3066,30 @@ class Store:
         """The ledger linker(s) a supersessions row stands for, as ``(entry_id,
         hash)``: the physical linker episode's, and for a rewired row each stand-in
         linker's, with the hash team_entries recorded for it (codex L3 1006 r1: a
-        rewired A->C must be matched through the B it stands in for)."""
+        rewired A->C must be matched through the B it stands in for). The id set
+        of this is the unmappable hold's key."""
         out = {line_of[new_id]} if new_id in line_of else set()
+        # The hash recorded at rewire time, never the mutable team_entries.hash
+        # (codex L3 1006 r2: a re-import under another hash forged provenance).
         for r in self._conn.execute(
-                "SELECT ro.standin_new, te.hash FROM rewire_origin ro "
-                "LEFT JOIN team_entries te ON te.entry_id = ro.standin_new "
-                "WHERE ro.old_id = ? AND ro.new_id = ?", (old_id, new_id)).fetchall():
+                "SELECT standin_new, standin_hash FROM rewire_origin "
+                "WHERE old_id = ? AND new_id = ?", (old_id, new_id)).fetchall():
             out.add((r[0], r[1]))
         return out
 
-    def _enforced_elsewhere(self, entry_id: str, hash_: Any, root: str) -> bool:
-        """True when an ACTIVE key of another ledger root enforces this exact copy:
-        a stream must never rewrite or flag another ledger's current entry."""
-        return self._conn.execute(
-            "SELECT 1 FROM team_snapshot_enforced se JOIN team_snapshot ts "
+    def _enforced_elsewhere(self, entry_id: str, hash_: Any, root: str,
+                            takers: list[str] | None = None) -> bool:
+        """True when an ACTIVE key of another ledger root, other than one this replace
+        takes over, enforces this exact copy: a stream must never rewrite or flag
+        another ledger's current entry."""
+        for r in self._conn.execute(
+            "SELECT se.key FROM team_snapshot_enforced se JOIN team_snapshot ts "
             "ON ts.key = se.key AND ts.active = 1 AND ts.root != ? "
             "WHERE se.entry_id = ? AND se.hash = ?", (root, entry_id, hash_)
-        ).fetchone() is not None
+        ).fetchall():
+            if r[0] not in (takers or ()):
+                return True
+        return False
 
     def _flag_stale_twin(self, twin: dict[str, Any]) -> None:
         """A stored copy of an id whose enforced line cannot be mapped: say so in its
@@ -3357,7 +3372,7 @@ class Store:
         self, records: list[dict[str, Any]], by_entry: dict[str, dict[str, Any]],
         gone: dict[str, str], session_id: str | None, *,
         replace: dict[str, list[str]] | None = None, final: frozenset[str] | set[str] = frozenset(),
-        root: str = "",
+        root: str = "", takers: list[str] | None = None, blocked: set[str] | None = None,
     ) -> dict[str, Any]:
         """Inside the caller's write transaction: insert each record not held, keyed by
         ledger id (a held id with another hash is a conflict; a removed id stays
@@ -3391,8 +3406,11 @@ class Store:
                         known["content"] = rec["content"]
                 elif (replace is not None and known.get("n", 1) == 1
                       and replace.get(rec["entry_id"]) == [rec["hash"]]
-                      and not self._enforced_elsewhere(rec["entry_id"], known["hash"], root)):
-                    # one authoritative hash, and no other ledger enforces the stored copy
+                      and rec["entry_id"] not in (blocked or ())
+                      and not self._enforced_elsewhere(rec["entry_id"], known["hash"], root,
+                                                       takers)):
+                    # one authoritative hash (no unmappable line names the id), and
+                    # no other ledger's active key enforces the stored copy
                     old_hash = _content_hash(known["content"])
                     self._replace_team_episode(rec, known)
                     replaced.append(rec["entry_id"])
@@ -3778,6 +3796,16 @@ class Store:
         eid = team.get("entry_id") if isinstance(team, dict) else None
         return eid if isinstance(eid, str) else None
 
+    def _team_hash_of(self, episode_id: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT metadata FROM episodes WHERE id = ?", (episode_id,)).fetchone()
+        try:
+            team = json.loads(row["metadata"]).get("team") if row else None
+        except (TypeError, ValueError, AttributeError):
+            return None
+        h = team.get("hash") if isinstance(team, dict) else None
+        return h if isinstance(h, str) else None
+
     def _rewire_one(self, start: str, first: str, cur: str) -> None:
         """Link ``start`` past the removed ``first`` .. to ``cur`` (a 'rewired' row),
         recording the pair it stands in for and carrying the team ownership of
@@ -3799,17 +3827,18 @@ class Store:
             conn.execute("INSERT INTO supersessions (old_id, new_id, source) "
                          "VALUES (?, ?, 'rewired')", (start, cur))
         origins = conn.execute(
-            "SELECT standin_old, standin_new, standin_source FROM rewire_origin "
+            "SELECT standin_old, standin_new, standin_source, standin_hash FROM rewire_origin "
             "WHERE old_id = ? AND new_id = ?", (start, first)).fetchall()
         if not origins:
             src = conn.execute("SELECT source FROM supersessions WHERE old_id = ? "
                                "AND new_id = ?", (start, first)).fetchone()
             a, b = self._team_entry_of(start), self._team_entry_of(first)
-            origins = [(a or start, b or first, str(src[0]) if src else "")]
+            origins = [(a or start, b or first, str(src[0]) if src else "",
+                        self._team_hash_of(first) if b else None)]
         conn.executemany(
-            "INSERT OR IGNORE INTO rewire_origin "
-            "(old_id, new_id, standin_old, standin_new, standin_source) VALUES (?, ?, ?, ?, ?)",
-            [(start, cur, o[0], o[1], o[2]) for o in origins])
+            "INSERT OR IGNORE INTO rewire_origin (old_id, new_id, standin_old, standin_new, "
+            "standin_source, standin_hash) VALUES (?, ?, ?, ?, ?, ?)",
+            [(start, cur, o[0], o[1], o[2], o[3]) for o in origins])
         conn.executemany(
             "INSERT OR IGNORE INTO team_snapshot_rows (key, old_id, new_id) VALUES (?, ?, ?)",
             [(k, start, cur) for k in owners])

@@ -668,7 +668,9 @@ def test_l3r1_1006_twin_adoption_and_cross_root_rewrite(tmp_path):
         s.close()
 
 
-def test_l3r1_1006_rewired_row_takeover_through_its_standin(tmp_path):
+def test_rewired_row_never_takes_a_key_over(tmp_path):
+    """Phill 2026-10-06: rewired rows are never adopted and never take a key over
+    (their provenance spiralled through L1, L3 r1 and r2; deleted, not guarded)."""
     a = ledger("alice", [{**RULING, "ts": "2026-01-01T00:00:00Z"}])[0]
     b = ledger("bob", [{"type": "retire", "supersedes": [A0], "ts": "2026-01-02T00:00:00Z"}])[0]
     s = Store(tmp_path / "rw.db", audit=False)
@@ -681,10 +683,10 @@ def test_l3r1_1006_rewired_row_takeover_through_its_standin(tmp_path):
         s._conn.commit()
         assert s.delete(eb, team_operator=True)        # A -> C rewired, owned by x
         assert s.team_owned(old_id=ea, new_id=c.id)
-        # a new key of ANOTHER root whose stream carries the exact line B takes x over
+        # a new key of ANOTHER root whose stream carries the exact line B: no takeover
         r = import_ledger(s, v3([(a, True, []), (b, True, [])], key="y", root="r2"))
         st = {k["key"]: k for k in s.team_snapshot_status()["keys"]}
-        assert not st["x"]["active"] and (ea, c.id) not in links(s)
+        assert st["x"]["active"] and (ea, c.id) in links(s) and r.links_adopted == 0
     finally:
         s.close()
 
@@ -714,28 +716,24 @@ def test_l3r2_1006_named_fixes(store, tmp_path):
                                (B0,)).fetchone()[0] == "operator"
 
 
-def test_l3r2_1006_standin_hash_is_fixed_at_rewire(tmp_path):
+def test_unowned_rewired_row_is_never_adopted_and_is_counted(tmp_path):
     a = ledger("alice", [{**RULING, "ts": "2026-01-01T00:00:00Z"}])[0]
     b = ledger("bob", [{"type": "retire", "supersedes": [A0], "ts": "2026-01-02T00:00:00Z"}])[0]
-    s = Store(tmp_path / "sh.db", audit=False)
+    s = Store(tmp_path / "uw.db", audit=False)
     try:
         import_ledger(s, [a, b], link_authority=["bob"])         # unowned team:bob row
         ea, eb = ep(s, A0), ep(s, B0)
-        c = s.record("a local note that replaces bob's retire", "observation")
-        s._conn.execute("INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, 'me')",
-                        (eb, c.id))
-        s._conn.commit()
-        assert s.delete(eb)                                       # A -> C rewired
-        h = s._conn.execute("SELECT standin_hash FROM rewire_origin WHERE old_id = ? "
-                            "AND new_id = ?", (ea, c.id)).fetchone()[0]
-        assert h == json.loads(b)["hash"]
-        # a twin of B (other hash) is NOT provenance for the rewired row, even after
-        # team_entries' hash for B moves to the twin's
-        b_twin = ledger("bob", [{**RETIRE, "reason": "twin", "ts": "2026-01-02T00:00:00Z"}])[0]
-        s._conn.execute("UPDATE team_entries SET hash = ? WHERE entry_id = ?",
-                        (json.loads(b_twin)["hash"], B0))
-        s._conn.commit()
-        r = import_ledger(s, v3([(a, True, []), (b_twin, False, [])], key="z", root="r9"))
-        assert r.links_adopted == 0 and (ea, c.id) in links(s)
+        c = ledger("cy", [{"type": "retire", "supersedes": [B0],
+                           "ts": "2026-01-03T00:00:00Z"}])[0]
+        import_ledger(s, [c], link_authority=["cy"])
+        ec = ep(s, f"{_prefix('cy')}-20261004120000-00000000")
+        assert s.delete(eb)                                       # A -> C rewired, unowned
+        assert (ea, ec) in links(s)
+        # the first v3 stream carries B exactly and does not honour (A, B): the rewired
+        # row is neither adopted nor removed, and team-status counts it
+        r = import_ledger(s, v3([(a, True, []), (b, True, []), (c, True, [])]))
+        assert r.snapshot == "replaced" and r.links_adopted == 0
+        assert (ea, ec) in links(s)
+        assert s.team_snapshot_status()["unmanaged_rewired"] == 1
     finally:
         s.close()

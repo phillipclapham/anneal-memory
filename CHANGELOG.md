@@ -28,8 +28,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   terminal, or with `ANNEAL_TEAM_OVERRIDE=1`) stays final. A stored copy whose hash no enforced
   line carries is replaced in place, keeping its episode id and links.
 - Retention `prune` keeps every team episode an active key's last stream enforces; an explicit
-  `delete` of one is allowed and logged. A rewired link carries the ownership and the pair it
-  stands in for.
+  `delete` of one is allowed and logged. A rewired link made from a link a snapshot owns carries
+  that ownership and the pair it stands in for, and stays while that pair is honoured.
 - New additive tables `team_snapshot`, `team_snapshot_rows`, `team_snapshot_enforced`,
   `team_snapshot_notes`, `team_overrides`, `rewire_origin`, and a `removal` column on
   `team_entries`.
@@ -46,8 +46,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   writes in several).
 - `anneal-memory team-status`, `anneal-memory team-forget-key KEY`.
 - Known limits (design §5): episodes are never retracted; one store fed by several clones follows
-  the last; a verbatim copy of a linker line into another ledger in one store is a takeover; an
-  older binary's rewired rows are never adopted (`team-status` counts them).
+  the last; a verbatim copy of a linker line into another ledger in one store is a takeover; a
+  rewired link no snapshot owns (an older binary's, or one made before the ledger's first v3
+  import) is never adopted and never takes a key over: it stays as it is, and `team-status`
+  counts it.
 
 
 ## [0.9.41] — 2026-10-05

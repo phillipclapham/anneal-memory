@@ -1520,14 +1520,15 @@ CREATE TABLE IF NOT EXISTS team_overrides (
     PRIMARY KEY (old_id, new_id)
 );
 -- What a 'rewired' row (A -> C made when B was removed) stands in for: the pair
--- (A, B) as LEDGER ids when both were team entries, and that pair's source.
+-- (A, B) as LEDGER ids when both were team entries, and that pair's source (kept
+-- as a record; no rule reads it). It serves only the keep rule of a rewired row a
+-- snapshot already owns: rewired rows are never adopted and never take a key over.
 CREATE TABLE IF NOT EXISTS rewire_origin (
     old_id TEXT NOT NULL,
     new_id TEXT NOT NULL,
     standin_old TEXT NOT NULL,
     standin_new TEXT NOT NULL,
     standin_source TEXT NOT NULL,
-    standin_hash TEXT,
     PRIMARY KEY (old_id, new_id, standin_old, standin_new)
 );
 
@@ -2524,11 +2525,6 @@ class Store:
         cols = {row[1] for row in self._conn.execute("PRAGMA table_info(team_entries)")}
         if "removal" not in cols:
             self._conn.execute("ALTER TABLE team_entries ADD COLUMN removal TEXT")
-        # The stand-in linker's hash, fixed when the rewire happens (NULL = unknown:
-        # never matches a stream, so provenance fails closed).
-        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(rewire_origin)")}
-        if "standin_hash" not in cols:
-            self._conn.execute("ALTER TABLE rewire_origin ADD COLUMN standin_hash TEXT")
         if commit:
             self._conn.commit()
 
@@ -2874,16 +2870,16 @@ class Store:
           the root stored for it; any other root change is a key collision
           (``partial_stream``, its rows untouched).
         - Every replace takes over every other key of this root, and every key owning
-          a row whose linker is a line of this stream by ``(entry_id, hash)``.
+          a non-rewired row whose linker is a line of this stream by ``(entry_id, hash)``.
         - Inside the replace: owned rows missing while both episodes exist become
           operator overrides; then the episodes import (an enforced entry with no
           episode comes back unless an operator removed it; a stored copy whose hash
           no enforced line carries is replaced in place); then removals; then
           additions (existence and cycle checks only).
         - The first replace on a root with no snapshot adopts each unowned
-          ``team:`` row (or rewired row standing in for one) whose target is enforced
-          and whose linker's entry is a line of this stream; wanted pairs with no row
-          are added and reported as ``links_added_legacy``.
+          ``team:`` row whose target is enforced and whose linker is a line of this
+          stream by ``(entry_id, hash)``; rewired rows are never adopted. Wanted
+          pairs with no row are added and reported as ``links_added_legacy``.
         - wanted = honoured pairs whose linker is stored with an enforced hash and
           whose target is the one stored episode with that id, minus overrides; an
           owned row stays when wanted, when its target is not enforced, or when a
@@ -3049,33 +3045,19 @@ class Store:
         by_entry: dict[str, dict[str, Any]], seen: set[tuple[str, str]],
     ) -> list[str]:
         """Keys this replace takes over: every other key of the root, and every key
-        owning a row whose LINKER is a line of this stream by ``(entry_id, hash)``
-        (a target alone proves nothing: rulings are copied between ledgers)."""
+        owning a NON-rewired row whose physical LINKER is a line of this stream by
+        ``(entry_id, hash)`` (a target alone proves nothing: rulings are copied
+        between ledgers). A rewired row never takes a key over (Phill 2026-10-06:
+        its provenance spiralled through three review rounds; deleted, not guarded)."""
         out = {r["key"] for r in same_root}
         line_of = {v["ep"]: (e, v["hash"]) for e, v in by_entry.items()}
         for r in self._conn.execute(
-                "SELECT DISTINCT key, old_id, new_id FROM team_snapshot_rows WHERE key != ?",
-                (key,)).fetchall():
-            if r["key"] not in out and self._row_linkers(
-                    r["old_id"], r["new_id"], line_of) & seen:
+                "SELECT DISTINCT o.key, o.new_id FROM team_snapshot_rows o "
+                "JOIN supersessions s ON s.old_id = o.old_id AND s.new_id = o.new_id "
+                "WHERE o.key != ? AND s.source != 'rewired'", (key,)).fetchall():
+            if r["key"] not in out and line_of.get(r["new_id"]) in seen:
                 out.add(r["key"])
         return sorted(out)
-
-    def _row_linkers(self, old_id: str, new_id: str,
-                     line_of: dict[str, tuple[str, Any]]) -> set[tuple[str, Any]]:
-        """The ledger linker(s) a supersessions row stands for, as ``(entry_id,
-        hash)``: the physical linker episode's, and for a rewired row each stand-in
-        linker's, with the hash team_entries recorded for it (codex L3 1006 r1: a
-        rewired A->C must be matched through the B it stands in for). The id set
-        of this is the unmappable hold's key."""
-        out = {line_of[new_id]} if new_id in line_of else set()
-        # The hash recorded at rewire time, never the mutable team_entries.hash
-        # (codex L3 1006 r2: a re-import under another hash forged provenance).
-        for r in self._conn.execute(
-                "SELECT standin_new, standin_hash FROM rewire_origin "
-                "WHERE old_id = ? AND new_id = ?", (old_id, new_id)).fetchall():
-            out.add((r[0], r[1]))
-        return out
 
     def _enforced_elsewhere(self, entry_id: str, hash_: Any, root: str,
                             takers: list[str] | None = None) -> bool:
@@ -3145,8 +3127,8 @@ class Store:
         """The team snapshot keys and what they own; what each key's last stream
         could not mirror (``notes``: unmappable lines, refused cycles, target ids held
         by several episodes); how many team episodes retention keeps for an active
-        key; and 'rewired' rows between two team episodes that no snapshot manages
-        (an older binary's, never adopted). Read-only."""
+        key; and 'rewired' rows between two team episodes that no snapshot owns
+        (never adopted, so they stay as they are until removed by hand). Read-only."""
         empty = {"keys": [], "overrides": 0, "unmanaged_rewired": 0, "notes": [],
                  "protected_episodes": 0}
         with self._db_boundary("status"), self._read_snapshot():
@@ -3161,8 +3143,8 @@ class Store:
                     "SELECT COUNT(*) FROM team_overrides").fetchone()[0]
                 unmanaged = self._conn.execute(
                     """SELECT COUNT(*) FROM supersessions s WHERE s.source = 'rewired'
-                       AND NOT EXISTS (SELECT 1 FROM rewire_origin r
-                                       WHERE r.old_id = s.old_id AND r.new_id = s.new_id)
+                       AND NOT EXISTS (SELECT 1 FROM team_snapshot_rows o
+                                       WHERE o.old_id = s.old_id AND o.new_id = s.new_id)
                        AND EXISTS (SELECT 1 FROM episodes e WHERE e.id = s.old_id
                                    AND e.source >= 'team:' AND e.source < 'team;')
                        AND EXISTS (SELECT 1 FROM episodes e WHERE e.id = s.new_id
@@ -3220,13 +3202,6 @@ class Store:
         ep_entry = {v["ep"]: e for e, v in by_entry.items()}
         line_of = {v["ep"]: (e, v["hash"]) for e, v in by_entry.items()}
 
-        def of_stream(old_id: str, linker_ep: str) -> bool:
-            # The linker (or, for a rewired row, a linker it stands in for) is a line
-            # of this stream by (entry_id, hash), enforced or not. A ``team:<handle>``
-            # label alone is a name, not provenance, and an id alone matches a
-            # twin: one author writes in several ledgers, rulings are copied.
-            return bool(self._row_linkers(old_id, linker_ep, line_of) & seen)
-
         if legacy:
             adopt = set()
             for r in conn.execute(
@@ -3236,14 +3211,12 @@ class Store:
             ).fetchall():
                 if ep_entry.get(r["old_id"]) not in enforced:
                     continue
-                src = str(r["source"])
-                if not of_stream(r["old_id"], r["new_id"]):
-                    continue
-                if src.startswith("team:") or (src == "rewired" and conn.execute(
-                    "SELECT 1 FROM rewire_origin WHERE old_id = ? AND new_id = ? "
-                    "AND standin_source >= 'team:' AND standin_source < 'team;'",
-                    (r["old_id"], r["new_id"]),
-                ).fetchone()):
+                # Only a ``team:``-labelled row whose physical linker is a line of
+                # this stream by (entry_id, hash), enforced or not. A label alone is
+                # a name, not provenance, and an id alone matches a twin. A rewired
+                # row is never adopted: it stays unmanaged and team-status counts it.
+                if str(r["source"]).startswith("team:") \
+                        and line_of.get(r["new_id"]) in seen:
                     adopt.add((r["old_id"], r["new_id"]))
             conn.executemany(
                 "INSERT OR IGNORE INTO team_snapshot_rows (key, old_id, new_id) VALUES (?, ?, ?)",
@@ -3272,7 +3245,9 @@ class Store:
         for old, new in sorted(owned):
             if (old, new) in wanted or ep_entry.get(old) not in enforced:
                 continue
-            if {i for i, _ in self._row_linkers(old, new, line_of)} & unmappable_ids:
+            if ({ep_entry.get(new)} | {r[0] for r in conn.execute(
+                    "SELECT standin_new FROM rewire_origin WHERE old_id = ? AND new_id = ?",
+                    (old, new)).fetchall()}) & unmappable_ids:
                 continue  # its linker's verdict cannot be read: rows it linked stay
             if any((so, sn) in honoured for so, sn in conn.execute(
                     "SELECT standin_old, standin_new FROM rewire_origin "
@@ -3796,16 +3771,6 @@ class Store:
         eid = team.get("entry_id") if isinstance(team, dict) else None
         return eid if isinstance(eid, str) else None
 
-    def _team_hash_of(self, episode_id: str) -> str | None:
-        row = self._conn.execute(
-            "SELECT metadata FROM episodes WHERE id = ?", (episode_id,)).fetchone()
-        try:
-            team = json.loads(row["metadata"]).get("team") if row else None
-        except (TypeError, ValueError, AttributeError):
-            return None
-        h = team.get("hash") if isinstance(team, dict) else None
-        return h if isinstance(h, str) else None
-
     def _rewire_one(self, start: str, first: str, cur: str) -> None:
         """Link ``start`` past the removed ``first`` .. to ``cur`` (a 'rewired' row),
         recording the pair it stands in for and carrying the team ownership of
@@ -3827,18 +3792,17 @@ class Store:
             conn.execute("INSERT INTO supersessions (old_id, new_id, source) "
                          "VALUES (?, ?, 'rewired')", (start, cur))
         origins = conn.execute(
-            "SELECT standin_old, standin_new, standin_source, standin_hash FROM rewire_origin "
+            "SELECT standin_old, standin_new, standin_source FROM rewire_origin "
             "WHERE old_id = ? AND new_id = ?", (start, first)).fetchall()
         if not origins:
             src = conn.execute("SELECT source FROM supersessions WHERE old_id = ? "
                                "AND new_id = ?", (start, first)).fetchone()
             a, b = self._team_entry_of(start), self._team_entry_of(first)
-            origins = [(a or start, b or first, str(src[0]) if src else "",
-                        self._team_hash_of(first) if b else None)]
+            origins = [(a or start, b or first, str(src[0]) if src else "")]
         conn.executemany(
-            "INSERT OR IGNORE INTO rewire_origin (old_id, new_id, standin_old, standin_new, "
-            "standin_source, standin_hash) VALUES (?, ?, ?, ?, ?, ?)",
-            [(start, cur, o[0], o[1], o[2], o[3]) for o in origins])
+            "INSERT OR IGNORE INTO rewire_origin "
+            "(old_id, new_id, standin_old, standin_new, standin_source) VALUES (?, ?, ?, ?, ?)",
+            [(start, cur, o[0], o[1], o[2]) for o in origins])
         conn.executemany(
             "INSERT OR IGNORE INTO team_snapshot_rows (key, old_id, new_id) VALUES (?, ?, ?)",
             [(k, start, cur) for k in owners])

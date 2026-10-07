@@ -2240,8 +2240,12 @@ def cmd_team_status(args: argparse.Namespace) -> None:
     if args.json:
         _print_json(data)
         return
+    unmanaged = (f"Rewired links hiding a team entry that no snapshot manages (never "
+                 f"adopted; remove by hand if wrong): {data['unmanaged_rewired']}")
     if not data["keys"]:
         print("No team snapshot (no v3 team-import has replaced links here).")
+        if data["unmanaged_rewired"]:
+            print(unmanaged)
         return
     for k in data["keys"]:
         print(f"key {k['key']}  root {k['root']}  {'active' if k['active'] else 'inactive'}  "
@@ -2253,8 +2257,7 @@ def cmd_team_status(args: argparse.Namespace) -> None:
     for n in data["notes"]:
         print(f"  {n['kind']}: {n['entry_id']} ({n['detail']}) [key {n['key']}]")
     if data["unmanaged_rewired"]:
-        print(f"Rewired links between team entries no snapshot manages (an older "
-              f"version's): {data['unmanaged_rewired']}")
+        print(unmanaged)
 
 
 def cmd_team_forget_key(args: argparse.Namespace) -> None:

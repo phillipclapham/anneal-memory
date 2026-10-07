@@ -771,3 +771,28 @@ def test_seam_doc_l3_1006_unmanaged_rewired_counted_and_never_owned(tmp_path):
         assert (ea, c.id) in links(s) and not s.team_owned(old_id=ea, new_id=c.id)
     finally:
         s.close()
+
+
+def test_team_status_cli_shows_unmanaged_with_no_keys(tmp_path, capsys, monkeypatch):
+    import sys
+
+    from anneal_memory.cli import main
+    a = ledger("alice", [{**RULING, "ts": "2026-01-01T00:00:00Z"}])[0]
+    b = ledger("bob", [{"type": "retire", "supersedes": [A0], "ts": "2026-01-02T00:00:00Z"}])[0]
+    db = tmp_path / "st.db"
+    s = Store(db, audit=False)
+    try:
+        import_ledger(s, v3([(a, True, []), (b, True, [A0])], key="x"))
+        eb = ep(s, B0)
+        c = s.record("a local note that replaces bob's retire", "observation")
+        s._conn.execute("INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, 'me')",
+                        (eb, c.id))
+        s._conn.commit()
+        assert s.delete(eb, team_operator=True)
+        s.team_forget_key("x")
+    finally:
+        s.close()
+    monkeypatch.setattr(sys, "argv", ["anneal-memory", "--db", str(db), "team-status"])
+    main()
+    out = capsys.readouterr().out
+    assert "No team snapshot" in out and "hiding a team entry" in out and out.rstrip().endswith("1")

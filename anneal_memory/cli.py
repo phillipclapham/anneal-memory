@@ -1126,6 +1126,7 @@ def cmd_delete(args: argparse.Namespace) -> None:
             print(f"Episode {args.episode_id} not found.", file=sys.stderr)
             sys.exit(1)
 
+        confirmed = False
         if not args.force:
             print(f"Episode {episode.id} ({episode.type.value}):")
             print(f"  {_truncate(episode.content.replace(chr(10), ' '), 100)}")
@@ -1134,8 +1135,15 @@ def cmd_delete(args: argparse.Namespace) -> None:
             if confirm != "y":
                 print("Cancelled.")
                 return
-
-        store.delete(args.episode_id)
+            confirmed = sys.stdin.isatty()
+        # A team entry's removal is final (no v3 team import brings it back) only on
+        # the operator's own say: a yes on a terminal, or ANNEAL_TEAM_OVERRIDE=1.
+        operator = confirmed or os.environ.get("ANNEAL_TEAM_OVERRIDE") == "1"
+        store.delete(args.episode_id, team_operator=operator)
+        if episode.source.startswith("team:") and not operator:
+            print("Note: this team entry comes back at the next v3 team import while the "
+                  "ledger enforces it (confirm on a terminal, or set "
+                  "ANNEAL_TEAM_OVERRIDE=1, to make it final).", file=sys.stderr)
 
         if args.json:
             _print_json({"deleted": args.episode_id})
@@ -2206,8 +2214,13 @@ def cmd_team_import(args: argparse.Namespace) -> None:
                   f"{len(data['links_added_legacy'])} added on first import, "
                   f"{len(data['links_removed'])} removed to match the ledger, "
                   f"{data['links_adopted']} adopted, "
-                  f"{len(data['overrides_recorded'])} operator removal(s) recorded",
+                  f"{len(data['overrides_recorded'])} operator removal(s) recorded, "
+                  f"{len(data['reimported'])} entr(ies) re-imported, "
+                  f"{len(data['replaced_in_place'])} replaced in place, "
+                  f"{len(data['sanitised'])} sanitised",
                   file=sys.stderr)
+            for item in data["unmappable"]:
+                print(f"  unmappable: {item['id']}: {item['reason']}", file=sys.stderr)
         for key in ("rejected", "chain_problems", "conflicts", "links_refused",
                     "links_unauthorized"):
             for item in data[key]:
@@ -2230,6 +2243,10 @@ def cmd_team_status(args: argparse.Namespace) -> None:
         print(f"key {k['key']}  root {k['root']}  {'active' if k['active'] else 'inactive'}  "
               f"pos {k['pos']} seq {k['seq']}  owns {k['owned']} link(s)")
     print(f"Operator overrides: {data['overrides']}")
+    print(f"Team episodes retention keeps (enforced by an active key): "
+          f"{data['protected_episodes']}")
+    for n in data["notes"]:
+        print(f"  {n['kind']}: {n['entry_id']} ({n['detail']}) [key {n['key']}]")
     if data["unmanaged_rewired"]:
         print(f"Rewired links between team entries no snapshot manages (an older "
               f"version's): {data['unmanaged_rewired']}")

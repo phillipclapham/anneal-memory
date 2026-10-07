@@ -87,7 +87,8 @@ STREAM_VERSION = 2
 _STREAM_KEY = "anneal_team_stream"
 _STREAM_END = "anneal_team_stream_end"
 SNAPSHOT_STREAM_VERSION = 3
-_V3_HEADER = {_STREAM_KEY, "key", "root", "epoch", "repin_n", "pos", "seq", "judged"}
+_V3_HEADER = {_STREAM_KEY, "key", "root", "prev_root", "epoch", "repin_n", "pos", "seq",
+              "judged"}
 _V3_ENVELOPE = {"frame", "n", "line", "enforced", "honours"}
 _FRAME_LABEL = re.compile(r"[A-Za-z0-9._@:+/=-]{1,200}", re.ASCII)
 TYPES = ("decision", "constraint", "finding", "question", "tension", "ack", "retire")
@@ -164,13 +165,17 @@ class TeamImportReport:
     links_removed: list[dict] = field(default_factory=list)
     links_adopted: int = 0
     overrides_recorded: list[dict] = field(default_factory=list)
+    unmappable: list[dict] = field(default_factory=list)
+    sanitised: list[str] = field(default_factory=list)
+    reimported: list[str] = field(default_factory=list)
+    replaced_in_place: list[str] = field(default_factory=list)
 
     @property
     def clean(self) -> bool:
         """True when nothing was refused or in conflict. Pending links are not a
         problem: a target not fetched yet completes on a later import."""
         return not (self.rejected or self.chain_problems or self.conflicts
-                    or self.links_refused or self.links_unauthorized)
+                    or self.links_refused or self.links_unauthorized or self.unmappable)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -200,7 +205,11 @@ class TeamImportReport:
                 "links_added_legacy": self.links_added_legacy,
                 "links_removed": self.links_removed,
                 "links_adopted": self.links_adopted,
-                "overrides_recorded": self.overrides_recorded}
+                "overrides_recorded": self.overrides_recorded,
+                "unmappable": self.unmappable,
+                "sanitised": self.sanitised,
+                "reimported": self.reimported,
+                "replaced_in_place": self.replaced_in_place}
                if self.framing == "v3" else {}),
         }
 
@@ -490,7 +499,7 @@ def _stream_header(raw: str) -> object:
 
 
 def _v3_header_problem(head: dict) -> str | None:
-    for name in ("key", "root", "epoch"):
+    for name in ("key", "root", "prev_root", "epoch"):
         v = head.get(name)
         if not isinstance(v, str) or not v or len(v) > 200 or _unsafe_text(v):
             return f"{name} is not a short text"
@@ -731,21 +740,49 @@ def _record_of(e: dict) -> dict[str, Any]:
     }
 
 
+def _sanitised(e: dict) -> dict | None:
+    """``e`` with every unsafe character in its free text escaped as a ``\\u``
+    sequence, flagged; None when the escaped entry still fails its own check. The
+    ledger hash is kept: the episode maps by the LINE's ``(entry_id, hash)``."""
+    def one(c: str) -> str:
+        if not _unsafe_text(c):
+            return c
+        return f"\\u{ord(c):04x}" if ord(c) <= 0xFFFF else f"\\U{ord(c):08x}"
+
+    def esc(text: str) -> str:
+        return "".join(one(c) for c in text)
+    out = dict(e)
+    for f in (*_TEXT_FIELDS, "owner"):
+        if isinstance(out.get(f), str):
+            out[f] = esc(out[f])
+    if isinstance(out.get("paths"), list):
+        out["paths"] = [esc(x) if isinstance(x, str) else x for x in out["paths"]]
+    if out == e or _entry_problem(out) is not None:
+        return None
+    out["sanitised"] = True
+    return out
+
+
 def _import_v3(store: Store, lines: Iterable[str], report: TeamImportReport,
                dry_run: bool) -> TeamImportReport:
     """A v3 stream: one clone's complete verdict (contract in
     ``project_memory/team_frame_contract_v3.md``). The exporter judged the chains, so
-    no chain-linkage walk runs here; each line's own hash and fields are still
-    checked, and a failure on an ENFORCED line makes the stream incomplete (its
-    episodes import, nothing is replaced) rather than narrowing the verdict."""
+    no chain-linkage walk runs here. Each line's own hash and fields are still
+    checked, and a failure never breaks the stream: an enforced line with unsafe
+    text is imported sanitised, and any other refusal makes it UNMAPPABLE (no
+    episode, reported). Only a header, envelope or trailer failure makes the stream
+    incomplete (its episodes import, nothing is replaced)."""
     report.framing = "v3"
     head: dict | None = None
     complete = True
     envelopes = 0
     trailer: int | None = None
-    enforced: dict[str, str] = {}
+    enforced: dict[str, list[str]] = {}
     honours: list[tuple[str, str]] = []
     records: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()   # (id, hash) of every verified line, any envelope
+    authors: set[str] = set()
+    unmappable: list[dict[str, str]] = []
     content = blanks = 0
 
     def broken(msg: str) -> None:
@@ -804,25 +841,38 @@ def _import_v3(store: Store, lines: Iterable[str], report: TeamImportReport,
         is_enforced = env["enforced"]
         if env["honours"] and not is_enforced:
             broken(f"line {k}: an unenforced line honours links")
-        pos = f"{env['frame']}:{env['n']}"
-        e = _line_entry(env["line"], pos, report if is_enforced else TeamImportReport())
-        problem = None if e is None else _entry_problem(e)
-        if e is None or problem:
-            if is_enforced:
-                if problem:
-                    report.rejected.append({"id": str(e.get("id"))[:100] if e else pos,
-                                            "reason": problem})
-                broken(f"{pos}: an enforced line failed its own check")
             continue
-        if not set(env["honours"]) <= set(e.get("supersedes") or []):
+        pos = f"{env['frame']}:{env['n']}"
+        # A per-line problem is reported through ``unmappable``, never as a chain
+        # problem: it does not make the stream incomplete.
+        e = _line_entry(env["line"], pos, TeamImportReport())
+        if e is not None and isinstance(e.get("id"), str) and isinstance(e.get("author"), str):
+            seen.add((e["id"], e["hash"]))
+            authors.add(e["author"])
+        if e is not None and not set(env["honours"]) <= set(
+                x for x in (e.get("supersedes") or []) if isinstance(x, str)):
             broken(f"{pos}: honours names an id the line does not supersede")
             continue
         if not is_enforced:
             continue
-        if e["id"] in enforced:
-            broken(f"{pos}: two enforced lines carry the id {e['id']!r}")
+        problem = "the line is not a hash-verified entry" if e is None else _entry_problem(e)
+        if e is not None and problem:
+            clean = _sanitised(e)
+            if clean is not None:
+                e, problem = clean, None
+                report.sanitised.append(e["id"])
+        if problem and e is not None and e.get("type") == "ack":
+            continue  # an ack carries no links: exempt from the unmappable rule
+        if problem:
+            # The hash is the line's own, and may be absent on a line that is not an entry.
+            rid = e.get("id") if e is not None else None
+            unmappable.append({
+                "id": rid[:100] if isinstance(rid, str) else pos,
+                "hash": str(e.get("hash"))[:100] if e is not None else "",
+                "reason": problem})
             continue
-        enforced[e["id"]] = e["hash"]
+        assert e is not None
+        enforced.setdefault(e["id"], []).append(e["hash"])
         honours.extend((t, e["id"]) for t in env["honours"])
         if e["type"] == "ack":
             report.skipped_ack.append(e["id"])
@@ -836,12 +886,14 @@ def _import_v3(store: Store, lines: Iterable[str], report: TeamImportReport,
         report.chain_problems.append("an empty v3 stream")
         return report
     result = store.import_team_snapshot(
-        records, key=head["key"], root=head["root"], epoch=head["epoch"],
-        repin_n=head["repin_n"], pos=head["pos"], seq=head["seq"],
+        records, key=head["key"], root=head["root"], prev_root=head["prev_root"],
+        epoch=head["epoch"], repin_n=head["repin_n"], pos=head["pos"], seq=head["seq"],
         judged=head["judged"], complete=complete, enforced=enforced,
-        honours=honours, dry_run=dry_run,
+        honours=honours, seen=seen, authors=authors, unmappable=unmappable,
+        dry_run=dry_run,
     )
     report.snapshot = result["snapshot"]
+    report.chain_problems.extend(result["stream_problems"])
     report.imported = result["imported"]
     report.already_present = result["already_present"]
     report.already_removed = result["already_removed"]
@@ -852,6 +904,9 @@ def _import_v3(store: Store, lines: Iterable[str], report: TeamImportReport,
     report.links_refused = result["links_refused"]
     report.links_adopted = result["links_adopted"]
     report.overrides_recorded = result["overrides_recorded"]
+    report.unmappable = result["unmappable"]
+    report.reimported = result["reimported"]
+    report.replaced_in_place = result["replaced_in_place"]
     return report
 
 

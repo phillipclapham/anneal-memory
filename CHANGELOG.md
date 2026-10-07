@@ -7,19 +7,46 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 ### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
 - `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one
   ledger clone's complete verdict, with each line marked `enforced` and the links it `honours`.
-  A complete, full, newer stream REPLACES the team links that clone's key owns: links levain no
-  longer honours are removed, newly honoured ones added, and operator links are never touched.
-  This closes spore-1344 on the anneal side: a link pinned by a forged owner flip is removed by the
-  first v3 import after the revert (run on a real stuck store: `project_memory/seam_v3_1005/`).
-- New additive tables `team_snapshot`, `team_snapshot_rows`, `team_overrides`, `rewire_origin`.
+  The header carries `key`, `root`, `prev_root`, `epoch`, `repin_n`, `pos`, `seq` and `judged`.
+  A complete, full stream that wins on order REPLACES the team links that clone's key owns:
+  links levain no longer honours are removed, newly honoured ones added, and operator links are
+  never touched. This closes spore-1344 on the anneal side: a link pinned by a forged owner flip
+  is removed by the first v3 import after the revert (run on a real stuck store:
+  `project_memory/seam_v3_1005/`).
+- Order: a key new to the store, or whose `repin_n` changed (bumped after a host rewrite, or
+  lower because its state was restored), replaces; so does a new `epoch`; otherwise `(pos, seq)`
+  must exceed the key's own and the active key's. A known key under a new `root` moves only when
+  `prev_root` names the root stored for it; any other root change is refused as a key collision.
+  Every replace takes over the other keys of its root and any key owning a link whose linker is a
+  line of the stream.
+- A per-line problem never breaks the stream: an enforced line with unsafe text is imported with
+  the characters escaped (flagged `sanitised`), and any other refusal makes the line
+  `unmappable` (reported, listed in `team-status`). Links are added after existence and cycle
+  checks only; levain's history order and its link rule already ruled.
+- Team episodes follow the verdict too: an entry the stream enforces that was pruned or deleted
+  by a library or MCP call comes back at the next replace; only a delete the CLI confirmed (on a
+  terminal, or with `ANNEAL_TEAM_OVERRIDE=1`) stays final. A stored copy whose hash no enforced
+  line carries is replaced in place, keeping its episode id and links.
+- Retention `prune` keeps every team episode an active key's last stream enforces; an explicit
+  `delete` of one is allowed and logged. A rewired link carries the ownership and the pair it
+  stands in for.
+- New additive tables `team_snapshot`, `team_snapshot_rows`, `team_snapshot_enforced`,
+  `team_snapshot_notes`, `team_overrides`, `rewire_origin`, and a `removal` column on
+  `team_entries`.
 - `supersede` / `unsupersede` leave a team-owned link alone (they return False) unless called with
   `team_override=True`; the CLI asks on a terminal, or takes `ANNEAL_TEAM_OVERRIDE=1` for one
-  command. A removal through any version is recorded as the operator's and never re-added.
-- Retention `prune` keeps a team episode that links an owned team link; an explicit `delete` of
-  one is allowed and logged. A rewired link carries the ownership and the pair it stands in for.
+  command. A taken-over link is relabelled `operator`. A removal of a link the team snapshot owns,
+  through any version, is recorded as the operator's and never re-added. A team link removed
+  before the ledger's first v3 import cannot be told from a first-import refusal: that import adds
+  it back and reports it in `links_added_legacy`; remove it once more through the CLI confirm and
+  it stays removed.
+- The first replace on a ledger root adopts existing `team:` links whose target the stream
+  enforces and whose linker, or `team:<handle>` label, belongs to the stream; a target alone
+  never adopts a link (rulings are copied between ledgers).
 - `anneal-memory team-status`, `anneal-memory team-forget-key KEY`.
 - Known limits (design §5): episodes are never retracted; one store fed by several clones follows
-  the last; an older binary's rewired rows are never adopted (`team-status` counts them).
+  the last; a verbatim copy of a linker line into another ledger in one store is a takeover; an
+  older binary's rewired rows are never adopted (`team-status` counts them).
 
 
 ## [0.9.41] — 2026-10-05

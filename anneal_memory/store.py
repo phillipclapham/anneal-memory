@@ -1496,6 +1496,23 @@ CREATE TABLE IF NOT EXISTS team_snapshot_rows (
 );
 CREATE INDEX IF NOT EXISTS idx_team_snapshot_rows_pair ON team_snapshot_rows(old_id, new_id);
 CREATE INDEX IF NOT EXISTS idx_team_snapshot_rows_new ON team_snapshot_rows(new_id);
+-- The enforced entries of each key's last complete stream: retention never prunes
+-- a team episode an active key enforces.
+CREATE TABLE IF NOT EXISTS team_snapshot_enforced (
+    key TEXT NOT NULL,
+    entry_id TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    PRIMARY KEY (key, entry_id, hash)
+);
+CREATE INDEX IF NOT EXISTS idx_team_snapshot_enforced_entry ON team_snapshot_enforced(entry_id);
+-- What each key's last complete stream could not mirror (an unmappable enforced
+-- line, a refused cycle, a target id held by several episodes): team-status counts it.
+CREATE TABLE IF NOT EXISTS team_snapshot_notes (
+    key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    entry_id TEXT NOT NULL,
+    detail TEXT NOT NULL
+);
 -- Team links an operator took back: a snapshot never re-adds them.
 CREATE TABLE IF NOT EXISTS team_overrides (
     old_id TEXT NOT NULL,
@@ -1815,6 +1832,15 @@ class WrapStatusSnapshot(NamedTuple):
     partial_error: "StoreError | None"
     gated_session: str | None
     bound_token: str | None
+
+
+# Team episodes retention keeps: the copy (entry id AND hash) of an entry that an
+# ACTIVE snapshot key's last complete stream enforces (flow seam design §3b.7).
+_PROTECTED_TEAM_EPISODES = (
+    "SELECT te.episode_id FROM team_entries te "
+    "JOIN team_snapshot_enforced se ON se.entry_id = te.entry_id AND se.hash = te.hash "
+    "JOIN team_snapshot ts ON ts.key = se.key AND ts.active = 1"
+)
 
 
 class Store:
@@ -2290,6 +2316,7 @@ class Store:
         # _warn_orphan_tmp_files (called later in __init__), so the orphan
         # classifier can query pair_id on a legacy store without faulting.
         self._migrate_wraps_recovery_columns(commit=False)
+        self._migrate_team_entries_removal(commit=False)
 
         # Insert default metadata (ignore if already exists)
         defaults = {**_DEFAULT_METADATA, "project_name": self._project_name}
@@ -2486,6 +2513,17 @@ class Store:
         if commit:
             self._conn.commit()
 
+    def _migrate_team_entries_removal(self, *, commit: bool = True) -> None:
+        """Add ``team_entries.removal``: NULL while held, or for a removal by a
+        version before the column; ``'auto'`` for a library/MCP delete or a prune;
+        ``'operator'`` for a delete the CLI confirmed. Only ``'operator'`` keeps an
+        entry a v3 stream enforces out of the store. Additive."""
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(team_entries)")}
+        if "removal" not in cols:
+            self._conn.execute("ALTER TABLE team_entries ADD COLUMN removal TEXT")
+        if commit:
+            self._conn.commit()
+
     # -- Core API --
 
     def record(
@@ -2643,8 +2681,9 @@ class Store:
         never delete: both episodes stay, and :meth:`recall` hides ``old_id`` by
         default. Recording a link that already exists changes nothing, and that
         includes a link a team snapshot owns (:meth:`team_owned`); only
-        ``team_override=True`` takes such a link over: it is relabelled ``source``
-        and no snapshot manages it again.
+        ``team_override=True`` takes such a link over: it is relabelled
+        ``'operator'`` (never a ``team:`` label, so no legacy adoption picks it up
+        again) and no snapshot manages it again.
 
         Returns:
             True if the link was recorded (or taken over), False if it already existed.
@@ -2674,17 +2713,17 @@ class Store:
                 problem = self._supersession_problem(
                     old_id, new_id, row["content"], row["timestamp"]
                 )
+            owned = self._team_owned(old_id, new_id)
             if not exists and problem is None:
                 self._conn.execute(
                     "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
-                    (old_id, new_id, source),
+                    (old_id, new_id, "operator" if owned else source),
                 )
-            owned = self._team_owned(old_id, new_id)
             took = exists and owned and team_override
             if took:
                 self._conn.execute(
-                    "UPDATE supersessions SET source = ? WHERE old_id = ? AND new_id = ?",
-                    (source, old_id, new_id))
+                    "UPDATE supersessions SET source = 'operator' "
+                    "WHERE old_id = ? AND new_id = ?", (old_id, new_id))
             if owned and (took or (not exists and problem is None)):
                 # The caller's link from now on: no snapshot adds or removes it again.
                 self._drop_ownership(old_id, new_id)
@@ -2759,9 +2798,12 @@ class Store:
             [t for t in items if all(isinstance(v, str) for v in t)],
         )
 
-    def _remember_team_rows(self, rows: Iterable[sqlite3.Row]) -> None:
+    def _remember_team_rows(self, rows: Iterable[sqlite3.Row], removal: str = "auto") -> None:
         """Before episodes are removed: record the ledger id of each imported team
-        row among them, so a later import does not bring it back."""
+        row among them, and how it went (``removal``: ``'operator'`` only for a
+        delete the CLI confirmed, else ``'auto'``). A v2 import never brings a
+        recorded entry back; a v3 replace brings back an entry its stream enforces
+        unless an operator removed it."""
         items = []
         for row in rows:
             if not str(row["source"]).startswith("team:"):
@@ -2774,6 +2816,9 @@ class Store:
                 items.append((team.get("entry_id"), team.get("hash"), row["id"]))
         if items:
             self._remember_team_entries(items)
+            self._conn.executemany(
+                "UPDATE team_entries SET removal = ? WHERE entry_id = ? AND episode_id = ?",
+                [(removal, t[0], t[2]) for t in items if all(isinstance(v, str) for v in t)])
 
     def import_team_snapshot(
         self,
@@ -2781,45 +2826,64 @@ class Store:
         *,
         key: str,
         root: str,
+        prev_root: str,
         epoch: str,
         repin_n: int,
         pos: int,
         seq: int,
         judged: str,
         complete: bool,
-        enforced: dict[str, str],
+        enforced: dict[str, list[str]],
         honours: list[tuple[str, str]],
+        seen: Iterable[tuple[str, str]] = (),
+        authors: Iterable[str] = (),
+        unmappable: Iterable[dict[str, str]] = (),
         dry_run: bool = False,
     ) -> dict[str, Any]:
-        """Import a v3 team stream: the episodes, then (when the stream is complete,
-        ``judged == "full"`` and newer than what this store holds for ``root``) REPLACE
-        the team links this ``key`` owns with the stream's verdict, in ONE write
-        transaction. ``enforced`` maps each enforced ledger id to its hash;
-        ``honours`` lists the honoured pairs as ``(target, linker)`` ledger ids.
+        """Import a v3 team stream (flow seam design §3b): the episodes, then, when
+        the stream is complete, ``judged == "full"`` and wins on order, REPLACE the
+        team state this ``key`` owns with the stream's verdict, in ONE write
+        transaction. ``enforced`` maps each enforced ledger id to its hash(es) (two
+        hashes = a live twin); ``honours`` lists the honoured pairs as ``(target,
+        linker)`` ledger ids; ``seen`` is ``(id, hash)`` of every verified line in any
+        envelope, ``authors`` their authors; ``unmappable`` the enforced lines the
+        reader refused.
 
-        - Newer: no stored key for ``root``; a different ``epoch`` from the root's
-          active key; the same key with a higher ``repin_n``; or ``(pos, seq)``
-          above every key's stored ``(pos, seq)`` for this root and epoch.
-        - Order: owned rows missing while both episodes exist become operator
-          overrides (never re-added); then the episodes import; then removals;
-          then additions.
-        - A key new to ``root`` takes over the owned rows of every other key with
-          that root (they go inactive); on its first snapshot it also adopts every
-          unowned ``team:``-labelled row (and every rewired row standing in for one)
-          whose target is enforced, and wanted pairs with no row are reported as
-          ``links_added_legacy``.
-        - wanted = honoured pairs whose two entries are stored with the enforced
-          hash, minus overrides; an owned row stays when wanted, when its target is
-          not enforced in the stream, or when a pair it stands in for is honoured.
-        - Operator rows are never touched.
+        - Order: a key new to the store, or whose ``repin_n`` differs from the one
+          stored (bumped, or lower: a restored state), replaces; so does a new
+          ``epoch``; otherwise ``(pos, seq)`` must exceed the key's own and the
+          ACTIVE key's of this root and epoch.
+        - A known key arriving with another ``root`` moves only when ``prev_root`` is
+          the root stored for it; any other root change is a key collision
+          (``partial_stream``, its rows untouched).
+        - Every replace takes over every other key of this root, and every key owning
+          a row whose linker is a line of this stream by ``(entry_id, hash)``.
+        - Inside the replace: owned rows missing while both episodes exist become
+          operator overrides; then the episodes import (an enforced entry with no
+          episode comes back unless an operator removed it; a stored copy whose hash
+          no enforced line carries is replaced in place); then removals; then
+          additions (existence and cycle checks only).
+        - The first replace on a root with no snapshot adopts each unowned
+          ``team:`` row (or rewired row standing in for one) whose target is enforced
+          and whose linker, or ``team:<handle>`` label, belongs to this stream; wanted
+          pairs with no row are added and reported as ``links_added_legacy``.
+        - wanted = honoured pairs whose linker is stored with an enforced hash and
+          whose target is the one stored episode with that id, minus overrides; an
+          owned row stays when wanted, when its target is not enforced, or when a
+          pair it stands in for is honoured. Operator rows are never touched.
         """
         if dry_run and self._defer_commit:
             raise ValueError("import_team_snapshot: dry_run cannot run inside a batch")
+        seen = set(seen)
+        authors = set(authors)
+        unmappable = list(unmappable)
         rep: dict[str, Any] = {
             "snapshot": "replaced", "links_added": [], "links_added_legacy": [],
             "links_removed": [], "links_refused": [], "links_adopted": 0,
-            "overrides_recorded": [],
+            "overrides_recorded": [], "stream_problems": [], "unmappable": [],
+            "reimported": [], "replaced_in_place": [],
         }
+        notes: list[tuple[str, str, str]] = []
         with self._db_boundary("import_team_snapshot"):
             if not self._conn.in_transaction:
                 self._conn.execute("BEGIN IMMEDIATE")
@@ -2827,31 +2891,76 @@ class Store:
             mine = self._conn.execute(
                 "SELECT * FROM team_snapshot WHERE key = ?", (key,)).fetchone()
             same_root = self._conn.execute(
-                "SELECT * FROM team_snapshot WHERE root = ?", (root,)).fetchall()
+                "SELECT * FROM team_snapshot WHERE root = ? AND key != ?",
+                (root, key)).fetchall()
+            moved = mine is not None and mine["root"] != root
             status = None
             if not complete:
                 status = "incomplete_stream"
             elif judged != "full":
                 status = "partial_stream"
+            elif moved and prev_root != mine["root"]:
+                status = "partial_stream"
+                rep["stream_problems"].append(
+                    f"key {key!r} is stored for another ledger root and this stream does "
+                    "not name that root as its previous one (a copied or reused state "
+                    "file); nothing was replaced")
             elif not self._snapshot_is_newer(mine, same_root, epoch, repin_n, pos, seq):
                 status = "stale_stream"
             rep["snapshot"] = status or "replaced"
-            root_keys = [r["key"] for r in same_root]
-            if status is None:
-                rep["overrides_recorded"] = self._snapshot_operator_removals(root_keys)
             by_entry, gone = self._team_held()
-            ins = self._insert_team_episodes(records, by_entry, gone, session_id)
             if status is None:
-                self._snapshot_replace(rep, by_entry, key, mine is None, root_keys,
-                                       enforced, honours)
+                takers = self._snapshot_takeover_keys(key, same_root, by_entry, seen)
+                rep["overrides_recorded"] = self._snapshot_operator_removals(
+                    [key, *takers] if mine is not None else takers)
+                final = {r[0] for r in self._conn.execute(
+                    "SELECT entry_id FROM team_entries WHERE removal = 'operator'")}
+                ins = self._insert_team_episodes(
+                    records, by_entry, gone, session_id, replace=enforced, final=final)
+                rep["reimported"] = ins["reimported"]
+                rep["replaced_in_place"] = ins["replaced"]
+                for u in unmappable:
+                    twin = by_entry.get(u["id"])
+                    if twin is not None and twin["hash"] == u["hash"]:
+                        continue  # a stored copy of this very line: it maps
+                    rep["unmappable"].append({**u, **({"stale_twin": twin["ep"]}
+                                                      if twin is not None else {})})
+                    notes.append(("unmappable", u["id"], u["reason"][:200]))
+                    if twin is not None:
+                        self._flag_stale_twin(twin)
+                self._snapshot_replace(
+                    rep, notes, by_entry, key,
+                    mine is None and not same_root, takers, enforced, honours,
+                    seen, authors)
                 self._conn.execute(
                     "UPDATE team_snapshot SET active = 0 WHERE root = ?", (root,))
+                if takers:
+                    marks = ",".join("?" * len(takers))
+                    self._conn.execute(
+                        f"UPDATE team_snapshot SET active = 0 WHERE key IN ({marks})", takers)
+                    for table in ("team_snapshot_enforced", "team_snapshot_notes"):
+                        self._conn.execute(
+                            f"DELETE FROM {table} WHERE key IN ({marks})", takers)
                 self._conn.execute(
                     "INSERT OR REPLACE INTO team_snapshot "
                     "(key, root, epoch, repin_n, pos, seq, active) "
                     "VALUES (?, ?, ?, ?, ?, ?, 1)",
                     (key, root, epoch, repin_n, pos, seq),
                 )
+                self._conn.execute("DELETE FROM team_snapshot_enforced WHERE key = ?", (key,))
+                self._conn.executemany(
+                    "INSERT OR IGNORE INTO team_snapshot_enforced (key, entry_id, hash) "
+                    "VALUES (?, ?, ?)",
+                    [(key, e, h) for e, hs in enforced.items() for h in hs])
+                self._conn.execute("DELETE FROM team_snapshot_notes WHERE key = ?", (key,))
+                self._conn.executemany(
+                    "INSERT INTO team_snapshot_notes (key, kind, entry_id, detail) "
+                    "VALUES (?, ?, ?, ?)", [(key, *n) for n in notes])
+            else:
+                ins = self._insert_team_episodes(records, by_entry, gone, session_id)
+                rep["unmappable"] = [u for u in unmappable
+                                     if not (u["id"] in by_entry
+                                             and by_entry[u["id"]]["hash"] == u["hash"])]
             if dry_run:
                 self._conn.rollback()
             elif not self._defer_commit:
@@ -2881,30 +2990,58 @@ class Store:
 
     @staticmethod
     def _snapshot_is_newer(
-        mine: sqlite3.Row | None, same_root: list[sqlite3.Row],
+        mine: sqlite3.Row | None, others: list[sqlite3.Row],
         epoch: str, repin_n: int, pos: int, seq: int,
     ) -> bool:
-        if not same_root:
+        """``others``: the OTHER keys stored for this stream's root."""
+        if mine is None or mine["repin_n"] != repin_n:
+            # A key's FIRST replace, a bumped repin_n (Phill's (a)), or a lower one
+            # (its state restored or copied): the clone that exists now takes over.
             return True
-        if mine is not None and repin_n < mine["repin_n"]:
-            return False  # repin_n is this clone's own monotone count: lower is an older view
-        if mine is not None and mine["epoch"] == epoch and repin_n == mine["repin_n"] \
-                and (pos, seq) <= (mine["pos"], mine["seq"]):
+        if mine["epoch"] == epoch and (pos, seq) <= (mine["pos"], mine["seq"]):
             return False  # this key already sent this view or a later one (codex L3 r1)
-        active = [r for r in same_root if r["active"]] or same_root
+        active = [r for r in others if r["active"]]
+        if mine["active"]:
+            active.append(mine)
         if all(r["epoch"] != epoch for r in active):
-            return True
-        if mine is not None and mine["epoch"] == epoch and repin_n > mine["repin_n"]:
-            return True
+            return True  # a repin or distrust: the new epoch wins
+        # Inactive keys export nothing any more: their high-water mark blocks no one.
         return all((pos, seq) > (r["pos"], r["seq"])
-                   for r in same_root if r["epoch"] == epoch)
+                   for r in active if r["epoch"] == epoch and r["key"] != mine["key"])
 
-    def _snapshot_operator_removals(self, root_keys: list[str]) -> list[dict[str, str]]:
+    def _snapshot_takeover_keys(
+        self, key: str, same_root: list[sqlite3.Row],
+        by_entry: dict[str, dict[str, Any]], seen: set[tuple[str, str]],
+    ) -> list[str]:
+        """Keys this replace takes over: every other key of the root, and every key
+        owning a row whose LINKER is a line of this stream by ``(entry_id, hash)``
+        (a target alone proves nothing: rulings are copied between ledgers)."""
+        out = {r["key"] for r in same_root}
+        line_of = {v["ep"]: (e, v["hash"]) for e, v in by_entry.items()}
+        for r in self._conn.execute(
+                "SELECT DISTINCT key, new_id FROM team_snapshot_rows WHERE key != ?",
+                (key,)).fetchall():
+            if r["key"] not in out and line_of.get(r["new_id"]) in seen:
+                out.add(r["key"])
+        return sorted(out)
+
+    def _flag_stale_twin(self, twin: dict[str, Any]) -> None:
+        """A stored copy of an id whose enforced line cannot be mapped: say so in its
+        text, once, so it does not read as the ledger's current entry."""
+        mark = ("[stale: the team ledger's current entry with this id could not be "
+                "imported; see team-status] ")
+        row = self._conn.execute(
+            "SELECT content FROM episodes WHERE id = ?", (twin["ep"],)).fetchone()
+        if row is not None and not str(row["content"]).startswith(mark):
+            self._conn.execute("UPDATE episodes SET content = ? WHERE id = ?",
+                               (mark + row["content"], twin["ep"]))
+
+    def _snapshot_operator_removals(self, owner_keys: list[str]) -> list[dict[str, str]]:
         """Owned rows that no longer exist while both episodes still do were removed
         by someone (any anneal version): record an override and drop ownership."""
-        if not root_keys:
+        if not owner_keys:
             return []
-        marks = ",".join("?" * len(root_keys))
+        marks = ",".join("?" * len(owner_keys))
         gone_rows = self._conn.execute(
             f"""SELECT DISTINCT o.old_id, o.new_id FROM team_snapshot_rows o
                 WHERE o.key IN ({marks})
@@ -2912,7 +3049,7 @@ class Store:
                                 WHERE s.old_id = o.old_id AND s.new_id = o.new_id)
                 AND EXISTS (SELECT 1 FROM episodes e WHERE e.id = o.old_id)
                 AND EXISTS (SELECT 1 FROM episodes e WHERE e.id = o.new_id)""",
-            root_keys,
+            owner_keys,
         ).fetchall()
         out = []
         for r in gone_rows:
@@ -2940,8 +3077,13 @@ class Store:
             return self._team_owned(old_id, new_id)
 
     def team_snapshot_status(self) -> dict[str, Any]:
-        """The team snapshot keys and what they own, plus 'rewired' rows between two
-        team episodes that no snapshot manages (an older binary's, never adopted)."""
+        """The team snapshot keys and what they own; what each key's last stream
+        could not mirror (``notes``: unmappable lines, refused cycles, target ids held
+        by several episodes); how many team episodes retention keeps for an active
+        key; and 'rewired' rows between two team episodes that no snapshot manages
+        (an older binary's, never adopted). Read-only."""
+        empty = {"keys": [], "overrides": 0, "unmanaged_rewired": 0, "notes": [],
+                 "protected_episodes": 0}
         with self._db_boundary("status"), self._read_snapshot():
             try:
                 keys = [dict(r) | {"owned": self._conn.execute(
@@ -2961,9 +3103,17 @@ class Store:
                        AND EXISTS (SELECT 1 FROM episodes e WHERE e.id = s.new_id
                                    AND e.source >= 'team:' AND e.source < 'team;')"""
                 ).fetchone()[0]
+                notes = [dict(r) for r in self._conn.execute(
+                    "SELECT key, kind, entry_id, detail FROM team_snapshot_notes "
+                    "ORDER BY key, kind, entry_id").fetchall()]
+                protected = self._conn.execute(
+                    _PROTECTED_TEAM_EPISODES.replace("SELECT te.episode_id",
+                                                     "SELECT COUNT(DISTINCT te.episode_id)")
+                ).fetchone()[0]
             except sqlite3.OperationalError:
-                return {"keys": [], "overrides": 0, "unmanaged_rewired": 0}
-        return {"keys": keys, "overrides": overrides, "unmanaged_rewired": unmanaged}
+                return empty
+        return {"keys": keys, "overrides": overrides, "unmanaged_rewired": unmanaged,
+                "notes": notes, "protected_episodes": protected}
 
     def team_forget_key(self, key: str) -> int:
         """Release a snapshot key: its record and its ownership go; the links stay in
@@ -2974,7 +3124,8 @@ class Store:
                 self._conn.execute("BEGIN IMMEDIATE")
             n = self._conn.execute(
                 "DELETE FROM team_snapshot_rows WHERE key = ?", (key,)).rowcount
-            self._conn.execute("DELETE FROM team_snapshot WHERE key = ?", (key,))
+            for table in ("team_snapshot", "team_snapshot_enforced", "team_snapshot_notes"):
+                self._conn.execute(f"DELETE FROM {table} WHERE key = ?", (key,))
             if not self._defer_commit:
                 self._conn.commit()
         return n
@@ -2987,21 +3138,28 @@ class Store:
             "DELETE FROM rewire_origin WHERE old_id = ? AND new_id = ?", (old_id, new_id))
 
     def _snapshot_replace(
-        self, rep: dict[str, Any], by_entry: dict[str, dict[str, Any]], key: str,
-        first: bool, root_keys: list[str], enforced: dict[str, str],
-        honours: list[tuple[str, str]],
+        self, rep: dict[str, Any], notes: list[tuple[str, str, str]],
+        by_entry: dict[str, dict[str, Any]], key: str, legacy: bool,
+        takers: list[str], enforced: dict[str, list[str]],
+        honours: list[tuple[str, str]], seen: set[tuple[str, str]], authors: set[str],
     ) -> None:
         conn = self._conn
-        others = [k for k in root_keys if k != key]
-        if others:  # one active key per root: this key takes over their rows
-            marks = ",".join("?" * len(others))
+        if takers:  # one active key per ledger: this key takes over their rows
+            marks = ",".join("?" * len(takers))
             conn.execute(
                 f"INSERT OR IGNORE INTO team_snapshot_rows (key, old_id, new_id) "
                 f"SELECT ?, old_id, new_id FROM team_snapshot_rows WHERE key IN ({marks})",
-                [key, *others])
-            conn.execute(f"DELETE FROM team_snapshot_rows WHERE key IN ({marks})", others)
+                [key, *takers])
+            conn.execute(f"DELETE FROM team_snapshot_rows WHERE key IN ({marks})", takers)
         ep_entry = {v["ep"]: e for e, v in by_entry.items()}
-        if first:
+        line_of = {v["ep"]: (e, v["hash"]) for e, v in by_entry.items()}
+
+        def of_stream(linker_ep: str, label: str) -> bool:
+            # The linker is a line of this stream, or the label names one of its authors.
+            return line_of.get(linker_ep) in seen or (
+                label.startswith("team:") and label[len("team:"):] in authors)
+
+        if legacy:
             adopt = set()
             for r in conn.execute(
                 "SELECT s.old_id, s.new_id, s.source FROM supersessions s "
@@ -3010,13 +3168,17 @@ class Store:
             ).fetchall():
                 if ep_entry.get(r["old_id"]) not in enforced:
                     continue
-                if str(r["source"]).startswith("team:"):
-                    adopt.add((r["old_id"], r["new_id"]))
-                elif r["source"] == "rewired" and conn.execute(
-                    "SELECT 1 FROM rewire_origin WHERE old_id = ? AND new_id = ? "
-                    "AND standin_source >= 'team:' AND standin_source < 'team;'",
-                    (r["old_id"], r["new_id"]),
-                ).fetchone():
+                src = str(r["source"])
+                if src.startswith("team:"):
+                    if of_stream(r["new_id"], src):
+                        adopt.add((r["old_id"], r["new_id"]))
+                elif src == "rewired" and any(
+                    of_stream(r["new_id"], str(o[0])) for o in conn.execute(
+                        "SELECT standin_source FROM rewire_origin WHERE old_id = ? "
+                        "AND new_id = ? AND standin_source >= 'team:' "
+                        "AND standin_source < 'team;'", (r["old_id"], r["new_id"])
+                    ).fetchall()
+                ):
                     adopt.add((r["old_id"], r["new_id"]))
             conn.executemany(
                 "INSERT OR IGNORE INTO team_snapshot_rows (key, old_id, new_id) VALUES (?, ?, ?)",
@@ -3024,15 +3186,22 @@ class Store:
             rep["links_adopted"] = len(adopt)
         overrides = {(r[0], r[1]) for r in conn.execute(
             "SELECT old_id, new_id FROM team_overrides").fetchall()}
-        ep_of = {e: v["ep"] for e, v in by_entry.items()
-                 if e in enforced and v["hash"] == enforced[e]}
+        # The linker maps by (entry_id, hash); the target by id, whatever its hash
+        # (levain hides by id), unless several stored episodes carry that id. An id
+        # enforced with two hashes (a live twin) maps no linker: never pinned.
+        linker_ep = {e: v["ep"] for e, v in by_entry.items()
+                     if [v["hash"]] == enforced.get(e)}
         honoured = set(honours)
         wanted: dict[tuple[str, str], tuple[str, str]] = {}
         for target, linker in honours:
-            if target in ep_of and linker in ep_of:
-                pair = (ep_of[target], ep_of[linker])
-                if pair not in overrides:
-                    wanted[pair] = (target, linker)
+            if linker not in linker_ep or target not in by_entry:
+                continue
+            if by_entry[target].get("n", 1) > 1:
+                notes.append(("several_episodes", target, f"honoured by {linker}"))
+                continue
+            pair = (by_entry[target]["ep"], linker_ep[linker])
+            if pair not in overrides:
+                wanted[pair] = (target, linker)
         owned = {(r[0], r[1]) for r in conn.execute(
             "SELECT old_id, new_id FROM team_snapshot_rows WHERE key = ?", (key,)).fetchall()}
         for old, new in sorted(owned):
@@ -3067,21 +3236,21 @@ class Store:
                     conn.execute("INSERT OR IGNORE INTO team_snapshot_rows "
                                  "(key, old_id, new_id) VALUES (?, ?, ?)", (key, old, new))
                 continue  # an operator's row: theirs
-            lk, tg = by_entry[linker], by_entry[target]
+            lk = by_entry[linker]
+            # v3 add-checks: existence and cycle only. levain's order is history
+            # order (no older-than check) and levain's may_link already ruled.
             problem = self._supersession_problem(old, new, lk["content"], lk["ts"],
-                                                 check_grounds=False)
-            if problem is None and tg["kind"] == "ruling" and not (lk["retire"] or lk["words"]):
-                problem = ("a ruling is superseded only by a retire or by an entry "
-                           "that carries the decider's own words")
+                                                 check_grounds=False, check_order=False)
             if problem:
                 rep["links_refused"].append({"id": linker, "target": target,
                                              "reason": problem})
+                notes.append(("refused", linker, f"over {target}: {problem}"[:200]))
                 continue
             conn.execute("INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
                          (old, new, lk["source"]))
             conn.execute("INSERT OR IGNORE INTO team_snapshot_rows (key, old_id, new_id) "
                          "VALUES (?, ?, ?)", (key, old, new))
-            rep["links_added_legacy" if first else "links_added"].append(
+            rep["links_added_legacy" if legacy else "links_added"].append(
                 {"id": linker, "target": target, "old": old, "new": new,
                  "source": lk["source"]})
 
@@ -3105,7 +3274,9 @@ class Store:
             if isinstance(team, dict) and isinstance(team.get("entry_id"), str):
                 kind = team.get("kind")
                 owner = team.get("owner")
+                n = by_entry.get(team["entry_id"], {}).get("n", 0) + 1
                 by_entry[team["entry_id"]] = {
+                    "n": n,
                     "ep": row["id"], "hash": team.get("hash"),
                     "kind": kind if isinstance(kind, str) else None,
                     "owner": owner if isinstance(owner, str) else None,
@@ -3132,29 +3303,51 @@ class Store:
 
     def _insert_team_episodes(
         self, records: list[dict[str, Any]], by_entry: dict[str, dict[str, Any]],
-        gone: dict[str, str], session_id: str | None,
+        gone: dict[str, str], session_id: str | None, *,
+        replace: dict[str, list[str]] | None = None, final: frozenset[str] | set[str] = frozenset(),
     ) -> dict[str, Any]:
         """Inside the caller's write transaction: insert each record not held, keyed by
         ledger id (a held id with another hash is a conflict; a removed id stays
         removed). Updates ``by_entry`` in place. Returns ``imported``, ``already``,
-        ``conflicts``, ``removed`` and ``fresh`` (the ledger ids inserted)."""
+        ``conflicts``, ``removed``, ``fresh`` (the ledger ids inserted), ``reimported``
+        and ``replaced``.
+
+        ``replace`` (a v3 replace: the enforced ids and their hashes; every record is
+        enforced): a removed id comes back unless it is in ``final`` (an operator's
+        delete), and a stored copy whose hash no enforced line carries is replaced IN
+        PLACE (same episode id, so its links survive). While both copies are enforced
+        (a live twin) the stored one stays and the conflict is reported."""
         imported: list[dict[str, str]] = []
         already: list[str] = []
         conflicts: list[dict[str, str]] = []
         removed: list[str] = []
         fresh: set[str] = set()
+        reimported: list[str] = []
+        replaced: list[str] = []
         for rec in records:
             known = by_entry.get(rec["entry_id"])
             if known is not None:
                 if known["hash"] == rec["hash"]:
                     already.append(rec["entry_id"])
+                    if replace is not None and known.get("n", 1) == 1 \
+                            and known["content"] != rec["content"]:
+                        # e.g. a stale-twin flag on a copy that is current again
+                        self._conn.execute("UPDATE episodes SET content = ? WHERE id = ?",
+                                           (rec["content"], known["ep"]))
+                        known["content"] = rec["content"]
+                elif (replace is not None and known.get("n", 1) == 1
+                      and known["hash"] not in replace.get(rec["entry_id"], ())):
+                    self._replace_team_episode(rec, known)
+                    replaced.append(rec["entry_id"])
                 else:
                     conflicts.append({
                         "id": rec["entry_id"], "stored_hash": str(known["hash"]),
                         "offered_hash": rec["hash"],
                     })
                 continue
-            if rec["entry_id"] in gone:
+            back = replace is not None and rec["entry_id"] in gone \
+                and rec["entry_id"] not in final
+            if rec["entry_id"] in gone and not back:
                 if gone[rec["entry_id"]] == rec["hash"]:
                     if rec["entry_id"] not in removed:
                         removed.append(rec["entry_id"])
@@ -3181,10 +3374,18 @@ class Store:
                 except sqlite3.IntegrityError:
                     if nonce == 63:
                         raise
-            self._remember_team_entries([(rec["entry_id"], rec["hash"], ep_id)])
+            if back:
+                # Not an operator's removal, and the stream enforces it: it comes back.
+                self._conn.execute(
+                    "UPDATE team_entries SET hash = ?, episode_id = ?, removal = NULL "
+                    "WHERE entry_id = ?", (rec["hash"], ep_id, rec["entry_id"]))
+                reimported.append(rec["entry_id"])
+            else:
+                self._remember_team_entries([(rec["entry_id"], rec["hash"], ep_id)])
             team_meta = rec["metadata"].get("team") or {}
             owner = team_meta.get("owner")
             by_entry[rec["entry_id"]] = {
+                "n": 1,
                 "ep": ep_id, "hash": rec["hash"], "kind": team_meta.get("kind"),
                 "owner": owner if isinstance(owner, str) else None,
                 "retire": team_meta.get("type") == "retire",
@@ -3197,7 +3398,29 @@ class Store:
                              "source": rec["source"], "type": rec["type"],
                              "content": rec["content"]})
         return {"imported": imported, "already": already, "conflicts": conflicts,
-                "removed": removed, "fresh": fresh}
+                "removed": removed, "fresh": fresh, "reimported": reimported,
+                "replaced": replaced}
+
+    def _replace_team_episode(self, rec: dict[str, Any], known: dict[str, Any]) -> None:
+        """Rewrite a stored team episode with the enforced copy of its entry, keeping
+        the episode id (links and associations survive), and record the new hash."""
+        self._conn.execute(
+            "UPDATE episodes SET timestamp = ?, type = ?, content = ?, source = ?, "
+            "metadata = ? WHERE id = ?",
+            (rec["timestamp"], rec["type"], rec["content"], rec["source"],
+             json.dumps(rec["metadata"]), known["ep"]))
+        self._conn.execute(
+            "UPDATE team_entries SET hash = ?, episode_id = ?, removal = NULL "
+            "WHERE entry_id = ?", (rec["hash"], known["ep"], rec["entry_id"]))
+        team_meta = rec["metadata"].get("team") or {}
+        owner = team_meta.get("owner")
+        known.update({
+            "hash": rec["hash"], "kind": team_meta.get("kind"),
+            "owner": owner if isinstance(owner, str) else None,
+            "retire": team_meta.get("type") == "retire",
+            "words": str(team_meta.get("words") or "").strip(),
+            "content": rec["content"], "ts": rec["timestamp"], "source": rec["source"],
+        })
 
     def import_team_entries(
         self,
@@ -3575,7 +3798,7 @@ class Store:
 
     def _supersession_problem(
         self, old_id: str, new_id: str | None, new_content: str, new_ts: str,
-        *, check_grounds: bool = True,
+        *, check_grounds: bool = True, check_order: bool = True,
     ) -> str | None:
         """Why one link fails validation, or None if it passes. Never raises a
         refusal (callers raise outside their ``_db_boundary``). Runs inside the
@@ -3589,7 +3812,7 @@ class Store:
         if row is None:
             return f"supersede: the superseded episode {old_id!r} does not exist"
         # String order, the same notion ``recall`` sorts by.
-        if row["timestamp"] > new_ts:
+        if check_order and row["timestamp"] > new_ts:
             return (
                 f"supersede: {old_id!r} ({row['timestamp']}) is newer than the episode "
                 f"replacing it ({new_ts}); only a newer episode can supersede an older one"
@@ -3642,7 +3865,7 @@ class Store:
             return None
         return self._row_to_episode(row)
 
-    def delete(self, episode_id: str) -> bool:
+    def delete(self, episode_id: str, *, team_operator: bool = False) -> bool:
         """Delete a single episode by ID.
 
         For corrections, mistakes, or privacy (right to erasure). The
@@ -3652,10 +3875,14 @@ class Store:
         type, and SHA-256 content hash — the text itself is gone but the
         audit trail retains enough metadata to prove the episode existed.
         An imported team entry's ledger id and hash stay in ``team_entries`` either
-        way, so a later team import does not bring it back.
+        way, so a later v2 team import does not bring it back. A v3 replace brings
+        back an entry its stream enforces unless ``team_operator=True``: only the
+        CLI sets it, after a confirm on a terminal or with ANNEAL_TEAM_OVERRIDE=1,
+        so an agent's delete never permanently un-hides what the ledger hides.
 
         Args:
             episode_id: The 8-char hex episode ID.
+            team_operator: the removal is the operator's own (CLI only).
 
         Returns:
             True if the episode was found and deleted, False if not found.
@@ -3690,7 +3917,7 @@ class Store:
                     "%d entr(ies) the team ledger still hides; they show in recall again",
                     row["id"], linker_of)
             links_removed = self._detach_supersessions([row["id"]])
-            self._remember_team_rows([row])
+            self._remember_team_rows([row], "operator" if team_operator else "auto")
             self._conn.execute("DELETE FROM episodes WHERE id = ?", (episode_id,))
             # 10.5c.5 L4 Fix: batch-aware commit for consistency with
             # record() and the other write-path methods. No current
@@ -6279,15 +6506,16 @@ class Store:
 
         with self._db_boundary("prune"):
             # The write lock before the candidate read: a team import between them
-            # could make a candidate the linker of an owned row (codex L3 r1).
+            # could make a candidate enforced (codex L3 r1).
             began = not self._conn.in_transaction
             if began:
                 self._conn.execute("BEGIN IMMEDIATE")
-            # A team episode that links an owned team row carries a levain verdict:
-            # retention keeps it (an explicit delete stays the operator's act).
+            # A team episode an active snapshot key enforces mirrors a line levain
+            # enforces: retention keeps it, linker or target, owned or not (an
+            # explicit delete stays the operator's act).
             rows = self._conn.execute(
                 "SELECT * FROM episodes WHERE timestamp < ? AND id NOT IN "
-                "(SELECT new_id FROM team_snapshot_rows)", (cutoff,)
+                f"({_PROTECTED_TEAM_EPISODES})", (cutoff,)
             ).fetchall()
 
             if not rows:

@@ -7154,26 +7154,41 @@ class Store:
         processes opening a brand-new store at once, one failed
         ``schema_init`` "database is locked" at t=0.00s in roughly 1 run in
         10 (measured 2026-10-08: 3/20, 2/30, 6/40). Retry only that
-        statement, with short growing sleeps, inside a total budget equal to
-        the connection's own ``busy_timeout`` (read, never hard-coded), then
-        re-raise the last error. A non-wal row is NOT an error here, as
-        before (e.g. an in-memory or network filesystem database).
+        statement, with short growing sleeps, for up to the connection's own
+        ``busy_timeout`` (read, never hard-coded), with one last attempt at
+        the deadline, then re-raise. The budget is for THIS statement; the
+        schema init after it has its own ``busy_timeout``.
+
+        A switch that succeeds but reports a mode other than ``wal`` (SQLite
+        returns the old mode when WAL cannot be enabled, e.g. a VFS without
+        shared memory) is refused: the store's concurrency assumes WAL
+        (L3 r1, codex MED; it was accepted silently before).
         """
         budget = self._conn.execute("PRAGMA busy_timeout").fetchone()[0] / 1000.0
         deadline = time.monotonic() + budget
         delay = 0.005
         while True:
             try:
-                self._conn.execute("PRAGMA journal_mode=WAL").fetchall()
-                return
+                row = self._conn.execute("PRAGMA journal_mode=WAL").fetchone()
+                break
             except sqlite3.OperationalError as exc:
-                msg = str(exc).lower()
-                if ("locked" not in msg and "busy" not in msg) or (
-                    time.monotonic() + delay > deadline
-                ):
+                code = getattr(exc, "sqlite_errorcode", None)
+                if code is not None:
+                    contended = (code & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                else:  # Python < 3.11 carries no code: read the message
+                    msg = str(exc).lower()
+                    contended = "locked" in msg or "busy" in msg
+                remaining = deadline - time.monotonic()
+                if not contended or remaining <= 0:
                     raise
-                time.sleep(delay)
+                time.sleep(min(delay, remaining))
                 delay = min(delay * 2, 0.1)
+        mode = str(row[0]).lower() if row else ""
+        if mode != "wal":
+            raise sqlite3.OperationalError(
+                f"journal_mode=WAL was not enabled (SQLite reports {mode!r}); "
+                "anneal-memory needs WAL, which this filesystem or VFS refused"
+            )
 
     def _refuse_a_newer_schema(self) -> None:
         """Refuse a store written by a NEWER anneal, the way the sidecars do.

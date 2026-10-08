@@ -4381,3 +4381,66 @@ class TestTheWriterSchemaFunctionLetsABumpRefuseOpenWriters:
         with pytest.raises(sqlite3.OperationalError, match="no such function"):
             conn.execute("DELETE FROM episodes")
         conn.close()
+
+
+# --- WAL switch at open (moved from test_continuity_lock: not fcntl-gated, runs on Windows) ---
+import sqlite3 as _sqlite3_wal  # noqa: E402
+import time  # noqa: E402
+
+
+def test_new_store_open_survives_a_peer_holding_the_file_at_the_wal_switch(tmp_path):
+    """`PRAGMA journal_mode=WAL` returns BUSY without consulting busy_timeout.
+
+    A peer holding a RESERVED lock on the brand-new file made Store() fail
+    "database is locked" at t=0 (4 racing openers, ~1 run in 10). The open
+    must retry the switch within the connection's busy budget instead.
+    """
+    import sqlite3  # noqa: F811
+    import threading
+
+    db = tmp_path / "fresh.db"
+    holder = sqlite3.connect(str(db), isolation_level=None, check_same_thread=False)
+    holder.execute("CREATE TABLE peer (x)")  # a non-empty file takes real locks
+    # RESERVED (a writer mid-switch): the journal-mode pragma then returns
+    # BUSY at once, without consulting busy_timeout (a bare SHARED reader
+    # does get the handler, so it would not reproduce the bug).
+    holder.execute("BEGIN IMMEDIATE")
+
+    def release():
+        time.sleep(0.2)
+        holder.execute("COMMIT")
+
+    worker = threading.Thread(target=release, daemon=True)
+    worker.start()
+    try:
+        started = time.monotonic()
+        s = Store(db)
+        waited = time.monotonic() - started
+        s.close()
+    finally:
+        worker.join()
+        holder.close()
+    assert waited >= 0.15  # it really did wait out the competing lock
+    chk = sqlite3.connect(str(db))
+    try:
+        assert chk.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    finally:
+        chk.close()
+
+
+def test_a_switch_that_reports_a_non_wal_mode_is_refused():
+    """SQLite returns the OLD mode when WAL cannot be enabled (L3 r1 codex MED)."""
+    class _Row:
+        def __init__(self, v):
+            self.v = v
+        def fetchone(self):
+            return self.v
+
+    class _Conn:
+        def execute(self, sql):
+            return _Row((5000,) if "busy_timeout" in sql else ("delete",))
+
+    fake = Store.__new__(Store)
+    fake._conn = _Conn()
+    with pytest.raises(_sqlite3_wal.OperationalError, match="WAL was not enabled"):
+        fake._enable_wal_with_retry()

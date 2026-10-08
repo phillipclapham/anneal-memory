@@ -1403,6 +1403,19 @@ class TestCmdExport:
         with Store(out, project_name="TestProject") as s:
             assert s.status().total_episodes == 4
 
+    def test_export_sqlite_to_a_uri_refuses_cleanly(self, base_args_with_data, tmp_path, capsys, monkeypatch):
+        """walopen L3 r7: a URI-shaped --output was a raw traceback; it is now an
+        `Error:` line and exit 1, with no destination created."""
+        monkeypatch.chdir(tmp_path)
+        base_args_with_data.format = "sqlite"
+        base_args_with_data.output = "./file:x.db?mode=rwc"
+        with pytest.raises(SystemExit) as exc:
+            cmd_export(base_args_with_data)
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert err.startswith("Error:") and "SQLite URI" in err and "Traceback" not in err
+        assert not any(p.name.startswith("file") for p in tmp_path.iterdir())
+
     def test_export_sqlite_json(self, base_args_with_data, tmp_path, capsys):
         out = str(tmp_path / "copy.db")
         base_args_with_data.json = True

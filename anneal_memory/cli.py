@@ -1901,9 +1901,14 @@ def cmd_export(args: argparse.Namespace) -> None:
             print(f"Error: database not found: {db_path}", file=sys.stderr)
             sys.exit(1)
         out = Path(args.output) if args.output else Path(f"anneal-export-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db")
-        src_conn = sqlite3.connect(sqlite_path(db_path))
+        try:  # both paths checked before either connection opens (walopen L3 r7)
+            src_target, dst_target = sqlite_path(db_path), sqlite_path(out)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        src_conn = sqlite3.connect(src_target)
         try:
-            dst_conn = sqlite3.connect(sqlite_path(out))
+            dst_conn = sqlite3.connect(dst_target)
             try:
                 src_conn.backup(dst_conn)
             finally:
@@ -3575,7 +3580,7 @@ def _outcome_store_id(db_path: Path, *, mint: bool) -> str | None:
         return sid
     try:
         conn = sqlite3.connect(sqlite_path(db_path), timeout=30.0, isolation_level=None)
-    except (OSError, sqlite3.Error) as exc:
+    except (OSError, sqlite3.Error, ValueError) as exc:  # ValueError: a URI path
         refuse(exc)
     try:
         register_writer_schema(conn)  # inside the try whose finally closes conn

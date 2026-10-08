@@ -438,16 +438,14 @@ class LevelCapped:
 class UncorroboratedGraduation:
     """A today-dated graduation whose grounding citations are all ``tool`` or
     ``external`` episodes (CAP-08 T3): content the agent relayed, not content it
-    observed. It does not climb. It is demoted with ``(uncorroborated)``, or
-    held at a level it earned earlier and recently (``held``), exactly as the
-    ungrounded path holds a line (see :class:`CarriedForward`). It climbs once
-    an ``agent`` or ``operator`` episode also grounds it."""
+    observed. It is written back at 1x marked ``(uncorroborated)``, whatever
+    level it claimed and whatever it held before, and forms no Hebbian link.
+    It climbs once an ``agent`` or ``operator`` episode also grounds it."""
 
     name: str
-    level: int  # the level the line claimed
-    citations: list[str]  # the grounding citations, all below agent
-    trust: str  # the highest trust among them
-    held: bool  # True: kept at its earned level; False: demoted one level
+    level: int  # the level the line claimed; it is written back at 1x
+    citations: list[str]  # the grounding citations (all of them when unchecked)
+    trust: str  # the trust that decided it (below agent)
 
 
 @dataclass
@@ -631,6 +629,9 @@ def validate_graduations(
        Bold Stand Phase 1b probe #1 (2026-05-21). Evaluated whenever
        check 1 passes (a cited ID resolves), INDEPENDENT of check 2's
        explanation-grounding result — see AM-XSESSION-LINKGATE below.
+    4. If ``trust_of`` is provided (CAP-08), the line must be grounded by an
+       ``agent`` or ``operator`` episode; see ``trust_of`` below. A failure
+       writes the line back at 1x marked ``(uncorroborated)``.
 
     If check 1 fails (no cited ID resolves) the line demotes and marks
     ``(ungrounded)``. If check 2 fails (explanation doesn't reference any
@@ -1043,11 +1044,24 @@ def validate_graduations(
                             explanation, node_content_map.get(cid, "")
                         )
                     ]
-                grounding_trust = max(
-                    (trust_of(cid) for cid in grounding_ids),
-                    key=trust_rank,
-                    default=DEFAULT_TRUST,
-                )
+                if grounding_checked:
+                    # One trusted witness among the citations that ground the
+                    # explanation is enough.
+                    grounding_trust = max(
+                        (trust_of(cid) for cid in grounding_ids),
+                        key=trust_rank,
+                        default=DEFAULT_TRUST,
+                    )
+                else:
+                    # Nothing says which citation grounds the claim (no quoted
+                    # explanation, or no content to check it against), so one
+                    # tool/external citation makes the whole line relayed: an
+                    # agent id stapled on would otherwise vouch for it (L1 r1, run).
+                    grounding_trust = min(
+                        (trust_of(cid) for cid in grounding_ids),
+                        key=trust_rank,
+                        default=DEFAULT_TRUST,
+                    )
             uncorroborated_line = (
                 grounding_trust is not None
                 and trust_rank(grounding_trust) < trust_rank(DEFAULT_TRUST)
@@ -1069,22 +1083,18 @@ def validate_graduations(
                     if grounding_trust is not None:
                         pattern_trust[grad_name_match.group(1)] = grounding_trust
             elif uncorroborated_line:
+                # ⛔ TO 1x, NOT ONE LEVEL DOWN, AND NEVER HELD (L1 + L2 r1, run):
+                # the claimed level is the composer's free text, so one level
+                # down left a claimed 9x at 8x; and the carry-forward hold kept
+                # an earned level while the line's text was the page's. A line
+                # that only relayed content grounds stands at 1x until an
+                # agent/operator episode grounds it.
                 assert grounding_trust is not None
                 name_m = _NAMED_PATTERN_WITH_EVIDENCE_RE.match(line)
-                held_cf = _carryforward_decision(
-                    line=line,
-                    level=level,
-                    today=today,
-                    pattern_history_lookup=pattern_history_lookup,
-                    carryforward_cold_days=carryforward_cold_days,
-                    cross_session_overlap_threshold=cross_session_overlap_threshold,
+                demoted += 1
+                lines[i] = _demote_line(
+                    line, match, level, marker="(uncorroborated)", to_level=1,
                 )
-                if held_cf is not None:
-                    lines[i] = _carryforward_line(line, match, level)
-                    carried_forward.append(held_cf)
-                else:
-                    demoted += 1
-                    lines[i] = _demote_line(line, match, level, marker="(uncorroborated)")
                 uncorroborated.append(UncorroboratedGraduation(
                     # A free-text line has no identifier: its text up to the marker.
                     name=(name_m.group(1) if name_m is not None
@@ -1092,7 +1102,6 @@ def validate_graduations(
                     level=level,
                     citations=list(grounding_ids),
                     trust=grounding_trust,
-                    held=held_cf is not None,
                 ))
             elif cross_session_overlap_words:
                 # Cross-session check fired: today's explanation reuses
@@ -1154,7 +1163,9 @@ def validate_graduations(
             # immune gate above still decides what graduates. Note this
             # block runs even on the demoted explanation path, so a real
             # but paraphrased co-citation keeps its link.
-            if ids_valid and not cross_session_overlap_words:
+            if ids_valid and not cross_session_overlap_words and not uncorroborated_line:
+                # CAP-08: an uncorroborated line links nothing, or relayed
+                # content would join the agent's own episodes in recall.
                 # codex L3 F2: a preservation-exempt line (byte-identical or
                 # warm+fresh-specific) SKIPPED the overlap demotion, but
                 # ``explanation_valid`` passes on ANY one grounding id — so linking
@@ -1822,7 +1833,7 @@ _SCAFFOLD_TAG_RE = re.compile(
     r"|\[contradicts:[^\]]*\]?"
     r"|\[provenance:[^\]]*\]?"  # AM-PROVENANCE: mop the audit marker from the snippet
     r"|\[(?:no-contradicts|Proven|Developing|ungrounded|needs-evidence"
-    r"|cross-session-overlap|carried-forward|level-capped)\]",
+    r"|cross-session-overlap|carried-forward|level-capped|uncorroborated)\]",
     re.IGNORECASE,
 )
 # A leading ``(YYYY-MM-DD)`` left over after the name|Nx marker is stripped.
@@ -1831,7 +1842,7 @@ _LEADING_DATE_RE = re.compile(r"^[ \t]*\(\d{4}-\d{2}-\d{2}\)")
 # annotations the wrap pipeline appends), so they don't pollute the summary.
 _STATE_PAREN_RE = re.compile(
     r"\((?:ungrounded|cross-session-overlap|carried-forward|needs-evidence|"
-    r"no-contradicts|level-capped)\)",
+    r"no-contradicts|level-capped|uncorroborated)\)",
     re.IGNORECASE,
 )
 
@@ -2184,8 +2195,9 @@ def _demote_line(
     match: re.Match,
     level: int,
     marker: str = "(ungrounded)",
+    to_level: int | None = None,
 ) -> str:
-    """Demote a graduated pattern line BY ONE LEVEL and mark it.
+    """Demote a graduated pattern line BY ONE LEVEL (or to ``to_level``) and mark it.
 
     ⚠ NOT "3x->2x or 2x->1x" — that enumeration was written under the removed
     AM-LEVELCAP ceiling and survived it here, in the function that performs the
@@ -2223,7 +2235,7 @@ def _demote_line(
     # graduation markers elsewhere in the captured span.
     new_marker = re.sub(
         rf"\|\s*{level}x",
-        f"| {level - 1}x",
+        f"| {level - 1 if to_level is None else to_level}x",
         old_marker,
         count=1,
     )

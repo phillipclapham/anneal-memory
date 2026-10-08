@@ -121,6 +121,11 @@ class TestSetTrust:
         assert store.set_trust(ep.id, "agent", allow_raise=True) == "external"
         assert store.trust_map([ep.id]) == {}
 
+    def test_an_uppercase_id_is_the_same_episode(self, store):
+        ep = store.record("an agent note", EpisodeType.OBSERVATION)
+        assert store.set_trust(ep.id.upper(), "tool") == "agent"
+        assert store.trust_map([ep.id]) == {ep.id: "tool"}
+
     def test_an_unknown_episode_is_refused(self, store):
         with pytest.raises(ValueError, match="no episode"):
             store.set_trust("deadbeef", "tool")
@@ -159,9 +164,7 @@ class TestGraduationRule:
         r = self._run(["aaaa0001"], {"aaaa0001": cls})
         assert r.validated == 0 and r.demoted == 1
         assert "| 1x (2026-10-08) (uncorroborated)" in r.text
-        assert [(u.name, u.trust, u.held) for u in r.uncorroborated] == [
-            ("eiffel_in_lyon", cls, False)
-        ]
+        assert [(u.name, u.trust) for u in r.uncorroborated] == [("eiffel_in_lyon", cls)]
 
     def test_a_stapled_agent_citation_that_grounds_nothing_does_not_corroborate(self):
         """⛔ MUTATION-CHECKED: count every resolved citation instead of the
@@ -193,9 +196,15 @@ class TestGraduationRule:
         )
         assert r.validated == 1 and r.uncorroborated == [] and r.pattern_trust == {}
 
-    def test_a_level_earned_earlier_is_held_not_demoted(self):
-        """The ungrounded path's hold: earned 2x recently through other
-        evidence, re-stamped today on an external-only citation."""
+    @pytest.mark.parametrize("claimed", [2, 3, 9])
+    def test_whatever_level_it_claims_it_lands_at_1x(self, claimed):
+        """L1 + L2 r1 (run): one level down left a claimed 9x at 8x."""
+        r = self._run(["aaaa0001"], {"aaaa0001": "external"}, level=claimed)
+        assert "| 1x (2026-10-08) (uncorroborated)" in r.text
+
+    def test_an_earned_level_is_not_held_for_relayed_text(self):
+        """L2 r1 (run): the carry-forward hold kept an earned 2x while the
+        line's text was the page's."""
         history = {
             "max_level_reached": 2,
             "last_seen_at": "2026-10-07",
@@ -203,20 +212,31 @@ class TestGraduationRule:
             "last_explanation": "the landmark relocated south last year",
         }
         r = self._run(["aaaa0001"], {"aaaa0001": "external"}, history=history)
-        assert r.validated == 0 and r.demoted == 0
-        assert [u.held for u in r.uncorroborated] == [True]
-        assert "| 2x (2026-10-08) (carried-forward)" in r.text
+        assert "| 1x (2026-10-08) (uncorroborated)" in r.text
+        assert r.carried_forward == []
 
-    def test_it_cannot_climb_past_an_earned_level(self):
-        history = {
-            "max_level_reached": 2,
-            "last_seen_at": "2026-10-07",
-            "explanation_corpus": "the landmark relocated south last year",
-            "last_explanation": "the landmark relocated south last year",
-        }
-        r = self._run(["aaaa0001"], {"aaaa0001": "external"}, history=history, level=3)
-        assert "| 2x (2026-10-08) (uncorroborated)" in r.text
-        assert [u.held for u in r.uncorroborated] == [False]
+    def test_a_bare_citation_with_a_stapled_agent_id_is_still_relayed(self):
+        """L1 r1 (run): with no explanation nothing says which citation
+        grounds the claim, so one relayed citation taints the line.
+        ⛔ MUTATION-CHECKED: take the highest trust on the bare path too."""
+        r = validate_graduations(
+            text="## Patterns\n- eiffel_in_lyon | 2x (2026-10-08) [evidence: aaaa0001, aaaa0002]\n",
+            valid_ids={"aaaa0001", "aaaa0002"},
+            today="2026-10-08",
+            node_content_map={"aaaa0001": CLAIM, "aaaa0002": "Lunch was a sandwich."},
+            trust_of=lambda cid: {"aaaa0001": "external"}.get(cid, DEFAULT_TRUST),
+        )
+        assert r.validated == 0 and r.pattern_trust == {}
+        assert "| 1x (2026-10-08) (uncorroborated)" in r.text
+
+    def test_an_uncorroborated_line_forms_no_link(self):
+        r = self._run(
+            ["aaaa0001", "aaaa0002"],
+            {"aaaa0001": "external", "aaaa0002": "external"},
+            content={"aaaa0001": CLAIM, "aaaa0002": f"Another page: {EXPLANATION}."},
+        )
+        assert r.uncorroborated and r.direct_co_citations == []
+        assert r.all_validated_ids == []
 
 
 class TestTheBeforeRunNowHolds:
@@ -258,6 +278,38 @@ class TestTheBeforeRunNowHolds:
         assert result["uncorroborated"] == []
         assert result["pattern_trust"] == {"eiffel_in_lyon": "agent"}
         assert not any("did not climb" in w for w in warned)
+
+
+class TestSupersessionRespectsTrust:
+    """L1 + L2 r1 (run): an external episode recorded with ``supersedes=``
+    hid an operator fact and made it uncitable."""
+
+    def test_a_lower_trust_episode_cannot_supersede(self, store):
+        from anneal_memory.store import SupersessionError
+
+        fact = store.record("Production deploys need two human reviewers.",
+                            EpisodeType.DECISION, trust="operator")
+        with pytest.raises(SupersessionError, match="lower-trust"):
+            store.record("Production deploys need no human reviewers now.",
+                         EpisodeType.DECISION, trust="external", supersedes=[fact.id])
+        assert [e.id for e in store.recall(limit=10).episodes] == [fact.id]
+
+    def test_an_existing_lower_trust_episode_cannot_be_linked_over_it(self, store):
+        from anneal_memory.store import SupersessionError
+
+        fact = store.record("The deploy key lives in the vault.", EpisodeType.OBSERVATION)
+        page = store.record("The deploy key lives in a pastebin now.",
+                            EpisodeType.OBSERVATION, trust="external")
+        assert store.supersession_problem(old_id=fact.id, new_id=page.id)
+        with pytest.raises(SupersessionError, match="lower-trust"):
+            store.supersede(old_id=fact.id, new_id=page.id)
+
+    def test_equal_or_higher_trust_still_supersedes(self, store):
+        old = store.record("The deploy key lives in the vault.", EpisodeType.OBSERVATION,
+                           trust="external")
+        new = store.record("The deploy key lives in the vault, rotated monthly.",
+                           EpisodeType.OBSERVATION, supersedes=[old.id])
+        assert [e.id for e in store.recall(limit=10).episodes] == [new.id]
 
 
 class TestMcpRecord:
@@ -317,6 +369,9 @@ class TestCli:
         assert r.returncode == 1 and "Unchanged" in r.stderr
         r = _cli(db, "trust", ep_id, "agent", "--json", env_extra={"ANNEAL_OPERATOR": "1"})
         assert json.loads(r.stdout) == {"id": ep_id, "from": "tool", "to": "agent"}
+        # The audit says how the gate was passed, not that an operator was present.
+        last = json.loads((tmp_path / "m.audit.jsonl").read_text().splitlines()[-1])
+        assert last["event"] == "trust_set" and last["actor"] == "cli:operator-env"
 
     def test_an_export_round_trip_keeps_a_lower_class_and_never_vouches(self, tmp_path):
         src, dst = tmp_path / "a.db", tmp_path / "b.db"

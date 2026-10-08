@@ -2672,7 +2672,7 @@ class Store:
             # cannot vanish between the check and the link. ⛔ The refusal is
             # raised AFTER this block (see _db_boundary's docstring).
             problem = next(
-                (p for p in (self._supersession_problem(o, None, content, ts)
+                (p for p in (self._supersession_problem(o, None, content, ts, new_trust=trust)
                              for o in old_ids) if p),
                 None,
             )
@@ -3928,11 +3928,17 @@ class Store:
     def _supersession_problem(
         self, old_id: str, new_id: str | None, new_content: str, new_ts: str,
         *, check_grounds: bool = True, check_order: bool = True,
+        new_trust: str | None = None,
     ) -> str | None:
         """Why one link fails validation, or None if it passes. Never raises a
         refusal (callers raise outside their ``_db_boundary``). Runs inside the
         caller's write transaction. ``new_id`` is None when the new episode is
-        not yet inserted (``record``)."""
+        not yet inserted (``record``), which then passes its ``new_trust``.
+
+        ⛔ A NEWER EPISODE OF LOWER TRUST CANNOT SUPERSEDE (CAP-08, L1 + L2 r1,
+        run): an external episode recorded with ``supersedes=`` hid an operator
+        fact from recall and made it uncitable, so a page's text became the
+        live fact and the corroboration it needed was gone."""
         if new_id is not None and old_id == new_id:
             return f"supersede: {old_id!r} cannot supersede itself"
         row = self._conn.execute(
@@ -3961,6 +3967,19 @@ class Store:
                 f"supersede: {new_id!r} already leads, through recorded links, to "
                 f"{old_id!r}; this link would close a cycle and hide every episode on it"
             )
+        if self._has_trust_table():
+            trust_rows = dict(self._conn.execute(
+                "SELECT episode_id, trust FROM episode_trust WHERE episode_id IN (?, ?)",
+                (old_id, new_id or ""),
+            ).fetchall())
+            old_trust = trust_rows.get(old_id, DEFAULT_TRUST)
+            if new_trust is None:
+                new_trust = trust_rows.get(new_id or "", DEFAULT_TRUST)
+            if trust_rank(new_trust) < trust_rank(old_trust):
+                return (
+                    f"supersede: {old_id!r} is {old_trust!r} and the replacing episode is "
+                    f"{new_trust!r}; a lower-trust episode cannot supersede a higher-trust one"
+                )
         if check_grounds and not _supersession_grounds(new_content, row["content"]):
             return (
                 f"supersede: the new text shares too little with {old_id!r} to ground as "
@@ -4034,6 +4053,7 @@ class Store:
                 ``allow_raise``.
         """
         new_rank = trust_rank(trust)
+        episode_id = str(episode_id).strip().lower()
         problem: str | None = None
         old = DEFAULT_TRUST
         # Refusals are computed inside and raised after the block: the boundary

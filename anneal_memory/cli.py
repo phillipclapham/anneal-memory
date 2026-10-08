@@ -915,14 +915,16 @@ def cmd_trust(args: argparse.Namespace) -> None:
                 print(f"{args.episode_id}: {current}")
             return
         raising = trust_rank(args.level) > trust_rank(current)
-        if raising and not _operator_ok(
-            f"Raise {args.episode_id} from {current} to {args.level}?"
-        ):
-            print(f"Error: raising trust ({current} -> {args.level}) needs a yes on a "
-                  "terminal, or ANNEAL_OPERATOR=1. Unchanged.", file=sys.stderr)
-            sys.exit(1)
+        via = None
+        if raising:
+            via = _operator_ok(f"Raise {args.episode_id} from {current} to {args.level}?")
+            if via is None:
+                print(f"Error: raising trust ({current} -> {args.level}) needs a yes on a "
+                      "terminal, or ANNEAL_OPERATOR=1. Unchanged.", file=sys.stderr)
+                sys.exit(1)
+        # The actor says how the gate was passed, not more than that.
         old = store.set_trust(args.episode_id, args.level, allow_raise=raising,
-                              actor="operator" if raising else "cli")
+                              actor=f"cli:operator-{via}" if via else "cli")
         if args.json:
             _print_json({"id": args.episode_id, "from": old, "to": args.level})
         else:
@@ -966,19 +968,22 @@ def cmd_search(args: argparse.Namespace) -> None:
             print()
 
 
-def _operator_ok(question: str) -> bool:
-    """The operator's own say for a CAP-08 trust claim an agent must not make:
-    ``ANNEAL_OPERATOR=1`` for one command, or a yes on a terminal."""
+def _operator_ok(question: str) -> str | None:
+    """How the operator said yes to a CAP-08 trust claim an agent must not make:
+    ``"terminal"`` (a yes on a terminal), ``"env"`` (``ANNEAL_OPERATOR=1`` for one
+    command), or None. ⚠ The env form is a convenience, not a boundary: any
+    process that can run this CLI can set it, so it binds only where the agent
+    has no shell (MCP never offers it). The audit records which form was used."""
     if os.environ.get("ANNEAL_OPERATOR") == "1":
-        return True
+        return "env"
     if sys.stdin.isatty() and sys.stderr.isatty():
         print(f"{question} [y/N] ", end="", file=sys.stderr, flush=True)
         try:
             answer = sys.stdin.readline().strip().lower()
         except (EOFError, OSError):
             answer = ""
-        return answer in ("y", "yes")
-    return False
+        return "terminal" if answer in ("y", "yes") else None
+    return None
 
 
 def _team_override_ok(store: Any, args: argparse.Namespace) -> bool:

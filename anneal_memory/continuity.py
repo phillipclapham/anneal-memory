@@ -1350,6 +1350,10 @@ names so the immune system can protect your patterns.
 - Patterns marked `(cross-session-overlap)` were demoted because today's explanation
   reused too much vocabulary from prior sessions; compose new evidence with
   genuinely distinct words to re-graduate.
+- Patterns marked `(uncorroborated)` were set back to 1x because every citation
+  grounding them was a tool result or outside source the agent relayed (trust
+  `tool`/`external`), not something observed. They re-graduate only when an episode
+  of your own (or the operator's) also grounds the claim.
 - Patterns at 3x AND ABOVE: extract the PRINCIPLE, not the surface observations.
 - Patterns older than 7 days with no new validation → remove (stale).
 - Group related patterns visually with a header line above them if you like —
@@ -3643,7 +3647,7 @@ def validated_save_continuity(
             if grad_result.uncorroborated:
                 audit_payload["uncorroborated"] = [
                     {"name": u.name, "level": u.level, "trust": u.trust,
-                     "citations": list(u.citations), "held": u.held}
+                     "citations": list(u.citations)}
                     for u in grad_result.uncorroborated
                 ]
             raised_trust = {

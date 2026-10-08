@@ -52,22 +52,30 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   `Store.trust_map(ids)` and `Store.trust_counts()` read them.
 - Graduation (`validate_graduations(..., trust_of=)`, wired by the canonical save pipeline): a
   today-dated graduation whose GROUNDING citations (those its explanation actually overlaps) are
-  all `tool`/`external` takes the ungrounded path marked `(uncorroborated)`: demoted one level,
-  or held at a level it earned earlier and recently. Listed in the save result's new
+  all `tool`/`external` is written back at 1x marked `(uncorroborated)`, whatever level it
+  claimed and whatever it held before, and forms no association. With no quoted explanation, a
+  single `tool`/`external` citation makes the line relayed. Listed in the save result's new
   `uncorroborated`, recorded in the `continuity_saved` audit event, and named in a warning. An
-  unrelated agent episode added to the citation does not corroborate it. `pattern_trust` on the
+  unrelated agent episode added to a quoted citation does not corroborate it.
+- A lower-trust episode cannot supersede a higher-trust one (`record(supersedes=)`,
+  `supersede`, a wrap's `[supersedes:]`): refused as a `SupersessionError`. `pattern_trust` on the
   save result gives each graduated named pattern's highest grounding trust (the audit event
   records it when above `agent`).
 - MCP `record` takes `trust` (`agent`, `tool`, `external` only: an agent cannot label its own
   write `operator`). CLI `record --trust` (`operator` needs a yes on a terminal or
-  `ANNEAL_OPERATOR=1`) and `anneal-memory trust ID [LEVEL]` (raising needs the same).
+  `ANNEAL_OPERATOR=1`) and `anneal-memory trust ID [LEVEL]` (raising needs the same). The env
+  form is a convenience any process with a shell can set; the audit actor records which form
+  was used (`cli:operator-terminal` / `cli:operator-env`).
 - JSON `export` writes each non-default class; `import` honours a class up to `agent`, so an
   edited export file can lower trust but never vouch. SQLite-format export copies the table.
 - Measured after: the 2026-10-07 plant recorded `external` is held at `1x (uncorroborated)`;
   the same with an unrelated agent episode stapled on is held too; with an agent episode that
   also grounds the claim it graduates to 2x.
 - Scope: provenance only. Unlabelled content reads as the agent's own, so the rule holds as far
-  as the host labels its tool boundary; whether a labelled claim is true stays the operator's.
+  as the host labels its tool boundary (team imports and JSON exports without the field arrive
+  as `agent`); grounding is lexical, so an on-topic agent episode corroborates; recall and the
+  wrap package do not yet mark relayed episodes as data (design T4, not built). Whether a claim
+  is true stays the operator's.
 
 ### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
 - `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one

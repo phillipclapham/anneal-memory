@@ -1845,6 +1845,9 @@ def _canonical_utc(ts: str) -> str | None:
     """``ts`` in the store's own timestamp form (UTC, microseconds, ``Z``), or None
     when it does not parse. Keyed episodes are stored in this form so the string order
     every SQL cutoff uses agrees with the instant order the key rule uses."""
+    m = _ISO_INSTANT.fullmatch(ts) if isinstance(ts, str) else None
+    if m is None or len(m.group(7) or "") > 6:
+        return None  # finer than a microsecond would be truncated and could tie or invert
     key = _instant_key(ts)
     if key[0] != 0:
         return None
@@ -2758,7 +2761,8 @@ class Store:
             canonical = _canonical_utc(ts)
             if canonical is None:
                 raise ValueError(
-                    f"state_key needs an ISO 8601 timestamp; {ts!r} does not parse")
+                    f"state_key needs an ISO 8601 timestamp of at most microsecond "
+                    f"precision; {ts!r} is not one")
             ts = canonical
         key_links: list[tuple[str, str]] = []
 
@@ -2802,7 +2806,7 @@ class Store:
             # cannot vanish between the check and the link. ⛔ The refusal is
             # raised AFTER this block (see _db_boundary's docstring).
             problem = next(
-                (p for p in (self._supersession_problem(o, None, content, ts)
+                (p for p in (self._supersession_problem(o, None, content, ts, new_key=key)
                              for o in old_ids) if p),
                 None,
             )
@@ -2989,28 +2993,17 @@ class Store:
         return True
 
     def _live_holders(self, key: str, exclude: str | None = None) -> list[Any]:
-        """Who holds slot ``key`` now, newest first: the live end of each keyed
-        episode's chain (a keyed episode that no link hides is its own end; one that an
-        explicit link replaced is held by that link's live end, keyed or not). Ordered by
-        the instant its timestamp names, then insertion order. Runs inside the caller's
-        transaction."""
-        keyed = self._conn.execute(
-            "SELECT episode_id FROM state_keys WHERE key = ?", (key,)).fetchall()
-        ids = [r[0] for r in keyed]
-        ends: set[str] = set(ids)
-        if ids and self._has_supersessions_table():
-            replaced = self._live_replacements(ids, None)
-            ends = {replaced.get(i, i) for i in ids}
-        ends.discard(exclude or "")
-        if not ends:
-            return []
-        order = list(ends)
-        rows = []
-        for start in range(0, len(order), 500):
-            chunk = order[start:start + 500]
-            rows.extend(self._conn.execute(
-                "SELECT rowid AS rn, id, timestamp FROM episodes "
-                f"WHERE id IN ({','.join('?' * len(chunk))})", chunk).fetchall())
+        """The keyed episodes filling slot ``key`` that no link hides now, newest first
+        by the instant their timestamp names, then insertion order. Only keyed episodes
+        hold a slot: a keyed episode is replaced only through its key (see
+        :meth:`_supersession_problem`), so no outside link reaches into a slot. Runs
+        inside the caller's transaction."""
+        hide_sql, hide_params = _hidden_by_supersession_sql(None)
+        rows = self._conn.execute(
+            "SELECT e.rowid AS rn, e.id, e.timestamp FROM state_keys k JOIN episodes e "
+            f"ON e.id = k.episode_id WHERE k.key = ? AND e.id != ? AND e.id NOT IN ({hide_sql})",
+            [key, exclude or "", *hide_params],
+        ).fetchall()
         return sorted(rows, key=lambda r: _instant_key(r["timestamp"], r["rn"]), reverse=True)
 
     def _state_key_plan(self, ep_id: str, ts: str, key: str) -> list[tuple[str, str]]:
@@ -3125,7 +3118,8 @@ class Store:
                     # The key is the grounding and the plan fixed the order (by instant),
                     # so only existence and cycles are checked here.
                     problem = self._supersession_problem(
-                        old_id, new_id, "", "", check_grounds=False, check_order=False)
+                        old_id, new_id, "", "", check_grounds=False, check_order=False,
+                        key_link=True)
                     if problem:
                         links = []
                         break
@@ -3216,9 +3210,13 @@ class Store:
                 replaced = [r["id"] for r in sorted(
                     keyed, key=lambda r: _instant_key(r["timestamp"], r["rn"]), reverse=True)
                     if r["id"] not in current]
-                rows = {r["id"]: r for r in self._conn.execute(
-                    "SELECT id, timestamp, content FROM episodes WHERE id IN "
-                    f"({','.join('?' * len(current + replaced))})", current + replaced)}
+                rows = {}
+                want_ids = current + replaced
+                for start in range(0, len(want_ids), 500):
+                    chunk = want_ids[start:start + 500]
+                    rows.update({r["id"]: r for r in self._conn.execute(
+                        "SELECT id, timestamp, content FROM episodes WHERE id IN "
+                        f"({','.join('?' * len(chunk))})", chunk)})
                 out.append({
                     "key": k,
                     "current": [dict(rows[i]) for i in current if i in rows],
@@ -4462,6 +4460,7 @@ class Store:
     def _supersession_problem(
         self, old_id: str, new_id: str | None, new_content: str, new_ts: str,
         *, check_grounds: bool = True, check_order: bool = True,
+        new_key: str | None = None, key_link: bool = False,
     ) -> str | None:
         """Why one link fails validation, or None if it passes. Never raises a
         refusal (callers raise outside their ``_db_boundary``). Runs inside the
@@ -4474,6 +4473,18 @@ class Store:
         ).fetchone()
         if row is None:
             return f"supersede: the superseded episode {old_id!r} does not exist"
+        if not key_link:
+            # CAP-04 bound (L3 r2): a keyed episode is replaced only through its key, as
+            # Graphiti and MemStrata invalidate only within one slot. Links from outside a
+            # slot made unkeyed chain ends, branches and uncleared links hold slots.
+            old_key = self._state_key_of(old_id)
+            if new_key is None and new_id is not None:
+                new_key = self._state_key_of(new_id)
+            if old_key is not None and new_key != old_key:
+                return (
+                    f"supersede: {old_id!r} fills the state slot {old_key!r}; record its "
+                    f"update with state_key={old_key!r} instead of a link"
+                )
         # String order, the same notion ``recall`` sorts by.
         if check_order and row["timestamp"] > new_ts:
             return (
@@ -4502,6 +4513,17 @@ class Store:
                 f"episode's meaningful words)"
             )
         return None
+
+    def _state_key_of(self, episode_id: str) -> str | None:
+        """The state key an episode fills, or None (no key, or no ``state_keys`` table
+        on a store an older binary created)."""
+        if self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'state_keys'"
+        ).fetchone() is None:
+            return None
+        row = self._conn.execute(
+            "SELECT key FROM state_keys WHERE episode_id = ?", (episode_id,)).fetchone()
+        return row[0] if row else None
 
     def _has_supersessions_table(self) -> bool:
         """A read_only Store skips schema init, so a database last opened by an

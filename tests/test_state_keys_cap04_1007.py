@@ -338,19 +338,6 @@ def test_unset_in_the_middle_of_a_chain_re_forms_the_slot(tmp_path):
         assert {e.id for e in st.recall(limit=10).episodes} == {b, c}
 
 
-def test_a_key_reaches_a_chain_whose_live_end_is_unkeyed(tmp_path):   # L1 MED
-    with Store(str(tmp_path / "m.db")) as st:
-        a = st.record("The database engine for Quillmark is postgres.", "observation",
-                      timestamp="2026-01-01T10:00:00Z", state_key="quillmark.db")
-        b = st.record("Quillmark moved its database engine over to sqlite.", "observation",
-                      timestamp="2026-02-01T10:00:00Z", supersedes=[a.id])
-        c = st.record("Quillmark now stores everything in duckdb.", "observation",
-                      timestamp="2026-03-01T10:00:00Z", state_key="quillmark.db")
-        assert [e.id for e in st.recall(limit=10).episodes] == [c.id]
-        assert b.id in {r[0] for r in st._conn.execute(
-            "SELECT old_id FROM supersessions WHERE new_id = ?", (c.id,))}
-
-
 def test_a_backdated_write_also_makes_a_split_slot_whole(tmp_path):   # L1 LOW 2
     with Store(str(tmp_path / "m.db")) as st:
         h1 = st.record("city one", "observation", timestamp="2026-01-01T10:00:00Z", state_key="k")
@@ -437,7 +424,7 @@ def test_record_with_a_key_stores_a_canonical_utc_timestamp(tmp_path):
         e = st.record("a fact", "observation", timestamp="2026-01-01T12:00:00+05:00",
                       state_key="k")
         assert e.timestamp == "2026-01-01T07:00:00.000000Z"
-        with pytest.raises(ValueError, match="does not parse"):
+        with pytest.raises(ValueError, match="microsecond precision"):
             st.record("b fact", "observation", timestamp="yesterday", state_key="k")
 
 
@@ -478,17 +465,6 @@ def test_a_key_link_is_its_own_kind_whoever_wrote_it(tmp_path):   # codex M3
         assert new.id in [e.id for e in res.episodes]
         assert st.redirectable_ids({old.id: new.id}) == {old.id}
 
-def test_the_report_shows_an_unkeyed_current_holder(tmp_path):   # codex M5
-    with Store(str(tmp_path / "m.db")) as st:
-        a = st.record("The database engine for Quillmark is postgres.", "observation",
-                      timestamp="2026-01-01T10:00:00Z", state_key="quillmark.db")
-        b = st.record("Quillmark moved its database engine over to sqlite.", "observation",
-                      timestamp="2026-02-01T10:00:00Z", supersedes=[a.id])
-        r = st.state_key_report("quillmark.db")[0]
-        assert [x["id"] for x in r["current"]] == [b.id]
-        assert [x["id"] for x in r["replaced"]] == [a.id]
-
-
 def test_a_key_row_never_outlives_its_episode_even_for_raw_sql(tmp_path):   # codex M6
     with Store(str(tmp_path / "m.db")) as st:
         e = st.record("lives in Seattle", "observation", state_key="k")
@@ -524,3 +500,63 @@ def test_normalising_a_normal_key_changes_nothing():   # complement LOW
     for k in ["\u0130stanbul", "STRASSE stra\u00dfe", "\u1e9e", "\ufb01le"]:
         n = normalize_state_key(k)
         assert normalize_state_key(n) == n
+
+
+# -- L3 r2: a keyed episode is replaced only through its key ------------------------
+
+def test_an_explicit_link_from_a_keyed_episode_is_refused(tmp_path):   # codex r2 H2/H3, glm H
+    with Store(str(tmp_path / "m.db")) as st:
+        a = st.record("The database engine for Quillmark is postgres.", "observation",
+                      timestamp="2026-01-01T10:00:00Z", state_key="quillmark.db")
+        with pytest.raises(SupersessionError, match="fills the state slot"):
+            st.record("Quillmark moved its database engine over to sqlite.", "observation",
+                      timestamp="2026-02-01T10:00:00Z", supersedes=[a.id])
+        b = st.record("Quillmark moved its database engine over to sqlite.", "observation",
+                      timestamp="2026-02-01T10:00:00Z")
+        with pytest.raises(SupersessionError, match="fills the state slot"):
+            st.supersede(old_id=a.id, new_id=b.id)
+        with pytest.raises(SupersessionError, match="fills the state slot"):
+            st.supersede(old_id=a.id, new_id=b.id, source="wrap")
+        # Through the key it goes, and an explicit link with the same key is allowed too.
+        c = st.record("Quillmark moved its database engine over to duckdb.", "observation",
+                      timestamp="2026-03-01T10:00:00Z", supersedes=[a.id], state_key="quillmark.db")
+        assert {e.id for e in st.recall(limit=10).episodes} == {b.id, c.id}
+
+
+def test_a_wrap_link_from_a_keyed_episode_is_rejected_not_saved(tmp_path):   # codex r2 H1
+    from anneal_memory import prepare_wrap, validated_save_continuity
+    with Store(str(tmp_path / "m.db")) as st:
+        a = st.record("The database engine for Quillmark is postgres.", "observation",
+                      state_key="quillmark.db")
+        b = st.record("Quillmark moved its database engine over to sqlite.", "observation")
+        token = prepare_wrap(st, max_chars=40000)["wrap_token"]
+        r = validated_save_continuity(
+            st, "# t\n\n## State\ns.\n\n## Patterns\n\n## Decisions\nd.\n\n## Context\n"
+            f"c. [supersedes: {a.id} by {b.id}]\n", wrap_token=token)
+        assert st.recall(limit=10).total_matching == 2
+        assert any("fills the state slot" in str(x) for x in r.get("supersessions_rejected", []))
+
+
+def test_finer_than_microsecond_is_refused_for_a_key(tmp_path):   # codex r2 M5
+    with Store(str(tmp_path / "m.db")) as st:
+        with pytest.raises(ValueError, match="microsecond"):
+            st.record("a", "observation", timestamp="2026-01-01T10:00:00.1234569Z", state_key="k")
+
+
+def test_the_report_reads_a_large_slot_in_chunks(tmp_path):   # codex r2 M6
+    with Store(str(tmp_path / "m.db")) as st:
+        for i in range(1100):
+            st.record(f"value {i}", "observation",
+                      timestamp=f"2026-01-01T{i // 3600:02d}:{i // 60 % 60:02d}:{i % 60:02d}Z",
+                      state_key="k")
+        r = st.state_key_report("k")[0]
+        assert len(r["current"]) == 1 and len(r["replaced"]) == 1099
+
+
+def test_cli_state_set_prints_the_canonical_key(tmp_path, monkeypatch, capsys):   # codex r2 LOW
+    db = str(tmp_path / "m.db")
+    with Store(db) as st:
+        a = st.record(OLD, "observation", timestamp="2026-01-05T10:00:00.000000Z")
+    out = json.loads(_cli(monkeypatch, capsys, "--db", db, "state", " USER.Home_City ",
+                          "--set", a.id, "--json").out)
+    assert out["key"] == "user.home_city"

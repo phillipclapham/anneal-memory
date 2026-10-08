@@ -146,6 +146,7 @@ from .store import (
     _WRAP_TOKEN_RE,
     _SCHEMA_VERSION,
     _parse_format_version,
+    normalize_state_key,
 )
 from .types import AffectiveState, AssociationStats, EpisodeType, RelevantPattern
 from .worth import (
@@ -1015,11 +1016,12 @@ def cmd_state(args: argparse.Namespace) -> None:
             except (SupersessionError, ValueError) as exc:
                 print(f"Error: {exc}. Nothing was recorded.", file=sys.stderr)
                 sys.exit(1)
+            canonical = normalize_state_key(args.key)
             if args.json:
-                _print_json({"episode_id": args.set, "key": args.key,
+                _print_json({"episode_id": args.set, "key": canonical,
                              "links": [{"old_id": o, "new_id": n} for o, n in links]})
             else:
-                print(f"{args.set} fills {args.key!r}")
+                print(f"{args.set} fills {canonical!r}")
                 for o, n in links:
                     print(f"  {n} supersedes {o}")
             return

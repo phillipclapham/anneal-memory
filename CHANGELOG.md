@@ -4,6 +4,33 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added — current-state recall: state keys and the recall redirect (CAP-04)
+- **Redirect.** `retrieve_relevant` now serves, in the slot of a keyword hit on a superseded
+  episode, the live episode at the end of its chain, with the hit's score. A query that names
+  the old state ("still in Seattle?") gets the current fact, which by construction shares
+  none of its words. `RelevantResult.replaced` maps each such episode to the superseded ids it
+  stands in for (empty when nothing was redirected). Weights are still counted over the
+  visible episodes, so a store with no links returns what it returned before. The associative
+  seed set is unchanged. MCP `recall` with a plain keyword adds a "Replaced since" block
+  naming the fact that replaced each hidden match. `Store.superseded_keyword_candidates` is
+  the read behind both.
+- **State keys.** `record(..., state_key=)`, `Store.set_state_key(id, key)`,
+  `Store.state_key_report(key=None)`, `normalize_state_key`; CLI `record --state-key KEY` and
+  `state [KEY] [--set ID]`; MCP `record` takes `state_key` (tool-integrity manifests
+  regenerated). A newer episode with the same key replaces the live holders of the key that
+  are not newer than it; a backdated one is linked as replaced by the newest holder. The links
+  are ordinary `supersessions` rows (hiding, `unsupersede`, delete/prune rewiring and the audit
+  chain apply; the audit event names the key) made without the lexical floor: the key is the
+  writer's claim. Keys are case-folded with whitespace collapsed, 1-200 characters, no
+  control or format characters. An episode keeps one key; a different key is refused. New
+  additive table `state_keys`; an older binary ignores it. Delete and prune drop the rows.
+- Measured: `scripts/stale_probe.py --supersede explicit` on reworded updates, scored recall's
+  current fact at the top went from 7 of 16 (main) to 16 of 16; the never-updated control is
+  unchanged (15 of 16). On 100 STALE scenarios with keys placed on the true old and new turns,
+  the old-state question served the old fact turn 93 times and the new one 0 times before, and
+  the new one 93 times and the old one 0 times keyed (prompt mode, k=10; mechanism counts, no
+  reader or judge). How well a model assigns keys is NOT measured.
+
 ### Added — drift probes, the operator's instrument for meaning drift (CAP-06)
 - `anneal-memory probe add --pattern NAME [--min-level N]` / `--fact TEXT [--section H]`,
   `probe list [--all]`, `probe retire ID`, `probe status`; library `Store.add_drift_probe`,

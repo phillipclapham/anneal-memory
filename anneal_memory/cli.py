@@ -865,8 +865,9 @@ def cmd_record(args: argparse.Namespace) -> None:
                 source=args.source,
                 metadata=metadata,
                 supersedes=getattr(args, "supersedes", None),
+                state_key=getattr(args, "state_key", None),
             )
-        except SupersessionError as exc:
+        except (SupersessionError, ValueError) as exc:
             print(f"Error: {exc}. Nothing was recorded.", file=sys.stderr)
             sys.exit(1)
 
@@ -977,6 +978,47 @@ def cmd_unsupersede(args: argparse.Namespace) -> None:
     else:
         print(f"Removed: {args.new} no longer supersedes {args.old}" if removed
               else f"No link {args.old} by {args.new} was recorded.")
+
+
+def cmd_state(args: argparse.Namespace) -> None:
+    """List state keys (CAP-04) with each key's live holder and what it replaced,
+    or, with --set, put an existing episode into a key's slot."""
+    with _open_store(args) as store:
+        if args.set:
+            if args.key is None:
+                print("Error: --set needs a KEY.", file=sys.stderr)
+                sys.exit(1)
+            try:
+                links = store.set_state_key(args.set, args.key, source="cli")
+            except (SupersessionError, ValueError) as exc:
+                print(f"Error: {exc}. Nothing was recorded.", file=sys.stderr)
+                sys.exit(1)
+            if args.json:
+                _print_json({"episode_id": args.set, "key": args.key,
+                             "links": [{"old_id": o, "new_id": n} for o, n in links]})
+            else:
+                print(f"{args.set} fills {args.key!r}")
+                for o, n in links:
+                    print(f"  {n} supersedes {o}")
+            return
+        try:
+            report = store.state_key_report(args.key)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+    if args.json:
+        _print_json(report)
+        return
+    if not report:
+        print("No state keys." if args.key is None else f"No episode fills {args.key!r}.")
+        return
+    for entry in report:
+        print(entry["key"])
+        for label, items in (("current", entry["current"]), ("replaced", entry["replaced"])):
+            for item in items:
+                content = _truncate(item["content"].replace("\n", " "), 90)
+                print(f"  {label:<8} [{item['id']}] {_format_timestamp(item['timestamp'])}  {content}")
+    print("\nA wrong slot hides a valid episode: undo it with `unsupersede --old ID --new ID`.")
 
 
 def cmd_pattern_associations(args: argparse.Namespace) -> None:
@@ -4209,7 +4251,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Id of an older episode this one replaces (repeatable). Validated like "
              "a citation; on refusal nothing is recorded. Recall then hides the old one.",
     )
+    sub.add_argument(
+        "--state-key", metavar="KEY", default=None,
+        help="The state slot this fact fills, e.g. user.home_city. A newer episode with "
+             "the same key replaces this one, and this one replaces older holders; "
+             "the key is your claim that the facts fill one slot (see `state`).",
+    )
     sub.set_defaults(func=cmd_record)
+
+    # -- state (CAP-04 state keys) --
+    sub = subparsers.add_parser(
+        "state", help="List state keys and what each replaced, or --set one",
+        parents=[json_parent])
+    sub.add_argument("key", nargs="?", default=None, help="Only this key")
+    sub.add_argument("--set", metavar="EPISODE_ID", default=None,
+                     help="Put this existing episode into KEY's slot")
+    sub.set_defaults(func=cmd_state)
 
     # -- search (alias: recall) --
     # `recall` is the verb the library (Store.recall) and MCP tool expose, and

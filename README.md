@@ -270,6 +270,12 @@ by design: an AI grading its own memory would be the substitution this library e
 avoid. The operator gets instruments for it, not a verdict: drift probes (below), the
 contradiction-scan record in every wrap, and the hash-chained audit.
 
+The same line holds for updates. Whether one fact replaces another is the writer's claim,
+made with an explicit link or a shared state key; anneal checks that the link is well formed
+(and, for an explicit link, lexically grounded) and never decides it semantically. The
+operator's instruments are `anneal-memory state` (each key's current holder and what it
+replaced), `search --include-superseded`, and `unsupersede` to undo a wrong one.
+
 **Drift probes.** Declare what must survive consolidation, a Proven pattern at a level (its
 current level by default) or a fact whose words must stay in one sentence or bullet:
 `anneal-memory probe add --pattern NAME` / `--fact TEXT [--section HEADING]`. Every save
@@ -461,9 +467,11 @@ What it fixes, measured with `scripts/stale_probe.py` (16 planted fact-and-updat
 
 - Without a link, recall behaves as it did before. Keyword recall (`Store.recall`, CLI `search`, MCP `recall`) returns the stale fact beside the current one in 16 of 16 cases. Scored recall (`retrieve_relevant`) returns it in 12 to 14 of 16, depending on how the update is worded.
 - With the link, written either way, the stale fact is served in 0 of 16 cases on every wording and both recall paths. A fact that never changed is unaffected.
-- One gap the link doesn't close. When the update is reworded, scored recall still misses the current fact in 9 of 16 cases (14 of 16 without the link), because the question's keywords aren't in the new sentence.
+- With the link, scored recall also serves the current fact when the question only reaches the old one: a hit on a replaced episode is swapped for the episode that replaced it, in the same slot, and `RelevantResult.replaced` says which it stands in for. On reworded updates that took the current fact from 7 of 16 to 16 of 16 at the top; without the redirect the question's keywords simply aren't in the new sentence. Keyword recall (MCP `recall`) lists a replaced match under "Replaced since", with the fact that replaced it.
 
-The catch is that all of this depends on the link being written. Nothing detects an update on its own, so an update recorded without a link still sits beside the old fact the way it always did. How often real agents write the link is something I haven't measured yet. The word-overlap check is also only a floor, not a judgment that one episode really replaces the other: two episodes that share boilerplate pass it, and a wrong link hides a still-valid episode until it's removed.
+**State keys, for updates that share no words.** Many real updates never repeat the old words ("I've been based in Seattle" becomes "settled into my new place in Austin"), so no word-overlap rule can link them. A state key names the slot a fact fills instead: `store.record(text, "observation", state_key="user.home_city")`, CLI `record --state-key KEY`, MCP `record` with `state_key`, or `set_state_key(id, KEY)` / CLI `state KEY --set ID` for an episode already recorded. A newer episode with the same key replaces the older one through an ordinary link, with no word-overlap check; a backdated one goes into the history. `anneal-memory state [KEY]` shows each key's current holder and what it replaced. On a knowledge-update benchmark's own scenarios (STALE, 100 of them, keys placed on the true old and new facts), the question that names the old state got the old fact 93 times and the new one 0 times; keyed, it got the new fact 93 times and the old one 0. That measures the mechanism with correct keys, not how well an agent assigns them.
+
+The catch is that all of this depends on the link or the key being written. Nothing detects an update on its own, so an update recorded without either still sits beside the old fact the way it always did. How often real agents write them is something I haven't measured yet. The word-overlap check is also only a floor, not a judgment that one episode really replaces the other: two episodes that share boilerplate pass it, and a wrong link or key hides a still-valid episode, and now serves its replacement in its place, until it's removed.
 
 ## Prospective memory — spores
 

@@ -166,6 +166,8 @@ CLI and MCP are thin transport adapters over the same library — not separate i
 | **Compress** | `prepare_wrap(store)` → agent → `validated_save_continuity(store, text)` | `prepare-wrap` → agent → `save-continuity` | `prepare_wrap` → agent → `save_continuity` |
 | **Best for** | Framework integration, custom agents | Agents with shell access, operators | MCP-enabled editors |
 
+**Recall reads one committed state.** A recall reads one committed state, as of its start: an episode deleted or erased before recall begins is never returned; a delete that commits while a recall runs may or may not be reflected, as with any database read.
+
 ## Framework Integrations
 
 anneal-memory works with any agent framework through the Python library. Each guide below shows where to call the four core functions — `record()`, `recall()`, `prepare_wrap()`, `validated_save_continuity()` — within the framework's lifecycle.

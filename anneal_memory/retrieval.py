@@ -982,6 +982,13 @@ def retrieve_relevant(
         keywords or nothing clears the precision threshold — surface nothing rather
         than noise.
 
+    Consistency:
+        A recall reads one committed state, as of its start: an episode deleted or
+        erased before recall begins is never returned; a delete that commits while a
+        recall runs may or may not be reflected, as with any database read. The episode
+        half (candidates, weights, the supersession redirect) runs in one read
+        transaction; the crystal store and durable facts are separate files, read outside.
+
     Raises:
         ValueError: ``mode`` is not ``"prompt"`` or ``"query"``.
     """
@@ -1002,32 +1009,37 @@ def retrieve_relevant(
     # corpus-IDF (the precision fix) — so the weighting is corpus-aware exactly when a
     # corpus is being scanned, and the length-proxy otherwise (the keyword-only path).
     want_assoc = associative and crystal_store is not None and max_patterns > 0
-    seed_episodes: list[ScoredEpisode] = []
-    redirect = False
-    if max_episodes > 0 or want_assoc:
-        until = _recent_cutoff(exclude_recent_minutes, now)
-        candidates, doc_freq, corpus_n = _fetch_episode_candidates(
-            store, keywords, until=until, uncapped=mode == "query"
-        )
-        weights, used_idf = _query_weights(
-            store, keywords, doc_freq, until=until, corpus_n=corpus_n
-        )
-        seed_episodes = _score_candidate_episodes(
-            candidates, keywords, weights,
-            score_threshold=_precision_bar(used_idf, mode),
-            require_anchor=_anchor_floor(used_idf, mode),
-            min_hits=_min_hits(mode),
-            min_len=_min_episode_len(mode),
-        )
-        redirect = max_episodes > 0 and store.has_supersessions()
-    else:
-        # Keyword-only pattern path (no episode fetch): the length-proxy, byte-identical
-        # to retrieve_patterns (the parity contract holds on this branch by construction).
-        weights, used_idf = _query_weights(store, keywords, None)
-    episodes = seed_episodes[:max_episodes] if max_episodes > 0 else []
-    if redirect:
-        episodes = _swap_replaced(store, keywords, seed_episodes, max_episodes,
-                                  until=until, mode=mode)
+    # The episode half reads ONE committed state (snapshot isolation): candidate fetch,
+    # corpus weights, the supersession check and the redirect all run in a single read
+    # transaction (nested inside a caller's open one, it just joins it). Nothing on this
+    # path writes. The crystal store and durable facts are other files, read outside.
+    with store._db_boundary("recall"), store._read_snapshot():
+        seed_episodes: list[ScoredEpisode] = []
+        redirect = False
+        if max_episodes > 0 or want_assoc:
+            until = _recent_cutoff(exclude_recent_minutes, now)
+            candidates, doc_freq, corpus_n = _fetch_episode_candidates(
+                store, keywords, until=until, uncapped=mode == "query"
+            )
+            weights, used_idf = _query_weights(
+                store, keywords, doc_freq, until=until, corpus_n=corpus_n
+            )
+            seed_episodes = _score_candidate_episodes(
+                candidates, keywords, weights,
+                score_threshold=_precision_bar(used_idf, mode),
+                require_anchor=_anchor_floor(used_idf, mode),
+                min_hits=_min_hits(mode),
+                min_len=_min_episode_len(mode),
+            )
+            redirect = max_episodes > 0 and store.has_supersessions()
+        else:
+            # Keyword-only pattern path (no episode fetch): the length-proxy, byte-identical
+            # to retrieve_patterns (the parity contract holds on this branch by construction).
+            weights, used_idf = _query_weights(store, keywords, None)
+        episodes = seed_episodes[:max_episodes] if max_episodes > 0 else []
+        if redirect:
+            episodes = _swap_replaced(store, keywords, seed_episodes, max_episodes,
+                                      until=until, mode=mode)
     # One regime-matched precision bar + anchor for every tier this call scores: the
     # lower IDF bar + the √N distinctiveness anchor when the weights are corpus-IDF, the
     # length-proxy bar + no anchor (0.0) otherwise.

@@ -350,6 +350,7 @@ StoreOperation = Literal[
     "delete",
     "recall",
     "keyword_candidates",
+    "redirectable_ids",
     "wrap_status_snapshot",
     "supersede",
     "unsupersede",
@@ -4894,7 +4895,7 @@ class Store:
         equal-timestamp ends the greater id is the head (the walk orders by
         ``timestamp, id`` and the last wins)."""
         want = list(ids)
-        with self._db_boundary("keyword_candidates"):
+        with self._db_boundary("redirectable_ids"), self._read_snapshot():
             if not want or not self._has_supersessions_table():
                 return {}
             heads = self._live_replacements(want, until, servable_only=True)

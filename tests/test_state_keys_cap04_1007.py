@@ -700,3 +700,33 @@ def test_the_recent_cutoff_bounds_the_served_head(tmp_path, src):   # L3 r7 code
         assert c.id not in [e.id for e in res.episodes]
         (swapped,) = [e for e in res.episodes if e.id == b.id]
         assert [r.id for r in swapped.replaces] == [a.id]
+
+
+def test_a_head_deleted_mid_redirect_is_not_swapped_in(tmp_path):   # L3 r8 codex M
+    db = str(tmp_path / "m.db")
+    with Store(db) as st:
+        _seed(st)
+        a = st.record("The database engine for Quillmark is postgres.", "observation",
+                      timestamp="2026-01-05T10:00:00Z")
+        b = st.record("Quillmark moved its database engine over to sqlite.", "observation",
+                      timestamp="2026-02-10T10:00:00Z")
+        c = st.record("Quillmark moved its database engine over to duckdb now.", "observation",
+                      timestamp="2026-04-28T10:00:00Z")   # after the cutoff: A's head is B
+        st.supersede(old_id=a.id, new_id=b.id)
+        st.supersede(old_id=b.id, new_id=c.id)
+        real = st._live_replacements
+        fired = []
+
+        def racing(*args, **kw):
+            out = real(*args, **kw)
+            if kw.get("servable_only") and not fired:
+                fired.append(1)
+                with Store(db) as other:
+                    other.delete(b.id)   # rewires A->C; C is past the cutoff
+            return out
+
+        st._live_replacements = racing   # type: ignore[method-assign]
+        res = _recall(st, "is quillmark still on postgres",
+                      exclude_recent_minutes=60 * 24 * 10, now="2026-05-01T12:00:00Z")
+        assert fired
+        assert all(not e.replaces for e in res.episodes)   # the deleted head is never swapped in

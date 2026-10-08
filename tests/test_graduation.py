@@ -2529,20 +2529,14 @@ class TestCarryforward:
         assert len(r.carried_forward) == 1
 
     def test_held_line_loses_evidence_tag(self):
-        # A held line's [evidence:] tag must NOT sit next to its marker: that is
-        # the property that prevents it upserting pattern_history, so warmth
-        # decays on its own and a chronically-failing pattern eventually ages
-        # out. The tag itself stays in the file (1008+3: replacing it deleted the
-        # operator's citation data), behind the (carried-forward) mark.
-        from anneal_memory.graduation import _NAMED_PATTERN_WITH_EVIDENCE_RE
-
+        # Held line must NOT retain an [evidence:] tag — that's the property
+        # that prevents it upserting pattern_history, so warmth decays on its
+        # own and a chronically-failing pattern eventually ages out.
         r = validate_graduations(
             text=self._text(3), valid_ids=set(), today="2026-06-04",
             pattern_history_lookup=self._lookup(3, "2026-06-03T10:00:00Z"),
         )
-        line = self._line(r)
-        assert _NAMED_PATTERN_WITH_EVIDENCE_RE.match(line) is None
-        assert "(carried-forward) [evidence: deadbeef" in line
+        assert "[evidence:" not in self._line(r)
 
     def test_cross_session_overlap_never_carried_forward(self):
         # The sycophancy immune path demotes a COLD re-worded high-overlap pattern,

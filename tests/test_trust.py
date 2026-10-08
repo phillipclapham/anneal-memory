@@ -240,21 +240,18 @@ class TestGraduationRule:
         """L1 + L2 r1 (run): one level down left a claimed 9x at 8x."""
         r = self._run(["aaaa0001"], {"aaaa0001": "external"}, level=claimed)
         assert "| 1x (2026-10-08) (uncorroborated)" in r.text
-        # Item 7 (1008+3, run): the demotion replaced the first evidence tag with
-        # its mark, deleting the citation; a two-tag line lost its first tag. Now
-        # every tag stays, behind the mark.
-        assert f'(uncorroborated) [evidence: aaaa0001 "{EXPLANATION}"]' in r.text
+        # Item 7 (1008+3, run): a demotion strips the line's evidence tag by
+        # design, but a two-tag line kept its second tag. Now every tag goes.
         two = validate_graduations(
             text="## Patterns\n" + _line(["aaaa0001"], level=claimed)
-                 + f' [evidence: aaaa0002 "{EXPLANATION}"]\n',
+                 + f' [evidence: aaaa0002 "{EXPLANATION}"] — felt\n',
             valid_ids={"aaaa0001", "aaaa0002"}, today="2026-10-08",
             node_content_map={"aaaa0001": CLAIM, "aaaa0002": CLAIM},
             trust_of=lambda cid: "external",
         )
         assert two.text.splitlines()[1] == (
-            f'- eiffel_in_lyon | 1x (2026-10-08) (uncorroborated) [evidence: aaaa0001 '
-            f'"{EXPLANATION}"] [evidence: aaaa0002 "{EXPLANATION}"]'
-        )
+            "- eiffel_in_lyon | 1x (2026-10-08) (uncorroborated) — felt")
+        assert "[evidence:" not in two.text
 
     def test_an_earned_level_is_not_held_for_relayed_text(self):
         """L2 r1 (run): the carry-forward hold kept an earned 2x while the

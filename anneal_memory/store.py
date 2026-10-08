@@ -390,6 +390,8 @@ StoreOperation = Literal[
     "get_pattern_history",
     "upsert_pattern_history",
     "seed_pattern_max_level",
+    # The graduation bound's receiver record (1007+29)
+    "saved_pattern_levels",
     "prune",
     "schema_init",
     "batch_begin",
@@ -1564,6 +1566,21 @@ CREATE TABLE IF NOT EXISTS pattern_history (
     last_seen_at TEXT NOT NULL,
     last_wrap_id INTEGER,
     FOREIGN KEY (last_wrap_id) REFERENCES wraps(id)
+);
+
+-- The level each pattern line held when this store last SAVED it (1007+29): the
+-- prior state the graduation bound measures a new continuity against, written by
+-- the save itself in the wrap's transaction. A named pattern dropped from the
+-- file keeps its row (its tombstone), so re-adding it returns to the level it was
+-- saved at, never to a high-water mark it was later demoted from. A freeform line
+-- has no identity across rewording, so its rows are replaced every save.
+-- Additive: an older binary ignores the table.
+CREATE TABLE IF NOT EXISTS pattern_levels (
+    kind TEXT NOT NULL CHECK (kind IN ('name', 'text')),
+    key TEXT NOT NULL,
+    level INTEGER NOT NULL,
+    saved_at TEXT NOT NULL,
+    PRIMARY KEY (kind, key)
 );
 """
 
@@ -5943,6 +5960,36 @@ class Store:
     # here; the cross-session check at graduation time compares today's
     # explanation against this history to detect sycophantic vocabulary
     # reuse across sessions.
+
+    def saved_pattern_levels(self) -> dict[tuple[str, str], int]:
+        """The level each pattern line held when this store last saved it, keyed
+        ``(kind, key)`` as :func:`graduation._line_levels` keys a line (``"name"``
+        and the operator name, or ``"text"`` and the normalised freeform text).
+        Empty for a store that has not saved under this version yet (or a
+        read-only store opened on an older schema). Read-only."""
+        with self._db_boundary("saved_pattern_levels"), self._read_snapshot():
+            if self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pattern_levels'"
+            ).fetchone() is None:
+                return {}
+            return {
+                (row[0], row[1]): int(row[2])
+                for row in self._conn.execute("SELECT kind, key, level FROM pattern_levels")
+            }
+
+    def _record_pattern_levels(
+        self, levels: dict[tuple[str, str], int], saved_at: str
+    ) -> None:
+        """Record the levels of the continuity being saved. Runs inside the save's
+        batch, so the record commits with the wrap or not at all. Named rows not in
+        ``levels`` stay as tombstones; freeform rows are replaced."""
+        self._conn.execute("DELETE FROM pattern_levels WHERE kind = 'text'")
+        self._conn.executemany(
+            "INSERT INTO pattern_levels (kind, key, level, saved_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(kind, key) DO UPDATE SET level = excluded.level, "
+            "saved_at = excluded.saved_at",
+            [(kind, key, level, saved_at) for (kind, key), level in levels.items()],
+        )
 
     def get_pattern_history(self, pattern_name: str) -> dict[str, Any] | None:
         """Look up the cross-session graduation history for a pattern.

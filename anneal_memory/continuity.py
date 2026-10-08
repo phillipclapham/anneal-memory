@@ -27,7 +27,7 @@ import uuid
 import logging
 import warnings
 from dataclasses import asdict
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -39,6 +39,7 @@ from .graduation import (
     detect_stale_patterns,
     extract_pattern_names,
     extract_pattern_summaries,
+    pattern_line_levels,
     validate_graduations,
     _NAMED_PATTERN_RE,
     _NAMED_PATTERN_WITH_EVIDENCE_RE,
@@ -699,6 +700,24 @@ def format_episodes_for_wrap(episodes: list[Episode]) -> str:
             lines.append(f"- ({ep.id}) {ep.content}{source_info}{replaced}")
 
     return "\n".join(lines)
+
+
+def _wrap_local_date(store: Store) -> str:
+    """The local date the wrap in progress was PREPARED on, else today.
+
+    prepare_wrap tells the composer to stamp ``({today})`` with the date it ran
+    on; a save after midnight read the next day and dropped every graduation the
+    composer stamped correctly (L2 r1, run). ``wrap_started_at`` is that
+    moment in UTC."""
+    started = store._get_metadata("wrap_started_at")
+    if started:
+        try:
+            moment = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+            if moment.tzinfo is not None:
+                return moment.astimezone().date().isoformat()
+        except ValueError:
+            pass
+    return date.today().isoformat()
 
 
 def _crystal_active_safe(crystal_store: CrystalStore | None) -> list:
@@ -2985,7 +3004,14 @@ def validated_save_continuity(
     # Validate graduations (demotes bad citations in-place).
     # Caller may pin ``today`` for deterministic test runs; default is
     # wall-clock. Same pattern _build_wrap_package already uses.
-    today_str = today if today is not None else date.today().isoformat()
+    today_str = today if today is not None else _wrap_local_date(store)
+    # The bound's prior: the store's own record of the levels it last saved, and
+    # for a pattern crystallized out before that record existed, its crystal level.
+    saved_levels = store.saved_pattern_levels()
+    crystal_levels = {
+        c["name"]: int(c["level"]) for c in _crystal_active_safe(crystal_store)
+        if isinstance(c.get("level"), int) and not isinstance(c.get("level"), bool)
+    }
     grad_result = validate_graduations(
         text=text,
         valid_ids=citable_ids,
@@ -3012,6 +3038,8 @@ def validated_save_continuity(
         # whatever date, level or tag shape the composer wrote. "" = no prior
         # file, so every line is new.
         prior_text=prior_continuity or "",
+        saved_levels=saved_levels,
+        crystal_levels=crystal_levels,
     )
 
     # The hard maximum is measured on the text that will be WRITTEN: graduation
@@ -3205,6 +3233,12 @@ def validated_save_continuity(
                     f"saved and the wrap is still open; save again (cite the replacing "
                     f"episode instead)."
                 )
+
+            # The bound's next prior, recorded in this transaction so it commits
+            # with the wrap or not at all.
+            store._record_pattern_levels(
+                pattern_line_levels(grad_result.text, grad_headings), today_str,
+            )
 
             wrap_result = store.wrap_completed(
                 episodes_compressed=len(episodes),

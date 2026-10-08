@@ -4,19 +4,26 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
-### Fixed — the graduation gate bounds every pattern line by the prior saved continuity
+### Fixed — the graduation gate bounds every pattern line by what the store last saved
 - `validate_graduations` checked only today-dated, well-formed lines. A back-dated line, a bare line on a store
   whose `citations_seen` is false, a bare line at 4x or above, a line with a non-adjacent `[evidence:]` tag, and a
   line that jumped several rungs on one valid citation each landed at whatever level it wrote; a brand-new
   `claim | 9x (yesterday)` was saved at 9x. Reproduced on 8542f49 by `tests/test_gradgate_prior_1007.py`.
-- New last check, read from the continuity as last SAVED (`prior_text`, supplied by the save path, never by the
-  composer): each line is cut to `max(1, prior level + 1 if it validated this wrap)`, which is prepare_wrap's own
-  contract (a new pattern enters at 1x; a validated Nx becomes (N+1)x). A pattern absent from the prior file takes
-  its `pattern_history` high-water mark, so drop-and-re-add keeps what it earned. A cut line is marked
-  `(level-capped)` and reported as `level_capped` on the save result (present only when a line was cut), as a
-  `UserWarning`, and in the `continuity_saved` audit event.
-- A first save onto a store with no continuity file has no prior: every named pattern line enters at 1x unless
-  its history says otherwise. Direct `validate_graduations` callers that pass no `prior_text` keep the old behavior.
+- New last check: each line is cut to `max(1, prior level + 1 if it validated this wrap)`, which is prepare_wrap's
+  own contract (a new pattern enters at 1x; a validated Nx becomes (N+1)x). The prior level is the store's record
+  of the level it last saved for that line (`Store.saved_pattern_levels`, the new additive `pattern_levels` table,
+  written in the wrap's own transaction). The continuity file may lower it, never raise it; a line in the file the
+  store never saved is new; a named pattern dropped from the file keeps its record, so re-adding it returns to its
+  saved level, not to `pattern_history`'s high-water mark. A store's first save under this version takes the file
+  as the prior, and a pattern crystallized out before then falls back to its crystal level.
+- A cut line is marked `(level-capped)` (cleared once the line stands at an entitled level; a cut carried line
+  loses its `(carried-forward)`) and reported as `level_capped` on the save result (present only when a line was
+  cut), in the MCP save reply and the CLI output, as a `UserWarning`, and in the `continuity_saved` audit event. A
+  validated line cut to 1x no longer counts in `graduations_validated` or seeds co-graduation links.
+- A save with no pinned `today` now dates the wrap by the local day `prepare_wrap` ran (`wrap_started_at`), so a
+  wrap saved after midnight keeps the graduations the composer stamped with the date it was given.
+- A first save onto a fresh store has no prior: every pattern line enters at 1x. Direct `validate_graduations`
+  callers that pass no `prior_text` keep the old behavior.
 
 ### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
 - `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one

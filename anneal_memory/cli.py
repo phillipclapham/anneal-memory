@@ -1518,6 +1518,7 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 "supersessions_rejected": result["supersessions_rejected"],
                 "sections": {name: c for name, c in sorted(sections.items())},
                 "stale_state": result.get("stale_state", []),
+                "level_capped": result.get("level_capped", []),
             })
             return
 
@@ -1542,6 +1543,8 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
             print(
                 f"Bare graduations demoted (no evidence): {result['bare_demoted']}"
             )
+        for cap in result.get("level_capped", []):
+            print(f"Level capped: {cap['name']} {cap['written_level']}x -> {cap['capped_to']}x")
         if result["skipped_non_today"]:
             # Carried-forward graduations from prior sessions are
             # normal. A non-zero count with no new validations is

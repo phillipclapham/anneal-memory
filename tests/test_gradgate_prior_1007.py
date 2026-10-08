@@ -163,15 +163,18 @@ def test_new_1x_line_is_untouched(tmp_path):
     assert not result.get("level_capped")
 
 
-def test_reinsert_up_to_history_high_water_is_allowed(tmp_path):
-    # Dropped from the prior continuity but earned 5x before (pattern_history):
-    # re-adding it at its earned level is a tombstone carry, not an inflation.
-    saved, _ = _save(
-        tmp_path, f"- returning_claim | 5x ({YESTERDAY})",
-        prior="- other_claim | 1x (2026-10-01)", citations_seen=True,
-        history={"returning_claim": 5},
-    )
-    assert _level(saved, "returning_claim") == 5
+def test_reinsert_returns_to_the_level_it_was_saved_at(tmp_path):
+    # Dropped from the file after the store saved it at 5x: re-adding it at 5x is
+    # a tombstone carry (store.saved_pattern_levels), not an inflation.
+    store = Store(tmp_path / "gate.db", project_name="Gate")
+    try:
+        store.save_continuity(_doc(f"- returning_claim | 5x ({YESTERDAY})"))
+        _wrap(store, f"- returning_claim | 5x ({YESTERDAY})")
+        _wrap(store, "- other_claim | 1x (2026-10-01)")
+        _wrap(store, f"- returning_claim | 5x ({YESTERDAY})")
+        assert _level(store.load_continuity(), "returning_claim") == 5
+    finally:
+        store.close()
 
 
 def test_cap_is_reported(tmp_path):
@@ -179,3 +182,153 @@ def test_cap_is_reported(tmp_path):
     capped = result.get("level_capped")
     assert capped and capped[0]["name"] == "planted_claim"
     assert capped[0]["written_level"] == 9 and capped[0]["capped_to"] == 1
+
+
+# --- L1 + L2 round 1 (1007+29): the record the bound reads, and its receipts ----
+
+
+def _wrap(store, patterns_tpl: str, *, today: str = TODAY):
+    """One real wrap on an open store: two grounded episodes, prepare, save."""
+    ids = [
+        store.record(f"{GROUNDED} (wrap note {i})", EpisodeType.OBSERVATION).id
+        for i in range(2)
+    ]
+    res = prepare_wrap(store)
+    return validated_save_continuity(
+        store, _doc(patterns_tpl.format(ep0=ids[0], ep1=ids[1])),
+        today=today, wrap_token=res["wrap_token"],
+    )
+
+
+def _open(tmp_path, seed: str | None = None) -> Store:
+    store = Store(tmp_path / "gate.db", project_name="Gate")
+    if seed is not None:
+        store.save_continuity(_doc(seed))
+    return store
+
+
+def test_drop_and_readd_returns_to_saved_level_not_high_water(tmp_path):
+    # L1 #1 / L2 #2 (run): history's high-water mark (5) let a demoted pattern
+    # (saved at 2x) come back at 5x by being left out for one wrap.
+    store = _open(tmp_path, seed=f"- foo | 2x ({YESTERDAY})")
+    try:
+        store.upsert_pattern_history(
+            pattern_name="foo", level=5, explanation="an older grounding about rotas",
+            seen_at=YESTERDAY, wrap_id=None,
+        )
+        _wrap(store, f"- foo | 2x ({YESTERDAY})")           # the store records foo=2
+        _wrap(store, "- other_claim | 1x (2026-10-01)")      # foo dropped
+        _wrap(store, "- foo | 5x (2026-09-01)")              # re-added at the old mark
+        assert _level(store.load_continuity(), "foo") == 2
+    finally:
+        store.close()
+
+
+def test_out_of_band_file_raise_is_not_a_prior(tmp_path):
+    # L1 #3: the file is writable by anyone; the store's own record is the prior.
+    store = _open(tmp_path, seed=f"- foo | 2x ({YESTERDAY})")
+    try:
+        _wrap(store, f"- foo | 2x ({YESTERDAY})")
+        store.save_continuity(_doc(f"- foo | 6x ({YESTERDAY})"))   # hand-raised
+        _wrap(store, f"- foo | 6x ({YESTERDAY})")
+        assert _level(store.load_continuity(), "foo") == 2
+    finally:
+        store.close()
+
+
+def test_operator_hand_demotion_in_the_file_stands(tmp_path):
+    store = _open(tmp_path, seed=f"- foo | 3x ({YESTERDAY})")
+    try:
+        _wrap(store, f"- foo | 3x ({YESTERDAY})")
+        store.save_continuity(_doc(f"- foo | 1x ({YESTERDAY})"))   # operator lowers
+        _wrap(store, f"- foo | 3x ({YESTERDAY})")                  # composer restores
+        assert _level(store.load_continuity(), "foo") == 1
+    finally:
+        store.close()
+
+
+def test_line_added_to_the_file_out_of_band_counts_as_new(tmp_path):
+    store = _open(tmp_path, seed=f"- foo | 2x ({YESTERDAY})")
+    try:
+        _wrap(store, f"- foo | 2x ({YESTERDAY})")
+        store.save_continuity(_doc(f"- foo | 2x ({YESTERDAY})\n- bar | 7x ({YESTERDAY})"))
+        _wrap(store, f"- foo | 2x ({YESTERDAY})\n- bar | 7x ({YESTERDAY})")
+        assert _level(store.load_continuity(), "bar") == 1
+    finally:
+        store.close()
+
+
+def test_wrap_crossing_midnight_keeps_its_rung(tmp_path):
+    # L2 #4 (run): prepared on day D, saved after midnight, `today` was D+1, so a
+    # correctly stamped D graduation was skipped and then cut.
+    from datetime import date, datetime, timedelta, timezone
+    prep_day = (date.today() - timedelta(days=1)).isoformat()
+    store = _open(tmp_path, seed=f"- foo | 1x ({prep_day})")
+    try:
+        ids = [store.record(f"{GROUNDED} (n{i})", EpisodeType.OBSERVATION).id
+               for i in range(2)]
+        res = prepare_wrap(store)
+        noon_local = datetime.fromisoformat(f"{prep_day}T12:00:00").astimezone()
+        store._conn.execute(
+            "UPDATE metadata SET value = ? WHERE key = 'wrap_started_at'",
+            (noon_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),),
+        )
+        store._conn.commit()
+        result = validated_save_continuity(
+            store, _doc(f"- foo | 2x ({prep_day}) " + EV.format(ep0=ids[0], ep1=ids[1])),
+            wrap_token=res["wrap_token"],
+        )
+        assert _level(store.load_continuity(), "foo") == 2
+        assert result["graduations_validated"] == 1
+    finally:
+        store.close()
+
+
+def test_stale_level_capped_mark_is_dropped_once_the_level_is_earned(tmp_path):
+    saved, result = _save(
+        tmp_path, f"- foo | 3x ({TODAY}) {EV} (level-capped)",
+        prior=f"- foo | 2x ({YESTERDAY})", citations_seen=True,
+    )
+    assert "(level-capped)" not in saved
+    assert not result.get("level_capped")
+
+
+def test_cut_carried_line_loses_its_carried_forward_mark(tmp_path):
+    # L1 #5 (run): a hold the bound overrode still said "(carried-forward)".
+    saved, _ = _save(
+        tmp_path, f"- foo | 3x ({TODAY}) [evidence: deadbeef \"no such episode\"]",
+        prior=f"- foo | 2x ({YESTERDAY})", citations_seen=True,
+        history={"foo": 3},
+    )
+    line = next(l for l in saved.split("\n") if "foo |" in l)
+    assert "(carried-forward)" not in line and "(level-capped)" in line
+    assert _level(saved, "foo") == 2
+
+
+def test_oversized_level_is_cut_not_a_crash(tmp_path):
+    # L1 #4 (run): int() refuses more than 4300 digits.
+    saved, result = _save(tmp_path, f"- huge | {'9' * 5000}x ({YESTERDAY})")
+    assert _level(saved, "huge") == 1
+    assert result["level_capped"][0]["capped_to"] == 1
+
+
+def test_new_validated_lines_cut_to_1x_are_not_graduations(tmp_path):
+    # L1 #2 (run): validated=2 and graduated_names=['foo','bar'] for two lines
+    # that entered at 1x.
+    _, result = _save(tmp_path, f"- foo | 9x ({TODAY}) {EV}\n- bar | 7x ({TODAY}) {EV}")
+    assert result["graduations_validated"] == 0
+
+
+def test_mcp_save_reply_names_the_cut(tmp_path):
+    # L2 #1 (run): the post-commit UserWarning never reaches an MCP client.
+    from anneal_memory.server import Server
+    mstore = Store(tmp_path / "mcp.db", project_name="Gate")
+    srv = Server(mstore)
+    try:
+        srv._tool_record({"content": GROUNDED, "episode_type": "observation"})
+        srv._tool_prepare_wrap({})
+        reply = srv._tool_save_continuity({"text": _doc(f"- planted | 9x ({YESTERDAY})")})
+        text = reply["content"][0]["text"]
+        assert "Level capped: planted 9x -> 1x" in text
+    finally:
+        mstore.close()

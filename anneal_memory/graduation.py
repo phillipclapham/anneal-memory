@@ -414,15 +414,15 @@ class LevelCapped:
     """A pattern line cut down to the level the prior continuity entitles it to.
 
     The contract is prepare_wrap's own: a new pattern enters at ``1x`` and a
-    validated ``Nx`` becomes ``(N+1)x``. The bound reads the PRIOR saved
-    continuity (the receiver's copy), never the line's own date, level or tag
+    validated ``Nx`` becomes ``(N+1)x``. The bound reads the levels the store
+    last SAVED (the receiver's record), never the line's own date, level or tag
     shape, so a back-dated, bare, malformed or multi-rung line is held to it too.
     """
 
     name: str  # operator name, or the freeform text before the marker
     written_level: int  # the highest level the line claimed
     capped_to: int  # the level it was cut to
-    prior_level: int | None  # its level in the prior continuity (None = new)
+    prior_level: int | None  # the level its prior record entitles (None = new)
     validated: bool  # whether the line validated this wrap (+1 allowed)
 
 
@@ -571,18 +571,23 @@ def validate_graduations(
     graduating_headings: frozenset[str] = DEFAULT_GRADUATING,
     carryforward_cold_days: int | None = 7,
     prior_text: str | None = None,
+    saved_levels: "dict[tuple[str, str], int] | None" = None,
+    crystal_levels: "dict[str, int] | None" = None,
 ) -> GraduationResult:
     """Validate evidence citations on graduated patterns.
 
-    ``prior_text`` (the continuity as last SAVED, read by the receiver, never
-    supplied by the composer) switches on the prior-state bound, which runs
-    after every check below: each pattern line is cut to
-    ``max(1, prior level + 1 if it validated this wrap)``. A line absent from
-    the prior text takes its ``pattern_history`` high-water mark as its prior
-    level (a pattern dropped and re-added keeps what it earned), else 0. ``""``
-    means the store has no prior continuity: every line is new. ``None`` skips
-    the bound (direct library callers that do not wire it); the canonical save
-    path always supplies it.
+    ``prior_text`` (the continuity file as it stands before this save) switches
+    on the prior-state bound, which runs after every check below: each pattern
+    line is cut to ``max(1, prior level + 1 if it validated this wrap)``. The
+    prior level comes from ``saved_levels`` (the store's own record of the
+    levels it last saved, :meth:`Store.saved_pattern_levels`) when the store has
+    one: the file can only LOWER it (an operator's hand demotion stands), never
+    raise it, and a line in the file the store never saved counts as new. A
+    named pattern with no record falls back to ``crystal_levels`` (a pattern
+    crystallized out before the store kept a record), else 0. With no record at
+    all (a store's first save under this version) the file's level is the prior.
+    ``""`` means there is no prior file. ``None`` skips the bound (direct library
+    callers that do not wire it); the canonical save path always supplies it.
 
     Scans the ## Patterns section for Nx lines (N >= 2, NO ceiling — see
     ``_GRADUATION_RE``) with [evidence: <id> "explanation"]. It said "2x/3x lines"
@@ -695,7 +700,7 @@ def validate_graduations(
             # was added). Increment ``skipped_non_today`` so callers
             # that care can assert on it; production ignores it.
             # A non-today line skips the checks below, never the prior-state
-            # bound at the end, which caps it against the saved prior continuity.
+            # bound at the end, which caps it against the store's saved levels.
             if date_str != today:
                 skipped_non_today += 1
                 continue
@@ -1171,15 +1176,23 @@ def validate_graduations(
         level_capped = _apply_prior_bound(
             lines,
             prior_text=prior_text,
+            saved_levels=saved_levels,
+            crystal_levels=crystal_levels,
             validated_lines=validated_lines,
-            pattern_history_lookup=pattern_history_lookup,
+            carried_lines=set(carried_by_line),
             graduating_headings=graduating_headings,
         )
-        # A held line the bound then cut was not held at its level: drop its
-        # carry record so the two reports cannot disagree about the same line.
-        capped_lines = {c_line for c_line, _ in level_capped}
-        for c_line in capped_lines & carried_by_line.keys():
-            carried_forward.remove(carried_by_line[c_line])
+        for c_line, cap in level_capped:
+            # A held line the bound then cut was not held at its level: drop its
+            # carry record so the two reports cannot disagree about the line.
+            if c_line in carried_by_line:
+                carried_forward.remove(carried_by_line[c_line])
+            # A validated line cut to 1x did not graduate (L1 r1, run): it must
+            # not count, seed co-graduation links, or name a graduation.
+            if cap.validated and cap.capped_to < 2:  # 2x: _GRADUATION_RE's floor
+                validated -= 1
+                if cap.name in graduated_names:
+                    graduated_names.remove(cap.name)
 
     reuse_max = max(citation_counts.values()) if citation_counts else 0
     gaming_suspects = detect_citation_gaming(citation_counts)
@@ -1210,7 +1223,16 @@ def validate_graduations(
 # level a downstream reader will believe, whatever shape the line is in.
 _LEVEL_TOKEN_RE = re.compile(r"\|[ \t]*(\d+)x(?:[ \t]*\(\d{4}-\d{2}-\d{2}\))?")
 _LEVEL_CAPPED_MARK = "(level-capped)"
+_CARRIED_MARK = "(carried-forward)"
 _FREEFORM_PREFIX_RE = re.compile(r"^[ \t]*(?:-[ \t]+)?(?:(?:!+|\?|✓|\*)[ \t]+)?")
+# A level token longer than this is not a level anyone wrote; it reads as
+# "above any bound" (``int`` refuses more than 4300 digits: L1 r1, run).
+_MAX_LEVEL_DIGITS = 9
+
+
+def _token_level(m: re.Match) -> int:
+    digits = m.group(1)
+    return 10 ** _MAX_LEVEL_DIGITS if len(digits) > _MAX_LEVEL_DIGITS else int(digits)
 
 
 def _line_levels(line: str) -> tuple[tuple[str, str], list[re.Match]] | None:
@@ -1218,11 +1240,11 @@ def _line_levels(line: str) -> tuple[tuple[str, str], list[re.Match]] | None:
 
     A named line (``_NAMED_PATTERN_RE``, the grammar every per-name consumer
     reads) is keyed by its name and governs its own marker, dated or not, plus
-    every DATED marker after it. Any other line counts only when it carries a
-    dated marker (the shape ``_GRADUATION_RE`` and the bare regex act on), so
-    prose such as ``Throughput | 3x when batched`` is never rewritten; it is
-    keyed by its normalised text before that marker, so rewording it makes it a
-    new pattern.
+    every DATED marker after it (so a ``name | Nx (date)`` mention later in the
+    line is cut with it). Any other line counts only when it carries a dated
+    marker (the shape ``_GRADUATION_RE`` and the bare regex act on), so an
+    unbulleted ``Throughput | 3x when batched`` is never touched; it is keyed by
+    its normalised text before that marker, so rewording it makes it new.
     """
     named = _NAMED_PATTERN_RE.match(line)
     if named:
@@ -1244,13 +1266,14 @@ def _line_levels(line: str) -> tuple[tuple[str, str], list[re.Match]] | None:
     return ("text", key), dated
 
 
-def _prior_level_map(
-    prior_text: str, graduating_headings: frozenset[str]
+def pattern_line_levels(
+    text: str, graduating_headings: frozenset[str] = DEFAULT_GRADUATING
 ) -> dict[tuple[str, str], int]:
-    """Highest level per line identity in the prior continuity's graduating sections."""
+    """Highest level per line identity in the graduating sections of ``text``,
+    keyed as the prior-state bound keys lines (what the save records)."""
     levels: dict[tuple[str, str], int] = {}
     in_patterns = False
-    for line in prior_text.split("\n"):
+    for line in text.split("\n"):
         if line.startswith("## "):
             in_patterns = _is_graduating_heading(line, graduating_headings)
             continue
@@ -1260,26 +1283,51 @@ def _prior_level_map(
         if parsed is None:
             continue
         key, marks = parsed
-        top = max(int(m.group(1)) for m in marks)
+        top = max(_token_level(m) for m in marks)
         if top > levels.get(key, -1):
             levels[key] = top
     return levels
+
+
+def _prior_base(
+    key: tuple[str, str],
+    file_levels: dict[tuple[str, str], int],
+    saved_levels: dict[tuple[str, str], int] | None,
+    crystal_levels: dict[str, int] | None,
+) -> int | None:
+    """The level a line identity is entitled to start from, or None (new)."""
+    in_file = file_levels.get(key)
+    if saved_levels:
+        saved = saved_levels.get(key)
+        if saved is not None:
+            # The store's record is the prior; the file may only lower it.
+            return saved if in_file is None else min(saved, in_file)
+        # In the file but never saved by the store: an out-of-band edit.
+    elif in_file is not None:
+        return in_file  # no record yet: this store's first save under the bound
+    if key[0] == "name" and crystal_levels and key[1] in crystal_levels:
+        return crystal_levels[key[1]]
+    return None
 
 
 def _apply_prior_bound(
     lines: list[str],
     *,
     prior_text: str,
+    saved_levels: dict[tuple[str, str], int] | None,
+    crystal_levels: dict[str, int] | None,
     validated_lines: set[int],
-    pattern_history_lookup: "Callable[[str], dict[str, Any] | None] | None",
+    carried_lines: set[int],
     graduating_headings: frozenset[str],
 ) -> list[tuple[int, LevelCapped]]:
     """Cut every graduating line to ``max(1, prior + 1 if validated)``, in place.
 
     ``lines`` is the text AFTER validation and demotion, so the bound is the last
-    word on every level. Returns ``(line index, LevelCapped)`` per cut line.
+    word on every level. A line the bound checks and does not cut loses a stale
+    ``(level-capped)`` mark; a carried line it cuts loses ``(carried-forward)``.
+    Returns ``(line index, LevelCapped)`` per cut line.
     """
-    prior = _prior_level_map(prior_text, graduating_headings)
+    file_levels = pattern_line_levels(prior_text, graduating_headings)
     capped: list[tuple[int, LevelCapped]] = []
     in_patterns = False
     for i, line in enumerate(lines):
@@ -1292,27 +1340,21 @@ def _apply_prior_bound(
         if parsed is None:
             continue
         key, marks = parsed
-        written = max(int(m.group(1)) for m in marks)
-        if written <= 1:
-            continue
-        prior_level = prior.get(key)
-        base = prior_level
-        if base is None and key[0] == "name" and pattern_history_lookup is not None:
-            # Dropped from the prior text but earned before: the history row is
-            # the tombstone, so a re-added pattern keeps its high-water mark.
-            history = pattern_history_lookup(key[1])
-            hwm = history.get("max_level_reached") if history else None
-            if isinstance(hwm, int) and not isinstance(hwm, bool):
-                base = hwm
+        written = max(_token_level(m) for m in marks)
+        prior_level = _prior_base(key, file_levels, saved_levels, crystal_levels)
         validated = i in validated_lines
-        allowed = max(1, (base or 0) + (1 if validated else 0))
+        allowed = max(1, (prior_level or 0) + (1 if validated else 0))
         if written <= allowed:
+            if _LEVEL_CAPPED_MARK in line:
+                lines[i] = _drop_mark(line, _LEVEL_CAPPED_MARK)
             continue
         new_line = line
         for m in reversed(marks):
-            if int(m.group(1)) > allowed:
+            if _token_level(m) > allowed:
                 start, end = m.span(1)
                 new_line = new_line[:start] + str(allowed) + new_line[end:]
+        if i in carried_lines:
+            new_line = _drop_mark(new_line, _CARRIED_MARK)
         if _LEVEL_CAPPED_MARK not in new_line:
             new_line = new_line.rstrip() + " " + _LEVEL_CAPPED_MARK
         lines[i] = new_line
@@ -1321,6 +1363,11 @@ def _apply_prior_bound(
             prior_level=prior_level, validated=validated,
         )))
     return capped
+
+
+def _drop_mark(line: str, mark: str) -> str:
+    """Remove every occurrence of ``mark`` and the space before it."""
+    return re.sub(r"[ \t]*" + re.escape(mark), "", line)
 
 
 def _meaningful_word_overlap(text_a: str, text_b: str) -> set[str]:
@@ -1665,7 +1712,7 @@ _SCAFFOLD_TAG_RE = re.compile(
     r"|\[contradicts:[^\]]*\]?"
     r"|\[provenance:[^\]]*\]?"  # AM-PROVENANCE: mop the audit marker from the snippet
     r"|\[(?:no-contradicts|Proven|Developing|ungrounded|needs-evidence"
-    r"|cross-session-overlap|carried-forward)\]",
+    r"|cross-session-overlap|carried-forward|level-capped)\]",
     re.IGNORECASE,
 )
 # A leading ``(YYYY-MM-DD)`` left over after the name|Nx marker is stripped.
@@ -1674,7 +1721,7 @@ _LEADING_DATE_RE = re.compile(r"^[ \t]*\(\d{4}-\d{2}-\d{2}\)")
 # annotations the wrap pipeline appends), so they don't pollute the summary.
 _STATE_PAREN_RE = re.compile(
     r"\((?:ungrounded|cross-session-overlap|carried-forward|needs-evidence|"
-    r"no-contradicts)\)",
+    r"no-contradicts|level-capped)\)",
     re.IGNORECASE,
 )
 

@@ -7,6 +7,7 @@ than a re-run of the probe.
 
 from __future__ import annotations
 
+from tests.prior_seed import seed_prior_levels
 import sqlite3
 import sys
 
@@ -263,6 +264,7 @@ def test_conflicting_proposals_leave_the_survivor_citable(tmp_path):
     with Store(str(tmp_path / "m.db")) as st:
         a = st.record(OLD, "observation", timestamp="2026-02-10T10:00:00Z")
         b = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00Z")
+        seed_prior_levels(st, {'quillmark_storage': 1})
         assert prepare_wrap(st)["status"] == "ready"
         line = (f"- quillmark_storage | 2x (2026-02-10) "
                 f'[evidence: {b.id} "Quillmark switched its storage over to sqlite"]')
@@ -312,6 +314,7 @@ def test_a_link_racing_the_save_refuses_it_and_the_wrap_survives(tmp_path):
     try:
         a = st.record(OLD, "observation", timestamp="2026-02-10T09:00:00Z")
         b = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00Z")
+        seed_prior_levels(st, {'quillmark_storage': 1})
         assert prepare_wrap(st)["status"] == "ready"
         real = st.superseded_by_map
         fired: list[int] = []
@@ -365,6 +368,7 @@ def test_the_in_batch_recheck_holds_the_write_lock(tmp_path, monkeypatch):
     try:
         a = st.record(OLD, "observation", timestamp="2026-02-10T09:00:00Z")
         b = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00Z")
+        seed_prior_levels(st, {'quillmark_storage': 1})
         assert prepare_wrap(st)["status"] == "ready"
         other._conn.execute("PRAGMA busy_timeout=200")
         real = st.superseded_by_map
@@ -538,6 +542,7 @@ def test_a_busy_batch_entry_leaves_the_store_usable(tmp_path):
     st = Store(db)
     try:
         a = st.record(OLD, "observation", timestamp="2026-02-10T09:00:00Z")
+        seed_prior_levels(st, {'quillmark_storage': 1})
         assert prepare_wrap(st)["status"] == "ready"
         st._conn.execute("PRAGMA busy_timeout=50")
         holder = sqlite3.connect(db, timeout=0.05)

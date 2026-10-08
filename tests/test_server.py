@@ -4,6 +4,7 @@ Tests the Server class by calling handler methods directly (not via stdio).
 Transport layer tests (_read_message) use mocked stdin/stdout.
 """
 
+from tests.prior_seed import seed_prior_levels
 import io
 import json
 import uuid
@@ -1435,6 +1436,7 @@ class TestGraduationValidation:
             "## Decisions\n\n"
             "## Context\nTested SQLite.\n"
         )
+        seed_prior_levels(store, {'thought: SQLite WAL is reliable': 1})
         server._tool_prepare_wrap({})
         result = server._tool_save_continuity({"text": text})
         assert not _is_error(result)

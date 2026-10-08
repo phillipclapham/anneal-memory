@@ -4879,30 +4879,28 @@ class Store:
             return self._has_supersessions_table() and self._conn.execute(
                 "SELECT 1 FROM supersessions LIMIT 1").fetchone() is not None
 
-    def redirectable_ids(self, heads: dict[str, str]) -> set[str]:
-        """Of ``{replaced_id: live head}``, the ids recall may SERVE the head for: those
-        joined to their head by a path of links none of which a wrap proposed
-        (``source='wrap'``) or a delete rewired (``'rewired'``, whose origin may have been
-        a wrap link). Those links still hide; they never serve (CAP-04)."""
-        out: set[str] = set()
-        ids = list(heads)
+    def redirectable_ids(self, ids: Iterable[str]) -> dict[str, str]:
+        """``{replaced_id: the live head recall may SERVE for it}`` (CAP-04): the head is
+        computed over the links a wrap did not propose (``source='wrap'``) and a delete did
+        not rewire (``'rewired'``, whose origin may have been a wrap link) ONLY, so every
+        serving path (recall's swap, :meth:`replaced_matches`) shares this one head. Those
+        links still hide (that ordering is :meth:`_live_replacements`' all-links one); they
+        never serve. An id with no servable path, or whose servable end is itself hidden
+        (a wrap link supersedes it), is absent."""
+        want = list(ids)
         with self._db_boundary("keyword_candidates"):
-            if not ids or not self._has_supersessions_table():
-                return out
-            for start in range(0, len(ids), 500):
-                chunk = ids[start:start + 500]
-                rows = self._conn.execute(
-                    f"""WITH RECURSIVE p(start, cur) AS (
-                            SELECT old_id, new_id FROM supersessions
-                            WHERE old_id IN ({','.join('?' * len(chunk))})
-                              AND source NOT IN ('wrap', 'rewired')
-                            UNION
-                            SELECT p.start, s.new_id FROM p JOIN supersessions s
-                              ON s.old_id = p.cur AND s.source NOT IN ('wrap', 'rewired')
-                        )
-                        SELECT start, cur FROM p""", chunk).fetchall()
-                out.update(r[0] for r in rows if heads.get(r[0]) == r[1])
-        return out
+            if not want or not self._has_supersessions_table():
+                return {}
+            heads = self._live_replacements(want, None, servable_only=True)
+            hide_sql, hide_params = _hidden_by_supersession_sql(None)
+            ends = sorted(set(heads.values()))
+            hidden: set[str] = set()
+            for start in range(0, len(ends), 500):
+                chunk = ends[start:start + 500]
+                hidden.update(r[0] for r in self._conn.execute(
+                    f"SELECT id FROM episodes WHERE id IN ({','.join('?' * len(chunk))}) "
+                    f"AND id IN ({hide_sql})", [*chunk, *hide_params]))
+            return {o: h for o, h in heads.items() if h not in hidden}
 
     def replaced_matches(
         self, phrase: str, *, max_heads: int, max_olds: int = 5,
@@ -4938,14 +4936,11 @@ class Store:
                     f"WHERE q.old_id = episodes.id AND q.source NOT IN ('wrap', 'rewired')){cursor} "
                     "ORDER BY timestamp DESC, id DESC LIMIT ?",
                     [*hide_params, pattern, *(after or ()), page]).fetchall()
-                heads = self._live_replacements(
-                    [r["id"] for r in rows], None, servable_only=True)
-                cand = {r["id"]: heads[r["id"]] for r in rows if r["id"] in heads}
-                ok = self.redirectable_ids(cand) if cand else set()
+                heads = self.redirectable_ids([r["id"] for r in rows])
                 for r in rows:
-                    if r["id"] not in ok:
+                    head = heads.get(r["id"])
+                    if head is None:
                         continue
-                    head = heads[r["id"]]
                     count_by_head[head] = count_by_head.get(head, 0) + 1
                     if len(kept_by_head.setdefault(head, [])) < max_olds:
                         kept_by_head[head].append(r)

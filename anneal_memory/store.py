@@ -4879,20 +4879,26 @@ class Store:
             return self._has_supersessions_table() and self._conn.execute(
                 "SELECT 1 FROM supersessions LIMIT 1").fetchone() is not None
 
-    def redirectable_ids(self, ids: Iterable[str]) -> dict[str, str]:
+    def redirectable_ids(
+        self, ids: Iterable[str], until: str | None = None,
+    ) -> dict[str, str]:
         """``{replaced_id: the live head recall may SERVE for it}`` (CAP-04): the head is
         computed over the links a wrap did not propose (``source='wrap'``) and a delete did
         not rewire (``'rewired'``, whose origin may have been a wrap link) ONLY, so every
         serving path (recall's swap, :meth:`replaced_matches`) shares this one head. Those
         links still hide (that ordering is :meth:`_live_replacements`' all-links one); they
         never serve. An id with no servable path, or whose servable end is itself hidden
-        (a wrap link supersedes it), is absent."""
+        (a wrap link supersedes it), is absent. ``until`` is recall's cutoff
+        (``exclude_recent_minutes``): only replacements at or before it exist, for the head
+        and for the hidden test alike, so an excluded episode is never served. Among
+        equal-timestamp ends the greater id is the head (the walk orders by
+        ``timestamp, id`` and the last wins)."""
         want = list(ids)
         with self._db_boundary("keyword_candidates"):
             if not want or not self._has_supersessions_table():
                 return {}
-            heads = self._live_replacements(want, None, servable_only=True)
-            hide_sql, hide_params = _hidden_by_supersession_sql(None)
+            heads = self._live_replacements(want, until, servable_only=True)
+            hide_sql, hide_params = _hidden_by_supersession_sql(until)
             ends = sorted(set(heads.values()))
             hidden: set[str] = set()
             for start in range(0, len(ends), 500):

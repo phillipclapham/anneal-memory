@@ -681,3 +681,22 @@ def test_a_servable_end_hidden_by_a_wrap_link_is_never_served(tmp_path):   # edg
         assert st.replaced_matches("postgres", max_heads=5).episodes == []
         res = _recall(st, "is quillmark still on postgres")
         assert all(not e.replaces for e in res.episodes)
+
+
+@pytest.mark.parametrize("src", ["agent", "wrap"])
+def test_the_recent_cutoff_bounds_the_served_head(tmp_path, src):   # L3 r7 codex H / complement M
+    with Store(str(tmp_path / "m.db")) as st:
+        _seed(st)
+        a = st.record("The database engine for Quillmark is postgres.", "observation",
+                      timestamp="2026-01-05T10:00:00Z")
+        b = st.record("Quillmark moved its database engine over to sqlite.", "observation",
+                      timestamp="2026-02-10T10:00:00Z")
+        c = st.record("Quillmark moved its database engine over to duckdb now.", "observation",
+                      timestamp="2026-04-28T10:00:00Z")   # after the cutoff below
+        st.supersede(old_id=a.id, new_id=b.id)
+        st.supersede(old_id=b.id, new_id=c.id, source=src)
+        res = _recall(st, "is quillmark still on postgres",
+                      exclude_recent_minutes=60 * 24 * 10, now="2026-05-01T12:00:00Z")
+        assert c.id not in [e.id for e in res.episodes]
+        (swapped,) = [e for e in res.episodes if e.id == b.id]
+        assert [r.id for r in swapped.replaces] == [a.id]

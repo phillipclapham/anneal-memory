@@ -9822,6 +9822,149 @@ class TestKL24ConcurrentWriters:
         assert events == ["retry"]
 
     @pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+    def test_stats_waits_out_a_peers_staged_window(self, tmp_path):
+        """KL-24 L3 r7, complement MED 1, each run first on 5de42b3: stats()
+        (no lock) read "unknown" for the instant a peer's first append of the
+        week held its staged file. It waits for the append lock now; a staged
+        file with no holder stays unknown."""
+        import threading
+
+        db = tmp_path / "m.db"
+        writer = AuditTrail(db)
+        staged, go = threading.Event(), threading.Event()
+        real = writer._record_active_begun
+
+        def paused(*a, **k):
+            real(*a, **k)
+            staged.set()
+            assert go.wait(10)
+
+        writer._record_active_begun = paused
+        t = threading.Thread(target=lambda: writer.log("first", {}))
+        t.start()
+        try:
+            assert staged.wait(10)
+            assert (tmp_path / "m.audit.jsonl.first").exists()
+            threading.Timer(0.3, go.set).start()
+            assert AuditTrail(db).stats()["entry_count"] == 1
+        finally:
+            go.set()
+            t.join()
+        # No holder, staged file left by a crash: still unknown.
+        db2 = tmp_path / "x" / "m.db"
+        db2.parent.mkdir()
+        self._crash_after_staging(db2)
+        with pytest.raises(OSError, match="staged first audit entry"):
+            AuditTrail(db2).stats()
+
+    def test_a_rollback_crash_after_the_set_aside_reconciles_by_hash(
+        self, tmp_path, monkeypatch
+    ):
+        """KL-24 L3 r7, codex MED 1, each run first on 5de42b3: a stop between the
+        rollback's set-aside of the staged file and the withdrawal of
+        ``active_begun`` made every append refuse, and audit-repair recorded a
+        definite missing-file gap for bytes that were kept. The record is
+        reconciled against the discarded file BY HASH; a file that does not
+        hash to it proves nothing."""
+        real_replace, real_aside = audit_module.os.replace, audit_module._set_aside
+
+        def crash(db):
+            def refuse(src, dst, *a, **k):
+                if str(src).endswith(".first"):
+                    raise PermissionError(13, "rename refused")
+                return real_replace(src, dst, *a, **k)
+
+            def aside_then_die(path, reason):
+                kept = real_aside(path, reason)
+                if str(path).endswith(".first"):
+                    raise KeyboardInterrupt
+                return kept
+
+            with monkeypatch.context() as m:
+                m.setattr(audit_module.os, "replace", refuse)
+                m.setattr(audit_module, "_set_aside", aside_then_die)
+                with pytest.raises(KeyboardInterrupt):
+                    AuditTrail(db).log("lost", {})
+            begun = json.loads((db.parent / "m.audit.manifest.json").read_text())["active_begun"]
+            assert begun is not None and not (db.parent / "m.audit.jsonl.first").exists()
+
+        a = tmp_path / "a" / "m.db"
+        a.parent.mkdir()
+        crash(a)
+        AuditTrail(a).log("retry", {})
+        events = [json.loads(x)["event"] for x in (a.parent / "m.audit.jsonl").read_text().splitlines()]
+        assert events == ["retry"]
+        assert AuditTrail.verify(a).valid and AuditTrail.verify(a).set_aside == []
+
+        b = tmp_path / "b" / "m.db"
+        b.parent.mkdir()
+        crash(b)
+        result = AuditTrail.repair_manifest(b)
+        assert result.repaired and result.set_aside == [], result.error
+        assert AuditTrail.verify(b).set_aside == []
+
+        c = tmp_path / "c" / "m.db"
+        c.parent.mkdir()
+        crash(c)
+        [kept] = [p for p in c.parent.iterdir() if ".first.discarded-" in p.name]
+        kept.write_text('{"event": "something else"}\n')
+        with pytest.raises(audit_module._ManifestUnavailable):
+            AuditTrail(c).log("retry", {})
+        result = AuditTrail.repair_manifest(c)
+        assert result.repaired and [r["set_aside_as"] for r in result.set_aside] == [""]
+
+    def test_certainty_is_validated_in_the_manifest(self, tmp_path):
+        """KL-24 L3 r7, codex LOW, each run first on 5de42b3: any ``certainty``
+        value, on any record, parsed."""
+        base = {
+            "version": 1, "files": [],
+            "set_aside": [{"filename": "m.audit.jsonl", "set_aside_as": "", "period": "2026-W41",
+                           "cause": "c", "at": "t", "certainty": "possible"}],
+        }
+        audit_module._parse_manifest_bytes(json.dumps(base).encode(), "m")
+        for bad in ({"certainty": "maybe"}, {"certainty": 1}, {"set_aside_as": "x.jsonl"}):
+            m = json.loads(json.dumps(base))
+            m["set_aside"][0].update(bad)
+            with pytest.raises(audit_module._CORRUPT_MANIFEST):
+                audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
+
+    def test_an_oserror_deciding_a_staged_entry_is_a_manifest_refusal(
+        self, tmp_path, monkeypatch
+    ):
+        """KL-24 L3 r7, complement LOW 2, each run first on 5de42b3: a failing
+        rename in the staged-entry recovery escaped ``log()`` as a bare OSError."""
+        db = tmp_path / "m.db"
+        self._crash_after_staging(db)
+        real = audit_module.os.replace
+
+        def eio(src, dst, *a, **k):
+            if str(src).endswith(".first"):
+                raise OSError(5, "I/O error")
+            return real(src, dst, *a, **k)
+
+        monkeypatch.setattr(audit_module.os, "replace", eio)
+        with pytest.raises(audit_module._ManifestUnavailable):
+            AuditTrail(db).log("next", {})
+
+    def test_a_staged_entry_finished_in_a_later_week_is_sealed_under_its_own(
+        self, tmp_path, monkeypatch
+    ):
+        """KL-24 L3 r7, complement LOW 5, run on 5de42b3: NOT a defect. A staged
+        entry finished after the week flipped is renamed in and then sealed by the
+        rotation under its own week; the chain stays valid with both entries.
+        Pinned so a period check is not added without a failing case."""
+        db = tmp_path / "m.db"
+        self._crash_after_staging(db)
+        week = audit_module._iso_week_now()
+        monkeypatch.setattr(
+            audit_module, "_iso_week_now", lambda: f"{int(week[:4]) + 1}-W01"
+        )
+        AuditTrail(db).log("next", {})
+        assert [p.name for p in db.parent.iterdir() if p.name.endswith(f"{week}.jsonl.gz")]
+        result = AuditTrail.verify(db)
+        assert result.valid and result.total_entries == 2
+
+    @pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
     def test_every_append_preflights_the_lock_and_stages_portably(self, tmp_path, monkeypatch):
         """KL-24 L3 r6, each run first on d3c408a. codex 3: an initialized
         same-week writer appended with the manifest lock unopenable, never

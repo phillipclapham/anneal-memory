@@ -70,6 +70,9 @@ _LOCK_HELD_ERRNOS = frozenset({errno.EWOULDBLOCK, errno.EAGAIN})
 # AuditTrail._append_lock). A healthy holder keeps it for one append, or for a
 # week's rotation; this bounds a stopped or hung one.
 _APPEND_LOCK_TIMEOUT_SECONDS = 30.0
+# How long ``stats()`` waits on a peer's append lock when only a staged first
+# entry makes the trail look unknown (a first append stages it for an instant).
+_STATS_STAGED_WAIT_SECONDS = 2.0
 
 
 def _week_of_ts(ts: str) -> str:
@@ -432,6 +435,13 @@ def _parse_manifest_bytes(raw: bytes, stem: str) -> dict[str, Any]:
         for r in set_aside
     ):
         raise TypeError("manifest field 'set_aside' is not a list of set-aside records")
+    # ``certainty`` is written only on the rebuild's active-file record (KL-24
+    # L3 r7, codex LOW): anything else would silently read as a definite gap.
+    if not all(
+        "certainty" not in r or (r["certainty"] == _POSSIBLE and r["set_aside_as"] == "")
+        for r in set_aside
+    ):
+        raise TypeError("manifest field 'set_aside' holds an invalid 'certainty'")
     begun = manifest.get("active_begun")
     if begun is not None and not (
         isinstance(begun, dict)
@@ -1425,6 +1435,8 @@ class AuditTrail:
             names = []
         except OSError as e:
             raise OSError(f"the audit directory cannot be listed: {e}") from e
+        if self._first_entry_path().name in names:
+            names = self._names_after_staged_window(audit_dir, stem, names)
         if _markers_in(names, stem):
             raise OSError("the audit manifest is quarantined; run `anneal-memory audit-repair`")
         if self._first_entry_path().name in names:
@@ -1445,6 +1457,34 @@ class AuditTrail:
             "entry_count": entry_count,
             "retention_days": self._retention_days,
         }
+
+    def _names_after_staged_window(
+        self, audit_dir: Path, stem: str, names: list[str]
+    ) -> list[str]:
+        """For :meth:`stats` when a staged first entry is on disk: a peer's first
+        append of the week stages it for an instant, holding the append lock. Wait
+        for that lock (bounded, ``_STATS_STAGED_WAIT_SECONDS``), then list again;
+        the staged file still there with no holder is the crash case and stays
+        unknown (KL-24 L3 r7, complement MED 1). Writes nothing but the lock file
+        the append already uses. Without advisory locks, or on a lock error, the
+        original names stand."""
+        if fcntl is None:
+            return names
+        try:
+            fd = self._open_and_flock(
+                audit_dir / f"{stem}.audit-append.lock",
+                "audit append lock",
+                "a staged first entry cannot be told from a crashed one",
+                timeout=_STATS_STAGED_WAIT_SECONDS,
+            )
+        except OSError:
+            return names
+        if fd is not None:
+            _unlock_and_close(fd)
+        try:
+            return [p.name for p in audit_dir.iterdir()]
+        except OSError as e:
+            raise OSError(f"the audit directory cannot be listed: {e}") from e
 
     def _raise_if_active_lost(self, names: list[str]) -> None:
         """For :meth:`stats` when the active file holds no valid entry: raise
@@ -2390,7 +2430,12 @@ class AuditTrail:
                     repaired=False,
                     error=f"Cannot inspect the active audit file: {e}; nothing was written.",
                 )
-            if not active_entry:
+            if not active_entry and trail._discarded_staged_matches(begun):
+                # The record names a staged entry that was set aside and never
+                # committed (KL-24 L3 r7): nothing was lost.
+                manifest["active_begun"] = None
+                stale_cleared = True
+            elif not active_entry:
                 # ``set_aside_as`` "" marks it: there is no file to move.
                 vanished = {
                     "filename": trail._active_path.name,
@@ -3173,6 +3218,33 @@ class AuditTrail:
             and not active_holds_entry
         )
 
+    def _discarded_staged_matches(self, begun: dict[str, Any]) -> bool:
+        """Whether a set-aside staged entry (``<active>.first.discarded-*``) holds
+        the first entry ``begun`` names, by HASH (KL-24 L3 r7, codex MED 1): a
+        rollback that stopped between setting the staged file aside and
+        withdrawing its record leaves a record naming an entry that never
+        committed. The file's existence alone proves nothing. A listing or read
+        error is "no match": the caller refuses or records as before."""
+        prefix = self._first_entry_path().name + f".{_DISCARDED_REASON}-"
+        try:
+            names = [p.name for p in self._active_path.parent.iterdir()]
+        except OSError:
+            return False
+        for name in names:
+            if not name.startswith(prefix):
+                continue
+            path = self._active_path.parent / name
+            try:
+                if not stat.S_ISREG(os.lstat(path).st_mode):
+                    continue
+                with _open_regular(path) as f:
+                    staged = _last_valid_entry_in(f, 0)[0]
+            except OSError:
+                continue
+            if staged and self._compute_hash(staged) == begun.get("first_hash"):
+                return True
+        return False
+
     def _resolve_staged_entry(self, manifest: dict[str, Any] | None) -> str | None:
         """Finish or set aside a staged first entry under ``manifest`` (see
         :meth:`_staged_entry_commits`); ``None`` when there is none. Returns what
@@ -3228,7 +3300,14 @@ class AuditTrail:
             manifest = None  # no manifest, no record
         except _CORRUPT_MANIFEST + (AttributeError,) as e:
             raise _ManifestUnavailable(f"{undecided}: {e}") from e
-        self._resolve_staged_entry(manifest)
+        try:
+            self._resolve_staged_entry(manifest)
+        except _ManifestUnavailable:
+            raise
+        except OSError as e:
+            # A refusal that counts as a dropped write, not a bare OSError (KL-24
+            # L3 r7, complement LOW 2).
+            raise _ManifestUnavailable(f"{undecided}: {e}") from e
 
     def _record_active_begun(self, first_hash: str, first_prev_hash: str) -> None:
         """Save ``active_begun`` for the active file this call is about to
@@ -3297,6 +3376,13 @@ class AuditTrail:
         the recorded one)."""
         begun = vanished_active_week(manifest)
         if begun is None:
+            return
+        if self._discarded_staged_matches(begun):
+            # The first entry the record names was staged and set aside, never
+            # renamed in: the append did not commit and nothing was lost (KL-24
+            # L3 r7, codex MED 1; matched by hash, never by existence).
+            manifest["active_begun"] = None
+            self._save_manifest(manifest)
             return
         raise _ManifestUnavailable(
             f"the active audit file {self._active_path.name} held entries in week "

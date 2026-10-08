@@ -2855,7 +2855,8 @@ def validated_save_continuity(
         raise ValueError("Continuity text cannot be empty")
     # NOTHING UN-CANONICAL ENTERS (Phill 12:13, "(A)"; graduation.canonical_continuity_text).
     # The pipeline has two inputs, and both are made canonical where they enter:
-    # the caller's text here, the prior continuity where it is loaded below. Every
+    # the caller's text here, and every prior continuity read through
+    # Store.load_continuity (the one load point, canonical itself). Every
     # parser after this line (the rederive strip, the durable carry-forward and
     # its drop markers, the gate) reads one grammar. L3 r8: an NBSP-indented
     # ``[drop-durable:]`` and a VT-hidden ``## State`` verdict were parsed raw.
@@ -2873,9 +2874,7 @@ def validated_save_continuity(
         text = strip_rederive_output(text, section_schema)
     # Loaded once here and reused by the durable-facts invariant just below,
     # the catastrophic-shrink gate and the silent-omission audit further down.
-    prior_continuity = store.load_continuity()
-    if prior_continuity is not None:
-        prior_continuity = canonical_continuity_text(prior_continuity)
+    prior_continuity = store.load_continuity()  # canonical: Store.load_continuity
     # Durable facts (B1): before anything validates, hashes or writes the text,
     # carry every prior durable line forward (re-inserting what the composer
     # left out) and apply the composer's drop markers. Never a refusal. A

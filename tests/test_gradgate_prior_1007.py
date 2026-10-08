@@ -702,3 +702,21 @@ def test_a_prior_with_a_hidden_durable_heading_is_read_canonically(tmp_path):
     finally:
         store.close()
     assert saved.count("- kept fact") == 1 and "\x0b" not in saved, saved
+
+
+# --- L3 r9 (1008+11, desk ruling inside Phill's (A)): every load point is canonical ---
+def test_every_reader_loads_the_continuity_canonically(tmp_path):
+    """gradgate r9 complement LOW 6 [traced]: prepare_wrap parsed its own raw load.
+    Store.load_continuity is the one load point (prepare, save, re-derive, recall,
+    CLI, MCP), and it returns canonical text, so no reader sees another grammar."""
+    store = Store(tmp_path / "c.db", project_name="C")
+    try:
+        store.save_continuity(_doc("- a | 3x (" + YESTERDAY + ")\x0b- b | 1x (" + YESTERDAY + ")"))
+        loaded = store.load_continuity()
+        store.record("an episode", EpisodeType.OBSERVATION)
+        package = prepare_wrap(store)
+    finally:
+        store.close()
+    for text in (loaded, package["package"]["continuity"]):
+        assert " " not in text and "\x0b" not in text, text
+        assert "- a | 3x (" in text and "\n- b | 1x (" in text, text

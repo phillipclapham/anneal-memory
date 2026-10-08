@@ -144,9 +144,7 @@ def test_a_verdict_flag_behind_a_hidden_state_heading_is_stripped(store):
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        try:
-            validated_save_continuity(store, text, wrap_token=res["wrap_token"])
-        except ValueError:
-            pass  # a refusal also keeps the verdict out of the file
-    saved = store.load_continuity() or ""
-    assert "✓" not in saved, saved
+        validated_save_continuity(store, text, wrap_token=res["wrap_token"])
+    saved = store.load_continuity()
+    assert "- decision [judged: me, now, review]" in saved, saved  # the line saved
+    assert "✓" not in saved, saved  # only its verdict suffix is gone

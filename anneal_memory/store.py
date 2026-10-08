@@ -68,7 +68,7 @@ from .associations import (
     record_associations as _record_associations,
 )
 from .audit import AuditTrail
-from .graduation import _meaningful_words
+from .graduation import _meaningful_words, canonical_continuity_text
 
 #: SQLite's own write-lock message grammar, for the Python 3.10 fallback in
 #: :func:`_is_write_lock_contention` where no primary result code is available.
@@ -6791,10 +6791,18 @@ class Store:
 
         Returns:
             The continuity text, or None if no continuity file exists.
+
+        The text is CANONICAL (``graduation.canonical_continuity_text``): this
+        is the one load point every reader goes through (the wrap's prepare
+        and save, re-derive, recall's durable facts, the CLI, the MCP server),
+        so a file written outside the gate (a raw ``save_continuity``, an older
+        anneal, a hand edit) is read in the same grammar the gate enforces
+        (Phill 2026-10-08 "(A)": nothing un-canonical enters; gradgate L3 r9
+        found prepare_wrap's own load parsed raw).
         """
         if not self.continuity_path.exists():
             return None
-        return self.continuity_path.read_text(encoding="utf-8")
+        return canonical_continuity_text(self.continuity_path.read_text(encoding="utf-8"))
 
     def save_continuity(self, text: str) -> str:
         """Low-level continuity file write. **Bypasses the immune system** and the

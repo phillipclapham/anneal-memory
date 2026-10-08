@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 import uuid
 import warnings
 from collections.abc import Iterable, Iterator
@@ -2124,7 +2125,7 @@ class Store:
                     # read-only handle reports a permanently clean trail.
                     self._seed_audit_health()
                     return
-                self._conn.execute("PRAGMA journal_mode=WAL")
+                self._enable_wal_with_retry()
                 # synchronous=FULL makes commit() fsync the WAL so a
                 # successful COMMIT is durable at the block-device layer.
                 # Under the default synchronous=NORMAL (which WAL
@@ -7144,6 +7145,35 @@ class Store:
     # and forward-looking rule live in the Store class docstring
     # ("Wrap-lifecycle invariants"). Do not reintroduce a single-key
     # helper inside wrap_started/wrap_cancelled/wrap_completed.
+
+    def _enable_wal_with_retry(self) -> None:
+        """``PRAGMA journal_mode=WAL``, retried while a peer holds the file.
+
+        SQLite returns BUSY on the journal-mode switch WITHOUT calling the
+        busy handler, so ``busy_timeout`` never applies to it: with four
+        processes opening a brand-new store at once, one failed
+        ``schema_init`` "database is locked" at t=0.00s in roughly 1 run in
+        10 (measured 2026-10-08: 3/20, 2/30, 6/40). Retry only that
+        statement, with short growing sleeps, inside a total budget equal to
+        the connection's own ``busy_timeout`` (read, never hard-coded), then
+        re-raise the last error. A non-wal row is NOT an error here, as
+        before (e.g. an in-memory or network filesystem database).
+        """
+        budget = self._conn.execute("PRAGMA busy_timeout").fetchone()[0] / 1000.0
+        deadline = time.monotonic() + budget
+        delay = 0.005
+        while True:
+            try:
+                self._conn.execute("PRAGMA journal_mode=WAL").fetchall()
+                return
+            except sqlite3.OperationalError as exc:
+                msg = str(exc).lower()
+                if ("locked" not in msg and "busy" not in msg) or (
+                    time.monotonic() + delay > deadline
+                ):
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 0.1)
 
     def _refuse_a_newer_schema(self) -> None:
         """Refuse a store written by a NEWER anneal, the way the sidecars do.

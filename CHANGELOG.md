@@ -61,6 +61,12 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [0.9.40] — 2026-10-05 (tagged, never published)
 
+### Fixed — opening a brand-new store from several processes at once could fail "database is locked"
+- SQLite returns BUSY on `PRAGMA journal_mode=WAL` without calling the busy handler, so
+  `busy_timeout` never applied to it: with 4 processes creating the same store, 2-6 runs in 40
+  had one opener die in `schema_init` at t=0. The switch is now retried with short growing
+  sleeps inside the connection's own `busy_timeout`, then re-raised.
+
 ### Fixed — a pruned or deleted team entry came back on the next `team-import`
 - An imported entry keeps the ledger's timestamp, so retention (`Store(retention_days=N)`,
   `prune --older-than N`) could prune it, and the next whole-ledger import found no stored

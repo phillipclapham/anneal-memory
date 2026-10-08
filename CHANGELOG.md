@@ -14,12 +14,17 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   the bytes where this instance's tip was written still hash to it, the chain continues from the
   last valid entry after them; anything else (another file, a reused inode, a truncation, a
   rewrite) re-initialises through the manifest, as an open does.
-- A lost active file (deleted, truncated below the tip, or replaced, with its week not sealed by
-  another writer's rotation) is refused once at the next append ("is gone"), from the instance's
-  own record, even when the manifest's best-effort record of the file is missing.
+- A lost active file (deleted, truncated below the tip, or replaced) is refused once at the next
+  append ("is gone"), from the instance's own record, even when the manifest's best-effort record
+  of the file is missing. This includes a file another writer sealed by rotating the week: a
+  sealed-looking filename is not proof that the lost file was sealed (a stale same-week orphan
+  hid a deletion), so a peer's rotation costs each other writer one refused, counted append, and
+  the next append re-reads the trail.
 - `AuditTrail.stats()` reads `entry_count` from the active file on every call (its last valid
   entry's `seq` + 1), so it includes other writers' entries; it takes no lock and changes no
-  state, so a status read never waits on a writer and never consumes the lost-file refusal.
+  state, so a status read never waits on a writer and never consumes the lost-file refusal. An
+  active file with no valid entry that the manifest records as having held some reads as unknown
+  (`audit_entry_count` None in `status`), not as 0 entries.
 - The append lock is released with `LOCK_UN` before its close, as the manifest lock now is, so a
   child forked while it was held does not keep it.
 - An append waits at most 30 seconds for another holder; past that, or when the lock file cannot
@@ -27,7 +32,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   dropped audit write (`audit_write_failures`, `dropped_before`), never appended unserialized.
   Its location is recorded as unknown, since without the lock the cached tip is not current.
 - After the fix: six processes x 250 episodes leave one valid chain of 1,500 entries, four
-  processes appending across a week rotation leave one valid chain of 800, and four writer
+  processes appending across a week rotation leave one valid chain (800 minus at most one
+  refused append per non-rotating writer), and four writer
   processes on a copy of a real store add exactly 600 entries to a chain that stays valid.
 - Known limits: where advisory locks do not exist (Windows, silently, as the README's Windows
   section says; or a filesystem without `flock`, warned on stderr once per lock path) appends are

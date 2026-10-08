@@ -1349,6 +1349,9 @@ class AuditTrail:
         lost file it stayed stale for good; and initialising took the manifest
         lock, on which a writer holding the append lock could wait until other
         writers' waits ran out. It takes no lock and changes nothing now.
+        An active file with no valid entry that the manifest says once held
+        some raises ``OSError`` (see :meth:`_raise_if_active_lost`) rather than
+        reading as 0 entries.
 
         Returns:
             Dict with keys ``log_path`` (str), ``entry_count`` (int),
@@ -1361,12 +1364,38 @@ class AuditTrail:
                 last_line = _last_valid_entry_in(f, 0)[0]
         except FileNotFoundError:
             last_line = ""
+        if not last_line:
+            self._raise_if_active_lost()
         entry_count = json.loads(last_line)["seq"] + 1 if last_line else 0
         return {
             "log_path": str(self._active_path),
             "entry_count": entry_count,
             "retention_days": self._retention_days,
         }
+
+    def _raise_if_active_lost(self) -> None:
+        """For :meth:`stats` when the active file holds no valid entry: raise
+        ``OSError`` if the manifest says it once did and its week is not sealed
+        (``vanished_active_week``), so ``Store.status()`` reports the counts as
+        unknown instead of a healthy 0 (KL-24 L3 r2, codex MED). Read-only: no
+        lock, no quarantine, nothing written. The same reading holds for the
+        instant inside a peer's rotation between the rename and the manifest
+        save, which reads as unknown, never as healthy."""
+        manifest_path = self._db_path.parent / f"{self._db_path.stem}.audit.manifest.json"
+        try:
+            manifest = _parse_manifest_bytes(
+                _read_regular_bytes(manifest_path), self._db_path.stem
+            )
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError) as e:
+            raise OSError(f"the audit manifest cannot be read: {e}") from e
+        begun = vanished_active_week(manifest)
+        if begun is not None:
+            raise OSError(
+                f"the active audit file for week {begun['period']} held entries "
+                "and is gone or empty; run `anneal-memory audit-repair`"
+            )
 
     @classmethod
     def verify(cls, db_path: str | Path) -> AuditVerifyResult:
@@ -2400,12 +2429,15 @@ class AuditTrail:
                         "concurrent audit writers are not serialized and can break the hash chain",
                         timeout=_APPEND_LOCK_TIMEOUT_SECONDS,
                     )
-                except _AuditLockError:
+                except BaseException:
                     # Without the lock this call never re-synced, so the cached
                     # tip says nothing about where the dropped entry belonged:
                     # cleared, ``note_write_failure`` reports the location as
                     # unknown rather than a seq another writer already used
                     # (L3 r1, codex), and the next call re-derives from disk.
+                    # ``BaseException`` (L3 r2, codex MED): an interrupt while
+                    # polling for the lock is the same case. Only acquisition
+                    # is inside this handler; the protected body is not.
                     self._initialized = False
                     raise
             yield
@@ -2432,10 +2464,9 @@ class AuditTrail:
 
         ⛔ A LOST ACTIVE FILE IS REFUSED HERE, NOT ONLY BY THE MANIFEST (L1 r1,
         run): when the file holding the tip is gone, emptied below the tip, or
-        replaced, and the week it held is not sealed on disk (which is what
-        another writer's rotation leaves), this raises ``_ManifestUnavailable``
-        once, as the append's own guard did before this re-sync existed. The
-        manifest's ``active_begun`` record refuses it too, but that record is
+        replaced, this raises ``_ManifestUnavailable`` once, whether a peer
+        sealed it or it was lost (see :meth:`_lost_active`). The manifest's
+        ``active_begun`` record refuses a loss too, but that record is
         best-effort, and without it the re-derivation continued the chain over
         the lost entries with nothing counted.
 
@@ -2491,21 +2522,26 @@ class AuditTrail:
             self._tip = (dev, ino, last_at, last_len)
 
     def _lost_active(self, what: str) -> None:
-        """The active file holding this instance's tip was ``what``: re-derive
-        quietly if another writer sealed its week, otherwise refuse once (see
-        :meth:`_resync_with_disk`). The week is the tip entry's own as well as
-        ``_last_week``, which a refused rotation moves on (L3 r1, complement)."""
+        """The active file holding this instance's tip was ``what``: refuse
+        once, and re-derive from disk on the next call (see
+        :meth:`_resync_with_disk`).
+
+        ⛔ EVERY LOST FILE IS REFUSED, A PEER'S ROTATION INCLUDED (KL-24 L3 r2,
+        ruled by Phill 2026-10-08, option (b)). This used to return quietly when
+        a sealed file, its ``.gz`` or a ``.gz.tmp`` for the tip's week existed,
+        reading a filename as proof that another writer sealed this file. A
+        stale same-week orphan or temp then hid a deleted active file (codex
+        HIGH), and retention removing a just-sealed week produced a false "is
+        gone" (complement MED). Deleted, not repaired: a peer's rotation now
+        costs this instance one refused, counted append, and a real loss is
+        never followed silently."""
         self._initialized = False
-        for week in {w for w in (self._tip_week, self._last_week) if w}:
-            sealed = self._db_path.parent / _sealed_filename(self._db_path.stem, week)
-            gz = sealed.with_suffix(".jsonl.gz")
-            if sealed.exists() or gz.exists() or Path(str(gz) + ".tmp").exists():
-                return
         raise _ManifestUnavailable(
             f"the active audit file {self._active_path.name} this process was "
-            f"appending to is gone ({what}, and week {self._tip_week or self._last_week or '?'} "
-            "is not sealed on disk); not continuing the chain past it. If it can be "
-            "restored, put it back and retry; otherwise run "
+            f"appending to is gone ({what}; another process may have sealed its "
+            f"week {self._tip_week or self._last_week or '?'}); not continuing the "
+            "chain past it. The next write re-reads the trail from disk. If the "
+            "file was lost rather than sealed, put it back and retry, or run "
             "`anneal-memory audit-repair` to record the week as a gap"
         )
 
@@ -3413,6 +3449,14 @@ class AuditTrail:
                 raw.flush()
                 os.fsync(raw.fileno())
         except BaseException:
+            if sealed_path.exists():
+                # This instance renamed the file holding its own tip, so its
+                # tip is no longer in the active file: re-derive at the next
+                # append (which adopts the orphan) instead of refusing it as
+                # lost. Its own act, not a filename read as a peer's seal (see
+                # _lost_active).
+                self._tip = None
+                self._initialized = False
             # The temp was created before the rename. If the rename never
             # happened it holds no audit data, and left behind it would read
             # as a rotation in flight until the next open.

@@ -9350,10 +9350,14 @@ class TestKL24ConcurrentWriters:
         seqs = [json.loads(line)["seq"] for line in (tmp_path / "m.audit.jsonl").read_text().splitlines()]
         assert seqs == list(range(10))
 
-    def test_a_peer_rotation_is_followed_not_resealed(self, tmp_path, monkeypatch, caplog):
-        """A peer seals the week and writes into the new file; this instance
-        re-initialises from the new file instead of chaining from the sealed
-        tip or rotating again. The whole module's clock jumps a week, so entry
+    def test_a_peer_rotation_is_refused_once_then_followed_not_resealed(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A peer seals the week and writes into the new file. This instance's
+        next append is refused once (ruled 10-08, option (b): a filename is not
+        proof of a peer's seal, so every lost file is refused); the one after it
+        re-initialises from the new file instead of chaining from the sealed tip
+        or rotating again. The whole module's clock jumps a week, so entry
         timestamps and the week agree, as they do outside a test."""
         db = tmp_path / "m.db"
         a, b = AuditTrail(db), AuditTrail(db)
@@ -9369,7 +9373,9 @@ class TestKL24ConcurrentWriters:
         monkeypatch.setattr(audit_module, "datetime", _NextWeek)
         b.log("ev", {"n": 2})  # b rotates and writes the first new-week entry
         with caplog.at_level(logging.WARNING, logger="anneal-memory.audit"):
-            a.log("ev", {"n": 3})
+            with pytest.raises(audit_module._ManifestUnavailable, match="is gone"):
+                a.log("ev", {"n": 3})
+            a.log("ev", {"n": 4})
         assert not [r for r in caplog.records if "Not rotating" in r.getMessage()]
         result = AuditTrail.verify(db)
         assert result.valid, result.error
@@ -9536,6 +9542,41 @@ class TestKL24ConcurrentWriters:
         with pytest.raises(audit_module._ManifestUnavailable, match="is gone"):
             trail.log("after", {})
 
+    def test_a_stale_same_week_sealed_file_does_not_hide_a_deleted_active_file(
+        self, tmp_path, monkeypatch
+    ):
+        """L3 r2 codex HIGH: a sealed-name file for the tip's week (a stale
+        orphan or ``.gz.tmp``) was read as a peer's seal, and the deletion was
+        followed silently. Every lost file is refused now (ruled 10-08 (b)).
+        The manifest's best-effort ``active_begun`` record is off, as when its
+        save failed, so only the instance's own refusal stands."""
+        monkeypatch.setattr(AuditTrail, "_record_active_begun", lambda self, *a: None)
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("ev", {"i": i})
+        week = trail._tip_week
+        assert week
+        sealed = tmp_path / audit_module._sealed_filename("m", week)
+        Path(str(sealed.with_suffix(".jsonl.gz")) + ".tmp").write_bytes(b"stale")
+        (tmp_path / "m.audit.jsonl").unlink()
+        with pytest.raises(audit_module._ManifestUnavailable, match="is gone"):
+            trail.log("after", {})
+
+    def test_status_reports_a_lost_trail_as_unknown_not_zero(self, tmp_path):
+        """L3 r2 codex MED: a deleted active file read as a healthy 0 entries."""
+        from anneal_memory.store import Store
+        from anneal_memory.types import EpisodeType
+
+        store = Store(tmp_path / "m.db")
+        try:
+            store.record("an episode", EpisodeType.OBSERVATION)
+            assert store.status().audit_entry_count
+            (tmp_path / "m.audit.jsonl").unlink()
+            assert store.status().audit_entry_count is None
+        finally:
+            store.close()
+
     def test_stats_from_inside_this_threads_append_answers_from_the_cache(
         self, tmp_path, monkeypatch
     ):
@@ -9699,8 +9740,15 @@ class TestKL24AppendLockHolders:
             "A.datetime = C\n"
             f"t = A.AuditTrail({str(db)!r})\n"
             f"while not Path({str(go)!r}).exists(): time.sleep(0.005)\n"
+            "refused = 0\n"
             f"for i in range({n_each}):\n"
-            "    t.log('ev', {'w': sys.argv[1], 'i': i}); time.sleep(0.003)\n"
+            "    try:\n"
+            "        t.log('ev', {'w': sys.argv[1], 'i': i})\n"
+            "    except A._ManifestUnavailable as e:\n"
+            "        assert 'is gone' in str(e), e\n"
+            "        refused += 1\n"
+            "    time.sleep(0.003)\n"
+            f"Path({str(tmp_path)!r}, 'refused-' + sys.argv[1]).write_text(str(refused))\n"
         )
         cwd = str(Path(audit_module.__file__).parent.parent)
         procs = [subprocess.Popen([sys.executable, "-c", script, str(w)], cwd=cwd)
@@ -9710,9 +9758,14 @@ class TestKL24AppendLockHolders:
         flag.write_text("x")
         for p in procs:
             assert p.wait(timeout=120) == 0
+        # Ruled 10-08 (option (b)): a peer whose tip sat in the sealed file is
+        # refused once, loudly, and never followed silently. One rotation, so
+        # at most one refusal per process other than the one that rotated.
+        refused = sum(int((tmp_path / f"refused-{w}").read_text()) for w in range(n_proc))
+        assert refused <= n_proc - 1
         result = AuditTrail.verify(db)
         assert result.valid, result.error
-        assert result.total_entries == n_proc * n_each
+        assert result.total_entries == n_proc * n_each - refused
         sealed = list(tmp_path.glob("m.audit.*.jsonl.gz"))
         active = (tmp_path / "m.audit.jsonl").read_text().splitlines()
         # Both sides hold entries, so the rotation happened mid-run.

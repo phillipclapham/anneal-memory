@@ -2477,6 +2477,17 @@ def _durable_cue_state(
         return None, []
 
 
+def _grounded_trust(store: Store, grounds: set[str], others: set[str]) -> dict[str, str]:
+    """Effective trust of the episodes a save leans on. A ground (a cited or
+    previously grounding episode) that no longer exists reads ``external``: a
+    deleted ground is a failed one, never a default ``agent`` one (codex r3 #1),
+    and one that vanishes between validation and the final re-check reads as a
+    trust change that aborts the save. ``others`` (``[supersedes:]`` endpoints)
+    keep the plain reading."""
+    return store.effective_trust_map(
+        grounds | others, missing="external", missing_for=grounds)
+
+
 def validated_save_continuity(
     store: Store,
     text: str,
@@ -3051,7 +3062,7 @@ def validated_save_continuity(
     }
     # Effective trust (D3): an episode derived from others counts at most as
     # trusted as its most trusted source.
-    window_trust = store.effective_trust_map(citable_ids | _marker_ids | _grounding_ids)
+    window_trust = _grounded_trust(store, citable_ids | _grounding_ids, _marker_ids)
     revoked_levels = revoked_pattern_levels(
         grounding, lambda cid: window_trust.get(cid, DEFAULT_TRUST)
     )
@@ -3281,7 +3292,8 @@ def validated_save_continuity(
             # changed after validation read it would let the save commit a
             # graduation judged on the old class. Raising rolls the batch back.
             _cited = set(grad_result.citation_counts) | _marker_ids | _grounding_ids
-            _trust_now = store.effective_trust_map(sorted(_cited))
+            _trust_now = _grounded_trust(
+                store, set(grad_result.citation_counts) | _grounding_ids, _marker_ids)
             _trust_moved = sorted(
                 cid for cid in _cited
                 if _trust_now.get(cid, DEFAULT_TRUST) != window_trust.get(cid, DEFAULT_TRUST)
@@ -3297,7 +3309,8 @@ def validated_save_continuity(
             # The bound's next prior, recorded in this transaction so it commits
             # with the wrap or not at all, with the episodes that grounded each
             # rung validated today (CAP-08 D2).
-            store._record_pattern_grounding(grad_result.pattern_grounding, today_str)
+            store._record_pattern_grounding(
+                grad_result.pattern_grounding, today_str, wrap_id=snapshot["token"])
             store._record_pattern_levels(
                 pattern_line_levels(grad_result.text, grad_headings), today_str,
                 lower_to=pattern_line_levels(prior_continuity or "", grad_headings),

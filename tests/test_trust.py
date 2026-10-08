@@ -252,6 +252,12 @@ class TestGraduationRule:
         assert two.text.splitlines()[1] == (
             "- eiffel_in_lyon | 1x (2026-10-08) (uncorroborated) — felt")
         assert "[evidence:" not in two.text
+        # codex r3 #7: a quoted "| 2x" inside the second tag is text, not the
+        # next marker; the whole tag goes, the real next marker's tag stays.
+        from anneal_memory.graduation import _strip_own_evidence_tail
+        assert _strip_own_evidence_tail(
+            ' [evidence: bbbb2222 "saw | 2x behavior"] | 1x (2026-10-08) [evidence: cccc3333]'
+        ) == " | 1x (2026-10-08) [evidence: cccc3333]"
 
     def test_an_earned_level_is_not_held_for_relayed_text(self):
         """L2 r1 (run): the carry-forward hold kept an earned 2x while the
@@ -731,6 +737,35 @@ class TestDemotionRevokes:
         result, _ = wrap(store, bare, "2026-10-11")
         assert result["level_capped"][0]["reason"] == "revoked: grounding lowered"
         assert f"- canary_gate | 1x (2026-10-10) [evidence: {a.id}, {b.id}]" in store.load_continuity()
+        # codex r3 #1: a grounding episode deleted after it was lowered is a
+        # failed ground, not a default agent one; the rung is still revoked.
+        store.record("A newer session.", EpisodeType.OBSERVATION)
+        wrap(store, "- drill_gate | 1x (2026-10-11)", "2026-10-11")
+        d = store.record("I watched the drill gate pass a restore in four minutes.",
+                         EpisodeType.OBSERVATION)
+        drill = (f'- drill_gate | 2x (2026-10-12) [evidence: {d.id} '
+                 f'"drill gate pass restore four minutes"]')
+        wrap(store, drill, "2026-10-12")
+        store.set_trust(d.id, "external")
+        assert store.delete(d.id)
+        store.record("Yet another session.", EpisodeType.OBSERVATION)
+        result, _ = wrap(store, drill, "2026-10-13")
+        assert result["level_capped"][0]["reason"] == "revoked: grounding lowered"
+        assert "- drill_gate | 1x" in store.load_continuity()
+        # codex r3 #5: two earnings of one rung on one day stay two groups, so
+        # lowering one earning's citation does not revoke what the other grounds.
+        x = store.record("Earning one saw the gate hold.", EpisodeType.OBSERVATION)
+        y = store.record("Earning two saw the gate hold.", EpisodeType.OBSERVATION)
+        for ids in ([x.id], [y.id]):
+            with store._batch():
+                store._record_pattern_grounding(
+                    [("twice_gate", 2, "unchecked", ids)], "2026-10-14")
+        assert [g["episodes"] for g in store.pattern_grounding()["twice_gate"][2]] == [
+            [x.id], [y.id]]
+        from anneal_memory.graduation import revoked_pattern_levels
+        low = {x.id: "external"}
+        assert revoked_pattern_levels(
+            store.pattern_grounding(), lambda c: low.get(c, "agent")).get("twice_gate") is None
 
 
 class TestDerivedAndRecall:
@@ -782,3 +817,112 @@ class TestDerivedAndRecall:
         assert page.id not in head
         found = retrieve_relevant(store, None, "Eiffel Tower Lyon", mode="query")
         assert found.episodes and {e.trust for e in found.episodes} == {"external"}
+
+
+class TestL3Round3:
+    def test_a_cited_episode_that_vanishes_mid_save_aborts_the_save(self, store, tmp_path):
+        """codex r3 #1: the final re-check read a deleted ground as agent, so a
+        save committed a graduation grounded by an episode that no longer exists.
+        Also #2 and #6: a deleted or lowered source never lifts what was derived
+        from it, and a 1,200-deep chain evaluates."""
+        self._lowered_then_deleted_and_deep(tmp_path)
+        import anneal_memory.continuity as cont
+        from anneal_memory.store import StoreError
+        wrap = TestTheBeforeRunNowHolds()._wrap
+        store.record("Session start.", EpisodeType.OBSERVATION)
+        wrap(store, "- gate_check | 1x (2026-10-07)", "2026-10-07")
+        g = store.record("I watched the gate check refuse an unsigned build twice.",
+                         EpisodeType.OBSERVATION)
+        real = cont.validate_graduations
+
+        def deleting(*a, **kw):
+            out = real(*a, **kw)
+            with Store(store.path) as other:
+                other.delete(g.id)
+            return out
+
+        cont.validate_graduations = deleting
+        try:
+            prepare_wrap(store)
+            with pytest.raises(StoreError, match="trust class"):
+                validated_save_continuity(
+                    store, HEAD + "## Patterns\n- gate_check | 2x (2026-10-08) "
+                    f'[evidence: {g.id} "gate check refuse unsigned build"]\n\n' + TAIL,
+                    today="2026-10-08")
+        finally:
+            cont.validate_graduations = real
+        assert store.status().wrap_in_progress
+        assert store.pattern_grounding() == {}
+
+    def test_a_json_round_trip_never_raises_an_episodes_effective_trust(self, tmp_path):
+        """codex r3 #3: an agent summary of an external page exported with no
+        trust or derivation and came back as agent."""
+        src_db, dst_db, out = tmp_path / "a.db", tmp_path / "b.db", tmp_path / "x.json"
+        with Store(src_db, project_name="T") as s:
+            page = s.record("External page A text.", EpisodeType.OBSERVATION,
+                            trust="external")
+            summ = s.record("Agent summary B of A.", EpisodeType.OBSERVATION,
+                            derived_from=[page.id])
+            summ2 = s.record("Summary C of B.", EpisodeType.OBSERVATION,
+                             derived_from=[summ.id])
+            fine = s.record("An ordinary agent note.", EpisodeType.OBSERVATION)
+        assert _cli(src_db, "export", "-o", str(out)).returncode == 0
+        with Store(dst_db, project_name="T"):
+            pass
+        done = _cli(dst_db, "import", str(out))
+        assert done.returncode == 0, done.stderr
+        with Store(dst_db) as d:
+            assert d.effective_trust_map([page.id, summ.id, summ2.id, fine.id]) == {
+                page.id: "external", summ.id: "external", summ2.id: "external"}
+            assert d.derived_edges([summ.id, summ2.id]) == {
+                summ.id: [(page.id, "external")], summ2.id: [(summ.id, "external")]}
+
+    def test_set_trust_refuses_a_stale_decision_and_a_same_class_write_is_a_no_op(self, tmp_path):
+        """codex r3 #4 + #8: the CLI's gate was decided on a read another writer
+        could change before the write; and re-setting an operator episode to
+        operator failed on an agent-ceiling Store."""
+        db = tmp_path / "t.db"
+        with Store(db, project_name="T", trust_ceiling="operator") as host:
+            ep = host.record("A claim.", EpisodeType.OBSERVATION, trust="operator")
+            page = host.record("A page.", EpisodeType.OBSERVATION)
+            host.set_trust(page.id, "external")
+        with Store(db) as agent:
+            with pytest.raises(ValueError, match="Nothing was changed"):
+                agent.set_trust(page.id, "agent", expect="agent")
+            assert agent.trust_map([page.id]) == {page.id: "external"}
+            assert agent.set_trust(ep.id, "operator") == "operator"
+        done = _cli(db, "trust", ep.id, "operator")
+        assert done.returncode == 0, done.stderr
+
+    @staticmethod
+    def _lowered_then_deleted_and_deep(tmp_path):
+        """codex r3 #2 + #6, in a store of their own."""
+        with Store(tmp_path / "d.db", project_name="T") as other:
+            # codex r3 #2: a source lowered AFTER the derivation, then deleted,
+            # leaves the derived episode at the lowered class, not the old one.
+            late = other.record("Web page: the Louvre has a new wing.", EpisodeType.OBSERVATION)
+            late_sum = other.record("My summary: the Louvre has a new wing.",
+                                    EpisodeType.OBSERVATION, derived_from=[late.id])
+            late_chain = other.record("Summary of that: a new wing.",
+                                      EpisodeType.OBSERVATION, derived_from=[late_sum.id])
+            other.set_trust(late.id, "external")
+            assert other.delete(late.id)
+            assert other.delete(late_sum.id)
+            assert other.effective_trust_map([late_chain.id]) == {late_chain.id: "external"}
+            # ... and a re-recorded source with the same deterministic id does
+            # not lift what was derived from the first one.
+            pg = other.record("Web page beta.", EpisodeType.OBSERVATION,
+                              timestamp="2026-01-01T00:00:00Z", trust="external")
+            pg_sum = other.record("Summary of beta.", EpisodeType.OBSERVATION,
+                                  derived_from=[pg.id])
+            assert other.delete(pg.id)
+            again_pg = other.record("Web page beta.", EpisodeType.OBSERVATION,
+                                    timestamp="2026-01-01T00:00:00Z")
+            assert again_pg.id == pg.id
+            assert other.effective_trust_map([pg_sum.id]) == {pg_sum.id: "external"}
+            # codex r3 #6: a 1,200-deep chain is evaluated without recursion.
+            prev = other.record("chain 0", EpisodeType.OBSERVATION, trust="external")
+            for n in range(1, 1200):
+                prev = other.record(f"chain {n}", EpisodeType.OBSERVATION,
+                                    derived_from=[prev.id])
+            assert other.effective_trust_map([prev.id]) == {prev.id: "external"}

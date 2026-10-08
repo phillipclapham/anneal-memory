@@ -938,8 +938,11 @@ def cmd_trust(args: argparse.Namespace) -> None:
     # gate was passed, not more than that.
     with _open_store(args, trust_ceiling="operator" if via else DEFAULT_TRUST) as store:
         try:
+            # expect: the class the gate above was decided on; if another writer
+            # moved it since, the write refuses instead of applying a stale gate.
             old = store.set_trust(args.episode_id, args.level,
-                                  actor=f"cli:operator-{via}" if via else "cli")
+                                  actor=f"cli:operator-{via}" if via else "cli",
+                                  expect=current)
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -2011,10 +2014,19 @@ def cmd_export(args: argparse.Namespace) -> None:
         episodes = [_episode_dict(ep) for ep in result.episodes]
         # CAP-08: the trust class rides along when it is not the default, so a
         # JSON round trip does not turn an external episode into an agent one.
-        export_trust = store.trust_map(ep["id"] for ep in episodes)
+        # It is the EFFECTIVE class (an agent summary of an external page exports
+        # as external), and the derivation edges ride along too, so a round trip
+        # never raises an episode's trust (codex r3 #3).
+        export_trust = store.effective_trust_map(ep["id"] for ep in episodes)
+        export_edges = store.derived_edges(ep["id"] for ep in episodes)
         for ep in episodes:
             if ep["id"] in export_trust:
                 ep["trust"] = export_trust[ep["id"]]
+            if ep["id"] in export_edges:
+                ep["derived_from"] = [
+                    {"id": src, "source_trust": snap}
+                    for src, snap in export_edges[ep["id"]]
+                ]
         supersessions = store.supersession_links()
         continuity = store.load_continuity()
         meta = store.load_meta()
@@ -2210,6 +2222,9 @@ def cmd_import(args: argparse.Namespace) -> None:
 
         lowered = 0
         capped = 0
+        # The file's ids, as this store now knows them, for the derivation edges.
+        id_map: dict[str, str] = {}
+        new_edges: list[tuple[str, Any]] = []
         for ep_data in episodes:
             try:
                 # CAP-08: an export file is plain JSON anyone can edit, so it can
@@ -2237,10 +2252,11 @@ def cmd_import(args: argparse.Namespace) -> None:
                             and trust_rank(raw_trust) < trust_rank(current)):
                         store.set_trust(existing.id, ep_trust, actor="cli:import")
                         lowered += 1
+                    id_map[str(ep_data["id"]).strip().lower()] = existing.id
                     skipped += 1
                     continue
 
-                store.record(
+                recorded = store.record(
                     content=ep_data["content"],
                     episode_type=ep_data["type"],
                     source=ep_data.get("source", "import"),
@@ -2248,12 +2264,30 @@ def cmd_import(args: argparse.Namespace) -> None:
                     timestamp=ep_data.get("timestamp"),
                     trust=ep_trust,
                 )
+                id_map[str(ep_data["id"]).strip().lower()] = recorded.id
+                if ep_data.get("derived_from"):
+                    new_edges.append((recorded.id, ep_data["derived_from"]))
                 imported += 1
                 capped += was_capped
             except Exception as e:
                 errors += 1
                 if not args.json:
                     print(f"  Error importing episode {ep_data.get('id', '?')}: {e}", file=sys.stderr)
+
+        # Derivation edges last, once every episode of the file is in: only to
+        # sources that exist here, and only ever lowering (restore_derived).
+        for new_id, raw_edges in new_edges:
+            try:
+                pairs = [
+                    (id_map.get(str(e["id"]).strip().lower(), str(e["id"])),
+                     e.get("source_trust", DEFAULT_TRUST))
+                    for e in raw_edges
+                ]
+                store.restore_derived(new_id, pairs)
+            except Exception as e:
+                errors += 1
+                if not args.json:
+                    print(f"  Error restoring derivation of {new_id}: {e}", file=sys.stderr)
 
         if args.json:
             _print_json({"imported": imported, "skipped": skipped, "errors": errors,

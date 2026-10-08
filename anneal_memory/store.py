@@ -355,6 +355,8 @@ StoreOperation = Literal[
     "trust_map",
     "trust_counts",
     "set_trust",
+    "derived_edges",
+    "restore_derived",
     "supersession_problem",
     "supersession_links",
     "episodes_since_wrap",
@@ -1638,8 +1640,8 @@ CREATE TABLE IF NOT EXISTS pattern_levels (
 -- earned, written by the save in the wrap's transaction beside pattern_levels.
 -- When every episode recorded for a rung has since been lowered to tool or
 -- external, the graduation bound cuts the pattern's prior back below that rung
--- at the next wrap. One group of rows per time a rung was earned (earned_on, the
--- wrap's day), each under the rule check 4 admitted it by: 'checked' (a quoted
+-- at the next wrap. One group of rows per time a rung was earned (`earning`;
+-- earned_on is the wrap's day), each under the rule check 4 admitted it by: 'checked' (a quoted
 -- explanation named which citations ground it; revoked when ALL of them are now
 -- tool/external) or 'unchecked' (nothing did; revoked when ANY is). A rung stands
 -- while any of its groups does. A rung saved before the table has no rows and is
@@ -1648,9 +1650,12 @@ CREATE TABLE IF NOT EXISTS pattern_grounding (
     name TEXT NOT NULL,
     level INTEGER NOT NULL,
     earned_on TEXT NOT NULL,
+    -- One earning: the wrap's token plus the line's ordinal in it. Two earnings
+    -- of the same rung on the same day stay two (codex r3 #5).
+    earning TEXT NOT NULL,
     rule TEXT NOT NULL CHECK (rule IN ('checked', 'unchecked')),
     episode_id TEXT NOT NULL,
-    PRIMARY KEY (name, level, earned_on, rule, episode_id)
+    PRIMARY KEY (name, level, earning, rule, episode_id)
 );
 """
 
@@ -4131,27 +4136,50 @@ class Store:
                     out[row[0]] = row[1]
             return out
 
-    def effective_trust_map(self, episode_ids: Iterable[str]) -> dict[str, str]:
+    def effective_trust_map(
+        self, episode_ids: Iterable[str], *, missing: str | None = None,
+        missing_for: Iterable[str] | None = None,
+    ) -> dict[str, str]:
         """As :meth:`trust_map`, but each episode's class is the lower of its own
         and the highest effective class among the episodes it was derived from
         (``record(derived_from=)``), followed through every level of derivation
         (CAP-08 D3). An agent summary of an external page reads ``external``. A
-        source that no longer exists counts at the effective trust it had when the
-        derived episode was recorded, so a delete never raises it. Absent =
-        ``agent``."""
+        source contributes the lower of the trust recorded with the derivation
+        and, while the source still exists, its class now, so deleting a source,
+        or reusing its id, never raises what was derived from it. Absent =
+        ``agent``.
+
+        ``missing``: the class an id with NO episode reads as (default: the same
+        ``agent`` absence reads as), for the ids in ``missing_for`` (default: all
+        of them). A caller judging grounding passes ``"external"`` so a deleted
+        episode is a failed ground, not a default one (codex r3 #1). The graph is walked iteratively, so a long chain of
+        derivations cannot exhaust the stack (codex r3 #6)."""
         wanted = {str(i).strip().lower() for i in episode_ids}
         if not wanted:
             return {}
-        sources: dict[str, list[str]] = {}
-        # A deleted source's trust as recorded with the row (fix 2, 1008+3).
+        # episode -> [(live source, trust recorded with the edge)], and the
+        # recorded trust of each source that no longer exists.
+        sources: dict[str, list[tuple[str, str]]] = {}
         recorded: dict[str, list[str]] = {}
         seen_ids = set(wanted)
+        absent: set[str] = set()
         with self._db_boundary("trust_map"), self._read_snapshot():
+            if missing is not None:
+                ordered = sorted(
+                    wanted if missing_for is None
+                    else wanted & {str(i).strip().lower() for i in missing_for}
+                )
+                for start in range(0, len(ordered), 500):
+                    chunk = ordered[start:start + 500]
+                    marks = ",".join("?" * len(chunk))
+                    live_ids = {r[0] for r in self._conn.execute(
+                        f"SELECT id FROM episodes WHERE id IN ({marks})", chunk)}
+                    absent.update(set(chunk) - live_ids)
             has_derived = self._conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' "
                 "AND name = 'episode_derived'"
             ).fetchone() is not None
-            frontier = sorted(wanted) if has_derived else []
+            frontier = sorted(wanted - absent) if has_derived else []
             while frontier:
                 found: set[str] = set()
                 for start in range(0, len(frontier), 500):
@@ -4164,7 +4192,7 @@ class Store:
                         f"WHERE d.episode_id IN ({marks})", chunk,
                     ):
                         if live:
-                            sources.setdefault(ep_id, []).append(src)
+                            sources.setdefault(ep_id, []).append((src, src_trust))
                             found.add(src)
                         else:
                             recorded.setdefault(ep_id, []).append(src_trust)
@@ -4173,25 +4201,106 @@ class Store:
         own = self.trust_map(seen_ids)
         memo: dict[str, str] = {}
 
-        def effective(ep_id: str, path: frozenset[str]) -> str:
-            if ep_id in memo:
-                return memo[ep_id]
+        def settle(ep_id: str) -> str:
             mine = own.get(ep_id, DEFAULT_TRUST)
-            srcs = [src for src in sources.get(ep_id, []) if src not in path]
-            witnessed = [effective(src, path | {ep_id}) for src in srcs]
+            # A source on the path being walked (a cycle) is skipped, so it
+            # contributes nothing; it is not in memo yet.
+            witnessed = [
+                min(memo[src], snap, key=trust_rank)
+                for src, snap in sources.get(ep_id, []) if src in memo
+            ]
             witnessed += recorded.get(ep_id, [])
             if witnessed:
-                best = max(witnessed, key=trust_rank)
-                mine = min(mine, best, key=trust_rank)
-            memo[ep_id] = mine
+                mine = min(mine, max(witnessed, key=trust_rank), key=trust_rank)
             return mine
+
+        wanted_live = wanted - absent
+        for root in sorted(wanted_live):
+            if root in memo:
+                continue
+            stack = [root]
+            onpath = {root}
+            nxt: dict[str, int] = {}
+            while stack:
+                node = stack[-1]
+                srcs = sources.get(node, [])
+                i = nxt.get(node, 0)
+                if i < len(srcs):
+                    nxt[node] = i + 1
+                    src = srcs[i][0]
+                    if src not in memo and src not in onpath:
+                        stack.append(src)
+                        onpath.add(src)
+                    continue
+                memo[node] = settle(node)
+                onpath.discard(node)
+                stack.pop()
 
         out: dict[str, str] = {}
         for ep_id in wanted:
-            level = effective(ep_id, frozenset())
-            if level != DEFAULT_TRUST:
+            level = missing if ep_id in absent else memo[ep_id]
+            if level is not None and level != DEFAULT_TRUST:
                 out[ep_id] = level
         return out
+
+    def derived_edges(self, episode_ids: Iterable[str]) -> dict[str, list[tuple[str, str]]]:
+        """``{episode id: [(source id, trust recorded with the edge), ...]}`` for
+        each listed episode derived from others (``record(derived_from=)``).
+        Read-only; what an export carries (codex r3 #3)."""
+        ids = sorted({str(i).strip().lower() for i in episode_ids})
+        out: dict[str, list[tuple[str, str]]] = {}
+        with self._db_boundary("derived_edges"), self._read_snapshot():
+            if not ids or self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'episode_derived'"
+            ).fetchone() is None:
+                return out
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                marks = ",".join("?" * len(chunk))
+                for ep_id, src, snap in self._conn.execute(
+                    f"SELECT episode_id, source_id, source_trust FROM episode_derived "
+                    f"WHERE episode_id IN ({marks}) ORDER BY episode_id, source_id",
+                    chunk,
+                ):
+                    out.setdefault(ep_id, []).append((src, snap))
+        return out
+
+    def restore_derived(
+        self, episode_id: str, sources: Iterable[tuple[str, str]],
+    ) -> int:
+        """Re-attach derivation edges to an existing episode (an import putting
+        back what an export carried): each ``(source id, recorded trust)`` whose
+        source exists. The recorded trust is kept only as a LOWER bound on what
+        the edge may say: it is capped at ``agent`` (a file cannot vouch) and
+        taken with the source's effective trust now, whichever is lower. Never
+        changes an edge that is already there. Returns the number added."""
+        episode_id = str(episode_id).strip().lower()
+        added = 0
+        with self._db_boundary("restore_derived"):
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")
+            if self._conn.execute(
+                "SELECT 1 FROM episodes WHERE id = ?", (episode_id,)
+            ).fetchone() is not None:
+                for src, snap in sources:
+                    src = str(src).strip().lower()
+                    if src == episode_id or self._conn.execute(
+                        "SELECT 1 FROM episodes WHERE id = ?", (src,)
+                    ).fetchone() is None:
+                        continue
+                    rank = min(trust_rank(snap), trust_rank(DEFAULT_TRUST))
+                    level = TRUST_LEVELS[rank]
+                    now = self.effective_trust_map([src]).get(src, DEFAULT_TRUST)
+                    level = min(level, now, key=trust_rank)
+                    added += self._conn.execute(
+                        "INSERT OR IGNORE INTO episode_derived "
+                        "(episode_id, source_id, source_trust) VALUES (?, ?, ?)",
+                        (episode_id, src, level),
+                    ).rowcount
+            if not self._defer_commit:
+                self._conn.commit()
+        return added
 
     def trust_counts(self) -> dict[str, int]:
         """Number of live episodes in each trust class, every class listed."""
@@ -4215,36 +4324,57 @@ class Store:
         whoever constructed it (CAP-08)."""
         return self._trust_ceiling
 
-    def _check_trust_ceiling(self, operation: str, trust: str) -> int:
-        """Rank of ``trust``; ValueError when it is unknown or above the ceiling."""
-        rank = trust_rank(trust)
-        if rank > trust_rank(self._trust_ceiling):
-            raise ValueError(
+    def _ceiling_problem(self, operation: str, trust: str) -> str | None:
+        """The refusal text when ``trust`` is above the ceiling, else None."""
+        if trust_rank(trust) > trust_rank(self._trust_ceiling):
+            return (
                 f"{operation}: trust {trust!r} is above this store's ceiling "
                 f"{self._trust_ceiling!r}; only the code that opens the Store sets "
                 f"the ceiling (Store(..., trust_ceiling=...)). Nothing was written."
             )
+        return None
+
+    def _check_trust_ceiling(self, operation: str, trust: str) -> int:
+        """Rank of ``trust``; ValueError when it is unknown or above the ceiling."""
+        rank = trust_rank(trust)
+        problem = self._ceiling_problem(operation, trust)
+        if problem:
+            raise ValueError(problem)
         return rank
 
     def set_trust(
         self, episode_id: str, trust: str, *, actor: str = "agent",
+        expect: str | None = None,
     ) -> str:
         """Change an episode's trust class; returns the class it had.
 
         Any class up to this Store's ``trust_ceiling`` may be set, lowering or
         raising; above it is refused. So raising anything above ``agent`` needs
         a Store the host opened with ``trust_ceiling="operator"`` (the CLI does
-        only after its operator gate; the MCP server never does). ``actor`` is the
-        host's statement of who asked, recorded as given. Audited as
-        ``trust_set``. A supersession link the change makes invalid (the
-        replacing episode now ranks below the one it hides) is removed in the same
-        transaction and named in the audit event, unless a team snapshot owns it.
+        only after its operator gate; the MCP server never does). Setting the
+        class the episode already has writes nothing and succeeds, whatever the
+        ceiling. ``actor`` is the host's statement of who asked, recorded as
+        given. Audited as ``trust_set``. A supersession link the change makes
+        invalid (the replacing episode now ranks below the one it hides) is
+        removed in the same transaction and named in the audit event, unless a
+        team snapshot owns it.
+
+        ``expect``: the class the caller read before deciding this change was
+        allowed. If the episode's class is no longer that one when the write
+        transaction reads it, nothing is changed and ``ValueError`` names the
+        conflict (a gate decided on a stale read must not be applied).
+
+        Lowering also lowers the trust recorded with every derivation from this
+        episode (``derived_from``), through what was derived from those, so
+        deleting the episode afterwards cannot raise them again.
 
         Raises:
-            ValueError: unknown ``trust``, ``trust`` above the ceiling, or no such
-                episode.
+            ValueError: unknown ``trust``, ``trust`` above the ceiling, no such
+                episode, or ``expect`` no longer matches.
         """
-        self._check_trust_ceiling("set_trust", trust)
+        trust_rank(trust)
+        if expect is not None:
+            trust_rank(expect)
         episode_id = str(episode_id).strip().lower()
         problem: str | None = None
         old = DEFAULT_TRUST
@@ -4265,17 +4395,27 @@ class Store:
                     "SELECT trust FROM episode_trust WHERE episode_id = ?", (episode_id,)
                 ).fetchone()
                 old = row[0] if row is not None else DEFAULT_TRUST
-                if trust == DEFAULT_TRUST:
-                    self._conn.execute(
-                        "DELETE FROM episode_trust WHERE episode_id = ?", (episode_id,)
+                if expect is not None and old != expect:
+                    problem = (
+                        f"set_trust: {episode_id!r} is {old!r} now, not the "
+                        f"{expect!r} the change was decided on. Nothing was changed."
                     )
-                else:
-                    self._conn.execute(
-                        "INSERT OR REPLACE INTO episode_trust (episode_id, trust) VALUES (?, ?)",
-                        (episode_id, trust),
-                    )
-                if problem is None and old != trust:
+                elif old != trust and self._ceiling_problem("set_trust", trust):
+                    problem = self._ceiling_problem("set_trust", trust)
+                elif old != trust:
+                    if trust == DEFAULT_TRUST:
+                        self._conn.execute(
+                            "DELETE FROM episode_trust WHERE episode_id = ?",
+                            (episode_id,),
+                        )
+                    else:
+                        self._conn.execute(
+                            "INSERT OR REPLACE INTO episode_trust "
+                            "(episode_id, trust) VALUES (?, ?)",
+                            (episode_id, trust),
+                        )
                     removed, team_left = self._drop_links_trust_invalidated(episode_id)
+                    self._lower_derived_snapshots([episode_id], follow=True)
             if not self._defer_commit:
                 self._conn.commit()
         if problem:
@@ -4291,6 +4431,45 @@ class Store:
                 committed="the trust change", actor=actor,
             )
         return old
+
+    def _lower_derived_snapshots(self, episode_ids: Iterable[str], *, follow: bool) -> None:
+        """Lower the trust recorded in ``episode_derived`` for each derivation
+        FROM these episodes to the episode's effective trust now, never raising
+        it (the recorded value is a running minimum). ``follow`` carries a lowering
+        on to what was derived from the lowered episodes in turn, so a chain
+        stays consistent when a middle link is deleted later. Runs inside the
+        caller's transaction (codex + complement r3: a snapshot taken at record
+        time went stale when the source was lowered, then deleted)."""
+        if self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'episode_derived'"
+        ).fetchone() is None:
+            return
+        queue = sorted({str(i) for i in episode_ids})
+        visited: set[str] = set()
+        while queue:
+            batch = [i for i in queue if i not in visited]
+            queue = []
+            visited.update(batch)
+            if not batch:
+                break
+            eff = self.effective_trust_map(batch)
+            for start in range(0, len(batch), 500):
+                chunk = batch[start:start + 500]
+                marks = ",".join("?" * len(chunk))
+                rows = self._conn.execute(
+                    f"SELECT episode_id, source_id, source_trust FROM episode_derived "
+                    f"WHERE source_id IN ({marks})", chunk,
+                ).fetchall()
+                for ep_id, src, snap in rows:
+                    level = eff.get(src, DEFAULT_TRUST)
+                    if trust_rank(level) < trust_rank(snap):
+                        self._conn.execute(
+                            "UPDATE episode_derived SET source_trust = ? "
+                            "WHERE episode_id = ? AND source_id = ?",
+                            (level, ep_id, src),
+                        )
+                        if follow:
+                            queue.append(ep_id)
 
     def _drop_links_trust_invalidated(
         self, episode_id: str
@@ -4403,6 +4582,8 @@ class Store:
                     row["id"], linker_of)
             links_removed = self._detach_supersessions([row["id"]])
             self._remember_team_rows([row], "operator" if team_operator else "auto")
+            # What was derived from it keeps the trust it has now (codex r3 #2).
+            self._lower_derived_snapshots([row["id"]], follow=False)
             self._conn.execute("DELETE FROM episodes WHERE id = ?", (episode_id,))
             # 10.5c.5 L4 Fix: batch-aware commit for consistency with
             # record() and the other write-path methods. No current
@@ -6414,30 +6595,38 @@ class Store:
                 "AND name = 'pattern_grounding'"
             ).fetchone() is None:
                 return {}
-            groups: dict[tuple[str, int, str, str], list[str]] = {}
-            for name, level, earned_on, rule, ep_id in self._conn.execute(
-                "SELECT name, level, earned_on, rule, episode_id FROM pattern_grounding "
-                "ORDER BY name, level, earned_on, rule, episode_id"
+            groups: dict[tuple[str, int, str], dict[str, Any]] = {}
+            for name, level, earned_on, earning, rule, ep_id in self._conn.execute(
+                "SELECT name, level, earned_on, earning, rule, episode_id "
+                "FROM pattern_grounding "
+                "ORDER BY name, level, earned_on, rowid"
             ):
-                groups.setdefault((name, int(level), earned_on, rule), []).append(ep_id)
-            out: dict[str, dict[int, list[dict[str, Any]]]] = {}
-            for (name, level, earned_on, rule), ids in groups.items():
-                out.setdefault(name, {}).setdefault(level, []).append(
-                    {"earned_on": earned_on, "rule": rule, "episodes": ids}
+                grp = groups.setdefault(
+                    (name, int(level), earning),
+                    {"earned_on": earned_on, "rule": rule, "episodes": []},
                 )
+                grp["episodes"].append(ep_id)
+            out: dict[str, dict[int, list[dict[str, Any]]]] = {}
+            for (name, level, _earning), grp in groups.items():
+                grp["episodes"].sort()
+                out.setdefault(name, {}).setdefault(level, []).append(grp)
             return out
 
     def _record_pattern_grounding(
-        self, rungs: Iterable[tuple[str, int, str, Iterable[str]]], earned_on: str
+        self, rungs: Iterable[tuple[str, int, str, Iterable[str]]], earned_on: str,
+        wrap_id: str | None = None,
     ) -> None:
         """Add the grounding episodes of each rung this save validated, as
-        ``(name, level, rule, ids)``. Runs inside the save's batch, like
+        ``(name, level, rule, ids)``. Each rung is one earning, identified by
+        ``wrap_id`` (the save's wrap token; random when not given) and its place
+        in ``rungs``. Runs inside the save's batch, like
         :meth:`_record_pattern_levels`."""
+        wrap_id = wrap_id or uuid.uuid4().hex
         self._conn.executemany(
             "INSERT OR IGNORE INTO pattern_grounding "
-            "(name, level, earned_on, rule, episode_id) VALUES (?, ?, ?, ?, ?)",
-            [(name, int(level), earned_on, rule, str(cid).strip().lower())
-             for name, level, rule, ids in rungs for cid in ids],
+            "(name, level, earned_on, earning, rule, episode_id) VALUES (?, ?, ?, ?, ?, ?)",
+            [(name, int(level), earned_on, f"{wrap_id}:{n}", rule, str(cid).strip().lower())
+             for n, (name, level, rule, ids) in enumerate(rungs) for cid in ids],
         )
 
     def _has_pattern_levels_table(self) -> bool:
@@ -7159,6 +7348,7 @@ class Store:
             links_removed = self._detach_supersessions([row["id"] for row in rows])
             self._remember_team_rows(rows)
             pruned = 0
+            self._lower_derived_snapshots([row["id"] for row in rows], follow=False)
             for row in rows:
                 if self._keep_tombstones:
                     self._conn.execute(
@@ -8749,6 +8939,7 @@ class Store:
         - :meth:`record` (episode writes)
         - :meth:`supersede` / :meth:`unsupersede` (supersession links)
         - :meth:`set_trust` (CAP-08 trust class)
+        - :meth:`restore_derived` (an import re-attaching derivation edges)
         - :meth:`import_team_entries` (``dry_run`` is refused inside a batch)
         - :meth:`import_team_snapshot` (``dry_run`` is refused inside a batch)
         - :meth:`team_forget_key`

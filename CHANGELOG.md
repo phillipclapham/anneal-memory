@@ -56,8 +56,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   operator gate. The host's labels (`trust`, `trust_via`, `actor`) are its statement, held by the
   human who configured it by design. A CLI import counts the operator labels it brought in as
   `agent` (`trust_capped`).
-- `Store.set_trust(id, trust)` sets any class up to the ceiling, lowering or raising; above it is
-  refused. Audited as `trust_set`. A change
+- `Store.set_trust(id, trust, expect=)` sets any class up to the ceiling, lowering or raising;
+  above it is refused, except that setting the class the episode already has is a no-op that
+  succeeds. `expect` is the class the caller decided on: if it moved, the write refuses with a
+  conflict (the CLI passes the class its operator gate read). Audited as `trust_set`. A change
   that leaves a recorded supersession pointing the wrong way (the replacing episode now below the
   one it hides) removes that link in the same transaction and names it in the audit event; a
   link a team snapshot owns stays (the ledger rules it) and is named as left.
@@ -84,7 +86,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   form is a convenience any process with a shell can set; the audit records which form was used
   (`cli:operator-terminal` / `cli:operator-env`: the `trust_set` actor, and `trust_via` on an
   operator `record` event, which `Store.record(trust_via=)` takes).
-- JSON `export` writes each non-default class; `import` honours a class up to `agent`, so an
+- JSON `export` writes each non-default EFFECTIVE class (an agent summary of an external page
+  exports as `external`) and each episode's `derived_from` edges; `import` restores the edges to
+  sources that exist, only ever lowering (`Store.derived_edges`, `Store.restore_derived`), so a
+  round trip never raises an episode's effective trust (run: it did). `import` honours a class up to `agent`, so an
   edited export file can lower trust but never vouch, including on an episode it already holds
   (reported as `trust_lowered`), and only from a class it states at or below `agent`: a missing
   class, or an `operator` one, asserts nothing, so re-importing a store's own export never demotes
@@ -100,7 +105,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - Lowering trust revokes what it earned, at the next wrap (C#11, 2026-10-08). Run first: an
   episode that grounded a 2x graduation was lowered to `external`, and the next wrap kept the
   pattern at 2x. Each save now records the episodes that grounded each rung a named pattern
-  earned, in a new additive `pattern_grounding(name, level, earned_on, rule, episode_id)` table
+  earned, in a new additive `pattern_grounding(name, level, earned_on, earning, rule, episode_id)` table
   written in the wrap's transaction (`Store.pattern_grounding()`; check 4's grounding citations,
   and the rule check 4 admitted the line by; a rename moves them). At the graduation bound, each
   earning is re-run under its own rule against today's trust: a `checked` one (a quoted
@@ -112,7 +117,11 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   reported in `level_capped` with the new `reason` field `revoked: grounding lowered` (`prior`
   for every other cut), in the MCP and CLI save output and the warning. A rung with no grounding
   record (saved before the table) keeps its level. The save's trust re-read covers the recorded
-  grounding episodes too.
+  grounding episodes too. A grounding or cited episode that no longer exists reads `external`, a
+  failed ground, never a default `agent` one (run: a lowered-then-deleted ground kept its rung);
+  one that vanishes between validation and the save's final re-read aborts the save. Two
+  earnings of one rung on one day are told apart by `earning` (the wrap token and the line's
+  ordinal), so lowering one earning's citation no longer revokes the other.
 - Derived content and recall labels (CAP-08 F4 = T4 + derived_from, C#11). Run first: an agent
   summary of an external page, cited beside the page, graduated the page's claim to 2x, and MCP
   `recall` showed both as plain memory. `Store.record(..., derived_from=[ids])` (CLI
@@ -122,7 +131,13 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   written). `Store.effective_trust_map(ids)` gives each episode the lower of its own class and
   the highest effective class among its sources, through every level of derivation; a deleted
   source counts at the effective trust recorded with the link (`episode_derived.source_trust`),
-  so a delete never raises a summary back to `agent` (run: it did, until this); the graduation
+  so a delete never raises a summary back to `agent` (run: it did, until this). The recorded
+  trust is a running minimum: `set_trust` lowering an episode lowers it on every derivation from
+  that episode and what was derived from those, deleting or pruning an episode snapshots its
+  effective trust into them first, and a live source contributes the lower of the record and its
+  class now, so a reused id never lifts it (run: a source lowered after the derivation and then
+  deleted read as `agent` again). The graph is walked iteratively (run: a ~1,000-deep chain
+  raised `RecursionError`). The graduation
   trust check and the save's re-read use it, so a
   summary of an external page reads `external` and cannot corroborate it. `ScoredEpisode.trust`
   (default `agent`) carries each episode's effective class out of `retrieve_relevant`, and MCP
@@ -134,7 +149,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   `(carried-forward)` replaced only the first tag, so a two-tag line kept its second while a
   one-tag line kept none. A demoted line is stripped by design (it must be re-grounded, never
   re-validated on the same citations); now every tag up to the line's next level marker goes,
-  and a later marker's own tags are left alone.
+  and a later marker's own tags are left alone. The next marker is found outside `[...]` tags, so
+  a quoted `| 2x` in an explanation is text, not a marker.
 
 ### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
 - `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one

@@ -2371,9 +2371,29 @@ def _strip_own_evidence_tail(rest: str) -> str:
     level token belongs to that marker and is removed, so a two-tag line ends
     like a one-tag one (1008+3, run: the second tag survived the strip). Tags
     after the next level token belong to that marker and are left alone."""
-    nxt = _LEVEL_TOKEN_RE.search(rest)
-    cut = nxt.start() if nxt else len(rest)
+    cut = _next_level_token(rest)
     return _ANY_EVIDENCE_TAG_RE.sub("", rest[:cut]) + rest[cut:]
+
+
+def _next_level_token(rest: str) -> int:
+    """Where the next level token (``| 2x``) starts in ``rest``, or its length.
+    A token inside a ``[...]`` tag (its quoted explanation may say ``| 2x``) is
+    text, not a marker (codex r3 #7); inside a tag a ``]`` within quotes does not
+    end it."""
+    i, n = 0, len(rest)
+    while i < n:
+        ch = rest[i]
+        if ch == "[":
+            i += 1
+            quoted = False
+            while i < n and (quoted or rest[i] != "]"):
+                if rest[i] == '"':
+                    quoted = not quoted
+                i += 1
+        elif ch == "|" and _LEVEL_TOKEN_RE.match(rest, i):
+            return i
+        i += 1
+    return n
 
 
 def _days_between(last_seen_at: Any, today: str) -> int | None:

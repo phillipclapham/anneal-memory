@@ -92,6 +92,16 @@ TOOLS: list[dict[str, Any]] = [
                         "recall then hides the old episode by default."
                     ),
                 },
+                "derived_from": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Ids of the episodes this content was derived from, e.g. your "
+                        "summary of a page you recorded as external. Each must exist. "
+                        "For graduation it then counts at most as trusted as its most "
+                        "trusted source, so a summary cannot corroborate its own source."
+                    ),
+                },
             },
             "required": ["content", "episode_type"],
         },

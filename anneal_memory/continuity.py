@@ -3046,7 +3046,9 @@ def validated_save_continuity(
     # under today's trust no longer counts toward the pattern's prior.
     grounding = store.pattern_grounding()
     _grounding_ids = {cid for rungs in grounding.values() for ids in rungs.values() for cid in ids}
-    window_trust = store.trust_map(citable_ids | _marker_ids | _grounding_ids)
+    # Effective trust (D3): an episode derived from others counts at most as
+    # trusted as its most trusted source.
+    window_trust = store.effective_trust_map(citable_ids | _marker_ids | _grounding_ids)
     revoked_levels = revoked_pattern_levels(
         grounding, lambda cid: window_trust.get(cid, DEFAULT_TRUST)
     )
@@ -3276,7 +3278,7 @@ def validated_save_continuity(
             # changed after validation read it would let the save commit a
             # graduation judged on the old class. Raising rolls the batch back.
             _cited = set(grad_result.citation_counts) | _marker_ids | _grounding_ids
-            _trust_now = store.trust_map(sorted(_cited))
+            _trust_now = store.effective_trust_map(sorted(_cited))
             _trust_moved = sorted(
                 cid for cid in _cited
                 if _trust_now.get(cid, DEFAULT_TRUST) != window_trust.get(cid, DEFAULT_TRUST)

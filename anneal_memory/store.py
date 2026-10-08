@@ -1459,6 +1459,23 @@ BEGIN
     DELETE FROM episode_trust WHERE episode_id = OLD.id;
 END;
 
+-- CAP-08 D3 (C#11): the episodes an episode was derived from (an agent's
+-- summary of a page it fetched). For the graduation trust check an episode
+-- counts at most as trusted as the most trusted of its sources, so a summary of
+-- an external page cannot corroborate that page. Written with the episode, in
+-- its transaction; a row leaves with its derived episode. Additive.
+CREATE TABLE IF NOT EXISTS episode_derived (
+    episode_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    PRIMARY KEY (episode_id, source_id)
+);
+
+CREATE TRIGGER IF NOT EXISTS episode_derived_follows_delete
+AFTER DELETE ON episodes
+BEGIN
+    DELETE FROM episode_derived WHERE episode_id = OLD.id;
+END;
+
 CREATE TABLE IF NOT EXISTS tombstones (
     id TEXT PRIMARY KEY,
     timestamp TEXT NOT NULL,
@@ -2622,6 +2639,7 @@ class Store:
         trust: str = DEFAULT_TRUST,
         *,
         trust_via: str | None = None,
+        derived_from: list[str] | tuple[str, ...] | None = None,
     ) -> Episode:
         """Record a new episode.
 
@@ -2647,11 +2665,18 @@ class Store:
                 ``cli:operator-terminal`` or ``cli:operator-env``). The host's
                 statement, recorded in the audit event as given; the library does
                 not check it.
+            derived_from: Ids of the episodes this content was derived from (an
+                agent's summary of a page it recorded as ``external``). Each must
+                exist; on refusal nothing is recorded. Stored with the episode in
+                one transaction. For the graduation trust check the episode counts
+                at most as trusted as its most trusted source
+                (:meth:`effective_trust_map`).
 
         Raises:
             SupersessionError: a ``supersedes`` link failed validation.
             ValueError: ``trust`` is not a known trust class, or is above the
-                Store's ``trust_ceiling``.
+                Store's ``trust_ceiling``, or a ``derived_from`` source does not
+                exist.
 
         Returns:
             The recorded Episode.
@@ -2672,6 +2697,16 @@ class Store:
         ts = timestamp or _now_utc()
         meta_json = json.dumps(metadata) if metadata is not None else None
         old_ids = _normalize_supersedes(supersedes)
+        if derived_from is not None and not isinstance(derived_from, (list, tuple)):
+            raise ValueError(
+                f"derived_from must be a list of episode ids, not {type(derived_from).__name__}"
+            )
+        source_ids: list[str] = []
+        for raw in derived_from or ():
+            if not isinstance(raw, str) or not raw.strip():
+                raise ValueError(f"derived_from: {raw!r} is not an episode id")
+            if raw.strip().lower() not in source_ids:
+                source_ids.append(raw.strip().lower())
 
         # Retry with incrementing nonce on ID collision (birthday or duplicate content).
         # 10.5c.5 L3 Fix #17: batch-aware commit. If this method is
@@ -2717,7 +2752,13 @@ class Store:
                              for o in old_ids) if p),
                 None,
             )
-            if problem is None:
+            missing_sources = [
+                sid for sid in source_ids
+                if self._conn.execute(
+                    "SELECT 1 FROM episodes WHERE id = ?", (sid,)
+                ).fetchone() is None
+            ]
+            if problem is None and not missing_sources:
                 for nonce in range(max_retries):
                     ep_id = _episode_id(content, ts, nonce)
                     try:
@@ -2741,12 +2782,22 @@ class Store:
                         "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
                         (old_id, ep_id, source),
                     )
+                self._conn.executemany(
+                    "INSERT OR IGNORE INTO episode_derived (episode_id, source_id) "
+                    "VALUES (?, ?)",
+                    [(ep_id, sid) for sid in source_ids],
+                )
             # On a refusal this commits an empty transaction (releasing the
             # lock); inside a batch it leaves the batch's writes alone.
             if not self._defer_commit:
                 self._conn.commit()
         if problem:
             raise SupersessionError(problem)
+        if missing_sources:
+            raise ValueError(
+                f"derived_from: no episode {', '.join(map(repr, missing_sources))}. "
+                "Nothing was recorded."
+            )
 
         episode = Episode(
             id=ep_id,
@@ -2773,6 +2824,8 @@ class Store:
             record_event["trust"] = trust  # absent = agent, as in the store
         if trust_via is not None:
             record_event["trust_via"] = trust_via
+        if source_ids:
+            record_event["derived_from"] = source_ids
         self._audit_log_after_commit(
             "record", record_event, method="record", committed="the episode", actor=source,
         )
@@ -4064,6 +4117,58 @@ class Store:
                 ):
                     out[row[0]] = row[1]
             return out
+
+    def effective_trust_map(self, episode_ids: Iterable[str]) -> dict[str, str]:
+        """As :meth:`trust_map`, but each episode's class is the lower of its own
+        and the highest effective class among the episodes it was derived from
+        (``record(derived_from=)``), followed through every level of derivation
+        (CAP-08 D3). An agent summary of an external page reads ``external``. A
+        source that no longer exists is not counted. Absent = ``agent``."""
+        wanted = {str(i).strip().lower() for i in episode_ids}
+        if not wanted:
+            return {}
+        sources: dict[str, list[str]] = {}
+        seen_ids = set(wanted)
+        with self._db_boundary("trust_map"), self._read_snapshot():
+            has_derived = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'episode_derived'"
+            ).fetchone() is not None
+            frontier = sorted(wanted) if has_derived else []
+            while frontier:
+                found: set[str] = set()
+                for start in range(0, len(frontier), 500):
+                    chunk = frontier[start:start + 500]
+                    marks = ",".join("?" * len(chunk))
+                    for ep_id, src in self._conn.execute(
+                        f"SELECT d.episode_id, d.source_id FROM episode_derived d "
+                        f"JOIN episodes e ON e.id = d.source_id "
+                        f"WHERE d.episode_id IN ({marks})", chunk,
+                    ):
+                        sources.setdefault(ep_id, []).append(src)
+                        found.add(src)
+                frontier = sorted(found - seen_ids)
+                seen_ids |= found
+        own = self.trust_map(seen_ids)
+        memo: dict[str, str] = {}
+
+        def effective(ep_id: str, path: frozenset[str]) -> str:
+            if ep_id in memo:
+                return memo[ep_id]
+            mine = own.get(ep_id, DEFAULT_TRUST)
+            srcs = [src for src in sources.get(ep_id, []) if src not in path]
+            if srcs:
+                best = max((effective(src, path | {ep_id}) for src in srcs), key=trust_rank)
+                mine = min(mine, best, key=trust_rank)
+            memo[ep_id] = mine
+            return mine
+
+        out: dict[str, str] = {}
+        for ep_id in wanted:
+            level = effective(ep_id, frozenset())
+            if level != DEFAULT_TRUST:
+                out[ep_id] = level
+        return out
 
     def trust_counts(self) -> dict[str, int]:
         """Number of live episodes in each trust class, every class listed."""

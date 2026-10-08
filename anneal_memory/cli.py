@@ -889,9 +889,13 @@ def cmd_record(args: argparse.Namespace) -> None:
                 supersedes=getattr(args, "supersedes", None),
                 trust=trust,
                 trust_via=f"cli:operator-{via}" if via else None,
+                derived_from=getattr(args, "derived_from", None),
             )
         except SupersessionError as exc:
             print(f"Error: {exc}. Nothing was recorded.", file=sys.stderr)
+            sys.exit(1)
+        except ValueError as exc:  # a derived_from source that does not exist
+            print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
 
         if args.json:
@@ -4236,6 +4240,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--supersedes", action="append", metavar="ID", default=None,
         help="Id of an older episode this one replaces (repeatable). Validated like "
              "a citation; on refusal nothing is recorded. Recall then hides the old one.",
+    )
+    sub.add_argument(
+        "--derived-from", action="append", metavar="ID", default=None,
+        help="Id of an episode this content was derived from (repeatable), e.g. a "
+             "summary of a page recorded as external. Each must exist. For graduation "
+             "the episode counts at most as trusted as its most trusted source.",
     )
     sub.add_argument(
         "--trust", choices=list(TRUST_LEVELS), default=DEFAULT_TRUST,

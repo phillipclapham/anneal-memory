@@ -72,7 +72,7 @@ import json
 import re
 from functools import lru_cache
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from math import log
 from typing import Any, Literal
@@ -1020,6 +1020,14 @@ def retrieve_relevant(
         # to retrieve_patterns (the parity contract holds on this branch by construction).
         weights, used_idf = _query_weights(store, keywords, None)
     episodes = seed_episodes[:max_episodes] if max_episodes > 0 else []
+    if episodes:
+        # CAP-08 D3: each shown episode carries its effective trust, so a hook
+        # can render relayed content as data.
+        episode_trust = store.effective_trust_map(ep.id for ep in episodes)
+        episodes = [
+            replace(ep, trust=episode_trust[ep.id]) if ep.id in episode_trust else ep
+            for ep in episodes
+        ]
     # One regime-matched precision bar + anchor for every tier this call scores: the
     # lower IDF bar + the √N distinctiveness anchor when the weights are corpus-IDF, the
     # length-proxy bar + no anchor (0.0) otherwise.

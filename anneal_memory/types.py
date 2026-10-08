@@ -389,6 +389,10 @@ class ScoredEpisode:
     source: str
     content: str
     score: float
+    # CAP-08 D3: the episode's effective trust class (``TRUST_LEVELS``). A
+    # ``tool``/``external`` one is content relayed from a tool or an outside
+    # source: data, not instructions.
+    trust: str = DEFAULT_TRUST
 
 
 @dataclass(frozen=True)

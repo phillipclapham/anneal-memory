@@ -111,19 +111,23 @@ def test_the_documented_bracket_spelling_still_parses_as_one_derive():
 @pytest.mark.parametrize("sep", ["\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"])
 def test_an_unannotated_claim_cannot_ride_the_next_lines_annotation(store, sep):
     """L2 2026-10-02, reproduced at 610aa5f: the gate split on newline only, so
-    this one State line was accepted as a single judged claim."""
+    this one State line was accepted as a single judged claim. Since the gradgate
+    L3 r7 redesign the save makes every such terminator a newline before any gate
+    reads the text, so the claim is its own line and refuses for its own missing
+    annotation (it no longer reaches the gate's terminator refusal)."""
     line = f"- unverified claim, no annotation{sep}- real [judged: me, now, x]"
     res = prepare_wrap(store)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        with pytest.raises(ValueError, match="line terminator other than the newline"):
+        with pytest.raises(ValueError, match=r"line \d+: no \[derive: …\] or \[judged: …\] annotation"):
             validated_save_continuity(store, _continuity([line]), wrap_token=res["wrap_token"])
     assert store.load_continuity() is None
     assert parse_annotation("- a [judged: me, now, x]\r").kind == "judged"  # CRLF is not one
     # the same character in a NON-State line forges a "## State" heading for any
-    # reader that splits on it (codex L3 r3), so the whole text is refused
+    # reader that splits on it (codex L3 r3); normalised, it IS a "## State"
+    # section, and its unannotated claim refuses the whole text
     forged = _continuity(["- real [judged: me, now, x]"]).replace(
         "## Plan\n- p", f"## Plan\n- p{sep}## State\n- unverified claim, no annotation"
     )
-    with pytest.raises(ValueError, match="line terminator other than the newline"):
+    with pytest.raises(ValueError, match=r"no \[derive: …\] or \[judged: …\] annotation"):
         validated_save_continuity(store, forged, wrap_token=res["wrap_token"])

@@ -646,9 +646,7 @@ def validate_graduations(
     Returns:
         GraduationResult with possibly modified text and validation counts.
     """
-    # Markers only: the terminator refusal belongs to the caller's text at the
-    # save entry; lines carried forward from a prior file are not re-refused here.
-    text = _ANY_MARKER_RE.sub(_canonical_marker, text)
+    text = canonical_continuity_text(text)
     lines = text.split("\n")
     in_patterns = False
     validated = 0
@@ -1222,29 +1220,25 @@ def validate_graduations(
     )
 
 
-# ONE TEXT GRAMMAR BEFORE ANY READ (L3 r6, 1008+11, run). The bound and every
+# ONE TEXT GRAMMAR BEFORE ANY READ (L3 r6-r7, 1008+11, run). The bound and every
 # reader must parse the same lines and the same markers; four rounds found four
 # ways they differed (identity r3, prose r4, in-marker whitespace r5, line
-# boundaries r6), so the text is made canonical once, upstream, instead of each
-# parser being widened to the next shape.
-# (1) Lines: every character ``str.splitlines()`` breaks on besides ``"\n"``.
+# boundaries r6), so the FINAL text (after the durable carry-forward, r7) is made
+# canonical once, upstream, instead of each parser being widened to the next shape.
+# (1) Lines: every character ``str.splitlines()`` breaks on besides ``"\n"``
+# becomes ``"\n"`` (the CR of a CRLF pair is kept: a CRLF file saves as CRLF).
 # ``## Notes\r## Patterns\r- x | 999x`` was one non-graduating heading line to the
-# bound while a universal-newline read of the saved file got a graduating 999x.
-# The same set ``rederive``'s State gate already refuses; the CR of a CRLF pair
-# is allowed.
-_LINE_TERMINATORS_RE = re.compile("[\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
-LINE_TERMINATOR_REFUSAL = (
-    "a line terminator other than the newline (CR, VT, FF, FS, GS, RS, NEL, U+2028 "
-    "or U+2029) is inside the continuity text: readers split lines differently on "
-    "it, so a level or a heading could be hidden from the graduation gate"
-)
-# (2) Markers: ``| Nx`` and an optional ``(YYYY-MM-DD)`` written with any Unicode
-# space or decimal digit is rewritten to ASCII `` | Nx (YYYY-MM-DD)``, so every
-# reader (``[ \t]``-only ones included) keys and levels it the same way.
-_ANY_MARKER_RE = re.compile(
-    r"[^\S\n]*\|[^\S\n]*(\d+)x(?:[^\S\n]*\((\d{4})-(\d{2})-(\d{2})\))?"
-)
-_CANONICAL_MARKER_CHARS = frozenset(" \t|x()-0123456789")
+# bound while a universal-newline read of the saved file got a graduating 999x;
+# normalised, the gate sees the section and bounds the line. Never a refusal: a
+# legacy durable line carrying a terminator must not make a store unsaveable.
+_LINE_TERMINATORS_RE = re.compile("\r(?!\n)|[\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
+# (2) Spaces: every other Unicode space becomes an ASCII space, so ``[ \t]``
+# readers and ``\s`` readers agree on every position of every grammar (codex r7:
+# an NBSP before ``[evidence:`` split ``_GRADUATION_RE`` from the history reader).
+_EXOTIC_SPACE_RE = re.compile(r"[^\S \t\r\n]")
+# (3) Marker digits: ``| Nx`` and its ``(YYYY-MM-DD)`` written in non-ASCII decimal
+# digits become ASCII, so a ``[0-9]`` reader and a ``\d`` reader read one level.
+_MARKER_DIGITS_RE = re.compile(r"\|[ \t]*(\d+)x(?:[ \t]*\((\d{4})-(\d{2})-(\d{2})\))?")
 
 
 def _ascii_digits(digits: str) -> str:
@@ -1252,24 +1246,22 @@ def _ascii_digits(digits: str) -> str:
 
 
 def _canonical_marker(m: "re.Match[str]") -> str:
-    if _CANONICAL_MARKER_CHARS.issuperset(m.group(0)):
-        return m.group(0)
-    out = f" | {_ascii_digits(m.group(1))}x"
-    if m.group(2):
-        out += " ({}-{}-{})".format(*(_ascii_digits(g) for g in m.group(2, 3, 4)))
-    return out
+    whole = m.group(0)
+    if whole.isascii():
+        return whole
+    return "".join(_ascii_digits(c) if c.isdigit() and not c.isascii() else c for c in whole)
 
 
 def canonical_continuity_text(text: str) -> str:
     """The one text grammar the graduation gate and every reader share.
 
-    Raises ``ValueError`` on a line terminator other than ``"\n"`` (the CR of a
-    CRLF pair is allowed and kept: a CRLF continuity saves as CRLF); rewrites every non-ASCII-spaced or non-ASCII-digit level
-    marker to its ASCII form. Idempotent.
+    Line terminators other than ``"\n"`` (a CRLF pair kept) become ``"\n"``, other
+    Unicode spaces become ``" "``, and non-ASCII digits in a level marker become
+    ASCII. Idempotent; never raises.
     """
-    if _LINE_TERMINATORS_RE.search(text.replace("\r\n", "\n")):
-        raise ValueError(LINE_TERMINATOR_REFUSAL)
-    return _ANY_MARKER_RE.sub(_canonical_marker, text)
+    text = _LINE_TERMINATORS_RE.sub("\n", text)
+    text = _EXOTIC_SPACE_RE.sub(" ", text)
+    return _MARKER_DIGITS_RE.sub(_canonical_marker, text)
 
 
 # The prior-state bound's own parser. A level token is ``| Nx`` with an optional
@@ -1330,9 +1322,8 @@ def pattern_line_levels(
     several lines, or in several graduating sections, counts once at its highest,
     which is how ``extract_pattern_names`` (and so every per-name reader) reads it."""
     levels: dict[tuple[str, str], int] = {}
-    # A prior file is read, never refused: only its markers are made canonical,
-    # so a prior line keys the way the current one does.
-    text = _ANY_MARKER_RE.sub(_canonical_marker, text)
+    # The prior file keys the way the current text does.
+    text = canonical_continuity_text(text)
     in_patterns = False
     for line in text.split("\n"):
         if line.startswith("## "):

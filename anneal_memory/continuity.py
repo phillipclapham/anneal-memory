@@ -2853,9 +2853,6 @@ def validated_save_continuity(
 
     if not text or not text.strip():
         raise ValueError("Continuity text cannot be empty")
-    # One text grammar before anything reads it (graduation.canonical_continuity_text):
-    # a stray line terminator refuses; exotic marker spacing/digits become ASCII.
-    text = canonical_continuity_text(text)
 
     # Validate structure (all sections declared by the store's schema). The
     # schema is read once here and reused for the schema-aware graduation gate
@@ -2877,6 +2874,11 @@ def validated_save_continuity(
     text, durable_report = enforce_durable_facts(
         prior_continuity, text, section_schema
     )
+    # One text grammar for the FINAL text, after the rederive strip and the durable
+    # carry-forward, before anything parses it (graduation.canonical_continuity_text;
+    # L3 r7: canonicalising the caller's text first let a re-inserted prior line
+    # carry a terminator past the gate).
+    text = canonical_continuity_text(text)
     grad_headings = graduating_headings(section_schema)
     # Reject ambiguous merged headings (e.g. "## Patterns and Understanding")
     # with a clear message before the generic all-sections check: one header

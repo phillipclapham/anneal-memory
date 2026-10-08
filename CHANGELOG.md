@@ -23,12 +23,13 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   Renaming a pattern to its own name changes nothing. A name's level is its highest line across graduating sections. Only a line's own marker earns the
   rung. Co-citation links from a validated line still form when the line is cut (the episodes were cited together
   and grounded; the cut is about the level).
-- One text grammar before the gate reads anything. `validated_save_continuity` now REFUSES (`ValueError`) a
-  continuity containing a line terminator other than the newline (CR, VT, FF, FS, GS, RS, NEL, U+2028, U+2029;
-  the CR of a CRLF pair is allowed and a CRLF file still saves as CRLF): `## Notes<CR>## Patterns<CR>- x | 999x`
-  was one non-graduating heading to the gate and a graduating 999x once the file was read back. A level marker
-  written with a Unicode space or non-ASCII digits (`|<NBSP>999x`) is rewritten to its ASCII form
-  (` | 999x (YYYY-MM-DD)`) before validation, so it keys under its pattern name and is bounded like any line.
+- One text grammar before the gate reads anything. `validated_save_continuity` makes the FINAL text (after the
+  rederive strip and the durable carry-forward) canonical before any check parses it: every line terminator other
+  than the newline (CR, VT, FF, FS, GS, RS, NEL, U+2028, U+2029) becomes a newline (the CR of a CRLF pair is kept,
+  so a CRLF file still saves as CRLF), every other Unicode space becomes an ASCII space, and non-ASCII digits in a
+  `| Nx (YYYY-MM-DD)` marker become ASCII. `## Notes<CR>## Patterns<CR>- x | 999x` was one non-graduating heading
+  to the gate and a graduating 999x once the file was read back; `|<NBSP>999x` escaped the bound. Both are now
+  bounded like any line. The saved text can differ from what the caller passed in exactly these characters.
 - Scope: the bound governs what `validated_save_continuity` writes. A continuity written by the raw
   `Store.save_continuity()` or by an older anneal (which ignores the table) is outside it until the next canonical
   save, which bounds it against the record again.

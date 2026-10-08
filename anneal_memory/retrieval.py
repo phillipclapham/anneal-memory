@@ -1093,9 +1093,8 @@ def _swap_replaced(
         filters={"include_superseded": True},
     )
     replaced = {i: e for i, e in every.items() if e.superseded_by}
-    swappable = store.redirectable_ids(
-        {i: e.superseded_by or "" for i, e in replaced.items()}) if replaced else set()
-    replaced = {i: e for i, e in replaced.items() if i in swappable}
+    swap_to = store.redirectable_ids(list(replaced)) if replaced else {}
+    replaced = {i: e for i, e in replaced.items() if i in swap_to}
     if not replaced:
         return live[:max_episodes]
     weights, used_idf = _query_weights(
@@ -1119,7 +1118,7 @@ def _swap_replaced(
                 refs[hit.id] = []
                 slots.append(hit)
         else:
-            head_id = replaced[hit.id].superseded_by or ""
+            head_id = swap_to[hit.id]
             if head_id not in heads:
                 heads[head_id] = every.get(head_id) or store.get(head_id)
             head = heads[head_id]

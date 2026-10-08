@@ -476,7 +476,7 @@ def test_a_wrap_hop_anywhere_on_the_path_never_serves(tmp_path):   # codex H2 + 
         assert st.supersede(old_id=b.id, new_id=c.id, source="wrap")
         res = _recall(st, "is quillmark still on postgres")
         assert all(not e.replaces for e in res.episodes)
-        assert st.redirectable_ids({a.id: c.id}) == set()
+        assert st.redirectable_ids([a.id]) == {}
 
 
 def test_a_key_link_is_its_own_kind_whoever_wrote_it(tmp_path):   # codex M3
@@ -489,7 +489,7 @@ def test_a_key_link_is_its_own_kind_whoever_wrote_it(tmp_path):   # codex M3
         assert [r[0] for r in st._conn.execute("SELECT source FROM supersessions")] == ["state_key"]
         res = _recall(st, QUESTION + " near the waterfront")
         assert new.id in [e.id for e in res.episodes]
-        assert st.redirectable_ids({old.id: new.id}) == {old.id}
+        assert st.redirectable_ids([old.id]) == {old.id: new.id}
 
 def test_a_key_row_never_outlives_its_episode_even_for_raw_sql(tmp_path):   # codex M6
     with Store(str(tmp_path / "m.db")) as st:
@@ -644,3 +644,40 @@ def test_replaced_matches_rejects_a_head_cap_below_one(tmp_path, bad):   # codex
     with Store(str(tmp_path / "m.db")) as st:
         with pytest.raises(ValueError):
             st.replaced_matches("postgres", max_heads=bad)
+
+
+def test_recall_swaps_the_servable_head_past_a_newer_wrap_fork(tmp_path):   # seat ruling
+    with Store(str(tmp_path / "m.db")) as st:
+        _seed(st)
+        old = st.record("The database engine for Quillmark is postgres.", "observation",
+                        timestamp="2026-01-05T10:00:00Z")
+        x = st.record("Quillmark moved its database engine over to sqlite.", "observation",
+                      timestamp="2026-02-10T10:00:00Z")
+        y = st.record("Quillmark relocated its warehouse to a new city entirely.", "observation",
+                      timestamp="2026-03-10T10:00:00Z")
+        assert st.supersede(old_id=old.id, new_id=x.id, source="agent")
+        assert st.supersede(old_id=old.id, new_id=y.id, source="wrap")   # newer, unservable
+        assert st.redirectable_ids([old.id]) == {old.id: x.id}
+        res = _recall(st, "is quillmark still on postgres")
+        (swapped,) = [e for e in res.episodes if e.id == x.id]
+        assert [r.id for r in swapped.replaces] == [old.id]
+
+
+def test_a_servable_end_hidden_by_a_wrap_link_is_never_served(tmp_path):   # edge: A->B->C, C->D wrap
+    with Store(str(tmp_path / "m.db")) as st:
+        _seed(st)
+        a = st.record("The database engine for Quillmark is postgres.", "observation",
+                      timestamp="2026-01-05T10:00:00Z")
+        b = st.record("Quillmark moved its database engine over to sqlite.", "observation",
+                      timestamp="2026-02-10T10:00:00Z")
+        c = st.record("Quillmark moved its database engine over to duckdb now.", "observation",
+                      timestamp="2026-03-10T10:00:00Z")
+        d = st.record("Quillmark moved its database engine over to mariadb later.", "observation",
+                      timestamp="2026-04-10T10:00:00Z")
+        st.supersede(old_id=a.id, new_id=b.id)
+        st.supersede(old_id=b.id, new_id=c.id)
+        st.supersede(old_id=c.id, new_id=d.id, source="wrap")
+        assert st.redirectable_ids([a.id, b.id, c.id]) == {}
+        assert st.replaced_matches("postgres", max_heads=5).episodes == []
+        res = _recall(st, "is quillmark still on postgres")
+        assert all(not e.replaces for e in res.episodes)

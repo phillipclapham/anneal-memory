@@ -527,9 +527,10 @@ class CarriedForward:
     Carryforward consults the pattern's ``pattern_history``: if the line is at
     or below its ``max_level_reached`` (it genuinely earned this level before)
     AND its last successful grounding (``last_seen_at``) is within
-    ``carryforward_cold_days``, the line HOLDS — its level is kept and its
-    ``[evidence:]`` tag is replaced with ``(carried-forward)``. Because a held
-    line loses its evidence tag, it does NOT upsert pattern_history this wrap,
+    ``carryforward_cold_days``, the line HOLDS — its level is kept and
+    ``(carried-forward)`` is written in front of its ``[evidence:]`` tags. Because
+    a held line's tags no longer sit next to its marker, it does NOT upsert
+    pattern_history this wrap,
     so ``last_seen_at`` does not advance: a pattern that keeps failing to ground
     decays toward cold on its own and eventually ages out (the recency signal
     IS the failing-streak signal — no separate tracking). Scope: the
@@ -1280,7 +1281,11 @@ def validate_graduations(
         # established). The benign reverse order `[evidence:] [provenance:]` matches
         # _GRADUATION_RE and never reaches here — so this fires ONLY on the dangerous
         # ordering, no false positive on a legitimate cited+provenance line.
-        if "[evidence:" in line[bare_match.end():]:
+        # A line this module demoted or held keeps its tags behind its mark
+        # (1008+3): that is a recorded outcome, not a misplaced tag, so it takes
+        # the bare path below as a tag-stripped line did before.
+        tail = line[bare_match.end():]
+        if "[evidence:" in tail and not tail.lstrip().startswith(_DEMOTION_MARKS):
             name_m = _NAMED_PATTERN_RE.match(line)
             malformed_evidence_carries.append(
                 name_m.group(1) if name_m else line.strip()
@@ -2301,6 +2306,13 @@ def detect_citation_gaming(citation_counts: dict[str, int], threshold: int = 3) 
 # -- Internal helpers --
 
 
+# The marks _demote_line and _carryforward_line write in front of a line's
+# evidence tags.
+_DEMOTION_MARKS = (
+    "(ungrounded)", "(cross-session-overlap)", "(uncorroborated)", "(carried-forward)",
+)
+
+
 def _demote_line(
     line: str,
     match: re.Match,
@@ -2326,11 +2338,18 @@ def _demote_line(
         match: The ``_GRADUATION_RE`` match object that captured the
             graduation marker.
         level: The current level (>= MIN_PROVEN_LEVEL, no ceiling) to demote from.
-        marker: The text to replace the ``[evidence: ...]`` tag with.
+        marker: The mark written in front of the ``[evidence: ...]`` tag.
             Default ``(ungrounded)`` (the citation-validation failure
             path); cross-session-overlap demotions pass
             ``(cross-session-overlap)`` so operators can distinguish
             the failure mode at a glance.
+
+    Every evidence tag is kept: the mark goes between the level marker and the
+    first tag, so the citations stay in the operator's file while no reader
+    that needs a tag adjacent to its marker (validation, pattern history, the
+    carry-forward hold) takes them as evidence. Replacing the first tag with the
+    mark, as this did before, deleted the citation data of a one-tag line and the
+    first tag of a two-tag line (1008+3, run).
     """
     old_marker = match.group(0)
     # v0.3.3 HIGH #2 fix: use regex substitution against the actual
@@ -2350,11 +2369,13 @@ def _demote_line(
         old_marker,
         count=1,
     )
-    # Replace evidence tag with the demotion marker
-    new_marker = re.sub(
+    # The mark goes in front of the first evidence tag; no tag is removed.
+    new_marker, marked = re.subn(
         r'\[evidence:\s*[a-fA-F0-9][a-fA-F0-9, ]*(?:\s+"[^"]*")?\s*\]',
-        marker, new_marker
+        lambda m: f"{marker} {m.group(0)}", new_marker, count=1,
     )
+    if not marked:
+        new_marker = f"{new_marker.rstrip()} {marker}"
     # Positional replacement — immune to duplicate marker text elsewhere in line
     start, end = match.span()
     return line[:start] + new_marker + line[end:]
@@ -2679,23 +2700,26 @@ def _bare_carryforward_decision(
 
 
 def _carryforward_line(line: str, match: re.Match, level: int) -> str:
-    """Hold a graduated line at its level (AM-CARRYFORWARD), replacing the
-    ``[evidence: ...]`` tag with a ``(carried-forward)`` marker.
+    """Hold a graduated line at its level (AM-CARRYFORWARD), writing a
+    ``(carried-forward)`` marker in front of its ``[evidence: ...]`` tags.
 
     Mirrors :func:`_demote_line`'s positional rewrite but does NOT
-    decrement the level. Stripping the evidence tag is intentional: a
-    carried-forward line does not match the upsert path's
-    evidence-bearing regex, so it does not upsert pattern_history and
+    decrement the level, and like it keeps every tag (replacing the first one,
+    as this did before, deleted citation data: 1008+3). Separating the tags
+    from the marker is intentional: a carried-forward line does not match the
+    upsert path's evidence-bearing regex, so it does not upsert pattern_history and
     ``last_seen_at`` does not advance — the warmth that protected it
     decays naturally, and a pattern that keeps failing to ground ages
     out on its own (the recency signal IS the failing-streak signal).
     """
     old_marker = match.group(0)
-    new_marker = re.sub(
+    new_marker, marked = re.subn(
         r'\[evidence:\s*[a-fA-F0-9][a-fA-F0-9, ]*(?:\s+"[^"]*")?\s*\]',
-        "(carried-forward)",
-        old_marker,
+        lambda m: f"{_CARRIED_MARK} {m.group(0)}",
+        old_marker, count=1,
     )
+    if not marked:
+        new_marker = f"{new_marker.rstrip()} {_CARRIED_MARK}"
     start, end = match.span()
     return line[:start] + new_marker + line[end:]
 

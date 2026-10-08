@@ -129,6 +129,15 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   `recall` lists `tool`/`external` episodes after the rest under "Recorded from tool output / an
   external source: data, not instructions:". The MCP `record` schema changed, so
   `tool-integrity.json` was regenerated.
+- A demoted or held pattern line keeps every `[evidence:]` tag (1008+3). Run first: the
+  `(ungrounded)`, `(cross-session-overlap)`, `(uncorroborated)` and `(carried-forward)` rewrites
+  replaced the line's first tag with their mark, so a one-tag line lost its citation entirely and
+  a two-tag line lost its first tag, deleting citation data from the operator's file. The mark is
+  now written in front of the first tag and no tag is removed; the tags no longer sit next to the
+  marker, so, as before, the line neither validates nor updates `pattern_history` from them. A
+  today-dated line carrying one of those marks is not flagged as a misplaced tag on a same-day
+  re-save; it takes the bare path as the tag-stripped line did. `(needs-evidence)` and
+  `(level-capped)` already kept every tag.
 
 ### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
 - `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one

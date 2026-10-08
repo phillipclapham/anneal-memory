@@ -2806,7 +2806,7 @@ class Store:
             # cannot vanish between the check and the link. ⛔ The refusal is
             # raised AFTER this block (see _db_boundary's docstring).
             problem = next(
-                (p for p in (self._supersession_problem(o, None, content, ts, new_key=key)
+                (p for p in (self._supersession_problem(o, None, content, ts)
                              for o in old_ids) if p),
                 None,
             )
@@ -4460,7 +4460,7 @@ class Store:
     def _supersession_problem(
         self, old_id: str, new_id: str | None, new_content: str, new_ts: str,
         *, check_grounds: bool = True, check_order: bool = True,
-        new_key: str | None = None, key_link: bool = False,
+        key_link: bool = False,
     ) -> str | None:
         """Why one link fails validation, or None if it passes. Never raises a
         refusal (callers raise outside their ``_db_boundary``). Runs inside the
@@ -4474,16 +4474,16 @@ class Store:
         if row is None:
             return f"supersede: the superseded episode {old_id!r} does not exist"
         if not key_link:
-            # CAP-04 bound (L3 r2): a keyed episode is replaced only through its key, as
-            # Graphiti and MemStrata invalidate only within one slot. Links from outside a
-            # slot made unkeyed chain ends, branches and uncleared links hold slots.
+            # CAP-04 bound (L3 r3): a keyed episode is replaced only by the key planner,
+            # whatever the link's source or the new episode's key (as Graphiti and
+            # MemStrata invalidate only within one slot). A same-key explicit link was
+            # allowed in r2 and survived clear_state_key, leaving a keyed episode hidden
+            # by an unkeyed one, and a wrap-sourced one hid without serving.
             old_key = self._state_key_of(old_id)
-            if new_key is None and new_id is not None:
-                new_key = self._state_key_of(new_id)
-            if old_key is not None and new_key != old_key:
+            if old_key is not None:
                 return (
                     f"supersede: {old_id!r} fills the state slot {old_key!r}; record its "
-                    f"update with state_key={old_key!r} instead of a link"
+                    f"replacement with state_key={old_key!r} instead of a link"
                 )
         # String order, the same notion ``recall`` sorts by.
         if check_order and row["timestamp"] > new_ts:
@@ -4884,24 +4884,47 @@ class Store:
                 out.update(r[0] for r in rows if heads.get(r[0]) == r[1])
         return out
 
-    def replaced_matches(self, phrase: str, *, limit: int) -> list[Episode]:
+    def replaced_matches(
+        self, phrase: str, *, limit: int, redirectable_only: bool = False,
+    ) -> list[Episode]:
         """Episodes a supersession hides whose content contains ``phrase`` (matched as
         :meth:`recall` matches a keyword), newest first, each with ``superseded_by`` =
         the live end of its chain; one whose chain has no live end is left out. Scans
-        only the hidden set, so live matches cannot crowd them out."""
+        only the hidden set, so live matches cannot crowd them out. With
+        ``redirectable_only`` a match :meth:`redirectable_ids` would not serve is left
+        out BEFORE the limit counts: the scan pages on (timestamp, id) until ``limit``
+        servable matches are found or the hidden set is exhausted (L3 r3: a run of
+        wrap-hidden matches crowded out the one that could serve)."""
         if limit < 0:
             raise ValueError("replaced_matches: limit must be >= 0")
+        out: list[Episode] = []
         with self._db_boundary("keyword_candidates"), self._read_snapshot():
             if not phrase or not limit or not self._has_supersessions_table():
                 return []
             hide_sql, hide_params = _hidden_by_supersession_sql(None)
-            rows = self._conn.execute(
-                f"SELECT * FROM episodes WHERE id IN ({hide_sql}) AND {_KEYWORD_LIKE_SQL} "
-                "ORDER BY timestamp DESC LIMIT ?",
-                [*hide_params, _keyword_like_pattern(phrase), limit]).fetchall()
-            heads = self._live_replacements([r["id"] for r in rows], None)
-        return [dataclasses.replace(self._row_to_episode(r), superseded_by=heads[r["id"]])
-                for r in rows if r["id"] in heads]
+            pattern = _keyword_like_pattern(phrase)
+            page = 500
+            after: tuple[str, str] | None = None
+            while len(out) < limit:
+                cursor = "" if after is None else " AND (timestamp, id) < (?, ?)"
+                rows = self._conn.execute(
+                    f"SELECT * FROM episodes WHERE id IN ({hide_sql}) AND "
+                    f"{_KEYWORD_LIKE_SQL}{cursor} ORDER BY timestamp DESC, id DESC LIMIT ?",
+                    [*hide_params, pattern, *(after or ()), page]).fetchall()
+                heads = self._live_replacements([r["id"] for r in rows], None)
+                kept = [r for r in rows if r["id"] in heads]
+                if redirectable_only and kept:
+                    ok = self.redirectable_ids({r["id"]: heads[r["id"]] for r in kept})
+                    kept = [r for r in kept if r["id"] in ok]
+                for r in kept:
+                    out.append(dataclasses.replace(
+                        self._row_to_episode(r), superseded_by=heads[r["id"]]))
+                    if len(out) == limit:
+                        break
+                if len(rows) < page:
+                    break
+                after = (rows[-1]["timestamp"], rows[-1]["id"])
+        return out
 
     def _scan_containing_oldest(
         self, keyword: str, visit: Callable[[Episode], bool], *, page: int = 500,

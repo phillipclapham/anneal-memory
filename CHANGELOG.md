@@ -25,7 +25,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   `state_key` (tool-integrity manifests regenerated). A slot holds one value: of its live keyed
   episodes and the new one, the newest by the instant its timestamp names (then insertion
   order) replaces every other. A keyed episode is replaced only through its key: an explicit,
-  wrap-proposed or team link from it to an episode outside its slot is refused (`record` and
+  wrap-proposed or team link from it is refused, even to an episode with the same key (`record` and
   `supersede` raise; a wrap reports it in `supersessions_rejected`). The links are ordinary
   `supersessions` rows with `source='state_key'` (the link's kind; who asked is in the audit
   event, which names the key), so hiding, delete/prune rewiring and the audit chain apply;

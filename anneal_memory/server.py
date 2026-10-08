@@ -154,7 +154,7 @@ _FALLBACK_DEFAULT_CAP = 10   # word matches listed when the caller passed no ``l
 _EXACT_RESULTS_ENOUGH = 3    # an exact result this small is topped up with word matches
 _ALSO_MATCHING_MAX = 5       # how many word matches are appended to such a result
 _REPLACED_MAX = 5  # replaced matches listed by one keyword recall
-_REPLACED_SCAN = 200  # hidden matches read to find them
+_REPLACED_SCAN = 200  # servable replaced matches read to find them
 _RECALL_DEFAULT_LIMIT = 100  # MCP recall's ``limit`` when the caller passes none
 
 
@@ -476,14 +476,10 @@ class Server:
         phrase = keyword.strip()
         if not phrase:
             return ""
-        # A wide window, filtered below: wrap-hidden matches cannot serve, and a narrow
-        # window of them would crowd out the one that can (complement L3 r2).
-        old = self._store.replaced_matches(phrase, limit=_REPLACED_SCAN)
-        swappable = self._store.redirectable_ids(
-            {ep.id: ep.superseded_by or "" for ep in old}) if old else set()
+        old = self._store.replaced_matches(phrase, limit=_REPLACED_SCAN, redirectable_only=True)
         by_head: dict[str, list[str]] = {}
         for ep in old:
-            if ep.id in swappable and ep.superseded_by:
+            if ep.superseded_by:
                 by_head.setdefault(ep.superseded_by, []).append(ep.id)
         lines = []
         for head_id, olds in list(by_head.items())[:_REPLACED_MAX]:

@@ -23,8 +23,13 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - `AuditTrail.stats()` reads `entry_count` from the active file on every call (its last valid
   entry's `seq` + 1), so it includes other writers' entries; it takes no lock and changes no
   state, so a status read never waits on a writer and never consumes the lost-file refusal. An
-  active file with no valid entry that the manifest records as having held some reads as unknown
-  (`audit_entry_count` None in `status`), not as 0 entries.
+  active file with no valid entry that the manifest, or the instance itself, records as having held
+  some reads as unknown (`audit_entry_count` None in `status`), not as 0 entries; so does an
+  unparseable manifest.
+- A sealed week with the same period no longer clears the manifest's record of an active file that
+  went missing: after a clock rollback a new active file could begin in an already-sealed week, and
+  its deletion read as sealed, with the chain continuing over the lost entries (reproduced). A seal
+  by an older release that left the record set now reads as a vanished file until `audit-repair`.
 - The append lock is released with `LOCK_UN` before its close, as the manifest lock now is, so a
   child forked while it was held does not keep it.
 - An append waits at most 30 seconds for another holder; past that, or when the lock file cannot

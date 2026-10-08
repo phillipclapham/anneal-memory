@@ -9563,16 +9563,26 @@ class TestKL24ConcurrentWriters:
         with pytest.raises(audit_module._ManifestUnavailable, match="is gone"):
             trail.log("after", {})
 
-    def test_status_reports_a_lost_trail_as_unknown_not_zero(self, tmp_path):
-        """L3 r2 codex MED: a deleted active file read as a healthy 0 entries."""
+    @pytest.mark.parametrize("shape", ["recorded", "no_record", "bad_manifest"])
+    def test_status_reports_a_lost_trail_as_unknown_not_zero(
+        self, tmp_path, monkeypatch, shape
+    ):
+        """L3 r2 codex MED: a deleted active file read as a healthy 0 entries.
+        L3 r3: also when the manifest's best-effort record was never saved
+        (codex MED), and when the manifest is ``[]`` (a TypeError crashed the
+        status call)."""
         from anneal_memory.store import Store
         from anneal_memory.types import EpisodeType
 
+        if shape == "no_record":
+            monkeypatch.setattr(AuditTrail, "_record_active_begun", lambda self, *a: None)
         store = Store(tmp_path / "m.db")
         try:
             store.record("an episode", EpisodeType.OBSERVATION)
             assert store.status().audit_entry_count
             (tmp_path / "m.audit.jsonl").unlink()
+            if shape == "bad_manifest":
+                (tmp_path / "m.audit.manifest.json").write_text("[]")
             assert store.status().audit_entry_count is None
         finally:
             store.close()

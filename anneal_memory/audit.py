@@ -1375,8 +1375,8 @@ class AuditTrail:
 
     def _raise_if_active_lost(self) -> None:
         """For :meth:`stats` when the active file holds no valid entry: raise
-        ``OSError`` if the manifest says it once did and its week is not sealed
-        (``vanished_active_week``), so ``Store.status()`` reports the counts as
+        ``OSError`` if the manifest (``vanished_active_week``) or this instance
+        says it once did, so ``Store.status()`` reports the counts as
         unknown instead of a healthy 0 (KL-24 L3 r2, codex MED). Read-only: no
         lock, no quarantine, nothing written. The same reading holds for the
         instant inside a peer's rotation between the rename and the manifest
@@ -1387,14 +1387,22 @@ class AuditTrail:
                 _read_regular_bytes(manifest_path), self._db_path.stem
             )
         except FileNotFoundError:
-            return
-        except (OSError, ValueError) as e:
+            manifest = {}
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as e:
+            # Every way a manifest fails to parse reads as unknown, never as a
+            # crash of the status call (L3 r3: ``[]`` raised TypeError).
             raise OSError(f"the audit manifest cannot be read: {e}") from e
-        begun = vanished_active_week(manifest)
-        if begun is not None:
+        try:
+            begun = vanished_active_week(manifest)
+        except (TypeError, KeyError, AttributeError) as e:
+            raise OSError(f"the audit manifest cannot be read: {e}") from e
+        if begun is not None or self._active_has_entry:
+            # The manifest's record is best-effort; this instance's own
+            # knowledge that the file held an entry counts too (L3 r3, codex
+            # MED: with no record the lost trail read as a healthy 0).
             raise OSError(
-                f"the active audit file for week {begun['period']} held entries "
-                "and is gone or empty; run `anneal-memory audit-repair`"
+                "the active audit file held entries and is gone or empty; run "
+                "`anneal-memory audit-repair`"
             )
 
     @classmethod
@@ -3416,6 +3424,9 @@ class AuditTrail:
             with open(tmp_gz_path, "wb") as raw:
                 with gzip.GzipFile(fileobj=raw, mode="wb") as f_out:
                     active.rename(sealed_path)
+                    # From here this instance's tip is in the sealed file, not
+                    # the active one, whatever happens next (L3 r3, codex MED).
+                    self._tip = None
                     _fsync_dir(sealed_path.parent)
                     with _open_regular(sealed_path) as f_in:
                         for line in f_in:
@@ -3450,12 +3461,10 @@ class AuditTrail:
                 os.fsync(raw.fileno())
         except BaseException:
             if sealed_path.exists():
-                # This instance renamed the file holding its own tip, so its
-                # tip is no longer in the active file: re-derive at the next
-                # append (which adopts the orphan) instead of refusing it as
-                # lost. Its own act, not a filename read as a peer's seal (see
-                # _lost_active).
-                self._tip = None
+                # This instance renamed the file holding its own tip: re-derive
+                # at the next append (which adopts the orphan) instead of
+                # refusing it as lost. Its own act, not a filename read as a
+                # peer's seal (see _lost_active).
                 self._initialized = False
             # The temp was created before the rename. If the rename never
             # happened it holds no audit data, and left behind it would read
@@ -3467,6 +3476,24 @@ class AuditTrail:
                     pass
             raise
 
+        try:
+            self._seal_after_rename(
+                manifest, tmp_gz_path, sealed_gz_path, sealed_path, current_week,
+                entry_count, first_ts, last_ts, file_hash,
+            )
+        except BaseException:
+            # The rename happened; a failure in any later step leaves this
+            # instance's cached chain state unproven (L3 r3, codex MED: a failed
+            # replace refused the next committed append as a lost file).
+            self._initialized = False
+            raise
+
+    def _seal_after_rename(
+        self, manifest: dict[str, Any], tmp_gz_path: Path, sealed_gz_path: Path,
+        sealed_path: Path, current_week: str, entry_count: int, first_ts: str,
+        last_ts: str, file_hash: Any,
+    ) -> None:
+        """Steps 3-5 of :meth:`_rotate_locked`, after the rename."""
         tmp_gz_path.replace(sealed_gz_path)
         _fsync_dir(sealed_gz_path.parent)
 
@@ -4159,18 +4186,20 @@ def _week_of(name: str, prefix: str) -> str:
 
 
 def vanished_active_week(manifest: dict[str, Any]) -> dict[str, str] | None:
-    """The manifest's ``active_begun`` record unless its week is sealed (a
-    ``files`` record has that period: the fallback for a seal by a release that
-    keeps the field but does not clear it; this release's seal and adoption clear
-    it). ``audit-repair`` clears the record in the same save that records the
-    gap, so a later deletion in the same week is seen again. The caller
-    establishes that the active file holds no usable entry; this says only that
-    it once did."""
+    """The manifest's ``active_begun`` record. A seal and an adoption clear it;
+    ``audit-repair`` clears it in the same save that records the gap, or when a
+    readable sealed week's first entry is the recorded file's first entry, so a
+    later deletion in the same week is seen again. The caller establishes that
+    the active file holds no usable entry; this says only that it once did.
+
+    ⛔ A ``files`` record with the same PERIOD no longer clears it (KL-24 L3 r3,
+    codex HIGH, reasoned trace): after a clock rollback a new active file began
+    in a week already sealed, and deleting it read as sealed, so the chain went
+    on with its entries silently missing. A seal by an older release that kept
+    the field set now reads as a vanished file until ``audit-repair`` matches
+    its first entry."""
     begun = manifest.get("active_begun")
     if not begun:
-        return None
-    period = begun["period"]
-    if any(f.get("period") == period for f in manifest.get("files", [])):
         return None
     return dict(begun)
 

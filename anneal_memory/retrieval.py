@@ -1093,7 +1093,7 @@ def _swap_replaced(
         filters={"include_superseded": True},
     )
     replaced = {i: e for i, e in every.items() if e.superseded_by}
-    swap_to = store.redirectable_ids(list(replaced)) if replaced else {}
+    swap_to = store.redirectable_ids(list(replaced), until) if replaced else {}
     replaced = {i: e for i, e in replaced.items() if i in swap_to}
     if not replaced:
         return live[:max_episodes]

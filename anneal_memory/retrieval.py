@@ -1109,7 +1109,6 @@ def _swap_replaced(
         min_len=_min_episode_len(mode),
     )
     ranked = sorted([*live, *old_hits], key=lambda e: (e.score, e.timestamp, e.id), reverse=True)
-    heads: dict[str, Episode | None] = {}
     slots: list[ScoredEpisode] = []
     refs: dict[str, list[ReplacedEpisode]] = {}
     for hit in ranked:
@@ -1118,12 +1117,8 @@ def _swap_replaced(
                 refs[hit.id] = []
                 slots.append(hit)
         else:
-            head_id = swap_to[hit.id]
-            if head_id not in heads:
-                heads[head_id] = store.get(head_id)   # read now: a head deleted since the fetch is skipped
-            head = heads[head_id]
-            if head is None:
-                continue
+            head = swap_to[hit.id]   # the row redirectable_ids read with its choice
+            head_id = head.id
             if head_id not in refs:
                 refs[head_id] = []
                 slots.append(ScoredEpisode(

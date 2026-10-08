@@ -489,7 +489,7 @@ def test_a_key_link_is_its_own_kind_whoever_wrote_it(tmp_path):   # codex M3
         assert [r[0] for r in st._conn.execute("SELECT source FROM supersessions")] == ["state_key"]
         res = _recall(st, QUESTION + " near the waterfront")
         assert new.id in [e.id for e in res.episodes]
-        assert st.redirectable_ids([old.id]) == {old.id: new.id}
+        assert {k: v.id for k, v in st.redirectable_ids([old.id]).items()} == {old.id: new.id}
 
 def test_a_key_row_never_outlives_its_episode_even_for_raw_sql(tmp_path):   # codex M6
     with Store(str(tmp_path / "m.db")) as st:
@@ -657,7 +657,7 @@ def test_recall_swaps_the_servable_head_past_a_newer_wrap_fork(tmp_path):   # se
                       timestamp="2026-03-10T10:00:00Z")
         assert st.supersede(old_id=old.id, new_id=x.id, source="agent")
         assert st.supersede(old_id=old.id, new_id=y.id, source="wrap")   # newer, unservable
-        assert st.redirectable_ids([old.id]) == {old.id: x.id}
+        assert {k: v.id for k, v in st.redirectable_ids([old.id]).items()} == {old.id: x.id}
         res = _recall(st, "is quillmark still on postgres")
         (swapped,) = [e for e in res.episodes if e.id == x.id]
         assert [r.id for r in swapped.replaces] == [old.id]
@@ -702,7 +702,8 @@ def test_the_recent_cutoff_bounds_the_served_head(tmp_path, src):   # L3 r7 code
         assert [r.id for r in swapped.replaces] == [a.id]
 
 
-def test_a_head_deleted_mid_redirect_is_not_swapped_in(tmp_path):   # L3 r8 codex M
+@pytest.mark.parametrize("src", ["agent", "wrap"])
+def test_the_head_is_chosen_and_read_in_one_state(tmp_path, src):   # L3 r8 codex M / r9 codex M
     db = str(tmp_path / "m.db")
     with Store(db) as st:
         _seed(st)
@@ -711,22 +712,27 @@ def test_a_head_deleted_mid_redirect_is_not_swapped_in(tmp_path):   # L3 r8 code
         b = st.record("Quillmark moved its database engine over to sqlite.", "observation",
                       timestamp="2026-02-10T10:00:00Z")
         c = st.record("Quillmark moved its database engine over to duckdb now.", "observation",
-                      timestamp="2026-04-28T10:00:00Z")   # after the cutoff: A's head is B
+                      timestamp="2026-02-20T10:00:00Z")
         st.supersede(old_id=a.id, new_id=b.id)
-        st.supersede(old_id=b.id, new_id=c.id)
-        real = st._live_replacements
-        fired = []
+        real = st.redirectable_ids
+        got = []
 
-        def racing(*args, **kw):
-            out = real(*args, **kw)
-            if kw.get("servable_only") and not fired:
-                fired.append(1)
-                with Store(db) as other:
-                    other.delete(b.id)   # rewires A->C; C is past the cutoff
+        def racing(ids, until=None):
+            out = real(ids, until)
+            got.append({o: h.id for o, h in out.items()})
+            # B->C commits (a wrap link, so it can never serve) after the choice was made
+            with Store(db) as other:
+                other.supersede(old_id=b.id, new_id=c.id, source=src)
             return out
 
-        st._live_replacements = racing   # type: ignore[method-assign]
-        res = _recall(st, "is quillmark still on postgres",
-                      exclude_recent_minutes=60 * 24 * 10, now="2026-05-01T12:00:00Z")
-        assert fired
-        assert all(not e.replaces for e in res.episodes)   # the deleted head is never swapped in
+        reads: list[str] = []
+        real_get = st.get
+        st.redirectable_ids = racing   # type: ignore[method-assign]
+        st.get = lambda i, *x, **k: (reads.append(i), real_get(i, *x, **k))[1]   # type: ignore[method-assign]
+        res = _recall(st, "is quillmark still on postgres")
+        assert got and b.id in got[0].values()
+        # The head came from the rows the choice was made on: no second read of it, so
+        # the later link cannot leave a head chosen in one state and read in another.
+        assert b.id not in reads
+        (swapped,) = [e for e in res.episodes if e.id == b.id]
+        assert [r.id for r in swapped.replaces] == [a.id]

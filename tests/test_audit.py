@@ -7504,24 +7504,33 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         assert result.total_entries == 5 + 4  # sealed, then rot/later/again/still
 
     @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root lists a mode-300 directory")
-    def test_a_directory_that_cannot_be_listed_does_not_block_writes(self, tmp_path):
-        """LOW, L1, round 10, reproduced: with the audit directory writable but
-        not listable (mode 0o300), recovery's listing raised and every
-        ``log()`` failed.
-
-        ⛔ MUTATION-CHECKED: let recovery's listing raise ``OSError`` and this
-        fails.
+    def test_a_directory_that_cannot_be_listed_refuses_writes(self, tmp_path):
+        """Round 10 (L1) made writes in a writable but unlistable directory
+        (mode 0o300) go through, because recovery's listing raised and every
+        ``log()`` failed with a raw ``OSError``. Ruling A (Phill 2026-10-08:
+        fail closed when the manifest cannot be checked) supersedes that: a
+        directory that cannot be listed cannot rule out a quarantine marker,
+        and KL-24 L3 r6 (codex 2, run) had an initialized writer append past a
+        marker there. So the append is refused as ``_ManifestUnavailable`` (a
+        counted drop, naming the listing), never a raw traceback, and nothing is
+        written; once the directory is listable again, writes resume.
         """
         store = tmp_path / "store"
         store.mkdir()
         db = store / "m.db"
-        AuditTrail(db).log("first", {})
+        trail = AuditTrail(db)
+        trail.log("first", {})
+        before = (store / "m.audit.jsonl").read_bytes()
         store.chmod(0o300)
         try:
-            AuditTrail(db).log("second", {})  # must NOT raise
+            for writer in (AuditTrail(db), trail):  # a new and an initialized one
+                with pytest.raises(audit_module._ManifestUnavailable, match="cannot be listed"):
+                    writer.log("second", {})
         finally:
             store.chmod(0o700)
 
+        assert (store / "m.audit.jsonl").read_bytes() == before
+        trail.log("third", {})
         assert AuditTrail.verify(db).total_entries == 2
 
     @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root lists a mode-300 directory")
@@ -7878,6 +7887,11 @@ class TestHybridManifestQuarantine:
         [gap] = repaired.set_aside
         assert "possible gap" in gap["cause"] and gap["set_aside_as"] == ""
         assert gap["filename"] == "m.audit.jsonl"
+        # KL-24 L3 r6 (codex 10, run): marked explicitly and reported as a
+        # POSSIBLE gap, never as entries that definitely went missing.
+        assert gap["certainty"] == "possible"
+        [line] = audit_module.set_aside_report_lines([gap], db)
+        assert line.startswith("POSSIBLE GAP:") and "went missing" not in line
         assert AuditTrail.verify(db).set_aside == [gap]
 
         # With the gap on record, the next append seeds from the sealed tail.
@@ -9730,6 +9744,168 @@ class TestKL24ConcurrentWriters:
         (db2.parent / "m.audit.jsonl").write_text("")
         assert AuditTrail.repair_manifest(db2).repaired
         assert AuditTrail.verify(db2).set_aside == []
+
+    @staticmethod
+    def _crash_after_staging(db):
+        """A child process appends the first entry of a fresh active file and
+        dies between saving its record and renaming the staged temp in."""
+        import subprocess
+
+        code = (
+            "import os, sys\n"
+            "import anneal_memory.audit as am\n"
+            "real = am.os.replace\n"
+            "def die(src, dst, *a, **k):\n"
+            "    if str(src).endswith('.first'): os._exit(9)\n"
+            "    return real(src, dst, *a, **k)\n"
+            "am.os.replace = die\n"
+            "am.AuditTrail(sys.argv[1]).log('staged', {})\n"
+        )
+        env = {**os.environ, "PYTHONPATH": str(Path(audit_module.__file__).parent.parent)}
+        assert subprocess.run([sys.executable, "-c", code, str(db)], env=env).returncode == 9
+        assert (db.parent / "m.audit.jsonl.first").exists()
+
+    def test_a_staged_first_entry_is_finished_or_set_aside_never_deleted(
+        self, tmp_path, monkeypatch
+    ):
+        """KL-24 L3 r6, each run first on d3c408a. complement 1 + codex 1:
+        audit-repair over a crash's staged entry recorded a permanent gap and
+        the next append deleted the entry; repair now finishes it. codex 5 + glm
+        1: with the manifest quarantined, the next append deleted the staged
+        entry before refusing; it is kept, and repair sets it aside under the
+        rebuild's possible gap. codex 8 + complement 2: a rename that failed with
+        no active file left the temp and its record, and the retry committed
+        the failed entry; the temp is set aside and the record withdrawn."""
+        db = tmp_path / "a" / "m.db"
+        db.parent.mkdir()
+        self._crash_after_staging(db)
+        result = AuditTrail.repair_manifest(db)
+        assert result.repaired and result.set_aside == [], result.error
+        assert result.staged_first_entry.startswith("finished")
+        AuditTrail(db).log("next", {})
+        events = [json.loads(line)["event"] for line in (db.parent / "m.audit.jsonl").read_text().splitlines()]
+        assert events == ["staged", "next"]
+        assert AuditTrail.verify(db).valid and AuditTrail.verify(db).set_aside == []
+
+        db = tmp_path / "b" / "m.db"
+        db.parent.mkdir()
+        self._crash_after_staging(db)
+        manifest = db.parent / "m.audit.manifest.json"
+        manifest.rename(db.parent / "m.audit.manifest.json.corrupt-20261008T000000000000Z")
+        with pytest.raises(audit_module._ManifestQuarantined):
+            AuditTrail(db).log("next", {})
+        assert (db.parent / "m.audit.jsonl.first").exists(), "kept while undecidable"
+        result = AuditTrail.repair_manifest(db)
+        assert result.repaired and result.staged_first_entry.startswith("set aside")
+        [kept] = [p for p in db.parent.iterdir() if ".first.discarded-" in p.name]
+        assert b'"event":"staged"' in kept.read_bytes()
+        assert [r["certainty"] for r in result.set_aside] == ["possible"]
+
+        db = tmp_path / "c" / "m.db"
+        db.parent.mkdir()
+        real = audit_module.os.replace
+
+        def refuse_the_rename(src, dst, *a, **k):
+            if str(src).endswith(".first"):
+                raise PermissionError(13, "rename refused")
+            return real(src, dst, *a, **k)
+
+        monkeypatch.setattr(audit_module.os, "replace", refuse_the_rename)
+        with pytest.raises(PermissionError):
+            AuditTrail(db).log("failed", {})
+        monkeypatch.setattr(audit_module.os, "replace", real)
+        assert not (db.parent / "m.audit.jsonl.first").exists()
+        assert [p for p in db.parent.iterdir() if ".first.discarded-" in p.name]
+        assert json.loads((db.parent / "m.audit.manifest.json").read_text())["active_begun"] is None
+        AuditTrail(db).log("retry", {})
+        events = [json.loads(line)["event"] for line in (db.parent / "m.audit.jsonl").read_text().splitlines()]
+        assert events == ["retry"]
+
+    @pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+    def test_every_append_preflights_the_lock_and_stages_portably(self, tmp_path, monkeypatch):
+        """KL-24 L3 r6, each run first on d3c408a. codex 3: an initialized
+        same-week writer appended with the manifest lock unopenable, never
+        taking the lock. codex 4: without ``os.O_NOFOLLOW`` (Windows) every
+        first-entry append raised ``AttributeError``. codex 7: a short
+        ``os.write`` renamed half an entry in and reported success."""
+        db = tmp_path / "a" / "m.db"
+        db.parent.mkdir()
+        trail = AuditTrail(db)
+        trail.log("a", {})
+        lock = db.parent / "m.audit-manifest.lock"
+        lock.unlink()
+        lock.mkdir()
+        with pytest.raises(audit_module._ManifestUnavailable, match="lock cannot be taken"):
+            trail.log("b", {})
+        lock.rmdir()
+        trail.log("c", {})
+        assert AuditTrail.verify(db).total_entries == 2
+
+        db = tmp_path / "b" / "m.db"
+        db.parent.mkdir()
+        monkeypatch.delattr(audit_module.os, "O_NOFOLLOW")
+        monkeypatch.setattr(audit_module, "fcntl", None)
+        AuditTrail(db).log("windows", {})
+        monkeypatch.undo()
+        assert AuditTrail.verify(db).total_entries == 1
+
+        db = tmp_path / "c" / "m.db"
+        db.parent.mkdir()
+        real_write = audit_module.os.write
+        monkeypatch.setattr(
+            audit_module.os, "write",
+            lambda fd, data: real_write(fd, data[: max(1, len(data) // 2)]),
+        )
+        AuditTrail(db).log("short", {"pad": "x" * 300})
+        assert AuditTrail.verify(db).valid
+        monkeypatch.setattr(audit_module.os, "write", lambda fd, data: 0)
+        db = tmp_path / "d" / "m.db"
+        db.parent.mkdir()
+        with pytest.raises(OSError, match="no progress"):
+            AuditTrail(db).log("stuck", {})
+        monkeypatch.undo()
+        assert not (db.parent / "m.audit.jsonl").exists()
+
+    def test_stats_and_repair_refuse_what_they_cannot_rule_out(self, tmp_path):
+        """KL-24 L3 r6, each run first on d3c408a. codex 6: ``stats()`` read an
+        active file with entries beside a quarantine marker as a normal count,
+        and a staged entry beside a manifest with no record as a healthy 0.
+        codex 9: with the manifested sealed week the record names replaced by a
+        directory, repair recorded a permanent gap instead of refusing."""
+        db = tmp_path / "a" / "m.db"
+        db.parent.mkdir()
+        trail = AuditTrail(db)
+        trail.log("a", {})
+        manifest = db.parent / "m.audit.manifest.json"
+        marker = db.parent / "m.audit.manifest.json.corrupt-20261008T000000000000Z"
+        manifest.rename(marker)
+        with pytest.raises(OSError, match="quarantined"):
+            AuditTrail(db).stats()
+        marker.rename(manifest)
+        (db.parent / "m.audit.jsonl.first").write_text("{}\n")
+        with pytest.raises(OSError, match="staged first audit entry"):
+            AuditTrail(db).stats()
+
+        db = tmp_path / "b" / "m.db"
+        db.parent.mkdir()
+        trail = AuditTrail(db)
+        trail.log("pre", {})
+        trail._last_week = "1999-W01"
+        trail.log("rot", {})
+        manifest = db.parent / "m.audit.manifest.json"
+        m = json.loads(manifest.read_text())
+        sealed = m["files"][-1]
+        m["active_begun"] = {"period": sealed["period"], "first_hash": "f" * 64,
+                             "first_prev_hash": GENESIS_HASH}
+        manifest.write_text(json.dumps(m))
+        (db.parent / "m.audit.jsonl").unlink()
+        path = db.parent / sealed["filename"]
+        path.unlink()
+        path.mkdir()
+        before = manifest.read_bytes()
+        result = AuditTrail.repair_manifest(db)
+        assert result.repaired is False and "not a regular file" in (result.error or "")
+        assert manifest.read_bytes() == before
 
     def test_stats_from_inside_this_threads_append_answers_from_the_cache(
         self, tmp_path, monkeypatch

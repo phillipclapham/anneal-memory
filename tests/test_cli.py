@@ -4629,3 +4629,31 @@ def test_audit_repair_names_a_missing_active_file_as_lost_not_moved(tmp_path):
     assert out.returncode == 0, out.stderr
     assert "Recorded the missing active audit file m.audit.jsonl" in out.stdout
     assert "Set aside sealed file" not in out.stdout
+
+    # KL-24 L3 r6 (codex 10, run on d3c408a): a rebuild from quarantine with
+    # sealed files printed no gap at all, and verify called the possible gap a
+    # definite one ("went missing with its entries").
+    db = tmp_path / "q" / "m.db"
+    db.parent.mkdir()
+    trail = AuditTrail(db)
+    trail.log("pre", {})
+    trail._last_week = "1999-W01"
+    trail.log("rot", {})
+    (db.parent / "m.audit.manifest.json").write_bytes(b"{not json")
+    (db.parent / "m.audit.jsonl").unlink()
+    with pytest.raises(_ManifestQuarantined):
+        AuditTrail(db).log("trigger", {})
+    out = subprocess.run(
+        [sys.executable, "-m", "anneal_memory.cli", "--db", str(db), "audit-repair"],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 0, out.stderr
+    assert "rebuilt from 1 sealed file(s)" in out.stdout
+    assert "Recorded a POSSIBLE gap for the active audit file m.audit.jsonl" in out.stdout
+    assert "entries are lost" not in out.stdout
+    verify = subprocess.run(
+        [sys.executable, "-m", "anneal_memory.cli", "--db", str(db), "verify"],
+        capture_output=True, text=True,
+    )
+    assert "POSSIBLE GAP: the active audit file m.audit.jsonl" in verify.stderr
+    assert "went missing" not in verify.stderr

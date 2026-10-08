@@ -36,7 +36,18 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   best-effort, a failed save left a later deletion of the file undetected: the chain restarted and
   `verify` read valid (reproduced). The first entry is staged in a temp file and renamed into place
   after its record is saved, so a crash between the two is finished on the next append instead of
-  reading as a deleted file.
+  reading as a deleted file. A staged entry is never deleted: one that does not commit is set aside
+  as `<active>.first.discarded-<UTC stamp>`. The next append decides it only after the quarantine
+  check and only from a readable manifest; `audit-repair` takes the append lock and then the
+  manifest lock and resolves a staged entry first, by the same rule, before any gap decision
+  (`AuditRepairResult.staged_first_entry`). Run first: repair over a crash's staged entry recorded
+  a permanent gap and the next append deleted it; a quarantine let the next append delete it; a
+  rename that failed with no active file left it and its record, and the retry committed the entry
+  whose append had failed. The temp is created exclusively (no `O_NOFOLLOW`, which Windows lacks:
+  every first append raised `AttributeError`) and written with a full-write loop (a short
+  `os.write` renamed half an entry in and reported success). A sealed week repair checks against
+  the first-entry record that is not a regular file, or cannot be read, refuses the repair instead
+  of recording a gap.
 - Audit appends FAIL CLOSED when the manifest lock cannot be taken or the manifest is quarantined
   (ruled 2026-10-08, superseding the 2026-10-03 "degrade with a warning" and the 2026-09-13
   "appending continues while quarantined"): each refused append is counted as a dropped audit write
@@ -45,6 +56,19 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   went on, and after `audit-repair` `verify` read valid with that week's entries gone and no gap.
   `audit-repair` rebuilding a quarantined manifest over an active file with no entry now records a
   possible gap, since nothing left on disk says whether the file held entries.
+- Also fail closed (L3 r6, each run first): an audit directory that cannot be listed to rule out a
+  quarantine marker (superseding round 10b's "an unlistable directory must not block writes": an
+  initialized writer appended past a marker at mode 0300), and a manifest lock that cannot be
+  taken by an already-initialized writer (it appended without ever taking the lock): every append
+  now takes the manifest lock briefly, with no manifest read when nothing else needs one. Measured
+  on 1,000 appends, interleaved runs under the same load: median 244-263 µs per append before,
+  284-305 µs after.
+- The possible-gap record carries `certainty: "possible"`, and `verify` (CLI, `--verify-audit`)
+  and `audit-repair` report it as a POSSIBLE GAP, never as entries that went missing; the human
+  `audit-repair` output prints every record it returns (a rebuild with sealed files printed none).
+- `stats()` reads as unknown whenever a quarantine marker or a staged first entry is on disk, or the
+  directory cannot be listed to rule those out, whatever the active file holds (an active file
+  with entries beside a marker read as a normal count).
 - The append lock is released with `LOCK_UN` before its close, as the manifest lock now is, so a
   child forked while it was held does not keep it.
 - An append waits at most 30 seconds for another holder; past that, or when the lock file cannot

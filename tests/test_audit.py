@@ -9857,77 +9857,13 @@ class TestKL24ConcurrentWriters:
         with pytest.raises(OSError, match="staged first audit entry"):
             AuditTrail(db2).stats()
 
-    def test_a_rollback_crash_after_the_set_aside_reconciles_by_hash(
-        self, tmp_path, monkeypatch
-    ):
-        """KL-24 L3 r7, codex MED 1, each run first on 5de42b3: a stop between the
-        rollback's set-aside of the staged file and the withdrawal of
-        ``active_begun`` made every append refuse, and audit-repair recorded a
-        definite missing-file gap for bytes that were kept. The record is
-        reconciled against the discarded file BY HASH; a file that does not
-        hash to it proves nothing."""
-        real_replace, real_aside = audit_module.os.replace, audit_module._set_aside
-
-        def crash(db):
-            def refuse(src, dst, *a, **k):
-                if str(src).endswith(".first"):
-                    raise PermissionError(13, "rename refused")
-                return real_replace(src, dst, *a, **k)
-
-            def aside_then_die(path, reason):
-                kept = real_aside(path, reason)
-                if str(path).endswith(".first"):
-                    raise KeyboardInterrupt
-                return kept
-
-            with monkeypatch.context() as m:
-                m.setattr(audit_module.os, "replace", refuse)
-                m.setattr(audit_module, "_set_aside", aside_then_die)
-                with pytest.raises(KeyboardInterrupt):
-                    AuditTrail(db).log("lost", {})
-            begun = json.loads((db.parent / "m.audit.manifest.json").read_text())["active_begun"]
-            assert begun is not None and not (db.parent / "m.audit.jsonl.first").exists()
-
-        a = tmp_path / "a" / "m.db"
-        a.parent.mkdir()
-        crash(a)
-        AuditTrail(a).log("retry", {})
-        events = [json.loads(x)["event"] for x in (a.parent / "m.audit.jsonl").read_text().splitlines()]
-        assert events == ["retry"]
-        assert AuditTrail.verify(a).valid and AuditTrail.verify(a).set_aside == []
-
-        b = tmp_path / "b" / "m.db"
-        b.parent.mkdir()
-        crash(b)
-        result = AuditTrail.repair_manifest(b)
-        assert result.repaired and result.set_aside == [], result.error
-        assert AuditTrail.verify(b).set_aside == []
-
-        c = tmp_path / "c" / "m.db"
-        c.parent.mkdir()
-        crash(c)
-        [kept] = [p for p in c.parent.iterdir() if ".first.discarded-" in p.name]
-        kept.write_text('{"event": "something else"}\n')
-        with pytest.raises(audit_module._ManifestUnavailable):
-            AuditTrail(c).log("retry", {})
-        result = AuditTrail.repair_manifest(c)
-        assert result.repaired and [r["set_aside_as"] for r in result.set_aside] == [""]
-
-    def test_a_discarded_staged_entry_reconciles_once(self, tmp_path, monkeypatch):
-        """KL-24 L3 r8, codex HIGH (reasoned), reproduced first on 7bb1537: with
-        a repeated clock an identical retried event commits the same hash H; a
-        later deletion of the active file matched the stale discarded file again
-        and the loss was suppressed (verify valid, no gap). The reconcile
-        consumes the file once (renamed to ``.first.reconciled-*``, kept)."""
+    @staticmethod
+    def _rollback_crash(db, monkeypatch, frozen=False):
+        """Inject the rollback crash: the staged file is set aside and the process
+        stops before ``active_begun`` is withdrawn. ``frozen`` pins the clock so
+        an identical retried event hashes the same."""
         from datetime import datetime as real_dt
 
-        class Frozen(real_dt):
-            @classmethod
-            def now(cls, tz=None):
-                return real_dt(2026, 10, 8, 12, 0, 0, 0, tzinfo=tz)
-
-        monkeypatch.setattr(audit_module, "datetime", Frozen)
-        monkeypatch.setattr(audit_module, "_iso_week_now", lambda: "2026-W41")
         real_replace, real_aside = audit_module.os.replace, audit_module._set_aside
 
         def refuse(src, dst, *a, **k):
@@ -9941,20 +9877,88 @@ class TestKL24ConcurrentWriters:
                 raise KeyboardInterrupt
             return kept
 
-        db = tmp_path / "m.db"
+        class Frozen(real_dt):
+            @classmethod
+            def now(cls, tz=None):
+                return real_dt(2026, 10, 8, 12, 0, 0, 0, tzinfo=tz)
+
         with monkeypatch.context() as m:
+            if frozen:
+                m.setattr(audit_module, "datetime", Frozen)
+                m.setattr(audit_module, "_iso_week_now", lambda: "2026-W41")
             m.setattr(audit_module.os, "replace", refuse)
             m.setattr(audit_module, "_set_aside", aside_then_die)
             with pytest.raises(KeyboardInterrupt):
                 AuditTrail(db).log("same", {})
-        AuditTrail(db).log("same", {})  # the retry: reconciles, commits the same hash
-        assert [p for p in db.parent.iterdir() if ".first.reconciled-" in p.name]
-        assert not [p for p in db.parent.iterdir() if ".first.discarded-" in p.name]
-        (db.parent / "m.audit.jsonl").unlink()
+
+    def test_a_rollback_crash_window_is_a_possible_gap_naming_the_kept_files(
+        self, tmp_path, monkeypatch
+    ):
+        """KL-24 L3 r9 (the hash reconcile is deleted). A stop between the
+        rollback's set-aside and the withdrawal of ``active_begun`` refuses the
+        next append (ruling A); ``audit-repair`` records a POSSIBLE gap naming the
+        kept ``.first.discarded-*`` file, never a definite one; no file is renamed."""
+        db = tmp_path / "m.db"
+        self._rollback_crash(db, monkeypatch)
+        before = sorted(p.name for p in db.parent.iterdir() if ".first.discarded-" in p.name)
+        assert len(before) == 1
         with pytest.raises(audit_module._ManifestUnavailable):
-            AuditTrail(db).log("after", {})
+            AuditTrail(db).log("retry", {})
+        assert not AuditTrail.verify(db).valid
         result = AuditTrail.repair_manifest(db)
-        assert result.repaired and [r["set_aside_as"] for r in result.set_aside] == [""]
+        assert result.repaired, result.error
+        [rec] = result.set_aside
+        assert rec["certainty"] == "possible" and rec["set_aside_as"] == ""
+        assert rec["preserved_attempts"] == before
+        assert sorted(p.name for p in db.parent.iterdir() if ".first.discarded-" in p.name) == before
+        assert not [p for p in db.parent.iterdir() if "reconciled" in p.name]
+        lines = audit_module.set_aside_report_lines(AuditTrail.verify(db).set_aside, db)
+        assert lines and lines[0].startswith("POSSIBLE GAP") and before[0] in lines[0]
+        AuditTrail(db).log("after", {})
+        assert AuditTrail.verify(db).valid
+
+    @pytest.mark.parametrize("copies", [0, 1])
+    def test_a_stale_discarded_file_never_suppresses_a_real_loss(
+        self, tmp_path, monkeypatch, copies
+    ):
+        """KL-24 L3 r8 + r9, each run first on 6c50aec (r9: two matching files,
+        the append was accepted and verify read valid with no gap). Frozen clock:
+        the retried event commits the same hash the discarded file holds; the
+        active file is then deleted. The append refuses, verify reads invalid, and
+        repair records a POSSIBLE gap naming every kept file."""
+        import shutil
+
+        db = tmp_path / "m.db"
+        self._rollback_crash(db, monkeypatch, frozen=True)
+        [f] = [p for p in db.parent.iterdir() if ".first.discarded-" in p.name]
+        for n in range(copies):
+            shutil.copy(f, f.with_name(f.name + f"-{n + 1}"))
+        with monkeypatch.context() as m:
+            from datetime import datetime as real_dt
+
+            class Frozen(real_dt):
+                @classmethod
+                def now(cls, tz=None):
+                    return real_dt(2026, 10, 8, 12, 0, 0, 0, tzinfo=tz)
+
+            m.setattr(audit_module, "datetime", Frozen)
+            m.setattr(audit_module, "_iso_week_now", lambda: "2026-W41")
+            with pytest.raises(audit_module._ManifestUnavailable):
+                AuditTrail(db).log("same", {})  # refused: the record is still set
+            result = AuditTrail.repair_manifest(db)
+            assert result.repaired, result.error
+            AuditTrail(db).log("same", {})  # commits the same hash again
+            (db.parent / "m.audit.jsonl").unlink()
+            with pytest.raises(audit_module._ManifestUnavailable):
+                AuditTrail(db).log("after", {})
+            assert not AuditTrail.verify(db).valid
+            result = AuditTrail.repair_manifest(db)
+        assert result.repaired, result.error
+        [rec] = [r for r in result.set_aside if r["period"] == "2026-W41" and r.get("certainty")][-1:]
+        assert rec["certainty"] == "possible"
+        assert AuditTrail.verify(db).set_aside, "manifest still loads"
+        assert not [x for x in db.parent.iterdir() if "corrupt" in x.name]
+        assert len(rec["preserved_attempts"]) == 1 + copies
 
     def test_certainty_is_validated_in_the_manifest(self, tmp_path):
         """KL-24 L3 r7, codex LOW, each run first on 5de42b3: any ``certainty``
@@ -9970,15 +9974,28 @@ class TestKL24ConcurrentWriters:
             m["set_aside"][0].update(bad)
             with pytest.raises(audit_module._CORRUPT_MANIFEST):
                 audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
-        # r8: only the active file's own name, and at most one such record.
+        for bad in ("x", ["a", 1], 5):
+            m = json.loads(json.dumps(base))
+            m["set_aside"][0]["preserved_attempts"] = bad
+            with pytest.raises(audit_module._CORRUPT_MANIFEST):
+                audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
+        m = json.loads(json.dumps(base))
+        del m["set_aside"][0]["certainty"]
+        m["set_aside"][0]["preserved_attempts"] = ["a"]
+        with pytest.raises(audit_module._CORRUPT_MANIFEST):
+            audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
+        m = json.loads(json.dumps(base))
+        m["set_aside"][0]["preserved_attempts"] = ["m.audit.jsonl.first.discarded-x"]
+        audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
+        # r8: only the active file's own name.
         m = json.loads(json.dumps(base))
         m["set_aside"][0]["filename"] = "other.audit.jsonl"
         with pytest.raises(audit_module._CORRUPT_MANIFEST):
             audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
+        # Two possible-gap records (two repairs of a loss in one week) are valid.
         m = json.loads(json.dumps(base))
         m["set_aside"].append(dict(m["set_aside"][0]))
-        with pytest.raises(audit_module._CORRUPT_MANIFEST):
-            audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
+        audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
 
     def test_an_oserror_deciding_a_staged_entry_is_a_manifest_refusal(
         self, tmp_path, monkeypatch

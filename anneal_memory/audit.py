@@ -438,12 +438,25 @@ def _parse_manifest_bytes(raw: bytes, stem: str) -> dict[str, Any]:
     # ``certainty`` is written only on the rebuild's active-file record (KL-24
     # L3 r7, codex LOW): anything else would silently read as a definite gap.
     rated = [r for r in set_aside if "certainty" in r]
-    if len(rated) > 1 or not all(
+    # No limit on their number: each repair of a loss in the same week records
+    # its own (measured: a cap made the second repair's manifest invalid).
+    if not all(
         r["certainty"] == _POSSIBLE and r["set_aside_as"] == ""
         and r["filename"] == f"{stem}.audit.jsonl"
         for r in rated
     ):
         raise TypeError("manifest field 'set_aside' holds an invalid 'certainty'")
+    # ``preserved_attempts``: names of kept staged entries, on a possible-gap
+    # record only.
+    if not all(
+        "preserved_attempts" not in r or (
+            "certainty" in r
+            and isinstance(r["preserved_attempts"], list)
+            and all(isinstance(n, str) for n in r["preserved_attempts"])
+        )
+        for r in set_aside
+    ):
+        raise TypeError("manifest field 'set_aside' holds an invalid 'preserved_attempts'")
     begun = manifest.get("active_begun")
     if begun is not None and not (
         isinstance(begun, dict)
@@ -669,7 +682,6 @@ class AuditTrail:
         # writing past a file that vanished under it (L3 r1 10-03, codex HIGH +
         # complement, run).
         self._active_has_entry = False
-        self._consumed_staged: tuple[Path, Path] | None = None
         # Threads inside :meth:`log`'s append-lock span (KL-24): a nested
         # ``log()`` on one of them is refused rather than deadlocked.
         self._append_threads: set[int] = set()
@@ -2355,7 +2367,7 @@ class AuditTrail:
                         "it aside. verify reports it. Nothing was written."
                     ),
                 )
-        vanished: dict[str, str] | None = None
+        vanished: dict[str, Any] | None = None
         begun = vanished_active_week(manifest)
         if (
             begun is not None
@@ -2433,19 +2445,19 @@ class AuditTrail:
                     repaired=False,
                     error=f"Cannot inspect the active audit file: {e}; nothing was written.",
                 )
-            consumed = False
             if not active_entry:
+                # ``set_aside_as`` "" marks it: there is no file to move. With a
+                # set-aside staged entry beside it the loss may be only a rolled-back
+                # append whose record was never withdrawn: a POSSIBLE gap naming the
+                # files, never silently cleared (KL-24 L3 r9: a hash reconcile
+                # suppressed real losses and is deleted).
                 try:
-                    consumed = trail._consume_discarded_staged(begun)
-                except _ManifestUnavailable as e:
-                    return AuditRepairResult(repaired=False, error=f"{e}; nothing was written.")
-            if consumed:
-                # The record names a staged entry that was set aside and never
-                # committed (KL-24 L3 r7): nothing was lost. Consumed once (r8).
-                manifest["active_begun"] = None
-                stale_cleared = True
-            elif not active_entry:
-                # ``set_aside_as`` "" marks it: there is no file to move.
+                    preserved = trail._discarded_staged_names()
+                except OSError as e:
+                    return AuditRepairResult(
+                        repaired=False,
+                        error=f"Cannot list the audit directory: {e}; nothing was written.",
+                    )
                 vanished = {
                     "filename": trail._active_path.name,
                     "set_aside_as": "",
@@ -2456,6 +2468,13 @@ class AuditTrail:
                     ),
                     "at": stamp,
                 }
+                if preserved:
+                    vanished["certainty"] = _POSSIBLE
+                    vanished["preserved_attempts"] = preserved
+                    vanished["cause"] += (
+                        "; set-aside staged entries are kept beside it and may be the "
+                        "rolled-back append that record named, so this may not be a loss"
+                    )
         if not new and vanished is None and not stale_cleared:
             return AuditRepairResult(repaired=False, error=_NOTHING_TO_REPAIR)
         taken = [r["set_aside_as"] for r in new if os.path.lexists(audit_dir / r["set_aside_as"])]
@@ -3227,66 +3246,18 @@ class AuditTrail:
             and not active_holds_entry
         )
 
-    def _discarded_staged_match(self, begun: dict[str, Any]) -> str | None:
-        """Whether a set-aside staged entry (``<active>.first.discarded-*``) holds
-        the first entry ``begun`` names, by HASH (KL-24 L3 r7, codex MED 1): a
-        rollback that stopped between setting the staged file aside and
-        withdrawing its record leaves a record naming an entry that never
-        committed. The file's existence alone proves nothing. A listing or read
-        error is "no match": the caller refuses or records as before. Returns the
-        file's name. Only ``<active>.first.discarded-<stamp>[-n]`` is listed: a
-        consumed file (:meth:`_consume_discarded_staged`) no longer matches."""
+    def _discarded_staged_names(self) -> list[str]:
+        """Names of the set-aside staged entries beside the active file
+        (``<active>.first.discarded-<stamp>[-n]``), sorted. Never renamed or
+        deleted; ``audit-repair`` names them in the possible gap it records so a
+        person can inspect them. A listing error propagates."""
         pattern = re.compile(
             re.escape(self._first_entry_path().name)
             + rf"\.{_DISCARDED_REASON}-\d{{8}}T\d{{12}}Z(?:-\d+)?"
         )
-        try:
-            names = [p.name for p in self._active_path.parent.iterdir()]
-        except OSError:
-            return None
-        for name in names:
-            if not pattern.fullmatch(name):
-                continue
-            path = self._active_path.parent / name
-            try:
-                if not stat.S_ISREG(os.lstat(path).st_mode):
-                    continue
-                with _open_regular(path) as f:
-                    staged = _last_valid_entry_in(f, 0)[0]
-            except OSError:
-                continue
-            if staged and self._compute_hash(staged) == begun.get("first_hash"):
-                return name
-        return None
-
-    def _consume_discarded_staged(self, begun: dict[str, Any]) -> bool:
-        """Reconcile ``begun`` against a discarded staged entry EXACTLY ONCE
-        (KL-24 L3 r8, codex HIGH, reasoned): with a repeated clock an identical
-        retried event commits the same hash, so a stale discarded file would
-        match again after a real loss and suppress it. A match is renamed to
-        ``<active>.first.reconciled-<stamp>`` (kept, and no longer matching)
-        before the caller clears the record. ``False``: no match. A failed
-        rename raises ``_ManifestUnavailable``: fail closed."""
-        name = self._discarded_staged_match(begun)
-        if name is None:
-            return False
-        audit_dir = self._active_path.parent
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        base = f"{self._first_entry_path().name}.reconciled-{stamp}"
-        try:
-            target, n = audit_dir / base, 0
-            while os.path.lexists(target):
-                n += 1
-                target = audit_dir / f"{base}-{n}"
-            os.rename(audit_dir / name, target)
-        except OSError as e:
-            raise _ManifestUnavailable(
-                f"cannot consume the discarded staged entry {name} that the manifest's "
-                f"record names, so nothing is reconciled: {e}"
-            ) from e
-        _fsync_dir(audit_dir)
-        self._consumed_staged = (target, audit_dir / name)
-        return True
+        return sorted(
+            p.name for p in self._active_path.parent.iterdir() if pattern.fullmatch(p.name)
+        )
 
     def _resolve_staged_entry(self, manifest: dict[str, Any] | None) -> str | None:
         """Finish or set aside a staged first entry under ``manifest`` (see
@@ -3419,23 +3390,6 @@ class AuditTrail:
         the recorded one)."""
         begun = vanished_active_week(manifest)
         if begun is None:
-            return
-        if self._consume_discarded_staged(begun):
-            # The first entry the record names was staged and set aside, never
-            # renamed in: the append did not commit and nothing was lost (KL-24
-            # L3 r7, codex MED 1; matched by hash, never by existence; consumed
-            # once, r8). A failed save puts the file back and refuses.
-            manifest["active_begun"] = None
-            try:
-                self._save_manifest(manifest)
-            except BaseException:
-                assert self._consumed_staged is not None
-                target, original = self._consumed_staged
-                try:
-                    os.rename(target, original)
-                except OSError:
-                    pass
-                raise
             return
         raise _ManifestUnavailable(
             f"the active audit file {self._active_path.name} held entries in week "
@@ -4762,11 +4716,13 @@ def set_aside_report_lines(
     lines = []
     for record in records:
         if record.get("certainty") == _POSSIBLE:
+            kept = record.get("preserved_attempts")
             lines.append(
                 f"POSSIBLE GAP: the active audit file {record['filename']} "
-                f"({record['period']}) held no entry when audit-repair rebuilt the "
-                f"manifest at {record['at']}; whether it held entries before cannot "
+                f"({record['period']}) held no entry when audit-repair recorded it "
+                f"at {record['at']}; whether it held entries before cannot "
                 f"be known: {record['cause']}"
+                + (f"; set-aside staged entries to inspect: {', '.join(kept)}" if kept else "")
             )
         elif record["set_aside_as"] == "":
             lines.append(

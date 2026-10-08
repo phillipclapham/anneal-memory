@@ -7169,8 +7169,8 @@ class Store:
         A switch that succeeds but reports a mode other than ``wal`` (SQLite
         returns the old mode when WAL cannot be enabled, e.g. a VFS without
         shared memory) is refused: the store's concurrency assumes WAL
-        (L3 r1, codex MED; it was accepted silently before). An in-memory
-        database reports ``memory`` and is accepted.
+        (L3 r1, codex MED; it was accepted silently before). A database with
+        no file (in-memory or temp) is accepted in whatever mode it reports.
         """
         budget = self._conn.execute("PRAGMA busy_timeout").fetchone()[0] / 1000.0
         deadline = time.monotonic() + budget
@@ -7187,10 +7187,16 @@ class Store:
                 time.sleep(min(delay, remaining))
                 delay = min(delay * 2, 0.1)
         mode = str(rows[0][0]).lower() if rows else ""
-        # ``memory`` is what SQLite reports for an in-memory database, which can
-        # never be WAL (L3 r2, codex reproduced: ``Store(":memory:")`` broke); a
-        # file-backed store reporting anything but ``wal`` is refused.
-        if mode not in ("wal", "memory"):
+        # A database with NO file (``:memory:``, a shared-cache memory URI, the
+        # private temp db of ``""``) has no peer to be concurrent with and can
+        # never be WAL (L3 r2: ``Store(":memory:")`` broke). Measured 1008+11:
+        # all three list main's filename as ``""``. Decided by the FILE, never by
+        # the mode word: a disk database already in MEMORY journal mode also
+        # reports ``memory`` when WAL is refused (L3 r3, codex MED).
+        main_file = next(
+            (r[2] for r in self._conn.execute("PRAGMA database_list").fetchall()
+             if r[1] == "main"), "")
+        if mode != "wal" and main_file:
             raise sqlite3.OperationalError(
                 f"journal_mode=WAL was not enabled (SQLite reports {mode!r}); "
                 "anneal-memory needs WAL, which this filesystem or VFS refused"

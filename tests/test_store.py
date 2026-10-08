@@ -4438,13 +4438,25 @@ def test_a_switch_that_reports_a_non_wal_mode_is_refused():
             return [self.v]
 
     class _Conn:
-        def execute(self, sql):
-            return _Row((5000,) if "busy_timeout" in sql else ("delete",))
+        def __init__(self, mode, file):
+            self.mode, self.file = mode, file
 
+        def execute(self, sql):
+            if "busy_timeout" in sql:
+                return _Row((5000,))
+            if "database_list" in sql:
+                return _Row((0, "main", self.file))
+            return _Row((self.mode,))
+
+    for mode in ("delete", "memory"):  # "memory": a disk db in MEMORY journal mode (r3)
+        fake = Store.__new__(Store)
+        fake._conn = _Conn(mode, "/tmp/real-file.db")
+        with pytest.raises(sqlite3.OperationalError, match="WAL was not enabled"):
+            fake._enable_wal_with_retry()
     fake = Store.__new__(Store)
-    fake._conn = _Conn()
-    with pytest.raises(sqlite3.OperationalError, match="WAL was not enabled"):
-        fake._enable_wal_with_retry()
+    fake._conn = _Conn("delete", "")  # no file (in-memory / temp): accepted
+    fake._enable_wal_with_retry()
+
 
 
 def test_an_in_memory_store_still_opens(tmp_path):

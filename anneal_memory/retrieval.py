@@ -1120,7 +1120,7 @@ def _swap_replaced(
         else:
             head_id = swap_to[hit.id]
             if head_id not in heads:
-                heads[head_id] = every.get(head_id) or store.get(head_id)
+                heads[head_id] = store.get(head_id)   # read now: a head deleted since the fetch is skipped
             head = heads[head_id]
             if head is None:
                 continue

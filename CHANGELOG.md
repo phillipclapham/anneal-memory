@@ -100,11 +100,15 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - Lowering trust revokes what it earned, at the next wrap (C#11, 2026-10-08). Run first: an
   episode that grounded a 2x graduation was lowered to `external`, and the next wrap kept the
   pattern at 2x. Each save now records the episodes that grounded each rung a named pattern
-  earned, in a new additive `pattern_grounding(name, level, episode_id)` table written in the
-  wrap's transaction (`Store.pattern_grounding()`; check 4's grounding citations; a rename moves
-  them). At the graduation bound, a pattern's prior is cut back to just below the lowest recorded
-  rung whose grounding is all `tool`/`external` under today's trust
-  (`graduation.revoked_pattern_levels`, `validate_graduations(..., revoked_levels=)`). The cut is
+  earned, in a new additive `pattern_grounding(name, level, earned_on, rule, episode_id)` table
+  written in the wrap's transaction (`Store.pattern_grounding()`; check 4's grounding citations,
+  and the rule check 4 admitted the line by; a rename moves them). At the graduation bound, each
+  earning is re-run under its own rule against today's trust: a `checked` one (a quoted
+  explanation named the grounding citations) fails when all of them are now `tool`/`external`, an
+  `unchecked` one when any is (run: a bare two-citation 2x kept its rung when one citation was
+  lowered, until this rule). A rung fails when every earning of it does, and the pattern's prior
+  is cut back to just below the lowest failed rung (`graduation.revoked_pattern_levels`,
+  `validate_graduations(..., revoked_levels=)`). The cut is
   reported in `level_capped` with the new `reason` field `revoked: grounding lowered` (`prior`
   for every other cut), in the MCP and CLI save output and the warning. A rung with no grounding
   record (saved before the table) keeps its level. The save's trust re-read covers the recorded
@@ -116,8 +120,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   was derived from in a new additive `episode_derived(episode_id, source_id)` table, in the
   episode's transaction; a source that does not exist refuses the record (`ValueError`, nothing
   written). `Store.effective_trust_map(ids)` gives each episode the lower of its own class and
-  the highest effective class among its sources, through every level of derivation (a deleted
-  source no longer counts); the graduation trust check and the save's re-read use it, so a
+  the highest effective class among its sources, through every level of derivation; a deleted
+  source counts at the effective trust recorded with the link (`episode_derived.source_trust`),
+  so a delete never raises a summary back to `agent` (run: it did, until this); the graduation
+  trust check and the save's re-read use it, so a
   summary of an external page reads `external` and cannot corroborate it. `ScoredEpisode.trust`
   (default `agent`) carries each episode's effective class out of `retrieve_relevant`, and MCP
   `recall` lists `tool`/`external` episodes after the rest under "Recorded from tool output / an

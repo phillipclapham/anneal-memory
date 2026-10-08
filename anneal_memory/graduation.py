@@ -415,12 +415,19 @@ class GraduationResult:
     # ``graduated_names`` holds; a free-text line has none), the highest trust
     # among the citations that ground it. Empty unless the caller passed ``trust_of``.
     pattern_trust: dict[str, str] = field(default_factory=dict)
-    # CAP-08 D2 (C#11): ``(name, level, grounding ids)`` for each named line
-    # that validated and stands at 2x or above after the bound, so the store can
-    # record which episodes earned that rung (``Store.pattern_grounding``). The
-    # ids are check 4's grounding citations. Empty unless the caller passed
-    # ``trust_of``.
-    pattern_grounding: list[tuple[str, int, list[str]]] = field(default_factory=list)
+    # CAP-08 D2 (C#11): ``(name, level, rule, grounding ids)`` for each named
+    # line that validated and stands at 2x or above after the bound, so the store
+    # can record which episodes earned that rung (``Store.pattern_grounding``).
+    # The ids are check 4's grounding citations; ``rule`` is GROUNDING_CHECKED
+    # (the explanation named which citations ground it) or GROUNDING_UNCHECKED.
+    # Empty unless the caller passed ``trust_of``.
+    pattern_grounding: list[tuple[str, int, str, list[str]]] = field(default_factory=list)
+
+
+# The rule check 4 admitted a line by: with a checked explanation one trusted
+# grounding citation is enough; unchecked, every citation must be trusted.
+GROUNDING_CHECKED = "checked"
+GROUNDING_UNCHECKED = "unchecked"
 
 
 # The reason a LevelCapped line was cut. A revocation is a prior lowered because
@@ -721,8 +728,8 @@ def validate_graduations(
     graduated_names: list[str] = []
     uncorroborated: list[UncorroboratedGraduation] = []
     pattern_trust: dict[str, str] = {}
-    # Line index -> (name, check 4's grounding ids), for D2's grounding record.
-    rung_grounding: dict[int, tuple[str, list[str]]] = {}
+    # Line index -> (name, check 4's grounding ids, its rule), for D2's record.
+    rung_grounding: dict[int, tuple[str, list[str], str]] = {}
     # AM-WARN (v0.4.2): tracked independent of the cross-session immune gate
     # (see the field docstring on GraduationResult).
     any_citation_resolved = False
@@ -1057,6 +1064,7 @@ def validate_graduations(
             grounding_trust: str | None = None
             reported_trust: str | None = None
             grounding_ids: list[str] = []
+            grounding_rule = GROUNDING_UNCHECKED
             if (
                 trust_of is not None
                 and ids_valid and explanation_valid and not cross_session_overlap_words
@@ -1072,6 +1080,7 @@ def validate_graduations(
                 if grounding_checked and grounding_ids:
                     # One trusted witness among the citations that ground the
                     # explanation is enough.
+                    grounding_rule = GROUNDING_CHECKED
                     grounding_trust = max(
                         (trust_of(cid) for cid in grounding_ids), key=trust_rank,
                     )
@@ -1107,7 +1116,9 @@ def validate_graduations(
                 if grad_name_match is not None and grad_name_match.group(2) == str(level):
                     graduated_names.append(grad_name_match.group(1))
                     if trust_of is not None:
-                        rung_grounding[i] = (grad_name_match.group(1), list(grounding_ids))
+                        rung_grounding[i] = (
+                            grad_name_match.group(1), list(grounding_ids), grounding_rule,
+                        )
                     if reported_trust is not None:
                         # The highest across the name's lines (codex r2: it was
                         # last-line-wins).
@@ -1353,8 +1364,8 @@ def validate_graduations(
     # CAP-08 D2: the rung each validated named line stands at after the bound,
     # and the episodes that grounded it. A line the bound left below 2x, or one
     # validated only through another marker on it, earned no rung.
-    pattern_grounding: list[tuple[str, int, list[str]]] = []
-    for gi, (g_name, g_ids) in sorted(rung_grounding.items()):
+    pattern_grounding: list[tuple[str, int, str, list[str]]] = []
+    for gi, (g_name, g_ids, g_rule) in sorted(rung_grounding.items()):
         parsed_g = _line_levels(lines[gi])
         if parsed_g is None or parsed_g[0] != ("name", g_name) or not g_ids:
             continue
@@ -1363,7 +1374,7 @@ def validate_graduations(
             continue
         g_level = _token_level(own_g)
         if g_level >= 2:
-            pattern_grounding.append((g_name, g_level, g_ids))
+            pattern_grounding.append((g_name, g_level, g_rule, g_ids))
 
     reuse_max = max(citation_counts.values()) if citation_counts else 0
     gaming_suspects = detect_citation_gaming(citation_counts)
@@ -1548,20 +1559,30 @@ def _apply_prior_bound(
 
 
 def revoked_pattern_levels(
-    grounding: dict[str, dict[int, list[str]]],
+    grounding: dict[str, dict[int, list[dict[str, Any]]]],
     trust_of: Callable[[str], str],
 ) -> dict[str, int]:
     """CAP-08 D2: for each pattern, the highest prior it may keep under today's
-    trust. Its rungs are walked lowest first; at the first rung whose recorded
-    grounding is ALL ``tool``/``external`` now (check 4's rule, re-run), the
-    prior is cut to just below that rung. A pattern with no such rung, or with
-    no grounding record at all, is absent: no record, no basis to revoke."""
+    trust. ``grounding`` is :meth:`Store.pattern_grounding`. Each time a rung was
+    earned is re-run under check 4's rule against today's trust: a
+    ``checked`` earning fails when ALL its grounding citations are now
+    ``tool``/``external``, an ``unchecked`` one when ANY is. A rung fails when
+    every earning of it fails; the rungs are walked lowest first, and at the
+    first failed rung the prior is cut to just below it. A pattern with no such
+    rung, or with no grounding record at all, is absent: no record, no basis to
+    revoke."""
     agent = trust_rank(DEFAULT_TRUST)
+
+    def earning_fails(group: dict[str, Any]) -> bool:
+        lowered = [trust_rank(trust_of(cid)) < agent for cid in group["episodes"]]
+        if not lowered:
+            return False
+        return any(lowered) if group["rule"] == GROUNDING_UNCHECKED else all(lowered)
+
     revoked: dict[str, int] = {}
     for name, rungs in grounding.items():
         for level in sorted(rungs):
-            ids = rungs[level]
-            if ids and all(trust_rank(trust_of(cid)) < agent for cid in ids):
+            if rungs[level] and all(earning_fails(g) for g in rungs[level]):
                 revoked[name] = level - 1
                 break
     return revoked

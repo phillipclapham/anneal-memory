@@ -676,7 +676,8 @@ class TestDemotionRevokes:
         line = f'- deploy_gate | 2x (2026-10-07) [evidence: {g.id} "deploy gate refuse unsigned build"]'
         result, _ = wrap(store, line, "2026-10-07")
         assert result["graduations_validated"] == 1
-        assert store.pattern_grounding() == {"deploy_gate": {2: [g.id]}}
+        assert store.pattern_grounding() == {"deploy_gate": {2: [
+            {"earned_on": "2026-10-07", "rule": "checked", "episodes": [g.id]}]}}
         store.set_trust(g.id, "external")
         store.record("Another session.", EpisodeType.OBSERVATION)
         result, warned = wrap(store, line, "2026-10-08")
@@ -695,11 +696,29 @@ class TestDemotionRevokes:
                  f'"deploy gate refuse unsigned build"]')
         result, _ = wrap(store, line2, "2026-10-09")
         assert result["graduations_validated"] == 1 and "level_capped" not in result
-        assert sorted(store.pattern_grounding()["deploy_gate"][2]) == sorted([g.id, own.id])
+        assert [grp["episodes"] for grp in store.pattern_grounding()["deploy_gate"][2]] == [
+            [g.id], [own.id]]
         # The record follows a rename.
         store.rename_pattern_association("deploy_gate", "release_gate")
         assert "deploy_gate" not in store.pattern_grounding()
         assert 2 in store.pattern_grounding()["release_gate"]
+        # Fix 1 (1008+3, run): a rung earned on a bare citation (no explanation
+        # says which citation grounds it) was kept at 2x when ONE of its two
+        # agent citations was lowered. Check 4 would not have admitted it, so it
+        # is revoked: unchecked earnings fail on ANY lowered citation.
+        store.record("A new session.", EpisodeType.OBSERVATION)
+        wrap(store, "- canary_gate | 1x (2026-10-09)", "2026-10-09")
+        a = store.record("I watched the canary gate hold a bad build.", EpisodeType.OBSERVATION)
+        b = store.record("The canary gate held a second bad build.", EpisodeType.OBSERVATION)
+        bare = f"- canary_gate | 2x (2026-10-10) [evidence: {a.id}, {b.id}]"
+        result, _ = wrap(store, bare, "2026-10-10")
+        assert result["graduations_validated"] == 1
+        assert store.pattern_grounding()["canary_gate"][2][0]["rule"] == "unchecked"
+        store.set_trust(b.id, "external")
+        store.record("Another session.", EpisodeType.OBSERVATION)
+        result, _ = wrap(store, bare, "2026-10-11")
+        assert result["level_capped"][0]["reason"] == "revoked: grounding lowered"
+        assert f"- canary_gate | 1x (2026-10-10) [evidence: {a.id}, {b.id}]" in store.load_continuity()
 
 
 class TestDerivedAndRecall:
@@ -721,6 +740,22 @@ class TestDerivedAndRecall:
         assert store.trust_map([summary.id, again.id]) == {}
         assert store.effective_trust_map([summary.id, again.id, page.id]) == {
             summary.id: "external", again.id: "external", page.id: "external"}
+        # Fix 2 (1008+3, run): deleting the page read the summary back as agent.
+        # The source's trust at write time stands in for a deleted source, down
+        # the chain too.
+        with Store(store.path, trust_ceiling="agent") as other:
+            ghost_page = other.record("Web page: the Louvre moved to Lille.",
+                                      EpisodeType.OBSERVATION, trust="external")
+            ghost_sum = other.record("My summary: the Louvre moved to Lille.",
+                                     EpisodeType.OBSERVATION, derived_from=[ghost_page.id])
+            ghost_chain = other.record("Summary of that: the Louvre is in Lille.",
+                                       EpisodeType.OBSERVATION, derived_from=[ghost_sum.id])
+            assert other.delete(ghost_page.id)
+            assert other.effective_trust_map([ghost_sum.id, ghost_chain.id]) == {
+                ghost_sum.id: "external", ghost_chain.id: "external"}
+            assert other.delete(ghost_sum.id)
+            assert other.effective_trust_map([ghost_chain.id]) == {ghost_chain.id: "external"}
+            assert other.delete(ghost_chain.id)
         with pytest.raises(ValueError, match="derived_from: no episode"):
             store.record("from nowhere", EpisodeType.OBSERVATION, derived_from=["deadbeef"])
         assert len(store.recall(limit=10).episodes) == 4

@@ -1463,10 +1463,14 @@ END;
 -- summary of a page it fetched). For the graduation trust check an episode
 -- counts at most as trusted as the most trusted of its sources, so a summary of
 -- an external page cannot corroborate that page. Written with the episode, in
--- its transaction; a row leaves with its derived episode. Additive.
+-- its transaction; a row leaves with its derived episode. source_trust is the
+-- source's effective trust when the row was written, so deleting a source never
+-- raises what was derived from it back to agent. Additive.
 CREATE TABLE IF NOT EXISTS episode_derived (
     episode_id TEXT NOT NULL,
     source_id TEXT NOT NULL,
+    source_trust TEXT NOT NULL DEFAULT 'agent'
+        CHECK (source_trust IN ('external', 'tool', 'agent', 'operator')),
     PRIMARY KEY (episode_id, source_id)
 );
 
@@ -1634,13 +1638,19 @@ CREATE TABLE IF NOT EXISTS pattern_levels (
 -- earned, written by the save in the wrap's transaction beside pattern_levels.
 -- When every episode recorded for a rung has since been lowered to tool or
 -- external, the graduation bound cuts the pattern's prior back below that rung
--- at the next wrap. Rows accumulate (a rung re-earned adds its new witnesses).
--- A rung saved before the table has no rows and is never revoked. Additive.
+-- at the next wrap. One group of rows per time a rung was earned (earned_on, the
+-- wrap's day), each under the rule check 4 admitted it by: 'checked' (a quoted
+-- explanation named which citations ground it; revoked when ALL of them are now
+-- tool/external) or 'unchecked' (nothing did; revoked when ANY is). A rung stands
+-- while any of its groups does. A rung saved before the table has no rows and is
+-- never revoked. Additive.
 CREATE TABLE IF NOT EXISTS pattern_grounding (
     name TEXT NOT NULL,
     level INTEGER NOT NULL,
+    earned_on TEXT NOT NULL,
+    rule TEXT NOT NULL CHECK (rule IN ('checked', 'unchecked')),
     episode_id TEXT NOT NULL,
-    PRIMARY KEY (name, level, episode_id)
+    PRIMARY KEY (name, level, earned_on, rule, episode_id)
 );
 """
 
@@ -2782,10 +2792,13 @@ class Store:
                         "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
                         (old_id, ep_id, source),
                     )
+                # Each source's effective trust now, kept for when it is deleted.
+                source_trust = self.effective_trust_map(source_ids) if source_ids else {}
                 self._conn.executemany(
-                    "INSERT OR IGNORE INTO episode_derived (episode_id, source_id) "
-                    "VALUES (?, ?)",
-                    [(ep_id, sid) for sid in source_ids],
+                    "INSERT OR IGNORE INTO episode_derived "
+                    "(episode_id, source_id, source_trust) VALUES (?, ?, ?)",
+                    [(ep_id, sid, source_trust.get(sid, DEFAULT_TRUST))
+                     for sid in source_ids],
                 )
             # On a refusal this commits an empty transaction (releasing the
             # lock); inside a batch it leaves the batch's writes alone.
@@ -4123,11 +4136,15 @@ class Store:
         and the highest effective class among the episodes it was derived from
         (``record(derived_from=)``), followed through every level of derivation
         (CAP-08 D3). An agent summary of an external page reads ``external``. A
-        source that no longer exists is not counted. Absent = ``agent``."""
+        source that no longer exists counts at the effective trust it had when the
+        derived episode was recorded, so a delete never raises it. Absent =
+        ``agent``."""
         wanted = {str(i).strip().lower() for i in episode_ids}
         if not wanted:
             return {}
         sources: dict[str, list[str]] = {}
+        # A deleted source's trust as recorded with the row (fix 2, 1008+3).
+        recorded: dict[str, list[str]] = {}
         seen_ids = set(wanted)
         with self._db_boundary("trust_map"), self._read_snapshot():
             has_derived = self._conn.execute(
@@ -4140,13 +4157,17 @@ class Store:
                 for start in range(0, len(frontier), 500):
                     chunk = frontier[start:start + 500]
                     marks = ",".join("?" * len(chunk))
-                    for ep_id, src in self._conn.execute(
-                        f"SELECT d.episode_id, d.source_id FROM episode_derived d "
-                        f"JOIN episodes e ON e.id = d.source_id "
+                    for ep_id, src, src_trust, live in self._conn.execute(
+                        f"SELECT d.episode_id, d.source_id, d.source_trust, "
+                        f"e.id IS NOT NULL FROM episode_derived d "
+                        f"LEFT JOIN episodes e ON e.id = d.source_id "
                         f"WHERE d.episode_id IN ({marks})", chunk,
                     ):
-                        sources.setdefault(ep_id, []).append(src)
-                        found.add(src)
+                        if live:
+                            sources.setdefault(ep_id, []).append(src)
+                            found.add(src)
+                        else:
+                            recorded.setdefault(ep_id, []).append(src_trust)
                 frontier = sorted(found - seen_ids)
                 seen_ids |= found
         own = self.trust_map(seen_ids)
@@ -4157,8 +4178,10 @@ class Store:
                 return memo[ep_id]
             mine = own.get(ep_id, DEFAULT_TRUST)
             srcs = [src for src in sources.get(ep_id, []) if src not in path]
-            if srcs:
-                best = max((effective(src, path | {ep_id}) for src in srcs), key=trust_rank)
+            witnessed = [effective(src, path | {ep_id}) for src in srcs]
+            witnessed += recorded.get(ep_id, [])
+            if witnessed:
+                best = max(witnessed, key=trust_rank)
                 mine = min(mine, best, key=trust_rank)
             memo[ep_id] = mine
             return mine
@@ -6379,35 +6402,42 @@ class Store:
                 return None
             return {(row[0], row[1]): int(row[2]) for row in rows if row[0] != "init"}
 
-    def pattern_grounding(self) -> dict[str, dict[int, list[str]]]:
-        """CAP-08 D2: ``{pattern name: {level: [episode ids]}}``, the episodes
-        recorded as grounding each rung a named pattern earned in a save. Empty
-        when none were recorded (or on a read-only store from before the table).
-        Read-only."""
+    def pattern_grounding(self) -> dict[str, dict[int, list[dict[str, Any]]]]:
+        """CAP-08 D2: ``{pattern name: {level: [group, ...]}}``, one group per time
+        a save recorded the rung as earned: ``{"earned_on": day, "rule":
+        "checked" | "unchecked", "episodes": [ids]}`` (the rule check 4 admitted
+        it by). Empty when none were recorded (or on a read-only store from before
+        the table). Read-only."""
         with self._db_boundary("pattern_grounding"), self._read_snapshot():
             if self._conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' "
                 "AND name = 'pattern_grounding'"
             ).fetchone() is None:
                 return {}
-            out: dict[str, dict[int, list[str]]] = {}
-            for name, level, ep_id in self._conn.execute(
-                "SELECT name, level, episode_id FROM pattern_grounding "
-                "ORDER BY name, level, episode_id"
+            groups: dict[tuple[str, int, str, str], list[str]] = {}
+            for name, level, earned_on, rule, ep_id in self._conn.execute(
+                "SELECT name, level, earned_on, rule, episode_id FROM pattern_grounding "
+                "ORDER BY name, level, earned_on, rule, episode_id"
             ):
-                out.setdefault(name, {}).setdefault(int(level), []).append(ep_id)
+                groups.setdefault((name, int(level), earned_on, rule), []).append(ep_id)
+            out: dict[str, dict[int, list[dict[str, Any]]]] = {}
+            for (name, level, earned_on, rule), ids in groups.items():
+                out.setdefault(name, {}).setdefault(level, []).append(
+                    {"earned_on": earned_on, "rule": rule, "episodes": ids}
+                )
             return out
 
     def _record_pattern_grounding(
-        self, rungs: Iterable[tuple[str, int, Iterable[str]]]
+        self, rungs: Iterable[tuple[str, int, str, Iterable[str]]], earned_on: str
     ) -> None:
-        """Add the grounding episodes of each rung this save validated. Runs
-        inside the save's batch, like :meth:`_record_pattern_levels`."""
+        """Add the grounding episodes of each rung this save validated, as
+        ``(name, level, rule, ids)``. Runs inside the save's batch, like
+        :meth:`_record_pattern_levels`."""
         self._conn.executemany(
-            "INSERT OR IGNORE INTO pattern_grounding (name, level, episode_id) "
-            "VALUES (?, ?, ?)",
-            [(name, int(level), str(cid).strip().lower())
-             for name, level, ids in rungs for cid in ids],
+            "INSERT OR IGNORE INTO pattern_grounding "
+            "(name, level, earned_on, rule, episode_id) VALUES (?, ?, ?, ?, ?)",
+            [(name, int(level), earned_on, rule, str(cid).strip().lower())
+             for name, level, rule, ids in rungs for cid in ids],
         )
 
     def _has_pattern_levels_table(self) -> bool:

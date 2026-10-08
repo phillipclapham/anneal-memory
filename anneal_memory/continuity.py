@@ -3045,7 +3045,10 @@ def validated_save_continuity(
     # CAP-08 D2 (C#11): a rung whose recorded grounding is all tool/external
     # under today's trust no longer counts toward the pattern's prior.
     grounding = store.pattern_grounding()
-    _grounding_ids = {cid for rungs in grounding.values() for ids in rungs.values() for cid in ids}
+    _grounding_ids = {
+        cid for rungs in grounding.values() for groups in rungs.values()
+        for g in groups for cid in g["episodes"]
+    }
     # Effective trust (D3): an episode derived from others counts at most as
     # trusted as its most trusted source.
     window_trust = store.effective_trust_map(citable_ids | _marker_ids | _grounding_ids)
@@ -3294,7 +3297,7 @@ def validated_save_continuity(
             # The bound's next prior, recorded in this transaction so it commits
             # with the wrap or not at all, with the episodes that grounded each
             # rung validated today (CAP-08 D2).
-            store._record_pattern_grounding(grad_result.pattern_grounding)
+            store._record_pattern_grounding(grad_result.pattern_grounding, today_str)
             store._record_pattern_levels(
                 pattern_line_levels(grad_result.text, grad_headings), today_str,
                 lower_to=pattern_line_levels(prior_continuity or "", grad_headings),

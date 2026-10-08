@@ -505,10 +505,13 @@ class AuditTrail:
     the SQLite episodic store. Each entry includes the SHA-256 hash
     of the previous entry, creating a cryptographic chain.
 
-    **Single-writer requirement:** Only one AuditTrail instance should
-    write to a given db_path at a time. Concurrent writers will corrupt
-    the hash chain (interleaved entries with incompatible prev_hash values).
-    The MCP server's single-threaded model enforces this naturally.
+    **Concurrent writers:** several instances, in one process or several, may
+    write to one db_path. Each append holds a cross-process lock
+    (:meth:`_append_lock`) and first re-reads the chain's tip from disk
+    (:meth:`_resync_with_disk`), so every entry chains from the one before
+    it on disk. Where advisory locks do not exist (Windows, or a filesystem
+    without ``flock``), appends are not serialized and only one instance may
+    write at a time; sequential writers stay chained through the re-sync.
 
     **No fork support:** do not fork a process while an AuditTrail in it is
     in use; a child must open its own AuditTrail. A child forked while the
@@ -608,6 +611,13 @@ class AuditTrail:
         # writing past a file that vanished under it (L3 r1 10-03, codex HIGH +
         # complement, run).
         self._active_has_entry = False
+        # Threads inside :meth:`log`'s append-lock span (KL-24); a nested
+        # ``log()`` or ``stats()`` on one of them is refused, not deadlocked.
+        self._append_threads: set[int] = set()
+        # ``(st_dev, st_ino, st_size)`` of the active file as this instance last
+        # read or wrote it, or None for no file. ``_resync_with_disk`` compares
+        # the file against it to see what other processes did in between.
+        self._known_active: tuple[int, int, int] | None = None
 
     # -- Public API --
 
@@ -665,12 +675,47 @@ class AuditTrail:
         # HIGH): _operation_span's own refusal runs only when this call needs a
         # span, and a refused rotation advances _last_week before its warning,
         # so a handler's nested log() needed none and appended while the outer
-        # operation held the manifest lock.
-        if threading.get_ident() in self._span_threads:
+        # operation held the manifest lock. It also runs before the append lock
+        # is taken: a nested log() would open its own descriptor and block on
+        # this thread's own lock forever (KL-24).
+        me = threading.get_ident()
+        if me in self._span_threads or me in self._append_threads:
             raise RuntimeError(
                 "an audit operation is already in progress on this thread; "
                 "the trail is not reentrant (e.g. from a logging handler)"
             )
+
+        self._append_threads.add(me)
+        try:
+            with self._append_lock():
+                entry = self._log_locked(event, data, actor)
+        finally:
+            self._append_threads.discard(me)
+
+        # Fire callback after successful write, outside every lock (the
+        # ``_manifest_lock`` invariant: no user callback inside a locked span).
+        if self._on_event is not None:
+            try:
+                self._on_event(entry)
+            except Exception:
+                _log(logging.WARNING, "on_event callback failed for seq %d", entry["seq"], exc_info=True)
+
+        return entry
+
+    def _log_locked(
+        self,
+        event: str,
+        data: dict[str, Any] | None,
+        actor: str,
+    ) -> dict[str, Any]:
+        """:meth:`log` from the re-sync on: the caller holds the append lock
+        (:meth:`_append_lock`) and has validated ``event`` and ``data``."""
+        # ⛔ RE-SYNC WITH DISK FIRST (KL-24, run 2026-10-07 on 8542f49: three
+        # writer processes, ``verify()`` valid=False, ``status()`` counting no
+        # audit failure). Another process may have appended, rotated or replaced the
+        # active file since this instance last touched it, so the cached
+        # ``seq``/``prev_hash`` may be a tip that is no longer the chain's.
+        self._resync_with_disk()
 
         # ⛔ ONE MANIFEST-LOCK SPAN FOR EVERYTHING THIS CALL DOES TO THE MANIFEST
         # (Phill, 10-03, item 2; reproduced with a real second process first):
@@ -685,6 +730,9 @@ class AuditTrail:
                 if not self._initialized:
                     self._initialize()
                 self._rotate_if_needed()
+        # What this instance has now read or made of the active file; the next
+        # call's re-sync compares against it.
+        self._known_active = self._active_signature()
 
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
@@ -755,14 +803,19 @@ class AuditTrail:
         # So: remember the pre-append size and roll the file back to it if the
         # append does not fully complete. Disk is then made to agree with the
         # in-memory state — nothing landed — which is what makes the caller's
-        # retry sound. Safe because this class is single-writer by contract
-        # (see the module docstring); truncating a file a peer was appending to
-        # would not be.
+        # retry sound. Safe because the caller holds the append lock, so no
+        # peer appends between ``resume_at`` and the truncate; where locking is
+        # unavailable (see :meth:`_append_lock`) the trail is single-writer by
+        # contract, and truncating a file a peer was appending to would not be.
         active = self._active_path
         active.parent.mkdir(parents=True, exist_ok=True)
         resume_at = active.stat().st_size if active.exists() else 0
         if resume_at == 0 and self._active_has_entry:
-            # ⛔ THE FILE THIS INSTANCE WAS APPENDING TO IS GONE. Appending would
+            # ⛔ THE FILE THIS INSTANCE WAS APPENDING TO IS GONE. A file already
+            # gone at ``_resync_with_disk`` re-initialised there, so this fires
+            # only when it went between that re-sync and here: removed by
+            # something that takes no append lock (a hand, an anneal from before
+            # the lock), or with no lock held at all (see _append_lock). Appending would
             # chain from its lost tip into a new file and overwrite the
             # manifest's record of it; verify then reports a hash break that
             # audit-repair cannot see (L3 r1 10-03, run). Re-init on the next
@@ -1164,15 +1217,16 @@ class AuditTrail:
         # so the save takes the span here. A failure is logged and never fails
         # this write (the entry is already on disk); that week is then not
         # protected, as in degrade mode, where the span cannot save at all.
+        # The entry is on disk and the chain state advanced; record the file as
+        # this instance now sees it. A failed stat cannot say what is on disk,
+        # so the next call re-derives everything from the file instead.
+        try:
+            self._known_active = self._active_signature()
+        except OSError:
+            self._initialized = False
+
         if not had_entry:
             self._record_active_begun(new_prev_hash, saved_chain_state[0])
-
-        # Fire callback after successful write
-        if self._on_event is not None:
-            try:
-                self._on_event(entry)
-            except Exception:
-                _log(logging.WARNING, "on_event callback failed for seq %d", entry["seq"], exc_info=True)
 
         return entry
 
@@ -1240,9 +1294,24 @@ class AuditTrail:
             about the enabled/disabled distinction should check for
             ``None`` at the ``Store._audit`` level before calling this.
         """
-        if not self._initialized:
-            with self._operation_span():  # initializing adopts and seeds: one span
-                self._initialize()
+        me = threading.get_ident()
+        if me in self._span_threads or me in self._append_threads:
+            raise RuntimeError(
+                "an audit operation is already in progress on this thread; "
+                "the trail is not reentrant (e.g. from a logging handler)"
+            )
+        # Under the append lock, so ``entry_count`` includes what other
+        # writer processes appended since this instance last looked (KL-24).
+        self._append_threads.add(me)
+        try:
+            with self._append_lock():
+                self._resync_with_disk()
+                if not self._initialized:
+                    with self._operation_span():  # initializing adopts and seeds: one span
+                        self._initialize()
+                self._known_active = self._active_signature()
+        finally:
+            self._append_threads.discard(me)
         return {
             "log_path": str(self._active_path),
             "entry_count": self._seq,
@@ -2233,12 +2302,106 @@ class AuditTrail:
             "(log(), repair_manifest()) or _manifest_lock() before this call"
         )
 
-    def _open_and_flock(self) -> int | None:
+    @contextmanager
+    def _append_lock(self) -> Iterator[None]:
+        """Hold the cross-process lock that serializes appends to this trail
+        (KL-24): ``log()`` holds it from its re-sync to its last manifest save,
+        and ``stats()`` while it re-syncs.
+
+        ⛔ WHY (KL-24, run 2026-10-07): three processes, each with its own
+        ``Store(audit=True)`` on one database, recorded 600 episodes; every
+        episode landed, ``verify()`` returned valid=False with a hash mismatch,
+        and ``status()`` reported 0 audit write failures. Each instance chained
+        from its own cached tip, so its entries skipped every peer entry
+        written since its previous one.
+
+        The lock file is ``<stem>.audit-append.lock``, beside the manifest lock
+        and like it outside ``<stem>.audit.*``; it is opened, refused and
+        degraded exactly as the manifest lock is (:meth:`_open_and_flock`).
+        ⛔ LOCK ORDER: this lock is taken FIRST and the manifest lock, when an
+        operation needs it, inside it. Nothing that holds the manifest lock
+        takes this one (``repair_manifest`` does not append), so the two never
+        wait on each other in opposite orders. Not reentrant: ``log()`` and
+        ``stats()`` refuse a nested call on the same thread before taking it,
+        and two instances for one database must not nest it in one thread (the
+        inner one blocks on the outer, as with the manifest lock).
+
+        With no ``fcntl`` (Windows) or a filesystem without ``flock`` (warned
+        on stderr once per lock path) it is not held, and appends are as
+        unserialized as they were before it existed.
+        """
+        fd = None
+        if fcntl is not None:
+            fd = self._open_and_flock(
+                self._db_path.parent / f"{self._db_path.stem}.audit-append.lock",
+                "audit append lock",
+                "concurrent audit writers are not serialized and can break the hash chain",
+            )
+        try:
+            yield
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+    def _active_signature(self) -> tuple[int, int, int] | None:
+        """``(st_dev, st_ino, st_size)`` of the active file, None when absent."""
+        try:
+            st = os.stat(self._active_path)
+        except FileNotFoundError:
+            return None
+        return (st.st_dev, st.st_ino, st.st_size)
+
+    def _resync_with_disk(self) -> None:
+        """Bring the cached chain tip up to date with the active file before an
+        append; the caller holds :meth:`_append_lock`.
+
+        Unchanged since this instance last read or wrote it: nothing to do.
+        Same file, grown: other writers appended, so the tip is the last valid
+        entry in the bytes past the old end (none valid, only a torn fragment,
+        leaves the tip where it was; the append's boundary guard handles the
+        fragment). Anything else (rotated, replaced, shrunk, vanished, or a
+        file this instance never saw): the cache says nothing reliable, so
+        ``_initialized`` is cleared and the caller re-derives everything
+        through :meth:`_initialize`, which also refuses a deleted active file.
+        """
+        if not self._initialized:
+            return  # _initialize reads the file itself
+        known = self._known_active
+        now = self._active_signature()
+        if now == known:
+            return
+        if (
+            known is not None
+            and now is not None
+            and now[:2] == known[:2]
+            and now[2] > known[2]
+        ):
+            last_line = _read_last_valid_entry(self._active_path, start=known[2])
+            if last_line:
+                last_entry = json.loads(last_line)  # Guaranteed valid by helper
+                # ``_prev_hash`` before ``_seq``, the order the rollback's
+                # restore pins: an interrupt between them leaves a skipped seq
+                # number, never a broken link. ``_known_active`` is set last,
+                # so an interrupt anywhere here re-runs this read next time.
+                self._prev_hash = self._compute_hash(last_line)
+                self._seq = last_entry["seq"] + 1
+                self._active_has_entry = True
+            self._known_active = now
+            return
+        self._initialized = False
+
+    def _open_and_flock(
+        self,
+        lock_path: Path | None = None,
+        label: str = "audit manifest lock",
+        consequence: str = "audit manifest changes are not serialized across processes",
+    ) -> int | None:
         """Open the lock file and take ``LOCK_EX`` on it; ``None`` when advisory
         locks are unavailable here (warned on stderr once per lock path). See
-        :meth:`_manifest_lock`."""
+        :meth:`_manifest_lock` (the default lock) and :meth:`_append_lock`."""
         assert fcntl is not None
-        lock_path = self._db_path.parent / f"{self._db_path.stem}.audit-manifest.lock"
+        if lock_path is None:
+            lock_path = self._db_path.parent / f"{self._db_path.stem}.audit-manifest.lock"
         # O_RDWR first: on Linux NFS an exclusive lock needs a descriptor open for
         # writing (L3: complement + codex). O_RDONLY is the fallback for a lock
         # file this user may not write (another user's, or 0444 under a umask),
@@ -2255,12 +2418,12 @@ class AuditTrail:
                 fd = os.open(lock_path, os.O_RDONLY | flags, 0o644)
         except OSError as e:
             raise _AuditLockError(
-                f"cannot open the audit manifest lock {lock_path}: {e}"
+                f"cannot open the {label} {lock_path}: {e}"
             ) from e
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise _AuditLockError(
-                    f"the audit manifest lock {lock_path} is not a regular file"
+                    f"the {label} {lock_path} is not a regular file"
                 )
             # ENOLCK is also what a lock table out of records returns, which is
             # transient; Linux NFS without lock support returns it for good. A
@@ -2281,7 +2444,7 @@ class AuditTrail:
                 raise
             if e.errno not in _LOCK_UNAVAILABLE_ERRNOS:
                 raise _AuditLockError(
-                    f"cannot lock the audit manifest lock {lock_path.name}: {e}"
+                    f"cannot lock the {label} {lock_path.name}: {e}"
                 ) from e
         # ⛔ STDERR, NOT ONLY THE LOGGER (L2 MED "silent degrade", ruled 10-03:
         # degrade with a stderr warning). Reproduced: an application that sends
@@ -2294,9 +2457,8 @@ class AuditTrail:
         if str(lock_path) not in _lock_degrade_warned:
             _lock_degrade_warned.add(str(lock_path))
             message = (
-                f"Advisory locks are unavailable for {lock_path}; the audit manifest "
-                "lock is NOT held, so audit manifest changes are not serialized "
-                "across processes."
+                f"Advisory locks are unavailable for {lock_path}; the {label} "
+                f"is NOT held, so {consequence}."
             )
             _emit_warning(message, stderr=True)
         return None
@@ -3414,7 +3576,7 @@ def _iso_week_now() -> str:
     return f"{iso[0]}-W{iso[1]:02d}"
 
 
-def _read_last_valid_entry(path: Path) -> str:
+def _read_last_valid_entry(path: Path, start: int = 0) -> str:
     """Read the last valid JSON line from an audit file.
 
     Reads line-by-line (not chunk-based) so entries of any size are
@@ -3454,6 +3616,11 @@ def _read_last_valid_entry(path: Path) -> str:
     # decoding per line puts the tear back where the rest of this loop
     # already handles it: skipped, like a partial ``json.loads``.
     with _open_regular(path) as f:
+        # ``start`` (AuditTrail._resync_with_disk) is an offset this process last
+        # saw as the file's end, so it is a line boundary or the end of a torn
+        # fragment, which the loop below skips like any other.
+        if start:
+            f.seek(start)
         for raw in f:
             try:
                 stripped = raw.decode("utf-8").strip()

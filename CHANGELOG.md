@@ -4,6 +4,24 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — the audit chain stays valid under concurrent writer processes (KL-24)
+- Several processes (or several `AuditTrail` instances) writing one store broke the hash chain:
+  each chained from its own cached tip. Reproduced on 2026-10-07: three processes recording 200
+  episodes each, every episode landed, `verify` reported a hash mismatch, and `status` counted no
+  audit failure. Each append now holds a cross-process lock, `<stem>.audit-append.lock` (taken
+  before the manifest lock, never inside it), and first re-reads the chain's tip from the active
+  file: a file that only grew is read from where this instance last saw it end; a rotated,
+  replaced, shrunk or vanished file re-initialises through the manifest, as an open does.
+  `AuditTrail.stats()` re-syncs the same way, so its `entry_count` includes other writers' entries.
+- After the fix: six processes x 250 episodes leave one valid chain of 1,500 entries, and four
+  processes appending across a week rotation leave one valid chain of 800.
+- A deleted active file is now refused by the manifest's record (the "deleted or emptied"
+  message) at the next append; the old "is gone" refusal remains for the window where no lock is
+  held.
+- Known limit: where advisory locks do not exist (Windows, or a filesystem without `flock`,
+  warned on stderr once per lock path) appends are not serialized and the trail needs one writer at
+  a time; writers that take turns stay chained through the re-sync.
+
 ### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
 - `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one
   ledger clone's complete verdict, with each line marked `enforced` and the links it `honours`.

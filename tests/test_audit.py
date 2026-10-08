@@ -591,7 +591,7 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
         )
         log = next(
             n for n in cls.body
-            if isinstance(n, ast.FunctionDef) and n.name == "log"
+            if isinstance(n, ast.FunctionDef) and n.name == "_log_locked"
         )
         # ⛔ ANCHORED TO THE HANDLER, AND TO THE SNAPSHOT IT RESTORES FROM.
         # This search was ``ast.walk(log)`` for any single-target tuple
@@ -805,7 +805,7 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
         )
         log = next(
             n for n in cls.body
-            if isinstance(n, ast.FunctionDef) and n.name == "log"
+            if isinstance(n, ast.FunctionDef) and n.name == "_log_locked"
         )
         guarded = [
             n for n in ast.walk(log)
@@ -6910,7 +6910,12 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         (tmp_path / "m.audit.1998-W43.jsonl.gz.tmp").write_bytes(gzip.compress(body(43))[:20])
         (tmp_path / "m.audit.1998-W44.jsonl.gz").write_bytes(gzip.compress(body(44))[:30])  # lone corrupt
         keep_out = {"m.audit.jsonl", "m.audit.manifest.json"}
-        before = [p.read_bytes() for p in tmp_path.iterdir() if p.name not in keep_out]
+        # Lock files hold no bytes (two of them are both empty), so they are
+        # not fixture blobs.
+        before = [
+            p.read_bytes() for p in tmp_path.iterdir()
+            if p.name not in keep_out and not p.name.endswith(".lock")
+        ]
         assert len(before) == len(set(before)), "fixture blobs must be unique"
 
         AuditTrail(db).log("after", {})
@@ -9229,7 +9234,9 @@ class TestWitnessL3Round1:
         mpath = tmp_path / "m.audit.manifest.json"
         recorded = json.loads(mpath.read_text())["active_begun"]
         trail._active_path.unlink()
-        with pytest.raises(audit_module._ManifestUnavailable, match="is gone"):
+        # KL-24: the append's re-sync sees the file gone and re-initialises, so
+        # the refusal comes from the manifest's record (``_refuse_vanished_active``).
+        with pytest.raises(audit_module._ManifestUnavailable, match="deleted or emptied"):
             trail.log("after", {})
         assert json.loads(mpath.read_text())["active_begun"] == recorded
         with pytest.raises(audit_module._ManifestUnavailable):
@@ -9323,3 +9330,125 @@ def test_a_gap_is_not_suppressed_for_an_orphan_adoption_will_reject(tmp_path):
     AuditTrail(db).log("after", {})
     result = AuditTrail.verify(db)
     assert result.valid is False and "Unmanifested" in (result.error or "")
+
+
+class TestKL24ConcurrentWriters:
+    """KL-24 (run 2026-10-07): writer processes sharing one database broke the
+    chain while every episode landed and ``status()`` reported 0 failures.
+    Each append now holds the append lock and re-syncs the tip from disk."""
+
+    def test_two_instances_taking_turns_stay_chained(self, tmp_path):
+        """The deterministic shape of KL-24: no concurrency needed, only a
+        cached tip. ⛔ MUTATION-CHECKED: make ``_resync_with_disk`` return at
+        once and this reads valid=False."""
+        db = tmp_path / "m.db"
+        a, b = AuditTrail(db), AuditTrail(db)
+        for i in range(5):
+            a.log("ev", {"a": i})
+            b.log("ev", {"b": i})
+        result = AuditTrail.verify(db)
+        assert result.valid, result.error
+        assert result.total_entries == 10
+        seqs = [json.loads(line)["seq"] for line in (tmp_path / "m.audit.jsonl").read_text().splitlines()]
+        assert seqs == list(range(10))
+
+    def test_a_peer_rotation_is_followed_not_resealed(self, tmp_path, monkeypatch, caplog):
+        """A peer seals the week and writes into the new file; this instance
+        re-initialises from the new file instead of chaining from the sealed
+        tip or rotating again. The whole module's clock jumps a week, so entry
+        timestamps and the week agree, as they do outside a test."""
+        db = tmp_path / "m.db"
+        a, b = AuditTrail(db), AuditTrail(db)
+        a.log("ev", {"n": 0})
+        b.log("ev", {"n": 1})
+        real_datetime = audit_module.datetime
+
+        class _NextWeek(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return real_datetime.now(tz) + timedelta(days=7)
+
+        monkeypatch.setattr(audit_module, "datetime", _NextWeek)
+        b.log("ev", {"n": 2})  # b rotates and writes the first new-week entry
+        with caplog.at_level(logging.WARNING, logger="anneal-memory.audit"):
+            a.log("ev", {"n": 3})
+        assert not [r for r in caplog.records if "Not rotating" in r.getMessage()]
+        result = AuditTrail.verify(db)
+        assert result.valid, result.error
+        assert result.total_entries == 4
+        assert len(list(tmp_path.glob("m.audit.*.jsonl.gz"))) == 1
+
+    def test_stats_counts_a_peers_entries(self, tmp_path):
+        db = tmp_path / "m.db"
+        a, b = AuditTrail(db), AuditTrail(db)
+        a.log("ev", {})
+        assert a.stats()["entry_count"] == 1
+        b.log("ev", {})
+        b.log("ev", {})
+        assert a.stats()["entry_count"] == 3
+
+    def test_a_nested_log_inside_the_append_lock_is_refused_not_deadlocked(
+        self, tmp_path, monkeypatch
+    ):
+        """A logging handler reaching back into the trail while the lock is held
+        would open a second descriptor and wait on its own thread forever."""
+        trail = AuditTrail(tmp_path / "m.db")
+        trail.log("ev", {})
+        seen: list[BaseException] = []
+        real = AuditTrail._resync_with_disk
+
+        def nested(self):
+            try:
+                self.log("nested", {})
+            except RuntimeError as e:
+                seen.append(e)
+            real(self)
+
+        monkeypatch.setattr(AuditTrail, "_resync_with_disk", nested)
+        trail.log("outer", {})
+        assert len(seen) == 1 and "not reentrant" in str(seen[0])
+        assert AuditTrail.verify(tmp_path / "m.db").valid
+
+    def test_on_event_may_still_log_after_the_lock_is_released(self, tmp_path):
+        db = tmp_path / "m.db"
+        calls: list[str] = []
+
+        def on_event(entry):
+            if entry["event"] == "first":
+                calls.append("nested")
+                trail.log("from_callback", {})
+
+        trail = AuditTrail(db, on_event=on_event)
+        trail.log("first", {})
+        assert calls == ["nested"]
+        result = AuditTrail.verify(db)
+        assert result.valid and result.total_entries == 2
+
+    @pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+    def test_writer_processes_at_once_keep_one_valid_chain(self, tmp_path):
+        """The KL-24 run itself, smaller: real processes, each its own trail,
+        appending at the same time. ⛔ MUTATION-CHECKED: take no lock in
+        ``_append_lock`` (re-sync kept) and this reads valid=False."""
+        import subprocess
+
+        db = tmp_path / "m.db"
+        go = tmp_path / "go"
+        n_proc, n_each = 4, 150
+        script = (
+            "import sys, time; from pathlib import Path\n"
+            "from anneal_memory.audit import AuditTrail\n"
+            f"t = AuditTrail({str(db)!r})\n"
+            f"while not Path({str(go)!r}).exists(): time.sleep(0.005)\n"
+            f"for i in range({n_each}): t.log('ev', {{'w': sys.argv[1], 'i': i}})\n"
+        )
+        cwd = str(Path(audit_module.__file__).parent.parent)
+        procs = [
+            subprocess.Popen([sys.executable, "-c", script, str(w)], cwd=cwd)
+            for w in range(n_proc)
+        ]
+        go.write_text("x")
+        for p in procs:
+            assert p.wait(timeout=120) == 0
+        result = AuditTrail.verify(db)
+        assert result.valid, result.error
+        assert result.total_entries == n_proc * n_each

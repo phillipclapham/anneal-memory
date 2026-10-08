@@ -87,8 +87,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   (`cli:operator-terminal` / `cli:operator-env`: the `trust_set` actor, and `trust_via` on an
   operator `record` event, which `Store.record(trust_via=)` takes).
 - JSON `export` writes each non-default EFFECTIVE class (an agent summary of an external page
-  exports as `external`) and each episode's `derived_from` edges; `import` restores the edges to
-  sources that exist, only ever lowering (`Store.derived_edges`, `Store.restore_derived`), so a
+  exports as `external`) and, for the record, each episode's `derived_from` edges
+  (`Store.derived_edges`); `import` does not read the edges (see the D3 entry below), so a
   round trip never raises an episode's effective trust (run: it did). `import` honours a class up to `agent`, so an
   edited export file can lower trust but never vouch, including on an episode it already holds
   (reported as `trust_lowered`), and only from a class it states at or below `agent`: a missing
@@ -144,10 +144,11 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   episode recorded again under the same id never clears a mark (run: re-recording a deleted
   ground revived its revoked 2x), and the grounding reads the mark when set. The save's re-check
   compares, per cited id, whether it exists, its marks and its effective trust (R4; run: an
-  external ground deleted mid-save read `external` before and after, and the save committed). A
-  JSON import writes the derivation edges of the episodes it skips as well as the new ones (R5;
-  run: a skipped summary lost its edge to an external page, and an operator raise then read it
-  `agent`). The graph is walked iteratively (run: a ~1,000-deep chain
+  external ground deleted mid-save read `external` before and after, and the save committed).
+  JSON import does not restore derivation edges. Each imported episode keeps the effective trust it was exported with. If an operator later raises an imported summary's trust, that raise is the operator's own statement (D1: the host's trust label is human-held); anneal does not re-derive it from the original sources. (L3 r5, Phill 12:57, option (a): an import that merged edges let a crafted file
+  raise an existing summary from `external` to `agent`, and an imported removal mark could not
+  lower an existing edge; `Store.restore_derived` is deleted, and the export still writes the
+  edges for the record.) The graph is walked iteratively (run: a ~1,000-deep chain
 raised `RecursionError`). The graduation
   trust check and the save's re-read use it, so a
   summary of an external page reads `external` and cannot corroborate it. `ScoredEpisode.trust`

@@ -357,7 +357,6 @@ StoreOperation = Literal[
     "trust_counts",
     "set_trust",
     "derived_edges",
-    "restore_derived",
     "supersession_problem",
     "supersession_links",
     "episodes_since_wrap",
@@ -4308,45 +4307,6 @@ class Store:
                 ):
                     out.setdefault(ep_id, []).append((src, gone))
         return out
-
-    def restore_derived(
-        self, episode_id: str, sources: Iterable[tuple[str, str | None]],
-    ) -> int:
-        """Re-attach derivation edges to an existing episode (an import putting
-        back what an export carried), each ``(source id, gone_trust)``. An edge
-        the file marks gone is written marked, at the lower of its mark and
-        ``agent`` (a file cannot vouch), whether or not the id exists here; an
-        unmarked edge is written only when its source exists here. Never changes
-        an edge that is already there. Returns the number added."""
-        episode_id = str(episode_id).strip().lower()
-        added = 0
-        with self._db_boundary("restore_derived"):
-            if not self._conn.in_transaction:
-                self._conn.execute("BEGIN IMMEDIATE")
-            if self._conn.execute(
-                "SELECT 1 FROM episodes WHERE id = ?", (episode_id,)
-            ).fetchone() is not None:
-                for src, gone in sources:
-                    src = str(src).strip().lower()
-                    if src == episode_id:
-                        continue
-                    if gone is not None:
-                        level: str | None = TRUST_LEVELS[
-                            min(trust_rank(gone), trust_rank(DEFAULT_TRUST))]
-                    elif self._conn.execute(
-                        "SELECT 1 FROM episodes WHERE id = ?", (src,)
-                    ).fetchone() is not None:
-                        level = None
-                    else:
-                        continue
-                    added += self._conn.execute(
-                        "INSERT OR IGNORE INTO episode_derived "
-                        "(episode_id, source_id, gone_trust) VALUES (?, ?, ?)",
-                        (episode_id, src, level),
-                    ).rowcount
-            if not self._defer_commit:
-                self._conn.commit()
-        return added
 
     def trust_counts(self) -> dict[str, int]:
         """Number of live episodes in each trust class, every class listed."""
@@ -8974,7 +8934,6 @@ class Store:
         - :meth:`record` (episode writes)
         - :meth:`supersede` / :meth:`unsupersede` (supersession links)
         - :meth:`set_trust` (CAP-08 trust class)
-        - :meth:`restore_derived` (an import re-attaching derivation edges)
         - :meth:`import_team_entries` (``dry_run`` is refused inside a batch)
         - :meth:`import_team_snapshot` (``dry_run`` is refused inside a batch)
         - :meth:`team_forget_key`

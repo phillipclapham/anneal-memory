@@ -2015,8 +2015,9 @@ def cmd_export(args: argparse.Namespace) -> None:
         # CAP-08: the trust class rides along when it is not the default, so a
         # JSON round trip does not turn an external episode into an agent one.
         # It is the EFFECTIVE class (an agent summary of an external page exports
-        # as external), and the derivation edges ride along too, so a round trip
-        # never raises an episode's trust (codex r3 #3).
+        # as external), so a round trip never raises an episode's trust (codex r3
+        # #3). The derivation edges are written for the record only: import does
+        # not read them (a file cannot vouch, and a merged edge could; L3 r5).
         export_trust = store.effective_trust_map(ep["id"] for ep in episodes)
         export_edges = store.derived_edges(ep["id"] for ep in episodes)
         for ep in episodes:
@@ -2222,9 +2223,6 @@ def cmd_import(args: argparse.Namespace) -> None:
 
         lowered = 0
         capped = 0
-        # The file's ids, as this store now knows them, for the derivation edges.
-        id_map: dict[str, str] = {}
-        new_edges: list[tuple[str, Any]] = []
         for ep_data in episodes:
             try:
                 # CAP-08: an export file is plain JSON anyone can edit, so it can
@@ -2252,12 +2250,6 @@ def cmd_import(args: argparse.Namespace) -> None:
                             and trust_rank(raw_trust) < trust_rank(current)):
                         store.set_trust(existing.id, ep_trust, actor="cli:import")
                         lowered += 1
-                    id_map[str(ep_data["id"]).strip().lower()] = existing.id
-                    # Its edges too (CAP-08 D3 R5): an existing copy without them
-                    # read as its own class, and an operator raise of it then
-                    # freed a summary of an external page (lane B, p6.py).
-                    if ep_data.get("derived_from"):
-                        new_edges.append((existing.id, ep_data["derived_from"]))
                     skipped += 1
                     continue
 
@@ -2269,32 +2261,12 @@ def cmd_import(args: argparse.Namespace) -> None:
                     timestamp=ep_data.get("timestamp"),
                     trust=ep_trust,
                 )
-                id_map[str(ep_data["id"]).strip().lower()] = recorded.id
-                if ep_data.get("derived_from"):
-                    new_edges.append((recorded.id, ep_data["derived_from"]))
                 imported += 1
                 capped += was_capped
             except Exception as e:
                 errors += 1
                 if not args.json:
                     print(f"  Error importing episode {ep_data.get('id', '?')}: {e}", file=sys.stderr)
-
-        # Derivation edges last, once every episode of the file is in, for the
-        # skipped episodes as well as the new ones: an unmarked edge only to a
-        # source that exists here, a gone one at no more than agent
-        # (restore_derived). INSERT OR IGNORE: an edge already here stays.
-        for new_id, raw_edges in new_edges:
-            try:
-                pairs = [
-                    (id_map.get(str(e["id"]).strip().lower(), str(e["id"])),
-                     e.get("gone_trust"))
-                    for e in raw_edges
-                ]
-                store.restore_derived(new_id, pairs)
-            except Exception as e:
-                errors += 1
-                if not args.json:
-                    print(f"  Error restoring derivation of {new_id}: {e}", file=sys.stderr)
 
         if args.json:
             _print_json({"imported": imported, "skipped": skipped, "errors": errors,

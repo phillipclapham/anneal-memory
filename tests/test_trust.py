@@ -874,8 +874,6 @@ class TestL3Round3:
         with Store(dst_db) as d:
             assert d.effective_trust_map([page.id, summ.id, summ2.id, fine.id]) == {
                 page.id: "external", summ.id: "external", summ2.id: "external"}
-            assert d.derived_edges([summ.id, summ2.id]) == {
-                summ.id: [(page.id, None)], summ2.id: [(summ.id, None)]}
 
     def test_set_trust_refuses_a_stale_decision_and_a_same_class_write_is_a_no_op(self, tmp_path):
         """codex r3 #4 + #8: the CLI's gate was decided on a read another writer
@@ -950,8 +948,9 @@ class TestD3Redesign:
     """CAP-08 D3 redesign (1008+11, Phill "let's go with (A)"): effective trust is
     a fixed point over the whole reachable closure (R1), no trust is stored for a
     live source (R2), a removal leaves a sticky mark on every row that cited the
-    id (R3), the save's re-check compares existence, marks and trust (R4), and
-    import writes the edges of the episodes it skips (R5). Each test is a lane B
+    id (R3), and the save's re-check compares existence, marks and trust (R4).
+    (R5, import writing edges, was deleted in L3 r5: TestImportCarriesNoDerivation.)
+    Each test is a lane B
     repro (``project_memory/seat_1008_11/laneB/``) through the public API."""
 
     TS = "2026-10-08T00:00:00.000000+00:00"
@@ -1073,28 +1072,6 @@ class TestD3Redesign:
         assert all(gone is None for edges in s.derived_edges(
             [a.id, b.id, c.id, d.id, e.id]).values() for _src, gone in edges)
 
-    def test_import_writes_the_edges_of_an_episode_it_skips(self, tmp_path):
-        """p6: import skipped S (already there) and dropped its edge to the
-        external page P, so an operator raise of S read it agent."""
-        src, dst, out = tmp_path / "src.db", tmp_path / "dst.db", tmp_path / "e.json"
-        t1, t2 = "2026-10-08T01:00:00.000000+00:00", "2026-10-08T01:00:01.000000+00:00"
-        with Store(src, project_name="T") as s:
-            p = s.record("fetched page", EpisodeType.OBSERVATION, timestamp=t1, trust="external")
-            sm = s.record("my summary of the page", EpisodeType.OBSERVATION, timestamp=t2,
-                          derived_from=[p.id])
-        with Store(dst, project_name="T") as t:
-            assert t.record("fetched page", EpisodeType.OBSERVATION, timestamp=t1,
-                            trust="external").id == p.id
-            assert t.record("my summary of the page", EpisodeType.OBSERVATION,
-                            timestamp=t2).id == sm.id
-        assert _cli(src, "export", "-o", str(out)).returncode == 0
-        done = _cli(dst, "import", str(out))
-        assert done.returncode == 0, done.stderr
-        with Store(dst, trust_ceiling="operator") as t:
-            assert t.derived_edges([sm.id]) == {sm.id: [(p.id, None)]}
-            t.set_trust(sm.id, "agent")
-            assert t.effective_trust_map([sm.id]) == {sm.id: "external"}
-
     def test_a_prune_does_not_revoke(self, tmp_path):
         """p7 (complement r4 MED 1): an aged-out grounding read external and
         revoked a graduation nothing had lowered."""
@@ -1122,3 +1099,74 @@ class TestD3Redesign:
             assert s.pattern_grounding()["deploy_gate"][2][0]["gone"] == {g.id: "agent"}
         finally:
             s.close()
+
+
+class TestImportCarriesNoDerivation:
+    """CAP-08 L3 r5 (Phill 12:57, option (a)): JSON import does not restore
+    derivation edges. Each imported episode keeps the effective trust it was
+    exported with; an operator raise of an imported summary afterwards is the
+    operator's own statement (D1: the host's trust label is human-held)."""
+
+    T1, T2 = "2026-10-08T01:00:00.000000+00:00", "2026-10-08T01:00:01.000000+00:00"
+
+    def _file(self, path, s_id, derived_from):
+        path.write_text(json.dumps({"anneal_memory_export": True, "format_version": 1,
+            "episodes": [{"id": s_id, "content": "my summary of the page",
+                          "type": "observation", "timestamp": self.T2,
+                          "derived_from": derived_from}]}))
+
+    def test_a_phantom_edge_in_the_file_cannot_raise_an_existing_summary(self, tmp_path):
+        """complement r5 MED 1: a crafted edge to a missing id marked
+        gone_trust "agent" raised S from external to agent."""
+        db, f = tmp_path / "dst.db", tmp_path / "x.json"
+        with Store(db, project_name="T") as t:
+            p = t.record("fetched page", EpisodeType.OBSERVATION, timestamp=self.T1,
+                         trust="external")
+            s = t.record("my summary of the page", EpisodeType.OBSERVATION,
+                         timestamp=self.T2, derived_from=[p.id])
+        self._file(f, s.id, [{"id": "deadbeef", "gone_trust": "agent"}])
+        done = _cli(db, "import", str(f))
+        assert done.returncode == 0, done.stderr
+        with Store(db) as t:
+            assert t.effective_trust_map([s.id]) == {s.id: "external"}
+            assert t.derived_edges([s.id]) == {s.id: [(p.id, None)]}
+
+    def test_an_imported_gone_mark_writes_no_edge(self, tmp_path):
+        """codex r5 HIGH 2, the import half: a mark in the file neither changes
+        an existing edge nor adds one, because import writes none."""
+        db, f = tmp_path / "dst.db", tmp_path / "x.json"
+        with Store(db, project_name="T") as t:
+            p = t.record("fetched page", EpisodeType.OBSERVATION, timestamp=self.T1)
+            s = t.record("my summary of the page", EpisodeType.OBSERVATION,
+                         timestamp=self.T2, derived_from=[p.id])
+        self._file(f, s.id, [{"id": p.id, "gone_trust": "external"},
+                             {"id": "deadbeef", "gone_trust": "external"}])
+        done = _cli(db, "import", str(f))
+        assert done.returncode == 0, done.stderr
+        with Store(db) as t:
+            assert t.derived_edges([s.id]) == {s.id: [(p.id, None)]}
+
+    def test_an_operator_raise_of_an_imported_summary_is_the_operators_statement(self, tmp_path):
+        """The stated rule, pinned: the summary comes in flat at its exported
+        effective trust (external), and an operator raise makes it agent;
+        anneal does not re-derive it from the original sources."""
+        src, dst, out = tmp_path / "src.db", tmp_path / "dst.db", tmp_path / "e.json"
+        with Store(src, project_name="T") as s:
+            p = s.record("fetched page", EpisodeType.OBSERVATION, timestamp=self.T1,
+                         trust="external")
+            sm = s.record("my summary of the page", EpisodeType.OBSERVATION,
+                          timestamp=self.T2, derived_from=[p.id])
+        with Store(dst, project_name="T") as t:
+            t.record("fetched page", EpisodeType.OBSERVATION, timestamp=self.T1,
+                     trust="external")
+            t.record("my summary of the page", EpisodeType.OBSERVATION, timestamp=self.T2)
+        assert _cli(src, "export", "-o", str(out)).returncode == 0
+        exported = {e["id"]: e for e in json.loads(out.read_text())["episodes"]}
+        assert exported[sm.id]["derived_from"] == [{"id": p.id}]  # for the record
+        done = _cli(dst, "import", str(out))
+        assert done.returncode == 0, done.stderr
+        with Store(dst, trust_ceiling="operator") as t:
+            assert t.trust_map([sm.id]) == {sm.id: "external"}
+            t.set_trust(sm.id, "agent")
+            assert t.effective_trust_map([sm.id]) == {}
+            assert t.derived_edges([sm.id]) == {}

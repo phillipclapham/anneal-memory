@@ -42,6 +42,7 @@ from .graduation import (
     extract_pattern_summaries,
     pattern_line_levels,
     validate_graduations,
+    canonical_continuity_text,
     _NAMED_PATTERN_RE,
     _NAMED_PATTERN_WITH_EVIDENCE_RE,
     _is_graduating_heading,
@@ -2852,6 +2853,9 @@ def validated_save_continuity(
 
     if not text or not text.strip():
         raise ValueError("Continuity text cannot be empty")
+    # One text grammar before anything reads it (graduation.canonical_continuity_text):
+    # a stray line terminator refuses; exotic marker spacing/digits become ASCII.
+    text = canonical_continuity_text(text)
 
     # Validate structure (all sections declared by the store's schema). The
     # schema is read once here and reused for the schema-aware graduation gate

@@ -559,7 +559,8 @@ def test_identity_is_the_text_before_the_earliest_level_token(tmp_path):
 import pytest  # noqa: E402
 
 
-@pytest.mark.parametrize("ws", [" ", " ", "\v", "\f", "\x1c", "　"])
+# \v, \f and \x1c are line terminators, refused at the save entry since r6.
+@pytest.mark.parametrize("ws", ["\u00a0", "\u2003", "\u3000"])
 def test_bound_grammar_covers_every_reader_whitespace(tmp_path, ws):
     """``_GRADUATION_RE`` reads ``|<any Unicode space>999x``; the bound must too."""
     saved, _ = _save(tmp_path, "- planted |" + ws + "999x (" + TODAY + ") " + EV,
@@ -574,3 +575,36 @@ def test_bound_reads_non_ascii_digits(tmp_path):
                      prior="- planted | 1x (" + YESTERDAY + ")")
     levels = [int(m.group(1)) for m in re.finditer(r"\|\s*(\d+)x", saved)]
     assert levels and max(levels) <= 2, saved
+
+
+# --- L3 r6 (1008+11, run on 3a3921d): one text grammar before any read ----------------
+@pytest.mark.parametrize("sep", ["\r", "\x0b", "\x0c", "\x1c", "\x85", " ", " "])
+def test_line_terminator_that_hides_a_heading_refuses(tmp_path, sep):
+    """``## Notes<sep>## Patterns<sep>- x | 999x`` was one non-graduating line to
+    the bound and a graduating 999x to a splitlines() / universal-newline read."""
+    with pytest.raises(ValueError, match="line terminator"):
+        _save(tmp_path, "- planted | 1x (" + YESTERDAY + ")\n## Notes" + sep
+              + "## Patterns" + sep + "- sneaky | 999x (" + TODAY + ")",
+              prior="- planted | 1x (" + YESTERDAY + ")")
+
+
+def test_crlf_is_not_refused(tmp_path):
+    saved, _ = _save(tmp_path, "- planted | 1x (" + YESTERDAY + ")\r\n- other | 1x ("
+                     + YESTERDAY + ")", prior="- planted | 1x (" + YESTERDAY + ")")
+    assert _level(saved, "other") == 1  # CRLF bytes kept: test_durable test_m3
+
+
+@pytest.mark.parametrize("ws", [" ", " ", "　"])
+def test_exotic_marker_keys_as_its_name_and_earns_exactly_one_rung(tmp_path, ws):
+    """codex r6 MED: the NBSP line keyed ``("text", ...)`` and lost its prior, so a
+    valid graduation landed at 1x; it must land at exactly 2x, in ASCII form."""
+    saved, _ = _save(tmp_path, "- planted |" + ws + "999x" + ws + "(" + TODAY + ") " + EV,
+                     prior="- planted | 1x (" + YESTERDAY + ")")
+    assert _level(saved, "planted") == 2
+    assert ws not in saved
+
+
+def test_non_ascii_marker_digits_become_ascii(tmp_path):
+    saved, _ = _save(tmp_path, "- planted | ١x (٢٠٢٦-10-07)",
+                     prior="- planted | 1x (" + YESTERDAY + ")")
+    assert "- planted | 1x (2026-10-07)" in saved

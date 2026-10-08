@@ -597,3 +597,50 @@ def test_cli_state_set_prints_the_canonical_key(tmp_path, monkeypatch, capsys): 
     out = json.loads(_cli(monkeypatch, capsys, "--db", db, "state", " USER.Home_City ",
                           "--set", a.id, "--json").out)
     assert out["key"] == "user.home_city"
+
+
+# -- L3 r6: a servable head must agree with servability -----------------------------
+
+def _fork(st: Store):
+    old = st.record("Quillmark runs on postgres in seattle", "observation",
+                    timestamp="2026-01-05T10:00:00Z")
+    x = st.record("Quillmark moved to sqlite in seattle now", "observation",
+                  timestamp="2026-02-10T10:00:00Z")
+    y = st.record("Quillmark moved to duckdb elsewhere", "observation",
+                  timestamp="2026-03-10T10:00:00Z")
+    return old, x, y
+
+
+def test_a_newer_wrap_fork_does_not_hide_the_servable_replacement(tmp_path):   # complement M
+    with Store(str(tmp_path / "m.db")) as st:
+        old, x, y = _fork(st)
+        assert st.supersede(old_id=old.id, new_id=x.id, source="agent")
+        assert st.supersede(old_id=old.id, new_id=y.id, source="wrap")   # newer, unservable
+        got = st.replaced_matches("postgres", max_heads=5)
+        assert [(e.id, e.superseded_by) for e in got.episodes] == [(old.id, x.id)]
+        assert set(got.heads) == {x.id}
+
+
+def test_the_shown_heads_are_read_with_the_matches_not_after(tmp_path):   # codex M
+    from anneal_memory.server import Server
+    with Store(str(tmp_path / "m.db")) as st:
+        old, x, y = _fork(st)
+        st.supersede(old_id=old.id, new_id=x.id)
+        st.supersede(old_id=old.id, new_id=y.id)
+        real = st.replaced_matches
+
+        def racing(*a, **k):
+            found = real(*a, **k)
+            st.delete(y.id)   # a writer lands between the scan and the render
+            return found
+
+        st.replaced_matches = racing   # type: ignore[method-assign]
+        block = Server(st)._replaced_block("postgres")
+        assert f"({y.id})" in block and f"replaces ({old.id})" in block
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_replaced_matches_rejects_a_head_cap_below_one(tmp_path, bad):   # codex L
+    with Store(str(tmp_path / "m.db")) as st:
+        with pytest.raises(ValueError):
+            st.replaced_matches("postgres", max_heads=bad)

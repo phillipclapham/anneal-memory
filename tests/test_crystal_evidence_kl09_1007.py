@@ -121,3 +121,30 @@ def test_an_explicit_update_clears_the_provisional_mark(tmp_path):
         assert cs.get("alpha_pattern")["evidence"] == [e.id[:8], "eeee5555"]
     finally:
         s.close()
+
+
+def test_a_revive_keeps_the_provisional_mark(tmp_path):
+    """L1 1007 (mutation M14): a revived pattern's grounded ids stay provisional, so
+    the first real evidence still replaces them."""
+    s, cs = _store(tmp_path)
+    try:
+        s.record("the alpha_pattern incident", "observation")
+        cs.crystallize(name="alpha_pattern", level=3, explanation="x")
+        cs.ground_empty_evidence(s)
+        cs.retire("alpha_pattern", kind="obsolete", reason="t")
+        cs.crystallize(name="alpha_pattern", level=3, explanation="x")
+        assert cs.get("alpha_pattern")[PROVISIONAL_EVIDENCE]
+        cs.crystallize(name="alpha_pattern", level=3, explanation="x", evidence=["ffff6666"])
+        assert cs.get("alpha_pattern")["evidence"] == ["ffff6666"]
+    finally:
+        s.close()
+
+
+def test_a_dotted_name_does_not_match_inside_another(tmp_path):
+    s, cs = _store(tmp_path)
+    try:
+        s.record("see foo.bar for the incident", "observation")
+        cs.crystallize(name="foo", level=3, explanation="x")
+        assert cs.ground_empty_evidence(s)["foo"].status == "no_episode"
+    finally:
+        s.close()

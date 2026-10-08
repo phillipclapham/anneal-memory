@@ -966,7 +966,8 @@ class CrystalStore:
     ) -> dict[str, GroundingResult]:
         """Fill the evidence of each live pattern that has none, from the OLDEST
         ``limit`` live (not superseded) episodes in ``store`` that name the pattern as
-        a whole word and name no other live pattern (KL-09).
+        a whole word and name no other known pattern (KL-09). "Oldest" is among the
+        newest ``_GROUNDING_SCAN_CAP`` episodes containing the name.
 
         Oldest, because the first episodes to name a pattern sit nearest the incident
         that produced it; later ones are mostly summaries. An episode naming two or
@@ -992,7 +993,7 @@ class CrystalStore:
         known = {c["name"] for c in live} | {n for n in retired if isinstance(n, str)} \
             | set(store.pattern_history_names())
         bounded = {n: re.compile(
-            rf"(?<![a-z0-9_\-]){re.escape(n.lower())}(?![a-z0-9_\-])") for n in known}
+            rf"(?<![a-z0-9_.\-]){re.escape(n.lower())}(?![a-z0-9_.\-])") for n in known}
         out: dict[str, GroundingResult] = {}
         for item in live:
             if any(isinstance(e, str) for e in (item.get("evidence") or [])):

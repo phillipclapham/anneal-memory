@@ -1305,10 +1305,10 @@ names so the immune system can protect your patterns.
     `[evidence:]` may be silently dropped depending on tag order) — use one or the other.
   - **Why re-stamp `({today})` here when "Preserved" above said don't?** The today-stamp
     is exactly what exposes the line to the warmth/level hold gate — so a provenance
-    pattern that goes cold STILL ages out (provenance is not immortality; it only
-    silences the nag). An OLD-dated provenance line is simply skipped like any other
-    preserved line. Do NOT slap provenance on to dodge retirement — it does not stop
-    natural cold-decay, it only records grounding.
+    pattern that goes cold is held but FLAGGED to the operator on every wrap that
+    re-dates it (provenance is not immortality; it does not silence that). An
+    OLD-dated provenance line is simply skipped like any other preserved line. Do NOT
+    slap provenance on to dodge retirement — it only records grounding.
 - Patterns marked `(ungrounded)` need FRESH evidence from THIS session to re-graduate.
 - Patterns marked `(cross-session-overlap)` were demoted because today's explanation
   reused too much vocabulary from prior sessions; compose new evidence with
@@ -3738,6 +3738,9 @@ def validated_save_continuity(
             # no citation (v0.5.0 path). Lets operators reconcile AM-WARN's
             # cited_graduations count against the held set.
             "cited": cf.cited,
+            # spore-676 ruling (A): True = a bare line held COLD (not grounded within
+            # carryforward_cold_days), dated back to its last grounding and flagged.
+            "cold": cf.cold,
             # AM-PROVENANCE (Slice A): True = the held line carried a
             # ``[provenance: id, ...]`` grounding-audit marker (a deliberately-
             # grounded mature pattern) → excluded from the graduate-OUT notice.
@@ -3887,9 +3890,19 @@ def validated_save_continuity(
         {
             cf.name
             for cf in grad_result.carried_forward
-            if cf.max_level_reached >= 3 and not cf.provenance
+            if cf.max_level_reached >= 3 and not cf.provenance and not cf.cold
         }
     )
+    # spore-676 ruling (A): every bare line held COLD, at any level, reaches the human.
+    cold_held = sorted({cf.name for cf in grad_result.carried_forward if cf.cold})
+    if cold_held:
+        _warn_after_commit(
+            f"{len(cold_held)} pattern(s) were re-dated to today with no evidence but "
+            f"have not been grounded in more than {carryforward_cold_days} days: "
+            f"{', '.join(cold_held)}. They were HELD at their earned level and dated "
+            f"back to their last grounding, not demoted. Decide for each: re-exercise "
+            f"it with fresh evidence, graduate it OUT to a stable home, or retire it."
+        )
     if graduate_out:
         _warn_after_commit(
             f"{len(graduate_out)} pattern(s) at 3x or higher were carried forward "

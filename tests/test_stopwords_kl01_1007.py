@@ -65,3 +65,10 @@ def test_three_shared_content_words_still_trip():
         node_content_map={"abc12345": today}, pattern_history_lookup=_lookup(prior))
     assert len(result.cross_session_collisions) == 1
     assert "(cross-session-overlap)" in result.text
+
+
+def test_grounding_and_the_supersede_floor_keep_the_grounding_list():
+    """L1 1007 (mutation M7): nothing pinned which list the grounding sites use."""
+    from anneal_memory.graduation import _STOP_WORDS
+    assert _meaningful_words("while only alpha") == {"while", "only", "alpha"}
+    assert "while" not in _STOP_WORDS and _STOP_WORDS < _SYCOPHANCY_STOP_WORDS

@@ -5915,17 +5915,19 @@ class TestBarePreserveEndToEnd:
         finally:
             store.close()
 
-    def test_cold_bare_ages_out_through_save(self, tmp_path):
-        # Seeded high-water 3 but COLD (last_seen far past) -> sunset, not held.
+    def test_cold_bare_is_held_and_flagged_through_save(self, tmp_path):
+        # spore-676 ruling (A), Phill 2026-10-07: seeded high-water 3 but COLD ->
+        # HELD, dated back to its last grounding, and the operator is told.
         store = self._prime(tmp_path, "bare_cold.db", "verify", 3, "2026-05-01T00:00:00Z")
         try:
             text = self._text("  verify | 3x (2026-06-05) — stale, long unseen")
             prepare_wrap(store)
-            r = validated_save_continuity(store, text, today="2026-06-05")
-            assert r["bare_demoted"] == 1
-            assert r["carried_forward"] == []
+            with pytest.warns(UserWarning, match="re-exercise it with fresh evidence"):
+                r = validated_save_continuity(store, text, today="2026-06-05")
+            assert r["bare_demoted"] == 0
+            assert [c["cold"] for c in r["carried_forward"]] == [True]
             with open(r["path"]) as f:
-                assert "(needs-evidence)" in f.read()
+                assert "verify | 3x (2026-05-01) (carried-forward)" in f.read()
         finally:
             store.close()
 
@@ -6016,10 +6018,10 @@ class TestProvenanceEndToEnd:
         finally:
             store.close()
 
-    def test_cold_provenance_still_ages_out(self, tmp_path):
-        # Provenance silences the NOTICE; it does NOT override the warmth gate. A
-        # COLD mature pattern with provenance still sunsets — provenance cannot
-        # immortalize a pattern that has decayed past the cold threshold.
+    def test_cold_provenance_is_held_and_flagged(self, tmp_path):
+        # spore-676 ruling (A), Phill 2026-10-07: a COLD bare line at its mark is held
+        # and flagged whatever it carries. Provenance does not silence the COLD notice,
+        # so nothing is immortalized quietly: the operator decides.
         store = self._prime(
             tmp_path, "prov_cold.db", "platform_security", 3, "2026-05-01T00:00:00Z"
         )
@@ -6028,11 +6030,12 @@ class TestProvenanceEndToEnd:
                 "  platform_security | 3x (2026-06-05) [provenance: a1b2c3d4, e5f6a7b8]"
             )
             prepare_wrap(store)
-            r = validated_save_continuity(store, text, today="2026-06-05")
-            assert r["bare_demoted"] == 1
-            assert r["carried_forward"] == []
+            with pytest.warns(UserWarning, match="platform_security"):
+                r = validated_save_continuity(store, text, today="2026-06-05")
+            assert r["bare_demoted"] == 0
+            assert [c["cold"] for c in r["carried_forward"]] == [True]
             with open(r["path"]) as f:
-                assert "(needs-evidence)" in f.read()
+                assert "platform_security | 3x (2026-05-01) (carried-forward)" in f.read()
         finally:
             store.close()
 

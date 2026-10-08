@@ -23,17 +23,25 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   Replayed against one real store's recorded demotions, about a third would not have tripped.
   Grounding (the explanation must share 2 meaningful words with a cited episode) and the
   supersession floor keep the shorter list, so their behaviour and the published supersession
-  numbers are unchanged. A re-worded explanation that shares three content words still demotes.
+  numbers are unchanged. The same longer list is used by carryforward's sycophancy guard, so
+  fewer cited lines are refused the hold on function-word overlap. A re-worded explanation that shares three content words still demotes.
 
-### Fixed — a bare graduation at 4x and up is no longer invisible (spore-676)
+### Changed — a bare graduation is held, not eroded, at every level (spore-676; changes 0.5.0)
 - A pattern line at 4x or higher with no `[evidence:]` tag matched neither graduation regex,
   so it was never validated or demoted, whatever its level. Bare lines now use the same
-  "2 and up" level as cited ones and follow the bare-path rules that already applied at 2x
-  and 3x: a line at or below its recorded high-water mark and grounded within the last
-  `carryforward_cold_days` (7) is held as `(carried-forward)`; otherwise it demotes one level.
-  Run on a copy of a real store before the change, with every bare line re-dated to the wrap
-  day: all 11 warm lines were held at full level (up to 29x), and the 4 cold ones each dropped
-  one level.
+  "2 and up" level as cited ones.
+- **Behaviour change from 0.5.0, ruled by the operator:** a today-dated bare line at or
+  below its recorded high-water mark is HELD at every level, warm or cold. A warm one
+  (grounded within `carryforward_cold_days`) is marked `(carried-forward)` as before. A COLD
+  one is no longer demoted a level: it is held, its date is set back to its last grounding,
+  it is reported with `cold: true` in `carried_forward`, and a warning asks the operator to
+  re-exercise it with fresh evidence, graduate it out or retire it. Before, a cold bare 2x or
+  3x lost a level on every wrap that re-dated it, so its decay tracked the consolidator's
+  dating habit rather than the pattern. A bare line with no history, or above its mark, still
+  demotes. Cited lines are unchanged: a cold line whose citation fails still demotes.
+- Run on a copy of a real store before the change, every bare line re-dated to the wrap day:
+  all 15 were held (11 warm, 4 cold and dated back), none eroded; over five simulated daily
+  wraps that re-dated every line, no level moved.
 
 ### Added — a shrink-gate override leaves an audit trace (KL-14)
 - Every `continuity_saved` audit event now carries `allow_shrink`: `requested` says whether

@@ -472,7 +472,8 @@ class CarriedForward:
     line loses its evidence tag, it does NOT upsert pattern_history this wrap,
     so ``last_seen_at`` does not advance: a pattern that keeps failing to ground
     decays toward cold on its own and eventually ages out (the recency signal
-    IS the failing-streak signal — no separate tracking). Scope: the
+    IS the failing-streak signal — no separate tracking). That is the cited path; a
+    BARE line that goes cold is held and flagged instead (``cold``, below). Scope: the
     ungrounded-citation path ONLY. The ``(cross-session-overlap)`` immune
     demotion is never carried forward — that path is the anti-sycophancy
     defense, and protecting it would blunt it.
@@ -505,9 +506,16 @@ class CarriedForward:
     # AM-WARN does not fabricate a "citation resolved to zero" alarm — provenance
     # is inert to the namespace/Hebbian signal exactly like a bare carry.
     # Provenance silences the NOTICE only; it does NOT override the warmth/level
-    # hold gate (a cold mature pattern still ages out — graduate it OUT to a
-    # stable home rather than immortalizing it with a marker).
+    # hold gate: a cold cited line still demotes, and a cold bare line is held but
+    # flagged (``cold``) whatever it carries — graduate it OUT to a stable home
+    # rather than immortalizing it with a marker.
     provenance: bool = False
+    # spore-676 ruling (A), Phill 2026-10-07: a BARE line at or below its mark whose
+    # last grounding is older than ``carryforward_cold_days`` is HELD, dated back to
+    # that grounding, and surfaced for the operator to re-exercise, graduate out or
+    # retire. It is never eroded a level per re-stamp. Bare path only: a cited line
+    # that fails its citation still demotes (a failed citation is a real event).
+    cold: bool = False
 
 
 @dataclass
@@ -1105,7 +1113,9 @@ def validate_graduations(
             carryforward_cold_days=carryforward_cold_days,
         )
         if bare_held is not None:
-            lines[i] = _bare_carryforward_line(line, bare_match)
+            lines[i] = (_bare_cold_hold_line(line, bare_match, today,
+                                             bare_held.days_since_grounded)
+                        if bare_held.cold else _bare_carryforward_line(line, bare_match))
             carried_forward.append(bare_held)
             continue
 
@@ -1158,7 +1168,9 @@ def _meaningful_word_overlap(
 ) -> set[str]:
     """Return the set of meaningful words shared by two explanation texts.
 
-    Uses the same tokenization rule as :func:`check_explanation_overlap`:
+    Uses the same tokenization rule as :func:`check_explanation_overlap` with the
+    default ``stop`` (the grounding list); the cross-session sites pass
+    ``_SYCOPHANCY_STOP_WORDS``:
     split on non-alphanumeric, lowercase, drop stop words and tokens of
     length ≤2. Returning the actual set (not just a count) lets callers
     surface which specific words triggered a cross-session collision —
@@ -2226,10 +2238,23 @@ def _bare_carryforward_decision(
     # carryforward_cold_days narrowed to int by the early-return guard above. The
     # bare path carried NO citation -> cited=False so AM-WARN does NOT fabricate a
     # "citation resolved to zero episodes" alarm on a wrap that has no citations.
-    return _carryforward_history_decision(
+    held = _carryforward_history_decision(
         name, level, history, today, carryforward_cold_days,
         cited=False, provenance=has_provenance,
     )
+    if held is not None:
+        return held
+    # Ruling (A): at or below the mark but COLD is held and flagged, not eroded.
+    # No history (above) and above-mark lines still fall through to the sunset.
+    max_level = history.get("max_level_reached")
+    days = _days_between(history.get("last_seen_at"), today)
+    if isinstance(max_level, int) and level <= max_level and days is not None \
+            and days > carryforward_cold_days:
+        return CarriedForward(
+            name=name, held_level=level, max_level_reached=max_level,
+            days_since_grounded=days, cited=False, provenance=has_provenance, cold=True,
+        )
+    return None
 
 
 def _carryforward_line(line: str, match: re.Match, level: int) -> str:
@@ -2252,6 +2277,18 @@ def _carryforward_line(line: str, match: re.Match, level: int) -> str:
     )
     start, end = match.span()
     return line[:start] + new_marker + line[end:]
+
+
+def _bare_cold_hold_line(line: str, match: re.Match, today: str, days: int) -> str:
+    """Hold a COLD bare line at its level, its date set back to its last grounding
+    (``today`` minus ``days``) and marked ``(carried-forward)``: the date stops
+    claiming the pattern was exercised today, and the staleness scan sees its real
+    age (spore-676 ruling (A))."""
+    from datetime import datetime as _dt, timedelta as _td
+    prior = (_dt.strptime(today, "%Y-%m-%d") - _td(days=days)).strftime("%Y-%m-%d")
+    held = _bare_carryforward_line(line, match)
+    d0, d1 = match.span(2)
+    return held[:d0] + prior + held[d1:]
 
 
 def _bare_carryforward_line(line: str, match: re.Match) -> str:

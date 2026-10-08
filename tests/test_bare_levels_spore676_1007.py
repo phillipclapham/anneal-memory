@@ -1,7 +1,9 @@
 """spore-676 (2026-10-07): a BARE graduation (no [evidence:] tag) at 4x and up was
 matched by no regex, so it was neither validated nor demoted at any level. The bare
-regex now uses the same 2-and-up atom as the cited one; AM-PRESERVE-BARE-PATH decides
-hold vs demote exactly as it does at 2x/3x."""
+regex now uses the same 2-and-up atom as the cited one. Phill's ruling (A), the same
+day: at every level, a line at or below its high-water mark is HELD whether warm or
+cold; a cold one is dated back to its last grounding and flagged for the operator.
+No-history and above-mark lines still demote."""
 import pytest
 
 from anneal_memory.graduation import validate_graduations
@@ -23,22 +25,31 @@ def _run(line, lookup):
                                 citations_seen=True, pattern_history_lookup=lookup)
 
 
-@pytest.mark.parametrize("level", [4, 12, 21])
-def test_cold_bare_line_at_4x_and_up_demotes_one_level(level):
+@pytest.mark.parametrize("level", [2, 3, 4, 12, 21])
+def test_cold_bare_line_at_or_below_its_mark_is_held_dated_back_and_flagged(level):
     r = _run(f"- p | {level}x ({TODAY})", _lookup(level, "2026-09-20"))
-    assert r.bare_demoted == 1
-    assert f"p | {level - 1}x" in r.text
+    assert r.bare_demoted == 0
+    assert f"- p | {level}x (2026-09-20) (carried-forward)" in r.text
+    assert [(c.name, c.cold) for c in r.carried_forward] == [("p", True)]
+
+
+@pytest.mark.parametrize("level", [2, 12])
+def test_no_history_still_demotes(level):
+    r = _run(f"- p | {level}x ({TODAY})", lambda name: None)
+    assert r.bare_demoted == 1 and f"p | {level - 1}x" in r.text
 
 
 @pytest.mark.parametrize("level", [4, 12, 29])
 def test_warm_bare_line_at_or_below_its_mark_is_held(level):
     r = _run(f"- p | {level}x ({TODAY})", _lookup(level, "2026-10-05"))
     assert r.bare_demoted == 0
-    assert f"p | {level}x" in r.text and "(carried-forward)" in r.text
+    assert f"p | {level}x ({TODAY}) (carried-forward)" in r.text
+    assert [c.cold for c in r.carried_forward] == [False]
 
 
-def test_bare_line_above_its_mark_is_not_held():
-    r = _run(f"- p | 12x ({TODAY})", _lookup(4, "2026-10-05"))
+@pytest.mark.parametrize("seen", ["2026-10-05", "2026-09-20"])
+def test_bare_line_above_its_mark_still_demotes(seen):
+    r = _run(f"- p | 12x ({TODAY})", _lookup(4, seen))
     assert r.bare_demoted == 1 and "p | 11x" in r.text
 
 

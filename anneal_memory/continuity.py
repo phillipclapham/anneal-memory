@@ -99,6 +99,7 @@ from .store import (
     _safe_unlink,
 )
 from .types import (
+    DEFAULT_TRUST,
     AffectiveState,
     Episode,
     FeltCurrency,
@@ -3028,6 +3029,9 @@ def validated_save_continuity(
     # existed re-enters the continuity as new and re-earns its rungs; its crystal
     # is untouched.
     saved_levels = store.saved_pattern_levels()
+    # CAP-08 T3: where each citable episode came from (absent = agent), so a
+    # graduation grounded only in tool/external episodes does not climb.
+    window_trust = store.trust_map(citable_ids)
     grad_result = validate_graduations(
         text=text,
         valid_ids=citable_ids,
@@ -3055,6 +3059,7 @@ def validated_save_continuity(
         # file, so every line is new.
         prior_text=prior_continuity or "",
         saved_levels=saved_levels,
+        trust_of=lambda cid: window_trust.get(cid, DEFAULT_TRUST),
     )
 
     # The hard maximum is measured on the text that will be WRITTEN: graduation
@@ -3632,6 +3637,21 @@ def validated_save_continuity(
                     {"name": p.name, "level": p.level}
                     for p in proven_without_declaration
                 ]
+            # CAP-08: graduations held back for tool/external-only grounding,
+            # and any graduation grounded above the default trust. Lean when
+            # empty, like the keys above.
+            if grad_result.uncorroborated:
+                audit_payload["uncorroborated"] = [
+                    {"name": u.name, "level": u.level, "trust": u.trust,
+                     "citations": list(u.citations), "held": u.held}
+                    for u in grad_result.uncorroborated
+                ]
+            raised_trust = {
+                name: t for name, t in grad_result.pattern_trust.items()
+                if t != DEFAULT_TRUST
+            }
+            if raised_trust:
+                audit_payload["pattern_trust"] = raised_trust
             # Durable facts (B1): a drop by marker is recorded here, and only
             # here, so the hash-chained audit log is the trail of every durable
             # line that left the store. Re-insertions ride along, lean when
@@ -3946,6 +3966,15 @@ def validated_save_continuity(
             + ". Each is marked (level-capped)."
         )
 
+    if grad_result.uncorroborated:
+        held_back = sorted({u.name for u in grad_result.uncorroborated})
+        _warn_after_commit(
+            f"{len(held_back)} graduation(s) did not climb because every citation "
+            f"grounding them is a tool or external episode (content relayed, not "
+            f"observed): {', '.join(held_back)}. They climb once an agent or "
+            f"operator episode also grounds them (CAP-08)."
+        )
+
     result = SaveContinuityResult(
         path=path,
         chars=len(grad_result.text),
@@ -3961,6 +3990,8 @@ def validated_save_continuity(
         cross_session_collisions=cross_session_collisions_payload,
         proven_without_contradicts_declaration=proven_without_declaration_payload,
         carried_forward=carried_forward_payload,
+        uncorroborated=[asdict(u) for u in grad_result.uncorroborated],
+        pattern_trust=dict(grad_result.pattern_trust),
         # Both 0 on a wrap that graduated patterns is the former AM-WARN
         # Signal C case, which went quiet in 0.9.26: these counts are its record.
         associations_formed=assoc_formed,

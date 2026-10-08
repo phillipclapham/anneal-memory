@@ -147,7 +147,15 @@ from .store import (
     _SCHEMA_VERSION,
     _parse_format_version,
 )
-from .types import AffectiveState, AssociationStats, EpisodeType, RelevantPattern
+from .types import (
+    DEFAULT_TRUST,
+    TRUST_LEVELS,
+    AffectiveState,
+    AssociationStats,
+    EpisodeType,
+    RelevantPattern,
+    trust_rank,
+)
 from .worth import (
     DEFAULT_FOLD_SKEW_SECONDS,
     FOLLOWED_VALUES,
@@ -853,6 +861,14 @@ def cmd_record(args: argparse.Namespace) -> None:
     else:
         content = args.content
 
+    trust = getattr(args, "trust", "agent")
+    if trust == "operator" and not _operator_ok(
+        "Record this episode as the OPERATOR's own (trusted above the agent)?"
+    ):
+        print("Error: --trust operator needs a yes on a terminal, or "
+              "ANNEAL_OPERATOR=1. Nothing was recorded.", file=sys.stderr)
+        sys.exit(1)
+
     with _open_store(args) as store:
         metadata = None
         if args.tags:
@@ -865,6 +881,7 @@ def cmd_record(args: argparse.Namespace) -> None:
                 source=args.source,
                 metadata=metadata,
                 supersedes=getattr(args, "supersedes", None),
+                trust=trust,
             )
         except SupersessionError as exc:
             print(f"Error: {exc}. Nothing was recorded.", file=sys.stderr)
@@ -876,10 +893,40 @@ def cmd_record(args: argparse.Namespace) -> None:
                 "timestamp": episode.timestamp,
                 "type": episode.type.value,
                 "source": episode.source,
+                "trust": trust,
             })
             return
 
         print(f"Recorded episode {episode.id} ({episode.type.value})")
+
+
+def cmd_trust(args: argparse.Namespace) -> None:
+    """Show or change an episode's trust class (CAP-08). Lowering is open;
+    raising needs the operator (a yes on a terminal, or ANNEAL_OPERATOR=1)."""
+    with _open_store(args) as store:
+        if store.get(args.episode_id) is None:
+            print(f"Error: no episode {args.episode_id!r}.", file=sys.stderr)
+            sys.exit(1)
+        current = store.trust_map([args.episode_id]).get(args.episode_id, DEFAULT_TRUST)
+        if args.level is None:
+            if args.json:
+                _print_json({"id": args.episode_id, "trust": current})
+            else:
+                print(f"{args.episode_id}: {current}")
+            return
+        raising = trust_rank(args.level) > trust_rank(current)
+        if raising and not _operator_ok(
+            f"Raise {args.episode_id} from {current} to {args.level}?"
+        ):
+            print(f"Error: raising trust ({current} -> {args.level}) needs a yes on a "
+                  "terminal, or ANNEAL_OPERATOR=1. Unchanged.", file=sys.stderr)
+            sys.exit(1)
+        old = store.set_trust(args.episode_id, args.level, allow_raise=raising,
+                              actor="operator" if raising else "cli")
+        if args.json:
+            _print_json({"id": args.episode_id, "from": old, "to": args.level})
+        else:
+            print(f"{args.episode_id}: {old} -> {args.level}")
 
 
 def cmd_search(args: argparse.Namespace) -> None:
@@ -917,6 +964,21 @@ def cmd_search(args: argparse.Namespace) -> None:
             print(f"  [{ep.id}] {ep.type.value:<12} {age}{replaced}")
             print(f"           {content}")
             print()
+
+
+def _operator_ok(question: str) -> bool:
+    """The operator's own say for a CAP-08 trust claim an agent must not make:
+    ``ANNEAL_OPERATOR=1`` for one command, or a yes on a terminal."""
+    if os.environ.get("ANNEAL_OPERATOR") == "1":
+        return True
+    if sys.stdin.isatty() and sys.stderr.isatty():
+        print(f"{question} [y/N] ", end="", file=sys.stderr, flush=True)
+        try:
+            answer = sys.stdin.readline().strip().lower()
+        except (EOFError, OSError):
+            answer = ""
+        return answer in ("y", "yes")
+    return False
 
 
 def _team_override_ok(store: Any, args: argparse.Namespace) -> bool:
@@ -1923,6 +1985,12 @@ def cmd_export(args: argparse.Namespace) -> None:
         # delete), so an export carries them, marked, plus the links.
         result = store.recall(limit=100000, include_superseded=True)
         episodes = [_episode_dict(ep) for ep in result.episodes]
+        # CAP-08: the trust class rides along when it is not the default, so a
+        # JSON round trip does not turn an external episode into an agent one.
+        export_trust = store.trust_map(ep["id"] for ep in episodes)
+        for ep in episodes:
+            if ep["id"] in export_trust:
+                ep["trust"] = export_trust[ep["id"]]
         supersessions = store.supersession_links()
         continuity = store.load_continuity()
         meta = store.load_meta()
@@ -2123,12 +2191,19 @@ def cmd_import(args: argparse.Namespace) -> None:
                     skipped += 1
                     continue
 
+                # CAP-08: an export file is plain JSON anyone can edit, so it can
+                # lower trust but never vouch: anything above agent comes in as
+                # agent.
+                ep_trust = ep_data.get("trust", DEFAULT_TRUST)
+                if trust_rank(ep_trust) > trust_rank(DEFAULT_TRUST):
+                    ep_trust = DEFAULT_TRUST
                 store.record(
                     content=ep_data["content"],
                     episode_type=ep_data["type"],
                     source=ep_data.get("source", "import"),
                     metadata=ep_data.get("metadata"),
                     timestamp=ep_data.get("timestamp"),
+                    trust=ep_trust,
                 )
                 imported += 1
             except Exception as e:
@@ -4118,7 +4193,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Id of an older episode this one replaces (repeatable). Validated like "
              "a citation; on refusal nothing is recorded. Recall then hides the old one.",
     )
+    sub.add_argument(
+        "--trust", choices=list(TRUST_LEVELS), default=DEFAULT_TRUST,
+        help="Where the content came from (default: agent). tool = a relayed tool "
+             "result, external = a web page, document or another party; a pattern "
+             "grounded only in those does not graduate past 1x. operator needs a yes "
+             "on a terminal, or ANNEAL_OPERATOR=1.",
+    )
     sub.set_defaults(func=cmd_record)
+
+    # -- trust --
+    sub = subparsers.add_parser(
+        "trust", help="Show or change an episode's trust class", parents=[json_parent]
+    )
+    sub.add_argument("episode_id", help="Episode id")
+    sub.add_argument(
+        "level", nargs="?", choices=list(TRUST_LEVELS), default=None,
+        help="New class. Lowering is open; raising needs a yes on a terminal, or "
+             "ANNEAL_OPERATOR=1. Omit to show the current class.",
+    )
+    sub.set_defaults(func=cmd_trust)
 
     # -- search (alias: recall) --
     # `recall` is the verb the library (Store.recall) and MCP tool expose, and

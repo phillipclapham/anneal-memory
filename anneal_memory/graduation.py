@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, NamedTuple
 
 from .schema import DEFAULT_GRADUATING
+from .types import DEFAULT_TRUST, trust_rank
 
 
 # Matches graduated patterns (2x AND UP) WITH [evidence: <id> "explanation"] citations.
@@ -407,6 +408,13 @@ class GraduationResult:
     # saved continuity entitles them to, and the level each was cut to. Empty
     # when ``prior_text`` was not supplied (the bound did not run).
     level_capped: list["LevelCapped"] = field(default_factory=list)
+    # CAP-08 T3: graduations held back because every grounding citation is a
+    # tool/external episode. Empty unless the caller passed ``trust_of``.
+    uncorroborated: list["UncorroboratedGraduation"] = field(default_factory=list)
+    # CAP-08 T2: for each NAMED pattern that graduated today (the identifiers
+    # ``graduated_names`` holds; a free-text line has none), the highest trust
+    # among the citations that ground it. Empty unless the caller passed ``trust_of``.
+    pattern_trust: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -424,6 +432,22 @@ class LevelCapped:
     capped_to: int  # the level it was cut to
     prior_level: int | None  # the level its prior record entitles (None = new)
     validated: bool  # whether the line validated this wrap (+1 allowed)
+
+
+@dataclass
+class UncorroboratedGraduation:
+    """A today-dated graduation whose grounding citations are all ``tool`` or
+    ``external`` episodes (CAP-08 T3): content the agent relayed, not content it
+    observed. It does not climb. It is demoted with ``(uncorroborated)``, or
+    held at a level it earned earlier and recently (``held``), exactly as the
+    ungrounded path holds a line (see :class:`CarriedForward`). It climbs once
+    an ``agent`` or ``operator`` episode also grounds it."""
+
+    name: str
+    level: int  # the level the line claimed
+    citations: list[str]  # the grounding citations, all below agent
+    trust: str  # the highest trust among them
+    held: bool  # True: kept at its earned level; False: demoted one level
 
 
 @dataclass
@@ -572,6 +596,7 @@ def validate_graduations(
     carryforward_cold_days: int | None = 7,
     prior_text: str | None = None,
     saved_levels: "dict[tuple[str, str], int] | None" = None,
+    trust_of: "Callable[[str], str] | None" = None,
 ) -> GraduationResult:
     """Validate evidence citations on graduated patterns.
 
@@ -641,6 +666,18 @@ def validate_graduations(
             sycophantic vocabulary reuse (5+ shared words) trips while
             normal cross-session graduations with distinct evidence
             (≤2 shared trope words) pass cleanly.
+        trust_of: Optional callable mapping a cited episode id to its trust
+            class (``types.TRUST_LEVELS``). When given (the canonical save
+            pipeline passes the store's), check 4 applies: a line that passes
+            checks 1-3 must have at least one ``agent`` or ``operator`` episode
+            among the citations that GROUND its explanation (or among all its
+            resolved citations when there is no explanation or no content map
+            to check it against). A line whose grounding is all ``tool`` /
+            ``external`` takes the ungrounded path marked ``(uncorroborated)``
+            and is listed in ``uncorroborated``. Counting grounding citations,
+            not every resolved one, is deliberate: an unrelated agent episode
+            stapled onto the line does not corroborate it. When None, no trust
+            check runs (library callers that predate it).
 
     Returns:
         GraduationResult with possibly modified text and validation counts.
@@ -659,6 +696,8 @@ def validate_graduations(
     # the cortical pattern-graph seeds weak links across. Re-derived from the line
     # at the validated site (not the conditionally-set ``pattern_name`` var).
     graduated_names: list[str] = []
+    uncorroborated: list[UncorroboratedGraduation] = []
+    pattern_trust: dict[str, str] = {}
     # AM-WARN (v0.4.2): tracked independent of the cross-session immune gate
     # (see the field docstring on GraduationResult).
     any_citation_resolved = False
@@ -988,7 +1027,36 @@ def validate_graduations(
             if valid_cited:
                 any_citation_resolved = True
 
-            if ids_valid and explanation_valid and not cross_session_overlap_words:
+            # CAP-08 T3 (check 4): who grounds this line. Computed only for a
+            # line that passed checks 1-3; see ``trust_of`` in the docstring.
+            grounding_trust: str | None = None
+            grounding_ids: list[str] = []
+            if (
+                trust_of is not None
+                and ids_valid and explanation_valid and not cross_session_overlap_words
+            ):
+                grounding_ids = valid_cited
+                if grounding_checked and node_content_map is not None:
+                    grounding_ids = [
+                        cid for cid in valid_cited
+                        if check_explanation_overlap(
+                            explanation, node_content_map.get(cid, "")
+                        )
+                    ]
+                grounding_trust = max(
+                    (trust_of(cid) for cid in grounding_ids),
+                    key=trust_rank,
+                    default=DEFAULT_TRUST,
+                )
+            uncorroborated_line = (
+                grounding_trust is not None
+                and trust_rank(grounding_trust) < trust_rank(DEFAULT_TRUST)
+            )
+
+            if (
+                ids_valid and explanation_valid and not cross_session_overlap_words
+                and not uncorroborated_line
+            ):
                 validated += 1
                 validated_lines[i] = match.start()
                 # AM-LINKGATE-DECAY: a genuine graduation this wrap. Re-derive
@@ -998,6 +1066,34 @@ def validate_graduations(
                 grad_name_match = _NAMED_PATTERN_WITH_EVIDENCE_RE.match(line)
                 if grad_name_match is not None and grad_name_match.group(2) == str(level):
                     graduated_names.append(grad_name_match.group(1))
+                    if grounding_trust is not None:
+                        pattern_trust[grad_name_match.group(1)] = grounding_trust
+            elif uncorroborated_line:
+                assert grounding_trust is not None
+                name_m = _NAMED_PATTERN_WITH_EVIDENCE_RE.match(line)
+                held_cf = _carryforward_decision(
+                    line=line,
+                    level=level,
+                    today=today,
+                    pattern_history_lookup=pattern_history_lookup,
+                    carryforward_cold_days=carryforward_cold_days,
+                    cross_session_overlap_threshold=cross_session_overlap_threshold,
+                )
+                if held_cf is not None:
+                    lines[i] = _carryforward_line(line, match, level)
+                    carried_forward.append(held_cf)
+                else:
+                    demoted += 1
+                    lines[i] = _demote_line(line, match, level, marker="(uncorroborated)")
+                uncorroborated.append(UncorroboratedGraduation(
+                    # A free-text line has no identifier: its text up to the marker.
+                    name=(name_m.group(1) if name_m is not None
+                          else line[:match.start()].strip().lstrip("-").strip()),
+                    level=level,
+                    citations=list(grounding_ids),
+                    trust=grounding_trust,
+                    held=held_cf is not None,
+                ))
             elif cross_session_overlap_words:
                 # Cross-session check fired: today's explanation reuses
                 # vocabulary from the pattern's prior-session
@@ -1215,6 +1311,8 @@ def validate_graduations(
         malformed_evidence_carries=malformed_evidence_carries,
         graduated_names=graduated_names,
         level_capped=[cap for _, cap in level_capped],
+        uncorroborated=uncorroborated,
+        pattern_trust=pattern_trust,
     )
 
 

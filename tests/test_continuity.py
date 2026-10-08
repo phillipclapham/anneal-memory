@@ -438,6 +438,9 @@ class TestTypedDictReturnShapes:
                 # this wrap instead of demoted (at/below earned high-water mark
                 # AND warm). Audit signal; empty when nothing was held.
                 "carried_forward",
+                # CAP-08: graduations held back for tool/external-only
+                # grounding, and each graduated pattern's grounding trust.
+                "uncorroborated", "pattern_trust",
                 "associations_formed",
                 "associations_strengthened", "associations_decayed",
                 # AM-WARN (v0.4.2): dead-Hebbian-graph mis-wire warning

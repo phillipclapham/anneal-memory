@@ -240,6 +240,8 @@ from .types import (
     AffectiveState,
     AssociationPair,
     AssociationStats,
+    DEFAULT_TRUST,
+    TRUST_LEVELS,
     Episode,
     EpisodeType,
     PatternAssociationPair,
@@ -251,6 +253,7 @@ from .types import (
     WrapRecord,
     WrapResult,
     WrapSnapshot,
+    trust_rank,
 )
 
 class AnnealMemoryError(Exception):
@@ -348,6 +351,10 @@ StoreOperation = Literal[
     "import_team_snapshot",
     "supersession_exists",
     "superseded_by_map",
+    # CAP-08 provenance trust
+    "trust_map",
+    "trust_counts",
+    "set_trust",
     "supersession_problem",
     "supersession_links",
     "episodes_since_wrap",
@@ -1431,6 +1438,22 @@ CREATE INDEX IF NOT EXISTS idx_episodes_timestamp ON episodes(timestamp);
 CREATE INDEX IF NOT EXISTS idx_episodes_type ON episodes(type);
 CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
 CREATE INDEX IF NOT EXISTS idx_episodes_source ON episodes(source);
+
+-- CAP-08: an episode's trust class when it is not the default 'agent'
+-- (types.TRUST_LEVELS). Absence = 'agent', so every existing row reads as agent.
+CREATE TABLE IF NOT EXISTS episode_trust (
+    episode_id TEXT PRIMARY KEY,
+    trust TEXT NOT NULL
+);
+
+-- A trust row never outlives its episode, whatever path deletes it: episode
+-- ids are 8 hex characters, and a stale row would label the next episode that
+-- happened to get the same id.
+CREATE TRIGGER IF NOT EXISTS episode_trust_follows_delete
+AFTER DELETE ON episodes
+BEGIN
+    DELETE FROM episode_trust WHERE episode_id = OLD.id;
+END;
 
 CREATE TABLE IF NOT EXISTS tombstones (
     id TEXT PRIMARY KEY,
@@ -2563,6 +2586,7 @@ class Store:
         metadata: dict[str, Any] | None = None,
         timestamp: str | None = None,
         supersedes: list[str] | tuple[str, ...] | None = None,
+        trust: str = DEFAULT_TRUST,
     ) -> Episode:
         """Record a new episode.
 
@@ -2577,9 +2601,16 @@ class Store:
                 :class:`SupersessionError`); the episode and its links commit
                 together or not at all. Superseded episodes are kept and are
                 hidden from :meth:`recall` by default.
+            trust: Where the content came from (``types.TRUST_LEVELS``):
+                ``agent`` (default), ``tool`` (a tool result the agent relays),
+                ``external`` (a web page, a document, another party), or
+                ``operator``. A graduation whose grounding citations are all
+                ``tool``/``external`` does not climb (CAP-08). Stored with the
+                episode in one transaction; :meth:`set_trust` lowers it later.
 
         Raises:
             SupersessionError: a ``supersedes`` link failed validation.
+            ValueError: ``trust`` is not a known trust class.
 
         Returns:
             The recorded Episode.
@@ -2596,6 +2627,7 @@ class Store:
         if isinstance(episode_type, str):
             episode_type = EpisodeType(episode_type)
 
+        trust_rank(trust)  # refuses an unknown class before anything is written
         ts = timestamp or _now_utc()
         meta_json = json.dumps(metadata) if metadata is not None else None
         old_ids = _normalize_supersedes(supersedes)
@@ -2658,6 +2690,11 @@ class Store:
                         if nonce == max_retries - 1:
                             raise
                         continue
+                if trust != DEFAULT_TRUST:
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO episode_trust (episode_id, trust) VALUES (?, ?)",
+                        (ep_id, trust),
+                    )
                 for old_id in old_ids:
                     self._conn.execute(
                         "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
@@ -2685,12 +2722,17 @@ class Store:
         # 2026-09-04: a bare emit raised a raw OSError with the episode already
         # persisted, so the caller was told record() failed and would write it
         # again — a duplicate-episode path.
-        self._audit_log_after_commit("record", {
+        record_event: dict[str, Any] = {
             "episode_id": ep_id,
             "type": episode_type.value,
             "content_hash": _content_hash(content),
             "source": source,
-        }, method="record", committed="the episode", actor=source)
+        }
+        if trust != DEFAULT_TRUST:
+            record_event["trust"] = trust  # absent = agent, as in the store
+        self._audit_log_after_commit(
+            "record", record_event, method="record", committed="the episode", actor=source,
+        )
         for old_id in old_ids:
             self._audit_log_after_commit("supersede", {
                 "old_id": old_id,
@@ -3934,6 +3976,104 @@ class Store:
         return self._conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'supersessions'"
         ).fetchone() is not None
+
+    def _has_trust_table(self) -> bool:
+        """As :meth:`_has_supersessions_table`, for ``episode_trust`` (CAP-08)."""
+        return self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'episode_trust'"
+        ).fetchone() is not None
+
+    def trust_map(self, episode_ids: Iterable[str]) -> dict[str, str]:
+        """Trust class of each listed episode that is NOT the default ``agent``.
+        Ids absent from the result are ``agent`` (or do not exist)."""
+        ids = sorted({str(i) for i in episode_ids})
+        with self._db_boundary("trust_map"), self._read_snapshot():
+            if not ids or not self._has_trust_table():
+                return {}
+            out: dict[str, str] = {}
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                marks = ",".join("?" * len(chunk))
+                for row in self._conn.execute(
+                    f"SELECT episode_id, trust FROM episode_trust WHERE episode_id IN ({marks})",
+                    chunk,
+                ):
+                    out[row[0]] = row[1]
+            return out
+
+    def trust_counts(self) -> dict[str, int]:
+        """Number of live episodes in each trust class, every class listed."""
+        with self._db_boundary("trust_counts"), self._read_snapshot():
+            total = self._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+            counts = {t: 0 for t in reversed(TRUST_LEVELS)}
+            if self._has_trust_table():
+                for row in self._conn.execute(
+                    """SELECT t.trust, COUNT(*) FROM episode_trust t
+                       JOIN episodes e ON e.id = t.episode_id GROUP BY t.trust"""
+                ):
+                    counts[row[0]] = counts.get(row[0], 0) + row[1]
+            counts[DEFAULT_TRUST] = total - sum(
+                n for t, n in counts.items() if t != DEFAULT_TRUST
+            )
+            return counts
+
+    def set_trust(
+        self, episode_id: str, trust: str, *, allow_raise: bool = False,
+        actor: str = "agent",
+    ) -> str:
+        """Change an episode's trust class; returns the class it had.
+
+        Lowering is always allowed. Raising (e.g. ``external`` -> ``agent``) is
+        refused unless ``allow_raise=True``, which only the operator's own path
+        passes (the CLI asks on a terminal, or reads ``ANNEAL_OPERATOR=1``;
+        MCP never raises): a writer must not be able to vouch for content after
+        the fact. Audited as ``trust_set``.
+
+        Raises:
+            ValueError: unknown ``trust``, no such episode, or a raise without
+                ``allow_raise``.
+        """
+        new_rank = trust_rank(trust)
+        problem: str | None = None
+        old = DEFAULT_TRUST
+        # Refusals are computed inside and raised after the block: the boundary
+        # rolls back on any exception, which inside a caller's batch would
+        # discard its earlier writes (see _db_boundary).
+        with self._db_boundary("set_trust"):
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")
+            if self._conn.execute(
+                "SELECT 1 FROM episodes WHERE id = ?", (episode_id,)
+            ).fetchone() is None:
+                problem = f"set_trust: no episode {episode_id!r}"
+            else:
+                row = self._conn.execute(
+                    "SELECT trust FROM episode_trust WHERE episode_id = ?", (episode_id,)
+                ).fetchone()
+                old = row[0] if row is not None else DEFAULT_TRUST
+                if new_rank > trust_rank(old) and not allow_raise:
+                    problem = (
+                        f"set_trust: {episode_id} is {old!r}; raising it to {trust!r} "
+                        "is the operator's call (allow_raise=True)"
+                    )
+                elif trust == DEFAULT_TRUST:
+                    self._conn.execute(
+                        "DELETE FROM episode_trust WHERE episode_id = ?", (episode_id,)
+                    )
+                else:
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO episode_trust (episode_id, trust) VALUES (?, ?)",
+                        (episode_id, trust),
+                    )
+            if not self._defer_commit:
+                self._conn.commit()
+        if problem:
+            raise ValueError(problem)
+        if old != trust:
+            self._audit_log_after_commit("trust_set", {
+                "episode_id": episode_id, "from": old, "to": trust,
+            }, method="set_trust", committed="the trust change", actor=actor)
+        return old
 
     def get(self, episode_id: str) -> Episode | None:
         """Get a single episode by ID.
@@ -8308,6 +8448,7 @@ class Store:
 
         - :meth:`record` (episode writes)
         - :meth:`supersede` / :meth:`unsupersede` (supersession links)
+        - :meth:`set_trust` (CAP-08 trust class)
         - :meth:`import_team_entries` (``dry_run`` is refused inside a batch)
         - :meth:`import_team_snapshot` (``dry_run`` is refused inside a batch)
         - :meth:`team_forget_key`

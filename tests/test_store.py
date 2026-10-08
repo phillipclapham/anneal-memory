@@ -4353,16 +4353,19 @@ class TestTheWriterSchemaFunctionLetsABumpRefuseOpenWriters:
 
     def test_triggers_at_this_schema_let_this_release_write(self, tmp_path):
         # positive control: the same triggers with the stamp unchanged pass
-        from anneal_memory.store import _SCHEMA_VERSION
+        from anneal_memory.store import _SCHEMA_VERSION, _WRITER_SCHEMA_FUNCTION
 
         db = tmp_path / "m.db"
         store = Store(db)
         import sqlite3 as _sq
 
         fresh = _sq.connect(str(db))
+        # Schema 1's only trigger is CAP-08's trust-row cleanup; no bump guard
+        # (a trigger calling the writer-schema function) exists before a bump.
         assert fresh.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger'"
-        ).fetchone()[0] == 0, "schema 1 installs no trigger; the first bump does"
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND sql LIKE ?",
+            (f"%{_WRITER_SCHEMA_FUNCTION}%",),
+        ).fetchone()[0] == 0, "schema 1 installs no bump guard; the first bump does"
         fresh.close()
         self._bump(db, _SCHEMA_VERSION)
         store.record("same schema", episode_type="observation")

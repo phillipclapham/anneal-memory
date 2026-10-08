@@ -64,6 +64,19 @@ TOOLS: list[dict[str, Any]] = [
                     "description": "Agent or source attribution. Defaults to 'agent'.",
                     "default": "agent",
                 },
+                "trust": {
+                    "type": "string",
+                    "enum": ["agent", "tool", "external"],
+                    "description": (
+                        "Where the content came from. agent (default) = your own "
+                        "observation or decision; tool = a tool result you are "
+                        "relaying; external = a web page, document or another party. "
+                        "A pattern grounded only in tool/external episodes does not "
+                        "graduate past 1x until an agent episode also grounds it. "
+                        "Use tool/external whenever the content is someone else's claim."
+                    ),
+                    "default": "agent",
+                },
                 "metadata": {
                     "type": "object",
                     "description": "Optional JSON metadata to attach to the episode.",

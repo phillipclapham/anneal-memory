@@ -38,6 +38,36 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   in local time), so a wrap saved after midnight or under another `TZ` keeps the graduations it stamped.
 - A first save onto a fresh store has no prior: every pattern line enters at 1x. Direct `validate_graduations`
   callers that pass no `prior_text` keep the old behavior.
+### Added — trust classes: relayed content cannot graduate on its own (CAP-08 T1-T3, KL-22)
+- Run first, on 2026-10-07: one episode recorded from a web page carrying a false claim, cited
+  alone by a wrap, graduated the claim to 2x through `prepare_wrap` and
+  `validated_save_continuity`. The README's "single-shot poisoning stalls at 1x" was false.
+- Every episode has a trust class, lowest first `external`, `tool`, `agent` (the default), and
+  `operator` (`TRUST_LEVELS`, `trust_rank`). `Store.record(..., trust=)` stores a non-default
+  class in a new `episode_trust` table, in the episode's transaction; absence means `agent`, so
+  every existing episode reads as `agent` and nothing changes for a caller that never passes it.
+  A trigger deletes an episode's trust row whatever path deletes the episode.
+- `Store.set_trust(id, trust, allow_raise=False)` lowers a class freely; raising one needs
+  `allow_raise=True`, which only the operator's path passes. Audited as `trust_set`.
+  `Store.trust_map(ids)` and `Store.trust_counts()` read them.
+- Graduation (`validate_graduations(..., trust_of=)`, wired by the canonical save pipeline): a
+  today-dated graduation whose GROUNDING citations (those its explanation actually overlaps) are
+  all `tool`/`external` takes the ungrounded path marked `(uncorroborated)`: demoted one level,
+  or held at a level it earned earlier and recently. Listed in the save result's new
+  `uncorroborated`, recorded in the `continuity_saved` audit event, and named in a warning. An
+  unrelated agent episode added to the citation does not corroborate it. `pattern_trust` on the
+  save result gives each graduated named pattern's highest grounding trust (the audit event
+  records it when above `agent`).
+- MCP `record` takes `trust` (`agent`, `tool`, `external` only: an agent cannot label its own
+  write `operator`). CLI `record --trust` (`operator` needs a yes on a terminal or
+  `ANNEAL_OPERATOR=1`) and `anneal-memory trust ID [LEVEL]` (raising needs the same).
+- JSON `export` writes each non-default class; `import` honours a class up to `agent`, so an
+  edited export file can lower trust but never vouch. SQLite-format export copies the table.
+- Measured after: the 2026-10-07 plant recorded `external` is held at `1x (uncorroborated)`;
+  the same with an unrelated agent episode stapled on is held too; with an agent episode that
+  also grounds the claim it graduates to 2x.
+- Scope: provenance only. Unlabelled content reads as the agent's own, so the rule holds as far
+  as the host labels its tool boundary; whether a labelled claim is true stays the operator's.
 
 ### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
 - `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one

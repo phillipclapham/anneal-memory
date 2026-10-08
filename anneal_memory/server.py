@@ -381,6 +381,13 @@ class Server:
         episode_type = args.get("episode_type", "")
         source = args.get("source", "agent")
         metadata = args.get("metadata")
+        # CAP-08: an agent may label its own write tool/external, never
+        # operator; vouching is the operator's (CLI) path.
+        trust = args.get("trust", "agent")
+        if trust not in ("agent", "tool", "external"):
+            return _tool_result(
+                "Error: trust must be one of agent, tool, external", is_error=True
+            )
 
         if not content:
             return _tool_result("Error: content is required", is_error=True)
@@ -394,6 +401,7 @@ class Server:
                 source=source,
                 metadata=metadata,
                 supersedes=args.get("supersedes"),
+                trust=trust,
             )
         except ValueError as e:  # SupersessionError is a ValueError
             return _tool_result(f"Error: {e}", is_error=True)

@@ -54,6 +54,7 @@ from anneal_memory.cli import (
 )
 from anneal_memory.store import StoreError
 from anneal_memory.crystal import CrystalStore
+from anneal_memory.audit import _ManifestQuarantined
 
 
 # -- Fixtures --
@@ -4110,7 +4111,9 @@ class TestHybridAuditCli:
 
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
-        AuditTrail(db).log("after", {})
+        # Ruling A (Phill 2026-10-08): the append that quarantines is refused.
+        with pytest.raises(_ManifestQuarantined):
+            AuditTrail(db).log("after", {})
 
         result = self._run("--db", str(db), "audit", "--json")
 
@@ -4138,7 +4141,9 @@ class TestHybridL3AuditCli:
 
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
-        AuditTrail(db).log("quarantines", {})
+        # Ruling A (Phill 2026-10-08): the append that quarantines is refused.
+        with pytest.raises(_ManifestQuarantined):
+            AuditTrail(db).log("quarantines", {})
         return db
 
     @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root lists a mode-300 directory")
@@ -4199,7 +4204,9 @@ class TestHybridFixDiffAuditCliTrust:
 
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
-        AuditTrail(db).log("quarantines", {})
+        # Ruling A (Phill 2026-10-08): the append that quarantines is refused.
+        with pytest.raises(_ManifestQuarantined):
+            AuditTrail(db).log("quarantines", {})
 
         result = self._run("--db", str(db), "audit", "--json")
 

@@ -1,6 +1,5 @@
 """Tests for the hash-chained JSONL audit trail."""
 
-import contextlib
 import gzip
 import json
 import logging
@@ -7810,18 +7809,28 @@ class TestHybridManifestQuarantine:
         db = self._two_sealed_weeks(tmp_path)
         manifest = tmp_path / "m.audit.manifest.json"
         manifest.write_bytes(b"{not json")
+        active = tmp_path / "m.audit.jsonl"
+        before = active.read_bytes()
 
-        AuditTrail(db).log("after", {})
-        AuditTrail(db).log("again", {})
+        # Ruling A (Phill 2026-10-08), superseding the 09-13 hybrid's "appending
+        # continues": the append that discovers the invalid manifest is refused,
+        # and so is every later one until audit-repair.
+        for event in ("after", "again"):
+            with pytest.raises(audit_module._ManifestQuarantined, match="audit-repair"):
+                AuditTrail(db).log(event, {})
 
         markers = audit_module._quarantine_markers(tmp_path, "m")
         assert len(markers) == 1
         assert (tmp_path / markers[0]).read_bytes() == b"{not json"
         assert not manifest.exists(), "no fresh manifest may be written over the quarantine"
-        events = [json.loads(l)["event"] for l in (tmp_path / "m.audit.jsonl").read_text().splitlines()]
-        assert events[-2:] == ["after", "again"], "appending continues"
+        assert active.read_bytes() == before, "nothing appended"
         result = AuditTrail.verify(db)
         assert result.valid is False and "quarantined" in (result.error or "")
+
+        assert AuditTrail.repair_manifest(db).repaired is True
+        AuditTrail(db).log("resumed", {})
+        assert json.loads(active.read_text().splitlines()[-1])["event"] == "resumed"
+        assert AuditTrail.verify(db).valid
 
     def test_rotation_and_retention_pause_while_quarantined(self, tmp_path):
         """Ruling A (Phill 2026-10-08): the append itself is refused while
@@ -7830,9 +7839,9 @@ class TestHybridManifestQuarantine:
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
         trail = AuditTrail(db)
-        # The append that discovers the invalid manifest quarantines it; whether
-        # that append is itself refused is pinned elsewhere, not here.
-        with contextlib.suppress(audit_module._ManifestQuarantined):
+        # The append that discovers the invalid manifest quarantines it, and is
+        # refused (ruling A).
+        with pytest.raises(audit_module._ManifestQuarantined):
             trail.log("quarantines", {})
         assert audit_module._quarantine_markers(tmp_path, "m")
         sealed = self._sealed_names(tmp_path)
@@ -7857,6 +7866,21 @@ class TestHybridManifestQuarantine:
         raw = gzip.decompress((tmp_path / "m.audit.1999-W02.jsonl.gz").read_bytes())
         tail = [l for l in raw.splitlines() if l.strip()][-1].decode("utf-8")
 
+        # Ruling A (Phill 2026-10-08): refused while quarantined, nothing written.
+        with pytest.raises(audit_module._ManifestQuarantined, match="audit-repair"):
+            AuditTrail(db).log("seeded", {})
+        assert not (tmp_path / "m.audit.jsonl").exists()
+
+        # The repair cannot know whether the deleted active file held entries, so
+        # it records one possible gap, reported by the repair and by verify.
+        repaired = AuditTrail.repair_manifest(db)
+        assert repaired.repaired is True, repaired.error
+        [gap] = repaired.set_aside
+        assert "possible gap" in gap["cause"] and gap["set_aside_as"] == ""
+        assert gap["filename"] == "m.audit.jsonl"
+        assert AuditTrail.verify(db).set_aside == [gap]
+
+        # With the gap on record, the next append seeds from the sealed tail.
         AuditTrail(db).log("seeded", {})
 
         first = json.loads((tmp_path / "m.audit.jsonl").read_text().splitlines()[0])
@@ -7904,7 +7928,8 @@ class TestHybridManifestQuarantine:
     def test_repair_rebuilds_in_order_and_releases_the_marker(self, tmp_path):
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
-        AuditTrail(db).log("after", {})
+        with pytest.raises(audit_module._ManifestQuarantined):  # ruling A: refused
+            AuditTrail(db).log("after", {})
         [marker] = audit_module._quarantine_markers(tmp_path, "m")
 
         result = AuditTrail.repair_manifest(db)
@@ -7936,7 +7961,8 @@ class TestHybridManifestQuarantine:
         week = tmp_path / "m.audit.1999-W01.jsonl.gz"
         week.write_bytes(week.read_bytes()[:25])
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
-        AuditTrail(db).log("after", {})
+        with pytest.raises(audit_module._ManifestQuarantined):  # ruling A: refused
+            AuditTrail(db).log("after", {})
         before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
 
         result = AuditTrail.repair_manifest(db)
@@ -7991,7 +8017,9 @@ class TestHybridL3Fixes:
     def _quarantined(self, tmp_path):
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
-        AuditTrail(db).log("quarantines", {})
+        # Ruling A (Phill 2026-10-08): the append that quarantines is refused.
+        with pytest.raises(audit_module._ManifestQuarantined):
+            AuditTrail(db).log("quarantines", {})
         return db
 
     @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root lists a mode-300 directory")
@@ -8550,7 +8578,10 @@ class TestManifestLock:
         monkeypatch.setattr(audit_module.fcntl, "flock", no_locks)
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
-        AuditTrail(db).log("after", {})
+        # No locks at all is not a lock failure: the refusal is the quarantine's
+        # (ruling A), never _ManifestUnavailable.
+        with pytest.raises(audit_module._ManifestQuarantined):
+            AuditTrail(db).log("after", {})
         assert len(audit_module._quarantine_markers(tmp_path, "m")) == 1
         assert AuditTrail.repair_manifest(db).repaired is True
         assert AuditTrail.verify(db).valid
@@ -9194,7 +9225,16 @@ class TestOneSpanPerOperation:
             return adopted
 
         monkeypatch.setattr(AuditTrail, "_adopt_orphaned_files", adopt_then_repair_in_another_process)
-        AuditTrail(db).log("x", {})  # must NOT raise
+        # Ruling A (Phill 2026-10-08): this append found a quarantined manifest,
+        # so it is refused as quarantined, never with adoption's stale "did not
+        # complete" (the bug this pins). The quarantine check after the span can
+        # also run after the waiting repair has finished, and then the append
+        # goes ahead on the rebuilt manifest (run, lane C 10-08: verify valid, the
+        # possible gap recorded); both are ruled outcomes, so either is accepted.
+        try:
+            AuditTrail(db).log("x", {})
+        except audit_module._ManifestQuarantined:
+            pass
         out = state["proc"].communicate(timeout=30)[0]
         monkeypatch.undo()
 

@@ -9913,6 +9913,49 @@ class TestKL24ConcurrentWriters:
         result = AuditTrail.repair_manifest(c)
         assert result.repaired and [r["set_aside_as"] for r in result.set_aside] == [""]
 
+    def test_a_discarded_staged_entry_reconciles_once(self, tmp_path, monkeypatch):
+        """KL-24 L3 r8, codex HIGH (reasoned), reproduced first on 7bb1537: with
+        a repeated clock an identical retried event commits the same hash H; a
+        later deletion of the active file matched the stale discarded file again
+        and the loss was suppressed (verify valid, no gap). The reconcile
+        consumes the file once (renamed to ``.first.reconciled-*``, kept)."""
+        from datetime import datetime as real_dt
+
+        class Frozen(real_dt):
+            @classmethod
+            def now(cls, tz=None):
+                return real_dt(2026, 10, 8, 12, 0, 0, 0, tzinfo=tz)
+
+        monkeypatch.setattr(audit_module, "datetime", Frozen)
+        monkeypatch.setattr(audit_module, "_iso_week_now", lambda: "2026-W41")
+        real_replace, real_aside = audit_module.os.replace, audit_module._set_aside
+
+        def refuse(src, dst, *a, **k):
+            if str(src).endswith(".first"):
+                raise PermissionError(13, "rename refused")
+            return real_replace(src, dst, *a, **k)
+
+        def aside_then_die(path, reason):
+            kept = real_aside(path, reason)
+            if str(path).endswith(".first"):
+                raise KeyboardInterrupt
+            return kept
+
+        db = tmp_path / "m.db"
+        with monkeypatch.context() as m:
+            m.setattr(audit_module.os, "replace", refuse)
+            m.setattr(audit_module, "_set_aside", aside_then_die)
+            with pytest.raises(KeyboardInterrupt):
+                AuditTrail(db).log("same", {})
+        AuditTrail(db).log("same", {})  # the retry: reconciles, commits the same hash
+        assert [p for p in db.parent.iterdir() if ".first.reconciled-" in p.name]
+        assert not [p for p in db.parent.iterdir() if ".first.discarded-" in p.name]
+        (db.parent / "m.audit.jsonl").unlink()
+        with pytest.raises(audit_module._ManifestUnavailable):
+            AuditTrail(db).log("after", {})
+        result = AuditTrail.repair_manifest(db)
+        assert result.repaired and [r["set_aside_as"] for r in result.set_aside] == [""]
+
     def test_certainty_is_validated_in_the_manifest(self, tmp_path):
         """KL-24 L3 r7, codex LOW, each run first on 5de42b3: any ``certainty``
         value, on any record, parsed."""
@@ -9927,6 +9970,15 @@ class TestKL24ConcurrentWriters:
             m["set_aside"][0].update(bad)
             with pytest.raises(audit_module._CORRUPT_MANIFEST):
                 audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
+        # r8: only the active file's own name, and at most one such record.
+        m = json.loads(json.dumps(base))
+        m["set_aside"][0]["filename"] = "other.audit.jsonl"
+        with pytest.raises(audit_module._CORRUPT_MANIFEST):
+            audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
+        m = json.loads(json.dumps(base))
+        m["set_aside"].append(dict(m["set_aside"][0]))
+        with pytest.raises(audit_module._CORRUPT_MANIFEST):
+            audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
 
     def test_an_oserror_deciding_a_staged_entry_is_a_manifest_refusal(
         self, tmp_path, monkeypatch

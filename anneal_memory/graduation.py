@@ -65,29 +65,19 @@ from .schema import DEFAULT_GRADUATING
 # rewrites by level, so it cannot rewrite ``| 01x`` and the counters could report a
 # demotion while the displayed level never moved. Verified on disk before the fix.
 #
-# ⚠ KNOWN, DELIBERATE ASYMMETRY: ``_BARE_GRADUATION_RE`` below stays ``[23]``. Widening
-# it would make every today-dated 4x+ line WITHOUT evidence newly eligible for bare
-# demotion — a mass demotion of mature carried patterns the moment one is re-stamped,
-# a far larger blast radius than the defect being fixed. Carried lines are date-gated
-# out in the normal case. ⛔ THAT LAST CLAUSE READ "so the asymmetry is inert" AND IT
-# WAS MEASURED FALSE ON 2026-08-31, against flow's live neocortex: of its pattern lines
-# only THREE carry an [evidence:] tag, FOURTEEN are bare at level >= 4, and TEN of those
-# were dated to the wrap then in progress — i.e. today-dated bare 4x+ lines are the
-# HABIT, not the exception the date-gate assumption relies on. Ten such lines matched
-# neither regex at the most recent consolidate and were silently skipped.
-# ⚠ THE DEFERRAL STILL STANDS AND IS NOT WEAKENED BY THIS: the reason to keep [23] is
-# the blast radius above (widening puts fourteen mature carried patterns onto the
-# bare-demotion path at the next re-stamp), not the frequency. Only the stated
-# JUSTIFICATION was wrong, and a deferral resting on a false premise is one somebody
-# re-opens for the wrong reason. spore-676 holds the decision; it is gated on spore-675
-# and is NOT to be widened casually. Recorded here rather than left to be rediscovered.
+# ``_BARE_GRADUATION_RE`` below uses the same "2 and up" atom (spore-676, 2026-10-07).
+# It stayed ``[23]`` until then for fear that widening would mass-demote mature carried
+# patterns. RUN on a copy of flow's real store before widening, every bare pattern line
+# re-stamped to today: AM-PRESERVE-BARE-PATH held all 11 warm lines at full level (up to
+# 29x), and the 4 cold ones dropped one level each, the rule a cited line already
+# follows. Under ``[23]`` a bare 4x+ line was neither validated nor demoted, at any level.
 _GRADUATION_RE = re.compile(
     r"\|\s*([2-9]|[1-9][0-9]+)x\s*\((\d{4}-\d{2}-\d{2})\)\s*\[evidence:\s*"
     r"([a-fA-F0-9][a-fA-F0-9, ]*)"  # one or more hex IDs
     r'(?:\s+"([^"]*)")?\s*\]'  # optional quoted explanation
 )
 
-# Matches bare graduations (2x or 3x) WITHOUT [evidence:] tags.
+# Matches bare graduations (2x AND UP) WITHOUT [evidence:] tags.
 # The negative lookahead runs BEFORE consuming trailing whitespace and spans the
 # optional space itself (``(?![ \t]*\[evidence:)``). The prior form
 # ``\s*(?!\[evidence:)`` could backtrack ``\s*`` to zero spaces so the zero-width
@@ -96,7 +86,7 @@ _GRADUATION_RE = re.compile(
 # _GRADUATION_RE rejects) as a BARE line, which the v0.5.0 hold would then
 # preserve. Checking ``[ \t]*\[evidence:`` atomically closes that (codex L3).
 _BARE_GRADUATION_RE = re.compile(
-    r"\|\s*([23])x\s*\((\d{4}-\d{2}-\d{2})\)(?![ \t]*\[evidence:)[ \t]*"
+    r"\|\s*([2-9]|[1-9][0-9]+)x\s*\((\d{4}-\d{2}-\d{2})\)(?![ \t]*\[evidence:)[ \t]*"
 )
 
 # Matches any pattern with temporal marker (Nx)
@@ -2156,7 +2146,7 @@ def _bare_carryforward_decision(
     pattern_history_lookup: Callable[[str], dict[str, Any] | None] | None,
     carryforward_cold_days: int | None,
 ) -> CarriedForward | None:
-    """Decide whether a BARE 2x/3x graduation (no ``[evidence:]`` tag) should be
+    """Decide whether a BARE graduation (2x and up, no ``[evidence:]`` tag) should be
     HELD instead of sunset-demoted (AM-PRESERVE-BARE-PATH, v0.5.0) — the
     bare-path analogue of :func:`_carryforward_decision`.
 

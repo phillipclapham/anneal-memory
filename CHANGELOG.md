@@ -13,6 +13,16 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   would not have tripped. Content words are unchanged, so a re-worded explanation that shares
   three content words with the prior one still demotes.
 
+### Fixed — a bare graduation at 4x and up is no longer invisible (spore-676)
+- A pattern line at 4x or higher with no `[evidence:]` tag matched neither graduation regex,
+  so it was never validated or demoted, whatever its level. Bare lines now use the same
+  "2 and up" level as cited ones and follow the bare-path rules that already applied at 2x
+  and 3x: a line at or below its recorded high-water mark and grounded within the last
+  `carryforward_cold_days` (7) is held as `(carried-forward)`; otherwise it demotes one level.
+  Run on a copy of a real store before the change, with every bare line re-dated to the wrap
+  day: all 11 warm lines were held at full level (up to 29x), and the 4 cold ones each dropped
+  one level.
+
 ### Added — a shrink-gate override leaves an audit trace (KL-14)
 - A save with `allow_shrink=True` (CLI `--allow-shrink`, MCP `"allow_shrink": true`) now
   records `allow_shrink` in its `continuity_saved` audit event: `refusal_suppressed` says

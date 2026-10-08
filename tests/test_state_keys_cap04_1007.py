@@ -146,7 +146,9 @@ def test_set_state_key_links_existing_episodes(tmp_path):
             st.set_state_key("deadbeef", "user.job")
 
 
-def test_set_state_key_refuses_a_cycle_and_writes_nothing(tmp_path):
+def test_set_state_key_refuses_an_episode_already_replaced_and_writes_nothing(tmp_path):
+    """Every planned link points at the slot's newest live holder, so a cycle can only
+    come from keying an episode a link already hides, and that is refused first."""
     with Store(str(tmp_path / "m.db")) as st:
         ts = "2026-01-05T10:00:00Z"
         x = st.record("The project database runs on postgres in production.", "observation",
@@ -155,7 +157,7 @@ def test_set_state_key_refuses_a_cycle_and_writes_nothing(tmp_path):
                       timestamp=ts)
         assert st.supersede(old_id=x.id, new_id=y.id)  # equal timestamps pass the order check
         st.set_state_key(y.id, "project.db")
-        with pytest.raises(SupersessionError, match="cycle"):
+        with pytest.raises(SupersessionError, match="already replaced"):
             st.set_state_key(x.id, "project.db")
         keyed = {r[0] for r in st._conn.execute("SELECT episode_id FROM state_keys")}
         assert keyed == {y.id}
@@ -177,7 +179,9 @@ def test_a_hit_on_the_replaced_fact_serves_the_current_one(tmp_path, mode):
         res = _recall(st, query, mode=mode)
         ids = [e.id for e in res.episodes]
         assert new.id in ids and old.id not in ids
-        assert res.replaced == {new.id: (old.id,)}
+        served = next(e for e in res.episodes if e.id == new.id)
+        assert [r.id for r in served.replaces] == [old.id]
+        assert served.replaces[0].content == OLD and served.replaces[0].timestamp.startswith("2026-01-05")
         # The new fact shares no distinctive word with the query: hiding alone served nothing.
         assert not ({"seattle", "live"} & set(NEW.lower().split()))
 
@@ -188,9 +192,8 @@ def test_no_links_means_no_redirect_and_the_same_episodes(tmp_path):
         st.record(OLD, "observation", timestamp="2026-01-05T10:00:00Z")
         st.record(NEW, "observation", timestamp="2026-02-10T10:00:00Z")
         res = _recall(st)
-        assert res.replaced == {}
-        hits, heads = st.superseded_keyword_candidates(["seattle"], limit_per_keyword=10)
-        assert hits == {} and heads == {}
+        assert all(e.replaces == () for e in res.episodes)
+        assert not st.has_supersessions()
 
 
 def test_a_replacement_after_the_cutoff_is_not_a_redirect(tmp_path):
@@ -202,7 +205,7 @@ def test_a_replacement_after_the_cutoff_is_not_a_redirect(tmp_path):
                   state_key="user.home_city")
         res = _recall(st, exclude_recent_minutes=60, now="2026-02-10T10:30:00Z")
         assert old.id in [e.id for e in res.episodes]
-        assert res.replaced == {}
+        assert all(e.replaces == () for e in res.episodes)
 
 
 def test_a_redirect_follows_the_chain_to_its_live_end(tmp_path):
@@ -217,7 +220,7 @@ def test_a_redirect_follows_the_chain_to_its_live_end(tmp_path):
         res = _recall(st)
         ids = [e.id for e in res.episodes]
         assert cur.id in ids and old.id not in ids and mid.id not in ids
-        assert res.replaced[cur.id] == (old.id,)
+        assert [r.id for r in res.episodes[ids.index(cur.id)].replaces] == [old.id]
 
 
 def test_an_explicit_link_redirects_too(tmp_path):
@@ -230,8 +233,9 @@ def test_an_explicit_link_redirects_too(tmp_path):
         new = st.record("Quillmark moved its database engine over to sqlite.", "observation",
                         timestamp="2026-02-10T10:00:00Z", supersedes=[old.id])
         res = _recall(st, "is quillmark still on postgres")
-        assert new.id in [e.id for e in res.episodes]
-        assert res.replaced == {new.id: (old.id,)}
+        ids = [e.id for e in res.episodes]
+        assert new.id in ids
+        assert [r.id for r in res.episodes[ids.index(new.id)].replaces] == [old.id]
 
 
 # -- surfaces ---------------------------------------------------------------------
@@ -272,7 +276,7 @@ def test_cli_record_state_key_and_the_state_listing(tmp_path, monkeypatch, capsy
     assert [r["key"] for r in report] == ["user.home_city"]
     assert len(report[0]["current"]) == 1 and len(report[0]["replaced"]) == 1
     text = _cli(monkeypatch, capsys, "--db", db, "state").out
-    assert "current" in text and "replaced" in text and "unsupersede" in text
+    assert "current" in text and "replaced" in text and "state --unset" in text
 
 
 def test_cli_state_set_and_its_refusal(tmp_path, monkeypatch, capsys):
@@ -297,8 +301,125 @@ def test_mcp_keyword_recall_names_the_replacement(tmp_path):
         new = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00Z",
                         state_key="user.home_city")
         text = Server(st)._tool_recall({"keyword": "Seattle"})["content"][0]["text"]
-        assert f"({old.id})" in text and f"replaced by ({new.id})" in text
+        assert f"({new.id})" in text and f"replaces ({old.id})" in text
         assert "Austin" in text
         # A filtered call is left alone, as the durable-facts block is.
         filtered = Server(st)._tool_recall({"keyword": "Seattle", "source": "agent"})
-        assert "replaced by" not in filtered["content"][0]["text"]
+        assert "Replaced since" not in filtered["content"][0]["text"]
+        listed = Server(st)._tool_recall({"keyword": "Seattle", "include_superseded": True})
+        assert "Replaced since" not in listed["content"][0]["text"]
+
+
+# -- L1/L2 round 1 regressions ------------------------------------------------------
+
+def test_unset_takes_a_wrong_key_out_and_it_stays_out(tmp_path):   # L2 H3
+    with Store(str(tmp_path / "m.db")) as st:
+        good = st.record("lives in Seattle", "observation", timestamp="2026-01-01T10:00:00Z",
+                         state_key="user.home_city")
+        wrong = st.record("quarterly offsite in Lisbon, bring a passport", "observation",
+                          timestamp="2026-02-01T10:00:00Z", state_key="user.home_city")
+        out = st.clear_state_key(wrong.id)
+        assert out["key"] == "user.home_city" and out["removed"] == [(good.id, wrong.id)]
+        assert {e.id for e in st.recall(limit=10).episodes} == {good.id, wrong.id}
+        later = st.record("lives in Austin", "observation", timestamp="2026-03-01T10:00:00Z",
+                          state_key="user.home_city")
+        live = {e.id for e in st.recall(limit=10).episodes}
+        assert live == {wrong.id, later.id}          # the unkeyed one is never re-hidden
+        assert st.clear_state_key(wrong.id) == {"key": None, "removed": [], "added": []}
+
+
+def test_unset_in_the_middle_of_a_chain_re_forms_the_slot(tmp_path):
+    with Store(str(tmp_path / "m.db")) as st:
+        a, b, c = (st.record(f"lives in city {n}", "observation",
+                             timestamp=f"2026-0{n}-01T10:00:00Z", state_key="k").id for n in (1, 2, 3))
+        out = st.clear_state_key(b)
+        assert sorted(out["removed"]) == sorted([(a, b), (b, c)])
+        assert out["added"] == [(a, c)]
+        assert {e.id for e in st.recall(limit=10).episodes} == {b, c}
+
+
+def test_a_key_reaches_a_chain_whose_live_end_is_unkeyed(tmp_path):   # L1 MED
+    with Store(str(tmp_path / "m.db")) as st:
+        a = st.record("The database engine for Quillmark is postgres.", "observation",
+                      timestamp="2026-01-01T10:00:00Z", state_key="quillmark.db")
+        b = st.record("Quillmark moved its database engine over to sqlite.", "observation",
+                      timestamp="2026-02-01T10:00:00Z", supersedes=[a.id])
+        c = st.record("Quillmark now stores everything in duckdb.", "observation",
+                      timestamp="2026-03-01T10:00:00Z", state_key="quillmark.db")
+        assert [e.id for e in st.recall(limit=10).episodes] == [c.id]
+        assert b.id in {r[0] for r in st._conn.execute(
+            "SELECT old_id FROM supersessions WHERE new_id = ?", (c.id,))}
+
+
+def test_a_backdated_write_also_makes_a_split_slot_whole(tmp_path):   # L1 LOW 2
+    with Store(str(tmp_path / "m.db")) as st:
+        h1 = st.record("city one", "observation", timestamp="2026-01-01T10:00:00Z", state_key="k")
+        h3 = st.record("city three", "observation", timestamp="2026-03-01T10:00:00Z", state_key="k")
+        assert st.unsupersede(old_id=h1.id, new_id=h3.id)
+        st.record("city two", "observation", timestamp="2026-02-01T10:00:00Z", state_key="k")
+        assert [e.id for e in st.recall(limit=10).episodes] == [h3.id]
+
+
+@pytest.mark.parametrize("older,newer", [
+    ("2026-01-01T12:00:00Z", "2026-01-01T12:00:00.500000Z"),     # L2 M2: 'Z' sorts after '.'
+    ("2026-01-01T12:00:00+05:00", "2026-01-01T10:00:00Z"),       # 07:00Z before 10:00Z
+])
+def test_order_is_by_instant_not_spelling(tmp_path, older, newer):
+    with Store(str(tmp_path / "m.db")) as st:
+        n = st.record("the newer fact", "observation", timestamp=newer, state_key="k")
+        st.record("the older fact", "observation", timestamp=older, state_key="k")
+        assert [e.id for e in st.recall(limit=10).episodes] == [n.id]
+
+
+def test_a_tie_goes_to_the_later_write(tmp_path):   # L1 LOW 4
+    ts = "2026-01-01T10:00:00Z"
+    with Store(str(tmp_path / "m.db")) as st:
+        st.record("first", "observation", timestamp=ts, state_key="k")
+        second = st.record("second", "observation", timestamp=ts, state_key="k")
+        assert [e.id for e in st.recall(limit=10).episodes] == [second.id]
+
+
+def test_keying_an_episode_already_replaced_is_refused(tmp_path):   # L2 L2
+    with Store(str(tmp_path / "m.db")) as st:
+        x = st.record("The database engine for Quillmark is postgres.", "observation",
+                      timestamp="2026-01-01T10:00:00Z")
+        st.record("Quillmark moved its database engine over to sqlite.", "observation",
+                  timestamp="2026-02-01T10:00:00Z", supersedes=[x.id])
+        with pytest.raises(SupersessionError, match="already replaced"):
+            st.set_state_key(x.id, "k")
+
+
+def test_a_wrap_link_hides_but_never_serves(tmp_path):   # L2 M5
+    with Store(str(tmp_path / "m.db")) as st:
+        _seed(st)
+        old = st.record("The database engine for Quillmark is postgres.", "observation",
+                        timestamp="2026-01-05T10:00:00Z")
+        new = st.record("Quillmark moved its database engine over to sqlite.", "observation",
+                        timestamp="2026-02-10T10:00:00Z")
+        assert st.supersede(old_id=old.id, new_id=new.id, source="wrap")
+        res = _recall(st, "is quillmark still on postgres")
+        assert old.id not in [e.id for e in res.episodes]
+        assert all(e.replaces == () for e in res.episodes)   # its own hit, never a swap
+
+
+def test_a_link_changes_no_score(tmp_path):   # L2 H1 + M4
+    with Store(str(tmp_path / "m.db")) as st:
+        _seed(st)
+        old = st.record(OLD, "observation", timestamp="2026-01-05T10:00:00Z", state_key="k")
+        before = {e.id: e.score for e in _recall(st, mode="prompt",
+                                                 query=QUESTION + " near the waterfront").episodes}
+        new = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00Z", state_key="k")
+        after = {e.id: e.score for e in _recall(st, mode="prompt",
+                                                query=QUESTION + " near the waterfront").episodes}
+        assert after[new.id] == before[old.id]
+        assert {i: v for i, v in after.items() if i != new.id} == \
+               {i: v for i, v in before.items() if i != old.id}
+
+
+def test_cli_state_unset(tmp_path, monkeypatch, capsys):
+    db = str(tmp_path / "m.db")
+    with Store(db) as st:
+        a = st.record(OLD, "observation", timestamp="2026-01-05T10:00:00Z", state_key="k")
+        b = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00Z", state_key="k")
+    out = json.loads(_cli(monkeypatch, capsys, "--db", db, "state", "--unset", b.id, "--json").out)
+    assert out["key"] == "k" and out["removed"] == [{"old_id": a.id, "new_id": b.id}]

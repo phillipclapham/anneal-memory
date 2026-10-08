@@ -459,7 +459,8 @@ class Server:
         ):
             return result
         block = _durable_block(self._cued_facts(keyword, "query"))
-        replaced = self._replaced_block(keyword)
+        replaced = ("" if args.get("include_superseded") is True
+                    else self._replaced_block(keyword))
         if not block and not replaced:
             return result
         text = result["content"][0]["text"]
@@ -467,22 +468,29 @@ class Server:
 
     def _replaced_block(self, keyword: str) -> str:
         """CAP-04 on the keyword surface: episodes the phrase matches that a newer
-        episode replaced (hidden from the list above), each with the fact that
-        replaced it, so a search for the old state finds the current one. Empty when
-        nothing matched is replaced."""
+        episode replaced (hidden from the list above), each named with the fact that
+        replaced it, once per replacement, so a search for the old state finds the
+        current one. A match hidden only by wrap-proposed links is not listed (those
+        links hide but never serve). Empty when nothing matched is replaced."""
         phrase = keyword.strip()
         if not phrase:
             return ""
-        hits, heads = self._store.superseded_keyword_candidates(
-            [phrase], limit_per_keyword=_REPLACED_MAX)
+        found = self._store.recall(keyword=phrase, include_superseded=True,
+                                   limit=_REPLACED_MAX * 4)
+        old = [ep for ep in found.episodes if ep.superseded_by]
+        swappable = self._store.redirectable_ids([ep.id for ep in old]) if old else set()
+        by_head: dict[str, list[str]] = {}
+        for ep in old:
+            if ep.id in swappable and ep.superseded_by:
+                by_head.setdefault(ep.superseded_by, []).append(ep.id)
         lines = []
-        for old in hits.values():
-            head = heads.get(old.superseded_by or "")
+        for head_id, olds in list(by_head.items())[:_REPLACED_MAX]:
+            head = self._store.get(head_id)
             if head is None:
                 continue
             lines.append(
-                f"- ({old.id}) {old.timestamp} was replaced by ({head.id}) "
-                f"[{head.type.value}] {head.timestamp}: {head.content}")
+                f"- ({head.id}) [{head.type.value}] {head.timestamp} replaces "
+                f"{', '.join('(' + o + ')' for o in olds)}: {_truncate(head.content, 300)}")
         if not lines:
             return ""
         return "Replaced since (the current fact for an older match):\n" + "\n".join(lines)

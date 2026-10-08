@@ -984,6 +984,25 @@ def cmd_state(args: argparse.Namespace) -> None:
     """List state keys (CAP-04) with each key's live holder and what it replaced,
     or, with --set, put an existing episode into a key's slot."""
     with _open_store(args) as store:
+        if args.unset:
+            try:
+                out = store.clear_state_key(args.unset, source="cli")
+            except (SupersessionError, ValueError) as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
+            if args.json:
+                _print_json({"episode_id": args.unset, "key": out["key"],
+                             "removed": [{"old_id": o, "new_id": n} for o, n in out["removed"]],
+                             "added": [{"old_id": o, "new_id": n} for o, n in out["added"]]})
+            elif out["key"] is None:
+                print(f"{args.unset} has no state key.")
+            else:
+                print(f"{args.unset} no longer fills {out['key']!r}")
+                for o, n in out["removed"]:
+                    print(f"  removed: {n} supersedes {o}")
+                for o, n in out["added"]:
+                    print(f"  re-formed: {n} supersedes {o}")
+            return
         if args.set:
             if args.key is None:
                 print("Error: --set needs a KEY.", file=sys.stderr)
@@ -1018,7 +1037,7 @@ def cmd_state(args: argparse.Namespace) -> None:
             for item in items:
                 content = _truncate(item["content"].replace("\n", " "), 90)
                 print(f"  {label:<8} [{item['id']}] {_format_timestamp(item['timestamp'])}  {content}")
-    print("\nA wrong slot hides a valid episode: undo it with `unsupersede --old ID --new ID`.")
+    print("\nA wrong key hides a valid episode: take it out with `state --unset ID`.")
 
 
 def cmd_pattern_associations(args: argparse.Namespace) -> None:
@@ -4266,6 +4285,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("key", nargs="?", default=None, help="Only this key")
     sub.add_argument("--set", metavar="EPISODE_ID", default=None,
                      help="Put this existing episode into KEY's slot")
+    sub.add_argument("--unset", metavar="EPISODE_ID", default=None,
+                     help="Take this episode out of its slot (the undo for a wrong key)")
     sub.set_defaults(func=cmd_state)
 
     # -- search (alias: recall) --

@@ -367,6 +367,24 @@ class ScoredEpisode:
     source: str
     content: str
     score: float
+    # CAP-04: the replaced episodes whose keyword hit this one stands in for (a query
+    # that reached an old fact is served the fact that replaced it, in the old one's
+    # place). Empty for an ordinary hit.
+    replaces: tuple["ReplacedEpisode", ...] = ()
+
+
+@dataclass(frozen=True)
+class ReplacedEpisode:
+    """An episode a :class:`ScoredEpisode` replaced: what the reader needs to treat
+    the served fact as an UPDATE (the old claim and when it was recorded).
+    ``content`` is cut to :data:`REPLACED_CONTENT_MAX` characters."""
+
+    id: str
+    timestamp: str
+    content: str
+
+
+REPLACED_CONTENT_MAX = 300
 
 
 @dataclass(frozen=True)
@@ -410,9 +428,6 @@ class RelevantResult:
     # Durable facts the query cued (at most MAX_DURABLE_FACTS). Additive: empty unless
     # the store's continuity has a durable section and a fact matched.
     facts: list[RelevantFact] = field(default_factory=list)
-    # CAP-04 redirect: a returned episode id -> the superseded episode ids whose
-    # keyword hit it stands in for (it replaced them). Empty unless a hit was redirected.
-    replaced: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 # -- TypedDict return shapes for the canonical pipeline --

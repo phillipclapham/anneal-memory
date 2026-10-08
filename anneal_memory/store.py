@@ -354,6 +354,7 @@ StoreOperation = Literal[
     "unsupersede",
     "import_team_entries",
     "import_team_snapshot",
+    "drift_probes",
     "supersession_exists",
     "superseded_by_map",
     "supersession_problem",
@@ -1473,6 +1474,38 @@ CREATE TABLE IF NOT EXISTS supersessions (
 );
 CREATE INDEX IF NOT EXISTS idx_supersessions_new ON supersessions(new_id);
 
+-- CAP-06 drift probes: what the operator declared must survive consolidation, and
+-- each save's verdict on it. Additive; an older binary ignores both tables.
+CREATE TABLE IF NOT EXISTS drift_probes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    name TEXT,
+    text TEXT,
+    min_level INTEGER,
+    section TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    retired_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS drift_results (
+    wrap_id INTEGER NOT NULL,
+    probe_id INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    detail TEXT,
+    PRIMARY KEY (wrap_id, probe_id)
+);
+
+-- What each save graduated at 2x and up with a validated citation: the operator's
+-- review worklist for truth and contradiction (CAP-06). Additive.
+CREATE TABLE IF NOT EXISTS wrap_graduations (
+    wrap_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    level INTEGER NOT NULL,
+    explanation TEXT,
+    PRIMARY KEY (wrap_id, name)
+);
+
 -- Team ledger entries this store imported (0.9.40): the ledger id and hash outlive
 -- the episode, so a whole-ledger re-import after a prune or delete does not bring
 -- the entry back. No content: both values are in the shared ledger already, so a
@@ -1727,6 +1760,17 @@ _KEYWORD_SCAN_GROUP = 100
 def _keyword_like_pattern(keyword: str) -> str:
     escaped = keyword.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{escaped}%"
+
+
+def _team_entry_id_of(metadata: Any) -> str | None:
+    """The ledger entry id an episode's metadata carries, as the importer wrote it,
+    or None (unparseable metadata, no ``team`` object, or a non-string id)."""
+    try:
+        team = json.loads(metadata).get("team") if metadata else None
+    except (ValueError, TypeError, AttributeError):
+        return None
+    entry = team.get("entry_id") if isinstance(team, dict) else None
+    return entry if isinstance(entry, str) else None
 
 
 def _hidden_by_supersession_sql(until: str | None) -> tuple[str, list[str]]:
@@ -3149,16 +3193,22 @@ class Store:
                         "FROM team_snapshot ORDER BY root, key").fetchall()]
                 overrides = self._conn.execute(
                     "SELECT COUNT(*) FROM team_overrides").fetchone()[0]
-                unmanaged = self._conn.execute(
-                    # Any unowned rewired row that hides a TEAM episode, whatever
-                    # its linker is (seam doc L3 1006, codex: A(team) -> C(local)
-                    # was uncounted).
-                    """SELECT COUNT(*) FROM supersessions s WHERE s.source = 'rewired'
-                       AND NOT EXISTS (SELECT 1 FROM team_snapshot_rows o
-                                       WHERE o.old_id = s.old_id AND o.new_id = s.new_id)
-                       AND EXISTS (SELECT 1 FROM episodes e WHERE e.id = s.old_id
-                                   AND e.source >= 'team:' AND e.source < 'team;')"""
-                ).fetchone()[0]
+                # Any unowned rewired row that hides a team entry, whatever its
+                # linker is (seam doc L3 1006, codex: A(team) -> C(local) was
+                # uncounted). A team entry is what the importer treats as one: a
+                # ``team:`` source AND metadata carrying a string ``team.entry_id``
+                # (L3 1007, codex: a label alone is not one). Checked here in Python,
+                # as ``_team_held`` does, so no JSON1 function can fail the query.
+                unmanaged = sum(
+                    1 for (meta,) in self._conn.execute(
+                        """SELECT e.metadata FROM supersessions s
+                           JOIN episodes e ON e.id = s.old_id
+                           WHERE s.source = 'rewired'
+                           AND e.source >= 'team:' AND e.source < 'team;'
+                           AND NOT EXISTS (SELECT 1 FROM team_snapshot_rows o
+                                           WHERE o.old_id = s.old_id
+                                           AND o.new_id = s.new_id)""")
+                    if _team_entry_id_of(meta) is not None)
                 notes = [dict(r) for r in self._conn.execute(
                     "SELECT key, kind, entry_id, detail FROM team_snapshot_notes "
                     "ORDER BY key, kind, entry_id").fetchall()]
@@ -3170,6 +3220,175 @@ class Store:
                 return empty
         return {"keys": keys, "overrides": overrides, "unmanaged_rewired": unmanaged,
                 "notes": notes, "protected_episodes": protected}
+
+    # --- CAP-06 drift probes (the operator's instrument; see anneal_memory.drift) ---
+
+    def add_drift_probe(
+        self,
+        *,
+        pattern: str | None = None,
+        min_level: int | None = None,
+        fact: str | None = None,
+        section: str | None = None,
+        note: str | None = None,
+    ) -> int:
+        """Declare something that must survive consolidation: a Proven ``pattern``
+        (held at ``min_level`` or above; default its level in the current continuity,
+        else 2) or a ``fact`` (every meaningful
+        word of it on one line, of ``section`` if given). Checked after every save;
+        never shown to the composer. Returns the probe id."""
+        if (pattern is None) == (fact is None):
+            raise ValueError("add_drift_probe: pass exactly one of pattern= or fact=")
+        if pattern is not None:
+            if not isinstance(pattern, str) or not pattern.strip() or section is not None:
+                raise ValueError("add_drift_probe: pattern must be a non-empty name "
+                                 "(section= applies to facts only)")
+            if min_level is not None and (isinstance(min_level, bool)
+                                          or not isinstance(min_level, int) or min_level < 2):
+                raise ValueError("add_drift_probe: min_level must be an int >= 2")
+            if min_level is None:  # the level it holds now (L2 1007), else 2
+                min_level = self._current_pattern_level(pattern.strip()) or 2
+            row: tuple[Any, ...] = ("pattern", pattern.strip(), None, min_level, None)
+        else:
+            from .drift import fact_has_words
+            if not isinstance(fact, str) or not fact_has_words(fact):
+                raise ValueError("add_drift_probe: a fact needs at least one meaningful word")
+            if min_level is not None:
+                raise ValueError("add_drift_probe: min_level applies to patterns only")
+            row = ("fact", None, fact.strip(), None, section.strip() if section else None)
+        with self._db_boundary("drift_probes"):
+            cur = self._conn.execute(
+                "INSERT INTO drift_probes (kind, name, text, min_level, section, note) "
+                "VALUES (?, ?, ?, ?, ?, ?)", (*row, note))
+            probe_id = int(cur.lastrowid or 0)
+            if not self._defer_commit:
+                self._conn.commit()
+        self._audit_log_after_commit(
+            "drift_probe_added",
+            {"probe_id": probe_id, "kind": row[0], "subject": row[1] or row[2],
+             "min_level": row[3], "section": row[4]},
+            method="add_drift_probe", committed="the probe")
+        return probe_id
+
+    def _current_pattern_level(self, name: str) -> int | None:
+        """The pattern's level in the graduating section(s) of the current continuity
+        (the parser a save uses; L3 1007, codex: a ``name | Nx`` mention in Context
+        must not set it), or None."""
+        from .continuity import _pattern_levels  # continuity imports store
+        try:
+            return _pattern_levels(self.load_continuity() or "",
+                                   self.section_schema).get(name)
+        except (OSError, StoreError, ValueError):
+            return None
+
+    def _record_wrap_graduations(self, rows: list[tuple[str, int, str]]) -> None:
+        """Write this save's validated Proven graduations against the wrap row just
+        inserted (inside the save batch): the operator's per-wrap review worklist."""
+        if not rows:
+            return
+        # A failed insert fails the whole save batch (L3 r3: swallowing it let a
+        # rolled-back transaction commit empty), as a StoreDatabaseError (L3 r4); the
+        # wrap-id read is inside the boundary too (L3 r5).
+        with self._db_boundary("drift_probes"):
+            wrap_id = self._conn.execute("SELECT MAX(id) FROM wraps").fetchone()[0]
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO wrap_graduations (wrap_id, name, level, "
+                "explanation) VALUES (?, ?, ?, ?)",
+                [(wrap_id, n, lv, ex) for n, lv, ex in rows])
+
+    def list_drift_probes(self, *, include_retired: bool = False) -> list[dict[str, Any]]:
+        """Every drift probe (live only unless ``include_retired``), oldest first."""
+        where = "" if include_retired else " WHERE retired_at IS NULL"
+        with self._db_boundary("drift_probes"), self._read_snapshot():
+            try:
+                return [dict(r) for r in self._conn.execute(
+                    f"SELECT * FROM drift_probes{where} ORDER BY id").fetchall()]
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc):
+                    return []  # a read_only open of a store no writer has upgraded
+                raise
+
+    def retire_drift_probe(self, probe_id: int) -> bool:
+        """Stop checking a probe (its past results stay). False if no live probe has
+        that id."""
+        with self._db_boundary("drift_probes"):
+            n = self._conn.execute(
+                "UPDATE drift_probes SET retired_at = ? WHERE id = ? AND retired_at IS NULL",
+                (_now_utc(), probe_id)).rowcount
+            if not self._defer_commit:
+                self._conn.commit()
+        if n == 1:
+            self._audit_log_after_commit(
+                "drift_probe_retired", {"probe_id": probe_id},
+                method="retire_drift_probe", committed="the retirement")
+        return n == 1
+
+    def _live_drift_probes_in_txn(self) -> list[dict[str, Any]] | None:
+        """The live probes, read on the caller's open save batch (under its write lock,
+        so a probe added or retired concurrently is either in or out of this save as a
+        whole). None when the read failed (the caller warns; "no probes" and "could not
+        read" must stay distinct); a failed SELECT does not end the batch."""
+        try:
+            return [dict(r) for r in self._conn.execute(
+                "SELECT * FROM drift_probes WHERE retired_at IS NULL ORDER BY id")]
+        except sqlite3.Error:
+            return None
+
+    def _record_drift_results(self, results: list[dict[str, Any]]) -> None:
+        """Write a save's probe verdicts against the wrap row just inserted. Called
+        inside the save batch, after ``wrap_completed``, so both commit together."""
+        if not results:
+            return
+        # Fails the save, as a StoreDatabaseError (see _record_wrap_graduations).
+        with self._db_boundary("drift_probes"):
+            wrap_id = self._conn.execute("SELECT MAX(id) FROM wraps").fetchone()[0]
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO drift_results (wrap_id, probe_id, status, detail) "
+                "VALUES (?, ?, ?, ?)",
+                [(wrap_id, r["probe_id"], r["status"], r["detail"]) for r in results
+                 if isinstance(r.get("probe_id"), int)])
+
+    def drift_status(self) -> dict[str, Any]:
+        """The latest save's probe verdicts, each with the first wrap since which it
+        has been continuously not ``held`` (``since_wrap``), plus that wrap's id and
+        time, and ``graduated``: the Proven lines that save graduated with a validated
+        citation, to review for truth and contradiction. Read-only."""
+        empty: dict[str, Any] = {"wrap_id": None, "wrapped_at": None, "probes": [],
+                                 "graduated": []}
+        with self._db_boundary("drift_probes"), self._read_snapshot():
+            try:
+                last = self._conn.execute(
+                    "SELECT MAX(id) FROM wraps").fetchone()[0]
+                if last is None:
+                    return empty
+                graduated = [dict(r) for r in self._conn.execute(
+                    "SELECT name, level, explanation FROM wrap_graduations "
+                    "WHERE wrap_id = ? ORDER BY level DESC, name", (last,)).fetchall()]
+                at = self._conn.execute(
+                    "SELECT wrapped_at FROM wraps WHERE id = ?", (last,)).fetchone()
+                rows = self._conn.execute(
+                    """SELECT p.id, p.kind, COALESCE(p.name, p.text) AS subject,
+                              r.status, r.detail
+                       FROM drift_results r JOIN drift_probes p ON p.id = r.probe_id
+                       WHERE r.wrap_id = ? AND p.retired_at IS NULL ORDER BY p.id""",
+                    (last,)).fetchall()
+                probes = []
+                for r in rows:
+                    since = None
+                    if r["status"] != "held":
+                        held = self._conn.execute(
+                            "SELECT MAX(wrap_id) FROM drift_results WHERE probe_id = ? "
+                            "AND status = 'held'", (r["id"],)).fetchone()[0]
+                        since = self._conn.execute(
+                            "SELECT MIN(wrap_id) FROM drift_results WHERE probe_id = ? "
+                            "AND wrap_id > ?", (r["id"], held or 0)).fetchone()[0]
+                    probes.append(dict(r) | {"since_wrap": since})
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc):
+                    return empty
+                raise
+        return {"wrap_id": last, "wrapped_at": at[0] if at else None, "probes": probes,
+                "graduated": graduated}
 
     def team_forget_key(self, key: str) -> int:
         """Release a snapshot key: its record and its ownership go; the links stay in
@@ -3773,12 +3992,7 @@ class Store:
             "SELECT source, metadata FROM episodes WHERE id = ?", (episode_id,)).fetchone()
         if row is None or not str(row["source"]).startswith("team:"):
             return None
-        try:
-            team = json.loads(row["metadata"]).get("team")
-        except (TypeError, ValueError, AttributeError):
-            return None
-        eid = team.get("entry_id") if isinstance(team, dict) else None
-        return eid if isinstance(eid, str) else None
+        return _team_entry_id_of(row["metadata"])
 
     def _rewire_one(self, start: str, first: str, cur: str) -> None:
         """Link ``start`` past the removed ``first`` .. to ``cur`` (a 'rewired' row),
@@ -4236,6 +4450,36 @@ class Store:
                 ep = dataclasses.replace(ep, superseded_by=replaced_by[ep.id])
             by_id[ep.id] = ep
         return {i: by_id[i] for i in keep if i in by_id}, doc_freq, corpus_n
+
+    def _scan_containing_oldest(
+        self, keyword: str, visit: Callable[[Episode], bool], *, page: int = 500,
+    ) -> None:
+        """Visit live (not superseded) episodes whose content contains ``keyword``
+        (case-insensitive substring, as :meth:`recall` matches), OLDEST first, until
+        ``visit`` returns True. One read snapshot for the whole scan and keyset paging
+        on ``(timestamp, id)``, so a concurrent write can neither repeat nor skip a row
+        (L3 1007: per-page snapshots with OFFSET could)."""
+        with self._db_boundary("keyword_candidates"), self._read_snapshot():
+            conditions, params, _ = self._recall_conditions(
+                since=None, until=None, episode_type=None, source=None,
+                include_superseded=False,
+            )
+            base = " AND ".join(conditions) if conditions else "1=1"
+            pattern = _keyword_like_pattern(keyword)
+            after: tuple[str, str] | None = None
+            while True:
+                cursor = "" if after is None else " AND (timestamp, id) > (?, ?)"
+                rows = self._conn.execute(
+                    f"SELECT * FROM episodes WHERE {base} AND {_KEYWORD_LIKE_SQL}{cursor} "
+                    f"ORDER BY timestamp ASC, id ASC LIMIT ?",
+                    [*params, pattern, *(after or ()), page],
+                ).fetchall()
+                for r in rows:
+                    if visit(self._row_to_episode(r)):
+                        return
+                if len(rows) < page:
+                    return
+                after = (rows[-1]["timestamp"], rows[-1]["id"])
 
     def episodes_since_wrap(self) -> list[Episode]:
         """Get all episodes since the last completed wrap.
@@ -5951,6 +6195,18 @@ class Store:
     # here; the cross-session check at graduation time compares today's
     # explanation against this history to detect sycophantic vocabulary
     # reuse across sessions.
+
+    def pattern_history_names(self) -> list[str]:
+        """Every pattern name the store has a history row for (any pattern that ever
+        graduated with a citation), sorted. Read-only."""
+        with self._db_boundary("get_pattern_history"), self._read_snapshot():
+            try:
+                return [r[0] for r in self._conn.execute(
+                    "SELECT pattern_name FROM pattern_history ORDER BY pattern_name")]
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc):
+                    return []
+                raise
 
     def get_pattern_history(self, pattern_name: str) -> dict[str, Any] | None:
         """Look up the cross-session graduation history for a pattern.
@@ -8242,6 +8498,7 @@ class Store:
         - :meth:`import_team_entries` (``dry_run`` is refused inside a batch)
         - :meth:`import_team_snapshot` (``dry_run`` is refused inside a batch)
         - :meth:`team_forget_key`
+        - :meth:`add_drift_probe` / :meth:`retire_drift_probe` (CAP-06)
         - :meth:`delete` (episode deletions)
         - :meth:`record_associations` / :meth:`decay_associations`
         - :meth:`wrap_completed`

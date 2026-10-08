@@ -4593,6 +4593,43 @@ class TestCatastrophicShrinkGate:
         finally:
             store.close()
 
+    @staticmethod
+    def _saved_events(store):
+        import json as _json
+        path = store._audit._active_path
+        return [e for e in (_json.loads(x) for x in path.read_text(encoding="utf-8")
+                            .splitlines() if x.strip())
+                if e["event"] == "continuity_saved"]
+
+    def test_pipeline_allow_shrink_override_is_audited_kl14(self, tmp_path):
+        """KL-14: an override of the shrink gate leaves a trace naming the refusal
+        it suppressed."""
+        from anneal_memory import Store, FLOW_SCHEMA
+        store = Store(tmp_path / "s.db", project_name="flow")
+        store.set_section_schema(FLOW_SCHEMA)
+        try:
+            self._wrap(store, self._flow_prior(), "2026-05-30")
+            assert self._saved_events(store)[-1]["data"]["allow_shrink"] == {
+                "requested": False}
+            self._wrap(store, self._flow_collapsed(), "2026-05-31", allow_shrink=True)
+            trace = self._saved_events(store)[-1]["data"]["allow_shrink"]
+            assert trace["requested"] is True and trace["refusal_suppressed"] is True
+            assert "collapses protected memory" in trace["refusal"]
+        finally:
+            store.close()
+
+    def test_pipeline_allow_shrink_with_nothing_to_override_says_so_kl14(self, tmp_path):
+        from anneal_memory import Store, FLOW_SCHEMA
+        store = Store(tmp_path / "s.db", project_name="flow")
+        store.set_section_schema(FLOW_SCHEMA)
+        try:
+            self._wrap(store, self._flow_prior(), "2026-05-30")
+            self._wrap(store, self._flow_prior(), "2026-05-31", allow_shrink=True)
+            assert self._saved_events(store)[-1]["data"]["allow_shrink"] == {
+                "requested": True, "refusal_suppressed": False}
+        finally:
+            store.close()
+
     def test_pipeline_flow_healthy_growth_saves(self, tmp_path):
         from anneal_memory import Store, FLOW_SCHEMA
         store = Store(tmp_path / "s.db", project_name="flow")
@@ -5878,17 +5915,25 @@ class TestBarePreserveEndToEnd:
         finally:
             store.close()
 
-    def test_cold_bare_ages_out_through_save(self, tmp_path):
-        # Seeded high-water 3 but COLD (last_seen far past) -> sunset, not held.
+    def test_cold_bare_is_held_and_flagged_through_save(self, tmp_path):
+        # spore-676 ruling (A), Phill 2026-10-07: seeded high-water 3 but COLD ->
+        # HELD, dated back to its last grounding, and the operator is told.
         store = self._prime(tmp_path, "bare_cold.db", "verify", 3, "2026-05-01T00:00:00Z")
         try:
             text = self._text("  verify | 3x (2026-06-05) — stale, long unseen")
             prepare_wrap(store)
-            r = validated_save_continuity(store, text, today="2026-06-05")
-            assert r["bare_demoted"] == 1
-            assert r["carried_forward"] == []
+            with pytest.warns(UserWarning) as caught:
+                r = validated_save_continuity(store, text, today="2026-06-05")
+            msgs = [str(w.message) for w in caught]
+            assert any("re-exercise it with fresh evidence" in m and "verify (" in m
+                       for m in msgs)
+            # L1 1007 (mutant Mg survived): a cold hold is not ALSO in the graduate-out notice
+            assert not any("graduate OUT to a stable home (e.g. partnership.md)" in m
+                           for m in msgs)
+            assert r["bare_demoted"] == 0
+            assert [c["cold"] for c in r["carried_forward"]] == [True]
             with open(r["path"]) as f:
-                assert "(needs-evidence)" in f.read()
+                assert "verify | 3x (2026-05-01) (carried-forward)" in f.read()
         finally:
             store.close()
 
@@ -5979,10 +6024,10 @@ class TestProvenanceEndToEnd:
         finally:
             store.close()
 
-    def test_cold_provenance_still_ages_out(self, tmp_path):
-        # Provenance silences the NOTICE; it does NOT override the warmth gate. A
-        # COLD mature pattern with provenance still sunsets — provenance cannot
-        # immortalize a pattern that has decayed past the cold threshold.
+    def test_cold_provenance_is_held_and_flagged(self, tmp_path):
+        # spore-676 ruling (A), Phill 2026-10-07: a COLD bare line at its mark is held
+        # and flagged whatever it carries. Provenance does not silence the COLD notice,
+        # so nothing is immortalized quietly: the operator decides.
         store = self._prime(
             tmp_path, "prov_cold.db", "platform_security", 3, "2026-05-01T00:00:00Z"
         )
@@ -5991,11 +6036,12 @@ class TestProvenanceEndToEnd:
                 "  platform_security | 3x (2026-06-05) [provenance: a1b2c3d4, e5f6a7b8]"
             )
             prepare_wrap(store)
-            r = validated_save_continuity(store, text, today="2026-06-05")
-            assert r["bare_demoted"] == 1
-            assert r["carried_forward"] == []
+            with pytest.warns(UserWarning, match="platform_security"):
+                r = validated_save_continuity(store, text, today="2026-06-05")
+            assert r["bare_demoted"] == 0
+            assert [c["cold"] for c in r["carried_forward"]] == [True]
             with open(r["path"]) as f:
-                assert "(needs-evidence)" in f.read()
+                assert "platform_security | 3x (2026-05-01) (carried-forward)" in f.read()
         finally:
             store.close()
 

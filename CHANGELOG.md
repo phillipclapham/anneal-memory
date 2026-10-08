@@ -4,6 +4,97 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added — drift probes, the operator's instrument for meaning drift (CAP-06)
+- `anneal-memory probe add --pattern NAME [--min-level N]` / `--fact TEXT [--section H]`,
+  `probe list [--all]`, `probe retire ID`, `probe status`; library `Store.add_drift_probe`,
+  `list_drift_probes`, `retire_drift_probe`, `drift_status`, and `anneal_memory.drift`.
+  Every save checks each live probe against the saved text and records its status with that
+  wrap (`probe status` shows each with its detail; the save result's `drift` and the
+  `continuity_saved` audit event carry the counts and each probe's id and status only):
+  `held`, `changed` (every word kept but a negation flipped), `weakened` (a pattern below
+  its level), `crystallized` (moved to the crystal store), `lost`, or `unchecked` (a probe
+  this version cannot read; a probe never blocks a save). A pattern probe's level defaults
+  to the level the pattern holds when the probe is added. A fact matches within one
+  sentence or bullet; numbers (any token with a digit), negators and ordering words count.
+  Probes are read and checked inside the save's own transaction. Probes are not part of the
+  wrap package. The check is lexical: a change that keeps every word (two roles swapped)
+  reads `held`, and that is the operator's to judge, as the README now says plainly.
+- `probe status` also lists what the latest save graduated with a validated citation at
+  2x and up: the operator's worklist for truth and for contradiction with Proven patterns.
+- Three additive tables, `drift_probes`, `drift_results` and `wrap_graduations`; an older
+  binary ignores them. Adding and retiring a probe are audited.
+- One level atom: a graduation level is an ASCII number from 1 to 999,999,999 with no
+  leading zero, and every parser reads it through the same pattern. In a graduating section
+  any other `| <digits>x` marker (10 or more digits, a leading zero, non-ASCII digits, 0) is
+  cut to `1x` on its own, with its own evidence tag replaced by `(level-capped)`, counted in
+  `demoted` (and in the new `GraduationResult.level_capped`, which the "resolved to ZERO
+  episodes" warning excludes). Before, such a line matched no validator yet read as a level
+  to the other parsers, so it saved untouched and held a probe. A failed write of a probe
+  result or worklist row fails the whole save, atomically, as a `StoreDatabaseError`. The
+  worklist is the validator's own records, not a re-read of the text.
+- Run through the real save pipeline on a copy of a real store: 25 probes held, and a
+  planted wrong number read `lost` and a planted flipped claim read `changed`.
+
+### Fixed — the cross-session check stopped grading function words (KL-01)
+- The cross-session-overlap check (a re-graduation whose explanation shares 3 or more
+  meaningful words with the prior one demotes) now drops every common function word and the
+  number words, not only the short list it shared with grounding. Before, "while", "only",
+  "when" and "one" counted as shared vocabulary and real patterns were demoted on them.
+  Replayed against one real store's recorded demotions, about a third would not have tripped.
+  Grounding (the explanation must share 2 meaningful words with a cited episode) and the
+  supersession floor keep the shorter list, so their behaviour and the published supersession
+  numbers are unchanged. The same longer list is used by carryforward's sycophancy guard, so
+  fewer cited lines are refused the hold on function-word overlap. A re-worded explanation that shares three content words still demotes.
+
+### Changed — a bare graduation is held, not eroded, at every level (spore-676; changes 0.5.0)
+- A pattern line at 4x or higher with no `[evidence:]` tag matched neither graduation regex,
+  so it was never validated or demoted, whatever its level. Bare lines now use the same
+  "2 and up" level as cited ones.
+- **Behaviour change from 0.5.0, ruled by the operator:** a today-dated bare line at or
+  below its recorded high-water mark is HELD at every level, warm or cold. A warm one
+  (grounded within `carryforward_cold_days`) is marked `(carried-forward)` as before. A COLD
+  one is no longer demoted a level: it is held, its date is set back to its last grounding,
+  it is reported with `cold: true` in `carried_forward`, and a warning asks the operator to
+  re-exercise it with fresh evidence, graduate it out or retire it. Before, a cold bare 2x or
+  3x lost a level on every wrap that re-dated it, so its decay tracked the consolidator's
+  dating habit rather than the pattern. A bare line with no history, or above its mark, still
+  demotes. Cited lines are unchanged: a cold line whose citation fails still demotes.
+- A hold keeps a level and never raises one, warm or cold, cited or bare: a line above its
+  level in the continuity being replaced (an eroded pattern re-asserted at its old peak)
+  is an inflation and demotes, even at or below its all-time high-water mark.
+  `validate_graduations(prior_levels=...)` carries those levels; the save pipeline passes them.
+- Run on a copy of a real store before the change, every bare line re-dated to the wrap day:
+  all 15 were held (11 warm, 4 cold and dated back), none eroded; over five simulated daily
+  wraps that re-dated every line, no level moved.
+
+### Added — a shrink-gate override leaves an audit trace (KL-14)
+- Every `continuity_saved` audit event now carries `allow_shrink`: `requested` says whether
+  the save passed `allow_shrink=True` (CLI `--allow-shrink`, MCP `"allow_shrink": true`). When
+  it did, `refusal_suppressed` says whether the shrink gate would have refused without it, and
+  `refusal` carries the text it suppressed. An event without the field comes from an older
+  version.
+
+### Fixed / Added — crystal evidence is never erased, and empty evidence can be grounded (KL-09)
+- Crystal evidence now accumulates. Re-crystallizing a live pattern adds the new evidence ids
+  to the stored ones, and reviving a retired pattern with no evidence keeps the retired
+  record's. Before, a re-crystallize from a carried-forward line (no `[evidence:]` tag) left
+  the pattern with no evidence, so associative recall could no longer reach it.
+  `CrystalStore.update(evidence=...)` still sets or prunes evidence explicitly.
+- `CrystalStore.ground_empty_evidence(store, limit=4, dry_run=False)` and
+  `anneal-memory crystal ground-evidence [--limit N] [--dry-run]`: for each live pattern with
+  no evidence, record the oldest live episodes that name the pattern as a whole word and name
+  no other live pattern. An episode naming several patterns (an end-of-day log) would become
+  a hub that recall discounts for every pattern citing it, so it is skipped and counted. The
+  ids are marked provisional (`provisional_evidence`); the first real evidence a crystallize
+  brings, or an explicit `update(evidence=...)`, replaces them. "Another pattern" is any
+  live or retired crystal or any name in the store's pattern history. This is lexical grounding: an episode that names a
+  pattern cites it, it does not prove it.
+
+### Fixed — team-status counts imported team entries only (L3 on the v3 seam)
+- The count of unmanaged rewired links now requires the hidden episode to be a team entry as
+  the importer reads one (a `team:` source and a string `team.entry_id` in its metadata), not
+  only a `team:` source, and the line says it counts link rows that no snapshot owns.
+
 ### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
 - `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one
   ledger clone's complete verdict, with each line marked `enforced` and the links it `honours`.

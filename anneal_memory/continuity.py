@@ -67,6 +67,7 @@ from .schema import (
     schema_role_warning,
 )
 from .crystal import CrystalError, CrystalStore
+from .drift import PROBE_STATUSES, evaluate_probes
 from .durable import (
     enforce_durable_facts,
     is_exact_heading,
@@ -1304,10 +1305,10 @@ names so the immune system can protect your patterns.
     `[evidence:]` may be silently dropped depending on tag order) — use one or the other.
   - **Why re-stamp `({today})` here when "Preserved" above said don't?** The today-stamp
     is exactly what exposes the line to the warmth/level hold gate — so a provenance
-    pattern that goes cold STILL ages out (provenance is not immortality; it only
-    silences the nag). An OLD-dated provenance line is simply skipped like any other
-    preserved line. Do NOT slap provenance on to dodge retirement — it does not stop
-    natural cold-decay, it only records grounding.
+    pattern that goes cold is held but FLAGGED to the operator on every wrap that
+    re-dates it (provenance is not immortality; it does not silence that). An
+    OLD-dated provenance line is simply skipped like any other preserved line. Do NOT
+    slap provenance on to dodge retirement — it only records grounding.
 - Patterns marked `(ungrounded)` need FRESH evidence from THIS session to re-graduate.
 - Patterns marked `(cross-session-overlap)` were demoted because today's explanation
   reused too much vocabulary from prior sessions; compose new evidence with
@@ -2436,6 +2437,116 @@ def _durable_cue_state(
         return None, []
 
 
+def _prior_levels(
+    prior_text: str | None, schema: list[SectionSpec], crystal_store: CrystalStore | None,
+    store: Store,
+) -> dict[str, int] | None:
+    """Where a held line's level comes from: each pattern's level in the continuity
+    being replaced, plus each live crystal's (a crystallized pattern re-added to the
+    working set is a recoverable move, not a new claim). None when there is no prior
+    continuity at all and no pattern history (a first save): nothing to derive from,
+    so the claimed level stands as before. A blank prior over a store that has history
+    is a truncated file, not a first save: each pattern's recorded high-water mark
+    bounds a hold instead (L3 r3, complement)."""
+    if not prior_text or not prior_text.strip():
+        levels: dict[str, int] = {}
+        try:
+            for n in store.pattern_history_names():
+                hist = store.get_pattern_history(n) or {}
+                mx = hist.get("max_level_reached")
+                if isinstance(mx, int):
+                    levels[n] = mx
+        except Exception:  # noqa: BLE001 - unreadable history is not proof of a first save
+            levels = {"": 0}  # a bound that holds nothing: fail closed
+        if not levels:
+            return None
+    else:
+        levels = _pattern_levels(prior_text, schema)
+    for c in _crystal_active_safe(crystal_store):
+        name, level = c.get("name"), c.get("level")
+        if isinstance(name, str) and isinstance(level, int) and name not in levels:
+            levels[name] = level
+    return levels
+
+
+def _crystal_levels_snapshot(
+    crystal_store: CrystalStore | None,
+) -> dict[str, Any] | None:
+    """Live crystal names -> levels, read BEFORE the save batch so no crystal-file IO
+    happens under the database write lock (L3 1007, codex). None when the store could
+    not be read: then a pattern probe absent from the file is ``unchecked``, not lost."""
+    if crystal_store is None:
+        return {}
+    try:
+        return {str(c["name"]): c.get("level") for c in crystal_store.active()
+                if isinstance(c, dict) and isinstance(c.get("name"), str)}
+    except Exception:  # noqa: BLE001 - an instrument's input; the wrap path reports faults
+        return None
+
+
+def _evaluate_drift_probes(
+    store: Store, schema: list[SectionSpec], text: str, crystals: dict[str, Any] | None,
+    deferred: list[str],
+) -> list[dict[str, Any]]:
+    """CAP-06: every live drift probe checked against ``text`` (empty when none).
+    Called inside the save batch. Never raises: a probe is an instrument, and an
+    instrument must not refuse a save (L3 1007: a nameless crystal row did)."""
+    try:
+        probes = store._live_drift_probes_in_txn()
+        if probes is None:
+            deferred.append(
+                "drift probes were not checked this save: the probe table could not be "
+                "read")
+            return []
+        if not probes:
+            return []
+        levels = _pattern_levels(text, schema)
+        results = evaluate_probes(text, probes, pattern_levels=levels,
+                                  live_crystals=crystals or {})
+        if crystals is None:  # crystal store unreadable: absence proves nothing
+            for r in results:
+                if r["kind"] == "pattern" and r["status"] == "lost":
+                    r["status"] = "unchecked"
+                    r["detail"] = "not in the file; the crystal store could not be read"
+        return results
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        deferred.append(f"drift probes were not checked this save: {exc!r}")
+        return []
+
+
+def _pattern_levels(text: str, schema: list[SectionSpec]) -> dict[str, int]:
+    """Each pattern named in the graduating section(s) of ``text``, at its highest
+    level there, found exactly as ``validate_graduations`` finds them (same heading
+    test, same line parser; L3 1007, codex: a fuzzy section match read
+    ``## Anti-Patterns``). No level ceiling."""
+    headings = graduating_headings(schema)
+    levels: dict[str, int] = {}
+    inside = False
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            inside = _is_graduating_heading(line, headings)
+            continue
+        m = _NAMED_PATTERN_RE.match(line) if inside else None
+        if m:
+            try:
+                level = int(m.group(2))
+            except ValueError:  # beyond Python's int-string limit
+                continue
+            levels[m.group(1)] = max(levels.get(m.group(1), 0), level)
+    return levels
+
+
+def _drift_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Counts and each probe's id and status. No probe text and no file text: the save
+    result goes back to the composer being measured, and the audit cannot be redacted
+    (L3 1007, complement). The detail is in ``probe status``."""
+    counts = {status: 0 for status in PROBE_STATUSES}
+    for r in results:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    return {"counts": counts,
+            "probes": [{"id": r["probe_id"], "status": r["status"]} for r in results]}
+
+
 def validated_save_continuity(
     store: Store,
     text: str,
@@ -2927,6 +3038,22 @@ def validated_save_continuity(
         prior_continuity, text, section_schema, allow_shrink=allow_shrink,
         crystallized_credit=crystallized_credit,
     )
+    # KL-14 (2026-10-07): an override must leave a trace. When the operator passes
+    # allow_shrink, run the same check without it and record in the audit whether
+    # the override changed the outcome, and the refusal it suppressed.
+    # Always written, so an event without the field means an older version, never
+    # "no override".
+    shrink_override: dict[str, Any] = {"requested": allow_shrink is True}
+    if allow_shrink is True:
+        try:
+            _check_no_catastrophic_shrink(
+                prior_continuity, text, section_schema, allow_shrink=False,
+                crystallized_credit=crystallized_credit,
+            )
+            shrink_override["refusal_suppressed"] = False
+        except ValueError as exc:
+            shrink_override["refusal_suppressed"] = True
+            shrink_override["refusal"] = str(exc)[:2000]
 
     # Get current session's episodes for citation validation.
     # Re-fetch the full post-last-wrap set and filter down to exactly
@@ -3007,6 +3134,9 @@ def validated_save_continuity(
         # within carryforward_cold_days (warm). Ungrounded path only; the
         # cross-session immune demotion is untouched. None disables it.
         carryforward_cold_days=carryforward_cold_days,
+        # L3 1007 (complement, codex): a held line's level is derived, never taken
+        # from the composer (see _prior_levels).
+        prior_levels=_prior_levels(prior_continuity, section_schema, crystal_store, store),
     )
 
     # The hard maximum is measured on the text that will be WRITTEN: graduation
@@ -3152,6 +3282,10 @@ def validated_save_continuity(
     db_committed = False
     composted: dict[str, int] = {}
     still_graduating: list[str] = []
+    drift_results: list[dict[str, Any]] = []
+    crystal_levels = _crystal_levels_snapshot(crystal_store)
+    # Raised inside the batch, delivered only after it commits.
+    drift_warnings: list[str] = []
 
     try:
         # Phase 2: batched DB DML.
@@ -3227,6 +3361,13 @@ def validated_save_continuity(
                 content_hash=content_hash,
                 pair_id=tmp_pair_id,
             )
+            # CAP-06: the operator's drift probes, read and checked INSIDE this batch
+            # (L3 1007, codex: a probe added between a pre-batch read and the commit
+            # had no result) against the exact text being saved; never a gate.
+            drift_results = _evaluate_drift_probes(
+                store, section_schema, grad_result.text, crystal_levels, drift_warnings
+            )
+            store._record_drift_results(drift_results)
 
 
             # Update cross-session pattern history. Scan the
@@ -3270,6 +3411,12 @@ def validated_save_continuity(
             # _NAMED_PATTERN_RE still polluted the pattern_history DB
             # via the upsert loop. The section guard closes that gap.
             in_patterns_section = False
+            # The review worklist is the validator's own records (name, level and
+            # explanation from the marker it validated and bound to the name), never a
+            # re-parse of the line by name (L3 r3, codex: a second line with the same
+            # name overwrote the validated row).
+            wrap_graduations: list[tuple[str, int, str]] = list(
+                grad_result.graduated_records)
             for line in grad_result.text.split("\n"):
                 if line.startswith("## "):
                     in_patterns_section = _is_graduating_heading(line, grad_headings)
@@ -3305,11 +3452,12 @@ def validated_save_continuity(
                 if line_date != today_str:
                     continue
                 explanation = ev_match.group(5)
-                if not explanation:
+                # A level of 10 or more digits is a malformed marker (bounded before
+                # int(), so a huge run can neither raise nor overflow the history).
+                if len(ev_match.group(2)) > 9:
                     continue
-                try:
-                    pattern_level = int(ev_match.group(2))
-                except ValueError:
+                pattern_level = int(ev_match.group(2))
+                if not explanation:
                     continue
                 store.upsert_pattern_history(
                     pattern_name=ev_match.group(1),
@@ -3322,6 +3470,7 @@ def validated_save_continuity(
                     # coherent on deterministic/backdated runs.
                     seen_at=today_str,
                 )
+            store._record_wrap_graduations(wrap_graduations)
 
             # flow spore-1169: the authoritative consolidate-gate check, deliberately the LAST
             # statement in the batch. wrap_completed's DML above means this connection holds
@@ -3529,6 +3678,9 @@ def validated_save_continuity(
                 # durable recovery oracle are guaranteed identical.
                 "content_hash": content_hash,
             }
+            audit_payload["allow_shrink"] = shrink_override
+            if drift_results:
+                audit_payload["drift"] = _drift_summary(drift_results)
             # Capture Proven-tier pattern omissions in the audit chain.
             # detect_pattern_omissions returns an empty list for the
             # common case (first wrap, or all prior Proven-tier patterns
@@ -3689,6 +3841,9 @@ def validated_save_continuity(
             # no citation (v0.5.0 path). Lets operators reconcile AM-WARN's
             # cited_graduations count against the held set.
             "cited": cf.cited,
+            # spore-676 ruling (A): True = a bare line held COLD (not grounded within
+            # carryforward_cold_days), dated back to its last grounding and flagged.
+            "cold": cf.cold,
             # AM-PROVENANCE (Slice A): True = the held line carried a
             # ``[provenance: id, ...]`` grounding-audit marker (a deliberately-
             # grounded mature pattern) → excluded from the graduate-OUT notice.
@@ -3738,7 +3893,8 @@ def validated_save_continuity(
     # signal (no citation = nothing to resolve to zero).
     cited_carried = sum(1 for cf in grad_result.carried_forward if cf.cited)
     cited_graduations = (
-        grad_result.validated + grad_result.demoted + cited_carried
+        grad_result.validated + grad_result.demoted - grad_result.level_capped
+        + cited_carried
     )
     # Read the GATE-INDEPENDENT resolution signal, NOT any(all_validated_ids):
     # all_validated_ids is suppressed on a cross-session-overlap demote (the
@@ -3838,9 +3994,21 @@ def validated_save_continuity(
         {
             cf.name
             for cf in grad_result.carried_forward
-            if cf.max_level_reached >= 3 and not cf.provenance
+            if cf.max_level_reached >= 3 and not cf.provenance and not cf.cold
         }
     )
+    # spore-676 ruling (A): every bare line held COLD, at any level, reaches the human.
+    # The age in days changes every wrap, so a repeat notice still carries news (L2 1007).
+    cold_held = sorted({f"{cf.name} ({cf.days_since_grounded} days)"
+                        for cf in grad_result.carried_forward if cf.cold})
+    if cold_held:
+        _warn_after_commit(
+            f"{len(cold_held)} pattern(s) were re-dated to today with no evidence but "
+            f"have not been grounded in more than {carryforward_cold_days} days: "
+            f"{', '.join(cold_held)}. They were HELD at their earned level and dated "
+            f"back to their last grounding, not demoted. Decide for each: re-exercise "
+            f"it with fresh evidence, graduate it OUT to a stable home, or retire it."
+        )
     if graduate_out:
         _warn_after_commit(
             f"{len(graduate_out)} pattern(s) at 3x or higher were carried forward "
@@ -3908,6 +4076,10 @@ def validated_save_continuity(
     )
     if compost_names is not None:
         result["composted"] = composted
+    if drift_results:
+        result["drift"] = _drift_summary(drift_results)
+    for message in drift_warnings:
+        _warn_after_commit(message)
     if durable_report is not None:
         result["durable_warnings"] = durable_messages
     if stale_state:

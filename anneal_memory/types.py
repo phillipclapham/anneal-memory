@@ -649,6 +649,9 @@ class _SaveContinuityOptional(TypedDict, total=False):
     # durable-facts warning text this save emitted (also delivered as
     # UserWarnings), empty when there were none.
     durable_warnings: list[str]
+    # Present ONLY when the store has live CAP-06 drift probes: ``counts`` per status
+    # (held / weakened / crystallized / lost) and every probe not ``held``.
+    drift: dict[str, Any]
 
 
 class SaveContinuityResult(_SaveContinuityOptional):
@@ -728,7 +731,9 @@ class SaveContinuityResult(_SaveContinuityOptional):
     # Because a held line does not upsert pattern_history, its warmth decays on
     # its own — a pattern that keeps failing to ground ages out. Each entry:
     # ``{"name": str, "held_level": int, "max_level_reached": int,
-    #  "days_since_grounded": int, "cited": bool, "provenance": bool}``
+    #  "days_since_grounded": int, "cited": bool, "provenance": bool, "cold": bool}``
+    # (``cold``: spore-676 ruling (A), 2026-10-07 — a bare line held although not
+    # grounded within ``carryforward_cold_days``; dated back and flagged, never eroded)
     # (``cited``: v0.5.0 — did the carry hold a citation that failed to resolve
     # [True] vs no citation at all [bare, False]; ``provenance``: Slice A — did the
     # carry record a ``[provenance: ...]`` audit marker, which EXCLUDES it from the

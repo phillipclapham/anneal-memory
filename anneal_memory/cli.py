@@ -2240,8 +2240,8 @@ def cmd_team_status(args: argparse.Namespace) -> None:
     if args.json:
         _print_json(data)
         return
-    unmanaged = (f"Rewired links hiding a team entry that no snapshot manages (never "
-                 f"adopted; remove by hand if wrong): {data['unmanaged_rewired']}")
+    unmanaged = (f"Rewired link rows no snapshot owns, hiding an imported team entry "
+                 f"(never adopted; remove by hand if wrong): {data['unmanaged_rewired']}")
     if not data["keys"]:
         print("No team snapshot (no v3 team-import has replaced links here).")
         if data["unmanaged_rewired"]:
@@ -2258,6 +2258,67 @@ def cmd_team_status(args: argparse.Namespace) -> None:
         print(f"  {n['kind']}: {n['entry_id']} ({n['detail']}) [key {n['key']}]")
     if data["unmanaged_rewired"]:
         print(unmanaged)
+
+
+def cmd_probe(args: argparse.Namespace) -> None:
+    """CAP-06 drift probes: declare what must survive consolidation, and read the
+    latest save's verdict on each."""
+    store = _open_store(args)
+    try:
+        if args.probe_command == "add":
+            pid = store.add_drift_probe(pattern=args.pattern, min_level=args.min_level,
+                                        fact=args.fact, section=args.section, note=args.note)
+            if args.json:
+                _print_json({"id": pid})
+            else:
+                print(f"Probe {pid} added; it is checked after every save.")
+        elif args.probe_command == "list":
+            rows = store.list_drift_probes(include_retired=args.all)
+            if args.json:
+                _print_json(rows)
+            elif not rows:
+                print("No drift probes.")
+            for r in rows if not args.json else ():
+                what = (f"pattern {r['name']} >= {r['min_level']}x" if r["kind"] == "pattern"
+                        else f"fact {r['text']!r}"
+                        + (f" in ## {r['section']}" if r["section"] else ""))
+                gone = f"  (retired {r['retired_at']})" if r["retired_at"] else ""
+                print(f"{r['id']:>4}  {what}{gone}")
+        elif args.probe_command == "retire":
+            ok = store.retire_drift_probe(args.id)
+            if args.json:
+                _print_json({"retired": ok})
+                if not ok:
+                    sys.exit(1)
+            elif ok:
+                print(f"Probe {args.id} retired.")
+            else:
+                print(f"No live probe {args.id}.", file=sys.stderr)
+                sys.exit(1)
+        else:  # status
+            data = store.drift_status()
+            if args.json:
+                _print_json(data)
+                return
+            if data["wrap_id"] is None:
+                print("No save yet.")
+                return
+            print(f"Drift probes at wrap {data['wrap_id']} ({data['wrapped_at']}):")
+            if not data["probes"]:
+                print("  (no probe was checked at this wrap)")
+            for r in data["probes"]:
+                since = f"  [since wrap {r['since_wrap']}]" if r["since_wrap"] else ""
+                print(f"  {r['status']:12s} {r['subject']}: {r['detail']}{since}")
+            if data["graduated"]:
+                print("Graduated with a validated citation at this wrap (review each for "
+                      "truth and for contradiction with your Proven patterns):")
+                for g in data["graduated"]:
+                    print(f"  {g['level']}x {g['name']}: {g['explanation']}")
+    except (ValueError, StoreError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        store.close()
 
 
 def cmd_team_forget_key(args: argparse.Namespace) -> None:
@@ -3694,6 +3755,36 @@ def cmd_crystal_fold_surfaced(args: argparse.Namespace) -> None:
         print(f"Not found (skipped): {', '.join(result.paths_missing)}", file=sys.stderr)
 
 
+def cmd_crystal_ground_evidence(args: argparse.Namespace) -> None:
+    """Fill empty crystal evidence from episodes naming the pattern (KL-09)."""
+    crystal_store = _open_crystal_store(args)
+    db_path = _existing_db_path(args, require_file=True)
+    try:
+        with Store(db_path, read_only=True) as store:
+            result = crystal_store.ground_empty_evidence(
+                store, limit=args.limit, dry_run=args.dry_run)
+    except (CrystalError, StoreError, ValueError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        _print_json({"dry_run": args.dry_run,
+                     "patterns": {n: r._asdict() for n, r in result.items()}})
+        return
+    if not result:
+        print("No live pattern is without evidence; nothing to ground.")
+        return
+    for name, r in result.items():
+        hubs = f" (skipped {r.hubs_skipped} episode(s) naming other patterns)" \
+            if r.hubs_skipped else ""
+        if r.status in ("grounded", "would_ground"):
+            verb = "Would ground" if r.status == "would_ground" else "Grounded"
+            print(f"{verb} {name}: {', '.join(r.evidence)}{hubs}")
+        elif r.status == "conflict":
+            print(f"Changed while running, left as it is: {name}")
+        else:
+            print(f"No episode names only {name}; left empty{hubs}")
+
+
 def cmd_worth(args: argparse.Namespace) -> None:
     """Report-only Memory-Worth counters. Nothing reads this to rank or decay."""
     db_path = _existing_db_path(args, require_file=True)
@@ -4395,6 +4486,30 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("key", help="The key, as team-status lists it")
     sub.set_defaults(func=cmd_team_forget_key)
 
+    # -- probe (CAP-06 drift probes) --
+    probe_parser = subparsers.add_parser(
+        "probe", help="Drift probes: what must survive consolidation, checked every save")
+    probe_sub = probe_parser.add_subparsers(dest="probe_command", required=True)
+    sub = probe_sub.add_parser(
+        "add", parents=[json_parent],
+        help="Declare a pattern (held at a level) or a fact (its words on one line)")
+    what = sub.add_mutually_exclusive_group(required=True)
+    what.add_argument("--pattern", help="A Proven pattern name that must stay in the file")
+    what.add_argument("--fact", help="A fact whose meaningful words must stay on one line")
+    sub.add_argument("--min-level", type=int, help="Pattern level it must hold (default 2)")
+    sub.add_argument("--section", help="Only look for the fact under this ## heading")
+    sub.add_argument("--note", help="Why this must survive (for the operator)")
+    sub.set_defaults(func=cmd_probe)
+    sub = probe_sub.add_parser("list", parents=[json_parent], help="List drift probes")
+    sub.add_argument("--all", action="store_true", help="Include retired probes")
+    sub.set_defaults(func=cmd_probe)
+    sub = probe_sub.add_parser("retire", parents=[json_parent], help="Stop checking a probe")
+    sub.add_argument("id", type=int)
+    sub.set_defaults(func=cmd_probe)
+    sub = probe_sub.add_parser("status", parents=[json_parent],
+                               help="The latest save's verdict on each probe")
+    sub.set_defaults(func=cmd_probe)
+
     # -- audit --
     sub = subparsers.add_parser("audit", help="Read and filter audit trail entries", parents=[json_parent])
     sub.add_argument("--since", help="Show entries after duration (e.g. 3d, 24h)")
@@ -4569,6 +4684,22 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[json_parent],
     )
     cp.set_defaults(func=cmd_crystal_rewarm)
+
+    cp = crystal_sub.add_parser(
+        "ground-evidence",
+        help="Fill EMPTY pattern evidence from episodes that name the pattern",
+        description="For each live pattern with no evidence, record the OLDEST --limit "
+                    "live episodes that name the pattern as a whole word and name no other "
+                    "known pattern, as provisional evidence (the edge associative recall "
+                    "surfaces it through). Patterns that already have evidence are never "
+                    "touched. Lexical grounding only.",
+        parents=[json_parent],
+    )
+    cp.add_argument("--limit", type=int, default=4,
+                    help="Episodes recorded per pattern (default 4)")
+    cp.add_argument("--dry-run", action="store_true",
+                    help="Report what would be recorded; write nothing")
+    cp.set_defaults(func=cmd_crystal_ground_evidence)
 
     cp = crystal_sub.add_parser(
         "index",

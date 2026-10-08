@@ -1179,6 +1179,11 @@ def _reconstruct_wrap_cancel_bound_error(session_id: str | None) -> "WrapCancelB
     return WrapCancelBoundError(session_id=session_id)
 
 
+# Floor of the hidden rows replaced_matches(redirectable_only=True) reads before it
+# returns what it found.
+_REPLACED_SCAN_FLOOR = 1000
+
+
 class SupersessionError(AnnealMemoryError, ValueError):
     """Raised when a supersession link fails validation. Nothing was written:
     not the link, and on ``record(supersedes=...)`` not the episode either.
@@ -4890,38 +4895,49 @@ class Store:
         """Episodes a supersession hides whose content contains ``phrase`` (matched as
         :meth:`recall` matches a keyword), newest first, each with ``superseded_by`` =
         the live end of its chain; one whose chain has no live end is left out. Scans
-        only the hidden set, so live matches cannot crowd them out. With
-        ``redirectable_only`` a match :meth:`redirectable_ids` would not serve is left
-        out BEFORE the limit counts: the scan pages on (timestamp, id) until ``limit``
-        servable matches are found or the hidden set is exhausted (L3 r3: a run of
-        wrap-hidden matches crowded out the one that could serve)."""
+        only the hidden set, so live matches cannot crowd them out.
+
+        With ``redirectable_only`` a match :meth:`redirectable_ids` would not serve is
+        left out, and ``limit`` counts DISTINCT replacement heads, not episodes: the scan
+        pages on (timestamp, id), collecting every servable match, until ``limit`` heads
+        are found (L3 r4: 200 matches under one head hid a second head). It reads at most
+        ``max(_REPLACED_SCAN_FLOOR, 50 * limit)`` hidden rows; at that bound it returns
+        what it found so far, never an error."""
         if limit < 0:
             raise ValueError("replaced_matches: limit must be >= 0")
         out: list[Episode] = []
+        seen_heads: set[str] = set()
         with self._db_boundary("keyword_candidates"), self._read_snapshot():
             if not phrase or not limit or not self._has_supersessions_table():
                 return []
             hide_sql, hide_params = _hidden_by_supersession_sql(None)
             pattern = _keyword_like_pattern(phrase)
             page = 500
+            budget = max(_REPLACED_SCAN_FLOOR, 50 * limit) if redirectable_only else 1 << 40
             after: tuple[str, str] | None = None
-            while len(out) < limit:
+            while budget > 0:
                 cursor = "" if after is None else " AND (timestamp, id) < (?, ?)"
                 rows = self._conn.execute(
                     f"SELECT * FROM episodes WHERE id IN ({hide_sql}) AND "
                     f"{_KEYWORD_LIKE_SQL}{cursor} ORDER BY timestamp DESC, id DESC LIMIT ?",
-                    [*hide_params, pattern, *(after or ()), page]).fetchall()
+                    [*hide_params, pattern, *(after or ()), min(page, budget)]).fetchall()
+                budget -= len(rows)
                 heads = self._live_replacements([r["id"] for r in rows], None)
                 kept = [r for r in rows if r["id"] in heads]
                 if redirectable_only and kept:
                     ok = self.redirectable_ids({r["id"]: heads[r["id"]] for r in kept})
                     kept = [r for r in kept if r["id"] in ok]
                 for r in kept:
+                    head = heads[r["id"]]
+                    if redirectable_only and head not in seen_heads \
+                            and len(seen_heads) == limit:
+                        continue  # a later head than the ones asked for
+                    seen_heads.add(head)
                     out.append(dataclasses.replace(
-                        self._row_to_episode(r), superseded_by=heads[r["id"]]))
-                    if len(out) == limit:
-                        break
-                if len(rows) < page:
+                        self._row_to_episode(r), superseded_by=head))
+                    if not redirectable_only and len(out) == limit:
+                        return out
+                if len(seen_heads) >= limit or len(rows) < page:
                     break
                 after = (rows[-1]["timestamp"], rows[-1]["id"])
         return out

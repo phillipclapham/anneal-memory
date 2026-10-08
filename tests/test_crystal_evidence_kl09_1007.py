@@ -148,3 +148,19 @@ def test_a_dotted_name_does_not_match_inside_another(tmp_path):
         assert cs.ground_empty_evidence(s)["foo"].status == "no_episode"
     finally:
         s.close()
+
+
+
+def test_a_retired_crystal_name_also_makes_a_hub(tmp_path):
+    """L1 1007 (mutant Md2 survived): the hub set includes retired crystal names."""
+    s, cs = _store(tmp_path)
+    try:
+        s.record("desk: beta_pattern fired, and old_pattern too", "observation")
+        own = s.record("the beta_pattern incident", "observation")
+        cs.crystallize(name="old_pattern", level=3, explanation="x", evidence=["aaaa1111"])
+        cs.retire("old_pattern", kind="obsolete", reason="t")
+        cs.crystallize(name="beta_pattern", level=3, explanation="x")
+        got = cs.ground_empty_evidence(s, limit=1)["beta_pattern"]
+        assert got.evidence == [own.id[:8]] and got.hubs_skipped == 1
+    finally:
+        s.close()

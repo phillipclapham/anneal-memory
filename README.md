@@ -268,13 +268,17 @@ by design: an AI grading its own memory would be the substitution this library e
 avoid. The operator gets instruments for it, not a verdict: drift probes (below), the
 contradiction-scan record in every wrap, and the hash-chained audit.
 
-**Drift probes.** Declare what must survive consolidation, a Proven pattern at a level or a
-fact whose words must stay on one line: `anneal-memory probe add --pattern NAME` /
-`--fact TEXT [--section HEADING]`. Every save checks each probe against the saved text and
-records held / weakened / crystallized / lost with that wrap (`probe status`, the save
-result's `drift`, the `continuity_saved` audit event). Probes are never shown to the
-composer, so they measure drift rather than obedience; they never block a save. The check is
-lexical: a distortion that keeps the words passes, and that residue is the operator's.
+**Drift probes.** Declare what must survive consolidation, a Proven pattern at a level (its
+current level by default) or a fact whose words must stay in one sentence or bullet:
+`anneal-memory probe add --pattern NAME` / `--fact TEXT [--section HEADING]`. Every save
+checks each probe against the saved text and records held / changed (every word kept but the
+negation flipped) / weakened / crystallized / lost with that wrap (`probe status`, the save
+result's `drift`, the `continuity_saved` audit event). Probes are not part of the wrap package,
+so they measure drift rather than obedience, and a probe never blocks a save (one that cannot
+be checked is reported `unchecked`). `probe status` also lists what that wrap graduated with a
+validated citation: the worklist for judging truth and contradiction with your Proven
+patterns. The check is lexical: numbers and negation count, but a distortion that keeps every
+word (two roles swapped, say) reads held, and that residue is the operator's.
 
 The defenses above are **structural at the citation layer**. They catch fabricated citation evidence (fake IDs, missing IDs, wholesale-invented explanations), naive replay (re-citing prior-session episodes), per-ID citation gaming (single episode pumped across patterns), and post-hoc audit tampering. They do not catch:
 

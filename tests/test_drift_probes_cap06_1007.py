@@ -83,8 +83,11 @@ def test_every_save_records_the_verdict_and_never_blocks(tmp_path):
 def test_no_probes_no_key(tmp_path):
     s = Store(tmp_path / "m.db", project_name="t")
     try:
+        assert s.drift_status()["wrap_id"] is None
         r = _wrap(s, _doc("- a | 2x (2026-10-01)"), "2026-10-07")
-        assert "drift" not in r and s.drift_status()["wrap_id"] is None
+        assert "drift" not in r
+        st = s.drift_status()
+        assert st["wrap_id"] == 1 and st["probes"] == []
     finally:
         s.close()
 
@@ -112,5 +115,81 @@ def test_cli_round_trip(tmp_path):
     assert run("probe", "add", "--pattern", "alpha").returncode == 0
     assert run("probe", "add", "--fact", "the of").returncode == 1
     assert "pattern alpha >= 2x" in run("probe", "list").stdout
-    assert "No save has checked" in run("probe", "status").stdout
+    assert "No save yet" in run("probe", "status").stdout
     assert run("probe", "retire", "9").returncode == 1
+    assert run("probe", "retire", "9", "--json").returncode == 1   # L1 1007
+
+
+
+@pytest.mark.parametrize("fact,saved,status", [
+    # L2 1007 [run]: each read "held" before
+    ("client data does not go to Google", "client data does go to Google now.", "changed"),
+    ("client data goes to Google", "client data never goes to Google.", "changed"),
+    ("the rate is $85 an hour", "the rate is $65 an hour.", "lost"),
+    ("rent due 10-22", "rent due 10-29.", "lost"),
+    ("Arlington audit is billed on her trigger",
+     "Arlington was audited. The hub is billed monthly. Her trigger is a new site.", "lost"),
+    # and false "lost" before
+    ("he decided after the call", "He decides, after the call.", "held"),
+    ("rent is due on the twenty second of the month",
+     "rent is due on the twenty second\nof the month.", "held"),
+    # residue run on flow's store [run]: emphasis around a sentence end, and an
+    # unrelated "no" later in the same sentence
+    ("the EOD is his; he runs it every day and calls it sacred",
+     "**Some rituals are his, not the harness's.** The EOD is one: he runs it every day "
+     "and calls it sacred, and no seat offers to run it for him.", "held"),
+])
+def test_fact_matching(fact, saved, status):
+    probes = [{"id": 1, "kind": "fact", "text": fact}]
+    assert evaluate_probes(_doc("", facts=saved), probes, pattern_levels={})[0]["status"] \
+        == status
+
+
+def test_a_bad_probe_is_unchecked_never_a_gate(tmp_path):
+    """L1 1007 [run]: an unknown kind (a newer version's) or a NULL text refused every save."""
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        s.add_drift_probe(fact="the hub runs on soupcan")
+        s._conn.execute("INSERT INTO drift_probes (kind, name) VALUES ('mood', 'x')")
+        s._conn.execute("INSERT INTO drift_probes (kind, text) VALUES ('fact', NULL)")
+        s._conn.commit()
+        r = _wrap(s, _doc("", facts="the hub runs on soupcan."), "2026-10-07")
+        assert r["drift"]["counts"] == {"held": 1, "changed": 0, "weakened": 0,
+                                        "crystallized": 0, "lost": 0, "unchecked": 2}
+    finally:
+        s.close()
+
+
+def test_pattern_probe_defaults_to_its_current_level(tmp_path):
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        _wrap(s, _doc("- alpha | 7x (2026-10-01)"), "2026-10-06")
+        pid = s.add_drift_probe(pattern="alpha")
+        assert [p["min_level"] for p in s.list_drift_probes() if p["id"] == pid] == [7]
+        assert s.list_drift_probes()[0]["min_level"] == 7
+        r = _wrap(s, _doc("- alpha | 3x (2026-10-01)"), "2026-10-07")
+        assert r["drift"]["counts"]["weakened"] == 1
+    finally:
+        s.close()
+
+
+def test_drift_is_in_the_audit_and_the_worklist_lists_graduations(tmp_path):
+    import json as _json
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        s.add_drift_probe(fact="the hub runs on soupcan")
+        ep = s.record("we moved the hub to soupcan and it runs there now", "observation")
+        token = prepare_wrap(s, max_chars=40000)["wrap_token"]
+        line = (f'- hub_location_is_soupcan | 2x (2026-10-07) '
+                f'[evidence: {ep.id[:8]} "the hub runs on soupcan now"]')
+        validated_save_continuity(s, _doc(line, facts="the hub runs on soupcan."),
+                                  today="2026-10-07", wrap_token=token)
+        events = [_json.loads(x) for x in s._audit._active_path.read_text().splitlines() if x]
+        saved = [e for e in events if e["event"] == "continuity_saved"][-1]["data"]
+        assert saved["drift"]["counts"]["held"] == 1
+        added = [e for e in events if e["event"] == "drift_probe_added"]
+        assert added and added[0]["data"]["kind"] == "fact"
+        g = s.drift_status()["graduated"]
+        assert [(x["name"], x["level"]) for x in g] == [("hub_location_is_soupcan", 2)]
+    finally:
+        s.close()

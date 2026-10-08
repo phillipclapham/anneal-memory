@@ -2288,6 +2288,8 @@ def cmd_probe(args: argparse.Namespace) -> None:
             ok = store.retire_drift_probe(args.id)
             if args.json:
                 _print_json({"retired": ok})
+                if not ok:
+                    sys.exit(1)
             elif ok:
                 print(f"Probe {args.id} retired.")
             else:
@@ -2299,12 +2301,19 @@ def cmd_probe(args: argparse.Namespace) -> None:
                 _print_json(data)
                 return
             if data["wrap_id"] is None:
-                print("No save has checked a drift probe yet.")
+                print("No save yet.")
                 return
             print(f"Drift probes at wrap {data['wrap_id']} ({data['wrapped_at']}):")
+            if not data["probes"]:
+                print("  (no probe was checked at this wrap)")
             for r in data["probes"]:
                 since = f"  [since wrap {r['since_wrap']}]" if r["since_wrap"] else ""
                 print(f"  {r['status']:12s} {r['subject']}: {r['detail']}{since}")
+            if data["graduated"]:
+                print("Graduated with a validated citation at this wrap (review each for "
+                      "truth and for contradiction with your Proven patterns):")
+                for g in data["graduated"]:
+                    print(f"  {g['level']}x {g['name']}: {g['explanation']}")
     except (ValueError, StoreError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)

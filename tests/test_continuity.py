@@ -5922,8 +5922,14 @@ class TestBarePreserveEndToEnd:
         try:
             text = self._text("  verify | 3x (2026-06-05) — stale, long unseen")
             prepare_wrap(store)
-            with pytest.warns(UserWarning, match="re-exercise it with fresh evidence"):
+            with pytest.warns(UserWarning) as caught:
                 r = validated_save_continuity(store, text, today="2026-06-05")
+            msgs = [str(w.message) for w in caught]
+            assert any("re-exercise it with fresh evidence" in m and "verify (" in m
+                       for m in msgs)
+            # L1 1007 (mutant Mg survived): a cold hold is not ALSO in the graduate-out notice
+            assert not any("graduate OUT to a stable home (e.g. partnership.md)" in m
+                           for m in msgs)
             assert r["bare_demoted"] == 0
             assert [c["cold"] for c in r["carried_forward"]] == [True]
             with open(r["path"]) as f:

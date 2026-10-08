@@ -68,7 +68,7 @@ from .associations import (
     record_associations as _record_associations,
 )
 from .audit import AuditTrail
-from .graduation import _meaningful_words
+from .graduation import _NAMED_PATTERN_RE, _meaningful_words
 
 #: SQLite's own write-lock message grammar, for the Python 3.10 fallback in
 #: :func:`_is_write_lock_contention` where no primary result code is available.
@@ -1466,11 +1466,6 @@ CREATE TABLE IF NOT EXISTS supersessions (
 );
 CREATE INDEX IF NOT EXISTS idx_supersessions_new ON supersessions(new_id);
 
--- Team ledger entries this store imported (0.9.40): the ledger id and hash outlive
--- the episode, so a whole-ledger re-import after a prune or delete does not bring
--- the entry back. No content: both values are in the shared ledger already, so a
--- delete keeps the row whatever keep_tombstones says. Additive: an older binary
--- ignores the table.
 -- CAP-06 drift probes: what the operator declared must survive consolidation, and
 -- each save's verdict on it. Additive; an older binary ignores both tables.
 CREATE TABLE IF NOT EXISTS drift_probes (
@@ -1493,6 +1488,21 @@ CREATE TABLE IF NOT EXISTS drift_results (
     PRIMARY KEY (wrap_id, probe_id)
 );
 
+-- What each save graduated at 2x and up with a validated citation: the operator's
+-- review worklist for truth and contradiction (CAP-06). Additive.
+CREATE TABLE IF NOT EXISTS wrap_graduations (
+    wrap_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    level INTEGER NOT NULL,
+    explanation TEXT,
+    PRIMARY KEY (wrap_id, name)
+);
+
+-- Team ledger entries this store imported (0.9.40): the ledger id and hash outlive
+-- the episode, so a whole-ledger re-import after a prune or delete does not bring
+-- the entry back. No content: both values are in the shared ledger already, so a
+-- delete keeps the row whatever keep_tombstones says. Additive: an older binary
+-- ignores the table.
 CREATE TABLE IF NOT EXISTS team_entries (
     entry_id TEXT PRIMARY KEY,
     hash TEXT NOT NULL,
@@ -3215,7 +3225,8 @@ class Store:
         note: str | None = None,
     ) -> int:
         """Declare something that must survive consolidation: a Proven ``pattern``
-        (held at ``min_level`` or above, default 2) or a ``fact`` (every meaningful
+        (held at ``min_level`` or above; default its level in the current continuity,
+        else 2) or a ``fact`` (every meaningful
         word of it on one line, of ``section`` if given). Checked after every save;
         never shown to the composer. Returns the probe id."""
         if (pattern is None) == (fact is None):
@@ -3227,9 +3238,12 @@ class Store:
             if min_level is not None and (isinstance(min_level, bool)
                                           or not isinstance(min_level, int) or min_level < 2):
                 raise ValueError("add_drift_probe: min_level must be an int >= 2")
-            row: tuple[Any, ...] = ("pattern", pattern.strip(), None, min_level or 2, None)
+            if min_level is None:  # the level it holds now (L2 1007), else 2
+                min_level = self._current_pattern_level(pattern.strip()) or 2
+            row: tuple[Any, ...] = ("pattern", pattern.strip(), None, min_level, None)
         else:
-            if not isinstance(fact, str) or not _meaningful_words(fact):
+            from .drift import fact_has_words
+            if not isinstance(fact, str) or not fact_has_words(fact):
                 raise ValueError("add_drift_probe: a fact needs at least one meaningful word")
             if min_level is not None:
                 raise ValueError("add_drift_probe: min_level applies to patterns only")
@@ -3247,6 +3261,26 @@ class Store:
              "min_level": row[3], "section": row[4]},
             method="add_drift_probe", committed="the probe")
         return probe_id
+
+    def _current_pattern_level(self, name: str) -> int | None:
+        """The highest ``name | Nx`` level in the current continuity, or None."""
+        try:
+            text = self.load_continuity() or ""
+        except (OSError, StoreError):
+            return None
+        levels = [int(m.group(2)) for m in map(_NAMED_PATTERN_RE.match, text.split("\n"))
+                  if m and m.group(1) == name]
+        return max(levels) if levels else None
+
+    def _record_wrap_graduations(self, rows: list[tuple[str, int, str]]) -> None:
+        """Write this save's validated Proven graduations against the wrap row just
+        inserted (inside the save batch): the operator's per-wrap review worklist."""
+        if not rows:
+            return
+        wrap_id = self._conn.execute("SELECT MAX(id) FROM wraps").fetchone()[0]
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO wrap_graduations (wrap_id, name, level, explanation) "
+            "VALUES (?, ?, ?, ?)", [(wrap_id, n, lv, ex) for n, lv, ex in rows])
 
     def list_drift_probes(self, *, include_retired: bool = False) -> list[dict[str, Any]]:
         """Every drift probe (live only unless ``include_retired``), oldest first."""
@@ -3289,14 +3323,19 @@ class Store:
     def drift_status(self) -> dict[str, Any]:
         """The latest save's probe verdicts, each with the first wrap since which it
         has been continuously not ``held`` (``since_wrap``), plus that wrap's id and
-        time. Read-only."""
-        empty: dict[str, Any] = {"wrap_id": None, "wrapped_at": None, "probes": []}
+        time, and ``graduated``: the Proven lines that save graduated with a validated
+        citation, to review for truth and contradiction. Read-only."""
+        empty: dict[str, Any] = {"wrap_id": None, "wrapped_at": None, "probes": [],
+                                 "graduated": []}
         with self._db_boundary("drift_probes"), self._read_snapshot():
             try:
                 last = self._conn.execute(
-                    "SELECT MAX(wrap_id) FROM drift_results").fetchone()[0]
+                    "SELECT MAX(id) FROM wraps").fetchone()[0]
                 if last is None:
                     return empty
+                graduated = [dict(r) for r in self._conn.execute(
+                    "SELECT name, level, explanation FROM wrap_graduations "
+                    "WHERE wrap_id = ? ORDER BY level DESC, name", (last,)).fetchall()]
                 at = self._conn.execute(
                     "SELECT wrapped_at FROM wraps WHERE id = ?", (last,)).fetchone()
                 rows = self._conn.execute(
@@ -3320,7 +3359,8 @@ class Store:
                 if "no such table" in str(exc):
                     return empty
                 raise
-        return {"wrap_id": last, "wrapped_at": at[0] if at else None, "probes": probes}
+        return {"wrap_id": last, "wrapped_at": at[0] if at else None, "probes": probes,
+                "graduated": graduated}
 
     def team_forget_key(self, key: str) -> int:
         """Release a snapshot key: its record and its ownership go; the links stay in

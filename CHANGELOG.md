@@ -8,12 +8,21 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - `anneal-memory probe add --pattern NAME [--min-level N]` / `--fact TEXT [--section H]`,
   `probe list [--all]`, `probe retire ID`, `probe status`; library `Store.add_drift_probe`,
   `list_drift_probes`, `retire_drift_probe`, `drift_status`, and `anneal_memory.drift`.
-  Every save checks each live probe against the saved text (a pattern held at its level, a
-  fact's meaningful words on one line) and records held / weakened / crystallized / lost with
-  that wrap, in the save result's `drift` and the `continuity_saved` audit event. Probes are
-  never shown to the composer and never block a save. The check is lexical; whether a kept
-  claim is still true is the operator's, and the README now says so plainly.
-- Two additive tables, `drift_probes` and `drift_results`; an older binary ignores them.
+  Every save checks each live probe against the saved text and records its status with that
+  wrap, in the save result's `drift` and the `continuity_saved` audit event:
+  `held`, `changed` (every word kept but a negation flipped), `weakened` (a pattern below
+  its level), `crystallized` (moved to the crystal store), `lost`, or `unchecked` (a probe
+  this version cannot read; a probe never blocks a save). A pattern probe's level defaults
+  to the level the pattern holds when the probe is added. A fact matches within one
+  sentence or bullet; numbers of any length and negators count. Probes are not part of the
+  wrap package. The check is lexical: a change that keeps every word (two roles swapped)
+  reads `held`, and that is the operator's to judge, as the README now says plainly.
+- `probe status` also lists what the latest save graduated with a validated citation at
+  2x and up: the operator's worklist for truth and for contradiction with Proven patterns.
+- Three additive tables, `drift_probes`, `drift_results` and `wrap_graduations`; an older
+  binary ignores them. Adding and retiring a probe are audited.
+- Run through the real save pipeline on a copy of a real store: 25 probes held, and a
+  planted wrong number read `lost` and a planted flipped claim read `changed`.
 
 ### Fixed — the cross-session check stopped grading function words (KL-01)
 - The cross-session-overlap check (a re-graduation whose explanation shares 3 or more

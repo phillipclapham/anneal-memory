@@ -2440,8 +2440,13 @@ def _durable_cue_state(
 def _evaluate_drift_probes(
     store: Store, schema: list[SectionSpec], text: str, crystal_store: CrystalStore | None,
 ) -> list[dict[str, Any]]:
-    """CAP-06: every live drift probe checked against ``text`` (empty when none)."""
-    probes = store.list_drift_probes()
+    """CAP-06: every live drift probe checked against ``text`` (empty when none).
+    Never raises: a probe is an instrument, and an instrument must not refuse a save."""
+    try:
+        probes = store.list_drift_probes()
+    except StoreError as exc:
+        _warn_after_commit(f"drift probes were not checked this save: {exc}")
+        return []
     if not probes:
         return []
     levels: dict[str, int] = {}
@@ -3316,6 +3321,7 @@ def validated_save_continuity(
             # _NAMED_PATTERN_RE still polluted the pattern_history DB
             # via the upsert loop. The section guard closes that gap.
             in_patterns_section = False
+            wrap_graduations: list[tuple[str, int, str]] = []
             for line in grad_result.text.split("\n"):
                 if line.startswith("## "):
                     in_patterns_section = _is_graduating_heading(line, grad_headings)
@@ -3357,6 +3363,9 @@ def validated_save_continuity(
                     pattern_level = int(ev_match.group(2))
                 except ValueError:
                     continue
+                if pattern_level >= 2:
+                    wrap_graduations.append(
+                        (ev_match.group(1), pattern_level, explanation))
                 store.upsert_pattern_history(
                     pattern_name=ev_match.group(1),
                     level=pattern_level,
@@ -3368,6 +3377,7 @@ def validated_save_continuity(
                     # coherent on deterministic/backdated runs.
                     seen_at=today_str,
                 )
+            store._record_wrap_graduations(wrap_graduations)
 
             # flow spore-1169: the authoritative consolidate-gate check, deliberately the LAST
             # statement in the batch. wrap_completed's DML above means this connection holds
@@ -3894,7 +3904,9 @@ def validated_save_continuity(
         }
     )
     # spore-676 ruling (A): every bare line held COLD, at any level, reaches the human.
-    cold_held = sorted({cf.name for cf in grad_result.carried_forward if cf.cold})
+    # The age in days changes every wrap, so a repeat notice still carries news (L2 1007).
+    cold_held = sorted({f"{cf.name} ({cf.days_since_grounded} days)"
+                        for cf in grad_result.carried_forward if cf.cold})
     if cold_held:
         _warn_after_commit(
             f"{len(cold_held)} pattern(s) were re-dated to today with no evidence but "

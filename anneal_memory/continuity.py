@@ -3007,6 +3007,11 @@ def validated_save_continuity(
         # within carryforward_cold_days (warm). Ungrounded path only; the
         # cross-session immune demotion is untouched. None disables it.
         carryforward_cold_days=carryforward_cold_days,
+        # The prior-state bound (1007+29): every line is cut to the level the
+        # STORED prior continuity entitles it to (new -> 1x, validated -> +1),
+        # whatever date, level or tag shape the composer wrote. "" = no prior
+        # file, so every line is new.
+        prior_text=prior_continuity or "",
     )
 
     # The hard maximum is measured on the text that will be WRITTEN: graduation
@@ -3539,6 +3544,10 @@ def validated_save_continuity(
             # wrap — operators and downstream review (Diogenes,
             # consultation, audit-chain queries) can see what was
             # dropped without re-reading prior continuity files.
+            if grad_result.level_capped:
+                audit_payload["level_capped"] = [
+                    asdict(cap) for cap in grad_result.level_capped
+                ]
             if grad_result.omitted_patterns:
                 audit_payload["omitted_patterns"] = [
                     {"name": op.name, "prior_level": op.prior_level}
@@ -3867,7 +3876,23 @@ def validated_save_continuity(
             f"[provenance:] — sits between them): {', '.join(malformed)}. That "
             f"evidence will NOT validate or form a Hebbian link. Move [evidence:] "
             f"immediately after the marker, OR use [provenance:] alone (never both "
-            f"on one line). The line(s) were left unchanged."
+            f"on one line). The line(s) were left unchanged unless they claimed "
+            f"a level above their prior one (then see the level-capped warning)."
+        )
+
+    # The prior-state bound cut a line the composer wrote above what the stored
+    # prior continuity entitles it to. Loud for the same reason as the line
+    # above: the saved text differs from what the composer wrote.
+    if grad_result.level_capped:
+        _warn_after_commit(
+            f"{len(grad_result.level_capped)} pattern line(s) claimed a level "
+            f"the prior continuity does not support and were cut "
+            f"(a new pattern enters at 1x; a validated Nx becomes (N+1)x): "
+            + ", ".join(
+                f"{cap.name} {cap.written_level}x->{cap.capped_to}x"
+                for cap in grad_result.level_capped
+            )
+            + ". Each is marked (level-capped)."
         )
 
     result = SaveContinuityResult(
@@ -3910,6 +3935,8 @@ def validated_save_continuity(
         result["composted"] = composted
     if durable_report is not None:
         result["durable_warnings"] = durable_messages
+    if grad_result.level_capped:
+        result["level_capped"] = [asdict(cap) for cap in grad_result.level_capped]
     if stale_state:
         result["stale_state"] = stale_state
         _warn_after_commit("State lines that do not hold at save: " + "; ".join(stale_state))

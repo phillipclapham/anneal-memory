@@ -4,6 +4,20 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — the graduation gate bounds every pattern line by the prior saved continuity
+- `validate_graduations` checked only today-dated, well-formed lines. A back-dated line, a bare line on a store
+  whose `citations_seen` is false, a bare line at 4x or above, a line with a non-adjacent `[evidence:]` tag, and a
+  line that jumped several rungs on one valid citation each landed at whatever level it wrote; a brand-new
+  `claim | 9x (yesterday)` was saved at 9x. Reproduced on 8542f49 by `tests/test_gradgate_prior_1007.py`.
+- New last check, read from the continuity as last SAVED (`prior_text`, supplied by the save path, never by the
+  composer): each line is cut to `max(1, prior level + 1 if it validated this wrap)`, which is prepare_wrap's own
+  contract (a new pattern enters at 1x; a validated Nx becomes (N+1)x). A pattern absent from the prior file takes
+  its `pattern_history` high-water mark, so drop-and-re-add keeps what it earned. A cut line is marked
+  `(level-capped)` and reported as `level_capped` on the save result (present only when a line was cut), as a
+  `UserWarning`, and in the `continuity_saved` audit event.
+- A first save onto a store with no continuity file has no prior: every named pattern line enters at 1x unless
+  its history says otherwise. Direct `validate_graduations` callers that pass no `prior_text` keep the old behavior.
+
 ### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
 - `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one
   ledger clone's complete verdict, with each line marked `enforced` and the links it `honours`.

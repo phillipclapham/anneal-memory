@@ -16,10 +16,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   no lines). The continuity file may lower it, never raise it, and a lowering survives a wrap that leaves the
   pattern out; a line in the file the store never saved is new; a named pattern dropped from the file keeps its
   record, so re-adding it returns to its saved level, not to `pattern_history`'s high-water mark. A store's first
-  save under this version takes the file as the prior and seeds the record with the prior file's named levels and
-  each crystal level, bounded by the highest level the store's `pattern_history` saw that name reach (a crystal it
-  never saw is not seeded); after that a crystal level never stands in for a saved one. A line's identity is the
-  text before its first level marker; a line with none (`- | 9x`, dated or not) is always new, every marker at 1x.
+  save under this version takes the file as the prior and seeds the record with the prior file's named levels. A
+  crystal's level is never a prior: a pattern crystallized out of the file re-enters as new and re-earns its rungs.
+  Every `| Nx` marker on a graduating line is governed, dated or not; a line's identity is the text before its first
+  marker, and a line with none (`- | 9x`) is always new, every marker at 1x.
   Renaming a pattern to its own name changes nothing. A name's level is its highest line across graduating sections. Only a line's own marker earns the
   rung. Co-citation links from a validated line still form when the line is cut (the episodes were cited together
   and grounded; the cut is about the level).

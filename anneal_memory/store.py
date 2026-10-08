@@ -6026,10 +6026,8 @@ class Store:
         when that is lower (the prior file's: an operator's hand demotion survives
         a wrap that leaves the pattern out, codex L3 r1); freeform rows are
         replaced. On the store's FIRST save under the bound, ``first_tombstones``
-        (the prior file's named levels and each crystal level the caller bounded
-        by the store's own history) seed the record,
-        so a pattern that first save omits, or one crystallized out before it, keeps
-        its level; after that no caller-supplied level enters the record except
+        (the prior file's named levels) seed the record, so a pattern that
+        first save omits keeps its level; after that no caller-supplied level enters the record except
         through a bounded save (complement + codex L3 r2)."""
         first = self._conn.execute(
             "SELECT 1 FROM pattern_levels WHERE kind = 'init'"

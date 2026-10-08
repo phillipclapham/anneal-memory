@@ -572,7 +572,6 @@ def validate_graduations(
     carryforward_cold_days: int | None = 7,
     prior_text: str | None = None,
     saved_levels: "dict[tuple[str, str], int] | None" = None,
-    crystal_levels: "dict[str, int] | None" = None,
 ) -> GraduationResult:
     """Validate evidence citations on graduated patterns.
 
@@ -582,10 +581,8 @@ def validate_graduations(
     prior level comes from ``saved_levels`` (the store's own record of the
     levels it last saved, :meth:`Store.saved_pattern_levels`) when the store has
     one: the file can only LOWER it (an operator's hand demotion stands), never
-    raise it, and a line in the file the store never saved counts as new. A
-    named pattern with no record falls back to ``crystal_levels`` (a pattern
-    crystallized out before the store kept a record), else 0. With no record at
-    all (a store's first save under this version) the file's level is the prior.
+    raise it, and a line in the file the store never saved counts as new.
+    With no record at all (a store's first save under this version) the file's level is the prior.
     ``""`` means there is no prior file. ``None`` skips the bound (direct library
     callers that do not wire it); the canonical save path always supplies it.
 
@@ -1180,7 +1177,6 @@ def validate_graduations(
             lines,
             prior_text=prior_text,
             saved_levels=saved_levels,
-            crystal_levels=crystal_levels,
             validated_lines=validated_lines,
             carried_lines=set(carried_by_line),
             graduating_headings=graduating_headings,
@@ -1243,47 +1239,30 @@ def _token_level(m: re.Match) -> int:
 def _line_levels(line: str) -> tuple[tuple[str, str], list[re.Match]] | None:
     """Return a graduating line's identity and the level tokens the bound governs.
 
-    A named line (``_NAMED_PATTERN_RE``, the grammar every per-name consumer
-    reads) is keyed by its name and governs its own marker, dated or not, plus
-    every DATED marker after it (so a ``name | Nx (date)`` mention later in the
-    line is cut with it). Any other line is keyed by its normalised text before
-    its earliest level token: with no text there it is anonymous and governs
-    every token; with text, it counts only when it carries a dated marker (the
-    shape ``_GRADUATION_RE`` and the bare regex act on), so an unbulleted
-    ``Throughput | 3x when batched`` is never touched, and rewording it makes it
-    new.
+    Every level token on the line is governed. A named line (``_NAMED_PATTERN_RE``,
+    the grammar every per-name consumer reads) is keyed by its name; any other
+    line by its normalised text before its earliest level token, so rewording it
+    makes it new, and with no text there it is anonymous.
     """
-    named = _NAMED_PATTERN_RE.match(line)
-    if named:
-        own = _LEVEL_TOKEN_RE.search(line, named.end(1))
-        if own is None:
-            return None
-        rest = [
-            m for m in _LEVEL_TOKEN_RE.finditer(line, own.end())
-            if m.group(0).endswith(")")
-        ]
-        return ("name", named.group(1)), [own, *rest]
     tokens = list(_LEVEL_TOKEN_RE.finditer(line))
     if not tokens:
         return None
-    # ONE GRAMMAR RULE, not a check per shape (L3 r3, codex HIGH, run): the
-    # identity is the text before the line's EARLIEST level token. Keying on the
-    # first DATED token let ``- | 999x decoy | 9x (date)`` forge the identity
-    # "| 999x decoy" and left 999x untouched, and an undated ``- | 9x`` was
-    # skipped as prose.
+    # ONE GRAMMAR RULE, GOVERNING EVERY TOKEN (L3 r3 + r4, codex HIGH, run): on a
+    # graduating line every ``| Nx`` token is governed, dated or not, wherever it
+    # sits. Keying on the first DATED token forged identities (r3), and a prose
+    # exemption for undated tokens let ``- multi word | 999x`` and a trailing
+    # undated ``| 999x`` on a named line keep their levels (r4): the exemption is
+    # DELETED, so prose in a graduating section that reads as a level is capped
+    # like any line.
+    named = _NAMED_PATTERN_RE.match(line)
+    if named and tokens[0].start() >= named.end(1):
+        return ("name", named.group(1)), tokens
     head = _FREEFORM_PREFIX_RE.sub("", line[: tokens[0].start()])
     key = " ".join(head.lower().split())
     if not key:
-        # No identity at all (``- | 9x``, dated or not; codex r2 #1, r3): never
-        # skipped, never recorded, always new, and every level token on the line
-        # stands at 1x.
+        # No identity at all (``- | 9x``): never recorded, always new.
         return ("anon", ""), tokens
-    dated = [m for m in tokens if m.group(0).endswith(")")]
-    if not dated:
-        # Prose with an undated ``| 3x`` after some words (``Throughput | 3x when
-        # batched``) is not a graduation line and is never touched.
-        return None
-    return ("text", key), dated
+    return ("text", key), tokens
 
 
 def pattern_line_levels(
@@ -1315,7 +1294,6 @@ def _prior_base(
     key: tuple[str, str],
     file_levels: dict[tuple[str, str], int],
     saved_levels: dict[tuple[str, str], int] | None,
-    crystal_levels: dict[str, int] | None,
 ) -> int | None:
     """The level a line identity is entitled to start from, or None (new)."""
     if key[0] == "anon":
@@ -1326,14 +1304,10 @@ def _prior_base(
         if saved is not None:
             # The store's record is the prior; the file may only lower it.
             return saved if in_file is None else min(saved, in_file)
-        # In the file but never saved by the store: an out-of-band edit. (The
-        # record's first save already took in the crystal levels, so a crystal
-        # store is never consulted once a record exists: codex r2 #2.)
+        # In the file but never saved by the store: an out-of-band edit.
         return None
     if in_file is not None:
         return in_file  # no record yet: this store's first save under the bound
-    if key[0] == "name" and crystal_levels and key[1] in crystal_levels:
-        return crystal_levels[key[1]]
     return None
 
 
@@ -1342,7 +1316,6 @@ def _apply_prior_bound(
     *,
     prior_text: str,
     saved_levels: dict[tuple[str, str], int] | None,
-    crystal_levels: dict[str, int] | None,
     validated_lines: dict[int, int],
     carried_lines: set[int],
     graduating_headings: frozenset[str],
@@ -1368,7 +1341,7 @@ def _apply_prior_bound(
             continue
         key, marks = parsed
         written = max(_token_level(m) for m in marks)
-        prior_level = _prior_base(key, file_levels, saved_levels, crystal_levels)
+        prior_level = _prior_base(key, file_levels, saved_levels)
         # Credit only the identity's OWN marker (codex L3 r1, run): a decoy
         # ``other | 2x (date) [evidence: ...]`` later on the line validated and
         # the whole line, ``foo`` included, took its rung.

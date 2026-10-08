@@ -703,37 +703,6 @@ def format_episodes_for_wrap(episodes: list[Episode]) -> str:
     return "\n".join(lines)
 
 
-def _crystal_levels(crystal_store: CrystalStore | None) -> dict[str, int]:
-    """Name -> level of every live crystal, skipping a malformed row rather than
-    breaking the wrap (the ``_crystal_active_safe`` invariant; complement L3 r2)."""
-    out: dict[str, int] = {}
-    for c in _crystal_active_safe(crystal_store):
-        name = c.get("name") if isinstance(c, dict) else None
-        level = c.get("level") if isinstance(c, dict) else None
-        if isinstance(name, str) and isinstance(level, int) and not isinstance(level, bool):
-            out[name] = level
-    return out
-
-
-def _crystal_levels_bounded(
-    store: Store, crystal_store: CrystalStore | None
-) -> dict[str, int]:
-    """:func:`_crystal_levels`, each bounded by the store's own high-water mark
-    for the name (``pattern_history``, written only by canonical saves). A
-    crystal's level is the caller's argument to ``crystallize``; at a store's
-    first bounded save it seeded the record unchecked, so a crystal planted at
-    999 before that save stood as a saved 999 (L3 r3, complement MED; codex MED:
-    an unbounded int overflowed the record and failed every wrap). A name the
-    history never saw is not seeded: it enters as new."""
-    out: dict[str, int] = {}
-    for name, level in _crystal_levels(crystal_store).items():
-        history = store.get_pattern_history(name)
-        earned = history.get("max_level_reached") if history else None
-        if isinstance(earned, int) and not isinstance(earned, bool) and earned > 0:
-            out[name] = min(level, earned)
-    return out
-
-
 def _wrap_started_extras(store: Store, token_bound: bool, today: str) -> dict[str, Any]:
     """Keyword arguments only a newer ``wrap_started`` takes. ``token_bound`` only
     when the caller supplied the token, so a Store subclass that overrides
@@ -3051,15 +3020,14 @@ def validated_save_continuity(
     # Caller may pin ``today`` for deterministic test runs; default is
     # wall-clock. Same pattern _build_wrap_package already uses.
     today_str = today if today is not None else (store.wrap_today() or _wrap_local_date(store))
-    # The bound's prior: the store's own record of the levels it last saved, and
-    # for a pattern crystallized out before that record existed, its crystal level.
+    # The bound's prior: the store's own record of the levels it last saved.
+    # ⛔ NO CRYSTAL SEED (L3 r4, 1008+3, DELETED): a crystal level seeded the
+    # first bounded save and was defeated a new way three rounds running (a
+    # caller-set crystallized_on, a caller-set level, then a caller-writable
+    # pattern_history bound). A pattern crystallized out before the record
+    # existed re-enters the continuity as new and re-earns its rungs; its crystal
+    # is untouched.
     saved_levels = store.saved_pattern_levels()
-    # Crystal levels count only until the store has a record: the first bounded
-    # save copies them into it, and from then on a crystal level never stands in
-    # for a saved one (codex L3 r2: crystallized_on is a caller-set date).
-    crystal_levels = (
-        _crystal_levels_bounded(store, crystal_store) if saved_levels is None else None
-    )
     grad_result = validate_graduations(
         text=text,
         valid_ids=citable_ids,
@@ -3087,7 +3055,6 @@ def validated_save_continuity(
         # file, so every line is new.
         prior_text=prior_continuity or "",
         saved_levels=saved_levels,
-        crystal_levels=crystal_levels,
     )
 
     # The hard maximum is measured on the text that will be WRITTEN: graduation
@@ -3287,10 +3254,7 @@ def validated_save_continuity(
             store._record_pattern_levels(
                 pattern_line_levels(grad_result.text, grad_headings), today_str,
                 lower_to=pattern_line_levels(prior_continuity or "", grad_headings),
-                first_tombstones={
-                    **{("name", n): lv for n, lv in (crystal_levels or {}).items()},
-                    **pattern_line_levels(prior_continuity or "", grad_headings),
-                },
+                first_tombstones=pattern_line_levels(prior_continuity or "", grad_headings),
             )
 
             wrap_result = store.wrap_completed(

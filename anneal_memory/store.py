@@ -3279,11 +3279,13 @@ class Store:
         if not rows:
             return
         wrap_id = self._conn.execute("SELECT MAX(id) FROM wraps").fetchone()[0]
-        # No error handling on purpose: a failed insert fails the whole save batch
-        # (L3 r3: swallowing it let a rolled-back transaction commit empty).
-        self._conn.executemany(
-            "INSERT OR REPLACE INTO wrap_graduations (wrap_id, name, level, "
-            "explanation) VALUES (?, ?, ?, ?)", [(wrap_id, n, lv, ex) for n, lv, ex in rows])
+        # A failed insert fails the whole save batch (L3 r3: swallowing it let a
+        # rolled-back transaction commit empty), as a StoreDatabaseError (L3 r4).
+        with self._db_boundary("drift_probes"):
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO wrap_graduations (wrap_id, name, level, "
+                "explanation) VALUES (?, ?, ?, ?)",
+                [(wrap_id, n, lv, ex) for n, lv, ex in rows])
 
     def list_drift_probes(self, *, include_retired: bool = False) -> list[dict[str, Any]]:
         """Every drift probe (live only unless ``include_retired``), oldest first."""
@@ -3329,12 +3331,13 @@ class Store:
         if not results:
             return
         wrap_id = self._conn.execute("SELECT MAX(id) FROM wraps").fetchone()[0]
-        # No error handling on purpose (see _record_wrap_graduations).
-        self._conn.executemany(
-            "INSERT OR REPLACE INTO drift_results (wrap_id, probe_id, status, detail) "
-            "VALUES (?, ?, ?, ?)",
-            [(wrap_id, r["probe_id"], r["status"], r["detail"]) for r in results
-             if isinstance(r.get("probe_id"), int)])
+        # Fails the save, as a StoreDatabaseError (see _record_wrap_graduations).
+        with self._db_boundary("drift_probes"):
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO drift_results (wrap_id, probe_id, status, detail) "
+                "VALUES (?, ?, ?, ?)",
+                [(wrap_id, r["probe_id"], r["status"], r["detail"]) for r in results
+                 if isinstance(r.get("probe_id"), int)])
 
     def drift_status(self) -> dict[str, Any]:
         """The latest save's probe verdicts, each with the first wrap since which it

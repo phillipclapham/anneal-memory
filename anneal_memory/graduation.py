@@ -93,6 +93,12 @@ _BARE_GRADUATION_RE = re.compile(
     r"\|\s*([2-9]|[1-9][0-9]{1,8})x\s*\((\d{4}-\d{2}-\d{2})\)(?![ \t]*\[evidence:)[ \t]*"
 )
 
+# A level token of 10 or more digits (see the bound above): cut to 1x before validation so
+# no parser has a second reading of it.
+_OVERLONG_LEVEL_RE = re.compile(r"(\|\s*)\d{10,}x")
+_EVIDENCE_TAG_STRIP_RE = re.compile(
+    r'\[evidence:\s*[a-fA-F0-9][a-fA-F0-9, ]*(?:\s+"[^"]*")?\s*\]')
+
 # Matches any pattern with temporal marker (Nx)
 _PATTERN_RE = re.compile(
     r"\|\s*(\d{1,9})x\s*\((\d{4}-\d{2}-\d{2})\)"
@@ -186,7 +192,7 @@ _NAMED_PATTERN_RE = re.compile(
     r")"
     r"(?:(?:!+|\?|✓|\*)[ \t]+)?"              # optional FlowScript marker prefix
     r"([A-Za-z][A-Za-z0-9_.\-]*)"               # operator-style identifier (ASCII)
-    r"[ \t]*\|[ \t]*(\d+)x"                     # graduation marker
+    r"[ \t]*\|[ \t]*(\d{1,9})x"                     # graduation marker
 )
 
 # AM-PERNAME-LINEBIND (v0.4.6): the name AND its evidence tag captured in ONE
@@ -215,7 +221,7 @@ _NAMED_PATTERN_WITH_EVIDENCE_RE = re.compile(
     r")"
     r"(?:(?:!+|\?|✓|\*)[ \t]+)?"
     r"([A-Za-z][A-Za-z0-9_.\-]*)"               # (1) operator-style identifier
-    r"[ \t]*\|[ \t]*(\d+)x"                     # (2) level
+    r"[ \t]*\|[ \t]*(\d{1,9})x"                     # (2) level
     r"[ \t]*\((\d{4}-\d{2}-\d{2})\)"            # (3) date
     r"[ \t]*\[evidence:[ \t]*"
     r"([a-fA-F0-9][a-fA-F0-9, ]*)"              # (4) cited ids
@@ -657,6 +663,21 @@ def validate_graduations(
     # [evidence:] tag NOT adjacent to their marker (so _GRADUATION_RE missed it) and
     # would otherwise be silently held as a bare carry, dropping the live evidence.
     malformed_evidence_carries: list[str] = []
+
+    # Level cap (L3 r4): a 10+ digit level token on a graduating-section line is cut to
+    # 1x, its evidence tag replaced by "(level-capped)", before anything else reads it.
+    # Left as written it matched no validator regex yet parsed as a huge level in the
+    # other parsers, so a fabricated line saved untouched and held a probe. Counted in
+    # ``demoted``.
+    capped_section = False
+    for i, line in enumerate(lines):
+        if line.startswith("## "):
+            capped_section = _is_graduating_heading(line, graduating_headings)
+        elif capped_section and _OVERLONG_LEVEL_RE.search(line):
+            line = _OVERLONG_LEVEL_RE.sub(r"\g<1>1x", line)
+            line, n_tags = _EVIDENCE_TAG_STRIP_RE.subn("(level-capped)", line)
+            lines[i] = line if n_tags else f"{line.rstrip()} (level-capped)"
+            demoted += 1
 
     for i, line in enumerate(lines):
         # Track section boundaries

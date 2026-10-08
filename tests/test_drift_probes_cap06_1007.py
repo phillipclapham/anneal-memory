@@ -2,6 +2,7 @@
 
 The operator declares what must survive; every save checks it lexically against the
 saved text, records the verdict with the wrap, and never blocks or rewrites."""
+import sqlite3
 import subprocess
 import sys
 
@@ -9,6 +10,7 @@ import pytest
 
 from anneal_memory import Store, prepare_wrap, validated_save_continuity
 from anneal_memory.crystal import CrystalStore
+from anneal_memory.store import StoreDatabaseError
 from anneal_memory.drift import evaluate_probes
 
 
@@ -315,12 +317,19 @@ def test_an_oversized_level_neither_raises_nor_graduates(tmp_path, digits):  # c
     s = Store(tmp_path / "m.db", project_name="t")
     try:
         ep = s.record("we moved the hub to soupcan and it runs there now", "observation")
+        s.add_drift_probe(pattern="big_one")
         token = prepare_wrap(s, max_chars=40000)["wrap_token"]
         huge = "1" + "0" * (digits - 1)
         line = f'- big_one | {huge}x (2026-10-07) [evidence: {ep.id[:8]} "the hub runs on soupcan"]'
-        validated_save_continuity(s, _doc(line), today="2026-10-07", wrap_token=token)
+        r = validated_save_continuity(s, _doc(line), today="2026-10-07", wrap_token=token)
+        assert r["drift"]["probes"][0]["status"] != "held"
         assert s.drift_status()["graduated"] == []
         assert s.get_pattern_history("big_one") is None
+        # the line itself is cut to 1x (L3 r4: it used to save untouched and read as a
+        # huge level to the other parsers)
+        saved = s.load_continuity()
+        assert "big_one | 1x" in saved and "(level-capped)" in saved
+        assert huge not in saved and "[evidence:" not in saved
     finally:
         s.close()
 
@@ -337,10 +346,11 @@ def test_a_failed_instrument_write_fails_the_whole_save(tmp_path, verb):   # cod
         s._conn.commit()
         before = s.load_continuity()
         wraps = s._conn.execute("SELECT COUNT(*) FROM wraps").fetchone()[0]
-        with pytest.raises(Exception):
+        with pytest.raises(StoreDatabaseError) as ei:
             validated_save_continuity(
                 s, _doc(f"- hub_on_soupcan | 2x (2026-10-07) [evidence: {ep.id[:8]}]"),
                 today="2026-10-07", wrap_token=token)
+        assert isinstance(ei.value.__cause__, sqlite3.DatabaseError)
         assert s._conn.execute("SELECT COUNT(*) FROM wraps").fetchone()[0] == wraps
         assert s.load_continuity() == before
     finally:

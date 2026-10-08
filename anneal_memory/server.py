@@ -154,7 +154,6 @@ _FALLBACK_DEFAULT_CAP = 10   # word matches listed when the caller passed no ``l
 _EXACT_RESULTS_ENOUGH = 3    # an exact result this small is topped up with word matches
 _ALSO_MATCHING_MAX = 5       # how many word matches are appended to such a result
 _REPLACED_MAX = 5  # replaced matches listed by one keyword recall
-_REPLACED_SCAN = 200  # servable replaced matches read to find them
 _RECALL_DEFAULT_LIMIT = 100  # MCP recall's ``limit`` when the caller passes none
 
 
@@ -476,7 +475,7 @@ class Server:
         phrase = keyword.strip()
         if not phrase:
             return ""
-        old = self._store.replaced_matches(phrase, limit=_REPLACED_SCAN, redirectable_only=True)
+        old = self._store.replaced_matches(phrase, limit=_REPLACED_MAX, redirectable_only=True)
         by_head: dict[str, list[str]] = {}
         for ep in old:
             if ep.superseded_by:

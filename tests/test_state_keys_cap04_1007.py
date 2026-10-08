@@ -312,6 +312,17 @@ def test_mcp_keyword_recall_names_the_replacement(tmp_path):
             st.supersede(old_id=x.id, new_id=y.id, source="wrap")
         got = st.replaced_matches("Seattle", limit=2, redirectable_only=True)
         assert [e.id for e in got] == [old.id]
+        # Many servable matches under ONE head cannot hide a second head either: the
+        # limit counts heads (L3 r4).
+        head = st.record("Seattle crowd note alpha beta gamma delta epsilon summary",
+                         "observation", timestamp="2026-06-01T10:00:00Z")
+        for i in range(200):
+            o = st.record(f"Seattle crowd note {i} alpha beta gamma delta epsilon", "observation",
+                          timestamp=f"2026-04-{1 + i % 28:02d}T{i // 28:02d}:00:00Z")
+            st.supersede(old_id=o.id, new_id=head.id)
+        got = st.replaced_matches("Seattle", limit=2, redirectable_only=True)
+        assert {e.superseded_by for e in got} == {head.id, new.id}
+        assert old.id in {e.id for e in got}
         assert "Austin" in text
         # A filtered call is left alone, as the durable-facts block is.
         filtered = Server(st)._tool_recall({"keyword": "Seattle", "source": "agent"})

@@ -12,24 +12,30 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   query that names the old state ("still in Seattle?") gets the current fact, which by
   construction shares none of its words. The served episode's new `ScoredEpisode.replaces`
   holds a `ReplacedEpisode` (id, timestamp, text cut to 300 characters) for each hit it stands
-  in for. A hit hidden only by wrap-proposed links (`source='wrap'`) is dropped, not swapped.
+  in for (it takes the slot and score of the best of them). A hit whose path to that episode
+  crosses a wrap-proposed (`source='wrap'`) or delete-rewired link is dropped, not swapped.
   The associative seed set is unchanged. With links present this costs one more candidate
   scan per call. MCP `recall` with a plain
   keyword (and without `include_superseded`) adds a "Replaced since" block naming the fact
-  that replaced each hidden match. New `Store.has_supersessions` and `Store.redirectable_ids`.
+  that replaced each hidden match (scanning only the hidden set, so live matches cannot crowd
+  it out). New `Store.has_supersessions`, `Store.redirectable_ids`, `Store.replaced_matches`.
 - **State keys.** `record(..., state_key=)`, `Store.set_state_key(id, key)`,
   `Store.clear_state_key(id)`, `Store.state_key_report(key=None)`, `normalize_state_key`; CLI
   `record --state-key KEY` and `state [KEY] [--set ID | --unset ID]`; MCP `record` takes
   `state_key` (tool-integrity manifests regenerated). A slot holds one value: of its holders
   (the live end of each keyed episode's chain) and the new episode, the newest by the instant
   its timestamp names (then insertion order) replaces every other. The links are ordinary
-  `supersessions` rows (hiding, delete/prune rewiring and the audit chain apply; the audit
-  event names the key) made without the lexical floor: the key is the writer's claim.
-  `clear_state_key` removes the episode's key and its same-key links and re-forms the slot.
+  `supersessions` rows with `source='state_key'` (the link's kind; who asked is in the audit
+  event, which names the key), so hiding, delete/prune rewiring and the audit chain apply;
+  they are made without the lexical floor: the key is the writer's claim. A keyed episode's
+  timestamp is stored in UTC (offsets converted) so SQL cutoffs and the key rule agree on
+  order; `set_state_key` refuses an episode stored in another form. `clear_state_key` removes
+  the episode's key and the links keys made to it, and re-forms the slot.
   Keys are NFKC-normalised, case-folded, whitespace-collapsed, 1-200 characters, with no
   control or format characters. An episode keeps one key; a different key, or keying an
-  episode already replaced, is refused. New additive table `state_keys`; an older binary
-  ignores it. Delete and prune drop the rows.
+  episode already replaced, is refused. New additive table `state_keys` with a trigger that
+  drops an episode's key row when any version deletes the episode; an older binary otherwise
+  ignores it.
 - Measured: `scripts/stale_probe.py --supersede explicit` on reworded updates, scored recall's
   current fact at the top went from 7 of 16 (main) to 15 of 16; restate and negate stay at 16
   of 16, links a wrap proposed give main's numbers (they hide, never serve), and the never-updated control is

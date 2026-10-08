@@ -475,10 +475,9 @@ class Server:
         phrase = keyword.strip()
         if not phrase:
             return ""
-        found = self._store.recall(keyword=phrase, include_superseded=True,
-                                   limit=_REPLACED_MAX * 4)
-        old = [ep for ep in found.episodes if ep.superseded_by]
-        swappable = self._store.redirectable_ids([ep.id for ep in old]) if old else set()
+        old = self._store.replaced_matches(phrase, limit=_REPLACED_MAX * 4)
+        swappable = self._store.redirectable_ids(
+            {ep.id: ep.superseded_by or "" for ep in old}) if old else set()
         by_head: dict[str, list[str]] = {}
         for ep in old:
             if ep.id in swappable and ep.superseded_by:

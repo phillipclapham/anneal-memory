@@ -985,6 +985,9 @@ def cmd_state(args: argparse.Namespace) -> None:
     or, with --set, put an existing episode into a key's slot."""
     with _open_store(args) as store:
         if args.unset:
+            if args.key is not None:
+                print("Error: --unset takes no KEY (an episode has one slot).", file=sys.stderr)
+                sys.exit(1)
             try:
                 out = store.clear_state_key(args.unset, source="cli")
             except (SupersessionError, ValueError) as exc:
@@ -4283,10 +4286,11 @@ def build_parser() -> argparse.ArgumentParser:
         "state", help="List state keys and what each replaced, or --set one",
         parents=[json_parent])
     sub.add_argument("key", nargs="?", default=None, help="Only this key")
-    sub.add_argument("--set", metavar="EPISODE_ID", default=None,
-                     help="Put this existing episode into KEY's slot")
-    sub.add_argument("--unset", metavar="EPISODE_ID", default=None,
-                     help="Take this episode out of its slot (the undo for a wrong key)")
+    mode = sub.add_mutually_exclusive_group()
+    mode.add_argument("--set", metavar="EPISODE_ID", default=None,
+                      help="Put this existing episode into KEY's slot")
+    mode.add_argument("--unset", metavar="EPISODE_ID", default=None,
+                      help="Take this episode out of its slot (the undo for a wrong key)")
     sub.set_defaults(func=cmd_state)
 
     # -- search (alias: recall) --

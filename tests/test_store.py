@@ -4363,9 +4363,11 @@ class TestTheWriterSchemaFunctionLetsABumpRefuseOpenWriters:
         import sqlite3 as _sq
 
         fresh = _sq.connect(str(db))
-        assert fresh.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger'"
-        ).fetchone()[0] == 0, "schema 1 installs no trigger; the first bump does"
+        # Schema 1's only trigger is the CAP-04 key-row cleanup; it reads no writer
+        # function, so it plays no part in the bump guard this test controls for.
+        assert [r[0] for r in fresh.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+        )] == ["state_keys_follow_episodes"], "schema 1 installs no bump guard; the first bump does"
         fresh.close()
         self._bump(db, _SCHEMA_VERSION)
         store.record("same schema", episode_type="observation")

@@ -484,7 +484,7 @@ class Server:
                 by_head.setdefault(ep.superseded_by, []).append(ep.id)
         lines = []
         for head_id, olds in by_head.items():
-            head = self._store.get(head_id)
+            head = found.heads.get(head_id)
             if head is None:
                 continue
             lines.append(

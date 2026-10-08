@@ -1185,6 +1185,9 @@ class ReplacedMatches(NamedTuple):
     episodes: list[Episode]
     more_heads: int  # servable replacements beyond ``max_heads``
     more_olds: int  # matches under the shown replacements beyond ``max_olds`` each
+    # The shown replacements themselves, read in the same snapshot as ``episodes``
+    # (a later ``get`` could find one deleted and render nothing, uncapped).
+    heads: dict[str, Episode]
 
 
 class SupersessionError(AnnealMemoryError, ValueError):
@@ -4424,22 +4427,31 @@ class Store:
                 return {}
             return self._live_replacements(list(episode_ids), None)
 
-    def _live_replacements(self, ids: list[str], until: str | None) -> dict[str, str]:
+    def _live_replacements(
+        self, ids: list[str], until: str | None, *, servable_only: bool = False,
+    ) -> dict[str, str]:
         """``old_id -> the latest live episode reachable down its chain``,
         restricted to replacements at or before ``until``. One recursive query per
-        500 ids."""
+        500 ids. ``servable_only`` walks only links recall may serve (not
+        ``'wrap'``/``'rewired'``, as :meth:`redirectable_ids` does), so a newer
+        wrap-proposed fork off the same episode can't become the head a servable
+        path never reaches."""
         out: dict[str, str] = {}
         cut = " AND r.timestamp <= ?" if until else ""
         hide_sql, hide_params = _hidden_by_supersession_sql(until)
+        # Hiding (the ordering below) always counts every link; only the walk narrows.
+        s_only = " AND source NOT IN ('wrap', 'rewired')" if servable_only else ""
+        j_only = " AND s.source NOT IN ('wrap', 'rewired')" if servable_only else ""
         for start in range(0, len(ids), 500):
             chunk = ids[start:start + 500]
             marks = ",".join("?" * len(chunk))
             rows = self._conn.execute(
                 f"""WITH RECURSIVE chain(old_id, cur) AS (
-                        SELECT old_id, new_id FROM supersessions WHERE old_id IN ({marks})
+                        SELECT old_id, new_id FROM supersessions
+                        WHERE old_id IN ({marks}){s_only}
                         UNION
                         SELECT c.old_id, s.new_id FROM chain c
-                        JOIN supersessions s ON s.old_id = c.cur
+                        JOIN supersessions s ON s.old_id = c.cur{j_only}
                     )
                     SELECT c.old_id, c.cur FROM chain c
                     JOIN episodes r ON r.id = c.cur
@@ -4907,13 +4919,13 @@ class Store:
         timestamp first), each with its newest ``max_olds`` matches, newest first; what
         that cut leaves out is COUNTED in the result (``more_heads``, ``more_olds``) for
         the caller to show (L3 r5: a row budget had dropped a valid redirect silently)."""
-        if max_heads < 0 or max_olds < 1:
-            raise ValueError("replaced_matches: max_heads must be >= 0 and max_olds >= 1")
+        if max_heads < 1 or max_olds < 1:
+            raise ValueError("replaced_matches: max_heads and max_olds must be >= 1")
         kept_by_head: dict[str, list[Any]] = {}
         count_by_head: dict[str, int] = {}
         with self._db_boundary("keyword_candidates"), self._read_snapshot():
-            if not phrase or not max_heads or not self._has_supersessions_table():
-                return ReplacedMatches([], 0, 0)
+            if not phrase or not self._has_supersessions_table():
+                return ReplacedMatches([], 0, 0, {})
             hide_sql, hide_params = _hidden_by_supersession_sql(None)
             pattern = _keyword_like_pattern(phrase)
             page = 500
@@ -4926,7 +4938,8 @@ class Store:
                     f"WHERE q.old_id = episodes.id AND q.source NOT IN ('wrap', 'rewired')){cursor} "
                     "ORDER BY timestamp DESC, id DESC LIMIT ?",
                     [*hide_params, pattern, *(after or ()), page]).fetchall()
-                heads = self._live_replacements([r["id"] for r in rows], None)
+                heads = self._live_replacements(
+                    [r["id"] for r in rows], None, servable_only=True)
                 cand = {r["id"]: heads[r["id"]] for r in rows if r["id"] in heads}
                 ok = self.redirectable_ids(cand) if cand else set()
                 for r in rows:
@@ -4947,13 +4960,20 @@ class Store:
                         f"SELECT id, timestamp FROM episodes WHERE id IN "
                         f"({','.join('?' * len(chunk))})", chunk):
                     stamp[h["id"]] = (h["timestamp"], h["id"])
-        order = sorted(count_by_head, key=lambda h: stamp.get(h, ("", h)), reverse=True)
-        chosen = order[:max_heads]
+            order = sorted(count_by_head, key=lambda h: stamp.get(h, ("", h)), reverse=True)
+            chosen = order[:max_heads]
+            head_rows = {
+                h["id"]: self._row_to_episode(h)
+                for start in range(0, len(chosen), 500)
+                for h in self._conn.execute(
+                    f"SELECT * FROM episodes WHERE id IN "
+                    f"({','.join('?' * len(chosen[start:start + 500]))})",
+                    chosen[start:start + 500])}
         out = [dataclasses.replace(self._row_to_episode(r), superseded_by=h)
                for h in chosen for r in kept_by_head[h]]
         return ReplacedMatches(
             out, len(order) - len(chosen),
-            sum(count_by_head[h] - len(kept_by_head[h]) for h in chosen))
+            sum(count_by_head[h] - len(kept_by_head[h]) for h in chosen), head_rows)
 
     def _scan_containing_oldest(
         self, keyword: str, visit: Callable[[Episode], bool], *, page: int = 500,

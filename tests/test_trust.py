@@ -544,3 +544,74 @@ class TestL3Round1:
             res = validated_save_continuity(store, text, today="2026-10-08")
         assert "- eiffel_in_lyon | 1x (2026-10-07)" in store.load_continuity()
         assert res["level_capped"][0]["capped_to"] == 1
+
+    def test_reimporting_a_stores_own_export_never_demotes_its_operator_episodes(self, tmp_path):
+        # codex + complement r2 (run): a clamped operator->agent lowered the original.
+        db = tmp_path / "a.db"
+        s = Store(db)
+        try:
+            op = s.record("the operator's own fact", EpisodeType.OBSERVATION, trust="operator")
+            plain = s.record("a plain agent note", EpisodeType.OBSERVATION)
+        finally:
+            s.close()
+        out = tmp_path / "export.json"
+        assert _cli(db, "export", "--format", "json", "--output", str(out)).returncode == 0
+        r = _cli(db, "import", str(out), "--json")
+        assert r.returncode == 0, r.stderr
+        assert json.loads(r.stdout)["trust_lowered"] == 0
+        s = Store(db)
+        try:
+            assert s.trust_map([op.id, plain.id]) == {op.id: "operator"}
+        finally:
+            s.close()
+
+    def test_pattern_trust_is_the_highest_across_a_names_lines(self):
+        # codex r2 LOW: last-line-wins.
+        text = ("## Patterns\n"
+                "- p | 2x (2026-10-08) [evidence: aaaa1111]\n"
+                "- p | 2x (2026-10-08) [evidence: bbbb2222]\n")
+        r = validate_graduations(
+            text=text, valid_ids={"aaaa1111", "bbbb2222"}, today="2026-10-08",
+            trust_of=lambda cid: {"aaaa1111": "operator"}.get(cid, DEFAULT_TRUST),
+        )
+        assert r.pattern_trust == {"p": "operator"}
+
+    def test_a_graduation_the_bound_cut_reports_no_trust(self):
+        # codex r2 LOW: a new operator-grounded 2x cut to 1x still reported operator.
+        r = validate_graduations(
+            text="## Patterns\n- p | 2x (2026-10-08) [evidence: aaaa1111]\n",
+            valid_ids={"aaaa1111"}, today="2026-10-08",
+            trust_of=lambda cid: "operator", prior_text="",
+        )
+        assert r.validated == 0 and r.pattern_trust == {}
+
+    def test_a_trust_change_on_a_supersedes_endpoint_refuses_the_save(self, tmp_path):
+        # codex r2 MED: the re-read covered cited ids only, not marker endpoints.
+        from anneal_memory.store import StoreError
+        db = tmp_path / "m.db"
+        st = Store(db, project_name="T")
+        try:
+            old = st.record("The deploy key lives in the vault.", EpisodeType.OBSERVATION,
+                            timestamp="2026-10-08T09:00:00Z")
+            new = st.record("The deploy key lives in the vault and in the CI secrets now.",
+                            EpisodeType.OBSERVATION, timestamp="2026-10-08T10:00:00Z")
+            assert prepare_wrap(st)["status"] == "ready"
+            real = st.trust_map
+            calls: list[int] = []
+
+            def racing(ids):
+                out = real(ids)
+                if not calls:
+                    calls.append(1)
+                    with Store(db) as other:
+                        other.set_trust(new.id, "external")
+                return out
+
+            st.trust_map = racing  # type: ignore[method-assign]
+            text = (HEAD + "## Patterns\n- deploy_key | 1x (2026-10-08)\n\n"
+                    f"## Decisions\n[supersedes: {old.id} by {new.id}]\n\n## Context\nx\n")
+            with pytest.raises(StoreError, match="trust class"):
+                validated_save_continuity(st, text, today="2026-10-08")
+            assert st.status().wrap_in_progress
+        finally:
+            st.close()

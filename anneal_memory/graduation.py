@@ -1083,7 +1083,13 @@ def validate_graduations(
                 if grad_name_match is not None and grad_name_match.group(2) == str(level):
                     graduated_names.append(grad_name_match.group(1))
                     if reported_trust is not None:
-                        pattern_trust[grad_name_match.group(1)] = reported_trust
+                        # The highest across the name's lines (codex r2: it was
+                        # last-line-wins).
+                        name_g = grad_name_match.group(1)
+                        pattern_trust[name_g] = max(
+                            reported_trust, pattern_trust.get(name_g, reported_trust),
+                            key=trust_rank,
+                        )
             elif uncorroborated_line:
                 # ⛔ TO 1x, NOT ONE LEVEL DOWN, AND NEVER HELD (L1 + L2 r1, run):
                 # the claimed level is the composer's free text, so one level
@@ -1312,6 +1318,10 @@ def validate_graduations(
                 validated -= 1
                 if cap.name in graduated_names:
                     graduated_names.remove(cap.name)
+
+    # Only a name that still graduated keeps its trust entry (codex r2: a line
+    # the bound cut to 1x reported operator grounding for no graduation).
+    pattern_trust = {n: t for n, t in pattern_trust.items() if n in graduated_names}
 
     reuse_max = max(citation_counts.values()) if citation_counts else 0
     gaming_suspects = detect_citation_gaming(citation_counts)

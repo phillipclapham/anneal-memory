@@ -2204,7 +2204,8 @@ def cmd_import(args: argparse.Namespace) -> None:
                 # CAP-08: an export file is plain JSON anyone can edit, so it can
                 # lower trust but never vouch: anything above agent comes in as
                 # agent.
-                ep_trust = ep_data.get("trust", DEFAULT_TRUST)
+                raw_trust = ep_data.get("trust")
+                ep_trust = raw_trust if raw_trust is not None else DEFAULT_TRUST
                 if trust_rank(ep_trust) > trust_rank(DEFAULT_TRUST):
                     ep_trust = DEFAULT_TRUST
 
@@ -2212,10 +2213,15 @@ def cmd_import(args: argparse.Namespace) -> None:
                 existing = store.get(ep_data["id"])
                 if existing is not None:
                     # An existing id still takes a LOWER trust from the file
-                    # (codex r1 #6): a corrected export must be able to mark a
-                    # page as external after an earlier import stored it as agent.
+                    # (codex r1 #6), but only from a class the file states at or
+                    # below agent: a missing field, or an operator one the file
+                    # cannot vouch for, asserts nothing, so re-importing a store's
+                    # own export never demotes its operator episodes (codex +
+                    # complement r2).
                     current = store.trust_map([existing.id]).get(existing.id, DEFAULT_TRUST)
-                    if trust_rank(ep_trust) < trust_rank(current):
+                    if (raw_trust is not None
+                            and trust_rank(raw_trust) <= trust_rank(DEFAULT_TRUST)
+                            and trust_rank(raw_trust) < trust_rank(current)):
                         store.set_trust(existing.id, ep_trust, actor="cli:import")
                         lowered += 1
                     skipped += 1

@@ -77,7 +77,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   operator `record` event, which `Store.record(trust_via=)` takes).
 - JSON `export` writes each non-default class; `import` honours a class up to `agent`, so an
   edited export file can lower trust but never vouch, including on an episode it already holds
-  (reported as `trust_lowered`). SQLite-format export copies the table.
+  (reported as `trust_lowered`), and only from a class it states at or below `agent`: a missing
+  class, or an `operator` one, asserts nothing, so re-importing a store's own export never demotes
+  it. SQLite-format export copies the table.
 - Measured after: the 2026-10-07 plant recorded `external` is held at `1x (uncorroborated)`;
   the same with an unrelated agent episode stapled on is held too; with an agent episode that
   also grounds the claim it graduates to 2x.

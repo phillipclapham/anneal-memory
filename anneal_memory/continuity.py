@@ -3035,7 +3035,12 @@ def validated_save_continuity(
     saved_levels = store.saved_pattern_levels()
     # CAP-08 T3: where each citable episode came from (absent = agent), so a
     # graduation grounded only in tool/external episodes does not climb.
-    window_trust = store.trust_map(citable_ids)
+    # Plus every [supersedes:] endpoint: a trust change on one decides whether its
+    # link is recorded, which decides what was citable (codex r2, the race).
+    _marker_ids = {
+        i.lower() for mm in _SUPERSEDES_RE.finditer(text) for i in (mm.group(1), mm.group(2))
+    }
+    window_trust = store.trust_map(citable_ids | _marker_ids)
     grad_result = validate_graduations(
         text=text,
         valid_ids=citable_ids,
@@ -3260,7 +3265,7 @@ def validated_save_continuity(
             # The same re-read for trust (codex r1 #4): a class another writer
             # changed after validation read it would let the save commit a
             # graduation judged on the old class. Raising rolls the batch back.
-            _cited = set(grad_result.citation_counts)
+            _cited = set(grad_result.citation_counts) | _marker_ids
             _trust_now = store.trust_map(sorted(_cited))
             _trust_moved = sorted(
                 cid for cid in _cited

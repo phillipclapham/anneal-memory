@@ -108,6 +108,13 @@ def _is_write_lock_contention(exc: StoreDatabaseError) -> bool:
     cause = exc.__cause__
     if not isinstance(cause, sqlite3.OperationalError):
         return False
+    return _sqlite_error_is_contention(cause)
+
+
+def _sqlite_error_is_contention(cause: sqlite3.OperationalError) -> bool:
+    """The one contention classifier: a raw ``OperationalError`` that is a
+    peer holding the database (BUSY/LOCKED), as :func:`_is_write_lock_contention`
+    reads it, so the WAL-switch retry at open uses the same rule."""
     # ⛔ CLASSIFY BY PRIMARY RESULT CODE, NOT BY A NAME ALLOWLIST.
     # This listed three extended names and returned False for every other
     # one — so SQLITE_BUSY_RECOVERY, SQLITE_LOCKED_SHAREDCACHE and friends
@@ -7172,12 +7179,7 @@ class Store:
                 row = self._conn.execute("PRAGMA journal_mode=WAL").fetchone()
                 break
             except sqlite3.OperationalError as exc:
-                code = getattr(exc, "sqlite_errorcode", None)
-                if code is not None:
-                    contended = (code & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
-                else:  # Python < 3.11 carries no code: read the message
-                    msg = str(exc).lower()
-                    contended = "locked" in msg or "busy" in msg
+                contended = _sqlite_error_is_contention(exc)
                 remaining = deadline - time.monotonic()
                 if not contended or remaining <= 0:
                     raise

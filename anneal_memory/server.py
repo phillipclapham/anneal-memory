@@ -153,7 +153,8 @@ _INTERNAL_ERROR = -32603
 _FALLBACK_DEFAULT_CAP = 10   # word matches listed when the caller passed no ``limit``
 _EXACT_RESULTS_ENOUGH = 3    # an exact result this small is topped up with word matches
 _ALSO_MATCHING_MAX = 5       # how many word matches are appended to such a result
-_REPLACED_MAX = 5  # replaced matches listed by one keyword recall
+_REPLACED_MAX = 5  # replacements listed by one keyword recall
+_REPLACED_OLDS_MAX = 5  # replaced matches named under each
 _RECALL_DEFAULT_LIMIT = 100  # MCP recall's ``limit`` when the caller passes none
 
 
@@ -475,13 +476,14 @@ class Server:
         phrase = keyword.strip()
         if not phrase:
             return ""
-        old = self._store.replaced_matches(phrase, limit=_REPLACED_MAX, redirectable_only=True)
+        found = self._store.replaced_matches(
+            phrase, max_heads=_REPLACED_MAX, max_olds=_REPLACED_OLDS_MAX)
         by_head: dict[str, list[str]] = {}
-        for ep in old:
+        for ep in found.episodes:
             if ep.superseded_by:
                 by_head.setdefault(ep.superseded_by, []).append(ep.id)
         lines = []
-        for head_id, olds in list(by_head.items())[:_REPLACED_MAX]:
+        for head_id, olds in by_head.items():
             head = self._store.get(head_id)
             if head is None:
                 continue
@@ -490,6 +492,14 @@ class Server:
                 f"{', '.join('(' + o + ')' for o in olds)}: {_truncate(head.content, 300)}")
         if not lines:
             return ""
+        # What the store's caps cut is said, never dropped silently.
+        more = []
+        if found.more_heads:
+            more.append(f"{found.more_heads} more replacement(s)")
+        if found.more_olds:
+            more.append(f"{found.more_olds} more replaced match(es) under those shown")
+        if more:
+            lines.append(f"- (+ {' and '.join(more)} not listed; narrow the keyword)")
         return "Replaced since (the current fact for an older match):\n" + "\n".join(lines)
 
     def _cued_facts(self, query: str, mode: RetrievalMode) -> list[RelevantFact]:

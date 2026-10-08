@@ -68,7 +68,7 @@ from .associations import (
     record_associations as _record_associations,
 )
 from .audit import AuditTrail
-from .graduation import _NAMED_PATTERN_RE, _meaningful_words
+from .graduation import _meaningful_words
 
 #: SQLite's own write-lock message grammar, for the Python 3.10 fallback in
 #: :func:`_is_write_lock_contention` where no primary result code is available.
@@ -3263,14 +3263,15 @@ class Store:
         return probe_id
 
     def _current_pattern_level(self, name: str) -> int | None:
-        """The highest ``name | Nx`` level in the current continuity, or None."""
+        """The pattern's level in the graduating section(s) of the current continuity
+        (the parser a save uses; L3 1007, codex: a ``name | Nx`` mention in Context
+        must not set it), or None."""
+        from .continuity import _pattern_levels  # continuity imports store
         try:
-            text = self.load_continuity() or ""
-        except (OSError, StoreError):
+            return _pattern_levels(self.load_continuity() or "",
+                                   self.section_schema).get(name)
+        except (OSError, StoreError, ValueError):
             return None
-        levels = [int(m.group(2)) for m in map(_NAMED_PATTERN_RE.match, text.split("\n"))
-                  if m and m.group(1) == name]
-        return max(levels) if levels else None
 
     def _record_wrap_graduations(self, rows: list[tuple[str, int, str]]) -> None:
         """Write this save's validated Proven graduations against the wrap row just
@@ -3308,6 +3309,16 @@ class Store:
                 "drift_probe_retired", {"probe_id": probe_id},
                 method="retire_drift_probe", committed="the retirement")
         return n == 1
+
+    def _live_drift_probes_in_txn(self) -> list[dict[str, Any]]:
+        """The live probes, read on the caller's open save batch (under its write lock,
+        so a probe added or retired concurrently is either in or out of this save as a
+        whole). A failed read gives ``[]``; a failed SELECT does not end the batch."""
+        try:
+            return [dict(r) for r in self._conn.execute(
+                "SELECT * FROM drift_probes WHERE retired_at IS NULL ORDER BY id")]
+        except sqlite3.Error:
+            return []
 
     def _record_drift_results(self, results: list[dict[str, Any]]) -> None:
         """Write a save's probe verdicts against the wrap row just inserted. Called
@@ -4422,6 +4433,25 @@ class Store:
                 ep = dataclasses.replace(ep, superseded_by=replaced_by[ep.id])
             by_id[ep.id] = ep
         return {i: by_id[i] for i in keep if i in by_id}, doc_freq, corpus_n
+
+    def _episodes_containing_oldest(
+        self, keyword: str, *, offset: int, limit: int
+    ) -> list[Episode]:
+        """One page of live (not superseded) episodes whose content contains
+        ``keyword`` (case-insensitive substring, as :meth:`recall` matches),
+        OLDEST first. For offline scans that must not stop at a newest-N cap."""
+        with self._db_boundary("keyword_candidates"), self._read_snapshot():
+            conditions, params, _ = self._recall_conditions(
+                since=None, until=None, episode_type=None, source=None,
+                include_superseded=False,
+            )
+            base = " AND ".join(conditions) if conditions else "1=1"
+            rows = self._conn.execute(
+                f"SELECT * FROM episodes WHERE {base} AND {_KEYWORD_LIKE_SQL} "
+                f"ORDER BY timestamp ASC, id ASC LIMIT ? OFFSET ?",
+                [*params, _keyword_like_pattern(keyword), limit, offset],
+            ).fetchall()
+        return [self._row_to_episode(r) for r in rows]
 
     def episodes_since_wrap(self) -> list[Episode]:
         """Get all episodes since the last completed wrap.

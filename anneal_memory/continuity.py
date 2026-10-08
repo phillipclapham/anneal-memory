@@ -2441,28 +2441,43 @@ def _evaluate_drift_probes(
     store: Store, schema: list[SectionSpec], text: str, crystal_store: CrystalStore | None,
 ) -> list[dict[str, Any]]:
     """CAP-06: every live drift probe checked against ``text`` (empty when none).
-    Never raises: a probe is an instrument, and an instrument must not refuse a save."""
+    Called inside the save batch. Never raises: a probe is an instrument, and an
+    instrument must not refuse a save (L3 1007: a nameless crystal row did)."""
     try:
-        probes = store.list_drift_probes()
-    except StoreError as exc:
-        _warn_after_commit(f"drift probes were not checked this save: {exc}")
+        probes = store._live_drift_probes_in_txn()
+        if not probes:
+            return []
+        levels = _pattern_levels(text, schema)
+        crystals: dict[str, Any] = {
+            str(c.get("name")): c.get("level")
+            for c in _crystal_active_safe(crystal_store)
+            if isinstance(c, dict) and isinstance(c.get("name"), str)}
+        return evaluate_probes(text, probes, pattern_levels=levels, live_crystals=crystals)
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        _warn_after_commit(f"drift probes were not checked this save: {exc!r}")
         return []
-    if not probes:
-        return []
+
+
+def _pattern_levels(text: str, schema: list[SectionSpec]) -> dict[str, int]:
+    """Each pattern named in the graduating section(s) of ``text``, at its highest
+    level there (graduation's own line parser)."""
     levels: dict[str, int] = {}
     for line in _role_section_body(text, schema, "graduating"):
         m = _NAMED_PATTERN_RE.match(line)
-        if m:
+        if m and len(m.group(2)) <= 6:
             levels[m.group(1)] = max(levels.get(m.group(1), 0), int(m.group(2)))
-    crystals = [c["name"] for c in _crystal_active_safe(crystal_store)]
-    return evaluate_probes(text, probes, pattern_levels=levels, live_crystals=crystals)
+    return levels
 
 
 def _drift_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Counts and each probe's id and status. No probe text and no file text: the save
+    result goes back to the composer being measured, and the audit cannot be redacted
+    (L3 1007, complement). The detail is in ``probe status``."""
     counts = {status: 0 for status in PROBE_STATUSES}
     for r in results:
-        counts[r["status"]] += 1
-    return {"counts": counts, "not_held": [r for r in results if r["status"] != "held"]}
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    return {"counts": counts,
+            "probes": [{"id": r["probe_id"], "status": r["status"]} for r in results]}
 
 
 def validated_save_continuity(
@@ -3052,6 +3067,9 @@ def validated_save_continuity(
         # within carryforward_cold_days (warm). Ungrounded path only; the
         # cross-session immune demotion is untouched. None disables it.
         carryforward_cold_days=carryforward_cold_days,
+        # L3 1007 (complement): a hold never raises a line above its level in the
+        # file being replaced.
+        prior_levels=_pattern_levels(prior_continuity or "", section_schema),
     )
 
     # The hard maximum is measured on the text that will be WRITTEN: graduation
@@ -3185,11 +3203,6 @@ def validated_save_continuity(
         inert_value, cue_warnings = _durable_cue_state(
             store, section_schema, grad_result.text
         )
-    # CAP-06: the operator's drift probes, checked against the exact text being saved
-    # (never shown to the composer; never a gate). Recorded with the wrap row below.
-    drift_results = _evaluate_drift_probes(
-        store, section_schema, grad_result.text, crystal_store
-    )
     cont_tmp: Path | None = store._prepare_continuity_write(
         grad_result.text, token_hex=tmp_pair_id
     )
@@ -3202,6 +3215,7 @@ def validated_save_continuity(
     db_committed = False
     composted: dict[str, int] = {}
     still_graduating: list[str] = []
+    drift_results: list[dict[str, Any]] = []
 
     try:
         # Phase 2: batched DB DML.
@@ -3276,6 +3290,12 @@ def validated_save_continuity(
                 # if the crash beat Phase 4's audit event.
                 content_hash=content_hash,
                 pair_id=tmp_pair_id,
+            )
+            # CAP-06: the operator's drift probes, read and checked INSIDE this batch
+            # (L3 1007, codex: a probe added between a pre-batch read and the commit
+            # had no result) against the exact text being saved; never a gate.
+            drift_results = _evaluate_drift_probes(
+                store, section_schema, grad_result.text, crystal_store
             )
             store._record_drift_results(drift_results)
 
@@ -3357,15 +3377,17 @@ def validated_save_continuity(
                 if line_date != today_str:
                     continue
                 explanation = ev_match.group(5)
-                if not explanation:
-                    continue
                 try:
                     pattern_level = int(ev_match.group(2))
                 except ValueError:
                     continue
+                # The review worklist takes every validated Proven graduation, with or
+                # without an explanation (L3 1007, codex); history needs one.
                 if pattern_level >= 2:
                     wrap_graduations.append(
-                        (ev_match.group(1), pattern_level, explanation))
+                        (ev_match.group(1), pattern_level, explanation or ""))
+                if not explanation:
+                    continue
                 store.upsert_pattern_history(
                     pattern_name=ev_match.group(1),
                     level=pattern_level,

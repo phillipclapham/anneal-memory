@@ -9,12 +9,14 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   `probe list [--all]`, `probe retire ID`, `probe status`; library `Store.add_drift_probe`,
   `list_drift_probes`, `retire_drift_probe`, `drift_status`, and `anneal_memory.drift`.
   Every save checks each live probe against the saved text and records its status with that
-  wrap, in the save result's `drift` and the `continuity_saved` audit event:
+  wrap (`probe status` shows each with its detail; the save result's `drift` and the
+  `continuity_saved` audit event carry the counts and each probe's id and status only):
   `held`, `changed` (every word kept but a negation flipped), `weakened` (a pattern below
   its level), `crystallized` (moved to the crystal store), `lost`, or `unchecked` (a probe
   this version cannot read; a probe never blocks a save). A pattern probe's level defaults
   to the level the pattern holds when the probe is added. A fact matches within one
-  sentence or bullet; numbers of any length and negators count. Probes are not part of the
+  sentence or bullet; numbers (any token with a digit), negators and ordering words count.
+  Probes are read and checked inside the save's own transaction. Probes are not part of the
   wrap package. The check is lexical: a change that keeps every word (two roles swapped)
   reads `held`, and that is the operator's to judge, as the README now says plainly.
 - `probe status` also lists what the latest save graduated with a validated citation at
@@ -48,6 +50,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   3x lost a level on every wrap that re-dated it, so its decay tracked the consolidator's
   dating habit rather than the pattern. A bare line with no history, or above its mark, still
   demotes. Cited lines are unchanged: a cold line whose citation fails still demotes.
+- A hold keeps a level and never raises one, warm or cold, cited or bare: a line above its
+  level in the continuity being replaced (an eroded pattern re-asserted at its old peak)
+  is an inflation and demotes, even at or below its all-time high-water mark.
+  `validate_graduations(prior_levels=...)` carries those levels; the save pipeline passes them.
 - Run on a copy of a real store before the change, every bare line re-dated to the wrap day:
   all 15 were held (11 warm, 4 cold and dated back), none eroded; over five simulated daily
   wraps that re-dated every line, no level moved.

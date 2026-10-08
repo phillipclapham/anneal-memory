@@ -63,3 +63,28 @@ def test_malformed_evidence_after_a_4x_plus_marker_is_reported_not_held():
 def test_zero_padded_level_is_not_a_graduation():
     r = _run(f"- p | 04x ({TODAY})", _lookup(4, "2026-09-20"))
     assert r.bare_demoted == 0 and f"p | 04x ({TODAY})" in r.text
+
+
+# --- L3 1007 round 1 ---------------------------------------------------------------
+
+def test_irregular_spacing_keeps_the_date_whole():
+    """glm's HIGH, refuted by this run: the cold hold edits only the date span."""
+    for line, want in ((f"- p |  12x  ({TODAY})", "- p |  12x  (2026-09-20) (carried-forward)"),
+                       (f"- p|12x ({TODAY})  — note", "- p|12x (2026-09-20) (carried-forward) — note"),
+                       (f"- p | 12x\t({TODAY})", "- p | 12x\t(2026-09-20) (carried-forward)")):
+        r = _run(line, _lookup(12, "2026-09-20"))
+        assert want in r.text
+
+
+@pytest.mark.parametrize("seen", ["2026-10-05", "2026-09-20"])  # warm and cold
+def test_a_hold_never_raises_a_line_above_its_prior_level(seen):
+    """complement MED: an eroded pattern (1x in the file being replaced) re-asserted
+    bare at its old 5x peak is a re-inflation, not a hold."""
+    r = validate_graduations(text=_text(f"- p | 5x ({TODAY})"), valid_ids=set(),
+                             today=TODAY, citations_seen=True,
+                             pattern_history_lookup=_lookup(5, seen), prior_levels={"p": 1})
+    assert r.bare_demoted == 1 and "p | 4x" in r.text and r.carried_forward == []
+    held = validate_graduations(text=_text(f"- p | 5x ({TODAY})"), valid_ids=set(),
+                                today=TODAY, citations_seen=True,
+                                pattern_history_lookup=_lookup(5, seen), prior_levels={"p": 5})
+    assert held.bare_demoted == 0 and len(held.carried_forward) == 1

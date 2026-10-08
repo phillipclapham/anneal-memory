@@ -65,7 +65,7 @@ def test_every_save_records_the_verdict_and_never_blocks(tmp_path):
         s.add_drift_probe(fact="the hub runs on soupcan", section="Context")
         r = _wrap(s, _doc("- alpha | 2x (2026-10-01)", facts="the hub runs on soupcan"),
                   "2026-10-06")
-        assert r["drift"]["counts"]["held"] == 2 and r["drift"]["not_held"] == []
+        assert r["drift"]["counts"]["held"] == 2 and {p["status"] for p in r["drift"]["probes"]} == {"held"}
         # alpha drops out and the fact is rewritten away: the save still commits
         r = _wrap(s, _doc("- beta | 2x (2026-10-01)", facts="moved to a new box"),
                   "2026-10-07")
@@ -191,5 +191,83 @@ def test_drift_is_in_the_audit_and_the_worklist_lists_graduations(tmp_path):
         assert added and added[0]["data"]["kind"] == "fact"
         g = s.drift_status()["graduated"]
         assert [(x["name"], x["level"]) for x in g] == [("hub_location_is_soupcan", 2)]
+    finally:
+        s.close()
+
+
+# --- L3 1007 round 1 ---------------------------------------------------------------
+
+@pytest.mark.parametrize("fact,saved,status", [
+    ("retry 5x then stop", "retry 3x then stop.", "lost"),            # complement LOW
+    ("deploy before migrate", "deploy after migrate.", "lost"),        # complement LOW
+    # a tie goes to the sentence whose negation agrees (complement LOW)
+    ("the hub runs on soupcan", "the hub never runs on soupcan. the hub runs on soupcan.",
+     "held"),
+])
+def test_fact_matching_round_1(fact, saved, status):
+    probes = [{"id": 1, "kind": "fact", "text": fact}]
+    assert evaluate_probes(_doc("", facts=saved), probes, pattern_levels={})[0]["status"] \
+        == status
+
+
+def test_a_crystal_below_the_probe_level_is_weakened():                # codex MED
+    probes = [{"id": 1, "kind": "pattern", "name": "alpha", "min_level": 7}]
+    out = evaluate_probes(_doc(""), probes, pattern_levels={}, live_crystals={"alpha": 2})
+    assert out[0]["status"] == "weakened"
+    out = evaluate_probes(_doc(""), probes, pattern_levels={}, live_crystals={"alpha": 9})
+    assert out[0]["status"] == "crystallized"
+
+
+def test_a_nameless_crystal_row_does_not_block_a_save(tmp_path):        # codex MED
+    import json as _json
+    s = Store(tmp_path / "m.db", project_name="t")
+    cpath = tmp_path / "m.crystal.json"
+    cs = CrystalStore(cpath)
+    try:
+        cs.crystallize(name="alpha", level=3, explanation="x")
+        data = _json.loads(cpath.read_text())
+        data["crystal"].append({"status": "crystallized"})
+        cpath.write_text(_json.dumps(data))
+        s.add_drift_probe(pattern="alpha")
+        s.record("episode: a substrate observation about the topic.", "observation")
+        token = prepare_wrap(s, max_chars=40000)["wrap_token"]
+        r = validated_save_continuity(s, _doc("- beta | 2x (2026-10-01)"),
+                                      today="2026-10-07", wrap_token=token, crystal_store=cs)
+        assert r["chars"] > 0
+    finally:
+        s.close()
+
+
+def test_the_default_level_reads_only_the_patterns_section(tmp_path):  # codex MED
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        _wrap(s, _doc("- alpha | 3x (2026-10-01)", facts="- alpha | 12x (old note)"),
+              "2026-10-06")
+        s.add_drift_probe(pattern="alpha")
+        assert s.list_drift_probes()[0]["min_level"] == 3
+    finally:
+        s.close()
+
+
+def test_an_explanationless_graduation_is_on_the_worklist(tmp_path):   # codex MED
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        ep = s.record("we moved the hub to soupcan and it runs there now", "observation")
+        token = prepare_wrap(s, max_chars=40000)["wrap_token"]
+        validated_save_continuity(
+            s, _doc(f"- hub_on_soupcan | 2x (2026-10-07) [evidence: {ep.id[:8]}]"),
+            today="2026-10-07", wrap_token=token)
+        assert [g["name"] for g in s.drift_status()["graduated"]] == ["hub_on_soupcan"]
+    finally:
+        s.close()
+
+
+def test_the_save_result_carries_ids_and_statuses_not_text(tmp_path):  # complement LOW
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        pid = s.add_drift_probe(fact="the hub runs on soupcan")
+        r = _wrap(s, _doc("", facts="moved."), "2026-10-07")
+        assert r["drift"]["probes"] == [{"id": pid, "status": "lost"}]
+        assert "soupcan" not in str(r["drift"])
     finally:
         s.close()

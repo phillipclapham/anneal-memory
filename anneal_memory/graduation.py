@@ -562,6 +562,7 @@ def validate_graduations(
     cross_session_overlap_threshold: int = 3,
     graduating_headings: frozenset[str] = DEFAULT_GRADUATING,
     carryforward_cold_days: int | None = 7,
+    prior_levels: dict[str, int] | None = None,
 ) -> GraduationResult:
     """Validate evidence citations on graduated patterns.
 
@@ -1010,6 +1011,7 @@ def validate_graduations(
                     pattern_history_lookup=pattern_history_lookup,
                     carryforward_cold_days=carryforward_cold_days,
                     cross_session_overlap_threshold=cross_session_overlap_threshold,
+                    prior_levels=prior_levels,
                 )
                 if held is not None:
                     lines[i] = _carryforward_line(line, match, level)
@@ -1111,6 +1113,7 @@ def validate_graduations(
             bare_match=bare_match,
             pattern_history_lookup=pattern_history_lookup,
             carryforward_cold_days=carryforward_cold_days,
+            prior_levels=prior_levels,
         )
         if bare_held is not None:
             lines[i] = (_bare_cold_hold_line(line, bare_match, today,
@@ -1985,8 +1988,14 @@ def _carryforward_history_decision(
     *,
     cited: bool,
     provenance: bool = False,
+    prior_level: int | None = None,
 ) -> CarriedForward | None:
     """The shared level+warmth core of the carryforward decision.
+
+    ``prior_level`` (L3 1007, complement): the line's level in the previously saved
+    continuity, when it was there. A hold keeps a level; it never raises one, so a
+    line above its prior level is an inflation and falls through to demotion even
+    when it is at or below its all-time high-water mark.
 
     Given a NAME already bound to its own graduation marker and that pattern's
     ``pattern_history`` row, decide HOLD (return a :class:`CarriedForward`) vs
@@ -2010,6 +2019,9 @@ def _carryforward_history_decision(
         return None
     if level > max_level:
         # Never earned this level — don't protect an un-earned rung.
+        return None
+    if prior_level is not None and level > prior_level:
+        # Above its level in the file being replaced: a re-inflation, not a hold.
         return None
     days = _days_between(history.get("last_seen_at"), today)
     if days is None or days < -1 or days > carryforward_cold_days:
@@ -2042,6 +2054,7 @@ def _carryforward_decision(
     pattern_history_lookup: Callable[[str], dict[str, Any] | None] | None,
     carryforward_cold_days: int | None,
     cross_session_overlap_threshold: int = 3,
+    prior_levels: dict[str, int] | None = None,
 ) -> CarriedForward | None:
     """Decide whether an ungrounded Proven-tier line should be HELD instead of
     demoted (AM-CARRYFORWARD, v0.4.6). Returns a :class:`CarriedForward`
@@ -2159,6 +2172,7 @@ def _carryforward_decision(
     return _carryforward_history_decision(
         name, level, history, today, carryforward_cold_days,
         cited=True, provenance=has_provenance,
+        prior_level=(prior_levels or {}).get(name),
     )
 
 
@@ -2169,6 +2183,7 @@ def _bare_carryforward_decision(
     bare_match: re.Match,
     pattern_history_lookup: Callable[[str], dict[str, Any] | None] | None,
     carryforward_cold_days: int | None,
+    prior_levels: dict[str, int] | None = None,
 ) -> CarriedForward | None:
     """Decide whether a BARE graduation (2x and up, no ``[evidence:]`` tag) should be
     HELD instead of sunset-demoted (AM-PRESERVE-BARE-PATH, v0.5.0) — the
@@ -2238,9 +2253,10 @@ def _bare_carryforward_decision(
     # carryforward_cold_days narrowed to int by the early-return guard above. The
     # bare path carried NO citation -> cited=False so AM-WARN does NOT fabricate a
     # "citation resolved to zero episodes" alarm on a wrap that has no citations.
+    prior_level = (prior_levels or {}).get(name)
     held = _carryforward_history_decision(
         name, level, history, today, carryforward_cold_days,
-        cited=False, provenance=has_provenance,
+        cited=False, provenance=has_provenance, prior_level=prior_level,
     )
     if held is not None:
         return held
@@ -2249,7 +2265,8 @@ def _bare_carryforward_decision(
     max_level = history.get("max_level_reached")
     days = _days_between(history.get("last_seen_at"), today)
     if isinstance(max_level, int) and level <= max_level and days is not None \
-            and days > carryforward_cold_days:
+            and days > carryforward_cold_days \
+            and (prior_level is None or level <= prior_level):
         return CarriedForward(
             name=name, held_level=level, max_level_reached=max_level,
             days_since_grounded=days, cited=False, provenance=has_provenance, cold=True,

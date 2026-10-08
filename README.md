@@ -272,8 +272,10 @@ contradiction-scan record in every wrap, and the hash-chained audit.
 current level by default) or a fact whose words must stay in one sentence or bullet:
 `anneal-memory probe add --pattern NAME` / `--fact TEXT [--section HEADING]`. Every save
 checks each probe against the saved text and records held / changed (every word kept but the
-negation flipped) / weakened / crystallized / lost with that wrap (`probe status`, the save
-result's `drift`, the `continuity_saved` audit event). Probes are not part of the wrap package,
+negation flipped) / weakened / crystallized / lost with that wrap. `probe status` shows each
+verdict with its detail; the save result's `drift` and the `continuity_saved` audit event
+carry only the counts and each probe's id and status, so neither hands the probe text back
+to the composer being measured. Probes are not part of the wrap package,
 so they measure drift rather than obedience, and a probe never blocks a save (one that cannot
 be checked is reported `unchecked`). `probe status` also lists what that wrap graduated with a
 validated citation: the worklist for judging truth and contradiction with your Proven

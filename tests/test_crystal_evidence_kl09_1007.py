@@ -164,3 +164,25 @@ def test_a_retired_crystal_name_also_makes_a_hub(tmp_path):
         assert got.evidence == [own.id[:8]] and got.hubs_skipped == 1
     finally:
         s.close()
+
+
+def test_a_sentence_final_name_is_whole(tmp_path):                       # complement MED
+    s, cs = _store(tmp_path)
+    try:
+        e = s.record("we finally fixed alpha_pattern.", "observation")
+        cs.crystallize(name="alpha_pattern", level=3, explanation="x")
+        assert cs.ground_empty_evidence(s)["alpha_pattern"].evidence == [e.id[:8]]
+    finally:
+        s.close()
+
+
+def test_an_old_match_is_found_behind_many_newer_substring_hits(tmp_path):  # codex MED
+    s, cs = _store(tmp_path)
+    try:
+        old = s.record("the alpha incident", "observation")
+        for i in range(620):
+            s.record(f"alpha_suffix mention {i}", "observation")
+        cs.crystallize(name="alpha", level=3, explanation="x")
+        assert cs.ground_empty_evidence(s, limit=1)["alpha"].evidence == [old.id[:8]]
+    finally:
+        s.close()

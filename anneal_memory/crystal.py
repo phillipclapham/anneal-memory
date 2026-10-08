@@ -193,8 +193,8 @@ class CrystalError(AnnealMemoryError):
 
 # Field on a crystal record listing evidence ids ground_empty_evidence recorded (KL-09).
 PROVISIONAL_EVIDENCE = "provisional_evidence"
-# How many naming episodes ground_empty_evidence reads per pattern before picking.
-_GROUNDING_SCAN_CAP = 5000
+# Page size for ground_empty_evidence's oldest-first scan.
+_GROUNDING_PAGE = 500
 
 
 class GroundingResult(NamedTuple):
@@ -966,8 +966,7 @@ class CrystalStore:
     ) -> dict[str, GroundingResult]:
         """Fill the evidence of each live pattern that has none, from the OLDEST
         ``limit`` live (not superseded) episodes in ``store`` that name the pattern as
-        a whole word and name no other known pattern (KL-09). "Oldest" is among the
-        newest ``_GROUNDING_SCAN_CAP`` episodes containing the name.
+        a whole word and name no other known pattern (KL-09).
 
         Oldest, because the first episodes to name a pattern sit nearest the incident
         that produced it; later ones are mostly summaries. An episode naming two or
@@ -992,26 +991,34 @@ class CrystalStore:
         retired = [r.get("name") for r in self._load().get("retired", [])]
         known = {c["name"] for c in live} | {n for n in retired if isinstance(n, str)} \
             | set(store.pattern_history_names())
+        # A name is whole when no word character touches it, and no "." or "-" joins it
+        # to one ("foo.bar", "foo-bar"); a sentence-final "foo." is whole (L3 1007).
         bounded = {n: re.compile(
-            rf"(?<![a-z0-9_.\-]){re.escape(n.lower())}(?![a-z0-9_.\-])") for n in known}
+            rf"(?<![a-z0-9_])(?<![a-z0-9_][.\-]){re.escape(n.lower())}"
+            rf"(?![a-z0-9_]|[.\-][a-z0-9_])") for n in known}
         out: dict[str, GroundingResult] = {}
         for item in live:
             if any(isinstance(e, str) for e in (item.get("evidence") or [])):
                 continue
             name = item["name"]
-            found, _, _ = store.keyword_candidates(
-                [name], limit_per_keyword=_GROUNDING_SCAN_CAP)
             ids: list[str] = []
             hubs = 0
-            for ep in sorted(found.values(), key=lambda e: (e.timestamp, e.id)):
-                text = ep.content.lower()
-                if not bounded[name].search(text):
-                    continue
-                if sum(1 for rx in bounded.values() if rx.search(text)) > 1:
-                    hubs += 1
-                    continue
-                ids.append(ep.id[:8])
-                if len(ids) == limit:
+            offset = 0
+            while len(ids) < limit:  # oldest first, page by page, no newest-N cap
+                page = store._episodes_containing_oldest(
+                    name, offset=offset, limit=_GROUNDING_PAGE)
+                offset += len(page)
+                for ep in page:
+                    text = ep.content.lower()
+                    if not bounded[name].search(text):
+                        continue
+                    if sum(1 for rx in bounded.values() if rx.search(text)) > 1:
+                        hubs += 1
+                        continue
+                    ids.append(ep.id[:8])
+                    if len(ids) == limit:
+                        break
+                if len(page) < _GROUNDING_PAGE:
                     break
             status = "no_episode"
             if ids:

@@ -3770,11 +3770,8 @@ def cmd_crystal_ground_evidence(args: argparse.Namespace) -> None:
         _print_json({"dry_run": args.dry_run,
                      "patterns": {n: r._asdict() for n, r in result.items()}})
         return
-    if not crystal_store.active():
-        print("No live crystallized patterns.")
-        return
     if not result:
-        print("Every live pattern already has evidence; nothing to ground.")
+        print("No live pattern is without evidence; nothing to ground.")
         return
     for name, r in result.items():
         hubs = f" (skipped {r.hubs_skipped} episode(s) naming other patterns)" \
@@ -4691,10 +4688,11 @@ def build_parser() -> argparse.ArgumentParser:
     cp = crystal_sub.add_parser(
         "ground-evidence",
         help="Fill EMPTY pattern evidence from episodes that name the pattern",
-        description="For each live pattern with no evidence, record the newest --limit "
-                    "live episodes whose content contains the pattern's exact name as its "
-                    "evidence (the edge associative recall surfaces it through). Patterns "
-                    "that already have evidence are never touched. Lexical grounding only.",
+        description="For each live pattern with no evidence, record the OLDEST --limit "
+                    "live episodes that name the pattern as a whole word and name no other "
+                    "known pattern, as provisional evidence (the edge associative recall "
+                    "surfaces it through). Patterns that already have evidence are never "
+                    "touched. Lexical grounding only.",
         parents=[json_parent],
     )
     cp.add_argument("--limit", type=int, default=4,

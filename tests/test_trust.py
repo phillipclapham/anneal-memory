@@ -875,7 +875,7 @@ class TestL3Round3:
             assert d.effective_trust_map([page.id, summ.id, summ2.id, fine.id]) == {
                 page.id: "external", summ.id: "external", summ2.id: "external"}
             assert d.derived_edges([summ.id, summ2.id]) == {
-                summ.id: [(page.id, "external")], summ2.id: [(summ.id, "external")]}
+                summ.id: [(page.id, None)], summ2.id: [(summ.id, None)]}
 
     def test_set_trust_refuses_a_stale_decision_and_a_same_class_write_is_a_no_op(self, tmp_path):
         """codex r3 #4 + #8: the CLI's gate was decided on a read another writer
@@ -927,8 +927,8 @@ class TestL3Round3:
                                     derived_from=[prev.id])
             assert other.effective_trust_map([prev.id]) == {prev.id: "external"}
             # The host raising a mislabelled source back restores what was derived
-            # from it, through the chain, and the audit names the rows; a deleted
-            # source keeps its record.
+            # from it, through the chain (computed, no pass of its own: D3 R2); a
+            # deleted source keeps its mark.
             mis = other.record("Page mislabelled as external.", EpisodeType.OBSERVATION)
             mid = other.record("Summary of it.", EpisodeType.OBSERVATION, derived_from=[mis.id])
             end = other.record("Summary of the summary.", EpisodeType.OBSERVATION,
@@ -938,13 +938,187 @@ class TestL3Round3:
                 mid.id: "external", end.id: "external"}
             other.set_trust(mis.id, "agent")
             assert other.effective_trust_map([mid.id, end.id]) == {}
-            raised = json.loads(
-                (tmp_path / "d.audit.jsonl").read_text().splitlines()[-1])["data"]
-            assert {(r["episode_id"], r["to"]) for r in raised["derived_raised"]} == {
-                (mid.id, "agent"), (end.id, "agent")}
             gone = other.record("Page gamma.", EpisodeType.OBSERVATION)
             gone_sum = other.record("Summary of gamma.", EpisodeType.OBSERVATION,
                                     derived_from=[gone.id])
             other.set_trust(gone.id, "external")
             assert other.delete(gone.id)
             assert other.effective_trust_map([gone_sum.id]) == {gone_sum.id: "external"}
+
+
+class TestD3Redesign:
+    """CAP-08 D3 redesign (1008+11, Phill "let's go with (A)"): effective trust is
+    a fixed point over the whole reachable closure (R1), no trust is stored for a
+    live source (R2), a removal leaves a sticky mark on every row that cited the
+    id (R3), the save's re-check compares existence, marks and trust (R4), and
+    import writes the edges of the episodes it skips (R5). Each test is a lane B
+    repro (``project_memory/seat_1008_11/laneB/``) through the public API."""
+
+    TS = "2026-10-08T00:00:00.000000+00:00"
+
+    def _relayed_cycle(self, store, b_first):
+        """p1d: B (external page) and A (agent summary derived from B); B deleted
+        and recorded again under its id, now derived from A. ``b_first`` picks
+        the lexical order of the two ids, which the old walk answered by."""
+        from anneal_memory.store import _episode_id
+        for k in range(400):
+            b_text, a_text = f"{CLAIM} #{k}", f"My summary: {EXPLANATION} #{k}"
+            if (_episode_id(b_text, self.TS, 0) < _episode_id(a_text, self.TS, 0)) == b_first:
+                break
+        b = store.record(b_text, EpisodeType.OBSERVATION, timestamp=self.TS, trust="external")
+        a = store.record(a_text, EpisodeType.OBSERVATION, timestamp=self.TS,
+                         derived_from=[b.id])
+        assert store.delete(b.id)
+        b2 = store.record(b_text, EpisodeType.OBSERVATION, timestamp=self.TS,
+                          trust="external", derived_from=[a.id])
+        assert b2.id == b.id and (b.id < a.id) == b_first
+        return a, b2
+
+    @pytest.mark.parametrize("b_first", [True, False])
+    def test_trust_is_the_same_whatever_else_is_asked_and_in_any_order(self, store, b_first):
+        """p1 / p1b / p1d: the answer for A depended on whether B was queried with
+        it and on which id sorted first (B<A read A as agent)."""
+        a, b = self._relayed_cycle(store, b_first)
+        other = store.record("an unrelated episode", EpisodeType.OBSERVATION)
+        both = {a.id: "external", b.id: "external"}
+        assert store.effective_trust_map([a.id, b.id]) == both
+        assert store.effective_trust_map([b.id, a.id, other.id]) == both
+        assert store.effective_trust_map([a.id]) == {a.id: "external"}
+        assert store.effective_trust_map([b.id]) == {b.id: "external"}
+        # A two-node cycle of live sources gets the meet, from either end.
+        x = store.record("cycle x", EpisodeType.OBSERVATION, trust="external")
+        y = store.record("cycle y", EpisodeType.OBSERVATION)
+        store._conn.executemany(
+            "INSERT INTO episode_derived (episode_id, source_id) VALUES (?, ?)",
+            [(x.id, y.id), (y.id, x.id)])
+        store._conn.commit()
+        for ids in ([x.id], [y.id], [x.id, y.id], [y.id, x.id]):
+            assert store.effective_trust_map(ids) == {i: "external" for i in ids}
+
+    def test_relayed_content_does_not_reach_2x_through_a_reused_id(self, store):
+        """p1d / p1c: with B<A, a wrap citing A and B graduated the page's claim
+        to 2x."""
+        wrap = TestTheBeforeRunNowHolds()._wrap
+        store.record("Session start.", EpisodeType.OBSERVATION)
+        wrap(store, "- eiffel_in_lyon | 1x (2026-10-07)", "2026-10-07")
+        a, b = self._relayed_cycle(store, b_first=True)
+        for ids, day in (([a.id, b.id], "2026-10-08"), ([a.id], "2026-10-09")):
+            store.record(f"Session {day}.", EpisodeType.OBSERVATION)
+            result, _ = wrap(store, _line(ids, date=day), day)
+            assert result["graduations_validated"] == 0
+            assert "eiffel_in_lyon | 2x" not in store.load_continuity()
+            if len(ids) == 2:
+                assert [u["name"] for u in result["uncorroborated"]] == ["eiffel_in_lyon"]
+                assert f"- eiffel_in_lyon | 1x ({day}) (uncorroborated)" in store.load_continuity()
+
+    def test_a_reused_id_does_not_revive_a_revoked_grounding(self, store):
+        """p2: G grounded 2x, was lowered and deleted, then recorded again (same
+        content and timestamp = same id, default agent); the 2x survived."""
+        wrap = TestTheBeforeRunNowHolds()._wrap
+        store.record("Session start.", EpisodeType.OBSERVATION)
+        wrap(store, "- deploy_gate | 1x (2026-10-06)", "2026-10-06")
+        text = "I watched the deploy gate refuse an unsigned build twice today."
+        g = store.record(text, EpisodeType.OBSERVATION, timestamp=self.TS)
+        line = f'- deploy_gate | 2x (2026-10-07) [evidence: {g.id} "deploy gate refuse unsigned build"]'
+        assert wrap(store, line, "2026-10-07")[0]["graduations_validated"] == 1
+        store.set_trust(g.id, "external")
+        assert store.delete(g.id)
+        assert store.record(text, EpisodeType.OBSERVATION, timestamp=self.TS).id == g.id
+        store.record("Another session.", EpisodeType.OBSERVATION)
+        result, _ = wrap(store, "- deploy_gate | 2x (2026-10-07)", "2026-10-08")
+        assert result["level_capped"][0]["reason"] == "revoked: grounding lowered"
+        assert "- deploy_gate | 1x (2026-10-07) (level-capped)" in store.load_continuity()
+        assert store.pattern_grounding()["deploy_gate"][2][0]["gone"] == {g.id: "external"}
+
+    def test_an_external_ground_that_vanishes_mid_save_refuses_it(self, store):
+        """p4: the re-check compared trust only, and a deleted external ground
+        reads external before and after, so the save committed without it."""
+        from anneal_memory.store import StoreError
+        wrap = TestTheBeforeRunNowHolds()._wrap
+        store.record("Session start.", EpisodeType.OBSERVATION)
+        wrap(store, "- eiffel_in_lyon | 1x (2026-10-07)", "2026-10-07")
+        g = store.record("Web page: " + EXPLANATION, EpisodeType.OBSERVATION, trust="external")
+        prepare_wrap(store)
+        real, calls = store.effective_trust_map, []
+
+        def racing(ids, **kw):
+            out = real(ids, **kw)
+            if not calls:
+                calls.append(1)
+                with Store(store.path, trust_ceiling="operator") as o:
+                    assert o.delete(g.id)
+            return out
+
+        store.effective_trust_map = racing
+        with pytest.raises(StoreError, match="were removed or changed trust class"):
+            validated_save_continuity(
+                store, HEAD + "## Patterns\n" + _line([g.id]) + "\n\n" + TAIL,
+                today="2026-10-08")
+        assert store.status().wrap_in_progress
+
+    def test_raising_a_source_restores_the_whole_chain_with_no_snapshot_pass(self, host_store):
+        """p5: the snapshot-raise pass kept a permanent visited set, so E stayed
+        tool after X was raised, while a graph built after the raise read agent."""
+        s = host_store
+        rec = lambda n, **k: s.record(n, EpisodeType.OBSERVATION, **k)  # noqa: E731
+        x = rec("X page", trust="external")
+        a = rec("A tool", trust="tool", derived_from=[x.id])
+        b = rec("B agent", derived_from=[x.id])
+        d = rec("D", derived_from=[b.id])
+        c = rec("C", derived_from=[a.id, d.id])
+        e = rec("E", derived_from=[c.id])
+        assert s.effective_trust_map([e.id]) == {e.id: "external"}
+        s.set_trust(x.id, "agent")
+        assert s.effective_trust_map([x.id, a.id, b.id, c.id, d.id, e.id]) == {a.id: "tool"}
+        assert all(gone is None for edges in s.derived_edges(
+            [a.id, b.id, c.id, d.id, e.id]).values() for _src, gone in edges)
+
+    def test_import_writes_the_edges_of_an_episode_it_skips(self, tmp_path):
+        """p6: import skipped S (already there) and dropped its edge to the
+        external page P, so an operator raise of S read it agent."""
+        src, dst, out = tmp_path / "src.db", tmp_path / "dst.db", tmp_path / "e.json"
+        t1, t2 = "2026-10-08T01:00:00.000000+00:00", "2026-10-08T01:00:01.000000+00:00"
+        with Store(src, project_name="T") as s:
+            p = s.record("fetched page", EpisodeType.OBSERVATION, timestamp=t1, trust="external")
+            sm = s.record("my summary of the page", EpisodeType.OBSERVATION, timestamp=t2,
+                          derived_from=[p.id])
+        with Store(dst, project_name="T") as t:
+            assert t.record("fetched page", EpisodeType.OBSERVATION, timestamp=t1,
+                            trust="external").id == p.id
+            assert t.record("my summary of the page", EpisodeType.OBSERVATION,
+                            timestamp=t2).id == sm.id
+        assert _cli(src, "export", "-o", str(out)).returncode == 0
+        done = _cli(dst, "import", str(out))
+        assert done.returncode == 0, done.stderr
+        with Store(dst, trust_ceiling="operator") as t:
+            assert t.derived_edges([sm.id]) == {sm.id: [(p.id, None)]}
+            t.set_trust(sm.id, "agent")
+            assert t.effective_trust_map([sm.id]) == {sm.id: "external"}
+
+    def test_a_prune_does_not_revoke(self, tmp_path):
+        """p7 (complement r4 MED 1): an aged-out grounding read external and
+        revoked a graduation nothing had lowered."""
+        import datetime as dt
+        s = Store(tmp_path / "m.db", project_name="T", retention_days=30)
+        try:
+            wrap = TestTheBeforeRunNowHolds()._wrap
+            today = dt.date.today()
+            day = lambda n: (today - dt.timedelta(days=n)).isoformat()  # noqa: E731
+            stamp = lambda n: (dt.datetime.now(dt.timezone.utc)  # noqa: E731
+                               - dt.timedelta(days=n)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            s.record("Session start.", EpisodeType.OBSERVATION)
+            wrap(s, f"- deploy_gate | 1x ({day(10)})", day(10))
+            g = s.record("I watched the deploy gate refuse an unsigned build twice today.",
+                         EpisodeType.OBSERVATION, timestamp=stamp(10))
+            line = f'- deploy_gate | 2x ({day(9)}) [evidence: {g.id} "deploy gate refuse unsigned build"]'
+            assert wrap(s, line, day(9))[0]["graduations_validated"] == 1
+            s._conn.execute("UPDATE episodes SET timestamp = ? WHERE id = ?", (stamp(40), g.id))
+            s._conn.commit()
+            assert s.prune() == 1 and s.get(g.id) is None
+            s.record("Another session.", EpisodeType.OBSERVATION)
+            result, _ = wrap(s, f"- deploy_gate | 2x ({day(9)})", day(0))
+            assert not result.get("level_capped")
+            assert f"- deploy_gate | 2x ({day(9)})" in s.load_continuity()
+            assert s.pattern_grounding()["deploy_gate"][2][0]["gone"] == {g.id: "agent"}
+        finally:
+            s.close()

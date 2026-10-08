@@ -1563,7 +1563,8 @@ def revoked_pattern_levels(
     trust_of: Callable[[str], str],
 ) -> dict[str, int]:
     """CAP-08 D2: for each pattern, the highest prior it may keep under today's
-    trust. ``grounding`` is :meth:`Store.pattern_grounding`. Each time a rung was
+    trust. ``grounding`` is :meth:`Store.pattern_grounding`; an episode its group
+    marks ``gone`` reads that class, else ``trust_of``. Each time a rung was
     earned is re-run under check 4's rule against today's trust: a
     ``checked`` earning fails when ALL its grounding citations are now
     ``tool``/``external``, an ``unchecked`` one when ANY is. A rung fails when
@@ -1574,7 +1575,9 @@ def revoked_pattern_levels(
     agent = trust_rank(DEFAULT_TRUST)
 
     def earning_fails(group: dict[str, Any]) -> bool:
-        lowered = [trust_rank(trust_of(cid)) < agent for cid in group["episodes"]]
+        gone = group.get("gone", {})
+        lowered = [trust_rank(gone.get(cid) or trust_of(cid)) < agent
+                   for cid in group["episodes"]]
         if not lowered:
             return False
         return any(lowered) if group["rule"] == GROUNDING_UNCHECKED else all(lowered)

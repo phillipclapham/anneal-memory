@@ -129,19 +129,26 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   was derived from in a new additive `episode_derived(episode_id, source_id)` table, in the
   episode's transaction; a source that does not exist refuses the record (`ValueError`, nothing
   written). `Store.effective_trust_map(ids)` gives each episode the lower of its own class and
-  the highest effective class among its sources, through every level of derivation; a deleted
-  source counts at the effective trust recorded with the link (`episode_derived.source_trust`),
-  so a delete never raises a summary back to `agent` (run: it did, until this). The recorded
-  trust is a running minimum: `set_trust` lowering an episode lowers it on every derivation from
-  that episode and what was derived from those, deleting or pruning an episode snapshots its
-  effective trust into them first, and a live source contributes the lower of the record and its
-  class now, so a reused id never lifts it (run: a source lowered after the derivation and then
-  deleted read as `agent` again). A host RAISING the source (correcting a mislabel) refreshes
-  that record to its new effective trust, through the chain, in the same transaction and behind
-  the same ceiling/gate, and the `trust_set` audit event names the rows as `derived_raised`
-  (run: a raised-back source left its summaries `external`, with no way to restore them); a
-  deleted source keeps its record. The graph is walked iteratively (run: a ~1,000-deep chain
-  raised `RecursionError`). The graduation
+  the highest effective class among its sources, through every level of derivation. It is
+  computed, never stored for a live source: a worklist lowers each episode in the whole reachable
+  closure from its own class to the fixed point, so the answer for an id does not depend on what
+  else was asked or on id order, and a cycle gets the meet (D3 redesign R1, 1008+11; run: a
+  depth-first walk that skipped the source on its path read an agent summary of an external page
+  as `agent` when its id sorted after the page's, and graduated the page's claim to 2x). Raising
+  or lowering a source therefore moves what was derived from it with no pass of its own (R2; run:
+  a snapshot-raise pass left a node `tool` after its source was raised). A removal leaves a sticky
+  mark instead (R3): an `AFTER DELETE` trigger sets `gone_trust = 'external'` on every
+  `episode_derived` row naming the id as a source and every `pattern_grounding` row citing it,
+  whatever path deleted it, and `prune` first sets the mark to the episode's effective trust, so
+  aging out is not a retraction (run: a pruned grounding revoked a rung nothing had lowered). An
+  episode recorded again under the same id never clears a mark (run: re-recording a deleted
+  ground revived its revoked 2x), and the grounding reads the mark when set. The save's re-check
+  compares, per cited id, whether it exists, its marks and its effective trust (R4; run: an
+  external ground deleted mid-save read `external` before and after, and the save committed). A
+  JSON import writes the derivation edges of the episodes it skips as well as the new ones (R5;
+  run: a skipped summary lost its edge to an external page, and an operator raise then read it
+  `agent`). The graph is walked iteratively (run: a ~1,000-deep chain
+raised `RecursionError`). The graduation
   trust check and the save's re-read use it, so a
   summary of an external page reads `external` and cannot corroborate it. `ScoredEpisode.trust`
   (default `agent`) carries each episode's effective class out of `retrieve_relevant`, and MCP

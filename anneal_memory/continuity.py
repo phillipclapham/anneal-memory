@@ -2477,15 +2477,34 @@ def _durable_cue_state(
         return None, []
 
 
-def _grounded_trust(store: Store, grounds: set[str], others: set[str]) -> dict[str, str]:
-    """Effective trust of the episodes a save leans on. A ground (a cited or
-    previously grounding episode) that no longer exists reads ``external``: a
-    deleted ground is a failed one, never a default ``agent`` one (codex r3 #1),
-    and one that vanishes between validation and the final re-check reads as a
-    trust change that aborts the save. ``others`` (``[supersedes:]`` endpoints)
-    keep the plain reading."""
-    return store.effective_trust_map(
-        grounds | others, missing="external", missing_for=grounds)
+def _grounded_trust(
+    store: Store, grounds: set[str], others: set[str],
+) -> tuple[dict[str, str], dict[str, tuple[bool, str]]]:
+    """Effective trust of the episodes a save leans on, and the
+    :meth:`Store.ground_state` it was read from. A ground (a cited or previously
+    grounding episode) that no longer exists reads ``external``: a deleted ground
+    is a failed one, never a default ``agent`` one (codex r3 #1). ``others``
+    (``[supersedes:]`` endpoints) keep the plain reading."""
+    state = store.ground_state(grounds | others)
+    trust: dict[str, str] = {}
+    for cid, (exists, eff) in state.items():
+        level = "external" if (not exists and cid in grounds) else eff
+        if level != DEFAULT_TRUST:
+            trust[cid] = level
+    return trust, state
+
+
+def _gone_marks(
+    grounding: dict[str, dict[int, list[dict[str, Any]]]],
+) -> dict[str, tuple[str, ...]]:
+    """Each episode id's removal marks across the grounding record (D3 R3)."""
+    marks: dict[str, list[str]] = {}
+    for rungs in grounding.values():
+        for groups in rungs.values():
+            for g in groups:
+                for cid, mark in g.get("gone", {}).items():
+                    marks.setdefault(cid, []).append(mark)
+    return {cid: tuple(sorted(m)) for cid, m in marks.items()}
 
 
 def validated_save_continuity(
@@ -3062,7 +3081,9 @@ def validated_save_continuity(
     }
     # Effective trust (D3): an episode derived from others counts at most as
     # trusted as its most trusted source.
-    window_trust = _grounded_trust(store, citable_ids | _grounding_ids, _marker_ids)
+    window_trust, window_state = _grounded_trust(
+        store, citable_ids | _grounding_ids, _marker_ids)
+    window_gone = _gone_marks(grounding)
     revoked_levels = revoked_pattern_levels(
         grounding, lambda cid: window_trust.get(cid, DEFAULT_TRUST)
     )
@@ -3288,21 +3309,28 @@ def validated_save_continuity(
                     f"saved and the wrap is still open; save again (cite the replacing "
                     f"episode instead)."
                 )
-            # The same re-read for trust (codex r1 #4): a class another writer
-            # changed after validation read it would let the save commit a
-            # graduation judged on the old class. Raising rolls the batch back.
+            # The same re-read for the grounds (codex r1 #4; CAP-08 D3 R4): per
+            # cited id, whether it exists, its removal marks and its effective
+            # trust. Another writer moving any of them after validation read them
+            # would let the save commit a graduation judged on the old state (a
+            # deleted external ground read the same class before and after, so
+            # comparing trust alone missed it). Raising rolls the batch back.
             _cited = set(grad_result.citation_counts) | _marker_ids | _grounding_ids
-            _trust_now = _grounded_trust(
+            _, _state_now = _grounded_trust(
                 store, set(grad_result.citation_counts) | _grounding_ids, _marker_ids)
+            _gone_now = _gone_marks(store.pattern_grounding())
+            _absent = (False, DEFAULT_TRUST)
             _trust_moved = sorted(
                 cid for cid in _cited
-                if _trust_now.get(cid, DEFAULT_TRUST) != window_trust.get(cid, DEFAULT_TRUST)
+                if (_state_now.get(cid, _absent), _gone_now.get(cid, ()))
+                != (window_state.get(cid, _absent), window_gone.get(cid, ()))
             )
             if _trust_moved:
                 raise StoreError(
-                    f"validated_save_continuity: the trust class of cited episode(s) "
-                    f"{', '.join(_trust_moved)} changed while this save ran. Nothing was "
-                    f"saved and the wrap is still open; save again.",
+                    f"validated_save_continuity: cited episode(s) "
+                    f"{', '.join(_trust_moved)} were removed or changed trust class "
+                    f"while this save ran. Nothing was saved and the wrap is still "
+                    f"open; save again.",
                     operation="save_continuity",
                 )
 

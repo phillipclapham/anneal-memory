@@ -21,6 +21,7 @@ import re
 import sqlite3
 import uuid
 import warnings
+from collections import deque
 from collections.abc import Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timedelta, timezone
@@ -1465,14 +1466,16 @@ END;
 -- summary of a page it fetched). For the graduation trust check an episode
 -- counts at most as trusted as the most trusted of its sources, so a summary of
 -- an external page cannot corroborate that page. Written with the episode, in
--- its transaction; a row leaves with its derived episode. source_trust is the
--- source's effective trust when the row was written, so deleting a source never
--- raises what was derived from it back to agent. Additive.
+-- its transaction; a row leaves with its derived episode. gone_trust is NULL
+-- while the source lives (its trust is then computed, never stored) and is set,
+-- for good, when the source is removed (episode_gone_marks_rows below; prune sets
+-- it first). Recording another episode under the source's id never clears it.
 CREATE TABLE IF NOT EXISTS episode_derived (
     episode_id TEXT NOT NULL,
     source_id TEXT NOT NULL,
-    source_trust TEXT NOT NULL DEFAULT 'agent'
-        CHECK (source_trust IN ('external', 'tool', 'agent', 'operator')),
+    gone_trust TEXT DEFAULT NULL
+        CHECK (gone_trust IS NULL
+               OR gone_trust IN ('external', 'tool', 'agent', 'operator')),
     PRIMARY KEY (episode_id, source_id)
 );
 
@@ -1655,8 +1658,29 @@ CREATE TABLE IF NOT EXISTS pattern_grounding (
     earning TEXT NOT NULL,
     rule TEXT NOT NULL CHECK (rule IN ('checked', 'unchecked')),
     episode_id TEXT NOT NULL,
+    -- As episode_derived.gone_trust: NULL while the episode lives, set for good
+    -- when it is removed. The grounding reads it when set, else the episode's
+    -- effective trust now.
+    gone_trust TEXT DEFAULT NULL
+        CHECK (gone_trust IS NULL
+               OR gone_trust IN ('external', 'tool', 'agent', 'operator')),
     PRIMARY KEY (name, level, earning, rule, episode_id)
 );
+
+-- CAP-08 D3 R3: a removal leaves a sticky marker on every row that cited the id,
+-- whatever path removed it (raw SQL included): an unexplained removal is a
+-- failed ground (codex r3 #1). Store.prune sets the marker to the episode's
+-- effective trust first, so aging out is not a retraction. A row already marked
+-- keeps its marker, so a later episode under the same id never inherits a row
+-- written for the one before it.
+CREATE TRIGGER IF NOT EXISTS episode_gone_marks_rows
+AFTER DELETE ON episodes
+BEGIN
+    UPDATE episode_derived SET gone_trust = 'external'
+        WHERE source_id = OLD.id AND gone_trust IS NULL;
+    UPDATE pattern_grounding SET gone_trust = 'external'
+        WHERE episode_id = OLD.id AND gone_trust IS NULL;
+END;
 """
 
 # Appended separately so existing DBs get the new table via CREATE IF NOT EXISTS
@@ -2797,13 +2821,12 @@ class Store:
                         "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
                         (old_id, ep_id, source),
                     )
-                # Each source's effective trust now, kept for when it is deleted.
-                source_trust = self.effective_trust_map(source_ids) if source_ids else {}
+                # No trust is stored with a live source: it is computed
+                # (effective_trust_map), and marked only when the source goes.
                 self._conn.executemany(
                     "INSERT OR IGNORE INTO episode_derived "
-                    "(episode_id, source_id, source_trust) VALUES (?, ?, ?)",
-                    [(ep_id, sid, source_trust.get(sid, DEFAULT_TRUST))
-                     for sid in source_ids],
+                    "(episode_id, source_id) VALUES (?, ?)",
+                    [(ep_id, sid) for sid in source_ids],
                 )
             # On a refusal this commits an empty transaction (releasing the
             # lock); inside a batch it leaves the batch's writes alone.
@@ -4141,27 +4164,33 @@ class Store:
         missing_for: Iterable[str] | None = None,
     ) -> dict[str, str]:
         """As :meth:`trust_map`, but each episode's class is the lower of its own
-        and the highest effective class among the episodes it was derived from
-        (``record(derived_from=)``), followed through every level of derivation
-        (CAP-08 D3). An agent summary of an external page reads ``external``. A
-        source contributes the lower of the trust recorded with the derivation
-        and, while the source still exists, its class now, so deleting a source,
-        or reusing its id, never raises what was derived from it. Absent =
+        and the highest class among the episodes it was derived from
+        (``record(derived_from=)``), through every level of derivation (CAP-08
+        D3). An agent summary of an external page reads ``external``. Absent =
         ``agent``.
+
+        ⛔ A FIXED POINT, NOT A WALK (D3 redesign R1, 1008+11). ``eff(e) =
+        min(own(e), max over sources s of src(e, s))``, where ``src`` is ``eff(s)``
+        while the source lives and the edge's ``gone_trust`` once it was removed
+        (an edge to a source that is absent with no marker reads ``external``).
+        Every episode reachable from the queried ids starts at its own class and is
+        only ever lowered, by a worklist, until nothing changes: the greatest fixed
+        point of a monotone function on a finite lattice, so the answer for an id
+        is the same whatever else was asked and whatever the visit order, and a
+        cycle gets the meet of its members' contributions. A depth-first walk that
+        skipped the source on its path answered by query set and id order, and
+        graduated a relayed claim (lane B, ``p1d.py``).
 
         ``missing``: the class an id with NO episode reads as (default: the same
         ``agent`` absence reads as), for the ids in ``missing_for`` (default: all
         of them). A caller judging grounding passes ``"external"`` so a deleted
-        episode is a failed ground, not a default one (codex r3 #1). The graph is walked iteratively, so a long chain of
-        derivations cannot exhaust the stack (codex r3 #6)."""
+        episode is a failed ground, not a default one (codex r3 #1)."""
         wanted = {str(i).strip().lower() for i in episode_ids}
         if not wanted:
             return {}
-        # episode -> [(live source, trust recorded with the edge)], and the
-        # recorded trust of each source that no longer exists.
-        sources: dict[str, list[tuple[str, str]]] = {}
-        recorded: dict[str, list[str]] = {}
-        seen_ids = set(wanted)
+        # episode -> [(live source id, None) | (None, the class the edge fixes)]
+        sources: dict[str, list[tuple[str | None, str | None]]] = {}
+        closure: set[str] = set()
         absent: set[str] = set()
         with self._db_boundary("trust_map"), self._read_snapshot():
             if missing is not None:
@@ -4175,80 +4204,94 @@ class Store:
                     live_ids = {r[0] for r in self._conn.execute(
                         f"SELECT id FROM episodes WHERE id IN ({marks})", chunk)}
                     absent.update(set(chunk) - live_ids)
+            closure = wanted - absent
             has_derived = self._conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' "
                 "AND name = 'episode_derived'"
             ).fetchone() is not None
-            frontier = sorted(wanted - absent) if has_derived else []
+            frontier = sorted(closure) if has_derived else []
             while frontier:
                 found: set[str] = set()
                 for start in range(0, len(frontier), 500):
                     chunk = frontier[start:start + 500]
                     marks = ",".join("?" * len(chunk))
-                    for ep_id, src, src_trust, live in self._conn.execute(
-                        f"SELECT d.episode_id, d.source_id, d.source_trust, "
+                    for ep_id, src, gone, live in self._conn.execute(
+                        f"SELECT d.episode_id, d.source_id, d.gone_trust, "
                         f"e.id IS NOT NULL FROM episode_derived d "
                         f"LEFT JOIN episodes e ON e.id = d.source_id "
                         f"WHERE d.episode_id IN ({marks})", chunk,
                     ):
-                        if live:
-                            sources.setdefault(ep_id, []).append((src, src_trust))
+                        if gone is not None:
+                            sources.setdefault(ep_id, []).append((None, gone))
+                        elif live:
+                            sources.setdefault(ep_id, []).append((src, None))
                             found.add(src)
                         else:
-                            recorded.setdefault(ep_id, []).append(src_trust)
-                frontier = sorted(found - seen_ids)
-                seen_ids |= found
-        own = self.trust_map(seen_ids)
-        memo: dict[str, str] = {}
+                            sources.setdefault(ep_id, []).append((None, "external"))
+                frontier = sorted(found - closure)
+                closure |= found
+            own = self.trust_map(closure)
 
-        def settle(ep_id: str) -> str:
-            mine = own.get(ep_id, DEFAULT_TRUST)
-            # A source on the path being walked (a cycle) is skipped, so it
-            # contributes nothing; it is not in memo yet.
-            witnessed = [
-                min(memo[src], snap, key=trust_rank)
-                for src, snap in sources.get(ep_id, []) if src in memo
-            ]
-            witnessed += recorded.get(ep_id, [])
-            if witnessed:
-                mine = min(mine, max(witnessed, key=trust_rank), key=trust_rank)
-            return mine
-
-        wanted_live = wanted - absent
-        for root in sorted(wanted_live):
-            if root in memo:
-                continue
-            stack = [root]
-            onpath = {root}
-            nxt: dict[str, int] = {}
-            while stack:
-                node = stack[-1]
-                srcs = sources.get(node, [])
-                i = nxt.get(node, 0)
-                if i < len(srcs):
-                    nxt[node] = i + 1
-                    src = srcs[i][0]
-                    if src not in memo and src not in onpath:
-                        stack.append(src)
-                        onpath.add(src)
-                    continue
-                memo[node] = settle(node)
-                onpath.discard(node)
-                stack.pop()
+        val = {n: own.get(n, DEFAULT_TRUST) for n in closure}
+        dependents: dict[str, set[str]] = {}
+        for ep_id, srcs in sources.items():
+            for src, _fixed in srcs:
+                if src is not None:
+                    dependents.setdefault(src, set()).add(ep_id)
+        work = deque(sorted(sources))
+        queued = set(work)
+        while work:
+            node = work.popleft()
+            queued.discard(node)
+            best = max(
+                (val[src] if src is not None else (fixed or "external")
+                 for src, fixed in sources[node]),
+                key=trust_rank,
+            )
+            new = min(val[node], best, key=trust_rank)
+            if new != val[node]:
+                val[node] = new
+                for dep in sorted(dependents.get(node, ())):
+                    if dep not in queued:
+                        work.append(dep)
+                        queued.add(dep)
 
         out: dict[str, str] = {}
         for ep_id in wanted:
-            level = missing if ep_id in absent else memo[ep_id]
+            level = missing if ep_id in absent else val[ep_id]
             if level is not None and level != DEFAULT_TRUST:
                 out[ep_id] = level
         return out
 
-    def derived_edges(self, episode_ids: Iterable[str]) -> dict[str, list[tuple[str, str]]]:
-        """``{episode id: [(source id, trust recorded with the edge), ...]}`` for
-        each listed episode derived from others (``record(derived_from=)``).
-        Read-only; what an export carries (codex r3 #3)."""
+    def ground_state(self, episode_ids: Iterable[str]) -> dict[str, tuple[bool, str]]:
+        """``{id: (exists, effective trust)}`` for each listed id, read in one
+        view: what a save judged its grounds on, and re-reads under its write lock
+        to see whether any of them moved (CAP-08 D3 R4: comparing trust alone
+        missed a ground that vanished while the save ran). An absent id reads
+        ``(False, "agent")``; the caller decides what absence means."""
         ids = sorted({str(i).strip().lower() for i in episode_ids})
-        out: dict[str, list[tuple[str, str]]] = {}
+        out: dict[str, tuple[bool, str]] = {}
+        with self._db_boundary("trust_map"), self._read_snapshot():
+            live: set[str] = set()
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                marks = ",".join("?" * len(chunk))
+                live.update(r[0] for r in self._conn.execute(
+                    f"SELECT id FROM episodes WHERE id IN ({marks})", chunk))
+            eff = self.effective_trust_map(ids)
+        for i in ids:
+            out[i] = (i in live, eff.get(i, DEFAULT_TRUST))
+        return out
+
+    def derived_edges(
+        self, episode_ids: Iterable[str],
+    ) -> dict[str, list[tuple[str, str | None]]]:
+        """``{episode id: [(source id, gone_trust), ...]}`` for each listed episode
+        derived from others (``record(derived_from=)``). ``gone_trust`` is None
+        while the source lives, else the class the edge was marked with when the
+        source was removed. Read-only; what an export carries (codex r3 #3)."""
+        ids = sorted({str(i).strip().lower() for i in episode_ids})
+        out: dict[str, list[tuple[str, str | None]]] = {}
         with self._db_boundary("derived_edges"), self._read_snapshot():
             if not ids or self._conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' "
@@ -4258,23 +4301,23 @@ class Store:
             for start in range(0, len(ids), 500):
                 chunk = ids[start:start + 500]
                 marks = ",".join("?" * len(chunk))
-                for ep_id, src, snap in self._conn.execute(
-                    f"SELECT episode_id, source_id, source_trust FROM episode_derived "
+                for ep_id, src, gone in self._conn.execute(
+                    f"SELECT episode_id, source_id, gone_trust FROM episode_derived "
                     f"WHERE episode_id IN ({marks}) ORDER BY episode_id, source_id",
                     chunk,
                 ):
-                    out.setdefault(ep_id, []).append((src, snap))
+                    out.setdefault(ep_id, []).append((src, gone))
         return out
 
     def restore_derived(
-        self, episode_id: str, sources: Iterable[tuple[str, str]],
+        self, episode_id: str, sources: Iterable[tuple[str, str | None]],
     ) -> int:
         """Re-attach derivation edges to an existing episode (an import putting
-        back what an export carried): each ``(source id, recorded trust)`` whose
-        source exists. The recorded trust is kept only as a LOWER bound on what
-        the edge may say: it is capped at ``agent`` (a file cannot vouch) and
-        taken with the source's effective trust now, whichever is lower. Never
-        changes an edge that is already there. Returns the number added."""
+        back what an export carried), each ``(source id, gone_trust)``. An edge
+        the file marks gone is written marked, at the lower of its mark and
+        ``agent`` (a file cannot vouch), whether or not the id exists here; an
+        unmarked edge is written only when its source exists here. Never changes
+        an edge that is already there. Returns the number added."""
         episode_id = str(episode_id).strip().lower()
         added = 0
         with self._db_boundary("restore_derived"):
@@ -4283,19 +4326,22 @@ class Store:
             if self._conn.execute(
                 "SELECT 1 FROM episodes WHERE id = ?", (episode_id,)
             ).fetchone() is not None:
-                for src, snap in sources:
+                for src, gone in sources:
                     src = str(src).strip().lower()
-                    if src == episode_id or self._conn.execute(
-                        "SELECT 1 FROM episodes WHERE id = ?", (src,)
-                    ).fetchone() is None:
+                    if src == episode_id:
                         continue
-                    rank = min(trust_rank(snap), trust_rank(DEFAULT_TRUST))
-                    level = TRUST_LEVELS[rank]
-                    now = self.effective_trust_map([src]).get(src, DEFAULT_TRUST)
-                    level = min(level, now, key=trust_rank)
+                    if gone is not None:
+                        level: str | None = TRUST_LEVELS[
+                            min(trust_rank(gone), trust_rank(DEFAULT_TRUST))]
+                    elif self._conn.execute(
+                        "SELECT 1 FROM episodes WHERE id = ?", (src,)
+                    ).fetchone() is not None:
+                        level = None
+                    else:
+                        continue
                     added += self._conn.execute(
                         "INSERT OR IGNORE INTO episode_derived "
-                        "(episode_id, source_id, source_trust) VALUES (?, ?, ?)",
+                        "(episode_id, source_id, gone_trust) VALUES (?, ?, ?)",
                         (episode_id, src, level),
                     ).rowcount
             if not self._defer_commit:
@@ -4364,13 +4410,9 @@ class Store:
         transaction reads it, nothing is changed and ``ValueError`` names the
         conflict (a gate decided on a stale read must not be applied).
 
-        Lowering also lowers the trust recorded with every derivation from this
-        episode (``derived_from``), through what was derived from those, so
-        deleting the episode afterwards cannot raise them again. Raising it (the
-        host correcting a mislabel) refreshes that record to the episode's new
-        effective trust, through the chain, so what was derived from it is
-        restored too; the audit event names the rows as ``derived_raised``. A
-        derivation whose source was deleted keeps its record.
+        What was derived from this episode (``derived_from``) follows the change
+        with no pass of its own: its trust is computed from this one
+        (:meth:`effective_trust_map`), never stored while this episode lives.
 
         Raises:
             ValueError: unknown ``trust``, ``trust`` above the ceiling, no such
@@ -4384,7 +4426,6 @@ class Store:
         old = DEFAULT_TRUST
         removed: list[dict[str, str]] = []
         team_left: list[dict[str, str]] = []
-        derived_raised: list[dict[str, str]] = []
         # Refusals are computed inside and raised after the block: the boundary
         # rolls back on any exception, which inside a caller's batch would
         # discard its earlier writes (see _db_boundary).
@@ -4420,10 +4461,6 @@ class Store:
                             (episode_id, trust),
                         )
                     removed, team_left = self._drop_links_trust_invalidated(episode_id)
-                    if trust_rank(trust) > trust_rank(old):
-                        derived_raised = self._raise_derived_snapshots([episode_id])
-                    else:
-                        self._lower_derived_snapshots([episode_id], follow=True)
             if not self._defer_commit:
                 self._conn.commit()
         if problem:
@@ -4434,94 +4471,11 @@ class Store:
                 event["supersessions_removed"] = removed
             if team_left:
                 event["team_supersessions_left"] = team_left
-            if derived_raised:
-                event["derived_raised"] = derived_raised
             self._audit_log_after_commit(
                 "trust_set", event, method="set_trust",
                 committed="the trust change", actor=actor,
             )
         return old
-
-    def _lower_derived_snapshots(self, episode_ids: Iterable[str], *, follow: bool) -> None:
-        """Lower the trust recorded in ``episode_derived`` for each derivation
-        FROM these episodes to the episode's effective trust now, never raising
-        it (the recorded value is a running minimum). ``follow`` carries a lowering
-        on to what was derived from the lowered episodes in turn, so a chain
-        stays consistent when a middle link is deleted later. Runs inside the
-        caller's transaction (codex + complement r3: a snapshot taken at record
-        time went stale when the source was lowered, then deleted)."""
-        if self._conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'episode_derived'"
-        ).fetchone() is None:
-            return
-        queue = sorted({str(i) for i in episode_ids})
-        visited: set[str] = set()
-        while queue:
-            batch = [i for i in queue if i not in visited]
-            queue = []
-            visited.update(batch)
-            if not batch:
-                break
-            eff = self.effective_trust_map(batch)
-            for start in range(0, len(batch), 500):
-                chunk = batch[start:start + 500]
-                marks = ",".join("?" * len(chunk))
-                rows = self._conn.execute(
-                    f"SELECT episode_id, source_id, source_trust FROM episode_derived "
-                    f"WHERE source_id IN ({marks})", chunk,
-                ).fetchall()
-                for ep_id, src, snap in rows:
-                    level = eff.get(src, DEFAULT_TRUST)
-                    if trust_rank(level) < trust_rank(snap):
-                        self._conn.execute(
-                            "UPDATE episode_derived SET source_trust = ? "
-                            "WHERE episode_id = ? AND source_id = ?",
-                            (level, ep_id, src),
-                        )
-                        if follow:
-                            queue.append(ep_id)
-
-    def _raise_derived_snapshots(self, episode_ids: Iterable[str]) -> list[dict[str, str]]:
-        """The inverse of :meth:`_lower_derived_snapshots`, for a trust RAISE: set
-        the trust recorded with each derivation FROM these episodes to the
-        episode's effective trust now where that is higher, then do the same for
-        what was derived from each episode whose row moved. Returns the rows
-        changed as ``{episode_id, source_id, from, to}``. Runs inside
-        :meth:`set_trust`'s transaction, after its ceiling and ``expect`` checks,
-        so it is as gated as the raise itself."""
-        changed: list[dict[str, str]] = []
-        if self._conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'episode_derived'"
-        ).fetchone() is None:
-            return changed
-        queue = sorted({str(i) for i in episode_ids})
-        visited: set[str] = set()
-        while queue:
-            batch = [i for i in queue if i not in visited]
-            queue = []
-            visited.update(batch)
-            if not batch:
-                break
-            eff = self.effective_trust_map(batch)
-            for start in range(0, len(batch), 500):
-                chunk = batch[start:start + 500]
-                marks = ",".join("?" * len(chunk))
-                rows = self._conn.execute(
-                    f"SELECT episode_id, source_id, source_trust FROM episode_derived "
-                    f"WHERE source_id IN ({marks})", chunk,
-                ).fetchall()
-                for ep_id, src, snap in rows:
-                    level = eff.get(src, DEFAULT_TRUST)
-                    if trust_rank(level) > trust_rank(snap):
-                        self._conn.execute(
-                            "UPDATE episode_derived SET source_trust = ? "
-                            "WHERE episode_id = ? AND source_id = ?",
-                            (level, ep_id, src),
-                        )
-                        changed.append({"episode_id": ep_id, "source_id": src,
-                                        "from": snap, "to": level})
-                        queue.append(ep_id)
-        return changed
 
     def _drop_links_trust_invalidated(
         self, episode_id: str
@@ -4634,8 +4588,8 @@ class Store:
                     row["id"], linker_of)
             links_removed = self._detach_supersessions([row["id"]])
             self._remember_team_rows([row], "operator" if team_operator else "auto")
-            # What was derived from it keeps the trust it has now (codex r3 #2).
-            self._lower_derived_snapshots([row["id"]], follow=False)
+            # The episode_gone_marks_rows trigger marks every row that cited it
+            # external: a deletion is a failed ground (CAP-08 D3 R3).
             self._conn.execute("DELETE FROM episodes WHERE id = ?", (episode_id,))
             # 10.5c.5 L4 Fix: batch-aware commit for consistency with
             # record() and the other write-path methods. No current
@@ -6639,8 +6593,11 @@ class Store:
         """CAP-08 D2: ``{pattern name: {level: [group, ...]}}``, one group per time
         a save recorded the rung as earned: ``{"earned_on": day, "rule":
         "checked" | "unchecked", "episodes": [ids]}`` (the rule check 4 admitted
-        it by). Empty when none were recorded (or on a read-only store from before
-        the table). Read-only."""
+        it by). A group whose episodes include one since removed also carries
+        ``"gone": {id: class}``, the class its row was marked with (CAP-08 D3 R3);
+        the grounding reads that, not whatever episode now holds the id. Empty
+        when none were recorded (or on a read-only store from before the table).
+        Read-only."""
         with self._db_boundary("pattern_grounding"), self._read_snapshot():
             if self._conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' "
@@ -6648,8 +6605,8 @@ class Store:
             ).fetchone() is None:
                 return {}
             groups: dict[tuple[str, int, str], dict[str, Any]] = {}
-            for name, level, earned_on, earning, rule, ep_id in self._conn.execute(
-                "SELECT name, level, earned_on, earning, rule, episode_id "
+            for name, level, earned_on, earning, rule, ep_id, gone in self._conn.execute(
+                "SELECT name, level, earned_on, earning, rule, episode_id, gone_trust "
                 "FROM pattern_grounding "
                 "ORDER BY name, level, earned_on, rowid"
             ):
@@ -6658,6 +6615,8 @@ class Store:
                     {"earned_on": earned_on, "rule": rule, "episodes": []},
                 )
                 grp["episodes"].append(ep_id)
+                if gone is not None:
+                    grp.setdefault("gone", {})[ep_id] = gone
             out: dict[str, dict[int, list[dict[str, Any]]]] = {}
             for (name, level, _earning), grp in groups.items():
                 grp["episodes"].sort()
@@ -7343,6 +7302,30 @@ class Store:
 
     # -- Pruning --
 
+    def _mark_aged_out(self, episode_ids: list[str]) -> None:
+        """Before a prune deletes these episodes, mark every row that cited one
+        (``episode_derived`` as a source, ``pattern_grounding``) with its
+        effective trust now, where not marked already. Aging out is not a
+        retraction, so it must not read as the ``external`` the delete trigger
+        would otherwise write (CAP-08 D3 R3, complement r4 MED 1). Runs inside
+        the prune's transaction, before the deletes."""
+        if not episode_ids:
+            return
+        eff = self.effective_trust_map(episode_ids)
+        tables = [t for t in ("episode_derived", "pattern_grounding")
+                  if self._conn.execute(
+                      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                      (t,)).fetchone() is not None]
+        for table, column in (("episode_derived", "source_id"),
+                              ("pattern_grounding", "episode_id")):
+            if table not in tables:
+                continue
+            self._conn.executemany(
+                f"UPDATE {table} SET gone_trust = ? "
+                f"WHERE {column} = ? AND gone_trust IS NULL",
+                [(eff.get(i, DEFAULT_TRUST), i) for i in episode_ids],
+            )
+
     def prune(self, older_than_days: int | None = None) -> int:
         """Prune old episodes, optionally creating tombstones.
 
@@ -7400,7 +7383,7 @@ class Store:
             links_removed = self._detach_supersessions([row["id"] for row in rows])
             self._remember_team_rows(rows)
             pruned = 0
-            self._lower_derived_snapshots([row["id"] for row in rows], follow=False)
+            self._mark_aged_out([row["id"] for row in rows])
             for row in rows:
                 if self._keep_tombstones:
                     self._conn.execute(

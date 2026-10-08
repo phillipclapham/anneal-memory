@@ -2024,8 +2024,8 @@ def cmd_export(args: argparse.Namespace) -> None:
                 ep["trust"] = export_trust[ep["id"]]
             if ep["id"] in export_edges:
                 ep["derived_from"] = [
-                    {"id": src, "source_trust": snap}
-                    for src, snap in export_edges[ep["id"]]
+                    {"id": src, **({"gone_trust": gone} if gone is not None else {})}
+                    for src, gone in export_edges[ep["id"]]
                 ]
         supersessions = store.supersession_links()
         continuity = store.load_continuity()
@@ -2253,6 +2253,11 @@ def cmd_import(args: argparse.Namespace) -> None:
                         store.set_trust(existing.id, ep_trust, actor="cli:import")
                         lowered += 1
                     id_map[str(ep_data["id"]).strip().lower()] = existing.id
+                    # Its edges too (CAP-08 D3 R5): an existing copy without them
+                    # read as its own class, and an operator raise of it then
+                    # freed a summary of an external page (lane B, p6.py).
+                    if ep_data.get("derived_from"):
+                        new_edges.append((existing.id, ep_data["derived_from"]))
                     skipped += 1
                     continue
 
@@ -2274,13 +2279,15 @@ def cmd_import(args: argparse.Namespace) -> None:
                 if not args.json:
                     print(f"  Error importing episode {ep_data.get('id', '?')}: {e}", file=sys.stderr)
 
-        # Derivation edges last, once every episode of the file is in: only to
-        # sources that exist here, and only ever lowering (restore_derived).
+        # Derivation edges last, once every episode of the file is in, for the
+        # skipped episodes as well as the new ones: an unmarked edge only to a
+        # source that exists here, a gone one at no more than agent
+        # (restore_derived). INSERT OR IGNORE: an edge already here stays.
         for new_id, raw_edges in new_edges:
             try:
                 pairs = [
                     (id_map.get(str(e["id"]).strip().lower(), str(e["id"])),
-                     e.get("source_trust", DEFAULT_TRUST))
+                     e.get("gone_trust"))
                     for e in raw_edges
                 ]
                 store.restore_derived(new_id, pairs)

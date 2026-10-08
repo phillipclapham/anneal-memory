@@ -29,7 +29,13 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - A sealed week with the same period no longer clears the manifest's record of an active file that
   went missing: after a clock rollback a new active file could begin in an already-sealed week, and
   its deletion read as sealed, with the chain continuing over the lost entries (reproduced). A seal
-  by an older release that left the record set now reads as a vanished file until `audit-repair`.
+  by an older release that left the record set now reads as a vanished file until `audit-repair`,
+  which clears it when the sealed week's first entry is the one the record names (no gap recorded).
+- The manifest's record of an active file's first entry is saved BEFORE that entry is written
+  (write-ahead); a save that fails refuses the append with nothing written. Saved after the entry and
+  best-effort, a failed save left a later deletion of the file undetected: the chain restarted and
+  `verify` read valid (reproduced). Two states still append with a warning and leave that week
+  unprotected, as ruled earlier: the manifest lock cannot be taken, and the manifest is quarantined.
 - The append lock is released with `LOCK_UN` before its close, as the manifest lock now is, so a
   child forked while it was held does not keep it.
 - An append waits at most 30 seconds for another holder; past that, or when the lock file cannot

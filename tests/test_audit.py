@@ -1024,8 +1024,13 @@ class TestAZeroByteActiveFileIsNotAnActiveFile:
         calls = {"n": 0}
 
         def fsync_failing_once(fd):
-            calls["n"] += 1
-            if calls["n"] == 1:
+            # Only the active file's fsync: the first entry's manifest record is
+            # now saved (and fsynced) before the entry is written (KL-24 r4).
+            st = audit_mod.os.fstat(fd)
+            target = trail._active_path
+            if (calls["n"] == 0 and target.exists()
+                    and (st.st_dev, st.st_ino) == (target.stat().st_dev, target.stat().st_ino)):
+                calls["n"] += 1
                 raise OSError(5, "injected fsync failure")
             return real_fsync(fd)
 
@@ -9586,6 +9591,61 @@ class TestKL24ConcurrentWriters:
             assert store.status().audit_entry_count is None
         finally:
             store.close()
+
+    def test_the_first_entry_record_is_written_ahead_and_repair_matches_seals(
+        self, tmp_path, monkeypatch
+    ):
+        """L3 r4 codex HIGH (run): the first entry's manifest record was saved
+        after the entry and best-effort, so a failed save left a deletion of the
+        file followed from genesis with verify valid. It is now saved first, and
+        a failed save refuses the append with nothing written. Codex MED (run):
+        audit-repair recorded a false gap for an older release's stale record of
+        a week that is sealed and manifested; it now matches the sealed file's
+        first entry and clears the record."""
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        real = AuditTrail._save_manifest
+        failed = []
+
+        def flaky(self, manifest):
+            if not failed and manifest.get("active_begun"):
+                failed.append(1)
+                raise OSError(28, "No space left on device")
+            return real(self, manifest)
+
+        monkeypatch.setattr(AuditTrail, "_save_manifest", flaky)
+        with pytest.raises(audit_module._ManifestUnavailable):
+            trail.log("first", {})
+        active = tmp_path / "m.audit.jsonl"
+        assert not active.exists() or active.stat().st_size == 0
+        trail.log("second", {})
+        monkeypatch.setattr(AuditTrail, "_save_manifest", real)
+        active.unlink()
+        with pytest.raises(audit_module._ManifestUnavailable):
+            trail.log("after", {})
+
+        # An older release's seal: the sealed week's own record left set.
+        db2 = tmp_path / "o" / "m.db"
+        db2.parent.mkdir()
+        t2 = AuditTrail(db2)
+        t2.log("w0", {})
+        manifest_path = db2.parent / "m.audit.manifest.json"
+        begun = json.loads(manifest_path.read_text())["active_begun"]
+        real_dt = audit_module.datetime
+
+        class _NextWeek(real_dt):
+            @classmethod
+            def now(cls, tz=None):
+                return real_dt.now(tz) + timedelta(days=7)
+
+        monkeypatch.setattr(audit_module, "datetime", _NextWeek)
+        t2.log("w1", {})
+        m = json.loads(manifest_path.read_text())
+        m["active_begun"] = begun
+        manifest_path.write_text(json.dumps(m))
+        (db2.parent / "m.audit.jsonl").write_text("")
+        assert AuditTrail.repair_manifest(db2).repaired
+        assert AuditTrail.verify(db2).set_aside == []
 
     def test_stats_from_inside_this_threads_append_answers_from_the_cache(
         self, tmp_path, monkeypatch

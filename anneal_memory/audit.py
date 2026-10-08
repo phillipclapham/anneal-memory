@@ -939,6 +939,14 @@ class AuditTrail:
         )
         saved_has_entry = self._active_has_entry  # L3 r2 10-03, codex MED
         saved_tip = self._tip
+        # ⛔ WRITE-AHEAD: THE FIRST ENTRY'S RECORD IS DURABLE BEFORE THE ENTRY
+        # (KL-24 L3 r4, codex HIGH). Saved after the write and best-effort, a
+        # failed save left only this process's memory knowing the file had
+        # entries: delete the file and, after one refusal, the next append
+        # seeded from genesis and verify() read valid; a restart read a healthy
+        # 0. Now a save that fails refuses this append, with nothing written.
+        if not had_entry:
+            self._record_active_begun(new_prev_hash, saved_chain_state[0])
         try:
             with open(active, "a", encoding="utf-8") as f:
                 f.write(payload)
@@ -1231,6 +1239,9 @@ class AuditTrail:
                 self._active_has_entry = saved_has_entry
                 self._tip = saved_tip
                 self._initialized = True
+                if not had_entry:
+                    # The write-ahead record names an entry that is not on disk.
+                    self._withdraw_active_begun(new_prev_hash)
             else:
                 # Disk is the authority now — see the block above.
                 # (``_initialized`` was already cleared in the except above,
@@ -1267,18 +1278,6 @@ class AuditTrail:
                 len(json_line.encode("utf-8")),
             )
             self._tip_week = _week_of_ts(ts)
-
-        # ⛔ THE ACTIVE FILE'S FIRST ENTRY IS RECORDED IN THE MANIFEST, so a
-        # restart can tell a deleted active file from an empty one (see
-        # ``_refuse_vanished_active``). Once per active file: only the append
-        # into a file that held no valid entry (absent, empty, or only a torn
-        # fragment: L3 r1 10-03, codex + glm, run). The append holds the append
-        # lock but not the manifest lock, so the save takes the span here. A
-        # failure is logged and never fails this write (the entry is already on
-        # disk); that week is then not protected, as in degrade mode, where the
-        # span cannot save at all.
-        if not had_entry:
-            self._record_active_begun(new_prev_hash, saved_chain_state[0])
 
         return entry
 
@@ -1388,9 +1387,13 @@ class AuditTrail:
             )
         except FileNotFoundError:
             manifest = {}
-        except (OSError, ValueError, TypeError, KeyError, AttributeError) as e:
+            if any(self._db_path.parent.glob(f"{self._db_path.stem}.audit.*.jsonl*")):
+                # Sealed weeks with no manifest: the trail is not empty, and
+                # nothing here can say what it holds (L3 r4, complement LOW).
+                raise OSError("the audit manifest is missing beside sealed audit files")
+        except _CORRUPT_MANIFEST + (AttributeError,) as e:
             # Every way a manifest fails to parse reads as unknown, never as a
-            # crash of the status call (L3 r3: ``[]`` raised TypeError).
+            # crash of the status call (L3 r3 ``[]``: TypeError; r4: RecursionError).
             raise OSError(f"the audit manifest cannot be read: {e}") from e
         try:
             begun = vanished_active_week(manifest)
@@ -2178,6 +2181,25 @@ class AuditTrail:
             # the week, a manifest rebuilt with no sealed files, a chain of orphan
             # weeks); those need outside damage, and the CHANGELOG names them.
             begun = None
+        stale_cleared = False
+        if begun is not None:
+            # A record of a file that IS sealed and manifested (an older release
+            # sealed it and left the field set): matched by the sealed file's
+            # first entry, never by period alone (KL-24 L3 r4, codex MED: repair
+            # recorded a false, permanent gap for entries still in the chain).
+            for f in manifest.get("files", []):
+                if f.get("period") != begun["period"]:
+                    continue
+                path = audit_dir / str(f.get("filename", ""))
+                try:
+                    first = _first_valid_line(path) if path.is_file() else None
+                except OSError:
+                    first = None
+                if first is not None and AuditTrail._compute_hash(first) == begun["first_hash"]:
+                    manifest["active_begun"] = None
+                    begun = None
+                    stale_cleared = True
+                    break
         if begun is not None and any(r["period"] == begun["period"] for r in new):
             # The same, unreadable: setting it aside records the gap, and a second
             # record would count it twice. Only the week the record names: an
@@ -2207,7 +2229,7 @@ class AuditTrail:
                     ),
                     "at": stamp,
                 }
-        if not new and vanished is None:
+        if not new and vanished is None and not stale_cleared:
             return AuditRepairResult(
                 repaired=False, error="The manifest is valid; there is nothing to repair."
             )
@@ -2863,22 +2885,70 @@ class AuditTrail:
             )
 
     def _record_active_begun(self, first_hash: str, first_prev_hash: str) -> None:
-        """Save ``active_begun`` for the active file this call just started."""
+        """Save ``active_begun`` for the active file this call is about to
+        start, BEFORE its first entry is written (see :meth:`_log_locked`), so a
+        restart can tell a deleted active file from an empty one (see
+        ``_refuse_vanished_active``). Once per active file: only the append into
+        a file that holds no valid entry (absent, empty, or only a torn fragment:
+        L3 r1 10-03, codex + glm, run). The append holds the append lock but not
+        the manifest lock, so the save takes the span here.
+
+        Raises ``_ManifestUnavailable`` when it cannot be saved, refusing the
+        append (KL-24 L3 r4: best-effort, a failure left the week unprotected).
+        Two states keep appending with a warning instead, because rulings chose
+        availability there: the manifest lock could not be taken (degrade with a
+        stderr warning, ruled 2026-10-03) and a quarantined manifest (the
+        2026-09-13 hybrid: appending to the active file does not need it). In
+        those two the week stays unprotected until the manifest is usable again.
+        Where advisory locks do not exist at all the span holds no lock and the
+        save still runs."""
+        degraded = (
+            "could not record the active audit file's first entry in the manifest "
+            "({}); a deletion of this week's active file will not be detected"
+        )
         try:
             with self._operation_span():
-                if self._lock_failures.get(threading.get_ident()) is not None:
-                    return  # degrade: no manifest save without the lock
-                manifest = self._load_manifest()
+                failure = self._lock_failures.get(threading.get_ident())
+                if failure is not None:
+                    _log(logging.WARNING, degraded.format(failure))
+                    return
+                try:
+                    manifest = self._load_manifest()
+                except _ManifestQuarantined as q:
+                    _log(logging.WARNING, degraded.format(q))
+                    return
                 manifest["active_begun"] = {
                     "period": self._last_week, "first_hash": first_hash,
                     "first_prev_hash": first_prev_hash,
                 }
                 self._save_manifest(manifest)
+        except _ManifestUnavailable:
+            raise
+        except Exception as e:
+            raise _ManifestUnavailable(
+                "cannot record the active audit file's first entry in the "
+                f"manifest, so this append is refused: {e}"
+            ) from e
+
+    def _withdraw_active_begun(self, first_hash: str) -> None:
+        """Best-effort: clear ``active_begun`` when it still names ``first_hash``,
+        an entry whose write was rolled back. Left in place, a restart would read
+        the empty file as a deleted one and refuse until ``audit-repair`` (a loud
+        false loss, never a silent one)."""
+        try:
+            with self._operation_span():
+                if self._lock_failures.get(threading.get_ident()) is not None:
+                    return
+                manifest = self._load_manifest()
+                begun = manifest.get("active_begun")
+                if isinstance(begun, dict) and begun.get("first_hash") == first_hash:
+                    manifest["active_begun"] = None
+                    self._save_manifest(manifest)
         except Exception:
             _log(logging.WARNING,
-                "could not record the active audit file's first entry in the "
-                "manifest; a deletion of this week's active file will not be "
-                "detected", exc_info=True,
+                "could not withdraw the manifest's record of a rolled-back first "
+                "audit entry; the next open may report the empty file as lost "
+                "until audit-repair", exc_info=True,
             )
 
     def _refuse_vanished_active(self, manifest: dict[str, Any]) -> None:

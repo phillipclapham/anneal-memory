@@ -107,7 +107,13 @@ try:  # POSIX advisory locking; absent on Windows (see CrystalStore._transaction
 except ImportError:  # pragma: no cover - exercised only on non-POSIX platforms
     fcntl = None  # type: ignore[assignment]
 
-from .graduation import _LEVEL_ATOM, _SCAFFOLD_TAG_RE, _STATE_PAREN_RE
+from .graduation import (
+    _LEVEL_ATOM,
+    _SCAFFOLD_TAG_RE,
+    _STATE_PAREN_RE,
+    _is_graduating_heading,
+)
+from .schema import DEFAULT_GRADUATING
 from .store import AnnealMemoryError, Store
 
 CRYSTAL_SCHEMA_VERSION = 1
@@ -1259,7 +1265,11 @@ class CrystalDecision(NamedTuple):
 _EVIDENCE_TAG_RE = re.compile(r'\[evidence:\s*((?:[^\]"]|"[^"]*"){0,4096})\]')
 
 
-def _extract_pattern_meta(wrap_text: str, name: str) -> tuple[int | None, str, list[str]]:
+def _extract_pattern_meta(
+    wrap_text: str,
+    name: str,
+    graduating_headings: frozenset[str] = DEFAULT_GRADUATING,
+) -> tuple[int | None, str, list[str]]:
     """Best-effort pull of ``(level, explanation, evidence_ids)`` from ``name``'s own
     ``name | Nx (date) [evidence: id, id "why"] — felt prose`` line in ``wrap_text``.
 
@@ -1301,7 +1311,17 @@ def _extract_pattern_meta(wrap_text: str, name: str) -> tuple[int | None, str, l
     best_key: tuple[int, int, int] | None = None  # (has_date, level, order)
     best_line: str | None = None
     best_level: int | None = None
+    # Only lines under a GRADUATING ``## `` heading are candidates, walked exactly as
+    # graduation's own validation walks them (``_is_graduating_heading``): a
+    # ``## State`` line ``name | 999x (date)`` is a decoy the validator never touched,
+    # and the highest-level rule would otherwise let it beat the real graduation line.
+    in_graduating = False
     for idx, line in enumerate(wrap_text.splitlines()):
+        if line.startswith("## "):
+            in_graduating = _is_graduating_heading(line, graduating_headings)
+            continue
+        if not in_graduating:
+            continue
         m = marker_re.search(line)
         if not m:
             continue
@@ -1431,7 +1451,10 @@ def _structural_dash(text: str) -> int:
     return -1
 
 
-def parse_crystal_decisions(wrap_text: str) -> list[CrystalDecision]:
+def parse_crystal_decisions(
+    wrap_text: str,
+    graduating_headings: frozenset[str] = DEFAULT_GRADUATING,
+) -> list[CrystalDecision]:
     """Parse the ```crystal-decisions``` routing block(s) out of a completed wrap.
 
     Scans ``wrap_text`` for every fenced ``crystal-decisions`` block and returns one
@@ -1447,7 +1470,12 @@ def parse_crystal_decisions(wrap_text: str) -> list[CrystalDecision]:
     every consumer inherits it structurally rather than re-implementing it.
 
     Grounding (``level`` / ``explanation`` / ``evidence_ids``) is pulled best-effort
-    from each pattern's graduation line elsewhere in ``wrap_text``. No matching block
+    from each pattern's graduation line elsewhere in ``wrap_text``, ONLY from sections
+    whose role is graduating (``graduating_headings`` =
+    :func:`anneal_memory.schema.graduating_headings` of the store's schema; the default
+    is ``## Patterns``). ``wrap_text`` must be the POST-validation text
+    (``validate_graduations(...).text``): the raw agent wrap still carries levels the
+    validator would demote or cap. No matching block
     → ``[]``. Duplicate names are returned as-is (the consumer owns conflict
     resolution); the parser stays a pure parser.
 
@@ -1493,7 +1521,9 @@ def parse_crystal_decisions(wrap_text: str) -> list[CrystalDecision]:
                     stacklevel=2,
                 )
                 continue
-            level, explanation, evidence_ids = _extract_pattern_meta(wrap_text, name)
+            level, explanation, evidence_ids = _extract_pattern_meta(
+                wrap_text, name, graduating_headings
+            )
             # route / permanence / activation_mode are narrowed to their Literal
             # types by the ``not in VALID_*`` guards above — no cast needed.
             decisions.append(

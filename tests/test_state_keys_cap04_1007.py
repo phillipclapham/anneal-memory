@@ -302,6 +302,16 @@ def test_mcp_keyword_recall_names_the_replacement(tmp_path):
                         state_key="user.home_city")
         text = Server(st)._tool_recall({"keyword": "Seattle"})["content"][0]["text"]
         assert f"({new.id})" in text and f"replaces ({old.id})" in text
+        # Wrap-hidden matches newer than the servable one cannot crowd it out of a
+        # small limit (codex L3 r3 MED).
+        for i in range(4):
+            x = st.record(f"Seattle wrap note {i}", "observation",
+                          timestamp=f"2026-03-0{i + 1}T10:00:00Z")
+            y = st.record(f"Seattle wrap note {i} again", "observation",
+                          timestamp=f"2026-03-0{i + 1}T11:00:00Z")
+            st.supersede(old_id=x.id, new_id=y.id, source="wrap")
+        got = st.replaced_matches("Seattle", limit=2, redirectable_only=True)
+        assert [e.id for e in got] == [old.id]
         assert "Austin" in text
         # A filtered call is left alone, as the durable-facts block is.
         filtered = Server(st)._tool_recall({"keyword": "Seattle", "source": "agent"})
@@ -517,10 +527,21 @@ def test_an_explicit_link_from_a_keyed_episode_is_refused(tmp_path):   # codex r
             st.supersede(old_id=a.id, new_id=b.id)
         with pytest.raises(SupersessionError, match="fills the state slot"):
             st.supersede(old_id=a.id, new_id=b.id, source="wrap")
-        # Through the key it goes, and an explicit link with the same key is allowed too.
+        # Not even with the same key, from any source (codex L3 r3 H1/H2: an equal-key
+        # explicit or wrap link survived clear_state_key and hid a keyed episode behind
+        # an unkeyed one); nothing was written by the refusals.
+        for src in ("agent", "wrap"):
+            with pytest.raises(SupersessionError, match="fills the state slot"):
+                st.record("Quillmark moved its database engine over to duckdb.", "observation",
+                          timestamp="2026-03-01T10:00:00Z", supersedes=[a.id],
+                          state_key="quillmark.db", source=src)
+        assert st.recall(limit=10).total_matching == 2
+        # Through the key alone it goes, and clearing that key brings the old one back.
         c = st.record("Quillmark moved its database engine over to duckdb.", "observation",
-                      timestamp="2026-03-01T10:00:00Z", supersedes=[a.id], state_key="quillmark.db")
+                      timestamp="2026-03-01T10:00:00Z", state_key="quillmark.db")
         assert {e.id for e in st.recall(limit=10).episodes} == {b.id, c.id}
+        st.clear_state_key(c.id)
+        assert {e.id for e in st.recall(limit=10).episodes} == {a.id, b.id, c.id}
 
 
 def test_a_wrap_link_from_a_keyed_episode_is_rejected_not_saved(tmp_path):   # codex r2 H1

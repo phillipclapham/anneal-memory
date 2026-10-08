@@ -4882,14 +4882,17 @@ class Store:
 
     def redirectable_ids(
         self, ids: Iterable[str], until: str | None = None,
-    ) -> dict[str, str]:
-        """``{replaced_id: the live head recall may SERVE for it}`` (CAP-04): the head is
+    ) -> dict[str, Episode]:
+        """``{replaced_id: the live head EPISODE recall may SERVE for it}`` (CAP-04): the head is
         computed over the links a wrap did not propose (``source='wrap'``) and a delete did
         not rewire (``'rewired'``, whose origin may have been a wrap link) ONLY, so every
         serving path (recall's swap, :meth:`replaced_matches`) shares this one head. Those
         links still hide (that ordering is :meth:`_live_replacements`' all-links one); they
         never serve. An id with no servable path, or whose servable end is itself hidden
-        (a wrap link supersedes it), is absent. ``until`` is recall's cutoff
+        (a wrap link supersedes it), is absent. The head rows are read in the same snapshot
+        as the walk and the hidden test, so the head is chosen and read in one state and a
+        caller needs no second read (a later one could see a state the choice never did).
+        ``until`` is recall's cutoff
         (``exclude_recent_minutes``): only replacements at or before it exist, for the head
         and for the hidden test alike, so an excluded episode is never served. Among
         equal-timestamp ends the greater id is the head (the walk orders by
@@ -4907,7 +4910,15 @@ class Store:
                 hidden.update(r[0] for r in self._conn.execute(
                     f"SELECT id FROM episodes WHERE id IN ({','.join('?' * len(chunk))}) "
                     f"AND id IN ({hide_sql})", [*chunk, *hide_params]))
-            return {o: h for o, h in heads.items() if h not in hidden}
+            keep = sorted({h for h in heads.values() if h not in hidden})
+            rows: dict[str, Episode] = {}
+            for start in range(0, len(keep), 500):
+                chunk = keep[start:start + 500]
+                for r in self._conn.execute(
+                        f"SELECT * FROM episodes WHERE id IN ({','.join('?' * len(chunk))})",
+                        chunk):
+                    rows[r["id"]] = self._row_to_episode(r)
+            return {o: rows[h] for o, h in heads.items() if h in rows}
 
     def replaced_matches(
         self, phrase: str, *, max_heads: int, max_olds: int = 5,
@@ -4927,6 +4938,7 @@ class Store:
         if max_heads < 1 or max_olds < 1:
             raise ValueError("replaced_matches: max_heads and max_olds must be >= 1")
         kept_by_head: dict[str, list[Any]] = {}
+        head_eps: dict[str, Episode] = {}
         count_by_head: dict[str, int] = {}
         with self._db_boundary("keyword_candidates"), self._read_snapshot():
             if not phrase or not self._has_supersessions_table():
@@ -4945,32 +4957,20 @@ class Store:
                     [*hide_params, pattern, *(after or ()), page]).fetchall()
                 heads = self.redirectable_ids([r["id"] for r in rows])
                 for r in rows:
-                    head = heads.get(r["id"])
-                    if head is None:
+                    head_ep = heads.get(r["id"])
+                    if head_ep is None:
                         continue
+                    head = head_ep.id
+                    head_eps[head] = head_ep
                     count_by_head[head] = count_by_head.get(head, 0) + 1
                     if len(kept_by_head.setdefault(head, [])) < max_olds:
                         kept_by_head[head].append(r)
                 if len(rows) < page:
                     break
                 after = (rows[-1]["timestamp"], rows[-1]["id"])
-            stamp: dict[str, tuple[str, str]] = {}
-            ids = list(count_by_head)
-            for start in range(0, len(ids), 500):
-                chunk = ids[start:start + 500]
-                for h in self._conn.execute(
-                        f"SELECT id, timestamp FROM episodes WHERE id IN "
-                        f"({','.join('?' * len(chunk))})", chunk):
-                    stamp[h["id"]] = (h["timestamp"], h["id"])
-            order = sorted(count_by_head, key=lambda h: stamp.get(h, ("", h)), reverse=True)
+            order = sorted(count_by_head, key=lambda h: (head_eps[h].timestamp, h), reverse=True)
             chosen = order[:max_heads]
-            head_rows = {
-                h["id"]: self._row_to_episode(h)
-                for start in range(0, len(chosen), 500)
-                for h in self._conn.execute(
-                    f"SELECT * FROM episodes WHERE id IN "
-                    f"({','.join('?' * len(chosen[start:start + 500]))})",
-                    chosen[start:start + 500])}
+            head_rows = {h: head_eps[h] for h in chosen}
         out = [dataclasses.replace(self._row_to_episode(r), superseded_by=h)
                for h in chosen for r in kept_by_head[h]]
         return ReplacedMatches(

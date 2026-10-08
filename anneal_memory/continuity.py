@@ -715,6 +715,40 @@ def _crystal_levels(crystal_store: CrystalStore | None) -> dict[str, int]:
     return out
 
 
+def _crystal_levels_bounded(
+    store: Store, crystal_store: CrystalStore | None
+) -> dict[str, int]:
+    """:func:`_crystal_levels`, each bounded by the store's own high-water mark
+    for the name (``pattern_history``, written only by canonical saves). A
+    crystal's level is the caller's argument to ``crystallize``; at a store's
+    first bounded save it seeded the record unchecked, so a crystal planted at
+    999 before that save stood as a saved 999 (L3 r3, complement MED; codex MED:
+    an unbounded int overflowed the record and failed every wrap). A name the
+    history never saw is not seeded: it enters as new."""
+    out: dict[str, int] = {}
+    for name, level in _crystal_levels(crystal_store).items():
+        history = store.get_pattern_history(name)
+        earned = history.get("max_level_reached") if history else None
+        if isinstance(earned, int) and not isinstance(earned, bool) and earned > 0:
+            out[name] = min(level, earned)
+    return out
+
+
+def _wrap_started_extras(store: Store, token_bound: bool, today: str) -> dict[str, Any]:
+    """Keyword arguments only a newer ``wrap_started`` takes. ``token_bound`` only
+    when the caller supplied the token, so a Store subclass that overrides
+    wrap_started with the pre-0.9.30 signature still works for every call that
+    does not use the new feature (codex L3, run); ``today`` (the day the
+    instructions told the composer to stamp) skipped for an override that
+    predates it (the save then reconstructs it)."""
+    extras: dict[str, Any] = {}
+    if token_bound:
+        extras["token_bound"] = True
+    if "today" in inspect.signature(store.wrap_started).parameters:
+        extras["today"] = today
+    return extras
+
+
 def _wrap_local_date(store: Store) -> str:
     """The local date the wrap in progress was PREPARED on, else today.
 
@@ -2132,14 +2166,7 @@ def prepare_wrap(
             gated_session_id=session_id,
             expect_last_wrap_id=window_last_wrap_id,
             derive_roots=frozen_identities,
-            # Only when the caller supplied the token, so a Store subclass that
-            # overrides wrap_started with the pre-0.9.30 signature still works for
-            # every call that does not use the new feature (codex L3, run).
-            **({"token_bound": True} if token_bound else {}),
-            # The day the instructions told the composer to stamp; skipped for an
-            # override that predates it (the save then reconstructs it).
-            **({"today": package["today"]}
-               if "today" in inspect.signature(store.wrap_started).parameters else {}),
+            **_wrap_started_extras(store, token_bound, package["today"]),
         )
     except WrapWindowMovedError:
         return _downgraded_empty(
@@ -3030,7 +3057,9 @@ def validated_save_continuity(
     # Crystal levels count only until the store has a record: the first bounded
     # save copies them into it, and from then on a crystal level never stands in
     # for a saved one (codex L3 r2: crystallized_on is a caller-set date).
-    crystal_levels = _crystal_levels(crystal_store) if saved_levels is None else None
+    crystal_levels = (
+        _crystal_levels_bounded(store, crystal_store) if saved_levels is None else None
+    )
     grad_result = validate_graduations(
         text=text,
         valid_ids=citable_ids,

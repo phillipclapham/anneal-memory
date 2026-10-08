@@ -431,13 +431,23 @@ def test_a_crystal_level_from_before_the_record_is_kept_on_rewarm(tmp_path):
         crystal = CrystalStore(tmp_path / "gate.crystal.json")
         crystal.crystallize(name="old_wisdom", level=6, explanation="earned long ago",
                             today=_date(2026, 1, 1))
+        # The store's own history saw it earn 6x; a crystal it never saw earn
+        # anything is not a prior (L3 r3, complement MED: planted before the
+        # first bounded save, it seeded the record at 999).
+        store.upsert_pattern_history(
+            pattern_name="old_wisdom", level=6, explanation="earned long ago",
+            seen_at="2026-01-01T00:00:00Z", wrap_id=None,
+        )
+        crystal.crystallize(name="planted_first", level=999,
+                            explanation="a level nobody earned in this store")
         ids = [store.record(f"{GROUNDED} (r{i})", EpisodeType.OBSERVATION).id for i in range(2)]
         res = prepare_wrap(store)
         validated_save_continuity(
-            store, _doc(f"- old_wisdom | 6x ({YESTERDAY})"),
+            store, _doc(f"- old_wisdom | 6x ({YESTERDAY})\n- planted_first | 999x ({YESTERDAY})"),
             today=TODAY, wrap_token=res["wrap_token"], crystal_store=crystal,
         )
         assert _level(store.load_continuity(), "old_wisdom") == 6
+        assert _level(store.load_continuity(), "planted_first") == 1
     finally:
         store.close()
 
@@ -518,5 +528,27 @@ def test_a_rename_carries_the_saved_level(tmp_path):
         store.rename_pattern_association("old_name", "new_name")
         assert store.saved_pattern_levels()[("name", "new_name")] == 4
         assert ("name", "old_name") not in store.saved_pattern_levels()
+    finally:
+        store.close()
+
+
+# --- L3 round 3 (1008+3) ------------------------------------------------------
+
+
+def test_identity_is_the_text_before_the_earliest_level_token(tmp_path):
+    # codex r3 HIGH (run): an undated anonymous line skipped the bound, and a
+    # decoy token before the dated one forged the identity "| 999x decoy".
+    saved, _ = _save(tmp_path, f"- | 9x\n- | 999x decoy | 9x ({YESTERDAY})")
+    levels = [int(m) for m in re.findall(r"\|\s*(\d+)x", saved)]
+    assert levels == [1, 1, 1]
+    # codex r3 HIGH + complement (run): renaming a name to itself deleted its
+    # saved level, so the next wrap cut it to 1x as new.
+    (tmp_path / "rn").mkdir()
+    store = _open(tmp_path / "rn")
+    try:
+        _wrap(store, "- foo | 1x (2026-10-01)")
+        before = store.saved_pattern_levels()
+        assert store.rename_pattern_association("foo", "foo") == 0
+        assert store.saved_pattern_levels() == before
     finally:
         store.close()

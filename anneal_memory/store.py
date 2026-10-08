@@ -6026,7 +6026,8 @@ class Store:
         when that is lower (the prior file's: an operator's hand demotion survives
         a wrap that leaves the pattern out, codex L3 r1); freeform rows are
         replaced. On the store's FIRST save under the bound, ``first_tombstones``
-        (the prior file's named levels and every crystal level) seed the record,
+        (the prior file's named levels and each crystal level the caller bounded
+        by the store's own history) seed the record,
         so a pattern that first save omits, or one crystallized out before it, keeps
         its level; after that no caller-supplied level enters the record except
         through a bounded save (complement + codex L3 r2)."""
@@ -6597,6 +6598,10 @@ class Store:
                 this event. Also counted on ``status().audit_write_failures``
                 and logged; see :meth:`_audit_log_after_commit`.
         target pair exists). Returns edges re-keyed."""
+        if old_name == new_name:
+            # Nothing to re-key, and the record update below would delete the
+            # name's own saved level (L3 r3, codex HIGH + complement, run).
+            return 0
         day = today or _today_local()
         with self._db_boundary("rename_pattern_association"):
             # The bound's record follows the rename (complement L3 r2): the old

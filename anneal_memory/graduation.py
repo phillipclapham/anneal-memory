@@ -1174,7 +1174,7 @@ def validate_graduations(
         sep = " " if rest and not rest.startswith(" ") else ""
         lines[i] = f"{line[:bstart]}{new_marker} (needs-evidence){sep}{rest}"
 
-    level_capped: list[LevelCapped] = []
+    level_capped: list[tuple[int, LevelCapped]] = []
     if prior_text is not None:
         level_capped = _apply_prior_bound(
             lines,
@@ -1246,10 +1246,12 @@ def _line_levels(line: str) -> tuple[tuple[str, str], list[re.Match]] | None:
     A named line (``_NAMED_PATTERN_RE``, the grammar every per-name consumer
     reads) is keyed by its name and governs its own marker, dated or not, plus
     every DATED marker after it (so a ``name | Nx (date)`` mention later in the
-    line is cut with it). Any other line counts only when it carries a dated
-    marker (the shape ``_GRADUATION_RE`` and the bare regex act on), so an
-    unbulleted ``Throughput | 3x when batched`` is never touched; it is keyed by
-    its normalised text before that marker, so rewording it makes it new.
+    line is cut with it). Any other line is keyed by its normalised text before
+    its earliest level token: with no text there it is anonymous and governs
+    every token; with text, it counts only when it carries a dated marker (the
+    shape ``_GRADUATION_RE`` and the bare regex act on), so an unbulleted
+    ``Throughput | 3x when batched`` is never touched, and rewording it makes it
+    new.
     """
     named = _NAMED_PATTERN_RE.match(line)
     if named:
@@ -1261,15 +1263,26 @@ def _line_levels(line: str) -> tuple[tuple[str, str], list[re.Match]] | None:
             if m.group(0).endswith(")")
         ]
         return ("name", named.group(1)), [own, *rest]
-    dated = [m for m in _LEVEL_TOKEN_RE.finditer(line) if m.group(0).endswith(")")]
-    if not dated:
+    tokens = list(_LEVEL_TOKEN_RE.finditer(line))
+    if not tokens:
         return None
-    head = _FREEFORM_PREFIX_RE.sub("", line[: dated[0].start()])
+    # ONE GRAMMAR RULE, not a check per shape (L3 r3, codex HIGH, run): the
+    # identity is the text before the line's EARLIEST level token. Keying on the
+    # first DATED token let ``- | 999x decoy | 9x (date)`` forge the identity
+    # "| 999x decoy" and left 999x untouched, and an undated ``- | 9x`` was
+    # skipped as prose.
+    head = _FREEFORM_PREFIX_RE.sub("", line[: tokens[0].start()])
     key = " ".join(head.lower().split())
     if not key:
-        # No identity at all (``- | 9x (date)``, codex r2 #1): never skipped,
-        # never recorded, always new, so it stands at 1x.
-        return ("anon", ""), dated
+        # No identity at all (``- | 9x``, dated or not; codex r2 #1, r3): never
+        # skipped, never recorded, always new, and every level token on the line
+        # stands at 1x.
+        return ("anon", ""), tokens
+    dated = [m for m in tokens if m.group(0).endswith(")")]
+    if not dated:
+        # Prose with an undated ``| 3x`` after some words (``Throughput | 3x when
+        # batched``) is not a graduation line and is never touched.
+        return None
     return ("text", key), dated
 
 
@@ -1314,7 +1327,7 @@ def _prior_base(
             # The store's record is the prior; the file may only lower it.
             return saved if in_file is None else min(saved, in_file)
         # In the file but never saved by the store: an out-of-band edit. (The
-        # record's first save already took in every crystal level, so a crystal
+        # record's first save already took in the crystal levels, so a crystal
         # store is never consulted once a record exists: codex r2 #2.)
         return None
     if in_file is not None:

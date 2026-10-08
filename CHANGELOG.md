@@ -17,13 +17,18 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   pattern out; a line in the file the store never saved is new; a named pattern dropped from the file keeps its
   record, so re-adding it returns to its saved level, not to `pattern_history`'s high-water mark. A store's first
   save under this version takes the file as the prior and seeds the record with the prior file's named levels and
-  every crystal level; after that a crystal level never stands in for a saved one. A line with a level and no
-  identity (`- | 9x`) is always new. A name's level is its highest line across graduating sections. Only a line's own marker earns the
+  each crystal level, bounded by the highest level the store's `pattern_history` saw that name reach (a crystal it
+  never saw is not seeded); after that a crystal level never stands in for a saved one. A line's identity is the
+  text before its first level marker; a line with none (`- | 9x`, dated or not) is always new, every marker at 1x.
+  Renaming a pattern to its own name changes nothing. A name's level is its highest line across graduating sections. Only a line's own marker earns the
   rung. Co-citation links from a validated line still form when the line is cut (the episodes were cited together
   and grounded; the cut is about the level).
 - Scope: the bound governs what `validated_save_continuity` writes. A continuity written by the raw
   `Store.save_continuity()` or by an older anneal (which ignores the table) is outside it until the next canonical
   save, which bounds it against the record again.
+  Refusing an older anneal outright needs a schema-version bump (arming the `anneal_writer_schema()` triggers),
+  which also makes every installed older anneal and anything pinned to one refuse the store until upgraded; it is
+  planned for the next schema generation, not this release (ruled 2026-10-08).
 - A cut line is marked `(level-capped)` (cleared once the line stands at an entitled level; a cut carried line
   loses its `(carried-forward)`) and reported as `level_capped` on the save result (present only when a line was
   cut), in the MCP save reply and the CLI output, as a `UserWarning`, and in the `continuity_saved` audit event. A

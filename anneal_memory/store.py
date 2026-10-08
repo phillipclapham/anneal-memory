@@ -7195,8 +7195,8 @@ class Store:
         # reports ``memory`` when WAL is refused (L3 r3, codex MED).
         main_file = next(
             (r[2] for r in self._conn.execute("PRAGMA database_list").fetchall()
-             if r[1] == "main"), "")
-        if mode != "wal" and main_file:
+             if r[1] == "main"), None)  # no main row: unknown, so refused (r4 LOW)
+        if mode != "wal" and main_file != "":
             raise sqlite3.OperationalError(
                 f"journal_mode=WAL was not enabled (SQLite reports {mode!r}); "
                 "anneal-memory needs WAL, which this filesystem or VFS refused"

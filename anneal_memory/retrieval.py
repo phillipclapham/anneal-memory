@@ -1081,17 +1081,20 @@ def _swap_replaced(
     construction shares none of its words. Replaced hits are scored with weights counted
     over every episode, replaced ones included, so a link never raises a hit's score
     (counted over the live episodes only, a word that survives only in replaced text
-    would read as maximally rare); live hits keep their own weights, so a link never
-    changes them either. A replacement keeps the first slot it earns and lists every
-    replaced hit it stands in for in ``replaces``. A hit hidden only by wrap-proposed
-    links is dropped, not swapped: a wrap model proposes those in bulk (measured ~1.4%
-    precise on STALE), so they hide but never serve."""
+    would read as maximally rare); live hits keep their own weights and scores. The
+    replacement takes the slot, and the score, of the best hit it stands in for (or its
+    own, if it ranks higher as a live hit): the slot the old fact would have held is the
+    update's. It lists every replaced hit it stands in for in ``replaces``. A hit whose path to that episode
+    crosses a wrap-proposed (or delete-rewired) link is dropped, not swapped: a wrap
+    model proposes those in bulk (measured ~1.4% precise on STALE), so they hide but
+    never serve."""
     every, doc_freq, corpus_n = _fetch_episode_candidates(
         store, keywords, until=until, uncapped=mode == "query",
         filters={"include_superseded": True},
     )
     replaced = {i: e for i, e in every.items() if e.superseded_by}
-    swappable = store.redirectable_ids(list(replaced)) if replaced else set()
+    swappable = store.redirectable_ids(
+        {i: e.superseded_by or "" for i, e in replaced.items()}) if replaced else set()
     replaced = {i: e for i, e in replaced.items() if i in swappable}
     if not replaced:
         return live[:max_episodes]

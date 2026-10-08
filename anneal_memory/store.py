@@ -1490,6 +1490,12 @@ CREATE TABLE IF NOT EXISTS state_keys (
     set_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 CREATE INDEX IF NOT EXISTS idx_state_keys_key ON state_keys(key);
+-- In the schema itself so an older binary's delete or prune fires it too: a key row
+-- never outlives its episode (a re-recorded id must not inherit a slot).
+CREATE TRIGGER IF NOT EXISTS state_keys_follow_episodes AFTER DELETE ON episodes
+BEGIN
+    DELETE FROM state_keys WHERE episode_id = OLD.id;
+END;
 
 -- CAP-06 drift probes: what the operator declared must survive consolidation, and
 -- each save's verdict on it. Additive; an older binary ignores both tables.
@@ -1791,7 +1797,10 @@ def normalize_state_key(key: object) -> str:
     """
     if not isinstance(key, str):
         raise ValueError(f"state_key must be a string, not {type(key).__name__}")
-    norm = " ".join(unicodedata.normalize("NFKC", key).split()).casefold()
+    # NFKC, case-fold, NFKC again: case-folding can produce text NFKC would change,
+    # and a stored key pasted back must name the same slot.
+    folded = unicodedata.normalize("NFKC", unicodedata.normalize("NFKC", key).casefold())
+    norm = " ".join(folded.split())
     if not norm:
         raise ValueError("state_key must not be empty")
     if len(norm) > STATE_KEY_MAX_LEN:
@@ -1825,8 +1834,21 @@ def _instant_key(ts: str, tiebreak: Any = "") -> tuple:
     if tz and tz != "Z":
         sign = 1 if tz[0] == "+" else -1
         digits = tz[1:].replace(":", "")
-        dt -= sign * timedelta(hours=int(digits[:2]), minutes=int(digits[2:4] or 0))
+        try:
+            dt -= sign * timedelta(hours=int(digits[:2]), minutes=int(digits[2:4] or 0))
+        except OverflowError:
+            return (1, ts, tiebreak)
     return (0, dt, tiebreak)
+
+
+def _canonical_utc(ts: str) -> str | None:
+    """``ts`` in the store's own timestamp form (UTC, microseconds, ``Z``), or None
+    when it does not parse. Keyed episodes are stored in this form so the string order
+    every SQL cutoff uses agrees with the instant order the key rule uses."""
+    key = _instant_key(ts)
+    if key[0] != 0:
+        return None
+    return key[1].strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _supersession_grounds(new_text: str, old_text: str) -> bool:
@@ -2732,6 +2754,12 @@ class Store:
         meta_json = json.dumps(metadata) if metadata is not None else None
         old_ids = _normalize_supersedes(supersedes)
         key = normalize_state_key(state_key) if state_key is not None else None
+        if key is not None:
+            canonical = _canonical_utc(ts)
+            if canonical is None:
+                raise ValueError(
+                    f"state_key needs an ISO 8601 timestamp; {ts!r} does not parse")
+            ts = canonical
         key_links: list[tuple[str, str]] = []
 
         # Retry with incrementing nonce on ID collision (birthday or duplicate content).
@@ -3000,17 +3028,22 @@ class Store:
         newest = max(everyone)[1]
         return sorted((i, newest) for _, i in everyone if i != newest)
 
-    def _insert_key_links(self, links: list[tuple[str, str]], source: str) -> list[tuple[str, str]]:
-        """Insert key links, skipping a pair a team snapshot owns and a pair already
-        recorded; returns the pairs actually written."""
+    def _insert_key_links(self, links: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        """Insert key links with ``source='state_key'`` (the link's KIND; who asked is in
+        the audit event), skipping a pair a team snapshot owns. A wrap-proposed link the
+        key confirms is relabelled ``state_key`` (wrap links hide but never serve; a key
+        is the writer's claim, so it may). Returns the pairs written or relabelled."""
         made = []
         for old_id, new_id in links:
             if self._team_owned(old_id, new_id):
                 continue
             cur = self._conn.execute(
-                "INSERT OR IGNORE INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
-                (old_id, new_id, source),
-            )
+                "INSERT OR IGNORE INTO supersessions (old_id, new_id, source) "
+                "VALUES (?, ?, 'state_key')", (old_id, new_id))
+            if not cur.rowcount:
+                cur = self._conn.execute(
+                    "UPDATE supersessions SET source = 'state_key' "
+                    "WHERE old_id = ? AND new_id = ? AND source = 'wrap'", (old_id, new_id))
             if cur.rowcount:
                 made.append((old_id, new_id))
         return made
@@ -3022,7 +3055,7 @@ class Store:
         returns the links actually written."""
         self._conn.execute(
             "INSERT INTO state_keys (episode_id, key) VALUES (?, ?)", (ep_id, key))
-        return self._insert_key_links(links, source)
+        return self._insert_key_links(links)
 
     def _audit_state_key_links(
         self, key: str | None, links: list[tuple[str, str]], source: str, *, method: str,
@@ -3067,6 +3100,12 @@ class Store:
             ).fetchone()
             if row is None:
                 problem = f"set_state_key: episode {episode_id!r} does not exist"
+            elif have is None and _canonical_utc(row["timestamp"]) != row["timestamp"]:
+                problem = (
+                    f"set_state_key: {episode_id!r} has timestamp {row['timestamp']!r}, not "
+                    "the store's UTC form; a keyed episode needs it so cutoffs and the key "
+                    "rule agree on order. Re-record it with state_key="
+                )
             elif have is not None and have["key"] != key:
                 problem = (
                     f"set_state_key: {episode_id!r} already fills {have['key']!r}; "
@@ -3101,8 +3140,10 @@ class Store:
 
     def clear_state_key(self, episode_id: str, *, source: str = "agent") -> dict[str, Any]:
         """Take an episode OUT of its state slot (CAP-04), the undo for a wrong key:
-        its key row goes, every link between it and another holder of the same key goes
-        (a link a team snapshot owns is left), and the slot is re-formed so its newest
+        its key row goes, every link a key made between it and another holder of the
+        same key goes (``source`` ``state_key``, or ``rewired`` through a deleted holder;
+        an explicit link and one a team snapshot owns are left), and the slot is
+        re-formed so its newest
         live holder replaces the others again. ``unsupersede`` alone does not do this:
         the key row stays, so the next keyed write in that slot hides the episode again.
 
@@ -3126,7 +3167,8 @@ class Store:
                 for r in self._conn.execute(
                     "SELECT s.old_id, s.new_id FROM supersessions s JOIN state_keys k "
                     "ON k.episode_id = CASE WHEN s.old_id = ? THEN s.new_id ELSE s.old_id END "
-                    "WHERE (s.old_id = ? OR s.new_id = ?) AND k.key = ?",
+                    "WHERE (s.old_id = ? OR s.new_id = ?) AND k.key = ? "
+                    "AND s.source IN ('state_key', 'rewired')",
                     (episode_id, episode_id, episode_id, key),
                 ).fetchall():
                     if self._team_owned(r["old_id"], r["new_id"]):
@@ -3139,7 +3181,7 @@ class Store:
                 holders = self._live_holders(key)
                 if len(holders) > 1:
                     out["added"] = self._insert_key_links(
-                        [(r["id"], holders[0]["id"]) for r in holders[1:]], source)
+                        [(r["id"], holders[0]["id"]) for r in holders[1:]])
             if not self._defer_commit:
                 self._conn.commit()
         for old_id, new_id in out["removed"]:
@@ -3156,28 +3198,33 @@ class Store:
         link was removed with :meth:`unsupersede`, and the next keyed write in that
         slot replaces them all. Read-only; ``[]`` on a store with no keys."""
         want = normalize_state_key(key) if key is not None else None
+        out: list[dict[str, Any]] = []
         with self._db_boundary("state_key_report"), self._read_snapshot():
             if self._conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'state_keys'"
             ).fetchone() is None:
                 return []
-            hidden: set[str] = set()
-            if self._has_supersessions_table():
-                hide_sql, hide_params = _hidden_by_supersession_sql(None)
-                hidden = {r[0] for r in self._conn.execute(hide_sql, hide_params)}
-            rows = self._conn.execute(
-                "SELECT k.key, e.id, e.timestamp, e.content FROM state_keys k "
-                "JOIN episodes e ON e.id = k.episode_id"
-                + (" WHERE k.key = ?" if want is not None else "")
-                + " ORDER BY k.key, e.timestamp DESC, e.id DESC",
-                [want] if want is not None else [],
-            ).fetchall()
-        out: dict[str, dict[str, Any]] = {}
-        for r in rows:
-            entry = out.setdefault(r["key"], {"key": r["key"], "current": [], "replaced": []})
-            item = {"id": r["id"], "timestamp": r["timestamp"], "content": r["content"]}
-            entry["replaced" if r["id"] in hidden else "current"].append(item)
-        return list(out.values())
+            keys = [r[0] for r in self._conn.execute(
+                "SELECT DISTINCT key FROM state_keys"
+                + (" WHERE key = ?" if want is not None else "") + " ORDER BY key",
+                [want] if want is not None else [])]
+            for k in keys:
+                current = [r["id"] for r in self._live_holders(k)]
+                keyed = self._conn.execute(
+                    "SELECT e.rowid AS rn, e.id, e.timestamp FROM state_keys s "
+                    "JOIN episodes e ON e.id = s.episode_id WHERE s.key = ?", (k,)).fetchall()
+                replaced = [r["id"] for r in sorted(
+                    keyed, key=lambda r: _instant_key(r["timestamp"], r["rn"]), reverse=True)
+                    if r["id"] not in current]
+                rows = {r["id"]: r for r in self._conn.execute(
+                    "SELECT id, timestamp, content FROM episodes WHERE id IN "
+                    f"({','.join('?' * len(current + replaced))})", current + replaced)}
+                out.append({
+                    "key": k,
+                    "current": [dict(rows[i]) for i in current if i in rows],
+                    "replaced": [dict(rows[i]) for i in replaced if i in rows],
+                })
+        return out
 
     def _remember_team_entries(self, items: Iterable[tuple[Any, Any, Any]]) -> None:
         """Record ``(entry_id, hash, episode_id)`` in ``team_entries``. The first
@@ -4456,19 +4503,6 @@ class Store:
             )
         return None
 
-    def _drop_state_keys(self, ids: list[str]) -> None:
-        """Remove the state-key rows of episodes being deleted (inside the caller's
-        transaction), so a later episode that reuses an id does not inherit a slot."""
-        if self._conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'state_keys'"
-        ).fetchone() is None:
-            return
-        for start in range(0, len(ids), 500):
-            chunk = ids[start:start + 500]
-            self._conn.execute(
-                f"DELETE FROM state_keys WHERE episode_id IN ({','.join('?' * len(chunk))})",
-                chunk)
-
     def _has_supersessions_table(self) -> bool:
         """A read_only Store skips schema init, so a database last opened by an
         older binary has no ``supersessions`` table. Readers check before using it
@@ -4549,7 +4583,6 @@ class Store:
                     "%d entr(ies) the team ledger still hides; they show in recall again",
                     row["id"], linker_of)
             links_removed = self._detach_supersessions([row["id"]])
-            self._drop_state_keys([row["id"]])
             self._remember_team_rows([row], "operator" if team_operator else "auto")
             self._conn.execute("DELETE FROM episodes WHERE id = ?", (episode_id,))
             # 10.5c.5 L4 Fix: batch-aware commit for consistency with
@@ -4804,20 +4837,49 @@ class Store:
             return self._has_supersessions_table() and self._conn.execute(
                 "SELECT 1 FROM supersessions LIMIT 1").fetchone() is not None
 
-    def redirectable_ids(self, ids: list[str]) -> set[str]:
-        """The given replaced episodes that recall may SERVE the replacement of: those
-        with a direct link not proposed by a wrap (``source != 'wrap'``). A wrap's links
-        still hide; they never serve (CAP-04)."""
+    def redirectable_ids(self, heads: dict[str, str]) -> set[str]:
+        """Of ``{replaced_id: live head}``, the ids recall may SERVE the head for: those
+        joined to their head by a path of links none of which a wrap proposed
+        (``source='wrap'``) or a delete rewired (``'rewired'``, whose origin may have been
+        a wrap link). Those links still hide; they never serve (CAP-04)."""
         out: set[str] = set()
+        ids = list(heads)
         with self._db_boundary("keyword_candidates"):
             if not ids or not self._has_supersessions_table():
                 return out
             for start in range(0, len(ids), 500):
                 chunk = ids[start:start + 500]
-                out.update(r[0] for r in self._conn.execute(
-                    "SELECT DISTINCT old_id FROM supersessions WHERE source != 'wrap' "
-                    f"AND old_id IN ({','.join('?' * len(chunk))})", chunk))
+                rows = self._conn.execute(
+                    f"""WITH RECURSIVE p(start, cur) AS (
+                            SELECT old_id, new_id FROM supersessions
+                            WHERE old_id IN ({','.join('?' * len(chunk))})
+                              AND source NOT IN ('wrap', 'rewired')
+                            UNION
+                            SELECT p.start, s.new_id FROM p JOIN supersessions s
+                              ON s.old_id = p.cur AND s.source NOT IN ('wrap', 'rewired')
+                        )
+                        SELECT start, cur FROM p""", chunk).fetchall()
+                out.update(r[0] for r in rows if heads.get(r[0]) == r[1])
         return out
+
+    def replaced_matches(self, phrase: str, *, limit: int) -> list[Episode]:
+        """Episodes a supersession hides whose content contains ``phrase`` (matched as
+        :meth:`recall` matches a keyword), newest first, each with ``superseded_by`` =
+        the live end of its chain; one whose chain has no live end is left out. Scans
+        only the hidden set, so live matches cannot crowd them out."""
+        if limit < 0:
+            raise ValueError("replaced_matches: limit must be >= 0")
+        with self._db_boundary("keyword_candidates"), self._read_snapshot():
+            if not phrase or not limit or not self._has_supersessions_table():
+                return []
+            hide_sql, hide_params = _hidden_by_supersession_sql(None)
+            rows = self._conn.execute(
+                f"SELECT * FROM episodes WHERE id IN ({hide_sql}) AND {_KEYWORD_LIKE_SQL} "
+                "ORDER BY timestamp DESC LIMIT ?",
+                [*hide_params, _keyword_like_pattern(phrase), limit]).fetchall()
+            heads = self._live_replacements([r["id"] for r in rows], None)
+        return [dataclasses.replace(self._row_to_episode(r), superseded_by=heads[r["id"]])
+                for r in rows if r["id"] in heads]
 
     def _scan_containing_oldest(
         self, keyword: str, visit: Callable[[Episode], bool], *, page: int = 500,
@@ -7337,7 +7399,6 @@ class Store:
                 return 0
 
             links_removed = self._detach_supersessions([row["id"] for row in rows])
-            self._drop_state_keys([row["id"] for row in rows])
             self._remember_team_rows(rows)
             pruned = 0
             for row in rows:

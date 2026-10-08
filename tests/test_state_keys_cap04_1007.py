@@ -134,8 +134,8 @@ def test_unsupersede_undoes_a_wrong_slot_and_the_next_write_replaces_both(tmp_pa
 
 def test_set_state_key_links_existing_episodes(tmp_path):
     with Store(str(tmp_path / "m.db")) as st:
-        old = st.record(OLD, "observation", timestamp="2026-01-05T10:00:00Z")
-        new = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00Z")
+        old = st.record(OLD, "observation", timestamp="2026-01-05T10:00:00.000000Z")
+        new = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00.000000Z")
         assert st.set_state_key(old.id, "user.home_city") == []
         assert st.set_state_key(new.id, "user.home_city") == [(old.id, new.id)]
         # The same key again changes nothing; a different key is refused.
@@ -150,7 +150,7 @@ def test_set_state_key_refuses_an_episode_already_replaced_and_writes_nothing(tm
     """Every planned link points at the slot's newest live holder, so a cycle can only
     come from keying an episode a link already hides, and that is refused first."""
     with Store(str(tmp_path / "m.db")) as st:
-        ts = "2026-01-05T10:00:00Z"
+        ts = "2026-01-05T10:00:00.000000Z"
         x = st.record("The project database runs on postgres in production.", "observation",
                       timestamp=ts)
         y = st.record("The project database runs on sqlite in production now.", "observation",
@@ -282,8 +282,8 @@ def test_cli_record_state_key_and_the_state_listing(tmp_path, monkeypatch, capsy
 def test_cli_state_set_and_its_refusal(tmp_path, monkeypatch, capsys):
     db = str(tmp_path / "m.db")
     with Store(db) as st:
-        a = st.record(OLD, "observation", timestamp="2026-01-05T10:00:00Z")
-        b = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00Z")
+        a = st.record(OLD, "observation", timestamp="2026-01-05T10:00:00.000000Z")
+        b = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00.000000Z")
     _cli(monkeypatch, capsys, "--db", db, "state", "user.home_city", "--set", a.id)
     out = json.loads(_cli(monkeypatch, capsys, "--db", db, "state", "user.home_city",
                           "--set", b.id, "--json").out)
@@ -382,9 +382,9 @@ def test_a_tie_goes_to_the_later_write(tmp_path):   # L1 LOW 4
 def test_keying_an_episode_already_replaced_is_refused(tmp_path):   # L2 L2
     with Store(str(tmp_path / "m.db")) as st:
         x = st.record("The database engine for Quillmark is postgres.", "observation",
-                      timestamp="2026-01-01T10:00:00Z")
+                      timestamp="2026-01-01T10:00:00.000000Z")
         st.record("Quillmark moved its database engine over to sqlite.", "observation",
-                  timestamp="2026-02-01T10:00:00Z", supersedes=[x.id])
+                  timestamp="2026-02-01T10:00:00.000000Z", supersedes=[x.id])
         with pytest.raises(SupersessionError, match="already replaced"):
             st.set_state_key(x.id, "k")
 
@@ -423,3 +423,104 @@ def test_cli_state_unset(tmp_path, monkeypatch, capsys):
         b = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00Z", state_key="k")
     out = json.loads(_cli(monkeypatch, capsys, "--db", db, "state", "--unset", b.id, "--json").out)
     assert out["key"] == "k" and out["removed"] == [{"old_id": a.id, "new_id": b.id}]
+
+
+def test_set_state_key_refuses_a_non_canonical_timestamp(tmp_path):   # codex L3 r1 HIGH 1
+    with Store(str(tmp_path / "m.db")) as st:
+        e = st.record("a fact", "observation", timestamp="2026-01-01T12:00:00+05:00")
+        with pytest.raises(SupersessionError, match="UTC form"):
+            st.set_state_key(e.id, "k")
+
+
+def test_record_with_a_key_stores_a_canonical_utc_timestamp(tmp_path):
+    with Store(str(tmp_path / "m.db")) as st:
+        e = st.record("a fact", "observation", timestamp="2026-01-01T12:00:00+05:00",
+                      state_key="k")
+        assert e.timestamp == "2026-01-01T07:00:00.000000Z"
+        with pytest.raises(ValueError, match="does not parse"):
+            st.record("b fact", "observation", timestamp="yesterday", state_key="k")
+
+
+def test_a_cutoff_and_the_key_rule_agree_on_order(tmp_path):   # codex L3 r1 HIGH 1
+    with Store(str(tmp_path / "m.db")) as st:
+        _seed(st)
+        old = st.record(OLD, "observation", timestamp="2026-02-10T08:00:00Z", state_key="k")
+        st.record(NEW, "observation", timestamp="2026-02-10T05:00:00-05:00", state_key="k")
+        res = _recall(st, exclude_recent_minutes=60, now="2026-02-10T10:00:00Z")
+        assert old.id in [e.id for e in res.episodes]          # 10:00Z is inside the window
+        assert all(e.replaces == () for e in res.episodes)
+
+
+def test_a_wrap_hop_anywhere_on_the_path_never_serves(tmp_path):   # codex H2 + complement M1
+    with Store(str(tmp_path / "m.db")) as st:
+        _seed(st)
+        a = st.record("The database engine for Quillmark is postgres.", "observation",
+                      timestamp="2026-01-05T10:00:00Z")
+        b = st.record("Quillmark moved its database engine over to sqlite.", "observation",
+                      timestamp="2026-02-10T10:00:00Z", supersedes=[a.id])
+        c = st.record("Quillmark moved its database engine over to duckdb now.", "observation",
+                      timestamp="2026-03-10T10:00:00Z")
+        assert st.supersede(old_id=b.id, new_id=c.id, source="wrap")
+        res = _recall(st, "is quillmark still on postgres")
+        assert all(not e.replaces for e in res.episodes)
+        assert st.redirectable_ids({a.id: c.id}) == set()
+
+
+def test_a_key_link_is_its_own_kind_whoever_wrote_it(tmp_path):   # codex M3
+    with Store(str(tmp_path / "m.db")) as st:
+        _seed(st)
+        old = st.record(OLD, "observation", timestamp="2026-01-05T10:00:00Z",
+                        state_key="k", source="wrap")
+        new = st.record(NEW, "observation", timestamp="2026-02-10T10:00:00Z",
+                        state_key="k", source="wrap")
+        assert [r[0] for r in st._conn.execute("SELECT source FROM supersessions")] == ["state_key"]
+        res = _recall(st, QUESTION + " near the waterfront")
+        assert new.id in [e.id for e in res.episodes]
+        assert st.redirectable_ids({old.id: new.id}) == {old.id}
+
+def test_the_report_shows_an_unkeyed_current_holder(tmp_path):   # codex M5
+    with Store(str(tmp_path / "m.db")) as st:
+        a = st.record("The database engine for Quillmark is postgres.", "observation",
+                      timestamp="2026-01-01T10:00:00Z", state_key="quillmark.db")
+        b = st.record("Quillmark moved its database engine over to sqlite.", "observation",
+                      timestamp="2026-02-01T10:00:00Z", supersedes=[a.id])
+        r = st.state_key_report("quillmark.db")[0]
+        assert [x["id"] for x in r["current"]] == [b.id]
+        assert [x["id"] for x in r["replaced"]] == [a.id]
+
+
+def test_a_key_row_never_outlives_its_episode_even_for_raw_sql(tmp_path):   # codex M6
+    with Store(str(tmp_path / "m.db")) as st:
+        e = st.record("lives in Seattle", "observation", state_key="k")
+        st._conn.execute("DELETE FROM episodes WHERE id = ?", (e.id,))   # an older binary
+        st._conn.commit()
+        assert st._conn.execute("SELECT COUNT(*) FROM state_keys").fetchone()[0] == 0
+
+
+def test_mcp_block_finds_an_old_match_behind_many_live_ones(tmp_path):   # codex M4
+    from anneal_memory.server import Server
+    with Store(str(tmp_path / "m.db")) as st:
+        old = st.record("Seattle office lease signed.", "observation",
+                        timestamp="2026-01-01T10:00:00Z", state_key="office.city")
+        new = st.record("The office moved to Austin.", "observation",
+                        timestamp="2026-01-02T10:00:00Z", state_key="office.city")
+        for i in range(30):
+            st.record(f"Seattle weather note {i}", "observation",
+                      timestamp=f"2026-02-{1 + i % 28:02d}T10:{i:02d}:00Z")
+        text = Server(st)._tool_recall({"keyword": "Seattle"})["content"][0]["text"]
+        assert f"({new.id})" in text and f"replaces ({old.id})" in text
+
+
+def test_cli_state_refuses_conflicting_flags(tmp_path, monkeypatch, capsys):   # LOW
+    db = str(tmp_path / "m.db")
+    Store(db).close()
+    with pytest.raises(SystemExit):
+        _cli(monkeypatch, capsys, "--db", db, "state", "k", "--set", "a", "--unset", "b")
+    with pytest.raises(SystemExit):
+        _cli(monkeypatch, capsys, "--db", db, "state", "k", "--unset", "abcd1234")
+
+
+def test_normalising_a_normal_key_changes_nothing():   # complement LOW
+    for k in ["\u0130stanbul", "STRASSE stra\u00dfe", "\u1e9e", "\ufb01le"]:
+        n = normalize_state_key(k)
+        assert normalize_state_key(n) == n

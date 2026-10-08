@@ -3257,6 +3257,22 @@ def validated_save_continuity(
                     f"saved and the wrap is still open; save again (cite the replacing "
                     f"episode instead)."
                 )
+            # The same re-read for trust (codex r1 #4): a class another writer
+            # changed after validation read it would let the save commit a
+            # graduation judged on the old class. Raising rolls the batch back.
+            _cited = set(grad_result.citation_counts)
+            _trust_now = store.trust_map(sorted(_cited))
+            _trust_moved = sorted(
+                cid for cid in _cited
+                if _trust_now.get(cid, DEFAULT_TRUST) != window_trust.get(cid, DEFAULT_TRUST)
+            )
+            if _trust_moved:
+                raise StoreError(
+                    f"validated_save_continuity: the trust class of cited episode(s) "
+                    f"{', '.join(_trust_moved)} changed while this save ran. Nothing was "
+                    f"saved and the wrap is still open; save again.",
+                    operation="save_continuity",
+                )
 
             # The bound's next prior, recorded in this transaction so it commits
             # with the wrap or not at all.

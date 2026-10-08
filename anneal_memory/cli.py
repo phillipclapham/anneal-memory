@@ -862,12 +862,16 @@ def cmd_record(args: argparse.Namespace) -> None:
         content = args.content
 
     trust = getattr(args, "trust", "agent")
-    if trust == "operator" and not _operator_ok(
-        "Record this episode as the OPERATOR's own (trusted above the agent)?"
-    ):
-        print("Error: --trust operator needs a yes on a terminal, or "
-              "ANNEAL_OPERATOR=1. Nothing was recorded.", file=sys.stderr)
-        sys.exit(1)
+    via = None
+    if trust == "operator":
+        # Kept for the audit (codex r1 #8): which form of the gate vouched.
+        via = _operator_ok(
+            "Record this episode as the OPERATOR's own (trusted above the agent)?"
+        )
+        if via is None:
+            print("Error: --trust operator needs a yes on a terminal, or "
+                  "ANNEAL_OPERATOR=1. Nothing was recorded.", file=sys.stderr)
+            sys.exit(1)
 
     with _open_store(args) as store:
         metadata = None
@@ -882,6 +886,7 @@ def cmd_record(args: argparse.Namespace) -> None:
                 metadata=metadata,
                 supersedes=getattr(args, "supersedes", None),
                 trust=trust,
+                trust_via=f"cli:operator-{via}" if via else None,
             )
         except SupersessionError as exc:
             print(f"Error: {exc}. Nothing was recorded.", file=sys.stderr)
@@ -903,6 +908,7 @@ def cmd_record(args: argparse.Namespace) -> None:
 def cmd_trust(args: argparse.Namespace) -> None:
     """Show or change an episode's trust class (CAP-08). Lowering is open;
     raising needs the operator (a yes on a terminal, or ANNEAL_OPERATOR=1)."""
+    args.episode_id = args.episode_id.strip().lower()
     with _open_store(args) as store:
         if store.get(args.episode_id) is None:
             print(f"Error: no episode {args.episode_id!r}.", file=sys.stderr)
@@ -923,8 +929,12 @@ def cmd_trust(args: argparse.Namespace) -> None:
                       "terminal, or ANNEAL_OPERATOR=1. Unchanged.", file=sys.stderr)
                 sys.exit(1)
         # The actor says how the gate was passed, not more than that.
-        old = store.set_trust(args.episode_id, args.level, allow_raise=raising,
-                              actor=f"cli:operator-{via}" if via else "cli")
+        try:
+            old = store.set_trust(args.episode_id, args.level, allow_raise=raising,
+                                  actor=f"cli:operator-{via}" if via else "cli")
+        except ValueError as exc:  # e.g. another writer raised it meanwhile
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
         if args.json:
             _print_json({"id": args.episode_id, "from": old, "to": args.level})
         else:
@@ -2176,7 +2186,7 @@ def cmd_import(args: argparse.Namespace) -> None:
                         file=sys.stderr,
                     )
         if args.json:
-            _print_json({"imported": 0, "skipped": 0, "errors": 0})
+            _print_json({"imported": 0, "skipped": 0, "errors": 0, "trust_lowered": 0})
         else:
             print("No episodes to import.")
         return
@@ -2188,20 +2198,29 @@ def cmd_import(args: argparse.Namespace) -> None:
         skipped = 0
         errors = 0
 
+        lowered = 0
         for ep_data in episodes:
             try:
-                # Check if episode already exists
-                existing = store.get(ep_data["id"])
-                if existing is not None:
-                    skipped += 1
-                    continue
-
                 # CAP-08: an export file is plain JSON anyone can edit, so it can
                 # lower trust but never vouch: anything above agent comes in as
                 # agent.
                 ep_trust = ep_data.get("trust", DEFAULT_TRUST)
                 if trust_rank(ep_trust) > trust_rank(DEFAULT_TRUST):
                     ep_trust = DEFAULT_TRUST
+
+                # Check if episode already exists
+                existing = store.get(ep_data["id"])
+                if existing is not None:
+                    # An existing id still takes a LOWER trust from the file
+                    # (codex r1 #6): a corrected export must be able to mark a
+                    # page as external after an earlier import stored it as agent.
+                    current = store.trust_map([existing.id]).get(existing.id, DEFAULT_TRUST)
+                    if trust_rank(ep_trust) < trust_rank(current):
+                        store.set_trust(existing.id, ep_trust, actor="cli:import")
+                        lowered += 1
+                    skipped += 1
+                    continue
+
                 store.record(
                     content=ep_data["content"],
                     episode_type=ep_data["type"],
@@ -2217,9 +2236,11 @@ def cmd_import(args: argparse.Namespace) -> None:
                     print(f"  Error importing episode {ep_data.get('id', '?')}: {e}", file=sys.stderr)
 
         if args.json:
-            _print_json({"imported": imported, "skipped": skipped, "errors": errors})
+            _print_json({"imported": imported, "skipped": skipped, "errors": errors,
+                         "trust_lowered": lowered})
         else:
-            print(f"Import complete: {imported} imported, {skipped} skipped (already exist), {errors} errors")
+            print(f"Import complete: {imported} imported, {skipped} skipped (already exist), {errors} errors"
+                  + (f", trust lowered on {lowered} existing" if lowered else ""))
 
 
 def cmd_team_import(args: argparse.Namespace) -> None:

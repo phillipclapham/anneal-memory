@@ -1443,7 +1443,9 @@ CREATE INDEX IF NOT EXISTS idx_episodes_source ON episodes(source);
 -- (types.TRUST_LEVELS). Absence = 'agent', so every existing row reads as agent.
 CREATE TABLE IF NOT EXISTS episode_trust (
     episode_id TEXT PRIMARY KEY,
-    trust TEXT NOT NULL
+    -- The schema refuses a class trust_rank cannot rank (glm r1: a hand-edited
+    -- row crashed every reader with ValueError). Spelled out, not derived.
+    trust TEXT NOT NULL CHECK (trust IN ('external', 'tool', 'agent', 'operator'))
 );
 
 -- A trust row never outlives its episode, whatever path deletes it: episode
@@ -2587,6 +2589,8 @@ class Store:
         timestamp: str | None = None,
         supersedes: list[str] | tuple[str, ...] | None = None,
         trust: str = DEFAULT_TRUST,
+        *,
+        trust_via: str | None = None,
     ) -> Episode:
         """Record a new episode.
 
@@ -2607,6 +2611,9 @@ class Store:
                 ``operator``. A graduation whose grounding citations are all
                 ``tool``/``external`` does not climb (CAP-08). Stored with the
                 episode in one transaction; :meth:`set_trust` lowers it later.
+            trust_via: How the caller's gate vouched for ``trust`` (the CLI passes
+                ``terminal`` or ``env`` for ``operator``). Recorded in the audit
+                event as given; the library does not check it.
 
         Raises:
             SupersessionError: a ``supersedes`` link failed validation.
@@ -2730,6 +2737,8 @@ class Store:
         }
         if trust != DEFAULT_TRUST:
             record_event["trust"] = trust  # absent = agent, as in the store
+        if trust_via is not None:
+            record_event["trust_via"] = trust_via
         self._audit_log_after_commit(
             "record", record_event, method="record", committed="the episode", actor=source,
         )
@@ -4005,7 +4014,9 @@ class Store:
     def trust_map(self, episode_ids: Iterable[str]) -> dict[str, str]:
         """Trust class of each listed episode that is NOT the default ``agent``.
         Ids absent from the result are ``agent`` (or do not exist)."""
-        ids = sorted({str(i) for i in episode_ids})
+        # Lowercased like set_trust (glm + complement r1): an id typed in
+        # capitals read as agent here while set_trust found its real class.
+        ids = sorted({str(i).strip().lower() for i in episode_ids})
         with self._db_boundary("trust_map"), self._read_snapshot():
             if not ids or not self._has_trust_table():
                 return {}
@@ -4046,7 +4057,10 @@ class Store:
         refused unless ``allow_raise=True``, which only the operator's own path
         passes (the CLI asks on a terminal, or reads ``ANNEAL_OPERATOR=1``;
         MCP never raises): a writer must not be able to vouch for content after
-        the fact. Audited as ``trust_set``.
+        the fact. Audited as ``trust_set``. A supersession link the change makes
+        invalid (the replacing episode now ranks below the one it hides) is removed
+        in the same transaction and named in the audit event, unless a team
+        snapshot owns it.
 
         Raises:
             ValueError: unknown ``trust``, no such episode, or a raise without
@@ -4056,6 +4070,8 @@ class Store:
         episode_id = str(episode_id).strip().lower()
         problem: str | None = None
         old = DEFAULT_TRUST
+        removed: list[dict[str, str]] = []
+        team_left: list[dict[str, str]] = []
         # Refusals are computed inside and raised after the block: the boundary
         # rolls back on any exception, which inside a caller's batch would
         # discard its earlier writes (see _db_boundary).
@@ -4085,15 +4101,61 @@ class Store:
                         "INSERT OR REPLACE INTO episode_trust (episode_id, trust) VALUES (?, ?)",
                         (episode_id, trust),
                     )
+                if problem is None and old != trust:
+                    removed, team_left = self._drop_links_trust_invalidated(episode_id)
             if not self._defer_commit:
                 self._conn.commit()
         if problem:
             raise ValueError(problem)
         if old != trust:
-            self._audit_log_after_commit("trust_set", {
-                "episode_id": episode_id, "from": old, "to": trust,
-            }, method="set_trust", committed="the trust change", actor=actor)
+            event: dict[str, Any] = {"episode_id": episode_id, "from": old, "to": trust}
+            if removed:
+                event["supersessions_removed"] = removed
+            if team_left:
+                event["team_supersessions_left"] = team_left
+            self._audit_log_after_commit(
+                "trust_set", event, method="set_trust",
+                committed="the trust change", actor=actor,
+            )
         return old
+
+    def _drop_links_trust_invalidated(
+        self, episode_id: str
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        """After a trust change, remove each link touching ``episode_id`` in which
+        the replacing episode now ranks below the one it hides (codex r1 #5, run:
+        lowering the newer episode to ``external`` left it hiding an agent fact).
+        The rule is :meth:`_supersession_problem`'s, re-checked for links already on
+        record. A link a team snapshot owns stays: the ledger rules it, and the
+        caller hears it in the audit. Runs inside the caller's transaction.
+        Returns ``(removed, team_owned_left)``."""
+        removed: list[dict[str, str]] = []
+        team_left: list[dict[str, str]] = []
+        if not self._has_supersessions_table():
+            return removed, team_left
+        links = self._conn.execute(
+            "SELECT old_id, new_id FROM supersessions WHERE old_id = ? OR new_id = ?",
+            (episode_id, episode_id),
+        ).fetchall()
+        for old_id, new_id in ((r[0], r[1]) for r in links):
+            trusts = dict(self._conn.execute(
+                "SELECT episode_id, trust FROM episode_trust WHERE episode_id IN (?, ?)",
+                (old_id, new_id),
+            ).fetchall())
+            if trust_rank(trusts.get(new_id, DEFAULT_TRUST)) >= trust_rank(
+                trusts.get(old_id, DEFAULT_TRUST)
+            ):
+                continue
+            link = {"old_id": old_id, "new_id": new_id}
+            if self._team_owned(old_id, new_id):
+                team_left.append(link)
+                continue
+            self._conn.execute(
+                "DELETE FROM supersessions WHERE old_id = ? AND new_id = ?",
+                (old_id, new_id),
+            )
+            removed.append(link)
+        return removed, team_left
 
     def get(self, episode_id: str) -> Episode | None:
         """Get a single episode by ID.

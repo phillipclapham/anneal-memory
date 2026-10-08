@@ -1031,6 +1031,7 @@ def validate_graduations(
             # CAP-08 T3 (check 4): who grounds this line. Computed only for a
             # line that passed checks 1-3; see ``trust_of`` in the docstring.
             grounding_trust: str | None = None
+            reported_trust: str | None = None
             grounding_ids: list[str] = []
             if (
                 trust_of is not None
@@ -1044,24 +1045,25 @@ def validate_graduations(
                             explanation, node_content_map.get(cid, "")
                         )
                     ]
-                if grounding_checked:
+                if grounding_checked and grounding_ids:
                     # One trusted witness among the citations that ground the
                     # explanation is enough.
                     grounding_trust = max(
-                        (trust_of(cid) for cid in grounding_ids),
-                        key=trust_rank,
-                        default=DEFAULT_TRUST,
+                        (trust_of(cid) for cid in grounding_ids), key=trust_rank,
                     )
+                    reported_trust = grounding_trust
                 else:
                     # Nothing says which citation grounds the claim (no quoted
-                    # explanation, or no content to check it against), so one
+                    # explanation, no content to check it against, or no single
+                    # citation grounding it alone: complement r1 #3), so one
                     # tool/external citation makes the whole line relayed: an
                     # agent id stapled on would otherwise vouch for it (L1 r1, run).
-                    grounding_trust = min(
-                        (trust_of(cid) for cid in grounding_ids),
-                        key=trust_rank,
-                        default=DEFAULT_TRUST,
-                    )
+                    grounding_ids = valid_cited
+                    cited_trusts = [trust_of(cid) for cid in valid_cited]
+                    grounding_trust = min(cited_trusts, key=trust_rank)
+                    # The admission is the minimum; what the audit reports for a
+                    # line that passes is the highest trust it cites (codex r1 #9).
+                    reported_trust = max(cited_trusts, key=trust_rank)
             uncorroborated_line = (
                 grounding_trust is not None
                 and trust_rank(grounding_trust) < trust_rank(DEFAULT_TRUST)
@@ -1080,8 +1082,8 @@ def validate_graduations(
                 grad_name_match = _NAMED_PATTERN_WITH_EVIDENCE_RE.match(line)
                 if grad_name_match is not None and grad_name_match.group(2) == str(level):
                     graduated_names.append(grad_name_match.group(1))
-                    if grounding_trust is not None:
-                        pattern_trust[grad_name_match.group(1)] = grounding_trust
+                    if reported_trust is not None:
+                        pattern_trust[grad_name_match.group(1)] = reported_trust
             elif uncorroborated_line:
                 # ⛔ TO 1x, NOT ONE LEVEL DOWN, AND NEVER HELD (L1 + L2 r1, run):
                 # the claimed level is the composer's free text, so one level
@@ -1089,7 +1091,6 @@ def validate_graduations(
                 # an earned level while the line's text was the page's. A line
                 # that only relayed content grounds stands at 1x until an
                 # agent/operator episode grounds it.
-                assert grounding_trust is not None
                 name_m = _NAMED_PATTERN_WITH_EVIDENCE_RE.match(line)
                 demoted += 1
                 lines[i] = _demote_line(
@@ -1101,7 +1102,8 @@ def validate_graduations(
                           else line[:match.start()].strip().lstrip("-").strip()),
                     level=level,
                     citations=list(grounding_ids),
-                    trust=grounding_trust,
+                    # Set whenever uncorroborated_line is (no assert: -O-safe).
+                    trust=grounding_trust or DEFAULT_TRUST,
                 ))
             elif cross_session_overlap_words:
                 # Cross-session check fired: today's explanation reuses
@@ -1182,6 +1184,15 @@ def validate_graduations(
                             explanation, node_content_map.get(cid, "")
                         )
                     )
+                if trust_of is not None:
+                    # codex r1 #7: a tool/external co-citation that does not
+                    # itself ground the explanation forms no link; one trusted
+                    # witness admits the line, not every id stapled beside it.
+                    link_ids = [
+                        cid for cid in link_ids
+                        if cid in grounding_ids
+                        or trust_rank(trust_of(cid)) >= trust_rank(DEFAULT_TRUST)
+                    ]
                 if len(link_ids) >= 2:
                     for idx_a in range(len(link_ids)):
                         for idx_b in range(idx_a + 1, len(link_ids)):

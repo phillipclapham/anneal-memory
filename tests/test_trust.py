@@ -394,3 +394,141 @@ class TestCli:
             assert d.trust_map([ext.id, op.id]) == {ext.id: "external"}
         finally:
             d.close()
+
+
+# --- CAP-08 L3 r1 fixes (1007+29) ------------------------------------------------
+
+
+class TestL3Round1:
+    def test_a_trust_change_racing_the_save_refuses_it_and_the_wrap_survives(self, tmp_path):
+        # codex #4: trust was read before the batch's BEGIN IMMEDIATE.
+        from anneal_memory.store import StoreError
+        db = tmp_path / "m.db"
+        st = Store(db, project_name="T")
+        try:
+            st.save_continuity(HEAD + "## Patterns\n- eiffel_in_lyon | 1x (2026-10-07)\n\n" + TAIL)
+            ep = st.record(CLAIM, EpisodeType.OBSERVATION)
+            assert prepare_wrap(st)["status"] == "ready"
+            real = st.trust_map
+            calls: list[int] = []
+
+            def racing(ids):
+                out = real(ids)
+                if not calls:
+                    calls.append(1)
+                    with Store(db) as other:
+                        other.set_trust(ep.id, "external")
+                return out
+
+            st.trust_map = racing  # type: ignore[method-assign]
+            text = HEAD + "## Patterns\n" + _line([ep.id]) + "\n\n" + TAIL
+            with pytest.raises(StoreError, match="trust class"):
+                validated_save_continuity(st, text, today="2026-10-08")
+            assert st.status().wrap_in_progress
+            st.trust_map = real  # type: ignore[method-assign]
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                res = validated_save_continuity(st, text, today="2026-10-08")
+            assert res["graduations_validated"] == 0
+            assert res["uncorroborated"][0]["trust"] == "external"
+        finally:
+            st.close()
+
+    def test_lowering_the_replacing_episode_removes_its_supersession(self, store, tmp_path):
+        # codex #5 (run): B lowered to external kept hiding agent A.
+        a = store.record("The deploy key lives in the vault.", EpisodeType.OBSERVATION)
+        b = store.record("The deploy key lives in the vault and in the CI secrets now.",
+                         EpisodeType.OBSERVATION, supersedes=[a.id])
+        assert a.id not in [e.id for e in store.recall(limit=10).episodes]
+        store.set_trust(b.id, "external")
+        assert not store.supersession_exists(old_id=a.id, new_id=b.id)
+        assert a.id in [e.id for e in store.recall(limit=10).episodes]
+        last = json.loads((tmp_path / "m.audit.jsonl").read_text().splitlines()[-1])
+        assert last["event"] == "trust_set"
+        assert last["data"]["supersessions_removed"] == [{"old_id": a.id, "new_id": b.id}]
+
+    def test_raising_the_hidden_episode_above_its_replacement_removes_the_link(self, store):
+        a = store.record("The deploy key lives in the vault.", EpisodeType.OBSERVATION)
+        b = store.record("The deploy key lives in the vault and in the CI secrets now.",
+                         EpisodeType.OBSERVATION, supersedes=[a.id])
+        store.set_trust(a.id, "operator", allow_raise=True)
+        assert not store.supersession_exists(old_id=a.id, new_id=b.id)
+
+    def test_import_lowers_an_existing_episode_it_skips(self, tmp_path):
+        # codex #6: a corrected export could never mark an imported page external.
+        src, dst = tmp_path / "a.db", tmp_path / "b.db"
+        s = Store(src)
+        try:
+            ep = s.record(CLAIM, EpisodeType.OBSERVATION)
+        finally:
+            s.close()
+        out = tmp_path / "export.json"
+        assert _cli(src, "export", "--format", "json", "--output", str(out)).returncode == 0
+        Store(dst).close()
+        assert _cli(dst, "import", str(out)).returncode == 0
+        data = json.loads(out.read_text())
+        data["episodes"][0]["trust"] = "external"
+        out.write_text(json.dumps(data))
+        r = _cli(dst, "import", str(out), "--json")
+        assert r.returncode == 0, r.stderr
+        assert json.loads(r.stdout)["trust_lowered"] == 1
+        d = Store(dst)
+        try:
+            assert d.trust_map([ep.id]) == {ep.id: "external"}
+        finally:
+            d.close()
+
+    def test_operator_record_audits_how_the_gate_vouched(self, tmp_path):
+        # codex #8: the record event lost whether the gate was a terminal or env.
+        db = tmp_path / "m.db"
+        Store(db).close()
+        r = _cli(db, "record", "the operator's own fact", "--trust", "operator",
+                 env_extra={"ANNEAL_OPERATOR": "1"})
+        assert r.returncode == 0, r.stderr
+        last = json.loads((tmp_path / "m.audit.jsonl").read_text().splitlines()[-1])
+        assert last["event"] == "record"
+        assert last["data"]["trust"] == "operator"
+        assert last["data"]["trust_via"] == "cli:operator-env"
+
+    def test_a_bare_citation_reports_its_highest_trust(self):
+        # codex #9: an agent+operator bare citation reported "agent".
+        r = validate_graduations(
+            text="## Patterns\n- deploys_need_review | 2x (2026-10-08) [evidence: aaaa1111, bbbb2222]\n",
+            valid_ids={"aaaa1111", "bbbb2222"}, today="2026-10-08",
+            trust_of=lambda cid: {"bbbb2222": "operator"}.get(cid, DEFAULT_TRUST),
+        )
+        assert r.validated == 1
+        assert r.pattern_trust == {"deploys_need_review": "operator"}
+
+    def test_an_unrelated_low_trust_co_citation_forms_no_link(self):
+        # codex #7: an agent episode grounded the line and an unrelated external
+        # episode stapled beside it got an agent<->external link.
+        content = {
+            "aaaa1111": "Deploys require two reviewers on the release branch.",
+            "bbbb2222": "Eiffel Tower trivia from a travel page.",
+            "cccc3333": "Two reviewers sign off on every release deploy.",
+        }
+        r = validate_graduations(
+            text=("## Patterns\n- deploys_need_review | 2x (2026-10-08) "
+                  '[evidence: aaaa1111, bbbb2222, cccc3333 "deploys require two reviewers"]\n'),
+            valid_ids=set(content), today="2026-10-08", node_content_map=content,
+            trust_of=lambda cid: {"bbbb2222": "external"}.get(cid, DEFAULT_TRUST),
+        )
+        assert r.validated == 1
+        linked = {i for pair in r.direct_co_citations for i in pair}
+        assert "bbbb2222" not in linked
+        assert ("aaaa1111", "cccc3333") in r.direct_co_citations
+
+    def test_an_uppercase_id_reads_its_real_class(self, store, tmp_path):
+        # glm + complement #2: trust_map did not lowercase.
+        ep = store.record(CLAIM, EpisodeType.OBSERVATION, trust="tool")
+        assert store.trust_map([ep.id.upper()]) == {ep.id: "tool"}
+        r = _cli(tmp_path / "m.db", "trust", ep.id.upper())
+        assert r.returncode == 0 and r.stdout.strip() == f"{ep.id}: tool"
+
+    def test_the_schema_refuses_an_unknown_class(self, store):
+        # glm #2: a hand-edited class crashed every reader at trust_rank.
+        ep = store.record(CLAIM, EpisodeType.OBSERVATION)
+        with pytest.raises(sqlite3.IntegrityError):
+            store._conn.execute(
+                "INSERT INTO episode_trust (episode_id, trust) VALUES (?, 'bogus')", (ep.id,))

@@ -48,26 +48,36 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   every existing episode reads as `agent` and nothing changes for a caller that never passes it.
   A trigger deletes an episode's trust row whatever path deletes the episode.
 - `Store.set_trust(id, trust, allow_raise=False)` lowers a class freely; raising one needs
-  `allow_raise=True`, which only the operator's path passes. Audited as `trust_set`.
-  `Store.trust_map(ids)` and `Store.trust_counts()` read them.
+  `allow_raise=True`, which only the operator's path passes. Audited as `trust_set`. A change
+  that leaves a recorded supersession pointing the wrong way (the replacing episode now below the
+  one it hides) removes that link in the same transaction and names it in the audit event; a
+  link a team snapshot owns stays (the ledger rules it) and is named as left.
+  `Store.trust_map(ids)` (ids case-insensitive) and `Store.trust_counts()` read them. The table
+  refuses a class outside `TRUST_LEVELS`.
 - Graduation (`validate_graduations(..., trust_of=)`, wired by the canonical save pipeline): a
   today-dated graduation whose GROUNDING citations (those its explanation actually overlaps) are
   all `tool`/`external` is written back at 1x marked `(uncorroborated)`, whatever level it
   claimed and whatever it held before, and forms no association. With no quoted explanation, a
   single `tool`/`external` citation makes the line relayed. Listed in the save result's new
   `uncorroborated`, recorded in the `continuity_saved` audit event, and named in a warning. An
-  unrelated agent episode added to a quoted citation does not corroborate it.
+  unrelated agent episode added to a quoted citation does not corroborate it, and a
+  `tool`/`external` citation that does not itself ground the explanation forms no association.
+  The save re-reads the cited episodes' classes under its write lock and refuses (nothing saved,
+  the wrap still open) if another writer changed one after validation.
 - A lower-trust episode cannot supersede a higher-trust one (`record(supersedes=)`,
   `supersede`, a wrap's `[supersedes:]`): refused as a `SupersessionError`. `pattern_trust` on the
-  save result gives each graduated named pattern's highest grounding trust (the audit event
-  records it when above `agent`).
+  save result gives each graduated named pattern's highest grounding trust, or for a citation
+  with no quoted explanation its highest cited trust (the audit event records it when above
+  `agent`).
 - MCP `record` takes `trust` (`agent`, `tool`, `external` only: an agent cannot label its own
   write `operator`). CLI `record --trust` (`operator` needs a yes on a terminal or
   `ANNEAL_OPERATOR=1`) and `anneal-memory trust ID [LEVEL]` (raising needs the same). The env
-  form is a convenience any process with a shell can set; the audit actor records which form
-  was used (`cli:operator-terminal` / `cli:operator-env`).
+  form is a convenience any process with a shell can set; the audit records which form was used
+  (`cli:operator-terminal` / `cli:operator-env`: the `trust_set` actor, and `trust_via` on an
+  operator `record` event, which `Store.record(trust_via=)` takes).
 - JSON `export` writes each non-default class; `import` honours a class up to `agent`, so an
-  edited export file can lower trust but never vouch. SQLite-format export copies the table.
+  edited export file can lower trust but never vouch, including on an episode it already holds
+  (reported as `trust_lowered`). SQLite-format export copies the table.
 - Measured after: the 2026-10-07 plant recorded `external` is held at `1x (uncorroborated)`;
   the same with an unrelated agent episode stapled on is held too; with an agent episode that
   also grounds the claim it graduates to 2x.

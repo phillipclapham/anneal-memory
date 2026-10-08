@@ -366,6 +366,7 @@ StoreOperation = Literal[
     "wrap_gated_session",
     "wrap_derive_roots",
     "wrap_bound_token",
+    "wrap_today",
     "set_consolidate_requires_baton",
     "get_wrap_history",
     "record_associations",
@@ -1573,10 +1574,12 @@ CREATE TABLE IF NOT EXISTS pattern_history (
 -- the save itself in the wrap's transaction. A named pattern dropped from the
 -- file keeps its row (its tombstone), so re-adding it returns to the level it was
 -- saved at, never to a high-water mark it was later demoted from. A freeform line
--- has no identity across rewording, so its rows are replaced every save.
+-- has no identity across rewording, so its rows are replaced every save. One
+-- ('init', 'since') row marks that the store has saved under the bound, so an
+-- empty record is told apart from no record (codex + complement L3 r1).
 -- Additive: an older binary ignores the table.
 CREATE TABLE IF NOT EXISTS pattern_levels (
-    kind TEXT NOT NULL CHECK (kind IN ('name', 'text')),
+    kind TEXT NOT NULL CHECK (kind IN ('name', 'text', 'init')),
     key TEXT NOT NULL,
     level INTEGER NOT NULL,
     saved_at TEXT NOT NULL,
@@ -1677,6 +1680,11 @@ _DEFAULT_METADATA = {
     # in a repo it was not written about.
     # Additive lifecycle key like wrap_gated_session, cleared on every terminal path.
     "wrap_derive_roots": "",
+    # The date prepare_wrap told the composer to stamp (``{today}`` in its
+    # instructions), so a save after midnight, or under another TZ, validates
+    # against that day (1007+29, codex L3 r1). Additive lifecycle key like
+    # wrap_gated_session, cleared on every terminal path.
+    "wrap_today": "",
     # The wrap's token again when prepare_wrap was given a caller-supplied
     # wrap_token, else empty. The wrap is token-bound only while this EQUALS
     # wrap_token, so a value a binary that predates the key left behind can never
@@ -4399,6 +4407,7 @@ class Store:
         expect_last_wrap_id: int | None = None,
         derive_roots: dict[str | None, str] | None = None,
         token_bound: bool = False,
+        today: str | None = None,
     ) -> None:
         """Mark that a wrap has been initiated (prepare_wrap called).
 
@@ -4702,6 +4711,10 @@ class Store:
             self._conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_bound_token", token if token_bound else ""),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_today", today or ""),
             )
             self._conn.commit()
 
@@ -5031,6 +5044,10 @@ class Store:
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_bound_token", ""),
             )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_today", ""),
+            )
             # AM-SCHEMASNAPSHOT: clear the frozen schema alongside the rest of
             # the wrap-in-progress state so section_schema_for_wrap() falls back
             # to the live schema once the wrap is abandoned.
@@ -5154,6 +5171,15 @@ class Store:
         with self._db_boundary("get_wrap_started_at"):
             started = self._get_metadata("wrap_started_at")
         return started if started else None
+
+    def wrap_today(self) -> str | None:
+        """The date (``YYYY-MM-DD``) prepare_wrap gave the composer for the wrap in
+        progress, or ``None`` when no wrap is in progress or it was started without
+        one (an earlier version, or a direct ``wrap_started``)."""
+        with self._db_boundary("wrap_today"):
+            if not self._get_metadata("wrap_started_at"):
+                return None
+            return self._get_metadata("wrap_today") or None
 
     def wrap_gated_session(self) -> str | None:
         """The ``session_id`` that prepared the wrap in progress under the consolidate
@@ -5777,6 +5803,10 @@ class Store:
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("wrap_bound_token", ""),
             )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                ("wrap_today", ""),
+            )
             # AM-SCHEMASNAPSHOT: clear the frozen wrap schema in the same
             # transaction as the other wrap-in-progress clears, so a completed
             # wrap leaves section_schema_for_wrap() reading the live schema again.
@@ -5961,34 +5991,65 @@ class Store:
     # explanation against this history to detect sycophantic vocabulary
     # reuse across sessions.
 
-    def saved_pattern_levels(self) -> dict[tuple[str, str], int]:
+    def saved_pattern_levels(self) -> dict[tuple[str, str], int] | None:
         """The level each pattern line held when this store last saved it, keyed
-        ``(kind, key)`` as :func:`graduation._line_levels` keys a line (``"name"``
-        and the operator name, or ``"text"`` and the normalised freeform text).
-        Empty for a store that has not saved under this version yet (or a
-        read-only store opened on an older schema). Read-only."""
+        ``(kind, key)`` as :func:`graduation.pattern_line_levels` keys a line
+        (``"name"`` and the operator name, or ``"text"`` and the normalised
+        freeform text). ``None`` when the store has not saved under the bound yet
+        (or a read-only store opened on an older schema); ``{}`` when it has and
+        recorded no lines. Read-only."""
         with self._db_boundary("saved_pattern_levels"), self._read_snapshot():
-            if self._conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pattern_levels'"
-            ).fetchone() is None:
-                return {}
-            return {
-                (row[0], row[1]): int(row[2])
-                for row in self._conn.execute("SELECT kind, key, level FROM pattern_levels")
-            }
+            if not self._has_pattern_levels_table():
+                return None
+            rows = self._conn.execute(
+                "SELECT kind, key, level FROM pattern_levels").fetchall()
+            if not any(row[0] == "init" for row in rows):
+                return None
+            return {(row[0], row[1]): int(row[2]) for row in rows if row[0] != "init"}
+
+    def pattern_levels_since(self) -> str | None:
+        """The date of the store's first save under the bound, or ``None``."""
+        with self._db_boundary("saved_pattern_levels"), self._read_snapshot():
+            if not self._has_pattern_levels_table():
+                return None
+            row = self._conn.execute(
+                "SELECT saved_at FROM pattern_levels WHERE kind = 'init' AND key = 'since'"
+            ).fetchone()
+            return row[0] if row else None
+
+    def _has_pattern_levels_table(self) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pattern_levels'"
+        ).fetchone() is not None
 
     def _record_pattern_levels(
-        self, levels: dict[tuple[str, str], int], saved_at: str
+        self,
+        levels: dict[tuple[str, str], int],
+        saved_at: str,
+        *,
+        lower_to: dict[tuple[str, str], int] | None = None,
     ) -> None:
         """Record the levels of the continuity being saved. Runs inside the save's
         batch, so the record commits with the wrap or not at all. Named rows not in
-        ``levels`` stay as tombstones; freeform rows are replaced."""
+        ``levels`` stay as tombstones, each lowered to ``lower_to``'s level for it
+        when that is lower (the prior file's: an operator's hand demotion survives
+        a wrap that leaves the pattern out, codex L3 r1); freeform rows are
+        replaced."""
+        self._conn.execute(
+            "INSERT OR IGNORE INTO pattern_levels (kind, key, level, saved_at) "
+            "VALUES ('init', 'since', 0, ?)", (saved_at,),
+        )
         self._conn.execute("DELETE FROM pattern_levels WHERE kind = 'text'")
         self._conn.executemany(
             "INSERT INTO pattern_levels (kind, key, level, saved_at) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(kind, key) DO UPDATE SET level = excluded.level, "
             "saved_at = excluded.saved_at",
             [(kind, key, level, saved_at) for (kind, key), level in levels.items()],
+        )
+        self._conn.executemany(
+            "UPDATE pattern_levels SET level = ? WHERE kind = ? AND key = ? AND level > ?",
+            [(lv, kind, key, lv) for (kind, key), lv in (lower_to or {}).items()
+             if kind == "name" and (kind, key) not in levels],
         )
 
     def get_pattern_history(self, pattern_name: str) -> dict[str, Any] | None:

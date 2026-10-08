@@ -673,7 +673,9 @@ def validate_graduations(
     malformed_evidence_carries: list[str] = []
     # The prior-state bound reads these: which lines validated this wrap (one
     # rung allowed), and which carried-forward record belongs to which line.
-    validated_lines: set[int] = set()
+    # line index -> start of the marker that validated (the +1 belongs to the
+    # line's identity only when that is the identity's own marker).
+    validated_lines: dict[int, int] = {}
     carried_by_line: dict[int, CarriedForward] = {}
 
     for i, line in enumerate(lines):
@@ -990,7 +992,7 @@ def validate_graduations(
 
             if ids_valid and explanation_valid and not cross_session_overlap_words:
                 validated += 1
-                validated_lines.add(i)
+                validated_lines[i] = match.start()
                 # AM-LINKGATE-DECAY: a genuine graduation this wrap. Re-derive
                 # the name from the line with the same level-guarded binding the
                 # cross-session check uses (the ``pattern_name`` var is only set
@@ -1270,7 +1272,9 @@ def pattern_line_levels(
     text: str, graduating_headings: frozenset[str] = DEFAULT_GRADUATING
 ) -> dict[tuple[str, str], int]:
     """Highest level per line identity in the graduating sections of ``text``,
-    keyed as the prior-state bound keys lines (what the save records)."""
+    keyed as the prior-state bound keys lines (what the save records). A name on
+    several lines, or in several graduating sections, counts once at its highest,
+    which is how ``extract_pattern_names`` (and so every per-name reader) reads it."""
     levels: dict[tuple[str, str], int] = {}
     in_patterns = False
     for line in text.split("\n"):
@@ -1297,7 +1301,7 @@ def _prior_base(
 ) -> int | None:
     """The level a line identity is entitled to start from, or None (new)."""
     in_file = file_levels.get(key)
-    if saved_levels:
+    if saved_levels is not None:
         saved = saved_levels.get(key)
         if saved is not None:
             # The store's record is the prior; the file may only lower it.
@@ -1316,7 +1320,7 @@ def _apply_prior_bound(
     prior_text: str,
     saved_levels: dict[tuple[str, str], int] | None,
     crystal_levels: dict[str, int] | None,
-    validated_lines: set[int],
+    validated_lines: dict[int, int],
     carried_lines: set[int],
     graduating_headings: frozenset[str],
 ) -> list[tuple[int, LevelCapped]]:
@@ -1342,7 +1346,10 @@ def _apply_prior_bound(
         key, marks = parsed
         written = max(_token_level(m) for m in marks)
         prior_level = _prior_base(key, file_levels, saved_levels, crystal_levels)
-        validated = i in validated_lines
+        # Credit only the identity's OWN marker (codex L3 r1, run): a decoy
+        # ``other | 2x (date) [evidence: ...]`` later on the line validated and
+        # the whole line, ``foo`` included, took its rung.
+        validated = validated_lines.get(i) == marks[0].start()
         allowed = max(1, (prior_level or 0) + (1 if validated else 0))
         if written <= allowed:
             if _LEVEL_CAPPED_MARK in line:

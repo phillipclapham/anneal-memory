@@ -20,6 +20,7 @@ Zero dependencies beyond Python stdlib.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import dataclasses
 import re
@@ -705,10 +706,12 @@ def format_episodes_for_wrap(episodes: list[Episode]) -> str:
 def _wrap_local_date(store: Store) -> str:
     """The local date the wrap in progress was PREPARED on, else today.
 
+    The fallback when the wrap has no stored ``wrap_today`` (started by an
+    earlier version, or a ``wrap_started`` override without the argument).
     prepare_wrap tells the composer to stamp ``({today})`` with the date it ran
     on; a save after midnight read the next day and dropped every graduation the
-    composer stamped correctly (L2 r1, run). ``wrap_started_at`` is that
-    moment in UTC."""
+    composer stamped correctly (L2 r1, run). ``wrap_started_at`` is that moment
+    in UTC, read in the saver's timezone."""
     started = store._get_metadata("wrap_started_at")
     if started:
         try:
@@ -2121,6 +2124,10 @@ def prepare_wrap(
             # overrides wrap_started with the pre-0.9.30 signature still works for
             # every call that does not use the new feature (codex L3, run).
             **({"token_bound": True} if token_bound else {}),
+            # The day the instructions told the composer to stamp; skipped for an
+            # override that predates it (the save then reconstructs it).
+            **({"today": package["today"]}
+               if "today" in inspect.signature(store.wrap_started).parameters else {}),
         )
     except WrapWindowMovedError:
         return _downgraded_empty(
@@ -3004,13 +3011,19 @@ def validated_save_continuity(
     # Validate graduations (demotes bad citations in-place).
     # Caller may pin ``today`` for deterministic test runs; default is
     # wall-clock. Same pattern _build_wrap_package already uses.
-    today_str = today if today is not None else _wrap_local_date(store)
+    today_str = today if today is not None else (store.wrap_today() or _wrap_local_date(store))
     # The bound's prior: the store's own record of the levels it last saved, and
     # for a pattern crystallized out before that record existed, its crystal level.
     saved_levels = store.saved_pattern_levels()
+    # Only a crystallization from before the record began: every later one left
+    # its pattern a tombstone in the record when the line left the file, so a
+    # crystal level the record never saw (a shell crystallizing a new name at
+    # any level) cannot stand in for one.
+    record_since = store.pattern_levels_since()
     crystal_levels = {
         c["name"]: int(c["level"]) for c in _crystal_active_safe(crystal_store)
         if isinstance(c.get("level"), int) and not isinstance(c.get("level"), bool)
+        and (record_since is None or str(c.get("crystallized_on", "")) < record_since)
     }
     grad_result = validate_graduations(
         text=text,
@@ -3238,6 +3251,7 @@ def validated_save_continuity(
             # with the wrap or not at all.
             store._record_pattern_levels(
                 pattern_line_levels(grad_result.text, grad_headings), today_str,
+                lower_to=pattern_line_levels(prior_continuity or "", grad_headings),
             )
 
             wrap_result = store.wrap_completed(

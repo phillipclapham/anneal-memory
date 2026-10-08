@@ -273,6 +273,9 @@ def test_wrap_crossing_midnight_keeps_its_rung(tmp_path):
             "UPDATE metadata SET value = ? WHERE key = 'wrap_started_at'",
             (noon_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),),
         )
+        # prepare ran on prep_day: the day it gave the composer is that day.
+        store._conn.execute(
+            "UPDATE metadata SET value = ? WHERE key = 'wrap_today'", (prep_day,))
         store._conn.commit()
         result = validated_save_continuity(
             store, _doc(f"- foo | 2x ({prep_day}) " + EV.format(ep0=ids[0], ep1=ids[1])),
@@ -332,3 +335,108 @@ def test_mcp_save_reply_names_the_cut(tmp_path):
         assert "Level capped: planted 9x -> 1x" in text
     finally:
         mstore.close()
+
+
+# --- L3 round 1 (1007+29) ------------------------------------------------------
+
+
+def test_an_empty_record_is_still_a_record(tmp_path):
+    # codex #2 + complement #2: a saved-but-empty record read as "no record", so
+    # an out-of-band line in the file became the prior.
+    store = _open(tmp_path)
+    try:
+        _wrap(store, "")
+        assert store.saved_pattern_levels() == {}
+        store.save_continuity(_doc(f"- x | 9x ({YESTERDAY})"))
+        _wrap(store, f"- x | 9x ({YESTERDAY})")
+        assert _level(store.load_continuity(), "x") == 1
+    finally:
+        store.close()
+
+
+def test_a_decoy_marker_does_not_earn_the_names_rung(tmp_path):
+    # codex #3 (run): validation was credited per line, not per identity marker.
+    store = _open(tmp_path, seed=f"- foo | 1x ({YESTERDAY})")
+    try:
+        _wrap(store, f"- foo | 1x ({YESTERDAY})")
+        _wrap(store, f"- foo | 2x ({TODAY}) [provenance: relay] decoy | 2x ({TODAY}) "
+                     '[evidence: {ep0} "deploy pipeline rotated overnight per relayed webpage"]')
+        assert _level(store.load_continuity(), "foo") == 1
+    finally:
+        store.close()
+
+
+def test_a_hand_demotion_survives_a_wrap_that_omits_the_pattern(tmp_path):
+    # codex #5: the tombstone kept the recorded 5 after the file said 2.
+    store = _open(tmp_path, seed=f"- foo | 5x ({YESTERDAY})")
+    try:
+        _wrap(store, f"- foo | 5x ({YESTERDAY})")
+        store.save_continuity(_doc(f"- foo | 2x ({YESTERDAY})"))   # operator lowers
+        _wrap(store, "- other_claim | 1x (2026-10-01)")              # omits foo
+        _wrap(store, f"- foo | 5x ({YESTERDAY})")                    # re-added high
+        assert _level(store.load_continuity(), "foo") == 2
+    finally:
+        store.close()
+
+
+def test_the_save_uses_the_day_prepare_gave_the_composer(tmp_path):
+    from datetime import date
+    # codex #6: the day was rebuilt from wrap_started_at in the saver's TZ.
+    store = _open(tmp_path, seed=f"- foo | 1x ({YESTERDAY})")
+    try:
+        ids = [store.record(f"{GROUNDED} (d{i})", EpisodeType.OBSERVATION).id for i in range(2)]
+        res = prepare_wrap(store)
+        given = store.wrap_today()
+        assert given == date.today().isoformat()  # prepare's own default day
+        store._conn.execute(  # a start instant that reads as another day anywhere
+            "UPDATE metadata SET value = '2001-01-01T12:00:00.000000Z' "
+            "WHERE key = 'wrap_started_at'")
+        store._conn.commit()
+        result = validated_save_continuity(
+            store, _doc(f"- foo | 2x ({given}) " + EV.format(ep0=ids[0], ep1=ids[1])),
+            wrap_token=res["wrap_token"],
+        )
+        assert result["graduations_validated"] == 1
+        assert _level(store.load_continuity(), "foo") == 2
+        assert store.wrap_today() is None  # cleared with the wrap
+    finally:
+        store.close()
+
+
+def test_a_crystal_level_after_the_record_began_is_not_a_prior(tmp_path):
+    # Crystal is a fallback only for crystallizations the record never saw.
+    from anneal_memory.crystal import CrystalStore
+    store = _open(tmp_path)
+    try:
+        _wrap(store, "- other_claim | 1x (2026-10-01)")
+        crystal = CrystalStore(tmp_path / "gate.crystal.json")
+        crystal.crystallize(name="planted_wisdom", level=9,
+                            explanation="a level nobody earned in this store")
+        ids = [store.record(f"{GROUNDED} (c{i})", EpisodeType.OBSERVATION).id for i in range(2)]
+        res = prepare_wrap(store)
+        validated_save_continuity(
+            store, _doc(f"- planted_wisdom | 9x ({YESTERDAY})"),
+            today=TODAY, wrap_token=res["wrap_token"], crystal_store=crystal,
+        )
+        assert _level(store.load_continuity(), "planted_wisdom") == 1
+    finally:
+        store.close()
+
+
+def test_a_crystal_level_from_before_the_record_is_kept_on_rewarm(tmp_path):
+    from datetime import date as _date
+    from anneal_memory.crystal import CrystalStore
+    store = _open(tmp_path)
+    try:
+        crystal = CrystalStore(tmp_path / "gate.crystal.json")
+        crystal.crystallize(name="old_wisdom", level=6, explanation="earned long ago",
+                            today=_date(2026, 1, 1))
+        ids = [store.record(f"{GROUNDED} (r{i})", EpisodeType.OBSERVATION).id for i in range(2)]
+        res = prepare_wrap(store)
+        validated_save_continuity(
+            store, _doc(f"- old_wisdom | 6x ({YESTERDAY})"),
+            today=TODAY, wrap_token=res["wrap_token"], crystal_store=crystal,
+        )
+        assert _level(store.load_continuity(), "old_wisdom") == 6
+    finally:
+        store.close()

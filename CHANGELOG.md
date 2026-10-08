@@ -17,18 +17,21 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - A lost active file (deleted, truncated below the tip, or replaced, with its week not sealed by
   another writer's rotation) is refused once at the next append ("is gone"), from the instance's
   own record, even when the manifest's best-effort record of the file is missing.
-- `AuditTrail.stats()` re-syncs without taking the lock, so its `entry_count` includes other
-  writers' entries and a status read never waits on a writer.
+- `AuditTrail.stats()` reads `entry_count` from the active file on every call (its last valid
+  entry's `seq` + 1), so it includes other writers' entries; it takes no lock and changes no
+  state, so a status read never waits on a writer and never consumes the lost-file refusal.
 - The append lock is released with `LOCK_UN` before its close, as the manifest lock now is, so a
   child forked while it was held does not keep it.
 - An append waits at most 30 seconds for another holder; past that, or when the lock file cannot
   be opened (a directory, symlink or FIFO at its path), the append is refused and counted as a
   dropped audit write (`audit_write_failures`, `dropped_before`), never appended unserialized.
+  Its location is recorded as unknown, since without the lock the cached tip is not current.
 - After the fix: six processes x 250 episodes leave one valid chain of 1,500 entries, four
   processes appending across a week rotation leave one valid chain of 800, and four writer
   processes on a copy of a real store add exactly 600 entries to a chain that stays valid.
-- Known limits: where advisory locks do not exist (Windows, or a filesystem without `flock`,
-  warned on stderr once per lock path) appends are not serialized and the trail needs one writer at
+- Known limits: where advisory locks do not exist (Windows, silently, as the README's Windows
+  section says; or a filesystem without `flock`, warned on stderr once per lock path) appends are
+  not serialized and the trail needs one writer at
   a time; writers that take turns stay chained through the re-sync. Every concurrent writer must
   run a version that takes the lock: an anneal-memory without it, writing alongside, breaks the
   chain as before, and nothing on the new side can detect it.

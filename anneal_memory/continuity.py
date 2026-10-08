@@ -703,6 +703,18 @@ def format_episodes_for_wrap(episodes: list[Episode]) -> str:
     return "\n".join(lines)
 
 
+def _crystal_levels(crystal_store: CrystalStore | None) -> dict[str, int]:
+    """Name -> level of every live crystal, skipping a malformed row rather than
+    breaking the wrap (the ``_crystal_active_safe`` invariant; complement L3 r2)."""
+    out: dict[str, int] = {}
+    for c in _crystal_active_safe(crystal_store):
+        name = c.get("name") if isinstance(c, dict) else None
+        level = c.get("level") if isinstance(c, dict) else None
+        if isinstance(name, str) and isinstance(level, int) and not isinstance(level, bool):
+            out[name] = level
+    return out
+
+
 def _wrap_local_date(store: Store) -> str:
     """The local date the wrap in progress was PREPARED on, else today.
 
@@ -3015,16 +3027,10 @@ def validated_save_continuity(
     # The bound's prior: the store's own record of the levels it last saved, and
     # for a pattern crystallized out before that record existed, its crystal level.
     saved_levels = store.saved_pattern_levels()
-    # Only a crystallization from before the record began: every later one left
-    # its pattern a tombstone in the record when the line left the file, so a
-    # crystal level the record never saw (a shell crystallizing a new name at
-    # any level) cannot stand in for one.
-    record_since = store.pattern_levels_since()
-    crystal_levels = {
-        c["name"]: int(c["level"]) for c in _crystal_active_safe(crystal_store)
-        if isinstance(c.get("level"), int) and not isinstance(c.get("level"), bool)
-        and (record_since is None or str(c.get("crystallized_on", "")) < record_since)
-    }
+    # Crystal levels count only until the store has a record: the first bounded
+    # save copies them into it, and from then on a crystal level never stands in
+    # for a saved one (codex L3 r2: crystallized_on is a caller-set date).
+    crystal_levels = _crystal_levels(crystal_store) if saved_levels is None else None
     grad_result = validate_graduations(
         text=text,
         valid_ids=citable_ids,
@@ -3252,6 +3258,10 @@ def validated_save_continuity(
             store._record_pattern_levels(
                 pattern_line_levels(grad_result.text, grad_headings), today_str,
                 lower_to=pattern_line_levels(prior_continuity or "", grad_headings),
+                first_tombstones={
+                    **{("name", n): lv for n, lv in (crystal_levels or {}).items()},
+                    **pattern_line_levels(prior_continuity or "", grad_headings),
+                },
             )
 
             wrap_result = store.wrap_completed(

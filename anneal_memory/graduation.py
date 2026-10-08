@@ -689,7 +689,8 @@ def validate_graduations(
         # Check for citations with evidence tags
         match = _GRADUATION_RE.search(line)
         if match:
-            level = int(match.group(1))
+            # Bounded parse: ``int`` refuses more than 4300 digits (codex r2 #3).
+            level = _token_level(match)
             date_str = match.group(2)
             cited_raw = match.group(3)
             explanation = match.group(4)
@@ -1185,13 +1186,15 @@ def validate_graduations(
             graduating_headings=graduating_headings,
         )
         for c_line, cap in level_capped:
-            # A held line the bound then cut was not held at its level: drop its
-            # carry record so the two reports cannot disagree about the line.
+            # A held line the bound then cut keeps its carry record at the cut
+            # level: AM-WARN counts cited carries, so dropping it would hide a
+            # dead-namespace alarm (complement r2 #3).
             if c_line in carried_by_line:
-                carried_forward.remove(carried_by_line[c_line])
-            # A validated line cut to 1x did not graduate (L1 r1, run): it must
-            # not count, seed co-graduation links, or name a graduation.
-            if cap.validated and cap.capped_to < 2:  # 2x: _GRADUATION_RE's floor
+                carried_by_line[c_line].held_level = cap.capped_to
+            # A validated line that did not graduate must not count, seed
+            # co-graduation links, or name a graduation: cut to 1x (L1 r1, run),
+            # or validated only through a decoy marker (complement r2 #3).
+            if c_line in validated_lines and (not cap.validated or cap.capped_to < 2):
                 validated -= 1
                 if cap.name in graduated_names:
                     graduated_names.remove(cap.name)
@@ -1264,7 +1267,9 @@ def _line_levels(line: str) -> tuple[tuple[str, str], list[re.Match]] | None:
     head = _FREEFORM_PREFIX_RE.sub("", line[: dated[0].start()])
     key = " ".join(head.lower().split())
     if not key:
-        return None
+        # No identity at all (``- | 9x (date)``, codex r2 #1): never skipped,
+        # never recorded, always new, so it stands at 1x.
+        return ("anon", ""), dated
     return ("text", key), dated
 
 
@@ -1284,7 +1289,7 @@ def pattern_line_levels(
         if not in_patterns:
             continue
         parsed = _line_levels(line)
-        if parsed is None:
+        if parsed is None or parsed[0][0] == "anon":
             continue
         key, marks = parsed
         top = max(_token_level(m) for m in marks)
@@ -1300,14 +1305,19 @@ def _prior_base(
     crystal_levels: dict[str, int] | None,
 ) -> int | None:
     """The level a line identity is entitled to start from, or None (new)."""
+    if key[0] == "anon":
+        return None
     in_file = file_levels.get(key)
     if saved_levels is not None:
         saved = saved_levels.get(key)
         if saved is not None:
             # The store's record is the prior; the file may only lower it.
             return saved if in_file is None else min(saved, in_file)
-        # In the file but never saved by the store: an out-of-band edit.
-    elif in_file is not None:
+        # In the file but never saved by the store: an out-of-band edit. (The
+        # record's first save already took in every crystal level, so a crystal
+        # store is never consulted once a record exists: codex r2 #2.)
+        return None
+    if in_file is not None:
         return in_file  # no record yet: this store's first save under the bound
     if key[0] == "name" and crystal_levels and key[1] in crystal_levels:
         return crystal_levels[key[1]]
@@ -1352,8 +1362,7 @@ def _apply_prior_bound(
         validated = validated_lines.get(i) == marks[0].start()
         allowed = max(1, (prior_level or 0) + (1 if validated else 0))
         if written <= allowed:
-            if _LEVEL_CAPPED_MARK in line:
-                lines[i] = _drop_mark(line, _LEVEL_CAPPED_MARK)
+            lines[i] = _drop_trailing_mark(line, _LEVEL_CAPPED_MARK)
             continue
         new_line = line
         for m in reversed(marks):
@@ -1362,8 +1371,9 @@ def _apply_prior_bound(
                 new_line = new_line[:start] + str(allowed) + new_line[end:]
         if i in carried_lines:
             new_line = _drop_mark(new_line, _CARRIED_MARK)
-        if _LEVEL_CAPPED_MARK not in new_line:
-            new_line = new_line.rstrip() + " " + _LEVEL_CAPPED_MARK
+        body = new_line.rstrip()
+        if not body.endswith(_LEVEL_CAPPED_MARK):
+            new_line = body + " " + _LEVEL_CAPPED_MARK + new_line[len(body):]
         lines[i] = new_line
         capped.append((i, LevelCapped(
             name=key[1], written_level=written, capped_to=allowed,
@@ -1375,6 +1385,15 @@ def _apply_prior_bound(
 def _drop_mark(line: str, mark: str) -> str:
     """Remove every occurrence of ``mark`` and the space before it."""
     return re.sub(r"[ \t]*" + re.escape(mark), "", line)
+
+
+def _drop_trailing_mark(line: str, mark: str) -> str:
+    """Remove ``mark`` only where this code puts it, at the end of the line, so
+    the same text inside an explanation is never touched (codex r2 #4)."""
+    body = line.rstrip()
+    if not body.endswith(mark):
+        return line
+    return body[: -len(mark)].rstrip() + line[len(body):]
 
 
 def _meaningful_word_overlap(text_a: str, text_b: str) -> set[str]:
@@ -1537,7 +1556,7 @@ def detect_stale_patterns(
         if not match:
             continue
 
-        level = int(match.group(1))
+        level = _token_level(match)
         date_str = match.group(2)
 
         try:

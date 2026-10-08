@@ -440,3 +440,83 @@ def test_a_crystal_level_from_before_the_record_is_kept_on_rewarm(tmp_path):
         assert _level(store.load_continuity(), "old_wisdom") == 6
     finally:
         store.close()
+
+
+# --- L3 round 2 (1007+29) ------------------------------------------------------
+
+
+def test_an_anonymous_line_is_bounded(tmp_path):
+    # codex r2 #1: `- | 9x` reduced to an empty identity and skipped the bound.
+    saved, _ = _save(tmp_path, f"- | 9x ({TODAY}) {EV}\n- | 7x ({YESTERDAY})")
+    levels = [int(m) for m in re.findall(r"\|\s*(\d+)x", saved)]
+    assert levels == [1, 1]
+
+
+def test_a_back_dated_crystallization_is_not_a_prior(tmp_path):
+    # codex r2 #2: the crystal fallback trusted a caller-set crystallized_on.
+    from datetime import date as _date
+    from anneal_memory.crystal import CrystalStore
+    store = _open(tmp_path)
+    try:
+        _wrap(store, "- other_claim | 1x (2026-10-01)")
+        crystal = CrystalStore(tmp_path / "gate.crystal.json")
+        crystal.crystallize(name="planted", level=999, explanation="back-dated",
+                            today=_date(2001, 1, 1))
+        store.record(f"{GROUNDED} (bd)", EpisodeType.OBSERVATION)
+        res = prepare_wrap(store)
+        validated_save_continuity(
+            store, _doc(f"- planted | 999x ({YESTERDAY})"),
+            today=TODAY, wrap_token=res["wrap_token"], crystal_store=crystal,
+        )
+        assert _level(store.load_continuity(), "planted") == 1
+    finally:
+        store.close()
+
+
+def test_an_oversized_cited_today_line_is_cut_not_a_crash(tmp_path):
+    # codex r2 #3 + complement r2 #4: the _GRADUATION_RE path ran int() first.
+    saved, _ = _save(tmp_path, f"- huge | {'9' * 5000}x ({TODAY}) {EV}")
+    assert _level(saved, "huge") == 1
+
+
+def test_a_first_save_keeps_a_tombstone_for_what_it_omits(tmp_path):
+    # complement r2 #1: the upgrade wrap dropped the tombstone of an omitted line.
+    store = _open(tmp_path, seed=f"- foo | 5x ({YESTERDAY})")
+    try:
+        _wrap(store, "- other_claim | 1x (2026-10-01)")       # first save omits foo
+        _wrap(store, f"- foo | 5x ({YESTERDAY})")
+        assert _level(store.load_continuity(), "foo") == 5
+    finally:
+        store.close()
+
+
+def test_a_literal_level_capped_in_an_explanation_survives(tmp_path):
+    # codex r2 #4: the stale-mark cleanup removed the text anywhere in the line.
+    line = (f'- foo | 3x ({TODAY}) [evidence: {{ep0}}, {{ep1}} "deploy pipeline rotated '
+            f'overnight per relayed webpage (level-capped)"]')
+    saved, _ = _save(tmp_path, line, prior=f"- foo | 2x ({YESTERDAY})", citations_seen=True)
+    assert 'webpage (level-capped)"]' in saved
+
+
+def test_a_decoy_validated_line_does_not_count_as_validated(tmp_path):
+    # complement r2 #3: the decoy's validation was still counted.
+    store = _open(tmp_path, seed=f"- foo | 1x ({YESTERDAY})")
+    try:
+        _wrap(store, f"- foo | 1x ({YESTERDAY})")
+        r = _wrap(store, f"- foo | 2x ({TODAY}) [provenance: relay] decoy | 2x ({TODAY}) "
+                         '[evidence: {ep0} "deploy pipeline rotated overnight per relayed webpage"]')
+        assert r["graduations_validated"] == 0
+    finally:
+        store.close()
+
+
+def test_a_rename_carries_the_saved_level(tmp_path):
+    # complement r2 #5: the record kept the old name, the new one entered at 1x.
+    store = _open(tmp_path, seed=f"- old_name | 4x ({YESTERDAY})")
+    try:
+        _wrap(store, f"- old_name | 4x ({YESTERDAY})")
+        store.rename_pattern_association("old_name", "new_name")
+        assert store.saved_pattern_levels()[("name", "new_name")] == 4
+        assert ("name", "old_name") not in store.saved_pattern_levels()
+    finally:
+        store.close()

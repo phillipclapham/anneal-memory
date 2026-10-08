@@ -6007,16 +6007,6 @@ class Store:
                 return None
             return {(row[0], row[1]): int(row[2]) for row in rows if row[0] != "init"}
 
-    def pattern_levels_since(self) -> str | None:
-        """The date of the store's first save under the bound, or ``None``."""
-        with self._db_boundary("saved_pattern_levels"), self._read_snapshot():
-            if not self._has_pattern_levels_table():
-                return None
-            row = self._conn.execute(
-                "SELECT saved_at FROM pattern_levels WHERE kind = 'init' AND key = 'since'"
-            ).fetchone()
-            return row[0] if row else None
-
     def _has_pattern_levels_table(self) -> bool:
         return self._conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pattern_levels'"
@@ -6028,17 +6018,32 @@ class Store:
         saved_at: str,
         *,
         lower_to: dict[tuple[str, str], int] | None = None,
+        first_tombstones: dict[tuple[str, str], int] | None = None,
     ) -> None:
         """Record the levels of the continuity being saved. Runs inside the save's
         batch, so the record commits with the wrap or not at all. Named rows not in
         ``levels`` stay as tombstones, each lowered to ``lower_to``'s level for it
         when that is lower (the prior file's: an operator's hand demotion survives
         a wrap that leaves the pattern out, codex L3 r1); freeform rows are
-        replaced."""
+        replaced. On the store's FIRST save under the bound, ``first_tombstones``
+        (the prior file's named levels and every crystal level) seed the record,
+        so a pattern that first save omits, or one crystallized out before it, keeps
+        its level; after that no caller-supplied level enters the record except
+        through a bounded save (complement + codex L3 r2)."""
+        first = self._conn.execute(
+            "SELECT 1 FROM pattern_levels WHERE kind = 'init'"
+        ).fetchone() is None
         self._conn.execute(
             "INSERT OR IGNORE INTO pattern_levels (kind, key, level, saved_at) "
             "VALUES ('init', 'since', 0, ?)", (saved_at,),
         )
+        if first and first_tombstones:
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO pattern_levels (kind, key, level, saved_at) "
+                "VALUES (?, ?, ?, ?)",
+                [(kind, key, lv, saved_at) for (kind, key), lv in first_tombstones.items()
+                 if kind == "name" and (kind, key) not in levels],
+            )
         self._conn.execute("DELETE FROM pattern_levels WHERE kind = 'text'")
         self._conn.executemany(
             "INSERT INTO pattern_levels (kind, key, level, saved_at) VALUES (?, ?, ?, ?) "
@@ -6594,6 +6599,16 @@ class Store:
         target pair exists). Returns edges re-keyed."""
         day = today or _today_local()
         with self._db_boundary("rename_pattern_association"):
+            # The bound's record follows the rename (complement L3 r2): the old
+            # name's level moves to the new one unless the new name already has
+            # its own, which stays (a rename never raises a level).
+            if self._has_pattern_levels_table():
+                self._conn.execute(
+                    "UPDATE OR IGNORE pattern_levels SET key = ? "
+                    "WHERE kind = 'name' AND key = ?", (new_name, old_name))
+                self._conn.execute(
+                    "DELETE FROM pattern_levels WHERE kind = 'name' AND key = ?",
+                    (old_name,))
             rekeyed = _rename_pattern(
                 self._conn, old_name, new_name, day, commit=not self._defer_commit
             )

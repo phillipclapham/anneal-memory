@@ -3893,7 +3893,8 @@ def validated_save_continuity(
     # signal (no citation = nothing to resolve to zero).
     cited_carried = sum(1 for cf in grad_result.carried_forward if cf.cited)
     cited_graduations = (
-        grad_result.validated + grad_result.demoted + cited_carried
+        grad_result.validated + grad_result.demoted - grad_result.level_capped
+        + cited_carried
     )
     # Read the GATE-INDEPENDENT resolution signal, NOT any(all_validated_ids):
     # all_validated_ids is suppressed on a cross-session-overlap demote (the

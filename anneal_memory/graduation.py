@@ -75,8 +75,14 @@ from .schema import DEFAULT_GRADUATING
 # re-stamped to today: AM-PRESERVE-BARE-PATH held all 11 warm lines at full level (up to
 # 29x), and the 4 cold ones dropped one level each, the rule a cited line already
 # follows. Under ``[23]`` a bare 4x+ line was neither validated nor demoted, at any level.
+# ONE level atom (L3 r5; overflow, 10+ digits, "02x" and non-ASCII digits each came back as
+# a new disagreement between parsers): ASCII, no leading zero, below 10**9. Every regex
+# that reads a level is built from it and writes its digits as [0-9], never \d. The
+# validators add the 2-and-up rule with a lookahead, not a second spelling.
+_LEVEL_ATOM = r"[1-9][0-9]{0,8}"
+_PROVEN_LEVEL = rf"(?!1x)({_LEVEL_ATOM})"  # 2 and up
 _GRADUATION_RE = re.compile(
-    r"\|\s*([2-9]|[1-9][0-9]{1,8})x\s*\((\d{4}-\d{2}-\d{2})\)\s*\[evidence:\s*"
+    rf"\|\s*{_PROVEN_LEVEL}x\s*\(([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})\)\s*\[evidence:\s*"
     r"([a-fA-F0-9][a-fA-F0-9, ]*)"  # one or more hex IDs
     r'(?:\s+"([^"]*)")?\s*\]'  # optional quoted explanation
 )
@@ -90,18 +96,21 @@ _GRADUATION_RE = re.compile(
 # _GRADUATION_RE rejects) as a BARE line, which the v0.5.0 hold would then
 # preserve. Checking ``[ \t]*\[evidence:`` atomically closes that (codex L3).
 _BARE_GRADUATION_RE = re.compile(
-    r"\|\s*([2-9]|[1-9][0-9]{1,8})x\s*\((\d{4}-\d{2}-\d{2})\)(?![ \t]*\[evidence:)[ \t]*"
+    rf"\|\s*{_PROVEN_LEVEL}x\s*\(([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})\)(?![ \t]*\[evidence:)[ \t]*"
 )
 
-# A level token of 10 or more digits (see the bound above): cut to 1x before validation so
-# no parser has a second reading of it.
-_OVERLONG_LEVEL_RE = re.compile(r"(\|\s*)\d{10,}x")
-_EVIDENCE_TAG_STRIP_RE = re.compile(
-    r'\[evidence:\s*[a-fA-F0-9][a-fA-F0-9, ]*(?:\s+"[^"]*")?\s*\]')
+# The one normalizer (see validate_graduations): any ``| <digits>x`` marker whose digits
+# are not exactly the atom. \d is Unicode on purpose here, to catch what the ASCII atom
+# refuses. Groups: (1) pipe, (2) digits, (3) optional date, (4) optional evidence tag.
+_ANY_LEVEL_MARKER_RE = re.compile(
+    r"(\|\s*)(\d+)x\b((?:\s*\([0-9]{4}-[0-9]{2}-[0-9]{2}\))?)"
+    r'(\s*\[evidence:(?:[^\]"]|"[^"]*")*\])?'
+)
+_LEVEL_ATOM_RE = re.compile(_LEVEL_ATOM)
 
 # Matches any pattern with temporal marker (Nx)
 _PATTERN_RE = re.compile(
-    r"\|\s*(\d{1,9})x\s*\((\d{4}-\d{2}-\d{2})\)"
+    rf"\|\s*({_LEVEL_ATOM})x\s*\(([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})\)"
 )
 
 # Matches a pattern line at ANY level (1x and up) with an
@@ -115,7 +124,7 @@ _PATTERN_RE = re.compile(
 # explanation to compare against, defeating the cross-session
 # defense on initially-developing patterns.
 _PATTERN_LINE_WITH_EVIDENCE_RE = re.compile(
-    r"\|\s*(\d{1,9})x\s*\((\d{4}-\d{2}-\d{2})\)\s*\[evidence:\s*"
+    rf"\|\s*({_LEVEL_ATOM})x\s*\(([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})\)\s*\[evidence:\s*"
     r"([a-fA-F0-9][a-fA-F0-9, ]*)"
     r'(?:\s+"([^"]*)")?\s*\]'
 )
@@ -192,7 +201,7 @@ _NAMED_PATTERN_RE = re.compile(
     r")"
     r"(?:(?:!+|\?|✓|\*)[ \t]+)?"              # optional FlowScript marker prefix
     r"([A-Za-z][A-Za-z0-9_.\-]*)"               # operator-style identifier (ASCII)
-    r"[ \t]*\|[ \t]*(\d{1,9})x"                     # graduation marker
+    rf"[ \t]*\|[ \t]*({_LEVEL_ATOM})x"                # graduation marker
 )
 
 # AM-PERNAME-LINEBIND (v0.4.6): the name AND its evidence tag captured in ONE
@@ -221,8 +230,8 @@ _NAMED_PATTERN_WITH_EVIDENCE_RE = re.compile(
     r")"
     r"(?:(?:!+|\?|✓|\*)[ \t]+)?"
     r"([A-Za-z][A-Za-z0-9_.\-]*)"               # (1) operator-style identifier
-    r"[ \t]*\|[ \t]*(\d{1,9})x"                     # (2) level
-    r"[ \t]*\((\d{4}-\d{2}-\d{2})\)"            # (3) date
+    rf"[ \t]*\|[ \t]*({_LEVEL_ATOM})x"                # (2) level
+    r"[ \t]*\(([0-9]{4}-[0-9]{2}-[0-9]{2})\)"      # (3) date
     r"[ \t]*\[evidence:[ \t]*"
     r"([a-fA-F0-9][a-fA-F0-9, ]*)"              # (4) cited ids
     r'(?:[ \t]+"([^"]*)")?[ \t]*\]'             # (5) explanation (optional)
@@ -422,6 +431,9 @@ class GraduationResult:
     # the validator itself matched and bound to the name (the CAP-06 review worklist
     # reads these, not the text).
     graduated_records: list[tuple[str, int, str]] = field(default_factory=list)
+    # Markers cut to 1x because their level was not exactly the level atom; already
+    # counted in ``demoted``, kept apart so they cannot read as lost citations.
+    level_capped: int = 0
 
 
 @dataclass
@@ -664,20 +676,29 @@ def validate_graduations(
     # would otherwise be silently held as a bare carry, dropping the live evidence.
     malformed_evidence_carries: list[str] = []
 
-    # Level cap (L3 r4): a 10+ digit level token on a graduating-section line is cut to
-    # 1x, its evidence tag replaced by "(level-capped)", before anything else reads it.
-    # Left as written it matched no validator regex yet parsed as a huge level in the
-    # other parsers, so a fabricated line saved untouched and held a probe. Counted in
-    # ``demoted``.
+    # The one normalizer (L3 r5): in a graduating section every ``| <digits>x`` marker whose
+    # digits are not exactly the level atom (leading zero, non-ASCII digits, 10+ digits,
+    # 0) becomes ``| 1x`` and its OWN adjacent evidence tag becomes ``(level-capped)``,
+    # before anything else reads the line. Left as written such a marker matched no
+    # validator regex yet parsed as a level elsewhere, so a fabricated line saved
+    # untouched and held a probe. Counted per marker in ``demoted`` (the public total)
+    # and in ``level_capped`` (which the citation-resolution warning excludes).
+    level_capped = 0
     capped_section = False
+
+    def _cap(m: "re.Match[str]") -> str:
+        nonlocal level_capped
+        if _LEVEL_ATOM_RE.fullmatch(m.group(2)) and m.group(2).isascii():
+            return m.group(0)
+        level_capped += 1
+        return f"{m.group(1)}1x{m.group(3)} (level-capped)"
+
     for i, line in enumerate(lines):
         if line.startswith("## "):
             capped_section = _is_graduating_heading(line, graduating_headings)
-        elif capped_section and _OVERLONG_LEVEL_RE.search(line):
-            line = _OVERLONG_LEVEL_RE.sub(r"\g<1>1x", line)
-            line, n_tags = _EVIDENCE_TAG_STRIP_RE.subn("(level-capped)", line)
-            lines[i] = line if n_tags else f"{line.rstrip()} (level-capped)"
-            demoted += 1
+        elif capped_section:
+            lines[i] = _ANY_LEVEL_MARKER_RE.sub(_cap, line)
+    demoted += level_capped
 
     for i, line in enumerate(lines):
         # Track section boundaries
@@ -1198,6 +1219,7 @@ def validate_graduations(
         malformed_evidence_carries=malformed_evidence_carries,
         graduated_names=graduated_names,
         graduated_records=graduated_records,
+        level_capped=level_capped,
     )
 
 

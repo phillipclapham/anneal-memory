@@ -62,7 +62,8 @@ def test_malformed_evidence_after_a_4x_plus_marker_is_reported_not_held():
 
 def test_zero_padded_level_is_not_a_graduation():
     r = _run(f"- p | 04x ({TODAY})", _lookup(4, "2026-09-20"))
-    assert r.bare_demoted == 0 and f"p | 04x ({TODAY})" in r.text
+    # not a graduation, and (L3 r5) no longer left standing: the one normalizer cuts it
+    assert r.bare_demoted == 0 and f"p | 1x ({TODAY}) (level-capped)" in r.text
 
 
 # --- L3 1007 round 1 ---------------------------------------------------------------

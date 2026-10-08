@@ -312,24 +312,32 @@ def test_the_worklist_takes_only_validated_lines_and_any_level(tmp_path):  # cod
         s.close()
 
 
-@pytest.mark.parametrize("digits", [20, 4301])
-def test_an_oversized_level_neither_raises_nor_graduates(tmp_path, digits):  # codex MED/LOW
+@pytest.mark.parametrize("tok", ["1" + "0" * 19, "1" + "0" * 4300, "02", "٢", "٢٢", "００", "0"],
+                         ids=["20d", "4301d", "zero-pad", "arabic", "arabic2", "fullwidth", "zero"])
+def test_an_oversized_level_neither_raises_nor_graduates(tmp_path, tok):  # codex MED/LOW
+    import warnings
     s = Store(tmp_path / "m.db", project_name="t")
     try:
         ep = s.record("we moved the hub to soupcan and it runs there now", "observation")
         s.add_drift_probe(pattern="big_one")
         token = prepare_wrap(s, max_chars=40000)["wrap_token"]
-        huge = "1" + "0" * (digits - 1)
-        line = f'- big_one | {huge}x (2026-10-07) [evidence: {ep.id[:8]} "the hub runs on soupcan"]'
-        r = validated_save_continuity(s, _doc(line), today="2026-10-07", wrap_token=token)
+        i = ep.id[:8]
+        line = (f'- big_one | {tok}x (2026-10-07) [evidence: {i} "the hub runs on soupcan"]\n'
+                f'- two_markers | {tok}x (2026-10-07) [evidence: {i}] and '
+                f'| 2x (2026-10-07) [evidence: {i} "the hub runs on soupcan"]')
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            r = validated_save_continuity(s, _doc(line), today="2026-10-07", wrap_token=token)
+        # a cap is not a lost citation (L3 r5: it raised the "resolved to ZERO" warning)
+        assert not any("ZERO" in str(w.message) for w in caught)
         assert r["drift"]["probes"][0]["status"] != "held"
-        assert s.drift_status()["graduated"] == []
         assert s.get_pattern_history("big_one") is None
-        # the line itself is cut to 1x (L3 r4: it used to save untouched and read as a
-        # huge level to the other parsers)
+        assert [g["name"] for g in s.drift_status()["graduated"]] == []
+        # each bad marker is cut to 1x on its own; the valid second marker keeps its tag
         saved = s.load_continuity()
-        assert "big_one | 1x" in saved and "(level-capped)" in saved
-        assert huge not in saved and "[evidence:" not in saved
+        assert "big_one | 1x (2026-10-07) (level-capped)" in saved
+        assert f"| 2x (2026-10-07) [evidence: {i}" in saved
+        assert f"| {tok}x" not in saved
     finally:
         s.close()
 
@@ -353,6 +361,13 @@ def test_a_failed_instrument_write_fails_the_whole_save(tmp_path, verb):   # cod
         assert isinstance(ei.value.__cause__, sqlite3.DatabaseError)
         assert s._conn.execute("SELECT COUNT(*) FROM wraps").fetchone()[0] == wraps
         assert s.load_continuity() == before
+        # the wrap-id read is inside the boundary too (L3 r5: it raised a raw sqlite error)
+        t = Store(tmp_path / "c.db", project_name="t")
+        t._conn.execute("DROP TABLE wraps")
+        with pytest.raises(StoreDatabaseError):
+            t._record_wrap_graduations([("a", 2, "")])
+        with pytest.raises(StoreDatabaseError):
+            t._record_drift_results([{"probe_id": 1, "status": "held", "detail": ""}])
     finally:
         s.close()
 

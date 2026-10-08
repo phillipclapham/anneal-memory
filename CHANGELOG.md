@@ -23,12 +23,15 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   2x and up: the operator's worklist for truth and for contradiction with Proven patterns.
 - Three additive tables, `drift_probes`, `drift_results` and `wrap_graduations`; an older
   binary ignores them. Adding and retiring a probe are audited.
-- A graduation level is bounded at 9 digits: a longer run on a graduating-section line is
-  cut to `1x`, its evidence tag replaced by `(level-capped)` and counted in `demoted` (a
-  20-digit level overflowed SQLite, a 4,301-digit one raised, and left as written it read as
-  a huge level to other parsers). A failed
-  write of a probe result or worklist row fails the whole save, atomically. The worklist
-  is the validator's own records, not a re-read of the text.
+- One level atom: a graduation level is an ASCII number from 1 to 999,999,999 with no
+  leading zero, and every parser reads it through the same pattern. In a graduating section
+  any other `| <digits>x` marker (10 or more digits, a leading zero, non-ASCII digits, 0) is
+  cut to `1x` on its own, with its own evidence tag replaced by `(level-capped)`, counted in
+  `demoted` (and in the new `GraduationResult.level_capped`, which the "resolved to ZERO
+  episodes" warning excludes). Before, such a line matched no validator yet read as a level
+  to the other parsers, so it saved untouched and held a probe. A failed write of a probe
+  result or worklist row fails the whole save, atomically, as a `StoreDatabaseError`. The
+  worklist is the validator's own records, not a re-read of the text.
 - Run through the real save pipeline on a copy of a real store: 25 probes held, and a
   planted wrong number read `lost` and a planted flipped claim read `changed`.
 

@@ -3278,10 +3278,11 @@ class Store:
         inserted (inside the save batch): the operator's per-wrap review worklist."""
         if not rows:
             return
-        wrap_id = self._conn.execute("SELECT MAX(id) FROM wraps").fetchone()[0]
         # A failed insert fails the whole save batch (L3 r3: swallowing it let a
-        # rolled-back transaction commit empty), as a StoreDatabaseError (L3 r4).
+        # rolled-back transaction commit empty), as a StoreDatabaseError (L3 r4); the
+        # wrap-id read is inside the boundary too (L3 r5).
         with self._db_boundary("drift_probes"):
+            wrap_id = self._conn.execute("SELECT MAX(id) FROM wraps").fetchone()[0]
             self._conn.executemany(
                 "INSERT OR REPLACE INTO wrap_graduations (wrap_id, name, level, "
                 "explanation) VALUES (?, ?, ?, ?)",
@@ -3330,9 +3331,9 @@ class Store:
         inside the save batch, after ``wrap_completed``, so both commit together."""
         if not results:
             return
-        wrap_id = self._conn.execute("SELECT MAX(id) FROM wraps").fetchone()[0]
         # Fails the save, as a StoreDatabaseError (see _record_wrap_graduations).
         with self._db_boundary("drift_probes"):
+            wrap_id = self._conn.execute("SELECT MAX(id) FROM wraps").fetchone()[0]
             self._conn.executemany(
                 "INSERT OR REPLACE INTO drift_results (wrap_id, probe_id, status, detail) "
                 "VALUES (?, ?, ?, ?)",

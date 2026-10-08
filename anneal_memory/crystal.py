@@ -1295,7 +1295,7 @@ def _extract_pattern_meta(wrap_text: str, name: str) -> tuple[int | None, str, l
     # ``has_date``; digits bounded (``\d{1,3}``) so a giant ``Nx`` can't ``ValueError``
     # int() (no-raise contract). ``structural_invariants_beat_discipline``.
     marker_re = re.compile(
-        rf"^[ \t]*(?:[-*•>!✓][ \t]*)*{re.escape(name)}[ \t]*\|[ \t]*(\d{{1,3}})x\b"
+        rf"^[ \t]*(?:[-*•>!✓][ \t]*)*{re.escape(name)}[ \t]*\|[ \t]*([0-9]{{1,3}})x\b"
         rf"[ \t]*(\(\d{{4}}-\d{{2}}-\d{{2}}\))?"
     )
     best_key: tuple[int, int, int] | None = None  # (has_date, level, order)

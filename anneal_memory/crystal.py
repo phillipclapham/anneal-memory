@@ -107,7 +107,7 @@ except ImportError:  # pragma: no cover - exercised only on non-POSIX platforms
     fcntl = None  # type: ignore[assignment]
 
 from .graduation import _SCAFFOLD_TAG_RE, _STATE_PAREN_RE
-from .store import AnnealMemoryError
+from .store import AnnealMemoryError, Store
 
 CRYSTAL_SCHEMA_VERSION = 1
 
@@ -686,7 +686,13 @@ class CrystalStore:
                 # drift) is reset to crystallized + retirement cleared.
                 existing["level"] = max(self._safe_level(existing.get("level")), level)
                 existing["explanation"] = explanation
-                existing["evidence"] = evidence_clean
+                # KL-09 (2026-10-07): evidence accumulates. A re-crystallize from a
+                # carried-forward line has no [evidence:] tag, and replacing with it
+                # erased the episodes the evidence edge recalls through. update()
+                # stays the explicit way to set or prune evidence.
+                prior_evidence = [e for e in (existing.get("evidence") or [])
+                                  if isinstance(e, str)]
+                existing["evidence"] = list(dict.fromkeys([*prior_evidence, *evidence_clean]))
                 existing["permanence"] = permanence
                 existing["activation_mode"] = activation_mode
                 existing["tags"] = tags_clean
@@ -914,6 +920,46 @@ class CrystalStore:
                 item["notes"].append(f"[{stamp}] {add_note}")
             item["rev"] = _rev(cast(dict, item), live=True)
             return item
+
+    def ground_empty_evidence(
+        self,
+        store: Store,
+        *,
+        limit: int = 4,
+        dry_run: bool = False,
+        today: date | None = None,
+    ) -> dict[str, list[str]]:
+        """Fill the evidence of each live pattern that has none, from the newest
+        ``limit`` live (not superseded) episodes in ``store`` whose content contains
+        the pattern's exact name, as a whole word (KL-09).
+
+        Lexical grounding only: an episode that names the pattern is a citation of
+        it, not proof it supports the claim. Returns ``{name: ids}`` for every
+        pattern that had no evidence, ``[]`` where no episode names it. Patterns
+        that already carry evidence are never touched. With ``dry_run`` nothing is
+        written. Each write is compare-and-mutate on the record read here, so a
+        pattern changed concurrently is skipped (reported with ``[]``) rather than
+        overwritten."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError(f"limit must be a positive int (got {limit!r}).")
+        out: dict[str, list[str]] = {}
+        for item in self.active():
+            if any(isinstance(e, str) for e in (item.get("evidence") or [])):
+                continue
+            name = item["name"]
+            found, _, _ = store.keyword_candidates([name], limit_per_keyword=limit * 5)
+            whole = re.compile(rf"(?<![a-z0-9_]){re.escape(name.lower())}(?![a-z0-9_])")
+            ids = [i[:8] for i, ep in found.items() if whole.search(ep.content.lower())][:limit]
+            out[name] = ids
+            if ids and not dry_run:
+                try:
+                    self.update(
+                        name, evidence=ids, expect=item["rev"], today=today,
+                        add_note=f"evidence grounded from {len(ids)} episode(s) "
+                                 "naming the pattern (ground_empty_evidence)")
+                except CrystalConflictError:
+                    out[name] = []
+        return out
 
     # --- public API: retire (the membrane out — crystallized ≠ immortal) ----
 

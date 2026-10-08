@@ -767,8 +767,40 @@ def test_seam_doc_l3_1006_unmanaged_rewired_counted_and_never_owned(tmp_path):
         s._conn.execute("INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, 'me')",
                         (eb2, c.id))
         s._conn.commit()
+        origin = s._conn.execute("SELECT * FROM rewire_origin ORDER BY 1, 2").fetchall()
         assert s.delete(eb2, team_operator=True)       # rewire A -> C collides
         assert (ea, c.id) in links(s) and not s.team_owned(old_id=ea, new_id=c.id)
+        # L3 1007 (complement): the collision leaves rewire_origin as it was, and a
+        # later import by key y does not adopt the unmanaged row either
+        assert s._conn.execute("SELECT * FROM rewire_origin ORDER BY 1, 2").fetchall() \
+            == origin
+        import_ledger(s, v3([(a, True, []), (b2, True, [A0])], key="y", root="r1",
+                            seq=2))
+        assert not s.team_owned(old_id=ea, new_id=c.id)
+        assert s.team_snapshot_status()["unmanaged_rewired"] == 1
+    finally:
+        s.close()
+
+
+def test_unmanaged_rewired_counts_imported_team_entries_only(tmp_path):
+    """L3 1007 (codex, reproduced): a local record labelled ``team:`` with no ledger
+    metadata is not an imported team entry, so a rewired row hiding it is not one."""
+    s = Store(tmp_path / "lbl.db", audit=False)
+    try:
+        fake = s.record("looks like a team entry", "observation", source="team:mallory")
+        real_a = ledger("alice", [{**RULING, "ts": "2026-01-01T00:00:00Z"}])[0]
+        import_ledger(s, [real_a])
+        real = ep(s, A0)
+        local = s.record("a local replacement", "observation")
+        for old in (fake.id, real):
+            s._conn.execute("INSERT INTO supersessions (old_id, new_id, source) "
+                            "VALUES (?, ?, 'rewired')", (old, local.id))
+        s._conn.commit()
+        assert s.team_snapshot_status()["unmanaged_rewired"] == 1
+        # a malformed metadata row elsewhere must not zero the count
+        s._conn.execute("UPDATE episodes SET metadata = '{not json' WHERE id = ?", (local.id,))
+        s._conn.commit()
+        assert s.team_snapshot_status()["unmanaged_rewired"] == 1
     finally:
         s.close()
 
@@ -795,4 +827,4 @@ def test_team_status_cli_shows_unmanaged_with_no_keys(tmp_path, capsys, monkeypa
     monkeypatch.setattr(sys, "argv", ["anneal-memory", "--db", str(db), "team-status"])
     main()
     out = capsys.readouterr().out
-    assert "No team snapshot" in out and "hiding a team entry" in out and out.rstrip().endswith("1")
+    assert "No team snapshot" in out and "hiding an imported team entry" in out and out.rstrip().endswith("1")

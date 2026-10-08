@@ -4,6 +4,36 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — graduation stopped grading function words (KL-01)
+- The overlap checks in graduation (explanation grounding, the cross-session-overlap demotion,
+  the preservation novelty check) now drop all common function words (pronouns, determiners,
+  prepositions, conjunctions, auxiliaries, number words), not a short list. Before, "while",
+  "only", "when" and "one" counted as shared vocabulary, and the cross-session gate demoted
+  real patterns on them. Replayed against one real store's recorded demotions, about a third
+  would not have tripped. Content words are unchanged, so a re-worded explanation that shares
+  three content words with the prior one still demotes.
+
+### Added — a shrink-gate override leaves an audit trace (KL-14)
+- A save with `allow_shrink=True` (CLI `--allow-shrink`, MCP `"allow_shrink": true`) now
+  records `allow_shrink` in its `continuity_saved` audit event: `refusal_suppressed` says
+  whether the gate would have refused without the override, and `refusal` carries the text
+  it suppressed.
+
+### Fixed / Added — crystal evidence is never erased, and empty evidence can be grounded (KL-09)
+- Re-crystallizing a pattern now adds the new evidence ids to the stored ones instead of
+  replacing them. A re-crystallize from a carried-forward line (no `[evidence:]` tag) used to
+  leave the pattern with no evidence, so associative recall could no longer reach it.
+  `CrystalStore.update(evidence=...)` still sets evidence explicitly.
+- `CrystalStore.ground_empty_evidence(store, limit=4, dry_run=False)` and
+  `anneal-memory crystal ground-evidence [--limit N] [--dry-run]`: for each live pattern with
+  no evidence, record the newest live episodes that name the pattern as a whole word.
+  Patterns that already have evidence are never touched. This is lexical grounding: an
+  episode that names a pattern cites it, it does not prove it.
+
+### Fixed — team-status counts imported team entries only (L3 on the v3 seam)
+- The count of unmanaged rewired links now requires the hidden episode to carry team-import's
+  ledger metadata, not only a `team:` source, and the line says it counts link rows.
+
 ### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
 - `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one
   ledger clone's complete verdict, with each line marked `enforced` and the links it `honours`.

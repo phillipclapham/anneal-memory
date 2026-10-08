@@ -4593,6 +4593,42 @@ class TestCatastrophicShrinkGate:
         finally:
             store.close()
 
+    @staticmethod
+    def _saved_events(store):
+        import json as _json
+        path = store._audit._active_path
+        return [e for e in (_json.loads(x) for x in path.read_text(encoding="utf-8")
+                            .splitlines() if x.strip())
+                if e["event"] == "continuity_saved"]
+
+    def test_pipeline_allow_shrink_override_is_audited_kl14(self, tmp_path):
+        """KL-14: an override of the shrink gate leaves a trace naming the refusal
+        it suppressed."""
+        from anneal_memory import Store, FLOW_SCHEMA
+        store = Store(tmp_path / "s.db", project_name="flow")
+        store.set_section_schema(FLOW_SCHEMA)
+        try:
+            self._wrap(store, self._flow_prior(), "2026-05-30")
+            assert "allow_shrink" not in self._saved_events(store)[-1]["data"]
+            self._wrap(store, self._flow_collapsed(), "2026-05-31", allow_shrink=True)
+            trace = self._saved_events(store)[-1]["data"]["allow_shrink"]
+            assert trace["refusal_suppressed"] is True
+            assert "collapses protected memory" in trace["refusal"]
+        finally:
+            store.close()
+
+    def test_pipeline_allow_shrink_with_nothing_to_override_says_so_kl14(self, tmp_path):
+        from anneal_memory import Store, FLOW_SCHEMA
+        store = Store(tmp_path / "s.db", project_name="flow")
+        store.set_section_schema(FLOW_SCHEMA)
+        try:
+            self._wrap(store, self._flow_prior(), "2026-05-30")
+            self._wrap(store, self._flow_prior(), "2026-05-31", allow_shrink=True)
+            assert self._saved_events(store)[-1]["data"]["allow_shrink"] == {
+                "refusal_suppressed": False}
+        finally:
+            store.close()
+
     def test_pipeline_flow_healthy_growth_saves(self, tmp_path):
         from anneal_memory import Store, FLOW_SCHEMA
         store = Store(tmp_path / "s.db", project_name="flow")

@@ -332,12 +332,23 @@ def _is_patterns_heading(line: str) -> bool:
     return _is_graduating_heading(line)
 
 
-# Stop words for explanation overlap checking
+# Stop words for explanation overlap checking: function words only (pronouns,
+# determiners, prepositions, conjunctions, auxiliaries, number words). KL-01,
+# 2026-10-07: the old list let "while"/"only"/"when"/"one" count as shared
+# vocabulary, and the cross-session gate demoted real patterns on them (flow's save
+# audit). Content words stay meaningful on purpose: grounding needs them.
 _STOP_WORDS = frozenset(
-    "a an the is are was were be been being have has had do does did "
-    "will would shall should may might can could this that these those "
-    "it its he she they we you i me my our his her their in on at to "
-    "for of by with from and or but not no nor so if as".split()
+    "a an the is are was were be been being have has had having do does did doing "
+    "will would shall should may might must can could this that these those "
+    "it its itself he him himself she hers herself they them themselves we us "
+    "ourselves you your yours yourself i me my myself mine our ours his her their "
+    "theirs what which who whom whose in on at to for of by with from about against "
+    "between into through during before after above below up down out off over "
+    "under again further then once here there when where why how all any both each "
+    "few more most other some such and or but not no nor so if as because until "
+    "while than too very only own same just now also still even ever yet already "
+    "much many another within without upon across since though although whether "
+    "unless via every one two three four five six seven eight nine ten am".split()
 )
 
 

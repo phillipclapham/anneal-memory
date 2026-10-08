@@ -2240,8 +2240,9 @@ def cmd_team_status(args: argparse.Namespace) -> None:
     if args.json:
         _print_json(data)
         return
-    unmanaged = (f"Rewired links hiding a team entry that no snapshot manages (never "
-                 f"adopted; remove by hand if wrong): {data['unmanaged_rewired']}")
+    unmanaged = (f"Rewired link rows hiding an imported team entry that no snapshot "
+                 f"manages (never adopted; remove by hand if wrong): "
+                 f"{data['unmanaged_rewired']}")
     if not data["keys"]:
         print("No team snapshot (no v3 team-import has replaced links here).")
         if data["unmanaged_rewired"]:
@@ -3694,6 +3695,31 @@ def cmd_crystal_fold_surfaced(args: argparse.Namespace) -> None:
         print(f"Not found (skipped): {', '.join(result.paths_missing)}", file=sys.stderr)
 
 
+def cmd_crystal_ground_evidence(args: argparse.Namespace) -> None:
+    """Fill empty crystal evidence from episodes naming the pattern (KL-09)."""
+    crystal_store = _open_crystal_store(args)
+    db_path = _existing_db_path(args, require_file=True)
+    try:
+        with Store(db_path, read_only=True) as store:
+            result = crystal_store.ground_empty_evidence(
+                store, limit=args.limit, dry_run=args.dry_run)
+    except (CrystalError, StoreError, ValueError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if args.json:
+        _print_json({"dry_run": args.dry_run, "grounded": result})
+        return
+    if not result:
+        print("Every live pattern already has evidence; nothing to ground.")
+        return
+    verb = "Would ground" if args.dry_run else "Grounded"
+    for name, ids in result.items():
+        if ids:
+            print(f"{verb} {name}: {', '.join(ids)}")
+        else:
+            print(f"No episode names {name} (or it changed meanwhile); left empty")
+
+
 def cmd_worth(args: argparse.Namespace) -> None:
     """Report-only Memory-Worth counters. Nothing reads this to rank or decay."""
     db_path = _existing_db_path(args, require_file=True)
@@ -4569,6 +4595,21 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[json_parent],
     )
     cp.set_defaults(func=cmd_crystal_rewarm)
+
+    cp = crystal_sub.add_parser(
+        "ground-evidence",
+        help="Fill EMPTY pattern evidence from episodes that name the pattern",
+        description="For each live pattern with no evidence, record the newest --limit "
+                    "live episodes whose content contains the pattern's exact name as its "
+                    "evidence (the edge associative recall surfaces it through). Patterns "
+                    "that already have evidence are never touched. Lexical grounding only.",
+        parents=[json_parent],
+    )
+    cp.add_argument("--limit", type=int, default=4,
+                    help="Episodes recorded per pattern (default 4)")
+    cp.add_argument("--dry-run", action="store_true",
+                    help="Report what would be recorded; write nothing")
+    cp.set_defaults(func=cmd_crystal_ground_evidence)
 
     cp = crystal_sub.add_parser(
         "index",

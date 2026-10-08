@@ -2927,6 +2927,19 @@ def validated_save_continuity(
         prior_continuity, text, section_schema, allow_shrink=allow_shrink,
         crystallized_credit=crystallized_credit,
     )
+    # KL-14 (2026-10-07): an override must leave a trace. When the operator passes
+    # allow_shrink, run the same check without it and record in the audit whether
+    # the override changed the outcome, and the refusal it suppressed.
+    shrink_override: dict[str, Any] | None = None
+    if allow_shrink is True:
+        try:
+            _check_no_catastrophic_shrink(
+                prior_continuity, text, section_schema, allow_shrink=False,
+                crystallized_credit=crystallized_credit,
+            )
+            shrink_override = {"refusal_suppressed": False}
+        except ValueError as exc:
+            shrink_override = {"refusal_suppressed": True, "refusal": str(exc)[:2000]}
 
     # Get current session's episodes for citation validation.
     # Re-fetch the full post-last-wrap set and filter down to exactly
@@ -3529,6 +3542,8 @@ def validated_save_continuity(
                 # durable recovery oracle are guaranteed identical.
                 "content_hash": content_hash,
             }
+            if shrink_override is not None:
+                audit_payload["allow_shrink"] = shrink_override
             # Capture Proven-tier pattern omissions in the audit chain.
             # detect_pattern_omissions returns an empty list for the
             # common case (first wrap, or all prior Proven-tier patterns

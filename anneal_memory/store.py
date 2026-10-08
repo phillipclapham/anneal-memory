@@ -3144,12 +3144,18 @@ class Store:
                 unmanaged = self._conn.execute(
                     # Any unowned rewired row that hides a TEAM episode, whatever
                     # its linker is (seam doc L3 1006, codex: A(team) -> C(local)
-                    # was uncounted).
+                    # was uncounted). A team episode is one team-import wrote: the
+                    # ledger metadata, not the label (a local record may carry a
+                    # ``team:`` source; L3 1007, codex). json_valid first: one
+                    # malformed row would otherwise fail the query into ``empty``.
                     """SELECT COUNT(*) FROM supersessions s WHERE s.source = 'rewired'
                        AND NOT EXISTS (SELECT 1 FROM team_snapshot_rows o
                                        WHERE o.old_id = s.old_id AND o.new_id = s.new_id)
                        AND EXISTS (SELECT 1 FROM episodes e WHERE e.id = s.old_id
-                                   AND e.source >= 'team:' AND e.source < 'team;')"""
+                                   AND e.source >= 'team:' AND e.source < 'team;'
+                                   AND CASE WHEN json_valid(e.metadata) THEN
+                                       json_extract(e.metadata, '$.team.entry_id') END
+                                       IS NOT NULL)"""
                 ).fetchone()[0]
                 notes = [dict(r) for r in self._conn.execute(
                     "SELECT key, kind, entry_id, detail FROM team_snapshot_notes "

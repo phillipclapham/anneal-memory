@@ -4366,7 +4366,11 @@ class Store:
 
         Lowering also lowers the trust recorded with every derivation from this
         episode (``derived_from``), through what was derived from those, so
-        deleting the episode afterwards cannot raise them again.
+        deleting the episode afterwards cannot raise them again. Raising it (the
+        host correcting a mislabel) refreshes that record to the episode's new
+        effective trust, through the chain, so what was derived from it is
+        restored too; the audit event names the rows as ``derived_raised``. A
+        derivation whose source was deleted keeps its record.
 
         Raises:
             ValueError: unknown ``trust``, ``trust`` above the ceiling, no such
@@ -4380,6 +4384,7 @@ class Store:
         old = DEFAULT_TRUST
         removed: list[dict[str, str]] = []
         team_left: list[dict[str, str]] = []
+        derived_raised: list[dict[str, str]] = []
         # Refusals are computed inside and raised after the block: the boundary
         # rolls back on any exception, which inside a caller's batch would
         # discard its earlier writes (see _db_boundary).
@@ -4415,7 +4420,10 @@ class Store:
                             (episode_id, trust),
                         )
                     removed, team_left = self._drop_links_trust_invalidated(episode_id)
-                    self._lower_derived_snapshots([episode_id], follow=True)
+                    if trust_rank(trust) > trust_rank(old):
+                        derived_raised = self._raise_derived_snapshots([episode_id])
+                    else:
+                        self._lower_derived_snapshots([episode_id], follow=True)
             if not self._defer_commit:
                 self._conn.commit()
         if problem:
@@ -4426,6 +4434,8 @@ class Store:
                 event["supersessions_removed"] = removed
             if team_left:
                 event["team_supersessions_left"] = team_left
+            if derived_raised:
+                event["derived_raised"] = derived_raised
             self._audit_log_after_commit(
                 "trust_set", event, method="set_trust",
                 committed="the trust change", actor=actor,
@@ -4470,6 +4480,48 @@ class Store:
                         )
                         if follow:
                             queue.append(ep_id)
+
+    def _raise_derived_snapshots(self, episode_ids: Iterable[str]) -> list[dict[str, str]]:
+        """The inverse of :meth:`_lower_derived_snapshots`, for a trust RAISE: set
+        the trust recorded with each derivation FROM these episodes to the
+        episode's effective trust now where that is higher, then do the same for
+        what was derived from each episode whose row moved. Returns the rows
+        changed as ``{episode_id, source_id, from, to}``. Runs inside
+        :meth:`set_trust`'s transaction, after its ceiling and ``expect`` checks,
+        so it is as gated as the raise itself."""
+        changed: list[dict[str, str]] = []
+        if self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'episode_derived'"
+        ).fetchone() is None:
+            return changed
+        queue = sorted({str(i) for i in episode_ids})
+        visited: set[str] = set()
+        while queue:
+            batch = [i for i in queue if i not in visited]
+            queue = []
+            visited.update(batch)
+            if not batch:
+                break
+            eff = self.effective_trust_map(batch)
+            for start in range(0, len(batch), 500):
+                chunk = batch[start:start + 500]
+                marks = ",".join("?" * len(chunk))
+                rows = self._conn.execute(
+                    f"SELECT episode_id, source_id, source_trust FROM episode_derived "
+                    f"WHERE source_id IN ({marks})", chunk,
+                ).fetchall()
+                for ep_id, src, snap in rows:
+                    level = eff.get(src, DEFAULT_TRUST)
+                    if trust_rank(level) > trust_rank(snap):
+                        self._conn.execute(
+                            "UPDATE episode_derived SET source_trust = ? "
+                            "WHERE episode_id = ? AND source_id = ?",
+                            (level, ep_id, src),
+                        )
+                        changed.append({"episode_id": ep_id, "source_id": src,
+                                        "from": snap, "to": level})
+                        queue.append(ep_id)
+        return changed
 
     def _drop_links_trust_invalidated(
         self, episode_id: str

@@ -926,3 +926,25 @@ class TestL3Round3:
                 prev = other.record(f"chain {n}", EpisodeType.OBSERVATION,
                                     derived_from=[prev.id])
             assert other.effective_trust_map([prev.id]) == {prev.id: "external"}
+            # The host raising a mislabelled source back restores what was derived
+            # from it, through the chain, and the audit names the rows; a deleted
+            # source keeps its record.
+            mis = other.record("Page mislabelled as external.", EpisodeType.OBSERVATION)
+            mid = other.record("Summary of it.", EpisodeType.OBSERVATION, derived_from=[mis.id])
+            end = other.record("Summary of the summary.", EpisodeType.OBSERVATION,
+                               derived_from=[mid.id])
+            other.set_trust(mis.id, "external")
+            assert other.effective_trust_map([mid.id, end.id]) == {
+                mid.id: "external", end.id: "external"}
+            other.set_trust(mis.id, "agent")
+            assert other.effective_trust_map([mid.id, end.id]) == {}
+            raised = json.loads(
+                (tmp_path / "d.audit.jsonl").read_text().splitlines()[-1])["data"]
+            assert {(r["episode_id"], r["to"]) for r in raised["derived_raised"]} == {
+                (mid.id, "agent"), (end.id, "agent")}
+            gone = other.record("Page gamma.", EpisodeType.OBSERVATION)
+            gone_sum = other.record("Summary of gamma.", EpisodeType.OBSERVATION,
+                                    derived_from=[gone.id])
+            other.set_trust(gone.id, "external")
+            assert other.delete(gone.id)
+            assert other.effective_trust_map([gone_sum.id]) == {gone_sum.id: "external"}

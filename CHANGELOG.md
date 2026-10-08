@@ -136,7 +136,11 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   that episode and what was derived from those, deleting or pruning an episode snapshots its
   effective trust into them first, and a live source contributes the lower of the record and its
   class now, so a reused id never lifts it (run: a source lowered after the derivation and then
-  deleted read as `agent` again). The graph is walked iteratively (run: a ~1,000-deep chain
+  deleted read as `agent` again). A host RAISING the source (correcting a mislabel) refreshes
+  that record to its new effective trust, through the chain, in the same transaction and behind
+  the same ceiling/gate, and the `trust_set` audit event names the rows as `derived_raised`
+  (run: a raised-back source left its summaries `external`, with no way to restore them); a
+  deleted source keeps its record. The graph is walked iteratively (run: a ~1,000-deep chain
   raised `RecursionError`). The graduation
   trust check and the save's re-read use it, so a
   summary of an external page reads `external` and cannot corroborate it. `ScoredEpisode.trust`

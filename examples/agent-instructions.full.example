@@ -260,13 +260,15 @@ associations. The cognitive topology inherits the citation-layer
 integrity of the graduation system (and its limits — see *What it
 does NOT catch* above).
 
-**Single-process invariant (load-bearing).** Only one process should
-operate against any given anneal-memory store at a time. The library
-is not thread-safe, not task-safe, not reentrant. Multi-tenant
-deployments sharing a store break the hash-chained audit trail by
-construction and remove the actor-scoping that filesystem-path
-isolation provides. If you need multi-agent setups, give each agent
-its own store path.
+**One store per entity (load-bearing).** A store is one entity's
+memory: sharing it between agents removes the actor-scoping that
+filesystem-path isolation provides, so give each agent its own store
+path. One `Store` object is not thread-safe, not task-safe, not
+reentrant; use one per thread. Several processes of the same entity
+may record into one store (the audit trail serializes its appends with
+a cross-process lock), provided every writer runs a version that takes
+that lock; an older anneal-memory writing alongside breaks the hash
+chain, and on Windows, which has no such lock, keep to one writer.
 
 **Limbic layer (optional — reflect on your state during compression):**
 

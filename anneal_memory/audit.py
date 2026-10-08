@@ -62,6 +62,28 @@ _LOCK_UNAVAILABLE_ERRNOS = frozenset(
     ) if e is not None
 )
 
+# ``flock(LOCK_NB)`` raising one of these means "another holder has it".
+_LOCK_HELD_ERRNOS = frozenset({errno.EWOULDBLOCK, errno.EAGAIN})
+
+# How long an append waits for another holder of the append lock before the
+# append is refused and counted as a dropped audit write (see
+# AuditTrail._append_lock). A healthy holder keeps it for one append, or for a
+# week's rotation; this bounds a stopped or hung one.
+_APPEND_LOCK_TIMEOUT_SECONDS = 30.0
+
+
+def _unlock_and_close(fd: int) -> None:
+    """Release a ``flock`` explicitly, then close. A close alone leaves the lock
+    held while a forked child still has a copy of the descriptor."""
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 # The module's logger, used as logging registered it: never re-classed or
 # wrapped, so an application's logger class, levels, filters and handlers on it
 # behave as the application set them up. From "anneal-memory", its parent,
@@ -611,13 +633,17 @@ class AuditTrail:
         # writing past a file that vanished under it (L3 r1 10-03, codex HIGH +
         # complement, run).
         self._active_has_entry = False
-        # Threads inside :meth:`log`'s append-lock span (KL-24); a nested
-        # ``log()`` or ``stats()`` on one of them is refused, not deadlocked.
+        # Threads inside :meth:`log`'s append-lock span (KL-24): a nested
+        # ``log()`` on one of them is refused rather than deadlocked, and a
+        # nested ``stats()`` answers from the cache without re-syncing.
         self._append_threads: set[int] = set()
-        # ``(st_dev, st_ino, st_size)`` of the active file as this instance last
-        # read or wrote it, or None for no file. ``_resync_with_disk`` compares
-        # the file against it to see what other processes did in between.
-        self._known_active: tuple[int, int, int] | None = None
+        # Where the entry this instance's chain state was taken from sits in the
+        # active file: ``(st_dev, st_ino, offset, length)``. None whenever the
+        # tip is not in the active file (``_active_has_entry`` False: a fresh
+        # file, a seed from the manifest, a seal). ``_resync_with_disk`` checks
+        # those bytes still hash to ``_prev_hash`` before trusting anything
+        # after them (L2 r1: a reused inode made a size check unsound).
+        self._tip: tuple[int, int, int, int] | None = None
 
     # -- Public API --
 
@@ -730,9 +756,6 @@ class AuditTrail:
                 if not self._initialized:
                     self._initialize()
                 self._rotate_if_needed()
-        # What this instance has now read or made of the active file; the next
-        # call's re-sync compares against it.
-        self._known_active = self._active_signature()
 
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
@@ -812,10 +835,11 @@ class AuditTrail:
         resume_at = active.stat().st_size if active.exists() else 0
         if resume_at == 0 and self._active_has_entry:
             # ⛔ THE FILE THIS INSTANCE WAS APPENDING TO IS GONE. A file already
-            # gone at ``_resync_with_disk`` re-initialised there, so this fires
-            # only when it went between that re-sync and here: removed by
-            # something that takes no append lock (a hand, an anneal from before
-            # the lock), or with no lock held at all (see _append_lock). Appending would
+            # gone at ``_resync_with_disk`` was refused (or followed, when
+            # another writer sealed its week) there, so this fires only when it
+            # went between that re-sync and here: removed by something that
+            # takes no append lock (a hand, an anneal from before the lock), or
+            # with no lock held at all (see _append_lock). Appending would
             # chain from its lost tip into a new file and overwrite the
             # manifest's record of it; verify then reports a hash break that
             # audit-repair cannot see (L3 r1 10-03, run). Re-init on the next
@@ -901,6 +925,7 @@ class AuditTrail:
             self._dropped_since_last,
         )
         saved_has_entry = self._active_has_entry  # L3 r2 10-03, codex MED
+        saved_tip = self._tip
         try:
             with open(active, "a", encoding="utf-8") as f:
                 f.write(payload)
@@ -1191,6 +1216,7 @@ class AuditTrail:
                     self._dropped_since_last,
                 ) = saved_chain_state
                 self._active_has_entry = saved_has_entry
+                self._tip = saved_tip
                 self._initialized = True
             else:
                 # Disk is the authority now — see the block above.
@@ -1209,22 +1235,34 @@ class AuditTrail:
                 self._dropped_since_last = saved_chain_state[2]
             raise
 
+        # The new tip is where THIS entry was written, computed from the append
+        # itself, not from a stat of the file afterwards: a stat would also take
+        # in anything an unlocked writer appended since, and the next re-sync
+        # would skip it (L2 r1, run). The stat is for the file's identity only.
+        # A failed stat cannot say which file this is, so the next call
+        # re-derives everything from disk instead.
+        try:
+            st_after = os.stat(active)
+        except OSError:
+            self._tip = None
+            self._initialized = False
+        else:
+            self._tip = (
+                st_after.st_dev,
+                st_after.st_ino,
+                resume_at + (1 if needs_boundary else 0),
+                len(json_line.encode("utf-8")),
+            )
+
         # ⛔ THE ACTIVE FILE'S FIRST ENTRY IS RECORDED IN THE MANIFEST, so a
         # restart can tell a deleted active file from an empty one (see
         # ``_refuse_vanished_active``). Once per active file: only the append
         # into a file that held no valid entry (absent, empty, or only a torn
-        # fragment: L3 r1 10-03, codex + glm, run). The append itself holds no lock,
-        # so the save takes the span here. A failure is logged and never fails
-        # this write (the entry is already on disk); that week is then not
-        # protected, as in degrade mode, where the span cannot save at all.
-        # The entry is on disk and the chain state advanced; record the file as
-        # this instance now sees it. A failed stat cannot say what is on disk,
-        # so the next call re-derives everything from the file instead.
-        try:
-            self._known_active = self._active_signature()
-        except OSError:
-            self._initialized = False
-
+        # fragment: L3 r1 10-03, codex + glm, run). The append holds the append
+        # lock but not the manifest lock, so the save takes the span here. A
+        # failure is logged and never fails this write (the entry is already on
+        # disk); that week is then not protected, as in degrade mode, where the
+        # span cannot save at all.
         if not had_entry:
             self._record_active_begun(new_prev_hash, saved_chain_state[0])
 
@@ -1294,24 +1332,19 @@ class AuditTrail:
             about the enabled/disabled distinction should check for
             ``None`` at the ``Store._audit`` level before calling this.
         """
-        me = threading.get_ident()
-        if me in self._span_threads or me in self._append_threads:
-            raise RuntimeError(
-                "an audit operation is already in progress on this thread; "
-                "the trail is not reentrant (e.g. from a logging handler)"
-            )
-        # Under the append lock, so ``entry_count`` includes what other
-        # writer processes appended since this instance last looked (KL-24).
-        self._append_threads.add(me)
-        try:
-            with self._append_lock():
-                self._resync_with_disk()
-                if not self._initialized:
-                    with self._operation_span():  # initializing adopts and seeds: one span
-                        self._initialize()
-                self._known_active = self._active_signature()
-        finally:
-            self._append_threads.discard(me)
+        # Re-synced first, so ``entry_count`` includes what other writers
+        # appended since this instance last looked (KL-24). Without the append
+        # lock: this only reads, a snapshot taken mid-append is at most one
+        # entry behind, and the next ``log()`` checks again under the lock (L2
+        # r1, run: under the lock a status poll waited out a peer's hold). From
+        # inside this thread's own append (a logging handler), the cache is
+        # answered as it stands: re-syncing there would move the chain state
+        # under the entry being written.
+        if threading.get_ident() not in self._append_threads:
+            self._resync_with_disk(reading=True)
+        if not self._initialized:
+            with self._operation_span():  # initializing adopts and seeds: one span
+                self._initialize()
         return {
             "log_path": str(self._active_path),
             "entry_count": self._seq,
@@ -2251,7 +2284,7 @@ class AuditTrail:
                 self._lock_owner = None
                 self._lock_fd = None
                 if fd is not None:
-                    os.close(fd)
+                    _unlock_and_close(fd)
 
     @contextmanager
     def _operation_span(self) -> Iterator[None]:
@@ -2305,8 +2338,7 @@ class AuditTrail:
     @contextmanager
     def _append_lock(self) -> Iterator[None]:
         """Hold the cross-process lock that serializes appends to this trail
-        (KL-24): ``log()`` holds it from its re-sync to its last manifest save,
-        and ``stats()`` while it re-syncs.
+        (KL-24): ``log()`` holds it from its re-sync to its last manifest save.
 
         ⛔ WHY (KL-24, run 2026-10-07): three processes, each with its own
         ``Store(audit=True)`` on one database, recorded 600 episodes; every
@@ -2316,85 +2348,150 @@ class AuditTrail:
         written since its previous one.
 
         The lock file is ``<stem>.audit-append.lock``, beside the manifest lock
-        and like it outside ``<stem>.audit.*``; it is opened, refused and
-        degraded exactly as the manifest lock is (:meth:`_open_and_flock`).
-        ⛔ LOCK ORDER: this lock is taken FIRST and the manifest lock, when an
-        operation needs it, inside it. Nothing that holds the manifest lock
-        takes this one (``repair_manifest`` does not append), so the two never
-        wait on each other in opposite orders. Not reentrant: ``log()`` and
-        ``stats()`` refuse a nested call on the same thread before taking it,
-        and two instances for one database must not nest it in one thread (the
-        inner one blocks on the outer, as with the manifest lock).
+        and like it outside ``<stem>.audit.*``. ⛔ LOCK ORDER: this lock is
+        taken FIRST and the manifest lock, when an operation needs it, inside
+        it. Nothing that holds the manifest lock takes this one
+        (``repair_manifest`` does not append), so the two never wait on each
+        other in opposite orders. Not reentrant: ``log()`` refuses a nested
+        call on the same thread before taking it, and two instances for one
+        database must not nest it in one thread (the inner one waits on the
+        outer, as with the manifest lock).
 
-        With no ``fcntl`` (Windows) or a filesystem without ``flock`` (warned
-        on stderr once per lock path) it is not held, and appends are as
-        unserialized as they were before it existed.
+        What a failure does, which is NOT what the manifest lock's does:
+        - advisory locks unavailable (no ``fcntl`` on Windows, or ``flock``
+          raising an errno in ``_LOCK_UNAVAILABLE_ERRNOS``, warned on stderr
+          once per lock path): not held, and appends are as unserialized as
+          they were before it existed;
+        - the lock file cannot be opened or is not a regular file, or another
+          holder keeps it past ``_APPEND_LOCK_TIMEOUT_SECONDS`` (a stopped or
+          hung process): ``_AuditLockError``, so the append is REFUSED. The
+          store counts it as a dropped audit write (``audit_write_failures``,
+          ``dropped_before`` on the next entry), so a wedged lock is loud and
+          bounded rather than an unserialized append or a hang.
+        Released with ``LOCK_UN`` before the close, so a child forked while it
+        was held does not keep it (L2 r1, run: another writer waited out the
+        child's whole lifetime).
         """
         fd = None
-        if fcntl is not None:
-            fd = self._open_and_flock(
-                self._db_path.parent / f"{self._db_path.stem}.audit-append.lock",
-                "audit append lock",
-                "concurrent audit writers are not serialized and can break the hash chain",
-            )
         try:
+            if fcntl is not None:
+                fd = self._open_and_flock(
+                    self._db_path.parent / f"{self._db_path.stem}.audit-append.lock",
+                    "audit append lock",
+                    "concurrent audit writers are not serialized and can break the hash chain",
+                    timeout=_APPEND_LOCK_TIMEOUT_SECONDS,
+                )
             yield
         finally:
             if fd is not None:
-                os.close(fd)
+                _unlock_and_close(fd)
 
-    def _active_signature(self) -> tuple[int, int, int] | None:
-        """``(st_dev, st_ino, st_size)`` of the active file, None when absent."""
-        try:
-            st = os.stat(self._active_path)
-        except FileNotFoundError:
-            return None
-        return (st.st_dev, st.st_ino, st.st_size)
+    def _resync_with_disk(self, *, reading: bool = False) -> None:
+        """Bring the cached chain tip up to date with the active file.
 
-    def _resync_with_disk(self) -> None:
-        """Bring the cached chain tip up to date with the active file before an
-        append; the caller holds :meth:`_append_lock`.
+        :meth:`log` calls it under :meth:`_append_lock`; :meth:`stats` calls
+        it without (it only reads, and the next ``log()`` checks again under
+        the lock), with ``reading=True``.
 
-        Unchanged since this instance last read or wrote it: nothing to do.
-        Same file, grown: other writers appended, so the tip is the last valid
-        entry in the bytes past the old end (none valid, only a torn fragment,
-        leaves the tip where it was; the append's boundary guard handles the
-        fragment). Anything else (rotated, replaced, shrunk, vanished, or a
-        file this instance never saw): the cache says nothing reliable, so
-        ``_initialized`` is cleared and the caller re-derives everything
-        through :meth:`_initialize`, which also refuses a deleted active file.
+        With a tip in the active file (``self._tip``): if that file is still
+        the same one AND the tip's bytes still hash to ``_prev_hash``, the
+        chain continues from the last valid entry after the tip (another
+        writer's), or from the tip itself when nothing valid follows. Any
+        other answer (no file, another inode, shorter than the tip, different
+        bytes there) means the cache says nothing reliable: ``_initialized``
+        is cleared and the caller re-derives everything through
+        :meth:`_initialize`, which also refuses a deleted active file.
+        Without a tip (the chain's tip is in the manifest or a sealed file):
+        any valid entry now in the active file was written by someone else,
+        so the same full re-derivation runs.
+
+        ⛔ A LOST ACTIVE FILE IS REFUSED HERE, NOT ONLY BY THE MANIFEST (L1 r1,
+        run): when the file holding the tip is gone, emptied below the tip, or
+        replaced, and the week it held is not sealed on disk (which is what
+        another writer's rotation leaves), this raises ``_ManifestUnavailable``
+        once, as the append's own guard did before this re-sync existed. The
+        manifest's ``active_begun`` record refuses it too, but that record is
+        best-effort, and without it the re-derivation continued the chain over
+        the lost entries with nothing counted. ``reading=True`` never raises or
+        invalidates for a lost file, so a status read cannot use up that one
+        refusal before the next append makes it.
+
+        ⛔ THE BYTES ARE CHECKED, NOT A (dev, inode, size) SIGNATURE (L2 r1,
+        run with a simulated inode): a rotation frees the inode, the new
+        active file can get the same number back (ext4, xfs), and a size that
+        happens to be larger sent the read to an offset in a different file.
         """
         if not self._initialized:
             return  # _initialize reads the file itself
-        known = self._known_active
-        now = self._active_signature()
-        if now == known:
+        active = self._active_path
+        try:
+            f_cm = _open_regular(active)
+        except FileNotFoundError:
+            if self._tip is not None:
+                self._lost_active("deleted", reading)
             return
-        if (
-            known is not None
-            and now is not None
-            and now[:2] == known[:2]
-            and now[2] > known[2]
-        ):
-            last_line = _read_last_valid_entry(self._active_path, start=known[2])
-            if last_line:
-                last_entry = json.loads(last_line)  # Guaranteed valid by helper
-                # ``_prev_hash`` before ``_seq``, the order the rollback's
-                # restore pins: an interrupt between them leaves a skipped seq
-                # number, never a broken link. ``_known_active`` is set last,
-                # so an interrupt anywhere here re-runs this read next time.
-                self._prev_hash = self._compute_hash(last_line)
-                self._seq = last_entry["seq"] + 1
-                self._active_has_entry = True
-            self._known_active = now
+        with f_cm as f:
+            if self._tip is None:
+                if _last_valid_entry_in(f, 0)[0]:
+                    self._initialized = False
+                return
+            dev, ino, at, length = self._tip
+            st = os.fstat(f.fileno())
+            if (st.st_dev, st.st_ino) != (dev, ino):
+                self._lost_active("replaced", reading)
+                return
+            if st.st_size < at + length:
+                self._lost_active("emptied or truncated", reading)
+                return
+            f.seek(at)
+            try:
+                tip_line = f.read(length).decode("utf-8").strip()
+            except UnicodeDecodeError:
+                tip_line = ""
+            if not tip_line or self._compute_hash(tip_line) != self._prev_hash:
+                self._initialized = False
+                return
+            last_line, last_at, last_len = _last_valid_entry_in(f, at + length)
+        if last_line:
+            last_entry = json.loads(last_line)  # Guaranteed valid by helper
+            # ⛔ ``_seq``, THEN ``_prev_hash``, THEN ``_tip`` (L1 r1, run). An
+            # interrupt after ``_seq`` alone leaves the old tip still hashing to
+            # the old ``_prev_hash``, so the next call adopts the same entry
+            # again, and ``note_write_failure`` meanwhile reports the right next
+            # seq. After ``_prev_hash`` too, the old tip no longer hashes to it,
+            # so the next call re-derives from disk. The reverse order left
+            # ``_seq`` stale, and a dropped write was located at a seq already
+            # on disk.
+            self._seq = last_entry["seq"] + 1
+            self._prev_hash = self._compute_hash(last_line)
+            self._tip = (dev, ino, last_at, last_len)
+
+    def _lost_active(self, what: str, reading: bool) -> None:
+        """The active file holding this instance's tip was ``what``: re-derive
+        quietly if another writer sealed its week, otherwise refuse once (see
+        :meth:`_resync_with_disk`). A read leaves everything for the next
+        append to find."""
+        if reading:
             return
         self._initialized = False
+        sealed = self._db_path.parent / _sealed_filename(self._db_path.stem, self._last_week)
+        gz = sealed.with_suffix(".jsonl.gz")
+        if sealed.exists() or gz.exists() or Path(str(gz) + ".tmp").exists():
+            return
+        raise _ManifestUnavailable(
+            f"the active audit file {self._active_path.name} this process was "
+            f"appending to is gone ({what}, and week {self._last_week or '?'} is "
+            "not sealed on disk); not continuing the chain past it. If it can be "
+            "restored, put it back and retry; otherwise run "
+            "`anneal-memory audit-repair` to record the week as a gap"
+        )
 
     def _open_and_flock(
         self,
         lock_path: Path | None = None,
         label: str = "audit manifest lock",
         consequence: str = "audit manifest changes are not serialized across processes",
+        timeout: float | None = None,
     ) -> int | None:
         """Open the lock file and take ``LOCK_EX`` on it; ``None`` when advisory
         locks are unavailable here (warned on stderr once per lock path). See
@@ -2428,15 +2525,30 @@ class AuditTrail:
             # ENOLCK is also what a lock table out of records returns, which is
             # transient; Linux NFS without lock support returns it for good. A
             # few short retries separate the two before degrading (L3: codex).
-            for attempt in range(_ENOLCK_RETRIES + 1):
+            # With a ``timeout`` the wait is polled (LOCK_NB) and bounded; a
+            # holder past it raises ``_AuditLockError`` (see _append_lock).
+            op = fcntl.LOCK_EX if timeout is None else fcntl.LOCK_EX | fcntl.LOCK_NB
+            deadline = None if timeout is None else time.monotonic() + timeout
+            enolck_retries = 0
+            delay = 0.002
+            while True:
                 try:
-                    fcntl.flock(fd, fcntl.LOCK_EX)
+                    fcntl.flock(fd, op)
                     return fd
                 except OSError as e:
-                    if e.errno != errno.ENOLCK or attempt == _ENOLCK_RETRIES:
+                    if deadline is not None and e.errno in _LOCK_HELD_ERRNOS:
+                        if time.monotonic() >= deadline:
+                            raise _AuditLockError(
+                                f"timed out after {timeout:g}s waiting for the {label} "
+                                f"{lock_path.name}: another process holds it"
+                            ) from e
+                        time.sleep(delay)
+                        delay = min(delay * 2, 0.05)
+                        continue
+                    if e.errno != errno.ENOLCK or enolck_retries == _ENOLCK_RETRIES:
                         raise
+                    enolck_retries += 1
                     time.sleep(_ENOLCK_RETRY_SECONDS)
-            raise AssertionError("unreachable")  # pragma: no cover
         except BaseException as e:
             # Any exception, an interrupt included, closes the descriptor.
             os.close(fd)
@@ -2499,11 +2611,14 @@ class AuditTrail:
             return
 
         # Recover from existing active file — find last valid JSON entry
-        last_line = _read_last_valid_entry(active)
+        with _open_regular(active) as f_scan:
+            st_scan = os.fstat(f_scan.fileno())
+            last_line, last_at, last_len = _last_valid_entry_in(f_scan, 0)
         if last_line:
             last_entry = json.loads(last_line)  # Guaranteed valid by helper
             self._seq = last_entry.get("seq", 0) + 1
             self._active_has_entry = True
+            self._tip = (st_scan.st_dev, st_scan.st_ino, last_at, last_len)
             # Hash the line from disk, not a re-serialization
             self._prev_hash = self._compute_hash(last_line)
             # Recover week from last entry timestamp
@@ -2620,6 +2735,7 @@ class AuditTrail:
         self._prev_hash = GENESIS_HASH
         self._seq = 0
         self._active_has_entry = False
+        self._tip = None
         try:
             manifest = self._load_manifest()  # absent -> fresh (genesis)
         except _ManifestQuarantined:
@@ -3304,6 +3420,7 @@ class AuditTrail:
         # pre-rotation value.
         self._seq = 0
         self._active_has_entry = False
+        self._tip = None
         manifest["active_last_seq"] = self._seq
         self._save_manifest(manifest)
 
@@ -3576,7 +3693,7 @@ def _iso_week_now() -> str:
     return f"{iso[0]}-W{iso[1]:02d}"
 
 
-def _read_last_valid_entry(path: Path, start: int = 0) -> str:
+def _read_last_valid_entry(path: Path) -> str:
     """Read the last valid JSON line from an audit file.
 
     Reads line-by-line (not chunk-based) so entries of any size are
@@ -3591,8 +3708,9 @@ def _read_last_valid_entry(path: Path, start: int = 0) -> str:
     direction. Behaviour is identical, which is why it survived.
 
     Memory-safe: only keeps the last valid line in memory at a time.
+    The scan itself is :func:`_last_valid_entry_in`, which the append's
+    re-sync also uses, so the two can never disagree about what is valid.
     """
-    last_valid = ""
     # ⛔ READ ERRORS PROPAGATE — THEY USED TO BE SWALLOWED, AND THAT MADE A
     # FAILED SCAN INDISTINGUISHABLE FROM AN EMPTY ONE. ``except (OSError,
     # UnicodeDecodeError): pass`` returned whatever had been found before the
@@ -3616,24 +3734,36 @@ def _read_last_valid_entry(path: Path, start: int = 0) -> str:
     # decoding per line puts the tear back where the rest of this loop
     # already handles it: skipped, like a partial ``json.loads``.
     with _open_regular(path) as f:
-        # ``start`` (AuditTrail._resync_with_disk) is an offset this process last
-        # saw as the file's end, so it is a line boundary or the end of a torn
-        # fragment, which the loop below skips like any other.
-        if start:
-            f.seek(start)
-        for raw in f:
-            try:
-                stripped = raw.decode("utf-8").strip()
-            except UnicodeDecodeError:
-                continue  # Torn line — skip, same as a partial write
-            if not stripped:
-                continue
-            try:
-                _require_entry_dict(json.loads(stripped))
-                last_valid = stripped
-            except _UNPARSEABLE_JSON:
-                pass  # Partial write, or valid JSON that isn't an entry — skip
-    return last_valid
+        return _last_valid_entry_in(f, 0)[0]
+
+
+def _last_valid_entry_in(f: Any, start: int) -> tuple[str, int, int]:
+    """The last valid entry in an open binary audit file from ``start`` to its
+    end, as ``(line, offset, length)``: the stripped line the chain hashes, the
+    offset its bytes start at, and their length without the newline.
+    ``("", -1, 0)`` when there is none. Torn lines, undecodable bytes and
+    JSON that is not an entry are skipped; read errors propagate (the reasons
+    are in :func:`_read_last_valid_entry`)."""
+    best: tuple[str, int, int] = ("", -1, 0)
+    if start:
+        f.seek(start)
+    pos = start
+    # Iterated, not looped on ``readline()``: the read-failure tests inject
+    # their error at iteration.
+    for raw in f:
+        here, pos = pos, pos + len(raw)
+        try:
+            stripped = raw.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            continue  # Torn line — skip, same as a partial write
+        if not stripped:
+            continue
+        try:
+            _require_entry_dict(json.loads(stripped))
+        except _UNPARSEABLE_JSON:
+            continue  # Partial write, or valid JSON that isn't an entry — skip
+        best = (stripped, here, len(raw) - (1 if raw.endswith(b"\n") else 0))
+    return best
 
 
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)

@@ -9234,9 +9234,7 @@ class TestWitnessL3Round1:
         mpath = tmp_path / "m.audit.manifest.json"
         recorded = json.loads(mpath.read_text())["active_begun"]
         trail._active_path.unlink()
-        # KL-24: the append's re-sync sees the file gone and re-initialises, so
-        # the refusal comes from the manifest's record (``_refuse_vanished_active``).
-        with pytest.raises(audit_module._ManifestUnavailable, match="deleted or emptied"):
+        with pytest.raises(audit_module._ManifestUnavailable, match="is gone"):
             trail.log("after", {})
         assert json.loads(mpath.read_text())["active_begun"] == recorded
         with pytest.raises(audit_module._ManifestUnavailable):
@@ -9452,3 +9450,271 @@ class TestKL24ConcurrentWriters:
         result = AuditTrail.verify(db)
         assert result.valid, result.error
         assert result.total_entries == n_proc * n_each
+
+    def test_a_reused_inode_with_other_bytes_is_rederived_not_read_on(
+        self, tmp_path, monkeypatch
+    ):
+        """L2 r1 (run with a simulated inode): a rotation frees the inode and
+        the new active file can get the same number (ext4, xfs). Simulated by
+        handing the cached tip the new file's real inode. ⛔ MUTATION-CHECKED:
+        skip the tip's hash check and this reads valid=False."""
+        db = tmp_path / "m.db"
+        a, b = AuditTrail(db), AuditTrail(db)
+        for i in range(3):
+            a.log("ev", {"a": i})
+        real_datetime = audit_module.datetime
+
+        class _NextWeek(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return real_datetime.now(tz) + timedelta(days=7)
+
+        monkeypatch.setattr(audit_module, "datetime", _NextWeek)
+        b.log("ev", {"pad": "y" * 900})  # rotates; the new file outgrows a's tip
+        st = os.stat(tmp_path / "m.audit.jsonl")
+        _, _, at, length = a._tip
+        assert st.st_size > at + length
+        a._tip = (st.st_dev, st.st_ino, at, length)
+        a.log("ev", {"a": "after"})
+        result = AuditTrail.verify(db)
+        assert result.valid, result.error
+        assert result.total_entries == 5
+
+    def test_an_unlocked_writers_entry_after_this_append_is_still_read(
+        self, tmp_path, monkeypatch
+    ):
+        """L2 r1 (run): the tip after an append comes from the append itself,
+        so an entry an unlocked writer (an anneal from before the lock) lands
+        right after it is read by the next re-sync, not skipped."""
+        import contextlib
+
+        db = tmp_path / "m.db"
+        a, old = AuditTrail(db), AuditTrail(db)
+        monkeypatch.setattr(old, "_append_lock", contextlib.nullcontext)
+        a.log("a", {})
+        old.log("o", {})
+        real_fsync = os.fsync
+        fired: list[int] = []
+
+        def racing_fsync(fd):
+            out = real_fsync(fd)
+            if not fired:
+                fired.append(1)
+                old.log("o-race", {})
+            return out
+
+        monkeypatch.setattr(audit_module.os, "fsync", racing_fsync)
+        a.log("a-racy", {})
+        monkeypatch.setattr(audit_module.os, "fsync", real_fsync)
+        a.log("a-next", {})
+        result = AuditTrail.verify(db)
+        assert fired and result.valid, result.error
+        assert result.total_entries == 5
+
+    def test_taking_turns_without_fcntl_stays_chained(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(audit_module, "fcntl", None)
+        db = tmp_path / "m.db"
+        a, b = AuditTrail(db), AuditTrail(db)
+        for i in range(4):
+            a.log("ev", {"a": i})
+            b.log("ev", {"b": i})
+        result = AuditTrail.verify(db)
+        assert result.valid and result.total_entries == 8
+
+    def test_a_lost_active_file_is_refused_even_without_the_manifest_record(
+        self, tmp_path, monkeypatch
+    ):
+        """L1 r1 (run): the manifest's ``active_begun`` record is best-effort.
+        Without it the re-derivation continued the chain over the deleted
+        entries and counted nothing; the instance's own tip refuses once."""
+        monkeypatch.setattr(AuditTrail, "_record_active_begun", lambda self, *a: None)
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("ev", {"i": i})
+        (tmp_path / "m.audit.jsonl").unlink()
+        with pytest.raises(audit_module._ManifestUnavailable, match="is gone"):
+            trail.log("after", {})
+
+    def test_stats_from_inside_this_threads_append_answers_from_the_cache(
+        self, tmp_path, monkeypatch
+    ):
+        trail = AuditTrail(tmp_path / "m.db")
+        trail.log("ev", {})
+        seen: list[int] = []
+        real = AuditTrail._log_locked
+
+        def with_nested_stats(self, *args):
+            seen.append(self.stats()["entry_count"])
+            return real(self, *args)
+
+        monkeypatch.setattr(AuditTrail, "_log_locked", with_nested_stats)
+        trail.log("ev", {})
+        assert seen == [1]
+
+    @pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+    def test_a_lock_path_that_cannot_be_opened_refuses_and_counts(self, tmp_path):
+        """The append is refused, not appended unserialized; the store counts
+        the drop and the episode stays committed."""
+        from anneal_memory.store import Store
+        from anneal_memory.types import EpisodeType
+
+        (tmp_path / "m.audit-append.lock").mkdir()
+        store = Store(tmp_path / "m.db")
+        try:
+            with pytest.warns(UserWarning, match="could not be written"):
+                store.record("an episode", EpisodeType.OBSERVATION)
+            assert store.status().audit_write_failures == 1
+            assert len(store.recall(limit=10).episodes) == 1
+        finally:
+            store.close()
+
+
+def _hold_append_lock(lock_path, held, release):
+    """A subprocess that holds ``lock_path`` with ``flock`` until ``release``."""
+    import subprocess
+
+    return subprocess.Popen([
+        sys.executable, "-c",
+        "import fcntl, os, time; from pathlib import Path\n"
+        f"fd = os.open({str(lock_path)!r}, os.O_RDWR | os.O_CREAT, 0o644)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+        f"Path({str(held) + '.tmp'!r}).write_text('x')\n"
+        f"Path({str(held) + '.tmp'!r}).replace({str(held)!r})\n"
+        f"while not Path({str(release)!r}).exists(): time.sleep(0.01)\n",
+    ])
+
+
+@pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+class TestKL24AppendLockHolders:
+    """The append lock against a holder that does not let go (L1 + L2 r1)."""
+
+    def _held(self, tmp_path):
+        held, release = tmp_path / "held", tmp_path / "release"
+        child = _hold_append_lock(tmp_path / "m.audit-append.lock", held, release)
+        deadline = datetime.now() + timedelta(seconds=20)
+        while not held.exists():
+            assert datetime.now() < deadline, "the holder never took the lock"
+        return child, release
+
+    def test_a_stopped_holder_times_out_into_a_counted_drop(self, tmp_path, monkeypatch):
+        from anneal_memory.store import Store
+        from anneal_memory.types import EpisodeType
+
+        monkeypatch.setattr(audit_module, "_APPEND_LOCK_TIMEOUT_SECONDS", 0.3)
+        store = Store(tmp_path / "m.db")
+        store.record("first", EpisodeType.OBSERVATION)
+        child, release = self._held(tmp_path)
+        try:
+            start = datetime.now()
+            with pytest.warns(UserWarning, match="timed out"):
+                store.record("second", EpisodeType.OBSERVATION)
+            waited = (datetime.now() - start).total_seconds()
+        finally:
+            release.write_text("x")
+            child.wait(timeout=20)
+        try:
+            assert 0.25 <= waited < 5, waited
+            assert store.status().audit_write_failures == 1
+            store.record("third", EpisodeType.OBSERVATION)
+        finally:
+            store.close()
+        assert AuditTrail.verify(tmp_path / "m.db").valid
+
+    def test_stats_does_not_wait_for_the_append_lock(self, tmp_path):
+        trail = AuditTrail(tmp_path / "m.db")
+        trail.log("ev", {})
+        child, release = self._held(tmp_path)
+        try:
+            start = datetime.now()
+            assert trail.stats()["entry_count"] == 1
+            took = (datetime.now() - start).total_seconds()
+        finally:
+            release.write_text("x")
+            child.wait(timeout=20)
+        assert took < 1.0, took
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
+    def test_a_child_forked_while_the_lock_is_held_does_not_keep_it(
+        self, tmp_path, monkeypatch
+    ):
+        """L2 r1 (run): ``flock`` belongs to the open file description, so a
+        close alone left the lock with the forked child for its lifetime.
+        ⛔ MUTATION-CHECKED: drop the ``LOCK_UN`` and the second writer waits."""
+        import subprocess
+        import time
+
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        trail.log("warm", {})
+        real_fsync = os.fsync
+        children: list[int] = []
+
+        def forking_fsync(fd):
+            if not children:
+                pid = os.fork()
+                if pid == 0:  # pragma: no cover - the child only sleeps
+                    time.sleep(4)
+                    os._exit(0)
+                children.append(pid)
+            return real_fsync(fd)
+
+        monkeypatch.setattr(audit_module.os, "fsync", forking_fsync)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)  # fork with threads
+            trail.log("x", {})
+        monkeypatch.setattr(audit_module.os, "fsync", real_fsync)
+        try:
+            start = time.monotonic()
+            subprocess.run([
+                sys.executable, "-c",
+                "from anneal_memory.audit import AuditTrail\n"
+                f"AuditTrail({str(db)!r}).log('y', {{}})\n",
+            ], cwd=str(Path(audit_module.__file__).parent.parent), check=True, timeout=30)
+            took = time.monotonic() - start
+        finally:
+            os.waitpid(children[0], 0)
+        assert took < 3.0, f"the second writer waited {took:.2f}s on the child's copy"
+        assert AuditTrail.verify(db).valid
+
+    def test_writer_processes_across_a_week_rotation_keep_one_chain(self, tmp_path):
+        """The cross-process rotation run, pinned (L1 r1: it was a hand run).
+        Each process's whole clock jumps a week when FLAG exists, so entry
+        timestamps and the week agree, as outside a test."""
+        import subprocess
+        import time
+
+        db, go, flag = tmp_path / "m.db", tmp_path / "go", tmp_path / "FLAG"
+        n_proc, n_each = 3, 100
+        script = (
+            "import os, sys, time\n"
+            "from datetime import datetime as _dt, timedelta\n"
+            "from pathlib import Path\n"
+            "import anneal_memory.audit as A\n"
+            "class C(_dt):\n"
+            "    @classmethod\n"
+            "    def now(cls, tz=None):\n"
+            "        n = _dt.now(tz)\n"
+            f"        return n + timedelta(days=7) if os.path.exists({str(flag)!r}) else n\n"
+            "A.datetime = C\n"
+            f"t = A.AuditTrail({str(db)!r})\n"
+            f"while not Path({str(go)!r}).exists(): time.sleep(0.005)\n"
+            f"for i in range({n_each}):\n"
+            "    t.log('ev', {'w': sys.argv[1], 'i': i}); time.sleep(0.003)\n"
+        )
+        cwd = str(Path(audit_module.__file__).parent.parent)
+        procs = [subprocess.Popen([sys.executable, "-c", script, str(w)], cwd=cwd)
+                 for w in range(n_proc)]
+        go.write_text("x")
+        time.sleep(0.25)
+        flag.write_text("x")
+        for p in procs:
+            assert p.wait(timeout=120) == 0
+        result = AuditTrail.verify(db)
+        assert result.valid, result.error
+        assert result.total_entries == n_proc * n_each
+        sealed = list(tmp_path.glob("m.audit.*.jsonl.gz"))
+        active = (tmp_path / "m.audit.jsonl").read_text().splitlines()
+        # Both sides hold entries, so the rotation happened mid-run.
+        assert len(sealed) == 1 and active
+        assert len(active) < n_proc * n_each

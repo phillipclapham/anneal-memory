@@ -8,19 +8,30 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - Several processes (or several `AuditTrail` instances) writing one store broke the hash chain:
   each chained from its own cached tip. Reproduced on 2026-10-07: three processes recording 200
   episodes each, every episode landed, `verify` reported a hash mismatch, and `status` counted no
-  audit failure. Each append now holds a cross-process lock, `<stem>.audit-append.lock` (taken
-  before the manifest lock, never inside it), and first re-reads the chain's tip from the active
-  file: a file that only grew is read from where this instance last saw it end; a rotated,
-  replaced, shrunk or vanished file re-initialises through the manifest, as an open does.
-  `AuditTrail.stats()` re-syncs the same way, so its `entry_count` includes other writers' entries.
-- After the fix: six processes x 250 episodes leave one valid chain of 1,500 entries, and four
-  processes appending across a week rotation leave one valid chain of 800.
-- A deleted active file is now refused by the manifest's record (the "deleted or emptied"
-  message) at the next append; the old "is gone" refusal remains for the window where no lock is
-  held.
-- Known limit: where advisory locks do not exist (Windows, or a filesystem without `flock`,
+  audit failure. The same break on a copy of a real 14,733-entry store.
+- Each append now holds a cross-process lock, `<stem>.audit-append.lock` (taken before the
+  manifest lock, never inside it), and first re-syncs the chain's tip from the active file: when
+  the bytes where this instance's tip was written still hash to it, the chain continues from the
+  last valid entry after them; anything else (another file, a reused inode, a truncation, a
+  rewrite) re-initialises through the manifest, as an open does.
+- A lost active file (deleted, truncated below the tip, or replaced, with its week not sealed by
+  another writer's rotation) is refused once at the next append ("is gone"), from the instance's
+  own record, even when the manifest's best-effort record of the file is missing.
+- `AuditTrail.stats()` re-syncs without taking the lock, so its `entry_count` includes other
+  writers' entries and a status read never waits on a writer.
+- The append lock is released with `LOCK_UN` before its close, as the manifest lock now is, so a
+  child forked while it was held does not keep it.
+- An append waits at most 30 seconds for another holder; past that, or when the lock file cannot
+  be opened (a directory, symlink or FIFO at its path), the append is refused and counted as a
+  dropped audit write (`audit_write_failures`, `dropped_before`), never appended unserialized.
+- After the fix: six processes x 250 episodes leave one valid chain of 1,500 entries, four
+  processes appending across a week rotation leave one valid chain of 800, and four writer
+  processes on a copy of a real store add exactly 600 entries to a chain that stays valid.
+- Known limits: where advisory locks do not exist (Windows, or a filesystem without `flock`,
   warned on stderr once per lock path) appends are not serialized and the trail needs one writer at
-  a time; writers that take turns stay chained through the re-sync.
+  a time; writers that take turns stay chained through the re-sync. Every concurrent writer must
+  run a version that takes the lock: an anneal-memory without it, writing alongside, breaks the
+  chain as before, and nothing on the new side can detect it.
 
 ### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
 - `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one

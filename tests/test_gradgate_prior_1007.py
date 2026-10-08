@@ -553,3 +553,24 @@ def test_identity_is_the_text_before_the_earliest_level_token(tmp_path):
         assert store.saved_pattern_levels() == before
     finally:
         store.close()
+
+
+# --- L3 r5 (codex HIGH, run on 023b700): the bound's grammar must cover every reader --
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("ws", [" ", " ", "\v", "\f", "\x1c", "　"])
+def test_bound_grammar_covers_every_reader_whitespace(tmp_path, ws):
+    """``_GRADUATION_RE`` reads ``|<any Unicode space>999x``; the bound must too."""
+    saved, _ = _save(tmp_path, "- planted |" + ws + "999x (" + TODAY + ") " + EV,
+                     prior="- planted | 1x (" + YESTERDAY + ")")
+    levels = [int(m.group(1)) for m in re.finditer(r"\|\s*(\d+)x", saved)]
+    assert levels and max(levels) <= 2, saved
+
+
+def test_bound_reads_non_ascii_digits(tmp_path):
+    """``\\d`` readers and ``int`` read Arabic-Indic ``٩٩٩`` as 999."""
+    saved, _ = _save(tmp_path, "- planted | ٩٩٩x (" + TODAY + ") " + EV,
+                     prior="- planted | 1x (" + YESTERDAY + ")")
+    levels = [int(m.group(1)) for m in re.finditer(r"\|\s*(\d+)x", saved)]
+    assert levels and max(levels) <= 2, saved

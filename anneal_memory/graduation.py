@@ -1219,10 +1219,13 @@ def validate_graduations(
 
 
 # The prior-state bound's own parser. A level token is ``| Nx`` with an optional
-# ``(YYYY-MM-DD)``, any digits (``int`` reads a zero-padded ``09`` as 9). It is
-# deliberately wider than every validation regex above: the bound must see each
-# level a downstream reader will believe, whatever shape the line is in.
-_LEVEL_TOKEN_RE = re.compile(r"\|[ \t]*(\d+)x(?:[ \t]*\(\d{4}-\d{2}-\d{2}\))?")
+# ``(YYYY-MM-DD)``, any digits (``int`` reads a zero-padded ``09`` as 9). The bound
+# must see each level a downstream reader will believe, whatever shape the line is
+# in, so its atoms are the WIDEST ones any reader uses: ``\s`` (Unicode whitespace)
+# and ``\d`` (Unicode decimal digits). A ``[ \t]`` atom here let ``|\u00a0999x``
+# pass the bound uncapped while ``_GRADUATION_RE`` read it as 999 (L3 r5, codex
+# HIGH, run); ``test_bound_grammar_covers_every_reader_whitespace`` holds it.
+_LEVEL_TOKEN_RE = re.compile(r"\|\s*(\d+)x(?:\s*\(\d{4}-\d{2}-\d{2}\))?")
 _LEVEL_CAPPED_MARK = "(level-capped)"
 _CARRIED_MARK = "(carried-forward)"
 _FREEFORM_PREFIX_RE = re.compile(r"^[ \t]*(?:-[ \t]+)?(?:(?:!+|\?|✓|\*)[ \t]+)?")
@@ -1255,7 +1258,7 @@ def _line_levels(line: str) -> tuple[tuple[str, str], list[re.Match]] | None:
     # DELETED, so prose in a graduating section that reads as a level is capped
     # like any line.
     named = _NAMED_PATTERN_RE.match(line)
-    if named and tokens[0].start() >= named.end(1):
+    if named:
         return ("name", named.group(1)), tokens
     head = _FREEFORM_PREFIX_RE.sub("", line[: tokens[0].start()])
     key = " ".join(head.lower().split())

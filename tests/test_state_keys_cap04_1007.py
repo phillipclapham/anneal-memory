@@ -714,25 +714,72 @@ def test_the_head_is_chosen_and_read_in_one_state(tmp_path, src):   # L3 r8 code
         c = st.record("Quillmark moved its database engine over to duckdb now.", "observation",
                       timestamp="2026-02-20T10:00:00Z")
         st.supersede(old_id=a.id, new_id=b.id)
-        real = st.redirectable_ids
-        got = []
+        real_walk = st._live_replacements
+        fired: list[int] = []
 
-        def racing(ids, until=None):
-            out = real(ids, until)
-            got.append({o: h.id for o, h in out.items()})
-            # B->C commits (a wrap link, so it can never serve) after the choice was made
-            with Store(db) as other:
-                other.supersede(old_id=b.id, new_id=c.id, source=src)
+        def racing(*args, **kw):
+            out = real_walk(*args, **kw)
+            if kw.get("servable_only") and not fired:
+                fired.append(1)
+                # B->C commits between the head walk and the head row read, inside
+                # redirectable_ids: the hidden test and the row read must not see it.
+                with Store(db) as other:
+                    other.supersede(old_id=b.id, new_id=c.id, source=src)
             return out
 
         reads: list[str] = []
         real_get = st.get
-        st.redirectable_ids = racing   # type: ignore[method-assign]
+        st._live_replacements = racing   # type: ignore[method-assign]
         st.get = lambda i, *x, **k: (reads.append(i), real_get(i, *x, **k))[1]   # type: ignore[method-assign]
         res = _recall(st, "is quillmark still on postgres")
-        assert got and b.id in got[0].values()
+        assert fired
         # The head came from the rows the choice was made on: no second read of it, so
         # the later link cannot leave a head chosen in one state and read in another.
         assert b.id not in reads
         (swapped,) = [e for e in res.episodes if e.id == b.id]
         assert [r.id for r in swapped.replaces] == [a.id]
+
+
+def test_a_recall_reads_one_state_across_a_delete_between_fetch_and_redirect(tmp_path):   # L3 r10
+    db = str(tmp_path / "m.db")
+    with Store(db) as st:
+        _seed(st)
+        a = st.record("The database engine for Quillmark is postgres.", "observation",
+                      timestamp="2026-01-05T10:00:00Z")
+        b = st.record("Quillmark moved its database engine over to sqlite.", "observation",
+                      timestamp="2026-02-10T10:00:00Z")
+        st.supersede(old_id=a.id, new_id=b.id)
+        real = st.keyword_candidates
+        fired: list[int] = []
+
+        def racing(*args, **kw):
+            out = real(*args, **kw)
+            if not fired:
+                fired.append(1)   # commit after the FIRST candidate fetch (the live tier)
+                with Store(db) as other:
+                    other.delete(b.id)   # A is live again
+            return out
+
+        st.keyword_candidates = racing   # type: ignore[method-assign]
+        res = _recall(st, "is quillmark still on postgres")
+        assert fired
+        shape = sorted((e.id, tuple(r.id for r in e.replaces)) for e in res.episodes
+                       if e.id in (a.id, b.id))
+        pre = [(b.id, (a.id,))]    # the state as of the start: A replaced by B
+        post = [(a.id, ())]        # the state after the delete: A live, B gone
+        assert shape in (pre, post), shape   # never a plain B beside a redirect from the other state
+
+
+def test_recall_runs_its_episode_half_in_one_read_transaction(tmp_path):   # L3 r10 complement L2
+    with Store(str(tmp_path / "m.db")) as st:
+        _seed(st)
+        a = st.record("The database engine for Quillmark is postgres.", "observation",
+                      timestamp="2026-01-05T10:00:00Z")
+        b = st.record("Quillmark moved its database engine over to sqlite.", "observation",
+                      timestamp="2026-02-10T10:00:00Z")
+        st.supersede(old_id=a.id, new_id=b.id)
+        begins = []
+        st._conn.set_trace_callback(lambda sql: begins.append(sql) if sql.strip().upper() == "BEGIN" else None)
+        _recall(st, "is quillmark still on postgres")
+        st._conn.set_trace_callback(None)
+        assert len(begins) == 1, begins

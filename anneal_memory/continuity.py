@@ -42,7 +42,6 @@ from .graduation import (
     validate_graduations,
     _NAMED_PATTERN_RE,
     _NAMED_PATTERN_WITH_EVIDENCE_RE,
-    _GRADUATION_RE,
     _is_graduating_heading,
 )
 from . import sessions
@@ -2440,15 +2439,29 @@ def _durable_cue_state(
 
 def _prior_levels(
     prior_text: str | None, schema: list[SectionSpec], crystal_store: CrystalStore | None,
+    store: Store,
 ) -> dict[str, int] | None:
     """Where a held line's level comes from: each pattern's level in the continuity
     being replaced, plus each live crystal's (a crystallized pattern re-added to the
     working set is a recoverable move, not a new claim). None when there is no prior
-    continuity at all (a first save): nothing to derive from, so the claimed level
-    stands as before."""
+    continuity at all and no pattern history (a first save): nothing to derive from,
+    so the claimed level stands as before. A blank prior over a store that has history
+    is a truncated file, not a first save: each pattern's recorded high-water mark
+    bounds a hold instead (L3 r3, complement)."""
     if not prior_text or not prior_text.strip():
-        return None
-    levels = _pattern_levels(prior_text, schema)
+        levels: dict[str, int] = {}
+        try:
+            for n in store.pattern_history_names():
+                hist = store.get_pattern_history(n) or {}
+                mx = hist.get("max_level_reached")
+                if isinstance(mx, int):
+                    levels[n] = mx
+        except Exception:  # noqa: BLE001 - unreadable history is not proof of a first save
+            levels = {"": 0}  # a bound that holds nothing: fail closed
+        if not levels:
+            return None
+    else:
+        levels = _pattern_levels(prior_text, schema)
     for c in _crystal_active_safe(crystal_store):
         name, level = c.get("name"), c.get("level")
         if isinstance(name, str) and isinstance(level, int) and name not in levels:
@@ -3123,7 +3136,7 @@ def validated_save_continuity(
         carryforward_cold_days=carryforward_cold_days,
         # L3 1007 (complement, codex): a held line's level is derived, never taken
         # from the composer (see _prior_levels).
-        prior_levels=_prior_levels(prior_continuity, section_schema, crystal_store),
+        prior_levels=_prior_levels(prior_continuity, section_schema, crystal_store, store),
     )
 
     # The hard maximum is measured on the text that will be WRITTEN: graduation
@@ -3398,10 +3411,12 @@ def validated_save_continuity(
             # _NAMED_PATTERN_RE still polluted the pattern_history DB
             # via the upsert loop. The section guard closes that gap.
             in_patterns_section = False
-            wrap_graduations: list[tuple[str, int, str]] = []
-            # Only what the validator counted (L3 1007, codex: "02x" parsed here but
-            # was never validated).
-            validated_names = set(grad_result.graduated_names)
+            # The review worklist is the validator's own records (name, level and
+            # explanation from the marker it validated and bound to the name), never a
+            # re-parse of the line by name (L3 r3, codex: a second line with the same
+            # name overwrote the validated row).
+            wrap_graduations: list[tuple[str, int, str]] = list(
+                grad_result.graduated_records)
             for line in grad_result.text.split("\n"):
                 if line.startswith("## "):
                     in_patterns_section = _is_graduating_heading(line, grad_headings)
@@ -3437,16 +3452,11 @@ def validated_save_continuity(
                 if line_date != today_str:
                     continue
                 explanation = ev_match.group(5)
-                try:
-                    pattern_level = int(ev_match.group(2))
-                except ValueError:
+                # A level of 10 or more digits is a malformed marker (bounded before
+                # int(), so a huge run can neither raise nor overflow the history).
+                if len(ev_match.group(2)) > 9:
                     continue
-                # The review worklist takes every validated Proven graduation, with or
-                # without an explanation (L3 1007, codex); history needs one.
-                if pattern_level >= 2 and ev_match.group(1) in validated_names \
-                        and _GRADUATION_RE.search(line):
-                    wrap_graduations.append(
-                        (ev_match.group(1), pattern_level, explanation or ""))
+                pattern_level = int(ev_match.group(2))
                 if not explanation:
                     continue
                 store.upsert_pattern_history(

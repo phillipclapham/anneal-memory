@@ -295,12 +295,54 @@ def test_the_worklist_takes_only_validated_lines_and_any_level(tmp_path):  # cod
     try:
         ep = s.record("we moved the hub to soupcan and it runs there now", "observation")
         token = prepare_wrap(s, max_chars=40000)["wrap_token"]
-        huge = 10 ** 19
-        lines = (f"- big_one | {huge}x (2026-10-07) [evidence: {ep.id[:8]}]\n"
-                 f"- padded | 02x (2026-10-07) [evidence: {ep.id[:8]}]")
+        big = 10 ** 8
+        i = ep.id[:8]
+        lines = (f"- big_one | {big}x (2026-10-07) [evidence: {i}]\n"
+                 f"- padded | 02x (2026-10-07) [evidence: {i}]\n"
+                 f"- dup | 2x (2026-10-07) [evidence: {i}]\n"
+                 f"- dup | 099x (2026-10-07) [evidence: {i}] trailing | 3x (2026-10-07) "
+                 f"[evidence: {i}]")
         validated_save_continuity(s, _doc(lines), today="2026-10-07", wrap_token=token)
         g = s.drift_status()["graduated"]
-        assert [(x["name"], x["level"]) for x in g] == [("big_one", huge)]
+        # the second dup line's later marker is not bound to the name: the row stays 2
+        assert [(x["name"], x["level"]) for x in g] == [("big_one", big), ("dup", 2)]
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize("digits", [20, 4301])
+def test_an_oversized_level_neither_raises_nor_graduates(tmp_path, digits):  # codex MED/LOW
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        ep = s.record("we moved the hub to soupcan and it runs there now", "observation")
+        token = prepare_wrap(s, max_chars=40000)["wrap_token"]
+        huge = "1" + "0" * (digits - 1)
+        line = f'- big_one | {huge}x (2026-10-07) [evidence: {ep.id[:8]} "the hub runs on soupcan"]'
+        validated_save_continuity(s, _doc(line), today="2026-10-07", wrap_token=token)
+        assert s.drift_status()["graduated"] == []
+        assert s.get_pattern_history("big_one") is None
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize("verb", ["ABORT", "ROLLBACK"])
+def test_a_failed_instrument_write_fails_the_whole_save(tmp_path, verb):   # codex HIGH
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        ep = s.record("we moved the hub to soupcan and it runs there now", "observation")
+        token = prepare_wrap(s, max_chars=40000)["wrap_token"]
+        s._conn.execute(
+            f"CREATE TRIGGER boom BEFORE INSERT ON wrap_graduations "
+            f"BEGIN SELECT RAISE({verb}, 'x'); END")
+        s._conn.commit()
+        before = s.load_continuity()
+        wraps = s._conn.execute("SELECT COUNT(*) FROM wraps").fetchone()[0]
+        with pytest.raises(Exception):
+            validated_save_continuity(
+                s, _doc(f"- hub_on_soupcan | 2x (2026-10-07) [evidence: {ep.id[:8]}]"),
+                today="2026-10-07", wrap_token=token)
+        assert s._conn.execute("SELECT COUNT(*) FROM wraps").fetchone()[0] == wraps
+        assert s.load_continuity() == before
     finally:
         s.close()
 

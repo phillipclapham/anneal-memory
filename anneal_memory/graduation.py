@@ -65,6 +65,10 @@ from .schema import DEFAULT_GRADUATING
 # rewrites by level, so it cannot rewrite ``| 01x`` and the counters could report a
 # demotion while the displayed level never moved. Verified on disk before the fix.
 #
+# A level is bounded at 9 digits (below 10**9): a longer digit run is a malformed marker,
+# never matched, so it neither validates nor reaches ``int()`` (a 4,301-digit run raised
+# ValueError) and no level can overflow a SQLite INTEGER.
+#
 # ``_BARE_GRADUATION_RE`` below uses the same "2 and up" atom (spore-676, 2026-10-07).
 # It stayed ``[23]`` until then for fear that widening would mass-demote mature carried
 # patterns. RUN on a copy of flow's real store before widening, every bare pattern line
@@ -72,7 +76,7 @@ from .schema import DEFAULT_GRADUATING
 # 29x), and the 4 cold ones dropped one level each, the rule a cited line already
 # follows. Under ``[23]`` a bare 4x+ line was neither validated nor demoted, at any level.
 _GRADUATION_RE = re.compile(
-    r"\|\s*([2-9]|[1-9][0-9]+)x\s*\((\d{4}-\d{2}-\d{2})\)\s*\[evidence:\s*"
+    r"\|\s*([2-9]|[1-9][0-9]{1,8})x\s*\((\d{4}-\d{2}-\d{2})\)\s*\[evidence:\s*"
     r"([a-fA-F0-9][a-fA-F0-9, ]*)"  # one or more hex IDs
     r'(?:\s+"([^"]*)")?\s*\]'  # optional quoted explanation
 )
@@ -86,12 +90,12 @@ _GRADUATION_RE = re.compile(
 # _GRADUATION_RE rejects) as a BARE line, which the v0.5.0 hold would then
 # preserve. Checking ``[ \t]*\[evidence:`` atomically closes that (codex L3).
 _BARE_GRADUATION_RE = re.compile(
-    r"\|\s*([2-9]|[1-9][0-9]+)x\s*\((\d{4}-\d{2}-\d{2})\)(?![ \t]*\[evidence:)[ \t]*"
+    r"\|\s*([2-9]|[1-9][0-9]{1,8})x\s*\((\d{4}-\d{2}-\d{2})\)(?![ \t]*\[evidence:)[ \t]*"
 )
 
 # Matches any pattern with temporal marker (Nx)
 _PATTERN_RE = re.compile(
-    r"\|\s*(\d+)x\s*\((\d{4}-\d{2}-\d{2})\)"
+    r"\|\s*(\d{1,9})x\s*\((\d{4}-\d{2}-\d{2})\)"
 )
 
 # Matches a pattern line at ANY level (1x and up) with an
@@ -105,7 +109,7 @@ _PATTERN_RE = re.compile(
 # explanation to compare against, defeating the cross-session
 # defense on initially-developing patterns.
 _PATTERN_LINE_WITH_EVIDENCE_RE = re.compile(
-    r"\|\s*(\d+)x\s*\((\d{4}-\d{2}-\d{2})\)\s*\[evidence:\s*"
+    r"\|\s*(\d{1,9})x\s*\((\d{4}-\d{2}-\d{2})\)\s*\[evidence:\s*"
     r"([a-fA-F0-9][a-fA-F0-9, ]*)"
     r'(?:\s+"([^"]*)")?\s*\]'
 )
@@ -408,6 +412,10 @@ class GraduationResult:
     # (fresh evidence, today) this wrap. The recall-INDEPENDENT co-activation set
     # the cortical pattern-graph seeds weak links across (store.seed_pattern_co_graduation).
     graduated_names: list[str] = field(default_factory=list)
+    # The same graduations as (name, level, explanation) records, taken from the marker
+    # the validator itself matched and bound to the name (the CAP-06 review worklist
+    # reads these, not the text).
+    graduated_records: list[tuple[str, int, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -639,6 +647,7 @@ def validate_graduations(
     # the cortical pattern-graph seeds weak links across. Re-derived from the line
     # at the validated site (not the conditionally-set ``pattern_name`` var).
     graduated_names: list[str] = []
+    graduated_records: list[tuple[str, int, str]] = []
     # AM-WARN (v0.4.2): tracked independent of the cross-session immune gate
     # (see the field docstring on GraduationResult).
     any_citation_resolved = False
@@ -969,6 +978,8 @@ def validate_graduations(
                 grad_name_match = _NAMED_PATTERN_WITH_EVIDENCE_RE.match(line)
                 if grad_name_match is not None and grad_name_match.group(2) == str(level):
                     graduated_names.append(grad_name_match.group(1))
+                    graduated_records.append(
+                        (grad_name_match.group(1), level, explanation or ""))
             elif cross_session_overlap_words:
                 # Cross-session check fired: today's explanation reuses
                 # vocabulary from the pattern's prior-session
@@ -1165,6 +1176,7 @@ def validate_graduations(
         carried_forward=carried_forward,
         malformed_evidence_carries=malformed_evidence_carries,
         graduated_names=graduated_names,
+        graduated_records=graduated_records,
     )
 
 

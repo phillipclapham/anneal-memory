@@ -1493,7 +1493,7 @@ CREATE TABLE IF NOT EXISTS drift_results (
 CREATE TABLE IF NOT EXISTS wrap_graduations (
     wrap_id INTEGER NOT NULL,
     name TEXT NOT NULL,
-    level TEXT NOT NULL,
+    level INTEGER NOT NULL,
     explanation TEXT,
     PRIMARY KEY (wrap_id, name)
 );
@@ -3279,16 +3279,11 @@ class Store:
         if not rows:
             return
         wrap_id = self._conn.execute("SELECT MAX(id) FROM wraps").fetchone()[0]
-        # Levels as decimal text: the library has no level ceiling and SQLite INTEGER
-        # does (L3 1007, codex: a 20-digit level raised OverflowError and rolled the
-        # save back). Never gating.
-        try:
-            self._conn.executemany(
-                "INSERT OR REPLACE INTO wrap_graduations (wrap_id, name, level, "
-                "explanation) VALUES (?, ?, ?, ?)",
-                [(wrap_id, n, str(lv), ex) for n, lv, ex in rows])
-        except sqlite3.Error as exc:
-            _LOG.warning("wrap graduations not recorded: %r", exc)
+        # No error handling on purpose: a failed insert fails the whole save batch
+        # (L3 r3: swallowing it let a rolled-back transaction commit empty).
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO wrap_graduations (wrap_id, name, level, "
+            "explanation) VALUES (?, ?, ?, ?)", [(wrap_id, n, lv, ex) for n, lv, ex in rows])
 
     def list_drift_probes(self, *, include_retired: bool = False) -> list[dict[str, Any]]:
         """Every drift probe (live only unless ``include_retired``), oldest first."""
@@ -3334,14 +3329,12 @@ class Store:
         if not results:
             return
         wrap_id = self._conn.execute("SELECT MAX(id) FROM wraps").fetchone()[0]
-        try:  # an instrument's record must not roll the save back
-            self._conn.executemany(
-                "INSERT OR REPLACE INTO drift_results (wrap_id, probe_id, status, detail) "
-                "VALUES (?, ?, ?, ?)",
-                [(wrap_id, r["probe_id"], r["status"], r["detail"]) for r in results
-                 if isinstance(r.get("probe_id"), int)])
-        except (sqlite3.Error, OverflowError, TypeError) as exc:
-            _LOG.warning("drift results not recorded: %r", exc)
+        # No error handling on purpose (see _record_wrap_graduations).
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO drift_results (wrap_id, probe_id, status, detail) "
+            "VALUES (?, ?, ?, ?)",
+            [(wrap_id, r["probe_id"], r["status"], r["detail"]) for r in results
+             if isinstance(r.get("probe_id"), int)])
 
     def drift_status(self) -> dict[str, Any]:
         """The latest save's probe verdicts, each with the first wrap since which it
@@ -3356,13 +3349,9 @@ class Store:
                     "SELECT MAX(id) FROM wraps").fetchone()[0]
                 if last is None:
                     return empty
-                graduated = sorted(
-                    ({"name": r["name"], "level": int(r["level"]),
-                      "explanation": r["explanation"]}
-                     for r in self._conn.execute(
-                         "SELECT name, level, explanation FROM wrap_graduations "
-                         "WHERE wrap_id = ?", (last,)).fetchall()),
-                    key=lambda g: (-g["level"], g["name"]))
+                graduated = [dict(r) for r in self._conn.execute(
+                    "SELECT name, level, explanation FROM wrap_graduations "
+                    "WHERE wrap_id = ? ORDER BY level DESC, name", (last,)).fetchall()]
                 at = self._conn.execute(
                     "SELECT wrapped_at FROM wraps WHERE id = ?", (last,)).fetchone()
                 rows = self._conn.execute(

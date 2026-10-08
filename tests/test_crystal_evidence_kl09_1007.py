@@ -192,6 +192,7 @@ def test_a_unicode_letter_touching_the_name_is_not_a_match(tmp_path):     # code
     s, cs = _store(tmp_path)
     try:
         s.record("éalpha and alphaé are other words", "observation")
+        s.record("a decomposed alpha\u0301 is the word alphá", "observation")
         cs.crystallize(name="alpha", level=3, explanation="x")
         assert cs.ground_empty_evidence(s)["alpha"].status == "no_episode"
     finally:

@@ -95,6 +95,7 @@ import json
 import os
 import re
 import tempfile
+import unicodedata
 import warnings
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
@@ -193,6 +194,12 @@ class CrystalError(AnnealMemoryError):
 
 # Field on a crystal record listing evidence ids ground_empty_evidence recorded (KL-09).
 PROVISIONAL_EVIDENCE = "provisional_evidence"
+
+
+def _nfc_lower(text: str) -> str:
+    """Composed (NFC) and lower-cased: a combining mark is part of its word, so a
+    decomposed "alpha" + U+0301 does not read as the whole word "alpha"."""
+    return unicodedata.normalize("NFC", text).lower()
 
 
 class GroundingResult(NamedTuple):
@@ -992,7 +999,8 @@ class CrystalStore:
         # A name is whole when no word character touches it, and no "." or "-" joins it
         # to one ("foo.bar", "foo-bar"); a sentence-final "foo." is whole (L3 1007).
         bounded = {n: re.compile(
-            rf"(?<!\w)(?<!\w[.\-]){re.escape(n.lower())}(?!\w|[.\-]\w)") for n in known}
+            rf"(?<!\w)(?<!\w[.\-]){re.escape(_nfc_lower(n))}(?!\w|[.\-]\w)")
+            for n in known}
         out: dict[str, GroundingResult] = {}
         for item in live:
             if any(isinstance(e, str) for e in (item.get("evidence") or [])):
@@ -1003,7 +1011,7 @@ class CrystalStore:
 
             def visit(ep: Any, name: str = name) -> bool:
                 nonlocal hubs
-                text = ep.content.lower()
+                text = _nfc_lower(ep.content)
                 if not bounded[name].search(text):
                     return False
                 if sum(1 for rx in bounded.values() if rx.search(text)) > 1:

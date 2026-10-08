@@ -22,14 +22,16 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - **State keys.** `record(..., state_key=)`, `Store.set_state_key(id, key)`,
   `Store.clear_state_key(id)`, `Store.state_key_report(key=None)`, `normalize_state_key`; CLI
   `record --state-key KEY` and `state [KEY] [--set ID | --unset ID]`; MCP `record` takes
-  `state_key` (tool-integrity manifests regenerated). A slot holds one value: of its holders
-  (the live end of each keyed episode's chain) and the new episode, the newest by the instant
-  its timestamp names (then insertion order) replaces every other. The links are ordinary
+  `state_key` (tool-integrity manifests regenerated). A slot holds one value: of its live keyed
+  episodes and the new one, the newest by the instant its timestamp names (then insertion
+  order) replaces every other. A keyed episode is replaced only through its key: an explicit,
+  wrap-proposed or team link from it to an episode outside its slot is refused (`record` and
+  `supersede` raise; a wrap reports it in `supersessions_rejected`). The links are ordinary
   `supersessions` rows with `source='state_key'` (the link's kind; who asked is in the audit
   event, which names the key), so hiding, delete/prune rewiring and the audit chain apply;
   they are made without the lexical floor: the key is the writer's claim. A keyed episode's
-  timestamp is stored in UTC (offsets converted) so SQL cutoffs and the key rule agree on
-  order; `set_state_key` refuses an episode stored in another form. `clear_state_key` removes
+  timestamp is stored in UTC (offsets converted; finer than a microsecond is refused) so SQL
+  cutoffs and the key rule agree on order; `set_state_key` refuses an episode stored in another form. `clear_state_key` removes
   the episode's key and the links keys made to it, and re-forms the slot.
   Keys are NFKC-normalised, case-folded, whitespace-collapsed, 1-200 characters, with no
   control or format characters. An episode keeps one key; a different key, or keying an

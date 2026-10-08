@@ -219,6 +219,17 @@ def _is_sealed_filename(name: str, stem: str) -> bool:
     return re.fullmatch(re.escape(stem) + _SEALED_SUFFIX_PATTERN, name) is not None
 
 
+def _unlink_quietly(path: Path) -> None:
+    """Remove ``path`` if it exists; a failure is logged, never raised (a
+    cleanup inside an exception handler)."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        _log(logging.WARNING, "could not remove %s", path, exc_info=True)
+
+
 def _sealed_period(name: str, stem: str) -> str:
     """The ISO-week label of a sealed filename (``2026-W37``); sorts in time order."""
     return name[len(f"{stem}.audit."):].removesuffix(".gz").removesuffix(".jsonl")
@@ -257,9 +268,11 @@ class _AuditLockError(OSError):
 
 
 class _ManifestUnavailable(OSError):
-    """The manifest cannot be used right now. Writers that need it skip their
-    step; appending to the active file does not need it. A plain instance is
-    transient (a read error) and callers retry; see ``_ManifestQuarantined``."""
+    """The manifest cannot be used right now. Maintenance steps that need it
+    (rotation, retention) skip; an append that needs it to record or check the
+    active file's first entry is refused (Phill 2026-10-08, "A"). A plain
+    instance is transient (a read error) and callers retry; see
+    ``_ManifestQuarantined``."""
 
 
 class _ManifestQuarantined(_ManifestUnavailable):
@@ -749,6 +762,8 @@ class AuditTrail:
     ) -> dict[str, Any]:
         """:meth:`log` from the re-sync on: the caller holds the append lock
         (:meth:`_append_lock`) and has validated ``event`` and ``data``."""
+        self._finish_first_entry()
+        self._refuse_while_quarantined()
         # ⛔ RE-SYNC WITH DISK FIRST (KL-24, run 2026-10-07 on 8542f49: three
         # writer processes, ``verify()`` valid=False, ``status()`` counting no
         # audit failure). Another process may have appended, rotated or replaced the
@@ -766,9 +781,14 @@ class AuditTrail:
         # the append and before ``on_event``, which must never run under it.
         if not self._initialized or _iso_week_now() != self._last_week:
             with self._operation_span():
+                self._refuse_without_manifest_lock()
                 if not self._initialized:
                     self._initialize()
                 self._rotate_if_needed()
+            # The span may have just found and quarantined an invalid manifest;
+            # the append that found it is refused too (ruling A, lane run: it
+            # was accepted while only the next one was refused).
+            self._refuse_while_quarantined()
 
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
@@ -945,13 +965,27 @@ class AuditTrail:
         # entries: delete the file and, after one refusal, the next append
         # seeded from genesis and verify() read valid; a restart read a healthy
         # 0. Now a save that fails refuses this append, with nothing written.
+        # The first entry of an active file is not appended: it is staged in a
+        # temp file with any bytes already there, fsynced, its record saved, and
+        # then renamed into place (KL-24 L3 r5, codex + complement: saved first
+        # and appended after, a crash between the two left a record naming an
+        # entry never written, and repair then recorded a false permanent gap).
+        # The temp is what recovery finishes (:meth:`_finish_first_entry`); the
+        # same order as LevelDB publishing a new MANIFEST through CURRENT.
+        first_tmp: Path | None = None
         if not had_entry:
-            self._record_active_begun(new_prev_hash, saved_chain_state[0])
+            first_tmp = self._stage_first_entry(
+                active, payload, new_prev_hash, saved_chain_state[0]
+            )
         try:
-            with open(active, "a", encoding="utf-8") as f:
-                f.write(payload)
-                f.flush()
-                os.fsync(f.fileno())
+            if first_tmp is not None:
+                os.replace(first_tmp, active)
+                _fsync_dir(active.parent)
+            else:
+                with open(active, "a", encoding="utf-8") as f:
+                    f.write(payload)
+                    f.flush()
+                    os.fsync(f.fileno())
             # Update chain state
             self._prev_hash = new_prev_hash
             self._seq += 1
@@ -1240,7 +1274,9 @@ class AuditTrail:
                 self._tip = saved_tip
                 self._initialized = True
                 if not had_entry:
-                    # The write-ahead record names an entry that is not on disk.
+                    # The record names an entry that is not on disk.
+                    if first_tmp is not None:
+                        _unlink_quietly(first_tmp)
                     self._withdraw_active_begun(new_prev_hash)
             else:
                 # Disk is the authority now — see the block above.
@@ -1387,10 +1423,20 @@ class AuditTrail:
             )
         except FileNotFoundError:
             manifest = {}
-            if any(self._db_path.parent.glob(f"{self._db_path.stem}.audit.*.jsonl*")):
-                # Sealed weeks with no manifest: the trail is not empty, and
-                # nothing here can say what it holds (L3 r4, complement LOW).
-                raise OSError("the audit manifest is missing beside sealed audit files")
+            audit_dir, stem = self._db_path.parent, self._db_path.stem
+            names = [p.name for p in audit_dir.iterdir()] if audit_dir.is_dir() else []
+            # Sealed weeks, a quarantined manifest or a staged first entry with no
+            # manifest: the trail is not empty, and nothing here can say what it
+            # holds (L3 r4 complement LOW; r5 codex HIGH: a quarantined manifest
+            # read as a healthy 0). Names are matched exactly, never globbed (a
+            # stem may hold glob characters: r5 complement LOW).
+            sealed_re = re.compile(re.escape(f"{stem}.audit.") + r"\d{4}-W\d{2}\.jsonl(?:\.gz)?")
+            sealed = [n for n in names if sealed_re.fullmatch(n)]
+            if sealed or _markers_in(names, stem) or self._first_entry_path().name in names:
+                raise OSError(
+                    "the audit manifest is missing beside sealed, quarantined or "
+                    "staged audit files"
+                )
         except _CORRUPT_MANIFEST + (AttributeError,) as e:
             # Every way a manifest fails to parse reads as unknown, never as a
             # crash of the status call (L3 r3 ``[]``: TypeError; r4: RecursionError).
@@ -1995,6 +2041,36 @@ class AuditTrail:
             return AuditRepairResult(
                 repaired=False, error=f"Cannot list the audit directory: {e}; {nothing}"
             )
+        # ⛔ A REBUILD CANNOT VOUCH FOR AN EMPTY ACTIVE FILE (Phill 2026-10-08,
+        # "A"; run first: the active file deleted while the manifest was
+        # quarantined, and after this rebuild verify read VALID with that week's
+        # entries gone and no gap). The record that would say the file once held
+        # entries was in the quarantined manifest. With no usable entry in the
+        # active file the rebuild records an UNKNOWN gap: loud, and possibly a
+        # false one when the file really never held an entry.
+        try:
+            active_holds_entry = _first_valid_line(trail._active_path) is not None
+        except FileNotFoundError:
+            active_holds_entry = False
+        except OSError as e:
+            return AuditRepairResult(
+                repaired=False,
+                error=f"Could not read the active audit file: {e}; {nothing}",
+            )
+        possible_gap: list[dict[str, str]] = []
+        if not active_holds_entry:
+            possible_gap = [{
+                "filename": trail._active_path.name,
+                "set_aside_as": "",
+                "period": _iso_week_now(),
+                "cause": (
+                    "the manifest was rebuilt from quarantine and the active file holds "
+                    "no entry; whether it held entries before cannot be known, so this "
+                    "is recorded as a possible gap"
+                ),
+                "at": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"),
+            }]
+            carried = list(carried or []) + possible_gap
         if carried:
             manifest["set_aside"] = carried
         try:
@@ -2051,6 +2127,9 @@ class AuditTrail:
             files=[r["path"].name for r in records],
             chain_anchor_recovered=recovered,
             untracked=untracked,
+            # The possible gap is reported to whoever ran the repair, not only
+            # recorded where a later verify finds it.
+            set_aside=possible_gap,
         )
 
     @classmethod
@@ -2193,8 +2272,15 @@ class AuditTrail:
                 path = audit_dir / str(f.get("filename", ""))
                 try:
                     first = _first_valid_line(path) if path.is_file() else None
-                except OSError:
-                    first = None
+                except OSError as e:
+                    # Unreadable is not a mismatch (L3 r5, codex MED): reading
+                    # it as one recorded a false permanent gap.
+                    return AuditRepairResult(
+                        repaired=False,
+                        error=(f"Cannot read the sealed week {path.name} to check it "
+                               f"against the manifest's active-file record: {e}; "
+                               "nothing was written."),
+                    )
                 if first is not None and AuditTrail._compute_hash(first) == begun["first_hash"]:
                     manifest["active_begun"] = None
                     begun = None
@@ -2812,8 +2898,10 @@ class AuditTrail:
         ⛔ HYBRID (Phill, 2026-09-13): an INVALID manifest no longer degrades
         to genesis. :meth:`_load_manifest` quarantines it, and this seeds from
         the newest sealed file's last entry instead — the value rotation would
-        have recorded — so appending continues on the true chain. If there is
-        no readable sealed tail, it refuses (raises); genesis would be a guess.
+        have recorded. If there is no readable sealed tail, it refuses (raises);
+        genesis would be a guess. Since 2026-10-08 ("A") :meth:`log` refuses
+        every append while a quarantine is unresolved, so a log() does not
+        continue past this seed until ``audit-repair`` has run.
 
         ``adopted`` is False when orphan adoption did not finish its scan; then
         a chain anchor read from the manifest is refused (see
@@ -2884,6 +2972,110 @@ class AuditTrail:
                 "a deletion of it will not be detected", exc_info=True,
             )
 
+    def _refuse_without_manifest_lock(self) -> None:
+        """Inside an operation span: refuse the append when the span could not
+        take the manifest lock (Phill 2026-10-08, "A": an append that cannot
+        record or check the manifest leaves a window in which a deleted active
+        file goes undetected, so it fails closed; the store counts the drop)."""
+        failure = self._lock_failures.get(threading.get_ident())
+        if failure is not None:
+            raise _ManifestUnavailable(
+                f"audit append refused: the audit manifest lock cannot be taken "
+                f"({failure}); fix the lock file, then retry. Until then audit "
+                "writes are counted as dropped (status: audit_write_failures)"
+            )
+
+    def _refuse_while_quarantined(self) -> None:
+        """Refuse every append while a quarantined manifest is unresolved (Phill
+        2026-10-08, "A", superseding the 09-13 hybrid; run first: with the
+        manifest quarantined and the active file deleted, appends seeded from
+        the sealed tail, and after audit-repair verify read VALID with the
+        deleted week's entries gone and no gap). A directory that cannot be
+        listed does not refuse: writes there must not block (round 10b), and
+        :meth:`_load_manifest` still quarantines and refuses an invalid manifest
+        it reads."""
+        try:
+            markers = _quarantine_markers(self._db_path.parent, self._db_path.stem)
+        except OSError:
+            return
+        if markers:
+            raise _ManifestQuarantined(
+                f"audit append refused: the audit manifest is quarantined "
+                f"({markers[-1]}); run `anneal-memory audit-repair`, then writes "
+                "resume. Until then audit writes are counted as dropped (status: "
+                "audit_write_failures)"
+            )
+
+    def _first_entry_path(self) -> Path:
+        return self._active_path.with_name(self._active_path.name + ".first")
+
+    def _stage_first_entry(
+        self, active: Path, payload: str, first_hash: str, first_prev_hash: str
+    ) -> Path:
+        """Write the active file's current bytes (none, or a torn fragment kept
+        as evidence) plus ``payload`` to the staging temp, fsynced, then save
+        its record (:meth:`_record_active_begun`). Any failure removes the temp
+        and raises, so nothing is committed."""
+        tmp = self._first_entry_path()
+        try:
+            existing = _read_regular_bytes(active)
+        except FileNotFoundError:
+            existing = b""
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+        try:
+            os.write(fd, existing + payload.encode("utf-8"))
+            os.fsync(fd)
+        except BaseException:
+            os.close(fd)
+            _unlink_quietly(tmp)
+            raise
+        os.close(fd)
+        try:
+            self._record_active_begun(first_hash, first_prev_hash)
+        except BaseException:
+            _unlink_quietly(tmp)
+            raise
+        return tmp
+
+    def _finish_first_entry(self) -> None:
+        """Recovery for a staged first entry left by a process that stopped
+        between saving its record and the rename (see :meth:`_log_locked`). Under
+        the append lock. The record names the staged entry: the rename is
+        finished. No record names it: the append never committed and the temp
+        is discarded. The manifest cannot be read: refused, nothing decided."""
+        tmp = self._first_entry_path()
+        if not os.path.lexists(tmp):
+            return
+        self._initialized = False  # whatever happens here, re-derive from disk
+        manifest_path = self._db_path.parent / f"{self._db_path.stem}.audit.manifest.json"
+        try:
+            manifest = _parse_manifest_bytes(
+                _read_regular_bytes(manifest_path), self._db_path.stem
+            )
+        except FileNotFoundError:
+            manifest = {}
+        except _CORRUPT_MANIFEST + (AttributeError,) as e:
+            raise _ManifestUnavailable(
+                f"a staged first audit entry ({tmp.name}) is waiting and the manifest "
+                f"cannot be read to decide it: {e}"
+            ) from e
+        begun = manifest.get("active_begun") if isinstance(manifest, dict) else None
+        with _open_regular(tmp) as f:
+            staged = _last_valid_entry_in(f, 0)[0]
+        try:
+            active_holds_entry = _first_valid_line(self._active_path) is not None
+        except FileNotFoundError:
+            active_holds_entry = False
+        if (
+            isinstance(begun, dict) and staged
+            and self._compute_hash(staged) == begun.get("first_hash")
+            and not active_holds_entry
+        ):
+            os.replace(tmp, self._active_path)
+            _fsync_dir(self._active_path.parent)
+        else:
+            os.unlink(tmp)
+
     def _record_active_begun(self, first_hash: str, first_prev_hash: str) -> None:
         """Save ``active_begun`` for the active file this call is about to
         start, BEFORE its first entry is written (see :meth:`_log_locked`), so a
@@ -2894,29 +3086,15 @@ class AuditTrail:
         the manifest lock, so the save takes the span here.
 
         Raises ``_ManifestUnavailable`` when it cannot be saved, refusing the
-        append (KL-24 L3 r4: best-effort, a failure left the week unprotected).
-        Two states keep appending with a warning instead, because rulings chose
-        availability there: the manifest lock could not be taken (degrade with a
-        stderr warning, ruled 2026-10-03) and a quarantined manifest (the
-        2026-09-13 hybrid: appending to the active file does not need it). In
-        those two the week stays unprotected until the manifest is usable again.
-        Where advisory locks do not exist at all the span holds no lock and the
-        save still runs."""
-        degraded = (
-            "could not record the active audit file's first entry in the manifest "
-            "({}); a deletion of this week's active file will not be detected"
-        )
+        append (KL-24 L3 r4: best-effort, a failure left the week unprotected),
+        including when the manifest lock cannot be taken or the manifest is
+        quarantined (Phill 2026-10-08, "A": fail closed, superseding the 10-03
+        degrade and the 09-13 hybrid). Where advisory locks do not exist at all
+        the span holds no lock and the save still runs."""
         try:
             with self._operation_span():
-                failure = self._lock_failures.get(threading.get_ident())
-                if failure is not None:
-                    _log(logging.WARNING, degraded.format(failure))
-                    return
-                try:
-                    manifest = self._load_manifest()
-                except _ManifestQuarantined as q:
-                    _log(logging.WARNING, degraded.format(q))
-                    return
+                self._refuse_without_manifest_lock()
+                manifest = self._load_manifest()
                 manifest["active_begun"] = {
                     "period": self._last_week, "first_hash": first_hash,
                     "first_prev_hash": first_prev_hash,
@@ -3784,9 +3962,9 @@ class AuditTrail:
             raise _ManifestUnavailable(f"could not quarantine the invalid audit manifest: {e}") from e
         _fsync_dir(path.parent)
         _log(logging.WARNING,
-            "Quarantined an invalid audit manifest as %s. Appending continues; "
-            "rotation, orphan adoption and retention are paused until "
-            "`anneal-memory audit-repair` rebuilds it.", target.name,
+            "Quarantined an invalid audit manifest as %s. Audit appends are refused "
+            "(counted as dropped writes), and rotation, orphan adoption and retention "
+            "are paused, until `anneal-memory audit-repair` rebuilds it.", target.name,
         )
         return target.name
 

@@ -34,8 +34,17 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - The manifest's record of an active file's first entry is saved BEFORE that entry is written
   (write-ahead); a save that fails refuses the append with nothing written. Saved after the entry and
   best-effort, a failed save left a later deletion of the file undetected: the chain restarted and
-  `verify` read valid (reproduced). Two states still append with a warning and leave that week
-  unprotected, as ruled earlier: the manifest lock cannot be taken, and the manifest is quarantined.
+  `verify` read valid (reproduced). The first entry is staged in a temp file and renamed into place
+  after its record is saved, so a crash between the two is finished on the next append instead of
+  reading as a deleted file.
+- Audit appends FAIL CLOSED when the manifest lock cannot be taken or the manifest is quarantined
+  (ruled 2026-10-08, superseding the 2026-10-03 "degrade with a warning" and the 2026-09-13
+  "appending continues while quarantined"): each refused append is counted as a dropped audit write
+  (`audit_write_failures` in `status`) and its message names `anneal-memory audit-repair`; episodes
+  still commit. Reproduced first: with the manifest quarantined and the active file deleted, appends
+  went on, and after `audit-repair` `verify` read valid with that week's entries gone and no gap.
+  `audit-repair` rebuilding a quarantined manifest over an active file with no entry now records a
+  possible gap, since nothing left on disk says whether the file held entries.
 - The append lock is released with `LOCK_UN` before its close, as the manifest lock now is, so a
   child forked while it was held does not keep it.
 - An append waits at most 30 seconds for another holder; past that, or when the lock file cannot

@@ -649,6 +649,9 @@ class _SaveContinuityOptional(TypedDict, total=False):
     # durable-facts warning text this save emitted (also delivered as
     # UserWarnings), empty when there were none.
     durable_warnings: list[str]
+    # Present ONLY when the store has live CAP-06 drift probes: ``counts`` per status
+    # (held / weakened / crystallized / lost) and every probe not ``held``.
+    drift: dict[str, Any]
 
 
 class SaveContinuityResult(_SaveContinuityOptional):

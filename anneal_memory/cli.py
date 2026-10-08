@@ -2260,6 +2260,58 @@ def cmd_team_status(args: argparse.Namespace) -> None:
         print(unmanaged)
 
 
+def cmd_probe(args: argparse.Namespace) -> None:
+    """CAP-06 drift probes: declare what must survive consolidation, and read the
+    latest save's verdict on each."""
+    store = _open_store(args)
+    try:
+        if args.probe_command == "add":
+            pid = store.add_drift_probe(pattern=args.pattern, min_level=args.min_level,
+                                        fact=args.fact, section=args.section, note=args.note)
+            if args.json:
+                _print_json({"id": pid})
+            else:
+                print(f"Probe {pid} added; it is checked after every save.")
+        elif args.probe_command == "list":
+            rows = store.list_drift_probes(include_retired=args.all)
+            if args.json:
+                _print_json(rows)
+            elif not rows:
+                print("No drift probes.")
+            for r in rows if not args.json else ():
+                what = (f"pattern {r['name']} >= {r['min_level']}x" if r["kind"] == "pattern"
+                        else f"fact {r['text']!r}"
+                        + (f" in ## {r['section']}" if r["section"] else ""))
+                gone = f"  (retired {r['retired_at']})" if r["retired_at"] else ""
+                print(f"{r['id']:>4}  {what}{gone}")
+        elif args.probe_command == "retire":
+            ok = store.retire_drift_probe(args.id)
+            if args.json:
+                _print_json({"retired": ok})
+            elif ok:
+                print(f"Probe {args.id} retired.")
+            else:
+                print(f"No live probe {args.id}.", file=sys.stderr)
+                sys.exit(1)
+        else:  # status
+            data = store.drift_status()
+            if args.json:
+                _print_json(data)
+                return
+            if data["wrap_id"] is None:
+                print("No save has checked a drift probe yet.")
+                return
+            print(f"Drift probes at wrap {data['wrap_id']} ({data['wrapped_at']}):")
+            for r in data["probes"]:
+                since = f"  [since wrap {r['since_wrap']}]" if r["since_wrap"] else ""
+                print(f"  {r['status']:12s} {r['subject']}: {r['detail']}{since}")
+    except (ValueError, StoreError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        store.close()
+
+
 def cmd_team_forget_key(args: argparse.Namespace) -> None:
     """Release a team snapshot key."""
     with _open_store(args) as store:
@@ -4427,6 +4479,30 @@ def build_parser() -> argparse.ArgumentParser:
              "import on a ledger root with no remaining key adopts them by their linker")
     sub.add_argument("key", help="The key, as team-status lists it")
     sub.set_defaults(func=cmd_team_forget_key)
+
+    # -- probe (CAP-06 drift probes) --
+    probe_parser = subparsers.add_parser(
+        "probe", help="Drift probes: what must survive consolidation, checked every save")
+    probe_sub = probe_parser.add_subparsers(dest="probe_command", required=True)
+    sub = probe_sub.add_parser(
+        "add", parents=[json_parent],
+        help="Declare a pattern (held at a level) or a fact (its words on one line)")
+    what = sub.add_mutually_exclusive_group(required=True)
+    what.add_argument("--pattern", help="A Proven pattern name that must stay in the file")
+    what.add_argument("--fact", help="A fact whose meaningful words must stay on one line")
+    sub.add_argument("--min-level", type=int, help="Pattern level it must hold (default 2)")
+    sub.add_argument("--section", help="Only look for the fact under this ## heading")
+    sub.add_argument("--note", help="Why this must survive (for the operator)")
+    sub.set_defaults(func=cmd_probe)
+    sub = probe_sub.add_parser("list", parents=[json_parent], help="List drift probes")
+    sub.add_argument("--all", action="store_true", help="Include retired probes")
+    sub.set_defaults(func=cmd_probe)
+    sub = probe_sub.add_parser("retire", parents=[json_parent], help="Stop checking a probe")
+    sub.add_argument("id", type=int)
+    sub.set_defaults(func=cmd_probe)
+    sub = probe_sub.add_parser("status", parents=[json_parent],
+                               help="The latest save's verdict on each probe")
+    sub.set_defaults(func=cmd_probe)
 
     # -- audit --
     sub = subparsers.add_parser("audit", help="Read and filter audit trail entries", parents=[json_parent])

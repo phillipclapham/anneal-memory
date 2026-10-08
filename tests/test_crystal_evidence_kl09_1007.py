@@ -88,3 +88,36 @@ def test_an_episode_naming_several_live_patterns_is_not_used(tmp_path):
         assert got["alpha_pattern"].hubs_skipped == 1
     finally:
         s.close()
+
+
+def test_a_working_set_pattern_name_also_makes_a_hub(tmp_path):
+    """L2 1007 follow-up [run]: a desk log naming one crystal and working-set patterns
+    (pattern_history only) must not be picked over the incident."""
+    s, cs = _store(tmp_path)
+    try:
+        s.record("desk: beta_pattern fired, plus ws_one and ws_two", "observation")
+        own = s.record("the beta_pattern incident", "observation")
+        s._conn.executemany(
+            "INSERT INTO pattern_history (pattern_name, max_level_reached, "
+            "explanation_corpus, last_explanation, last_seen_at) "
+            "VALUES (?, 2, 'x', 'x', '2026-10-01')", [("ws_one",), ("ws_two",)])
+        s._conn.commit()
+        cs.crystallize(name="beta_pattern", level=3, explanation="x")
+        got = cs.ground_empty_evidence(s, limit=1)["beta_pattern"]
+        assert got.evidence == [own.id[:8]] and got.hubs_skipped == 1
+    finally:
+        s.close()
+
+
+def test_an_explicit_update_clears_the_provisional_mark(tmp_path):
+    s, cs = _store(tmp_path)
+    try:
+        e = s.record("the alpha_pattern incident", "observation")
+        cs.crystallize(name="alpha_pattern", level=3, explanation="x")
+        cs.ground_empty_evidence(s)
+        cs.update("alpha_pattern", evidence=[e.id[:8]])     # the operator confirms it
+        assert PROVISIONAL_EVIDENCE not in cs.get("alpha_pattern")
+        cs.crystallize(name="alpha_pattern", level=4, explanation="y", evidence=["eeee5555"])
+        assert cs.get("alpha_pattern")["evidence"] == [e.id[:8], "eeee5555"]
+    finally:
+        s.close()

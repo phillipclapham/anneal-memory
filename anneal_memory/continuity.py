@@ -67,6 +67,7 @@ from .schema import (
     schema_role_warning,
 )
 from .crystal import CrystalError, CrystalStore
+from .drift import PROBE_STATUSES, evaluate_probes
 from .durable import (
     enforce_durable_facts,
     is_exact_heading,
@@ -2436,6 +2437,29 @@ def _durable_cue_state(
         return None, []
 
 
+def _evaluate_drift_probes(
+    store: Store, schema: list[SectionSpec], text: str, crystal_store: CrystalStore | None,
+) -> list[dict[str, Any]]:
+    """CAP-06: every live drift probe checked against ``text`` (empty when none)."""
+    probes = store.list_drift_probes()
+    if not probes:
+        return []
+    levels: dict[str, int] = {}
+    for line in _role_section_body(text, schema, "graduating"):
+        m = _NAMED_PATTERN_RE.match(line)
+        if m:
+            levels[m.group(1)] = max(levels.get(m.group(1), 0), int(m.group(2)))
+    crystals = [c["name"] for c in _crystal_active_safe(crystal_store)]
+    return evaluate_probes(text, probes, pattern_levels=levels, live_crystals=crystals)
+
+
+def _drift_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
+    counts = {status: 0 for status in PROBE_STATUSES}
+    for r in results:
+        counts[r["status"]] += 1
+    return {"counts": counts, "not_held": [r for r in results if r["status"] != "held"]}
+
+
 def validated_save_continuity(
     store: Store,
     text: str,
@@ -3156,6 +3180,11 @@ def validated_save_continuity(
         inert_value, cue_warnings = _durable_cue_state(
             store, section_schema, grad_result.text
         )
+    # CAP-06: the operator's drift probes, checked against the exact text being saved
+    # (never shown to the composer; never a gate). Recorded with the wrap row below.
+    drift_results = _evaluate_drift_probes(
+        store, section_schema, grad_result.text, crystal_store
+    )
     cont_tmp: Path | None = store._prepare_continuity_write(
         grad_result.text, token_hex=tmp_pair_id
     )
@@ -3243,6 +3272,7 @@ def validated_save_continuity(
                 content_hash=content_hash,
                 pair_id=tmp_pair_id,
             )
+            store._record_drift_results(drift_results)
 
 
             # Update cross-session pattern history. Scan the
@@ -3546,6 +3576,8 @@ def validated_save_continuity(
                 "content_hash": content_hash,
             }
             audit_payload["allow_shrink"] = shrink_override
+            if drift_results:
+                audit_payload["drift"] = _drift_summary(drift_results)
             # Capture Proven-tier pattern omissions in the audit chain.
             # detect_pattern_omissions returns an empty list for the
             # common case (first wrap, or all prior Proven-tier patterns
@@ -3925,6 +3957,8 @@ def validated_save_continuity(
     )
     if compost_names is not None:
         result["composted"] = composted
+    if drift_results:
+        result["drift"] = _drift_summary(drift_results)
     if durable_report is not None:
         result["durable_warnings"] = durable_messages
     if stale_state:

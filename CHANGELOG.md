@@ -4,6 +4,17 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added — drift probes, the operator's instrument for meaning drift (CAP-06)
+- `anneal-memory probe add --pattern NAME [--min-level N]` / `--fact TEXT [--section H]`,
+  `probe list [--all]`, `probe retire ID`, `probe status`; library `Store.add_drift_probe`,
+  `list_drift_probes`, `retire_drift_probe`, `drift_status`, and `anneal_memory.drift`.
+  Every save checks each live probe against the saved text (a pattern held at its level, a
+  fact's meaningful words on one line) and records held / weakened / crystallized / lost with
+  that wrap, in the save result's `drift` and the `continuity_saved` audit event. Probes are
+  never shown to the composer and never block a save. The check is lexical; whether a kept
+  claim is still true is the operator's, and the README now says so plainly.
+- Two additive tables, `drift_probes` and `drift_results`; an older binary ignores them.
+
 ### Fixed — the cross-session check stopped grading function words (KL-01)
 - The cross-session-overlap check (a re-graduation whose explanation shares 3 or more
   meaningful words with the prior one demotes) now drops every common function word and the
@@ -42,8 +53,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   no evidence, record the oldest live episodes that name the pattern as a whole word and name
   no other live pattern. An episode naming several patterns (an end-of-day log) would become
   a hub that recall discounts for every pattern citing it, so it is skipped and counted. The
-  ids are marked provisional (`provisional_evidence`), and the first real evidence a
-  crystallize brings replaces them. This is lexical grounding: an episode that names a
+  ids are marked provisional (`provisional_evidence`); the first real evidence a crystallize
+  brings, or an explicit `update(evidence=...)`, replaces them. "Another pattern" is any
+  live or retired crystal or any name in the store's pattern history. This is lexical grounding: an episode that names a
   pattern cites it, it does not prove it.
 
 ### Fixed — team-status counts imported team entries only (L3 on the v3 seam)

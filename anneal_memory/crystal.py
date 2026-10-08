@@ -930,6 +930,8 @@ class CrystalStore:
                 item["level"] = self._validate_level(level)
             if not isinstance(evidence, _Unset):
                 item["evidence"] = _clean_str_list(evidence, "evidence")
+                # An explicit set is the operator's: nothing in it is provisional.
+                cast(dict, item).pop(PROVISIONAL_EVIDENCE, None)
             if not isinstance(permanence, _Unset):
                 if permanence not in VALID_PERMANENCE:
                     raise ValueError(f"permanence must be one of {VALID_PERMANENCE} (got {permanence!r}).")
@@ -982,9 +984,15 @@ class CrystalStore:
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
             raise ValueError(f"limit must be a positive int (got {limit!r}).")
         live = self.active()
-        bounded = {c["name"]: re.compile(
-            rf"(?<![a-z0-9_\-]){re.escape(c['name'].lower())}(?![a-z0-9_\-])")
-            for c in live}
+        # A hub is an episode naming any OTHER known pattern: live or retired
+        # crystals, or any working-set pattern that ever graduated (L2 1007, run:
+        # a desk log naming one crystal and four working-set patterns was picked
+        # over the incident).
+        retired = [r.get("name") for r in self._load().get("retired", [])]
+        known = {c["name"] for c in live} | {n for n in retired if isinstance(n, str)} \
+            | set(store.pattern_history_names())
+        bounded = {n: re.compile(
+            rf"(?<![a-z0-9_\-]){re.escape(n.lower())}(?![a-z0-9_\-])") for n in known}
         out: dict[str, GroundingResult] = {}
         for item in live:
             if any(isinstance(e, str) for e in (item.get("evidence") or [])):

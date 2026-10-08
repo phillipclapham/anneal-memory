@@ -346,6 +346,7 @@ StoreOperation = Literal[
     "unsupersede",
     "import_team_entries",
     "import_team_snapshot",
+    "drift_probes",
     "supersession_exists",
     "superseded_by_map",
     "supersession_problem",
@@ -1470,6 +1471,28 @@ CREATE INDEX IF NOT EXISTS idx_supersessions_new ON supersessions(new_id);
 -- the entry back. No content: both values are in the shared ledger already, so a
 -- delete keeps the row whatever keep_tombstones says. Additive: an older binary
 -- ignores the table.
+-- CAP-06 drift probes: what the operator declared must survive consolidation, and
+-- each save's verdict on it. Additive; an older binary ignores both tables.
+CREATE TABLE IF NOT EXISTS drift_probes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    name TEXT,
+    text TEXT,
+    min_level INTEGER,
+    section TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    retired_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS drift_results (
+    wrap_id INTEGER NOT NULL,
+    probe_id INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    detail TEXT,
+    PRIMARY KEY (wrap_id, probe_id)
+);
+
 CREATE TABLE IF NOT EXISTS team_entries (
     entry_id TEXT PRIMARY KEY,
     hash TEXT NOT NULL,
@@ -3179,6 +3202,125 @@ class Store:
                 return empty
         return {"keys": keys, "overrides": overrides, "unmanaged_rewired": unmanaged,
                 "notes": notes, "protected_episodes": protected}
+
+    # --- CAP-06 drift probes (the operator's instrument; see anneal_memory.drift) ---
+
+    def add_drift_probe(
+        self,
+        *,
+        pattern: str | None = None,
+        min_level: int | None = None,
+        fact: str | None = None,
+        section: str | None = None,
+        note: str | None = None,
+    ) -> int:
+        """Declare something that must survive consolidation: a Proven ``pattern``
+        (held at ``min_level`` or above, default 2) or a ``fact`` (every meaningful
+        word of it on one line, of ``section`` if given). Checked after every save;
+        never shown to the composer. Returns the probe id."""
+        if (pattern is None) == (fact is None):
+            raise ValueError("add_drift_probe: pass exactly one of pattern= or fact=")
+        if pattern is not None:
+            if not isinstance(pattern, str) or not pattern.strip() or section is not None:
+                raise ValueError("add_drift_probe: pattern must be a non-empty name "
+                                 "(section= applies to facts only)")
+            if min_level is not None and (isinstance(min_level, bool)
+                                          or not isinstance(min_level, int) or min_level < 2):
+                raise ValueError("add_drift_probe: min_level must be an int >= 2")
+            row: tuple[Any, ...] = ("pattern", pattern.strip(), None, min_level or 2, None)
+        else:
+            if not isinstance(fact, str) or not _meaningful_words(fact):
+                raise ValueError("add_drift_probe: a fact needs at least one meaningful word")
+            if min_level is not None:
+                raise ValueError("add_drift_probe: min_level applies to patterns only")
+            row = ("fact", None, fact.strip(), None, section.strip() if section else None)
+        with self._db_boundary("drift_probes"):
+            cur = self._conn.execute(
+                "INSERT INTO drift_probes (kind, name, text, min_level, section, note) "
+                "VALUES (?, ?, ?, ?, ?, ?)", (*row, note))
+            probe_id = int(cur.lastrowid or 0)
+            if not self._defer_commit:
+                self._conn.commit()
+        self._audit_log_after_commit(
+            "drift_probe_added",
+            {"probe_id": probe_id, "kind": row[0], "subject": row[1] or row[2],
+             "min_level": row[3], "section": row[4]},
+            method="add_drift_probe", committed="the probe")
+        return probe_id
+
+    def list_drift_probes(self, *, include_retired: bool = False) -> list[dict[str, Any]]:
+        """Every drift probe (live only unless ``include_retired``), oldest first."""
+        where = "" if include_retired else " WHERE retired_at IS NULL"
+        with self._db_boundary("drift_probes"), self._read_snapshot():
+            try:
+                return [dict(r) for r in self._conn.execute(
+                    f"SELECT * FROM drift_probes{where} ORDER BY id").fetchall()]
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc):
+                    return []  # a read_only open of a store no writer has upgraded
+                raise
+
+    def retire_drift_probe(self, probe_id: int) -> bool:
+        """Stop checking a probe (its past results stay). False if no live probe has
+        that id."""
+        with self._db_boundary("drift_probes"):
+            n = self._conn.execute(
+                "UPDATE drift_probes SET retired_at = ? WHERE id = ? AND retired_at IS NULL",
+                (_now_utc(), probe_id)).rowcount
+            if not self._defer_commit:
+                self._conn.commit()
+        if n == 1:
+            self._audit_log_after_commit(
+                "drift_probe_retired", {"probe_id": probe_id},
+                method="retire_drift_probe", committed="the retirement")
+        return n == 1
+
+    def _record_drift_results(self, results: list[dict[str, Any]]) -> None:
+        """Write a save's probe verdicts against the wrap row just inserted. Called
+        inside the save batch, after ``wrap_completed``, so both commit together."""
+        if not results:
+            return
+        wrap_id = self._conn.execute("SELECT MAX(id) FROM wraps").fetchone()[0]
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO drift_results (wrap_id, probe_id, status, detail) "
+            "VALUES (?, ?, ?, ?)",
+            [(wrap_id, r["probe_id"], r["status"], r["detail"]) for r in results])
+
+    def drift_status(self) -> dict[str, Any]:
+        """The latest save's probe verdicts, each with the first wrap since which it
+        has been continuously not ``held`` (``since_wrap``), plus that wrap's id and
+        time. Read-only."""
+        empty: dict[str, Any] = {"wrap_id": None, "wrapped_at": None, "probes": []}
+        with self._db_boundary("drift_probes"), self._read_snapshot():
+            try:
+                last = self._conn.execute(
+                    "SELECT MAX(wrap_id) FROM drift_results").fetchone()[0]
+                if last is None:
+                    return empty
+                at = self._conn.execute(
+                    "SELECT wrapped_at FROM wraps WHERE id = ?", (last,)).fetchone()
+                rows = self._conn.execute(
+                    """SELECT p.id, p.kind, COALESCE(p.name, p.text) AS subject,
+                              r.status, r.detail
+                       FROM drift_results r JOIN drift_probes p ON p.id = r.probe_id
+                       WHERE r.wrap_id = ? AND p.retired_at IS NULL ORDER BY p.id""",
+                    (last,)).fetchall()
+                probes = []
+                for r in rows:
+                    since = None
+                    if r["status"] != "held":
+                        held = self._conn.execute(
+                            "SELECT MAX(wrap_id) FROM drift_results WHERE probe_id = ? "
+                            "AND status = 'held'", (r["id"],)).fetchone()[0]
+                        since = self._conn.execute(
+                            "SELECT MIN(wrap_id) FROM drift_results WHERE probe_id = ? "
+                            "AND wrap_id > ?", (r["id"], held or 0)).fetchone()[0]
+                    probes.append(dict(r) | {"since_wrap": since})
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc):
+                    return empty
+                raise
+        return {"wrap_id": last, "wrapped_at": at[0] if at else None, "probes": probes}
 
     def team_forget_key(self, key: str) -> int:
         """Release a snapshot key: its record and its ownership go; the links stay in
@@ -5956,6 +6098,18 @@ class Store:
     # explanation against this history to detect sycophantic vocabulary
     # reuse across sessions.
 
+    def pattern_history_names(self) -> list[str]:
+        """Every pattern name the store has a history row for (any pattern that ever
+        graduated with a citation), sorted. Read-only."""
+        with self._db_boundary("get_pattern_history"), self._read_snapshot():
+            try:
+                return [r[0] for r in self._conn.execute(
+                    "SELECT pattern_name FROM pattern_history ORDER BY pattern_name")]
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc):
+                    return []
+                raise
+
     def get_pattern_history(self, pattern_name: str) -> dict[str, Any] | None:
         """Look up the cross-session graduation history for a pattern.
 
@@ -8197,6 +8351,7 @@ class Store:
         - :meth:`import_team_entries` (``dry_run`` is refused inside a batch)
         - :meth:`import_team_snapshot` (``dry_run`` is refused inside a batch)
         - :meth:`team_forget_key`
+        - :meth:`add_drift_probe` / :meth:`retire_drift_probe` (CAP-06)
         - :meth:`delete` (episode deletions)
         - :meth:`record_associations` / :meth:`decay_associations`
         - :meth:`wrap_completed`

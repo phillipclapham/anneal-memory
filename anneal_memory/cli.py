@@ -1625,7 +1625,8 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 f"Bare graduations demoted (no evidence): {result['bare_demoted']}"
             )
         for cap in result.get("level_capped", []):
-            print(f"Level capped: {cap['name']} {cap['written_level']}x -> {cap['capped_to']}x")
+            why = f" ({cap['reason']})" if cap.get("reason", "prior") != "prior" else ""
+            print(f"Level capped: {cap['name']} {cap['written_level']}x -> {cap['capped_to']}x{why}")
         if result["skipped_non_today"]:
             # Carried-forward graduations from prior sessions are
             # normal. A non-zero count with no new validations is

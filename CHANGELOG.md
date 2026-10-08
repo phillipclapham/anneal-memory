@@ -97,6 +97,18 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   as `agent`); grounding is lexical, so an on-topic agent episode corroborates; recall and the
   wrap package do not yet mark relayed episodes as data (design T4, not built). Whether a claim
   is true stays the operator's.
+- Lowering trust revokes what it earned, at the next wrap (C#11, 2026-10-08). Run first: an
+  episode that grounded a 2x graduation was lowered to `external`, and the next wrap kept the
+  pattern at 2x. Each save now records the episodes that grounded each rung a named pattern
+  earned, in a new additive `pattern_grounding(name, level, episode_id)` table written in the
+  wrap's transaction (`Store.pattern_grounding()`; check 4's grounding citations; a rename moves
+  them). At the graduation bound, a pattern's prior is cut back to just below the lowest recorded
+  rung whose grounding is all `tool`/`external` under today's trust
+  (`graduation.revoked_pattern_levels`, `validate_graduations(..., revoked_levels=)`). The cut is
+  reported in `level_capped` with the new `reason` field `revoked: grounding lowered` (`prior`
+  for every other cut), in the MCP and CLI save output and the warning. A rung with no grounding
+  record (saved before the table) keeps its level. The save's trust re-read covers the recorded
+  grounding episodes too.
 
 ### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
 - `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one

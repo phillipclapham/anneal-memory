@@ -400,6 +400,8 @@ StoreOperation = Literal[
     "seed_pattern_max_level",
     # The graduation bound's receiver record (1007+29)
     "saved_pattern_levels",
+    # CAP-08 D2: the episodes that grounded each earned rung
+    "pattern_grounding",
     "prune",
     "schema_init",
     "batch_begin",
@@ -1609,6 +1611,19 @@ CREATE TABLE IF NOT EXISTS pattern_levels (
     level INTEGER NOT NULL,
     saved_at TEXT NOT NULL,
     PRIMARY KEY (kind, key)
+);
+
+-- CAP-08 D2 (C#11): the episodes that grounded each rung a named pattern
+-- earned, written by the save in the wrap's transaction beside pattern_levels.
+-- When every episode recorded for a rung has since been lowered to tool or
+-- external, the graduation bound cuts the pattern's prior back below that rung
+-- at the next wrap. Rows accumulate (a rung re-earned adds its new witnesses).
+-- A rung saved before the table has no rows and is never revoked. Additive.
+CREATE TABLE IF NOT EXISTS pattern_grounding (
+    name TEXT NOT NULL,
+    level INTEGER NOT NULL,
+    episode_id TEXT NOT NULL,
+    PRIMARY KEY (name, level, episode_id)
 );
 """
 
@@ -6259,6 +6274,37 @@ class Store:
                 return None
             return {(row[0], row[1]): int(row[2]) for row in rows if row[0] != "init"}
 
+    def pattern_grounding(self) -> dict[str, dict[int, list[str]]]:
+        """CAP-08 D2: ``{pattern name: {level: [episode ids]}}``, the episodes
+        recorded as grounding each rung a named pattern earned in a save. Empty
+        when none were recorded (or on a read-only store from before the table).
+        Read-only."""
+        with self._db_boundary("pattern_grounding"), self._read_snapshot():
+            if self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'pattern_grounding'"
+            ).fetchone() is None:
+                return {}
+            out: dict[str, dict[int, list[str]]] = {}
+            for name, level, ep_id in self._conn.execute(
+                "SELECT name, level, episode_id FROM pattern_grounding "
+                "ORDER BY name, level, episode_id"
+            ):
+                out.setdefault(name, {}).setdefault(int(level), []).append(ep_id)
+            return out
+
+    def _record_pattern_grounding(
+        self, rungs: Iterable[tuple[str, int, Iterable[str]]]
+    ) -> None:
+        """Add the grounding episodes of each rung this save validated. Runs
+        inside the save's batch, like :meth:`_record_pattern_levels`."""
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO pattern_grounding (name, level, episode_id) "
+            "VALUES (?, ?, ?)",
+            [(name, int(level), str(cid).strip().lower())
+             for name, level, ids in rungs for cid in ids],
+        )
+
     def _has_pattern_levels_table(self) -> bool:
         return self._conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pattern_levels'"
@@ -6864,6 +6910,13 @@ class Store:
                 self._conn.execute(
                     "DELETE FROM pattern_levels WHERE kind = 'name' AND key = ?",
                     (old_name,))
+            # So does its grounding record (CAP-08 D2): the rungs the old name
+            # earned stay revocable under the new one.
+            self._conn.execute(
+                "UPDATE OR IGNORE pattern_grounding SET name = ? WHERE name = ?",
+                (new_name, old_name))
+            self._conn.execute(
+                "DELETE FROM pattern_grounding WHERE name = ?", (old_name,))
             rekeyed = _rename_pattern(
                 self._conn, old_name, new_name, day, commit=not self._defer_commit
             )

@@ -415,6 +415,18 @@ class GraduationResult:
     # ``graduated_names`` holds; a free-text line has none), the highest trust
     # among the citations that ground it. Empty unless the caller passed ``trust_of``.
     pattern_trust: dict[str, str] = field(default_factory=dict)
+    # CAP-08 D2 (C#11): ``(name, level, grounding ids)`` for each named line
+    # that validated and stands at 2x or above after the bound, so the store can
+    # record which episodes earned that rung (``Store.pattern_grounding``). The
+    # ids are check 4's grounding citations. Empty unless the caller passed
+    # ``trust_of``.
+    pattern_grounding: list[tuple[str, int, list[str]]] = field(default_factory=list)
+
+
+# The reason a LevelCapped line was cut. A revocation is a prior lowered because
+# every episode that grounded a rung is now tool/external (CAP-08 D2).
+CAP_REASON_PRIOR = "prior"
+CAP_REASON_REVOKED = "revoked: grounding lowered"
 
 
 @dataclass
@@ -432,6 +444,9 @@ class LevelCapped:
     capped_to: int  # the level it was cut to
     prior_level: int | None  # the level its prior record entitles (None = new)
     validated: bool  # whether the line validated this wrap (+1 allowed)
+    # CAP_REASON_PRIOR, or CAP_REASON_REVOKED when the prior was cut back because
+    # the grounding of a rung it held was lowered to tool/external since.
+    reason: str = CAP_REASON_PRIOR
 
 
 @dataclass
@@ -595,6 +610,7 @@ def validate_graduations(
     prior_text: str | None = None,
     saved_levels: "dict[tuple[str, str], int] | None" = None,
     trust_of: "Callable[[str], str] | None" = None,
+    revoked_levels: "dict[str, int] | None" = None,
 ) -> GraduationResult:
     """Validate evidence citations on graduated patterns.
 
@@ -679,6 +695,12 @@ def validate_graduations(
             not every resolved one, is deliberate: an unrelated agent episode
             stapled onto the line does not corroborate it. When None, no trust
             check runs (library callers that predate it).
+        revoked_levels: Optional ``{pattern name: level}`` (CAP-08 D2): the
+            highest prior a named pattern may keep because a rung it earned is
+            now grounded only by tool/external episodes (see
+            :func:`revoked_pattern_levels`). Applied by the prior-state bound, so
+            it needs ``prior_text``; a line cut by it is reported in
+            ``level_capped`` with ``reason`` :data:`CAP_REASON_REVOKED`.
 
     Returns:
         GraduationResult with possibly modified text and validation counts.
@@ -699,6 +721,8 @@ def validate_graduations(
     graduated_names: list[str] = []
     uncorroborated: list[UncorroboratedGraduation] = []
     pattern_trust: dict[str, str] = {}
+    # Line index -> (name, check 4's grounding ids), for D2's grounding record.
+    rung_grounding: dict[int, tuple[str, list[str]]] = {}
     # AM-WARN (v0.4.2): tracked independent of the cross-session immune gate
     # (see the field docstring on GraduationResult).
     any_citation_resolved = False
@@ -1082,6 +1106,8 @@ def validate_graduations(
                 grad_name_match = _NAMED_PATTERN_WITH_EVIDENCE_RE.match(line)
                 if grad_name_match is not None and grad_name_match.group(2) == str(level):
                     graduated_names.append(grad_name_match.group(1))
+                    if trust_of is not None:
+                        rung_grounding[i] = (grad_name_match.group(1), list(grounding_ids))
                     if reported_trust is not None:
                         # The highest across the name's lines (codex r2: it was
                         # last-line-wins).
@@ -1304,6 +1330,7 @@ def validate_graduations(
             validated_lines=validated_lines,
             carried_lines=set(carried_by_line),
             graduating_headings=graduating_headings,
+            revoked_levels=revoked_levels,
         )
         for c_line, cap in level_capped:
             # A held line the bound then cut keeps its carry record at the cut
@@ -1322,6 +1349,21 @@ def validate_graduations(
     # Only a name that still graduated keeps its trust entry (codex r2: a line
     # the bound cut to 1x reported operator grounding for no graduation).
     pattern_trust = {n: t for n, t in pattern_trust.items() if n in graduated_names}
+
+    # CAP-08 D2: the rung each validated named line stands at after the bound,
+    # and the episodes that grounded it. A line the bound left below 2x, or one
+    # validated only through another marker on it, earned no rung.
+    pattern_grounding: list[tuple[str, int, list[str]]] = []
+    for gi, (g_name, g_ids) in sorted(rung_grounding.items()):
+        parsed_g = _line_levels(lines[gi])
+        if parsed_g is None or parsed_g[0] != ("name", g_name) or not g_ids:
+            continue
+        own_g = parsed_g[1][0]
+        if validated_lines.get(gi) != own_g.start() or g_name not in graduated_names:
+            continue
+        g_level = _token_level(own_g)
+        if g_level >= 2:
+            pattern_grounding.append((g_name, g_level, g_ids))
 
     reuse_max = max(citation_counts.values()) if citation_counts else 0
     gaming_suspects = detect_citation_gaming(citation_counts)
@@ -1345,6 +1387,7 @@ def validate_graduations(
         level_capped=[cap for _, cap in level_capped],
         uncorroborated=uncorroborated,
         pattern_trust=pattern_trust,
+        pattern_grounding=pattern_grounding,
     )
 
 
@@ -1449,6 +1492,7 @@ def _apply_prior_bound(
     validated_lines: dict[int, int],
     carried_lines: set[int],
     graduating_headings: frozenset[str],
+    revoked_levels: dict[str, int] | None = None,
 ) -> list[tuple[int, LevelCapped]]:
     """Cut every graduating line to ``max(1, prior + 1 if validated)``, in place.
 
@@ -1472,6 +1516,11 @@ def _apply_prior_bound(
         key, marks = parsed
         written = max(_token_level(m) for m in marks)
         prior_level = _prior_base(key, file_levels, saved_levels)
+        reason = CAP_REASON_PRIOR
+        revoked = (revoked_levels or {}).get(key[1]) if key[0] == "name" else None
+        if revoked is not None and prior_level is not None and revoked < prior_level:
+            prior_level = revoked
+            reason = CAP_REASON_REVOKED
         # Credit only the identity's OWN marker (codex L3 r1, run): a decoy
         # ``other | 2x (date) [evidence: ...]`` later on the line validated and
         # the whole line, ``foo`` included, took its rung.
@@ -1493,9 +1542,29 @@ def _apply_prior_bound(
         lines[i] = new_line
         capped.append((i, LevelCapped(
             name=key[1], written_level=written, capped_to=allowed,
-            prior_level=prior_level, validated=validated,
+            prior_level=prior_level, validated=validated, reason=reason,
         )))
     return capped
+
+
+def revoked_pattern_levels(
+    grounding: dict[str, dict[int, list[str]]],
+    trust_of: Callable[[str], str],
+) -> dict[str, int]:
+    """CAP-08 D2: for each pattern, the highest prior it may keep under today's
+    trust. Its rungs are walked lowest first; at the first rung whose recorded
+    grounding is ALL ``tool``/``external`` now (check 4's rule, re-run), the
+    prior is cut to just below that rung. A pattern with no such rung, or with
+    no grounding record at all, is absent: no record, no basis to revoke."""
+    agent = trust_rank(DEFAULT_TRUST)
+    revoked: dict[str, int] = {}
+    for name, rungs in grounding.items():
+        for level in sorted(rungs):
+            ids = rungs[level]
+            if ids and all(trust_rank(trust_of(cid)) < agent for cid in ids):
+                revoked[name] = level - 1
+                break
+    return revoked
 
 
 def _drop_mark(line: str, mark: str) -> str:

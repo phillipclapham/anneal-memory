@@ -657,3 +657,46 @@ class TestL3Round1:
             assert st.status().wrap_in_progress
         finally:
             st.close()
+
+
+# --- C#11 rework (1008+3) ------------------------------------------------------
+
+
+class TestDemotionRevokes:
+    def test_lowering_a_grounding_episode_revokes_its_rung_at_the_next_wrap(self, store):
+        """D2, the BEFORE run (1008+3, on the rebased tip): an episode grounded a
+        2x graduation, was lowered to external, and the next wrap kept the
+        pattern at 2x. Now the save records which episodes grounded each rung and
+        the next wrap cuts a rung whose grounding is all tool/external."""
+        wrap = TestTheBeforeRunNowHolds()._wrap
+        store.record("Session start.", EpisodeType.OBSERVATION)
+        wrap(store, "- deploy_gate | 1x (2026-10-06)", "2026-10-06")
+        g = store.record("I watched the deploy gate refuse an unsigned build twice today.",
+                         EpisodeType.OBSERVATION)
+        line = f'- deploy_gate | 2x (2026-10-07) [evidence: {g.id} "deploy gate refuse unsigned build"]'
+        result, _ = wrap(store, line, "2026-10-07")
+        assert result["graduations_validated"] == 1
+        assert store.pattern_grounding() == {"deploy_gate": {2: [g.id]}}
+        store.set_trust(g.id, "external")
+        store.record("Another session.", EpisodeType.OBSERVATION)
+        result, warned = wrap(store, line, "2026-10-08")
+        assert result["level_capped"] == [{
+            "name": "deploy_gate", "written_level": 2, "capped_to": 1, "prior_level": 1,
+            "validated": False, "reason": "revoked: grounding lowered",
+        }]
+        assert "- deploy_gate | 1x (2026-10-07)" in store.load_continuity()
+        assert any("revoked: grounding lowered" in w for w in warned)
+        assert store.saved_pattern_levels()[("name", "deploy_gate")] == 1
+        # A rung earned again from an agent episode stands, and the old
+        # external witness does not revoke it.
+        own = store.record("I saw the deploy gate refuse an unsigned build again.",
+                           EpisodeType.OBSERVATION)
+        line2 = (f'- deploy_gate | 2x (2026-10-09) [evidence: {own.id} '
+                 f'"deploy gate refuse unsigned build"]')
+        result, _ = wrap(store, line2, "2026-10-09")
+        assert result["graduations_validated"] == 1 and "level_capped" not in result
+        assert sorted(store.pattern_grounding()["deploy_gate"][2]) == sorted([g.id, own.id])
+        # The record follows a rename.
+        store.rename_pattern_association("deploy_gate", "release_gate")
+        assert "deploy_gate" not in store.pattern_grounding()
+        assert 2 in store.pattern_grounding()["release_gate"]

@@ -40,7 +40,9 @@ from .graduation import (
     detect_stale_patterns,
     extract_pattern_names,
     extract_pattern_summaries,
+    CAP_REASON_REVOKED,
     pattern_line_levels,
+    revoked_pattern_levels,
     validate_graduations,
     _NAMED_PATTERN_RE,
     _NAMED_PATTERN_WITH_EVIDENCE_RE,
@@ -3040,7 +3042,14 @@ def validated_save_continuity(
     _marker_ids = {
         i.lower() for mm in _SUPERSEDES_RE.finditer(text) for i in (mm.group(1), mm.group(2))
     }
-    window_trust = store.trust_map(citable_ids | _marker_ids)
+    # CAP-08 D2 (C#11): a rung whose recorded grounding is all tool/external
+    # under today's trust no longer counts toward the pattern's prior.
+    grounding = store.pattern_grounding()
+    _grounding_ids = {cid for rungs in grounding.values() for ids in rungs.values() for cid in ids}
+    window_trust = store.trust_map(citable_ids | _marker_ids | _grounding_ids)
+    revoked_levels = revoked_pattern_levels(
+        grounding, lambda cid: window_trust.get(cid, DEFAULT_TRUST)
+    )
     grad_result = validate_graduations(
         text=text,
         valid_ids=citable_ids,
@@ -3069,6 +3078,7 @@ def validated_save_continuity(
         prior_text=prior_continuity or "",
         saved_levels=saved_levels,
         trust_of=lambda cid: window_trust.get(cid, DEFAULT_TRUST),
+        revoked_levels=revoked_levels,
     )
 
     # The hard maximum is measured on the text that will be WRITTEN: graduation
@@ -3265,7 +3275,7 @@ def validated_save_continuity(
             # The same re-read for trust (codex r1 #4): a class another writer
             # changed after validation read it would let the save commit a
             # graduation judged on the old class. Raising rolls the batch back.
-            _cited = set(grad_result.citation_counts) | _marker_ids
+            _cited = set(grad_result.citation_counts) | _marker_ids | _grounding_ids
             _trust_now = store.trust_map(sorted(_cited))
             _trust_moved = sorted(
                 cid for cid in _cited
@@ -3280,7 +3290,9 @@ def validated_save_continuity(
                 )
 
             # The bound's next prior, recorded in this transaction so it commits
-            # with the wrap or not at all.
+            # with the wrap or not at all, with the episodes that grounded each
+            # rung validated today (CAP-08 D2).
+            store._record_pattern_grounding(grad_result.pattern_grounding)
             store._record_pattern_levels(
                 pattern_line_levels(grad_result.text, grad_headings), today_str,
                 lower_to=pattern_line_levels(prior_continuity or "", grad_headings),
@@ -3986,9 +3998,14 @@ def validated_save_continuity(
             f"(a new pattern enters at 1x; a validated Nx becomes (N+1)x): "
             + ", ".join(
                 f"{cap.name} {cap.written_level}x->{cap.capped_to}x"
+                + (f" ({cap.reason})" if cap.reason == CAP_REASON_REVOKED else "")
                 for cap in grad_result.level_capped
             )
             + ". Each is marked (level-capped)."
+            + (" A revoked one lost a rung whose grounding episodes were since "
+               "lowered to tool/external (CAP-08)."
+               if any(c.reason == CAP_REASON_REVOKED for c in grad_result.level_capped)
+               else "")
         )
 
     if grad_result.uncorroborated:

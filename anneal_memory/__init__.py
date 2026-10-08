@@ -32,6 +32,7 @@ from .types import (
     RelevantPattern,
     RelevantResult,
     SaveContinuityResult,
+    ReplacedEpisode,
     ScoredEpisode,
     StalePatternDict,
     StoreStatus,
@@ -259,5 +260,6 @@ __all__ = [
     "RelevantResult",
     "RelevantPattern",
     "RelevantFact",
+    "ReplacedEpisode",
     "ScoredEpisode",
 ]

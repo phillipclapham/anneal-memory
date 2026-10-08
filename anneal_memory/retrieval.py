@@ -72,6 +72,7 @@ import json
 import re
 from functools import lru_cache
 from collections import Counter
+import dataclasses
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from math import log
@@ -86,6 +87,8 @@ from .types import (
     RelevantFact,
     RelevantPattern,
     RelevantResult,
+    REPLACED_CONTENT_MAX,
+    ReplacedEpisode,
     ScoredEpisode,
 )
 
@@ -931,8 +934,8 @@ def retrieve_relevant(
         query: the prompt / text to find relevant memory for.
         max_patterns / max_episodes: caps per kind (precision bias).
         exclude_recent_minutes: if set, episodes newer than this are excluded — the
-            harness's "don't re-surface the live session's own echo" knob (the flow
-            hook passes 45). Patterns are unaffected (they're distilled, not live).
+            harness's "don't re-surface the live session's own echo" knob. Patterns
+            are unaffected (they're distilled, not live).
         now: ISO-8601 UTC instant for the recent-exclusion cutoff (+ determinism);
             defaults to wall-clock. Only consulted when ``exclude_recent_minutes`` is set.
         today: logical date for crystallized-pattern activation tiers (+ determinism);
@@ -1000,6 +1003,7 @@ def retrieve_relevant(
     # corpus is being scanned, and the length-proxy otherwise (the keyword-only path).
     want_assoc = associative and crystal_store is not None and max_patterns > 0
     seed_episodes: list[ScoredEpisode] = []
+    redirect = False
     if max_episodes > 0 or want_assoc:
         until = _recent_cutoff(exclude_recent_minutes, now)
         candidates, doc_freq, corpus_n = _fetch_episode_candidates(
@@ -1015,17 +1019,15 @@ def retrieve_relevant(
             min_hits=_min_hits(mode),
             min_len=_min_episode_len(mode),
         )
+        redirect = max_episodes > 0 and store.has_supersessions()
     else:
         # Keyword-only pattern path (no episode fetch): the length-proxy, byte-identical
         # to retrieve_patterns (the parity contract holds on this branch by construction).
         weights, used_idf = _query_weights(store, keywords, None)
     episodes = seed_episodes[:max_episodes] if max_episodes > 0 else []
-    replaced: dict[str, tuple[str, ...]] = {}
-    if max_episodes > 0:
-        episodes, replaced = _redirect_superseded(
-            store, keywords, weights, seed_episodes, max_episodes=max_episodes,
-            until=until, mode=mode, used_idf=used_idf,
-        )
+    if redirect:
+        episodes = _swap_replaced(store, keywords, seed_episodes, max_episodes,
+                                  until=until, mode=mode)
     # One regime-matched precision bar + anchor for every tier this call scores: the
     # lower IDF bar + the √N distinctiveness anchor when the weights are corpus-IDF, the
     # length-proxy bar + no anchor (0.0) otherwise.
@@ -1059,67 +1061,80 @@ def retrieve_relevant(
             )
 
     return RelevantResult(
-        patterns=patterns, episodes=episodes, query_keywords=keywords, facts=facts,
-        replaced=replaced,
+        patterns=patterns, episodes=episodes, query_keywords=keywords, facts=facts
     )
 
 
-def _redirect_superseded(
+def _swap_replaced(
     store: Store,
     keywords: list[str],
-    weights: dict[str, float],
-    seed_episodes: list[ScoredEpisode],
-    *,
+    live: list[ScoredEpisode],
     max_episodes: int,
+    *,
     until: str | None,
     mode: str,
-    used_idf: bool,
-) -> tuple[list[ScoredEpisode], dict[str, tuple[str, ...]]]:
-    """The displayed episode tier with every superseded keyword hit that clears the
-    mode's gates REPLACED by the live episode that replaced it (CAP-04): a query that
-    names the old state ("still in Seattle?") gets the current one, which by
-    construction shares none of its words. The replacement takes the hit's score
-    (the hit earned the slot; the link is the writer's claim); an episode already in
-    the list keeps its better score. Weights stay those of the visible population, so
-    a store with no links returns exactly what the plain tier returns. The seed set
-    for associative pattern reach is not touched."""
-    hits, heads = store.superseded_keyword_candidates(
-        keywords,
-        limit_per_keyword=(QUERY_CANDIDATE_LIMIT if mode == "query"
-                           else CANDIDATE_LIMIT_PER_KEYWORD),
-        until=until,
+) -> list[ScoredEpisode]:
+    """The displayed episode tier, CAP-04: the live hits exactly as ranked without this
+    step, merged with the keyword hits on REPLACED episodes, each of which is swapped,
+    in its own slot, for the live episode at the end of its chain. A query that names
+    the old state ("still in Seattle?") is served the current fact, which by
+    construction shares none of its words. Replaced hits are scored with weights counted
+    over every episode, replaced ones included, so a link never raises a hit's score
+    (counted over the live episodes only, a word that survives only in replaced text
+    would read as maximally rare); live hits keep their own weights, so a link never
+    changes them either. A replacement keeps the first slot it earns and lists every
+    replaced hit it stands in for in ``replaces``. A hit hidden only by wrap-proposed
+    links is dropped, not swapped: a wrap model proposes those in bulk (measured ~1.4%
+    precise on STALE), so they hide but never serve."""
+    every, doc_freq, corpus_n = _fetch_episode_candidates(
+        store, keywords, until=until, uncapped=mode == "query",
+        filters={"include_superseded": True},
     )
-    if not hits:
-        return seed_episodes[:max_episodes], {}
-    scored_hits = _score_candidate_episodes(
-        hits, keywords, weights,
+    replaced = {i: e for i, e in every.items() if e.superseded_by}
+    swappable = store.redirectable_ids(list(replaced)) if replaced else set()
+    replaced = {i: e for i, e in replaced.items() if i in swappable}
+    if not replaced:
+        return live[:max_episodes]
+    weights, used_idf = _query_weights(
+        store, keywords, doc_freq, until=until, corpus_n=corpus_n,
+        filters={"include_superseded": True},
+    )
+    old_hits = _score_candidate_episodes(
+        replaced, keywords, weights,
         score_threshold=_precision_bar(used_idf, mode),
         require_anchor=_anchor_floor(used_idf, mode),
         min_hits=_min_hits(mode),
         min_len=_min_episode_len(mode),
     )
-    best: dict[str, ScoredEpisode] = {e.id: e for e in seed_episodes}
-    via: dict[str, list[str]] = {}
-    for hit in scored_hits:
-        head_id = hits[hit.id].superseded_by
-        head = heads.get(head_id) if head_id else None
-        if head is None:
-            continue
-        via.setdefault(head.id, []).append(hit.id)
-        current = best.get(head.id)
-        if current is None or hit.score > current.score:
-            best[head.id] = ScoredEpisode(
-                id=head.id,
-                timestamp=head.timestamp,
-                type=head.type.value if isinstance(head.type, EpisodeType) else str(head.type),
-                source=head.source or "",
-                content=head.content or "",
-                score=hit.score,
-            )
-    ranked = sorted(best.values(), key=lambda e: (e.score, e.timestamp, e.id), reverse=True)
-    shown = ranked[:max_episodes]
-    replaced = {e.id: tuple(via[e.id]) for e in shown if e.id in via}
-    return shown, replaced
+    ranked = sorted([*live, *old_hits], key=lambda e: (e.score, e.timestamp, e.id), reverse=True)
+    heads: dict[str, Episode | None] = {}
+    slots: list[ScoredEpisode] = []
+    refs: dict[str, list[ReplacedEpisode]] = {}
+    for hit in ranked:
+        if hit.id not in replaced:
+            if hit.id not in refs:
+                refs[hit.id] = []
+                slots.append(hit)
+        else:
+            head_id = replaced[hit.id].superseded_by or ""
+            if head_id not in heads:
+                heads[head_id] = every.get(head_id) or store.get(head_id)
+            head = heads[head_id]
+            if head is None:
+                continue
+            if head_id not in refs:
+                refs[head_id] = []
+                slots.append(ScoredEpisode(
+                    id=head.id, timestamp=head.timestamp,
+                    type=head.type.value if isinstance(head.type, EpisodeType) else str(head.type),
+                    source=head.source or "", content=head.content or "", score=hit.score,
+                ))
+            refs[head_id].append(ReplacedEpisode(
+                id=hit.id, timestamp=hit.timestamp, content=hit.content[:REPLACED_CONTENT_MAX]))
+        if len(slots) >= max_episodes:
+            break
+    return [dataclasses.replace(e, replaces=tuple(refs[e.id])) if refs[e.id] else e
+            for e in slots]
 
 
 def retrieve_patterns(

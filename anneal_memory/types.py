@@ -410,6 +410,9 @@ class RelevantResult:
     # Durable facts the query cued (at most MAX_DURABLE_FACTS). Additive: empty unless
     # the store's continuity has a durable section and a fact matched.
     facts: list[RelevantFact] = field(default_factory=list)
+    # CAP-04 redirect: a returned episode id -> the superseded episode ids whose
+    # keyword hit it stands in for (it replaced them). Empty unless a hit was redirected.
+    replaced: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 # -- TypedDict return shapes for the canonical pipeline --

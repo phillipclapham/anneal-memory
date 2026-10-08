@@ -79,6 +79,18 @@ TOOLS: list[dict[str, Any]] = [
                         "recall then hides the old episode by default."
                     ),
                 },
+                "state_key": {
+                    "type": "string",
+                    "description": (
+                        "The state slot this fact fills, e.g. 'user.home_city'. A newer "
+                        "episode with the same key replaces this one, and this one "
+                        "replaces older episodes with the key, with no word-overlap "
+                        "check: the shared key is your claim that the facts fill one "
+                        "slot. recall then hides the older episode and, for a keyword "
+                        "that matches it, names this one as its replacement. Case and "
+                        "spacing are ignored."
+                    ),
+                },
             },
             "required": ["content", "episode_type"],
         },

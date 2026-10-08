@@ -153,6 +153,7 @@ _INTERNAL_ERROR = -32603
 _FALLBACK_DEFAULT_CAP = 10   # word matches listed when the caller passed no ``limit``
 _EXACT_RESULTS_ENOUGH = 3    # an exact result this small is topped up with word matches
 _ALSO_MATCHING_MAX = 5       # how many word matches are appended to such a result
+_REPLACED_MAX = 5  # replaced matches listed by one keyword recall
 _RECALL_DEFAULT_LIMIT = 100  # MCP recall's ``limit`` when the caller passes none
 
 
@@ -394,6 +395,7 @@ class Server:
                 source=source,
                 metadata=metadata,
                 supersedes=args.get("supersedes"),
+                state_key=args.get("state_key"),
             )
         except ValueError as e:  # SupersessionError is a ValueError
             return _tool_result(f"Error: {e}", is_error=True)
@@ -457,10 +459,33 @@ class Server:
         ):
             return result
         block = _durable_block(self._cued_facts(keyword, "query"))
-        if not block:
+        replaced = self._replaced_block(keyword)
+        if not block and not replaced:
             return result
         text = result["content"][0]["text"]
-        return _tool_result(block + "\n\n" + text)
+        return _tool_result("\n\n".join(b for b in (block, text, replaced) if b))
+
+    def _replaced_block(self, keyword: str) -> str:
+        """CAP-04 on the keyword surface: episodes the phrase matches that a newer
+        episode replaced (hidden from the list above), each with the fact that
+        replaced it, so a search for the old state finds the current one. Empty when
+        nothing matched is replaced."""
+        phrase = keyword.strip()
+        if not phrase:
+            return ""
+        hits, heads = self._store.superseded_keyword_candidates(
+            [phrase], limit_per_keyword=_REPLACED_MAX)
+        lines = []
+        for old in hits.values():
+            head = heads.get(old.superseded_by or "")
+            if head is None:
+                continue
+            lines.append(
+                f"- ({old.id}) {old.timestamp} was replaced by ({head.id}) "
+                f"[{head.type.value}] {head.timestamp}: {head.content}")
+        if not lines:
+            return ""
+        return "Replaced since (the current fact for an older match):\n" + "\n".join(lines)
 
     def _cued_facts(self, query: str, mode: RetrievalMode) -> list[RelevantFact]:
         """The durable facts of this server's store that ``query`` cues."""

@@ -133,6 +133,7 @@ from .crystal import (
 )
 from .retrieval import retrieve_patterns, retrieve_relevant, MAX_PATTERNS
 from .store import (
+    sqlite_path,
     register_writer_schema,
     Store,
     StoreDatabaseError,
@@ -1900,9 +1901,9 @@ def cmd_export(args: argparse.Namespace) -> None:
             print(f"Error: database not found: {db_path}", file=sys.stderr)
             sys.exit(1)
         out = Path(args.output) if args.output else Path(f"anneal-export-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db")
-        src_conn = sqlite3.connect(str(db_path))
+        src_conn = sqlite3.connect(sqlite_path(db_path))
         try:
-            dst_conn = sqlite3.connect(str(out))
+            dst_conn = sqlite3.connect(sqlite_path(out))
             try:
                 src_conn.backup(dst_conn)
             finally:
@@ -3573,7 +3574,7 @@ def _outcome_store_id(db_path: Path, *, mint: bool) -> str | None:
     if sid is not None or not mint:
         return sid
     try:
-        conn = sqlite3.connect(str(db_path), timeout=30.0, isolation_level=None)
+        conn = sqlite3.connect(sqlite_path(db_path), timeout=30.0, isolation_level=None)
     except (OSError, sqlite3.Error) as exc:
         refuse(exc)
     try:

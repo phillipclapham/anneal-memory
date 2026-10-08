@@ -4470,7 +4470,11 @@ def test_an_in_memory_store_still_opens(tmp_path):
         s.close()
 
 
-@pytest.mark.parametrize("uri", ["file::memory:?cache=shared", "file:x.db?mode=rwc"])
+@pytest.mark.parametrize("uri", [
+    "file::memory:?cache=shared", "file:x.db?mode=rwc",
+    # r6 codex HIGH (reproduced): Path() strips "./", so SQLite saw the URI
+    "./file::memory:?cache=shared", "./file:x.db?mode=rwc", Path("file:x.db"),
+])
 def test_an_sqlite_uri_is_refused_as_a_store_path(uri, tmp_path, monkeypatch):
     """walopen L3 r4 (codex, reproduced): a shared-cache memory URI opened, and
     two Stores on it hit SQLITE_LOCKED that busy_timeout cannot wait out. Whether
@@ -4478,3 +4482,4 @@ def test_an_sqlite_uri_is_refused_as_a_store_path(uri, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     with pytest.raises(ValueError, match="SQLite URI"):
         Store(uri, audit=False)
+    assert list(tmp_path.iterdir()) == []  # refused before any side effect

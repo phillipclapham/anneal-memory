@@ -1855,6 +1855,28 @@ _PROTECTED_TEAM_EPISODES = (
 )
 
 
+def sqlite_path(path: str | Path) -> str:
+    """The exact string handed to ``sqlite3.connect`` for a database path; refuses
+    an SQLite URI.
+
+    A database path is a filesystem path (or ``:memory:``), never a URI. Whether
+    SQLite reads ``file:`` as a URI depends on how it was built (measured 1008+11
+    on Homebrew Python 3.13: honoured without ``uri=True``), so one string meant a
+    file on one machine and a shared in-memory database on another, and
+    shared-cache memory use fails SQLITE_LOCKED with no busy wait. The check runs
+    on the NORMALISED string, the one SQLite receives: ``./file::memory:`` became
+    ``file::memory:`` after ``Path()`` (walopen L3 r6, codex, reproduced). Every
+    ``sqlite3.connect`` in the package goes through here.
+    """
+    final = str(Path(path))
+    if final.startswith("file:"):
+        raise ValueError(
+            f"Database path {str(path)!r} reaches SQLite as {final!r}, an SQLite URI; "
+            "pass a filesystem path (or ':memory:'). URIs are not supported."
+        )
+    return final
+
+
 class Store:
     """SQLite-backed episodic store.
 
@@ -1924,20 +1946,7 @@ class Store:
         on_audit_event: Callable | None = None,
         read_only: bool = False,
     ) -> None:
-        # A store path is a filesystem path (or ``:memory:``), never an SQLite
-        # URI. Whether ``file:...`` is read as a URI depends on how the local
-        # SQLite was built (measured 1008+11 on Homebrew Python 3.13: honoured,
-        # without ``uri=True``), so the same string is a file on one machine and
-        # a shared in-memory database on another. Shared-cache in-memory use
-        # (``file::memory:?cache=shared``) also fails SQLITE_LOCKED with no busy
-        # wait (walopen L3 r4, codex, reproduced) and is discouraged by SQLite
-        # itself. Refused outright: one rule, no URI mode to half-support.
-        if str(path).startswith("file:"):
-            raise ValueError(
-                f"Store path {str(path)!r} looks like an SQLite URI; pass a filesystem "
-                "path (or ':memory:'). URIs are not supported."
-            )
-        self._path = Path(path)
+        self._path = Path(sqlite_path(path))
         # Read-only mode (per-turn recall consumers): the connection rejects writes and
         # the DB-setup branch below skips ALL init writes, so a per-prompt open can't
         # contend with a concurrent single-writer wrap. See the schema_init block.
@@ -2114,7 +2123,7 @@ class Store:
         self._closed: bool = False
         try:
             with self._db_boundary("schema_init"):
-                self._conn = sqlite3.connect(str(self._path))
+                self._conn = sqlite3.connect(sqlite_path(self._path))
                 self._conn.row_factory = sqlite3.Row
                 register_writer_schema(self._conn)
                 # ⛔ FIRST, BEFORE EVERY PERSISTENT WRITE — INCLUDING THE

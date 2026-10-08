@@ -1179,9 +1179,12 @@ def _reconstruct_wrap_cancel_bound_error(session_id: str | None) -> "WrapCancelB
     return WrapCancelBoundError(session_id=session_id)
 
 
-# Floor of the hidden rows replaced_matches(redirectable_only=True) reads before it
-# returns what it found.
-_REPLACED_SCAN_FLOOR = 1000
+class ReplacedMatches(NamedTuple):
+    """What :meth:`Store.replaced_matches` found: the old episodes (``superseded_by`` set,
+    grouped by replacement, most current replacement first) and what its caps left out."""
+    episodes: list[Episode]
+    more_heads: int  # servable replacements beyond ``max_heads``
+    more_olds: int  # matches under the shown replacements beyond ``max_olds`` each
 
 
 class SupersessionError(AnnealMemoryError, ValueError):
@@ -4890,57 +4893,67 @@ class Store:
         return out
 
     def replaced_matches(
-        self, phrase: str, *, limit: int, redirectable_only: bool = False,
-    ) -> list[Episode]:
+        self, phrase: str, *, max_heads: int, max_olds: int = 5,
+    ) -> "ReplacedMatches":
         """Episodes a supersession hides whose content contains ``phrase`` (matched as
-        :meth:`recall` matches a keyword), newest first, each with ``superseded_by`` =
-        the live end of its chain; one whose chain has no live end is left out. Scans
-        only the hidden set, so live matches cannot crowd them out.
+        :meth:`recall` matches a keyword) and that :meth:`redirectable_ids` would serve a
+        replacement for, grouped by that live replacement (``superseded_by``).
 
-        With ``redirectable_only`` a match :meth:`redirectable_ids` would not serve is
-        left out, and ``limit`` counts DISTINCT replacement heads, not episodes: the scan
-        pages on (timestamp, id), collecting every servable match, until ``limit`` heads
-        are found (L3 r4: 200 matches under one head hid a second head). It reads at most
-        ``max(_REPLACED_SCAN_FLOOR, 50 * limit)`` hidden rows; at that bound it returns
-        what it found so far, never an error."""
-        if limit < 0:
-            raise ValueError("replaced_matches: limit must be >= 0")
-        out: list[Episode] = []
-        seen_heads: set[str] = set()
+        Servability is a SQL predicate on the scan (the episode's own first link is not
+        wrap-proposed or rewired), so an unservable hidden match is never read or counted,
+        and the exact test (the head is reached through servable links only) runs per
+        page. The scan has NO row budget: it reads every servable candidate, which is the
+        work asked for. It returns the ``max_heads`` heads that are most current (newest
+        timestamp first), each with its newest ``max_olds`` matches, newest first; what
+        that cut leaves out is COUNTED in the result (``more_heads``, ``more_olds``) for
+        the caller to show (L3 r5: a row budget had dropped a valid redirect silently)."""
+        if max_heads < 0 or max_olds < 1:
+            raise ValueError("replaced_matches: max_heads must be >= 0 and max_olds >= 1")
+        kept_by_head: dict[str, list[Any]] = {}
+        count_by_head: dict[str, int] = {}
         with self._db_boundary("keyword_candidates"), self._read_snapshot():
-            if not phrase or not limit or not self._has_supersessions_table():
-                return []
+            if not phrase or not max_heads or not self._has_supersessions_table():
+                return ReplacedMatches([], 0, 0)
             hide_sql, hide_params = _hidden_by_supersession_sql(None)
             pattern = _keyword_like_pattern(phrase)
             page = 500
-            budget = max(_REPLACED_SCAN_FLOOR, 50 * limit) if redirectable_only else 1 << 40
             after: tuple[str, str] | None = None
-            while budget > 0:
+            while True:
                 cursor = "" if after is None else " AND (timestamp, id) < (?, ?)"
                 rows = self._conn.execute(
                     f"SELECT * FROM episodes WHERE id IN ({hide_sql}) AND "
-                    f"{_KEYWORD_LIKE_SQL}{cursor} ORDER BY timestamp DESC, id DESC LIMIT ?",
-                    [*hide_params, pattern, *(after or ()), min(page, budget)]).fetchall()
-                budget -= len(rows)
+                    f"{_KEYWORD_LIKE_SQL} AND EXISTS (SELECT 1 FROM supersessions q "
+                    f"WHERE q.old_id = episodes.id AND q.source NOT IN ('wrap', 'rewired')){cursor} "
+                    "ORDER BY timestamp DESC, id DESC LIMIT ?",
+                    [*hide_params, pattern, *(after or ()), page]).fetchall()
                 heads = self._live_replacements([r["id"] for r in rows], None)
-                kept = [r for r in rows if r["id"] in heads]
-                if redirectable_only and kept:
-                    ok = self.redirectable_ids({r["id"]: heads[r["id"]] for r in kept})
-                    kept = [r for r in kept if r["id"] in ok]
-                for r in kept:
+                cand = {r["id"]: heads[r["id"]] for r in rows if r["id"] in heads}
+                ok = self.redirectable_ids(cand) if cand else set()
+                for r in rows:
+                    if r["id"] not in ok:
+                        continue
                     head = heads[r["id"]]
-                    if redirectable_only and head not in seen_heads \
-                            and len(seen_heads) == limit:
-                        continue  # a later head than the ones asked for
-                    seen_heads.add(head)
-                    out.append(dataclasses.replace(
-                        self._row_to_episode(r), superseded_by=head))
-                    if not redirectable_only and len(out) == limit:
-                        return out
-                if len(seen_heads) >= limit or len(rows) < page:
+                    count_by_head[head] = count_by_head.get(head, 0) + 1
+                    if len(kept_by_head.setdefault(head, [])) < max_olds:
+                        kept_by_head[head].append(r)
+                if len(rows) < page:
                     break
                 after = (rows[-1]["timestamp"], rows[-1]["id"])
-        return out
+            stamp: dict[str, tuple[str, str]] = {}
+            ids = list(count_by_head)
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                for h in self._conn.execute(
+                        f"SELECT id, timestamp FROM episodes WHERE id IN "
+                        f"({','.join('?' * len(chunk))})", chunk):
+                    stamp[h["id"]] = (h["timestamp"], h["id"])
+        order = sorted(count_by_head, key=lambda h: stamp.get(h, ("", h)), reverse=True)
+        chosen = order[:max_heads]
+        out = [dataclasses.replace(self._row_to_episode(r), superseded_by=h)
+               for h in chosen for r in kept_by_head[h]]
+        return ReplacedMatches(
+            out, len(order) - len(chosen),
+            sum(count_by_head[h] - len(kept_by_head[h]) for h in chosen))
 
     def _scan_containing_oldest(
         self, keyword: str, visit: Callable[[Episode], bool], *, page: int = 500,

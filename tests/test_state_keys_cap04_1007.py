@@ -302,27 +302,32 @@ def test_mcp_keyword_recall_names_the_replacement(tmp_path):
                         state_key="user.home_city")
         text = Server(st)._tool_recall({"keyword": "Seattle"})["content"][0]["text"]
         assert f"({new.id})" in text and f"replaces ({old.id})" in text
-        # Wrap-hidden matches newer than the servable one cannot crowd it out of a
-        # small limit (codex L3 r3 MED).
-        for i in range(4):
-            x = st.record(f"Seattle wrap note {i}", "observation",
-                          timestamp=f"2026-03-0{i + 1}T10:00:00Z")
-            y = st.record(f"Seattle wrap note {i} again", "observation",
-                          timestamp=f"2026-03-0{i + 1}T11:00:00Z")
-            st.supersede(old_id=x.id, new_id=y.id, source="wrap")
-        got = st.replaced_matches("Seattle", limit=2, redirectable_only=True)
-        assert [e.id for e in got] == [old.id]
-        # Many servable matches under ONE head cannot hide a second head either: the
-        # limit counts heads (L3 r4).
-        head = st.record("Seattle crowd note alpha beta gamma delta epsilon summary",
-                         "observation", timestamp="2026-06-01T10:00:00Z")
-        for i in range(200):
-            o = st.record(f"Seattle crowd note {i} alpha beta gamma delta epsilon", "observation",
-                          timestamp=f"2026-04-{1 + i % 28:02d}T{i // 28:02d}:00:00Z")
-            st.supersede(old_id=o.id, new_id=head.id)
-        got = st.replaced_matches("Seattle", limit=2, redirectable_only=True)
-        assert {e.superseded_by for e in got} == {head.id, new.id}
-        assert old.id in {e.id for e in got}
+        # Neither a pile of wrap-hidden matches nor a pile under one other head can hide
+        # this replacement or be dropped silently (L3 r3-r5: a 200-row window, an
+        # episode-counted limit and a row budget each missed it): servability is a SQL
+        # predicate, the scan has no budget, and what the caps cut is counted.
+        n = 1100
+        wrap_head = st.record("Seattle wrap head", "observation",
+                              timestamp="2026-06-02T10:00:00Z")
+        head = st.record("Seattle crowd head summary", "observation",
+                         timestamp="2026-06-01T10:00:00Z")
+        for i in range(n):
+            for tag, h, src in (("wrap", wrap_head, "wrap"), ("crowd", head, "agent")):
+                o = st.record(f"Seattle {tag} note {i}", "observation",
+                              timestamp=f"2026-04-{1 + i % 28:02d}T{i // 28:02d}:{i % 60:02d}:00Z")
+                st._conn.execute(
+                    "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
+                    (o.id, h.id, src))
+        st._conn.commit()
+        got = st.replaced_matches("Seattle", max_heads=5)
+        assert [e.superseded_by for e in got.episodes][:5] == [head.id] * 5   # newest head
+        assert {e.superseded_by for e in got.episodes} == {head.id, new.id}
+        assert old.id in {e.id for e in got.episodes}
+        assert got.more_heads == 0 and got.more_olds == n - 5
+        one = st.replaced_matches("Seattle", max_heads=1)
+        assert {e.superseded_by for e in one.episodes} == {head.id} and one.more_heads == 1
+        text = Server(st)._tool_recall({"keyword": "Seattle"})["content"][0]["text"]
+        assert f"({new.id})" in text and f"{n - 5} more replaced match(es)" in text
         assert "Austin" in text
         # A filtered call is left alone, as the durable-facts block is.
         filtered = Server(st)._tool_recall({"keyword": "Seattle", "source": "agent"})

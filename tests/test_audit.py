@@ -1,5 +1,6 @@
 """Tests for the hash-chained JSONL audit trail."""
 
+import contextlib
 import gzip
 import json
 import logging
@@ -960,7 +961,11 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
             f"the restore is either incomplete or clobbering"
         )
 
-        allowed = {"open", "f.write", "f.flush", "os.fsync", "f.fileno"}
+        # ``os.replace`` and ``_fsync_dir`` (KL-24 r6: the first entry of an
+        # active file is a staged temp renamed into place) are module-level
+        # calls on paths; neither can reach ``self``.
+        allowed = {"open", "f.write", "f.flush", "os.fsync", "f.fileno",
+                   "os.replace", "_fsync_dir"}
         for node in ast.walk(try_node):
             if not isinstance(node, ast.Call):
                 continue
@@ -1024,10 +1029,10 @@ class TestAZeroByteActiveFileIsNotAnActiveFile:
         calls = {"n": 0}
 
         def fsync_failing_once(fd):
-            # Only the active file's fsync: the first entry's manifest record is
-            # now saved (and fsynced) before the entry is written (KL-24 r4).
+            # Only the first entry's own fsync: it is staged in a temp that is
+            # renamed into place, after its manifest record is saved (KL-24 r6).
             st = audit_mod.os.fstat(fd)
-            target = trail._active_path
+            target = trail._first_entry_path()
             if (calls["n"] == 0 and target.exists()
                     and (st.st_dev, st.st_ino) == (target.stat().st_dev, target.stat().st_ino)):
                 calls["n"] += 1
@@ -1044,8 +1049,10 @@ class TestAZeroByteActiveFileIsNotAnActiveFile:
             audit_mod.os.fsync = real_fsync
         active = trail._active_path
 
-        # what a rolled-back first-append-into-a-fresh-file leaves behind
-        assert active.exists() and active.stat().st_size == 0
+        # what a rolled-back first-append-into-a-fresh-file leaves behind: no
+        # active file (its first entry is staged and renamed in, KL-24 r6), or
+        # an empty one
+        assert not active.exists() or active.stat().st_size == 0
 
         AuditTrail(db).log("next_process", {})
 
@@ -1176,12 +1183,14 @@ class TestWeeklyRotation:
         db = tmp_path / "test.db"
         trail = AuditTrail(db)
         trail.log("record", {"id": "1"})
+        synced_dirs.clear()  # the first entry's own rename (KL-24 r6) is not rotation's
         trail._last_week = "2026-W01"
         trail.log("record", {"id": "2"})  # triggers rotation
 
-        assert len(synced_dirs) == 3, (
+        assert len(synced_dirs) == 4, (
             "rotation must fsync its directory 3 times: the seal rename, "
-            "the gzip atomic replace, and the manifest save"
+            "the gzip atomic replace, and the manifest save; the 4th is the "
+            "new active file's first entry renamed into place"
         )
         assert all(d == tmp_path for d in synced_dirs)
 
@@ -7815,19 +7824,27 @@ class TestHybridManifestQuarantine:
         assert result.valid is False and "quarantined" in (result.error or "")
 
     def test_rotation_and_retention_pause_while_quarantined(self, tmp_path):
+        """Ruling A (Phill 2026-10-08): the append itself is refused while
+        quarantined, superseding the 09-13 hybrid's "appending continues"; what
+        this still pins is that nothing is sealed and retention deletes nothing."""
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
         trail = AuditTrail(db)
-        trail.log("quarantines", {})
+        # The append that discovers the invalid manifest quarantines it; whether
+        # that append is itself refused is pinned elsewhere, not here.
+        with contextlib.suppress(audit_module._ManifestQuarantined):
+            trail.log("quarantines", {})
+        assert audit_module._quarantine_markers(tmp_path, "m")
         sealed = self._sealed_names(tmp_path)
+        before = (tmp_path / "m.audit.jsonl").read_bytes()
 
         trail._last_week = "1999-W03"
-        trail.log("would-rotate", {})
+        with pytest.raises(audit_module._ManifestQuarantined, match="audit-repair"):
+            trail.log("would-rotate", {})
 
         assert self._sealed_names(tmp_path) == sealed
         assert trail._last_week == "1999-W03", "left for a later log() to retry"
-        last = (tmp_path / "m.audit.jsonl").read_text().splitlines()[-1]
-        assert json.loads(last)["event"] == "would-rotate"
+        assert (tmp_path / "m.audit.jsonl").read_bytes() == before, "nothing appended"
         trail._retention_days = 0
         with trail._operation_span():
             assert trail._cleanup() == 0
@@ -8728,8 +8745,13 @@ class TestManifestLockFile:
         lock.unlink(missing_ok=True)
         lock.mkdir()
         trail._last_week = "1999-W01"
-        trail.log("not-rotated", {})
+        before = (tmp_path / "m.audit.jsonl").read_bytes()
+        # Ruling A (Phill 2026-10-08): the append fails closed without the lock,
+        # superseding the 10-03 degrade; still nothing is sealed.
+        with pytest.raises(audit_module._ManifestUnavailable, match="lock cannot be taken"):
+            trail.log("not-rotated", {})
         assert not list(tmp_path.glob("m.audit.1999-W01*"))
+        assert (tmp_path / "m.audit.jsonl").read_bytes() == before, "nothing appended"
         assert AuditTrail.verify(db).valid
 
 
@@ -8787,19 +8809,25 @@ class TestManifestLockL3:
         boom = Boom()
         log.addHandler(boom)
         try:
-            (tmp_path / "m.audit-manifest.lock").mkdir()
+            lock = tmp_path / "m.audit-manifest.lock"
+            lock.mkdir()
             trail = AuditTrail(tmp_path / "m.db")
-            trail.log("x", {"a": 1})
-            assert (tmp_path / "m.audit.jsonl").stat().st_size > 0
+            # Ruling A (Phill 2026-10-08): without the lock the append fails
+            # closed, and the refusal is _ManifestUnavailable, never the
+            # handler's RuntimeError, on the first log() and every later one.
+            with pytest.raises(audit_module._ManifestUnavailable):
+                trail.log("x", {"a": 1})
             # L3 on 81cc968 (run): a refused ROTATION with the same handler raised
             # on every later log(), because the refusal flag was set after the
             # warning. Every diagnostic now goes through a logger that cannot raise.
             trail._last_week = "1999-W01"
-            before = (tmp_path / "m.audit.jsonl").stat().st_size
-            trail.log("y", {"b": 2})
-            trail.log("z", {"c": 3})
-            assert (tmp_path / "m.audit.jsonl").stat().st_size > before
-            assert trail._rotation_refusal_logged
+            for event in ("y", "z"):
+                with pytest.raises(audit_module._ManifestUnavailable):
+                    trail.log(event, {"b": 2})
+            assert not (tmp_path / "m.audit.jsonl").exists(), "nothing appended"
+            lock.rmdir()
+            trail.log("after", {"c": 3})
+            assert (tmp_path / "m.audit.jsonl").stat().st_size > 0
         finally:
             log.removeHandler(boom)
 
@@ -8818,8 +8846,15 @@ class TestManifestLockL3:
         boom = BoomFilter()
         log.addFilter(boom)
         try:
-            (tmp_path / "m.audit-manifest.lock").mkdir()
+            lock = tmp_path / "m.audit-manifest.lock"
+            lock.mkdir()
             trail = AuditTrail(tmp_path / "m.db")
+            # Ruling A (Phill 2026-10-08): refused without the lock, as
+            # _ManifestUnavailable, never the filter's RuntimeError.
+            with pytest.raises(audit_module._ManifestUnavailable):
+                trail.log("x", {"a": 1})
+            assert not (tmp_path / "m.audit.jsonl").exists(), "nothing appended"
+            lock.rmdir()
             trail.log("x", {"a": 1})
             assert (tmp_path / "m.audit.jsonl").stat().st_size > 0
         finally:
@@ -9097,8 +9132,17 @@ class TestOneSpanPerOperation:
                 trail.log("outer", {})
         finally:
             log.removeHandler(handler)
-        assert inner and isinstance(inner[0], RuntimeError), inner
-        assert "not reentrant" in str(inner[0])
+        # Ruling A (Phill 2026-10-08): the outer log() now refuses before it logs
+        # any diagnostic, so no handler runs inside its span and the reentry is
+        # driven directly: a nested span inside the failed outer one is refused
+        # as not reentrant, and the outer failure survives it.
+        assert inner == []
+        with trail._operation_span():
+            with pytest.raises(RuntimeError, match="not reentrant"):
+                with trail._operation_span():
+                    pass
+            with pytest.raises(audit_module._ManifestUnavailable):
+                trail._refuse_without_manifest_lock()
 
     def test_a_repair_in_another_process_cannot_land_between_adoption_and_seed(
         self, tmp_path, monkeypatch

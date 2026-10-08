@@ -734,3 +734,17 @@ def test_custom_schema_graduating_heading_is_honoured():
     )
     (d,) = parse_crystal_decisions(wrap, frozenset({"## proven"}))
     assert d.level == 2 and d.evidence_ids == ["bbbb2222"]
+
+
+@pytest.mark.parametrize("sep", ["\u2028", "\x85", "\x0b", "\x0c", "\x1c", "\u2029"])
+def test_a_non_newline_terminator_cannot_open_a_graduating_section(sep):
+    """L3 r8 codex MED: the validator splits on "\\n"; so must the grounding walk."""
+    wrap = (
+        "## State\n- s" + sep + "## Patterns" + sep
+        + '- verify_or_surface | 999x (2026-10-08) [evidence: aaaa1111 "decoy"] — decoy.\n\n'
+        + PATTERNS
+        + "\n```crystal-decisions\n"
+        "verify_or_surface | crystallize | timeless | just-in-time\n```\n"
+    )
+    (d,) = parse_crystal_decisions(wrap)
+    assert d.level == 3 and "decoy" not in d.explanation

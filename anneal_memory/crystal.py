@@ -1315,8 +1315,11 @@ def _extract_pattern_meta(
     # graduation's own validation walks them (``_is_graduating_heading``): a
     # ``## State`` line ``name | 999x (date)`` is a decoy the validator never touched,
     # and the highest-level rule would otherwise let it beat the real graduation line.
+    # Lines split on "\n" only, as the validator splits them (L3 r8, codex MED, run):
+    # ``splitlines()`` also broke on U+2028/NEL/VT..., so ``## Patterns<U+2028>- p |
+    # 999x`` was one line to the validator and a graduating decoy here.
     in_graduating = False
-    for idx, line in enumerate(wrap_text.splitlines()):
+    for idx, line in enumerate(wrap_text.split("\n")):
         if line.startswith("## "):
             in_graduating = _is_graduating_heading(line, graduating_headings)
             continue

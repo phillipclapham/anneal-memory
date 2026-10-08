@@ -532,3 +532,15 @@ class TestL3Round1:
         with pytest.raises(sqlite3.IntegrityError):
             store._conn.execute(
                 "INSERT INTO episode_trust (episode_id, trust) VALUES (?, 'bogus')", (ep.id,))
+
+    def test_a_backdated_external_line_lands_at_1x(self, store):
+        # codex r1 #2 (CAP-08), closed by the graduation bound it rebased onto: a
+        # current external episode cited by `claim | 9x (yesterday)` skipped check 4.
+        ep = store.record(CLAIM, EpisodeType.OBSERVATION, trust="external")
+        prepare_wrap(store)
+        text = HEAD + "## Patterns\n" + _line([ep.id], level=9, date="2026-10-07") + "\n\n" + TAIL
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res = validated_save_continuity(store, text, today="2026-10-08")
+        assert "- eiffel_in_lyon | 1x (2026-10-07)" in store.load_continuity()
+        assert res["level_capped"][0]["capped_to"] == 1

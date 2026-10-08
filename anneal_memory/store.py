@@ -1924,6 +1924,19 @@ class Store:
         on_audit_event: Callable | None = None,
         read_only: bool = False,
     ) -> None:
+        # A store path is a filesystem path (or ``:memory:``), never an SQLite
+        # URI. Whether ``file:...`` is read as a URI depends on how the local
+        # SQLite was built (measured 1008+11 on Homebrew Python 3.13: honoured,
+        # without ``uri=True``), so the same string is a file on one machine and
+        # a shared in-memory database on another. Shared-cache in-memory use
+        # (``file::memory:?cache=shared``) also fails SQLITE_LOCKED with no busy
+        # wait (walopen L3 r4, codex, reproduced) and is discouraged by SQLite
+        # itself. Refused outright: one rule, no URI mode to half-support.
+        if str(path).startswith("file:"):
+            raise ValueError(
+                f"Store path {str(path)!r} looks like an SQLite URI; pass a filesystem "
+                "path (or ':memory:'). URIs are not supported."
+            )
         self._path = Path(path)
         # Read-only mode (per-turn recall consumers): the connection rejects writes and
         # the DB-setup branch below skips ALL init writes, so a per-prompt open can't

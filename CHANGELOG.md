@@ -4,6 +4,11 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Changed — a Store path is never an SQLite URI
+- `Store("file:...")` now raises `ValueError`. Whether SQLite reads `file:` as a URI depends on how it was built, so
+  the same string was a file on one machine and a shared in-memory database on another; shared-cache in-memory use
+  also failed `database table is locked` with no busy wait. Pass a filesystem path, or `":memory:"`.
+
 ### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
 - `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one
   ledger clone's complete verdict, with each line marked `enforced` and the links it `honours`.

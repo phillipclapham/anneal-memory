@@ -1014,7 +1014,8 @@ def validate_graduations(
                     prior_levels=prior_levels,
                 )
                 if held is not None:
-                    lines[i] = _carryforward_line(line, match, level)
+                    lines[i] = _with_level(_carryforward_line(line, match, level),
+                                           match, held.held_level)
                     carried_forward.append(held)
                 else:
                     demoted += 1
@@ -1116,9 +1117,10 @@ def validate_graduations(
             prior_levels=prior_levels,
         )
         if bare_held is not None:
-            lines[i] = (_bare_cold_hold_line(line, bare_match, today,
-                                             bare_held.days_since_grounded)
-                        if bare_held.cold else _bare_carryforward_line(line, bare_match))
+            lines[i] = _with_level(
+                _bare_cold_hold_line(line, bare_match, today, bare_held.days_since_grounded)
+                if bare_held.cold else _bare_carryforward_line(line, bare_match),
+                bare_match, bare_held.held_level)
             carried_forward.append(bare_held)
             continue
 
@@ -1988,14 +1990,16 @@ def _carryforward_history_decision(
     *,
     cited: bool,
     provenance: bool = False,
-    prior_level: int | None = None,
+    prior_levels: dict[str, int] | None = None,
 ) -> CarriedForward | None:
     """The shared level+warmth core of the carryforward decision.
 
-    ``prior_level`` (L3 1007, complement): the line's level in the previously saved
-    continuity, when it was there. A hold keeps a level; it never raises one, so a
-    line above its prior level is an inflation and falls through to demotion even
-    when it is at or below its all-time high-water mark.
+    ``prior_levels`` (L3 1007, complement + codex): each pattern's level in the
+    continuity being replaced, when the caller has it (the save pipeline does). A hold
+    KEEPS a line, so its level is derived from that file, never from the composer: a
+    name not in it is a new claim (no hold), and a held line is set to its prior
+    level when the composer wrote more. ``None`` (library callers) keeps the
+    claimed level.
 
     Given a NAME already bound to its own graduation marker and that pattern's
     ``pattern_history`` row, decide HOLD (return a :class:`CarriedForward`) vs
@@ -2020,8 +2024,8 @@ def _carryforward_history_decision(
     if level > max_level:
         # Never earned this level — don't protect an un-earned rung.
         return None
-    if prior_level is not None and level > prior_level:
-        # Above its level in the file being replaced: a re-inflation, not a hold.
+    held_level = _held_level(name, level, prior_levels)
+    if held_level is None:
         return None
     days = _days_between(history.get("last_seen_at"), today)
     if days is None or days < -1 or days > carryforward_cold_days:
@@ -2036,7 +2040,7 @@ def _carryforward_history_decision(
         return None
     return CarriedForward(
         name=name,
-        held_level=level,
+        held_level=held_level,
         max_level_reached=max_level,
         # Clamp the reported recency to >= 0: the decision tolerates a -1 UTC/
         # local skew, but a negative "days since grounded" would read oddly in
@@ -2171,8 +2175,7 @@ def _carryforward_decision(
     # so AM-WARN's cited_graduations count still surfaces a dead-namespace bug.
     return _carryforward_history_decision(
         name, level, history, today, carryforward_cold_days,
-        cited=True, provenance=has_provenance,
-        prior_level=(prior_levels or {}).get(name),
+        cited=True, provenance=has_provenance, prior_levels=prior_levels,
     )
 
 
@@ -2253,10 +2256,9 @@ def _bare_carryforward_decision(
     # carryforward_cold_days narrowed to int by the early-return guard above. The
     # bare path carried NO citation -> cited=False so AM-WARN does NOT fabricate a
     # "citation resolved to zero episodes" alarm on a wrap that has no citations.
-    prior_level = (prior_levels or {}).get(name)
     held = _carryforward_history_decision(
         name, level, history, today, carryforward_cold_days,
-        cited=False, provenance=has_provenance, prior_level=prior_level,
+        cited=False, provenance=has_provenance, prior_levels=prior_levels,
     )
     if held is not None:
         return held
@@ -2264,11 +2266,11 @@ def _bare_carryforward_decision(
     # No history (above) and above-mark lines still fall through to the sunset.
     max_level = history.get("max_level_reached")
     days = _days_between(history.get("last_seen_at"), today)
+    held_level = _held_level(name, level, prior_levels)
     if isinstance(max_level, int) and level <= max_level and days is not None \
-            and days > carryforward_cold_days \
-            and (prior_level is None or level <= prior_level):
+            and days > carryforward_cold_days and held_level is not None:
         return CarriedForward(
-            name=name, held_level=level, max_level_reached=max_level,
+            name=name, held_level=held_level, max_level_reached=max_level,
             days_since_grounded=days, cited=False, provenance=has_provenance, cold=True,
         )
     return None
@@ -2294,6 +2296,25 @@ def _carryforward_line(line: str, match: re.Match, level: int) -> str:
     )
     start, end = match.span()
     return line[:start] + new_marker + line[end:]
+
+
+def _held_level(name: str, level: int, prior_levels: dict[str, int] | None) -> int | None:
+    """The level a hold keeps: the claimed one with no prior file; else the line's level
+    in the prior file (never above the claim), or None when the name was not in it."""
+    if prior_levels is None:
+        return level
+    if name not in prior_levels:
+        return None
+    return min(level, prior_levels[name])
+
+
+def _with_level(line: str, match: re.Match, level: int) -> str:
+    """``line`` with the level digits of ``match``'s marker set to ``level``. Every
+    other rewrite of a held line happens after that span, so it is still valid."""
+    l0, l1 = match.span(1)
+    if line[l0:l1] == str(level):
+        return line
+    return line[:l0] + str(level) + line[l1:]
 
 
 def _bare_cold_hold_line(line: str, match: re.Match, today: str, days: int) -> str:

@@ -42,6 +42,7 @@ from .graduation import (
     validate_graduations,
     _NAMED_PATTERN_RE,
     _NAMED_PATTERN_WITH_EVIDENCE_RE,
+    _GRADUATION_RE,
     _is_graduating_heading,
 )
 from . import sessions
@@ -2437,35 +2438,88 @@ def _durable_cue_state(
         return None, []
 
 
+def _prior_levels(
+    prior_text: str | None, schema: list[SectionSpec], crystal_store: CrystalStore | None,
+) -> dict[str, int] | None:
+    """Where a held line's level comes from: each pattern's level in the continuity
+    being replaced, plus each live crystal's (a crystallized pattern re-added to the
+    working set is a recoverable move, not a new claim). None when there is no prior
+    continuity at all (a first save): nothing to derive from, so the claimed level
+    stands as before."""
+    if not prior_text or not prior_text.strip():
+        return None
+    levels = _pattern_levels(prior_text, schema)
+    for c in _crystal_active_safe(crystal_store):
+        name, level = c.get("name"), c.get("level")
+        if isinstance(name, str) and isinstance(level, int) and name not in levels:
+            levels[name] = level
+    return levels
+
+
+def _crystal_levels_snapshot(
+    crystal_store: CrystalStore | None,
+) -> dict[str, Any] | None:
+    """Live crystal names -> levels, read BEFORE the save batch so no crystal-file IO
+    happens under the database write lock (L3 1007, codex). None when the store could
+    not be read: then a pattern probe absent from the file is ``unchecked``, not lost."""
+    if crystal_store is None:
+        return {}
+    try:
+        return {str(c["name"]): c.get("level") for c in crystal_store.active()
+                if isinstance(c, dict) and isinstance(c.get("name"), str)}
+    except Exception:  # noqa: BLE001 - an instrument's input; the wrap path reports faults
+        return None
+
+
 def _evaluate_drift_probes(
-    store: Store, schema: list[SectionSpec], text: str, crystal_store: CrystalStore | None,
+    store: Store, schema: list[SectionSpec], text: str, crystals: dict[str, Any] | None,
+    deferred: list[str],
 ) -> list[dict[str, Any]]:
     """CAP-06: every live drift probe checked against ``text`` (empty when none).
     Called inside the save batch. Never raises: a probe is an instrument, and an
     instrument must not refuse a save (L3 1007: a nameless crystal row did)."""
     try:
         probes = store._live_drift_probes_in_txn()
+        if probes is None:
+            deferred.append(
+                "drift probes were not checked this save: the probe table could not be "
+                "read")
+            return []
         if not probes:
             return []
         levels = _pattern_levels(text, schema)
-        crystals: dict[str, Any] = {
-            str(c.get("name")): c.get("level")
-            for c in _crystal_active_safe(crystal_store)
-            if isinstance(c, dict) and isinstance(c.get("name"), str)}
-        return evaluate_probes(text, probes, pattern_levels=levels, live_crystals=crystals)
+        results = evaluate_probes(text, probes, pattern_levels=levels,
+                                  live_crystals=crystals or {})
+        if crystals is None:  # crystal store unreadable: absence proves nothing
+            for r in results:
+                if r["kind"] == "pattern" and r["status"] == "lost":
+                    r["status"] = "unchecked"
+                    r["detail"] = "not in the file; the crystal store could not be read"
+        return results
     except Exception as exc:  # noqa: BLE001 - see the docstring
-        _warn_after_commit(f"drift probes were not checked this save: {exc!r}")
+        deferred.append(f"drift probes were not checked this save: {exc!r}")
         return []
 
 
 def _pattern_levels(text: str, schema: list[SectionSpec]) -> dict[str, int]:
     """Each pattern named in the graduating section(s) of ``text``, at its highest
-    level there (graduation's own line parser)."""
+    level there, found exactly as ``validate_graduations`` finds them (same heading
+    test, same line parser; L3 1007, codex: a fuzzy section match read
+    ``## Anti-Patterns``). No level ceiling."""
+    headings = graduating_headings(schema)
     levels: dict[str, int] = {}
-    for line in _role_section_body(text, schema, "graduating"):
-        m = _NAMED_PATTERN_RE.match(line)
-        if m and len(m.group(2)) <= 6:
-            levels[m.group(1)] = max(levels.get(m.group(1), 0), int(m.group(2)))
+    inside = False
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            inside = _is_graduating_heading(line, headings)
+            continue
+        m = _NAMED_PATTERN_RE.match(line) if inside else None
+        if m:
+            try:
+                level = int(m.group(2))
+            except ValueError:  # beyond Python's int-string limit
+                continue
+            levels[m.group(1)] = max(levels.get(m.group(1), 0), level)
     return levels
 
 
@@ -3067,9 +3121,9 @@ def validated_save_continuity(
         # within carryforward_cold_days (warm). Ungrounded path only; the
         # cross-session immune demotion is untouched. None disables it.
         carryforward_cold_days=carryforward_cold_days,
-        # L3 1007 (complement): a hold never raises a line above its level in the
-        # file being replaced.
-        prior_levels=_pattern_levels(prior_continuity or "", section_schema),
+        # L3 1007 (complement, codex): a held line's level is derived, never taken
+        # from the composer (see _prior_levels).
+        prior_levels=_prior_levels(prior_continuity, section_schema, crystal_store),
     )
 
     # The hard maximum is measured on the text that will be WRITTEN: graduation
@@ -3216,6 +3270,9 @@ def validated_save_continuity(
     composted: dict[str, int] = {}
     still_graduating: list[str] = []
     drift_results: list[dict[str, Any]] = []
+    crystal_levels = _crystal_levels_snapshot(crystal_store)
+    # Raised inside the batch, delivered only after it commits.
+    drift_warnings: list[str] = []
 
     try:
         # Phase 2: batched DB DML.
@@ -3295,7 +3352,7 @@ def validated_save_continuity(
             # (L3 1007, codex: a probe added between a pre-batch read and the commit
             # had no result) against the exact text being saved; never a gate.
             drift_results = _evaluate_drift_probes(
-                store, section_schema, grad_result.text, crystal_store
+                store, section_schema, grad_result.text, crystal_levels, drift_warnings
             )
             store._record_drift_results(drift_results)
 
@@ -3342,6 +3399,9 @@ def validated_save_continuity(
             # via the upsert loop. The section guard closes that gap.
             in_patterns_section = False
             wrap_graduations: list[tuple[str, int, str]] = []
+            # Only what the validator counted (L3 1007, codex: "02x" parsed here but
+            # was never validated).
+            validated_names = set(grad_result.graduated_names)
             for line in grad_result.text.split("\n"):
                 if line.startswith("## "):
                     in_patterns_section = _is_graduating_heading(line, grad_headings)
@@ -3383,7 +3443,8 @@ def validated_save_continuity(
                     continue
                 # The review worklist takes every validated Proven graduation, with or
                 # without an explanation (L3 1007, codex); history needs one.
-                if pattern_level >= 2:
+                if pattern_level >= 2 and ev_match.group(1) in validated_names \
+                        and _GRADUATION_RE.search(line):
                     wrap_graduations.append(
                         (ev_match.group(1), pattern_level, explanation or ""))
                 if not explanation:
@@ -4006,6 +4067,8 @@ def validated_save_continuity(
         result["composted"] = composted
     if drift_results:
         result["drift"] = _drift_summary(drift_results)
+    for message in drift_warnings:
+        _warn_after_commit(message)
     if durable_report is not None:
         result["durable_warnings"] = durable_messages
     if stale_state:

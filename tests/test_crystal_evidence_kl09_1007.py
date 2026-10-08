@@ -186,3 +186,13 @@ def test_an_old_match_is_found_behind_many_newer_substring_hits(tmp_path):  # co
         assert cs.ground_empty_evidence(s, limit=1)["alpha"].evidence == [old.id[:8]]
     finally:
         s.close()
+
+
+def test_a_unicode_letter_touching_the_name_is_not_a_match(tmp_path):     # codex LOW
+    s, cs = _store(tmp_path)
+    try:
+        s.record("éalpha and alphaé are other words", "observation")
+        cs.crystallize(name="alpha", level=3, explanation="x")
+        assert cs.ground_empty_evidence(s)["alpha"].status == "no_episode"
+    finally:
+        s.close()

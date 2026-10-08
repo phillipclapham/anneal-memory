@@ -50,7 +50,7 @@ def _tokens(text: str) -> list[str]:
     text = re.sub(r"n't\b", " not", text.lower()).replace("cannot", "can not")
     return [t for t in re.split(r"[^a-z0-9]+", text)
             if t and (any(c.isdigit() for c in t) or (len(t) > 2 and t not in _STOP)
-                      or t in NEGATORS)]
+                      or t in NEGATORS or t in _ORDERING)]
 
 
 def _units(lines: list[str]) -> list[str]:

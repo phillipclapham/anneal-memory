@@ -99,7 +99,7 @@ import warnings
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Iterator, Literal, NamedTuple, TypedDict, cast
+from typing import Any, Iterator, Literal, NamedTuple, TypedDict, cast
 
 try:  # POSIX advisory locking; absent on Windows (see CrystalStore._transaction).
     import fcntl
@@ -193,8 +193,6 @@ class CrystalError(AnnealMemoryError):
 
 # Field on a crystal record listing evidence ids ground_empty_evidence recorded (KL-09).
 PROVISIONAL_EVIDENCE = "provisional_evidence"
-# Page size for ground_empty_evidence's oldest-first scan.
-_GROUNDING_PAGE = 500
 
 
 class GroundingResult(NamedTuple):
@@ -994,8 +992,7 @@ class CrystalStore:
         # A name is whole when no word character touches it, and no "." or "-" joins it
         # to one ("foo.bar", "foo-bar"); a sentence-final "foo." is whole (L3 1007).
         bounded = {n: re.compile(
-            rf"(?<![a-z0-9_])(?<![a-z0-9_][.\-]){re.escape(n.lower())}"
-            rf"(?![a-z0-9_]|[.\-][a-z0-9_])") for n in known}
+            rf"(?<!\w)(?<!\w[.\-]){re.escape(n.lower())}(?!\w|[.\-]\w)") for n in known}
         out: dict[str, GroundingResult] = {}
         for item in live:
             if any(isinstance(e, str) for e in (item.get("evidence") or [])):
@@ -1003,23 +1000,20 @@ class CrystalStore:
             name = item["name"]
             ids: list[str] = []
             hubs = 0
-            offset = 0
-            while len(ids) < limit:  # oldest first, page by page, no newest-N cap
-                page = store._episodes_containing_oldest(
-                    name, offset=offset, limit=_GROUNDING_PAGE)
-                offset += len(page)
-                for ep in page:
-                    text = ep.content.lower()
-                    if not bounded[name].search(text):
-                        continue
-                    if sum(1 for rx in bounded.values() if rx.search(text)) > 1:
-                        hubs += 1
-                        continue
+
+            def visit(ep: Any, name: str = name) -> bool:
+                nonlocal hubs
+                text = ep.content.lower()
+                if not bounded[name].search(text):
+                    return False
+                if sum(1 for rx in bounded.values() if rx.search(text)) > 1:
+                    hubs += 1
+                    return False
+                if ep.id[:8] not in ids:
                     ids.append(ep.id[:8])
-                    if len(ids) == limit:
-                        break
-                if len(page) < _GROUNDING_PAGE:
-                    break
+                return len(ids) >= limit
+
+            store._scan_containing_oldest(name, visit)  # oldest first, no cap
             status = "no_episode"
             if ids:
                 status = "would_ground" if dry_run else "grounded"

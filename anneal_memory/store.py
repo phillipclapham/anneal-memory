@@ -1493,7 +1493,7 @@ CREATE TABLE IF NOT EXISTS drift_results (
 CREATE TABLE IF NOT EXISTS wrap_graduations (
     wrap_id INTEGER NOT NULL,
     name TEXT NOT NULL,
-    level INTEGER NOT NULL,
+    level TEXT NOT NULL,
     explanation TEXT,
     PRIMARY KEY (wrap_id, name)
 );
@@ -3279,9 +3279,16 @@ class Store:
         if not rows:
             return
         wrap_id = self._conn.execute("SELECT MAX(id) FROM wraps").fetchone()[0]
-        self._conn.executemany(
-            "INSERT OR REPLACE INTO wrap_graduations (wrap_id, name, level, explanation) "
-            "VALUES (?, ?, ?, ?)", [(wrap_id, n, lv, ex) for n, lv, ex in rows])
+        # Levels as decimal text: the library has no level ceiling and SQLite INTEGER
+        # does (L3 1007, codex: a 20-digit level raised OverflowError and rolled the
+        # save back). Never gating.
+        try:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO wrap_graduations (wrap_id, name, level, "
+                "explanation) VALUES (?, ?, ?, ?)",
+                [(wrap_id, n, str(lv), ex) for n, lv, ex in rows])
+        except sqlite3.Error as exc:
+            _LOG.warning("wrap graduations not recorded: %r", exc)
 
     def list_drift_probes(self, *, include_retired: bool = False) -> list[dict[str, Any]]:
         """Every drift probe (live only unless ``include_retired``), oldest first."""
@@ -3310,15 +3317,16 @@ class Store:
                 method="retire_drift_probe", committed="the retirement")
         return n == 1
 
-    def _live_drift_probes_in_txn(self) -> list[dict[str, Any]]:
+    def _live_drift_probes_in_txn(self) -> list[dict[str, Any]] | None:
         """The live probes, read on the caller's open save batch (under its write lock,
         so a probe added or retired concurrently is either in or out of this save as a
-        whole). A failed read gives ``[]``; a failed SELECT does not end the batch."""
+        whole). None when the read failed (the caller warns; "no probes" and "could not
+        read" must stay distinct); a failed SELECT does not end the batch."""
         try:
             return [dict(r) for r in self._conn.execute(
                 "SELECT * FROM drift_probes WHERE retired_at IS NULL ORDER BY id")]
         except sqlite3.Error:
-            return []
+            return None
 
     def _record_drift_results(self, results: list[dict[str, Any]]) -> None:
         """Write a save's probe verdicts against the wrap row just inserted. Called
@@ -3326,10 +3334,14 @@ class Store:
         if not results:
             return
         wrap_id = self._conn.execute("SELECT MAX(id) FROM wraps").fetchone()[0]
-        self._conn.executemany(
-            "INSERT OR REPLACE INTO drift_results (wrap_id, probe_id, status, detail) "
-            "VALUES (?, ?, ?, ?)",
-            [(wrap_id, r["probe_id"], r["status"], r["detail"]) for r in results])
+        try:  # an instrument's record must not roll the save back
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO drift_results (wrap_id, probe_id, status, detail) "
+                "VALUES (?, ?, ?, ?)",
+                [(wrap_id, r["probe_id"], r["status"], r["detail"]) for r in results
+                 if isinstance(r.get("probe_id"), int)])
+        except (sqlite3.Error, OverflowError, TypeError) as exc:
+            _LOG.warning("drift results not recorded: %r", exc)
 
     def drift_status(self) -> dict[str, Any]:
         """The latest save's probe verdicts, each with the first wrap since which it
@@ -3344,9 +3356,13 @@ class Store:
                     "SELECT MAX(id) FROM wraps").fetchone()[0]
                 if last is None:
                     return empty
-                graduated = [dict(r) for r in self._conn.execute(
-                    "SELECT name, level, explanation FROM wrap_graduations "
-                    "WHERE wrap_id = ? ORDER BY level DESC, name", (last,)).fetchall()]
+                graduated = sorted(
+                    ({"name": r["name"], "level": int(r["level"]),
+                      "explanation": r["explanation"]}
+                     for r in self._conn.execute(
+                         "SELECT name, level, explanation FROM wrap_graduations "
+                         "WHERE wrap_id = ?", (last,)).fetchall()),
+                    key=lambda g: (-g["level"], g["name"]))
                 at = self._conn.execute(
                     "SELECT wrapped_at FROM wraps WHERE id = ?", (last,)).fetchone()
                 rows = self._conn.execute(
@@ -4434,24 +4450,35 @@ class Store:
             by_id[ep.id] = ep
         return {i: by_id[i] for i in keep if i in by_id}, doc_freq, corpus_n
 
-    def _episodes_containing_oldest(
-        self, keyword: str, *, offset: int, limit: int
-    ) -> list[Episode]:
-        """One page of live (not superseded) episodes whose content contains
-        ``keyword`` (case-insensitive substring, as :meth:`recall` matches),
-        OLDEST first. For offline scans that must not stop at a newest-N cap."""
+    def _scan_containing_oldest(
+        self, keyword: str, visit: Callable[[Episode], bool], *, page: int = 500,
+    ) -> None:
+        """Visit live (not superseded) episodes whose content contains ``keyword``
+        (case-insensitive substring, as :meth:`recall` matches), OLDEST first, until
+        ``visit`` returns True. One read snapshot for the whole scan and keyset paging
+        on ``(timestamp, id)``, so a concurrent write can neither repeat nor skip a row
+        (L3 1007: per-page snapshots with OFFSET could)."""
         with self._db_boundary("keyword_candidates"), self._read_snapshot():
             conditions, params, _ = self._recall_conditions(
                 since=None, until=None, episode_type=None, source=None,
                 include_superseded=False,
             )
             base = " AND ".join(conditions) if conditions else "1=1"
-            rows = self._conn.execute(
-                f"SELECT * FROM episodes WHERE {base} AND {_KEYWORD_LIKE_SQL} "
-                f"ORDER BY timestamp ASC, id ASC LIMIT ? OFFSET ?",
-                [*params, _keyword_like_pattern(keyword), limit, offset],
-            ).fetchall()
-        return [self._row_to_episode(r) for r in rows]
+            pattern = _keyword_like_pattern(keyword)
+            after: tuple[str, str] | None = None
+            while True:
+                cursor = "" if after is None else " AND (timestamp, id) > (?, ?)"
+                rows = self._conn.execute(
+                    f"SELECT * FROM episodes WHERE {base} AND {_KEYWORD_LIKE_SQL}{cursor} "
+                    f"ORDER BY timestamp ASC, id ASC LIMIT ?",
+                    [*params, pattern, *(after or ()), page],
+                ).fetchall()
+                for r in rows:
+                    if visit(self._row_to_episode(r)):
+                        return
+                if len(rows) < page:
+                    return
+                after = (rows[-1]["timestamp"], rows[-1]["id"])
 
     def episodes_since_wrap(self) -> list[Episode]:
         """Get all episodes since the last completed wrap.

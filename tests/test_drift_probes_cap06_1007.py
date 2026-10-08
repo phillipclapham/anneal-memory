@@ -271,3 +271,65 @@ def test_the_save_result_carries_ids_and_statuses_not_text(tmp_path):  # complem
         assert "soupcan" not in str(r["drift"])
     finally:
         s.close()
+
+
+# --- L3 1007 round 2 ---------------------------------------------------------------
+
+def test_spin_up_is_not_spin_down():                                       # glm MED
+    probes = [{"id": 1, "kind": "fact", "text": "spin up"}]
+    assert evaluate_probes(_doc("", facts="spin down."), probes,
+                           pattern_levels={})[0]["status"] == "lost"
+
+
+def test_pattern_levels_read_only_graduating_sections():                  # codex MED
+    from anneal_memory import DEFAULT_SCHEMA
+    from anneal_memory.continuity import _pattern_levels
+    text = "## State\n.\n## Patterns\n- alpha | 1x (d)\n## Anti-Patterns\n- alpha | 5x (d)\n"
+    assert _pattern_levels(text, DEFAULT_SCHEMA) == {"alpha": 1}
+    assert _pattern_levels("## Patterns\n- big | 1000000x (d)\n", DEFAULT_SCHEMA) == {
+        "big": 1000000}
+
+
+def test_the_worklist_takes_only_validated_lines_and_any_level(tmp_path):  # codex MEDs
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        ep = s.record("we moved the hub to soupcan and it runs there now", "observation")
+        token = prepare_wrap(s, max_chars=40000)["wrap_token"]
+        huge = 10 ** 19
+        lines = (f"- big_one | {huge}x (2026-10-07) [evidence: {ep.id[:8]}]\n"
+                 f"- padded | 02x (2026-10-07) [evidence: {ep.id[:8]}]")
+        validated_save_continuity(s, _doc(lines), today="2026-10-07", wrap_token=token)
+        g = s.drift_status()["graduated"]
+        assert [(x["name"], x["level"]) for x in g] == [("big_one", huge)]
+    finally:
+        s.close()
+
+
+def test_an_unreadable_probe_table_warns_and_the_save_commits(tmp_path):    # codex/complement
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        s.record("episode: a substrate observation about the topic.", "observation")
+        token = prepare_wrap(s, max_chars=40000)["wrap_token"]
+        s._conn.execute("DROP TABLE drift_probes")
+        s._conn.commit()
+        with pytest.warns(UserWarning, match="drift probes were not checked"):
+            r = validated_save_continuity(s, _doc("- a | 2x (2026-10-01)"),
+                                          today="2026-10-07", wrap_token=token)
+        assert r["chars"] > 0 and "drift" not in r
+    finally:
+        s.close()
+
+
+def test_an_unreadable_crystal_store_reads_unchecked_not_lost(tmp_path):   # complement LOW
+    s = Store(tmp_path / "m.db", project_name="t")
+    cpath = tmp_path / "m.crystal.json"
+    cpath.write_text("{not json")
+    try:
+        s.add_drift_probe(pattern="alpha")
+        s.record("episode: a substrate observation about the topic.", "observation")
+        token = prepare_wrap(s, max_chars=40000)["wrap_token"]
+        r = validated_save_continuity(s, _doc("- beta | 2x (2026-10-01)"), today="2026-10-07",
+                                      wrap_token=token, crystal_store=CrystalStore(cpath))
+        assert r["drift"]["probes"][0]["status"] == "unchecked"
+    finally:
+        s.close()

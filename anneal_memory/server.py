@@ -53,6 +53,7 @@ from .retrieval import (
     search_episodes_counted,
 )
 from .store import (
+    StorePathError,
     Store,
     StoreDatabaseError,
     _is_write_lock_contention,
@@ -1576,12 +1577,16 @@ def start_server(
         # Missing file is not an error — first run or dev mode
 
     # Open store and run server
-    store = Store(
-        path=db_path,
-        project_name=project_name,
-        audit=not no_audit,
-        audit_retention_days=audit_retention_days,
-    )
+    try:
+        store = Store(
+            path=db_path,
+            project_name=project_name,
+            audit=not no_audit,
+            audit_retention_days=audit_retention_days,
+        )
+    except StorePathError as exc:  # every server entry (cli, `-m anneal_memory.server`)
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     try:
         server = Server(store)

@@ -40,6 +40,7 @@ Zero dependencies beyond Python stdlib.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import errno
 import json
 import os
@@ -134,6 +135,7 @@ from .crystal import (
 from .retrieval import retrieve_patterns, retrieve_relevant, MAX_PATTERNS
 from .store import (
     StorePathError,
+    connect as sqlite_connect,
     sqlite_path,
     register_writer_schema,
     Store,
@@ -1914,19 +1916,26 @@ def cmd_export(args: argparse.Namespace) -> None:
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
+        # Write a temp file only THIS process owns, in the destination's directory,
+        # and publish it with os.replace only after the backup succeeded: a failed
+        # export leaves --output untouched (absent, or the previous file) and
+        # deletes nothing but its own temp (walopen L3 r11; r10's cleanup decided
+        # ownership by exists() and could delete a peer's export).
+        tmp = out.with_name(f".{out.name}.{os.getpid()}-{uuid.uuid4().hex[:8]}.export-tmp")
         try:
-            src_conn = sqlite3.connect(src_target)
+            src_conn = sqlite_connect(src_target)
             try:
-                dst_conn = sqlite3.connect(dst_target)
+                dst_conn = sqlite_connect(tmp)
                 try:
                     src_conn.backup(dst_conn)
                 finally:
                     dst_conn.close()
             finally:
                 src_conn.close()
+            os.replace(tmp, out)
         except (ValueError, OSError, sqlite3.Error) as exc:  # NUL in a path, unwritable dir…
-            # No cleanup of the destination: deciding "this file is mine" by an
-            # earlier exists() check deleted a peer's export (L3 r10, codex HIGH).
+            with contextlib.suppress(OSError, ValueError):
+                tmp.unlink()
             print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
             sys.exit(1)
         try:
@@ -3598,7 +3607,7 @@ def _outcome_store_id(db_path: Path, *, mint: bool) -> str | None:
     if sid is not None or not mint:
         return sid
     try:
-        conn = sqlite3.connect(sqlite_path(db_path), timeout=30.0, isolation_level=None)
+        conn = sqlite_connect(db_path, timeout=30.0, isolation_level=None)
     except (OSError, sqlite3.Error, ValueError) as exc:  # ValueError: a URI path
         refuse(exc)
     try:
@@ -4769,11 +4778,7 @@ def main() -> None:
         # server-specific flags (--no-audit, --skip-integrity, etc.). Its own
         # stdin/stdout reconfigure above is now a harmless no-op re-assertion.
         from .server import main as server_main
-        try:  # the legacy no-subcommand server path: same boundary (walopen L3 r10)
-            server_main()
-        except StorePathError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            sys.exit(1)
+        server_main()  # refuses a URI path itself (server.start_server)
         return
 
     # CLI subcommand present — reject any unrecognized arguments

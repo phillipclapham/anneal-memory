@@ -4483,3 +4483,25 @@ def test_an_sqlite_uri_is_refused_as_a_store_path(uri, tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="SQLite URI"):
         Store(uri, audit=False)
     assert list(tmp_path.iterdir()) == []  # refused before any side effect
+
+
+
+def test_every_sqlite_connect_goes_through_the_one_opener():
+    """walopen bound (desk 1008+12): any sqlite3.connect call in the package other
+    than inside store.connect bypasses the URI refusal; r6-r11 each found one."""
+    import ast
+    import anneal_memory
+    pkg = Path(anneal_memory.__file__).parent
+    offenders = []
+    for f in sorted(pkg.rglob("*.py")):
+        tree = ast.parse(f.read_text(encoding="utf-8"))
+        allowed = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "connect" and f.name == "store.py":
+                allowed.update(id(n) for n in ast.walk(node))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "connect" and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "sqlite3" and id(node) not in allowed):
+                offenders.append(f"{f.name}:{node.lineno}")
+    assert offenders == [], offenders

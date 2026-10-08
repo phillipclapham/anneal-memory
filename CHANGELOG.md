@@ -8,6 +8,14 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - `Store("file:...")` now raises `ValueError`. Whether SQLite reads `file:` as a URI depends on how it was built, so
   the same string was a file on one machine and a shared in-memory database on another; shared-cache in-memory use
   also failed `database table is locked` with no busy wait. Pass a filesystem path, or `":memory:"`.
+- Every SQLite connection in the package goes through one opener (`anneal_memory.store.connect`), which applies
+  the refusal; a test fails on any other `sqlite3.connect` call. The CLI and `python -m anneal_memory.server` print
+  `Error: …` and exit 1 instead of a traceback.
+
+### Fixed — a failed `export --format sqlite` no longer leaves a file at `--output`
+- A failed backup (a source that is not a database, a full disk) left an empty or partial file at the output path
+  that looked like an export. The export now writes a temp file of its own in the destination directory and moves it
+  into place only on success; on failure `--output` is untouched (absent, or the previous file).
 
 ### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
 - `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one

@@ -1855,6 +1855,15 @@ _PROTECTED_TEAM_EPISODES = (
 )
 
 
+def connect(path: str | Path, **kwargs: Any) -> sqlite3.Connection:
+    """THE way this package opens SQLite: :func:`sqlite_path` first, then
+    ``sqlite3.connect``. ``tests/test_store.py::test_every_sqlite_connect_goes_
+    through_the_one_opener`` fails on any other ``sqlite3.connect`` call in the
+    package, so a new call site cannot bypass the URI refusal (walopen L3 r6-r11:
+    each round found a caller that did)."""
+    return sqlite3.connect(sqlite_path(path), **kwargs)
+
+
 class StorePathError(ValueError):
     """A database path that reaches SQLite as a URI (see :func:`sqlite_path`).
     A ``ValueError``, so existing callers are unchanged; its own class so the CLI
@@ -2129,7 +2138,7 @@ class Store:
         self._closed: bool = False
         try:
             with self._db_boundary("schema_init"):
-                self._conn = sqlite3.connect(sqlite_path(self._path))
+                self._conn = connect(self._path)
                 self._conn.row_factory = sqlite3.Row
                 register_writer_schema(self._conn)
                 # ⛔ FIRST, BEFORE EVERY PERSISTENT WRITE — INCLUDING THE

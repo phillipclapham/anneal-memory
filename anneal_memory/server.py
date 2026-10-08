@@ -1592,11 +1592,15 @@ def start_server(
         # Missing file is not an error — first run or dev mode
 
     # Open store and run server
+    # CAP-08 (C#11): the server is the host of this Store and pins its trust
+    # ceiling at agent; no tool argument reaches it, so an agent's write can
+    # never carry operator trust.
     store = Store(
         path=db_path,
         project_name=project_name,
         audit=not no_audit,
         audit_retention_days=audit_retention_days,
+        trust_ceiling="agent",
     )
 
     try:

@@ -353,14 +353,16 @@ def _existing_db_path(args: argparse.Namespace, *, require_file: bool = False) -
     return db_path
 
 
-def _open_store(args: argparse.Namespace) -> Store:
-    """Open a Store from CLI args."""
+def _open_store(args: argparse.Namespace, *, trust_ceiling: str = DEFAULT_TRUST) -> Store:
+    """Open a Store from CLI args. ``trust_ceiling`` is ``"operator"`` only for a
+    command whose operator gate (:func:`_operator_ok`) said yes (CAP-08)."""
     db_path = _existing_db_path(args)
     try:
         return Store(
             path=db_path,
             project_name=getattr(args, "project_name", "Agent"),
             audit=True,
+            trust_ceiling=trust_ceiling,
         )
     except StoreDatabaseError as exc:
         # ⚠ THE OPERATOR'S FIRST MESSAGE, AND IT USED TO READ LIKE CORRUPTION.
@@ -873,7 +875,7 @@ def cmd_record(args: argparse.Namespace) -> None:
                   "ANNEAL_OPERATOR=1. Nothing was recorded.", file=sys.stderr)
             sys.exit(1)
 
-    with _open_store(args) as store:
+    with _open_store(args, trust_ceiling="operator" if via else DEFAULT_TRUST) as store:
         metadata = None
         if args.tags:
             metadata = {"tags": [t.strip() for t in args.tags.split(",")]}
@@ -914,25 +916,27 @@ def cmd_trust(args: argparse.Namespace) -> None:
             print(f"Error: no episode {args.episode_id!r}.", file=sys.stderr)
             sys.exit(1)
         current = store.trust_map([args.episode_id]).get(args.episode_id, DEFAULT_TRUST)
-        if args.level is None:
-            if args.json:
-                _print_json({"id": args.episode_id, "trust": current})
-            else:
-                print(f"{args.episode_id}: {current}")
-            return
-        raising = trust_rank(args.level) > trust_rank(current)
-        via = None
-        if raising:
-            via = _operator_ok(f"Raise {args.episode_id} from {current} to {args.level}?")
-            if via is None:
-                print(f"Error: raising trust ({current} -> {args.level}) needs a yes on a "
-                      "terminal, or ANNEAL_OPERATOR=1. Unchanged.", file=sys.stderr)
-                sys.exit(1)
-        # The actor says how the gate was passed, not more than that.
+    if args.level is None:
+        if args.json:
+            _print_json({"id": args.episode_id, "trust": current})
+        else:
+            print(f"{args.episode_id}: {current}")
+        return
+    raising = trust_rank(args.level) > trust_rank(current)
+    via = None
+    if raising:
+        via = _operator_ok(f"Raise {args.episode_id} from {current} to {args.level}?")
+        if via is None:
+            print(f"Error: raising trust ({current} -> {args.level}) needs a yes on a "
+                  "terminal, or ANNEAL_OPERATOR=1. Unchanged.", file=sys.stderr)
+            sys.exit(1)
+    # The gate's yes is what opens the Store at operator; the actor says how the
+    # gate was passed, not more than that.
+    with _open_store(args, trust_ceiling="operator" if via else DEFAULT_TRUST) as store:
         try:
-            old = store.set_trust(args.episode_id, args.level, allow_raise=raising,
+            old = store.set_trust(args.episode_id, args.level,
                                   actor=f"cli:operator-{via}" if via else "cli")
-        except ValueError as exc:  # e.g. another writer raised it meanwhile
+        except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
         if args.json:
@@ -2186,7 +2190,8 @@ def cmd_import(args: argparse.Namespace) -> None:
                         file=sys.stderr,
                     )
         if args.json:
-            _print_json({"imported": 0, "skipped": 0, "errors": 0, "trust_lowered": 0})
+            _print_json({"imported": 0, "skipped": 0, "errors": 0, "trust_lowered": 0,
+                         "trust_capped": 0})
         else:
             print("No episodes to import.")
         return
@@ -2199,14 +2204,17 @@ def cmd_import(args: argparse.Namespace) -> None:
         errors = 0
 
         lowered = 0
+        capped = 0
         for ep_data in episodes:
             try:
                 # CAP-08: an export file is plain JSON anyone can edit, so it can
                 # lower trust but never vouch: anything above agent comes in as
-                # agent.
+                # agent, counted in the output so the cap is not silent (C#11).
+                # The Store is opened at agent, so it would refuse it anyway.
                 raw_trust = ep_data.get("trust")
                 ep_trust = raw_trust if raw_trust is not None else DEFAULT_TRUST
-                if trust_rank(ep_trust) > trust_rank(DEFAULT_TRUST):
+                was_capped = trust_rank(ep_trust) > trust_rank(DEFAULT_TRUST)
+                if was_capped:
                     ep_trust = DEFAULT_TRUST
 
                 # Check if episode already exists
@@ -2236,6 +2244,7 @@ def cmd_import(args: argparse.Namespace) -> None:
                     trust=ep_trust,
                 )
                 imported += 1
+                capped += was_capped
             except Exception as e:
                 errors += 1
                 if not args.json:
@@ -2243,10 +2252,12 @@ def cmd_import(args: argparse.Namespace) -> None:
 
         if args.json:
             _print_json({"imported": imported, "skipped": skipped, "errors": errors,
-                         "trust_lowered": lowered})
+                         "trust_lowered": lowered, "trust_capped": capped})
         else:
             print(f"Import complete: {imported} imported, {skipped} skipped (already exist), {errors} errors"
-                  + (f", trust lowered on {lowered} existing" if lowered else ""))
+                  + (f", trust lowered on {lowered} existing" if lowered else "")
+                  + (f", {capped} brought in as agent (the file cannot vouch for "
+                     "operator)" if capped else ""))
 
 
 def cmd_team_import(args: argparse.Namespace) -> None:

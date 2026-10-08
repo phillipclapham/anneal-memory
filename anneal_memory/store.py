@@ -1952,6 +1952,14 @@ class Store:
             which contends with a concurrent single-writer wrap. Assumes the db
             already exists and is schema-current (a reader cannot migrate); audit is
             disabled. Default False (full read-write store).
+        trust_ceiling: The highest trust class (``types.TRUST_LEVELS``) a write
+            through this Store may carry: ``record(trust=)``, :meth:`set_trust`, and
+            so the CLI's JSON import. Above it a write is refused with ``ValueError``
+            before anything is written. Default ``"agent"``. The code that constructs
+            the Store is the host: only it sets the ceiling, and the labels it writes
+            (``trust``, ``trust_via``, ``actor``) are its statement, held by the
+            human who configured it. The MCP server opens at ``"agent"``; the CLI
+            opens at ``"operator"`` only after its operator gate.
     """
 
     def __init__(
@@ -1965,8 +1973,16 @@ class Store:
         audit_retention_days: int | None = None,
         on_audit_event: Callable | None = None,
         read_only: bool = False,
+        trust_ceiling: str = DEFAULT_TRUST,
     ) -> None:
         self._path = Path(path)
+        # CAP-08 (C#11): the highest trust class any write through this instance
+        # may carry. The code that constructs the Store is the host, so the host
+        # sets it; no call argument moves it (record, set_trust and the CLI's JSON
+        # import all go through it). Refused, never capped, above it: a capped
+        # label would read as the one the caller asked for.
+        trust_rank(trust_ceiling)
+        self._trust_ceiling: str = trust_ceiling
         # Read-only mode (per-turn recall consumers): the connection rejects writes and
         # the DB-setup branch below skips ALL init writes, so a per-prompt open can't
         # contend with a concurrent single-writer wrap. See the schema_init block.
@@ -2610,14 +2626,17 @@ class Store:
                 ``external`` (a web page, a document, another party), or
                 ``operator``. A graduation whose grounding citations are all
                 ``tool``/``external`` does not climb (CAP-08). Stored with the
-                episode in one transaction; :meth:`set_trust` lowers it later.
-            trust_via: How the caller's gate vouched for ``trust`` (the CLI passes
-                ``terminal`` or ``env`` for ``operator``). Recorded in the audit
-                event as given; the library does not check it.
+                episode in one transaction; :meth:`set_trust` changes it later.
+                Refused above the Store's ``trust_ceiling``.
+            trust_via: How the host's gate vouched for ``trust`` (the CLI passes
+                ``cli:operator-terminal`` or ``cli:operator-env``). The host's
+                statement, recorded in the audit event as given; the library does
+                not check it.
 
         Raises:
             SupersessionError: a ``supersedes`` link failed validation.
-            ValueError: ``trust`` is not a known trust class.
+            ValueError: ``trust`` is not a known trust class, or is above the
+                Store's ``trust_ceiling``.
 
         Returns:
             The recorded Episode.
@@ -2634,7 +2653,7 @@ class Store:
         if isinstance(episode_type, str):
             episode_type = EpisodeType(episode_type)
 
-        trust_rank(trust)  # refuses an unknown class before anything is written
+        self._check_trust_ceiling("record", trust)  # before anything is written
         ts = timestamp or _now_utc()
         meta_json = json.dumps(metadata) if metadata is not None else None
         old_ids = _normalize_supersedes(supersedes)
@@ -4047,26 +4066,42 @@ class Store:
             )
             return counts
 
+    @property
+    def trust_ceiling(self) -> str:
+        """The highest trust class a write through this Store may carry, set by
+        whoever constructed it (CAP-08)."""
+        return self._trust_ceiling
+
+    def _check_trust_ceiling(self, operation: str, trust: str) -> int:
+        """Rank of ``trust``; ValueError when it is unknown or above the ceiling."""
+        rank = trust_rank(trust)
+        if rank > trust_rank(self._trust_ceiling):
+            raise ValueError(
+                f"{operation}: trust {trust!r} is above this store's ceiling "
+                f"{self._trust_ceiling!r}; only the code that opens the Store sets "
+                f"the ceiling (Store(..., trust_ceiling=...)). Nothing was written."
+            )
+        return rank
+
     def set_trust(
-        self, episode_id: str, trust: str, *, allow_raise: bool = False,
-        actor: str = "agent",
+        self, episode_id: str, trust: str, *, actor: str = "agent",
     ) -> str:
         """Change an episode's trust class; returns the class it had.
 
-        Lowering is always allowed. Raising (e.g. ``external`` -> ``agent``) is
-        refused unless ``allow_raise=True``, which only the operator's own path
-        passes (the CLI asks on a terminal, or reads ``ANNEAL_OPERATOR=1``;
-        MCP never raises): a writer must not be able to vouch for content after
-        the fact. Audited as ``trust_set``. A supersession link the change makes
-        invalid (the replacing episode now ranks below the one it hides) is removed
-        in the same transaction and named in the audit event, unless a team
-        snapshot owns it.
+        Any class up to this Store's ``trust_ceiling`` may be set, lowering or
+        raising; above it is refused. So raising anything above ``agent`` needs
+        a Store the host opened with ``trust_ceiling="operator"`` (the CLI does
+        only after its operator gate; the MCP server never does). ``actor`` is the
+        host's statement of who asked, recorded as given. Audited as
+        ``trust_set``. A supersession link the change makes invalid (the
+        replacing episode now ranks below the one it hides) is removed in the same
+        transaction and named in the audit event, unless a team snapshot owns it.
 
         Raises:
-            ValueError: unknown ``trust``, no such episode, or a raise without
-                ``allow_raise``.
+            ValueError: unknown ``trust``, ``trust`` above the ceiling, or no such
+                episode.
         """
-        new_rank = trust_rank(trust)
+        self._check_trust_ceiling("set_trust", trust)
         episode_id = str(episode_id).strip().lower()
         problem: str | None = None
         old = DEFAULT_TRUST
@@ -4087,12 +4122,7 @@ class Store:
                     "SELECT trust FROM episode_trust WHERE episode_id = ?", (episode_id,)
                 ).fetchone()
                 old = row[0] if row is not None else DEFAULT_TRUST
-                if new_rank > trust_rank(old) and not allow_raise:
-                    problem = (
-                        f"set_trust: {episode_id} is {old!r}; raising it to {trust!r} "
-                        "is the operator's call (allow_raise=True)"
-                    )
-                elif trust == DEFAULT_TRUST:
+                if trust == DEFAULT_TRUST:
                     self._conn.execute(
                         "DELETE FROM episode_trust WHERE episode_id = ?", (episode_id,)
                     )

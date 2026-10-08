@@ -47,8 +47,17 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   class in a new `episode_trust` table, in the episode's transaction; absence means `agent`, so
   every existing episode reads as `agent` and nothing changes for a caller that never passes it.
   A trigger deletes an episode's trust row whatever path deletes the episode.
-- `Store.set_trust(id, trust, allow_raise=False)` lowers a class freely; raising one needs
-  `allow_raise=True`, which only the operator's path passes. Audited as `trust_set`. A change
+- The trust ceiling belongs to the host (C#11, 2026-10-08): `Store(..., trust_ceiling="agent")` is
+  the highest class any write through that instance may carry, set by the code that constructs the
+  Store and moved by no call argument. `record(trust=)`, `set_trust` and the CLI's JSON import
+  refuse anything above it with `ValueError` before writing (never silently capped). Before it, a
+  library caller could label its own write `operator` with no gate at all (run on the rebased tip,
+  1008+3). The MCP server opens its store at `agent`; the CLI opens at `operator` only after its
+  operator gate. The host's labels (`trust`, `trust_via`, `actor`) are its statement, held by the
+  human who configured it by design. A CLI import counts the operator labels it brought in as
+  `agent` (`trust_capped`).
+- `Store.set_trust(id, trust)` sets any class up to the ceiling, lowering or raising; above it is
+  refused. Audited as `trust_set`. A change
   that leaves a recorded supersession pointing the wrong way (the replacing episode now below the
   one it hides) removes that link in the same transaction and names it in the audit event; a
   link a team snapshot owns stays (the ledger rules it) and is named as left.

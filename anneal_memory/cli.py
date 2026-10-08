@@ -1277,6 +1277,11 @@ def cmd_audit_repair(args: argparse.Namespace) -> None:
                     f"Recorded a POSSIBLE gap for the active audit file {record['filename']} "
                     f"({record['period']}): it holds no entry, and whether it held entries "
                     "before cannot be known. Writes continue, and verify reports it."
+                    + (
+                        " Set-aside staged entries to inspect (kept, never deleted): "
+                        + ", ".join(record["preserved_attempts"])
+                        if record.get("preserved_attempts") else ""
+                    )
                 )
             elif record["set_aside_as"] == "":
                 print(

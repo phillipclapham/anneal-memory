@@ -2472,8 +2472,8 @@ class AuditTrail:
                     vanished["certainty"] = _POSSIBLE
                     vanished["preserved_attempts"] = preserved
                     vanished["cause"] += (
-                        "; set-aside staged entries are kept beside it and may be the "
-                        "rolled-back append that record named, so this may not be a loss"
+                        "; kept staged entries may be the rolled-back append that record "
+                        "named, so this may not be a loss"
                     )
         if not new and vanished is None and not stale_cleared:
             return AuditRepairResult(repaired=False, error=_NOTHING_TO_REPAIR)
@@ -2526,7 +2526,8 @@ class AuditTrail:
         if vanished:
             _emit_warning(
                 f"Recorded the missing active audit file {vanished['filename']} "
-                f"({vanished['period']}) as a gap"
+                f"({vanished['period']}) as a "
+                + ("POSSIBLE gap" if vanished.get("certainty") == _POSSIBLE else "gap")
             )
         return AuditRepairResult(
             repaired=True, set_aside=new + ([vanished] if vanished else [])

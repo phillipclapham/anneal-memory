@@ -86,6 +86,23 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   run a version that takes the lock: an anneal-memory without it, writing alongside, breaks the
   chain as before, and nothing on the new side can detect it.
 
+### Known limit, by design — a crash during a week's first audit append (KL-24)
+- After a crash in one window (the week's first entry staged and set aside, the process stopped
+  before the manifest's record of it was withdrawn), whether that entry committed is not
+  decidable from disk. A hash reconcile that tried to decide it drew a new HIGH in each of three
+  review rounds (a discarded file's bytes can equal a later real entry; two matching files; consume
+  and clear not crash-atomic), so it was deleted (Phill, 2026-10-08).
+- What anneal does instead: the next append refuses (`verify` is INVALID) until
+  `anneal-memory audit-repair`, which records a POSSIBLE gap (`certainty: "possible"`) naming the
+  kept `<active>.first.discarded-*` files in `preserved_attempts`. `audit-repair`, `verify` and
+  `--verify-audit` print the names; a person inspects the plain-JSONL files and decides. Nothing
+  is renamed or deleted. With no kept file the gap is recorded as definite, as before.
+- Manifest validation: `certainty` must be `"possible"` on an active-file record (its own
+  filename, `set_aside_as` empty); `preserved_attempts` must be a list of names on such a record.
+- `AuditTrail.stats()` waits (bounded, 2s) on a peer's append lock when only a staged first entry
+  makes the trail look unknown, then re-reads; a staged file with no holder still reads unknown.
+- Audit-repair's stderr warning calls a possible gap "POSSIBLE", not a plain gap.
+
 ### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
 - `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one
   ledger clone's complete verdict, with each line marked `enforced` and the links it `honours`.

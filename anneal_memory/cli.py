@@ -2240,9 +2240,8 @@ def cmd_team_status(args: argparse.Namespace) -> None:
     if args.json:
         _print_json(data)
         return
-    unmanaged = (f"Rewired link rows hiding an imported team entry that no snapshot "
-                 f"manages (never adopted; remove by hand if wrong): "
-                 f"{data['unmanaged_rewired']}")
+    unmanaged = (f"Rewired link rows no snapshot owns, hiding an imported team entry "
+                 f"(never adopted; remove by hand if wrong): {data['unmanaged_rewired']}")
     if not data["keys"]:
         print("No team snapshot (no v3 team-import has replaced links here).")
         if data["unmanaged_rewired"]:
@@ -3707,17 +3706,25 @@ def cmd_crystal_ground_evidence(args: argparse.Namespace) -> None:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
     if args.json:
-        _print_json({"dry_run": args.dry_run, "grounded": result})
+        _print_json({"dry_run": args.dry_run,
+                     "patterns": {n: r._asdict() for n, r in result.items()}})
+        return
+    if not crystal_store.active():
+        print("No live crystallized patterns.")
         return
     if not result:
         print("Every live pattern already has evidence; nothing to ground.")
         return
-    verb = "Would ground" if args.dry_run else "Grounded"
-    for name, ids in result.items():
-        if ids:
-            print(f"{verb} {name}: {', '.join(ids)}")
+    for name, r in result.items():
+        hubs = f" (skipped {r.hubs_skipped} episode(s) naming other patterns)" \
+            if r.hubs_skipped else ""
+        if r.status in ("grounded", "would_ground"):
+            verb = "Would ground" if r.status == "would_ground" else "Grounded"
+            print(f"{verb} {name}: {', '.join(r.evidence)}{hubs}")
+        elif r.status == "conflict":
+            print(f"Changed while running, left as it is: {name}")
         else:
-            print(f"No episode names {name} (or it changed meanwhile); left empty")
+            print(f"No episode names only {name}; left empty{hubs}")
 
 
 def cmd_worth(args: argparse.Namespace) -> None:

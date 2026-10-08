@@ -4,14 +4,15 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
-### Fixed — graduation stopped grading function words (KL-01)
-- The overlap checks in graduation (explanation grounding, the cross-session-overlap demotion,
-  the preservation novelty check) now drop all common function words (pronouns, determiners,
-  prepositions, conjunctions, auxiliaries, number words), not a short list. Before, "while",
-  "only", "when" and "one" counted as shared vocabulary, and the cross-session gate demoted
-  real patterns on them. Replayed against one real store's recorded demotions, about a third
-  would not have tripped. Content words are unchanged, so a re-worded explanation that shares
-  three content words with the prior one still demotes.
+### Fixed — the cross-session check stopped grading function words (KL-01)
+- The cross-session-overlap check (a re-graduation whose explanation shares 3 or more
+  meaningful words with the prior one demotes) now drops every common function word and the
+  number words, not only the short list it shared with grounding. Before, "while", "only",
+  "when" and "one" counted as shared vocabulary and real patterns were demoted on them.
+  Replayed against one real store's recorded demotions, about a third would not have tripped.
+  Grounding (the explanation must share 2 meaningful words with a cited episode) and the
+  supersession floor keep the shorter list, so their behaviour and the published supersession
+  numbers are unchanged. A re-worded explanation that shares three content words still demotes.
 
 ### Fixed — a bare graduation at 4x and up is no longer invisible (spore-676)
 - A pattern line at 4x or higher with no `[evidence:]` tag matched neither graduation regex,
@@ -24,25 +25,31 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   one level.
 
 ### Added — a shrink-gate override leaves an audit trace (KL-14)
-- A save with `allow_shrink=True` (CLI `--allow-shrink`, MCP `"allow_shrink": true`) now
-  records `allow_shrink` in its `continuity_saved` audit event: `refusal_suppressed` says
-  whether the gate would have refused without the override, and `refusal` carries the text
-  it suppressed.
+- Every `continuity_saved` audit event now carries `allow_shrink`: `requested` says whether
+  the save passed `allow_shrink=True` (CLI `--allow-shrink`, MCP `"allow_shrink": true`). When
+  it did, `refusal_suppressed` says whether the shrink gate would have refused without it, and
+  `refusal` carries the text it suppressed. An event without the field comes from an older
+  version.
 
 ### Fixed / Added — crystal evidence is never erased, and empty evidence can be grounded (KL-09)
-- Re-crystallizing a pattern now adds the new evidence ids to the stored ones instead of
-  replacing them. A re-crystallize from a carried-forward line (no `[evidence:]` tag) used to
-  leave the pattern with no evidence, so associative recall could no longer reach it.
-  `CrystalStore.update(evidence=...)` still sets evidence explicitly.
+- Crystal evidence now accumulates. Re-crystallizing a live pattern adds the new evidence ids
+  to the stored ones, and reviving a retired pattern with no evidence keeps the retired
+  record's. Before, a re-crystallize from a carried-forward line (no `[evidence:]` tag) left
+  the pattern with no evidence, so associative recall could no longer reach it.
+  `CrystalStore.update(evidence=...)` still sets or prunes evidence explicitly.
 - `CrystalStore.ground_empty_evidence(store, limit=4, dry_run=False)` and
   `anneal-memory crystal ground-evidence [--limit N] [--dry-run]`: for each live pattern with
-  no evidence, record the newest live episodes that name the pattern as a whole word.
-  Patterns that already have evidence are never touched. This is lexical grounding: an
-  episode that names a pattern cites it, it does not prove it.
+  no evidence, record the oldest live episodes that name the pattern as a whole word and name
+  no other live pattern. An episode naming several patterns (an end-of-day log) would become
+  a hub that recall discounts for every pattern citing it, so it is skipped and counted. The
+  ids are marked provisional (`provisional_evidence`), and the first real evidence a
+  crystallize brings replaces them. This is lexical grounding: an episode that names a
+  pattern cites it, it does not prove it.
 
 ### Fixed — team-status counts imported team entries only (L3 on the v3 seam)
-- The count of unmanaged rewired links now requires the hidden episode to carry team-import's
-  ledger metadata, not only a `team:` source, and the line says it counts link rows.
+- The count of unmanaged rewired links now requires the hidden episode to be a team entry as
+  the importer reads one (a `team:` source and a string `team.entry_id` in its metadata), not
+  only a `team:` source, and the line says it counts link rows that no snapshot owns.
 
 ### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
 - `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one

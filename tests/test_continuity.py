@@ -4609,10 +4609,11 @@ class TestCatastrophicShrinkGate:
         store.set_section_schema(FLOW_SCHEMA)
         try:
             self._wrap(store, self._flow_prior(), "2026-05-30")
-            assert "allow_shrink" not in self._saved_events(store)[-1]["data"]
+            assert self._saved_events(store)[-1]["data"]["allow_shrink"] == {
+                "requested": False}
             self._wrap(store, self._flow_collapsed(), "2026-05-31", allow_shrink=True)
             trace = self._saved_events(store)[-1]["data"]["allow_shrink"]
-            assert trace["refusal_suppressed"] is True
+            assert trace["requested"] is True and trace["refusal_suppressed"] is True
             assert "collapses protected memory" in trace["refusal"]
         finally:
             store.close()
@@ -4625,7 +4626,7 @@ class TestCatastrophicShrinkGate:
             self._wrap(store, self._flow_prior(), "2026-05-30")
             self._wrap(store, self._flow_prior(), "2026-05-31", allow_shrink=True)
             assert self._saved_events(store)[-1]["data"]["allow_shrink"] == {
-                "refusal_suppressed": False}
+                "requested": True, "refusal_suppressed": False}
         finally:
             store.close()
 

@@ -1721,6 +1721,17 @@ def _keyword_like_pattern(keyword: str) -> str:
     return f"%{escaped}%"
 
 
+def _team_entry_id_of(metadata: Any) -> str | None:
+    """The ledger entry id an episode's metadata carries, as the importer wrote it,
+    or None (unparseable metadata, no ``team`` object, or a non-string id)."""
+    try:
+        team = json.loads(metadata).get("team") if metadata else None
+    except (ValueError, TypeError, AttributeError):
+        return None
+    entry = team.get("entry_id") if isinstance(team, dict) else None
+    return entry if isinstance(entry, str) else None
+
+
 def _hidden_by_supersession_sql(until: str | None) -> tuple[str, list[str]]:
     """SQL selecting every episode id hidden by a supersession, and its params.
 
@@ -3141,22 +3152,22 @@ class Store:
                         "FROM team_snapshot ORDER BY root, key").fetchall()]
                 overrides = self._conn.execute(
                     "SELECT COUNT(*) FROM team_overrides").fetchone()[0]
-                unmanaged = self._conn.execute(
-                    # Any unowned rewired row that hides a TEAM episode, whatever
-                    # its linker is (seam doc L3 1006, codex: A(team) -> C(local)
-                    # was uncounted). A team episode is one team-import wrote: the
-                    # ledger metadata, not the label (a local record may carry a
-                    # ``team:`` source; L3 1007, codex). json_valid first: one
-                    # malformed row would otherwise fail the query into ``empty``.
-                    """SELECT COUNT(*) FROM supersessions s WHERE s.source = 'rewired'
-                       AND NOT EXISTS (SELECT 1 FROM team_snapshot_rows o
-                                       WHERE o.old_id = s.old_id AND o.new_id = s.new_id)
-                       AND EXISTS (SELECT 1 FROM episodes e WHERE e.id = s.old_id
-                                   AND e.source >= 'team:' AND e.source < 'team;'
-                                   AND CASE WHEN json_valid(e.metadata) THEN
-                                       json_extract(e.metadata, '$.team.entry_id') END
-                                       IS NOT NULL)"""
-                ).fetchone()[0]
+                # Any unowned rewired row that hides a team entry, whatever its
+                # linker is (seam doc L3 1006, codex: A(team) -> C(local) was
+                # uncounted). A team entry is what the importer treats as one: a
+                # ``team:`` source AND metadata carrying a string ``team.entry_id``
+                # (L3 1007, codex: a label alone is not one). Checked here in Python,
+                # as ``_team_held`` does, so no JSON1 function can fail the query.
+                unmanaged = sum(
+                    1 for (meta,) in self._conn.execute(
+                        """SELECT e.metadata FROM supersessions s
+                           JOIN episodes e ON e.id = s.old_id
+                           WHERE s.source = 'rewired'
+                           AND e.source >= 'team:' AND e.source < 'team;'
+                           AND NOT EXISTS (SELECT 1 FROM team_snapshot_rows o
+                                           WHERE o.old_id = s.old_id
+                                           AND o.new_id = s.new_id)""")
+                    if _team_entry_id_of(meta) is not None)
                 notes = [dict(r) for r in self._conn.execute(
                     "SELECT key, kind, entry_id, detail FROM team_snapshot_notes "
                     "ORDER BY key, kind, entry_id").fetchall()]
@@ -3771,12 +3782,7 @@ class Store:
             "SELECT source, metadata FROM episodes WHERE id = ?", (episode_id,)).fetchone()
         if row is None or not str(row["source"]).startswith("team:"):
             return None
-        try:
-            team = json.loads(row["metadata"]).get("team")
-        except (TypeError, ValueError, AttributeError):
-            return None
-        eid = team.get("entry_id") if isinstance(team, dict) else None
-        return eid if isinstance(eid, str) else None
+        return _team_entry_id_of(row["metadata"])
 
     def _rewire_one(self, start: str, first: str, cur: str) -> None:
         """Link ``start`` past the removed ``first`` .. to ``cur`` (a 'rewired' row),

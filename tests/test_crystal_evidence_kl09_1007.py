@@ -3,7 +3,7 @@
 Two paths produced it: a crystallize from a carried-forward line (no [evidence:] tag)
 and a re-crystallize, which REPLACED good evidence with that empty list."""
 from anneal_memory import Store
-from anneal_memory.crystal import CrystalStore
+from anneal_memory.crystal import PROVISIONAL_EVIDENCE, CrystalStore
 
 
 def test_recrystallize_without_evidence_keeps_the_old_evidence(tmp_path):
@@ -18,29 +18,73 @@ def test_recrystallize_without_evidence_keeps_the_old_evidence(tmp_path):
     assert cs.get("derive_dont_invent")["evidence"] == []
 
 
-def test_ground_empty_evidence(tmp_path):
-    s = Store(tmp_path / "m.db", audit=False)
+def test_revive_without_evidence_keeps_the_retired_rows(tmp_path):
     cs = CrystalStore(tmp_path / "c.json")
+    cs.crystallize(name="p", level=3, explanation="x", evidence=["aaaa1111"])
+    cs.retire("p", kind="obsolete", reason="t")
+    cs.crystallize(name="p", level=3, explanation="x")
+    assert cs.get("p")["evidence"] == ["aaaa1111"]
+    cs.retire("p", kind="obsolete", reason="t")
+    cs.crystallize(name="p", level=3, explanation="x", evidence=["cccc3333"])
+    assert cs.get("p")["evidence"] == ["cccc3333"]  # fresh evidence starts fresh
+
+
+def _store(tmp_path):
+    return Store(tmp_path / "m.db", audit=False), CrystalStore(tmp_path / "c.json")
+
+
+def test_ground_empty_evidence(tmp_path):
+    s, cs = _store(tmp_path)
     try:
-        hit = s.record("the seat re-derived it: derive_dont_invent applied", "observation")
+        first = s.record("the incident: we derive_dont_invent from PyPI", "observation")
         s.record("derive_dont_invent_more is a different name", "observation")
         s.record("deriveXdontXinvent must not match through LIKE wildcards", "observation")
+        s.record("derive_dont_invent-ish is hyphen-joined, not the name", "observation")
         old = s.record("old seam note naming derive_dont_invent, review rounds", "observation")
         new = s.record("corrected seam note, review rounds", "observation")
         assert s.supersede(old_id=old.id, new_id=new.id)
-        s.record("harness_before_model, cited", "observation")
+        later = s.record("again derive_dont_invent, later", "observation")
         cs.crystallize(name="derive_dont_invent", level=3, explanation="x")
         cs.crystallize(name="has_evidence", level=3, explanation="x", evidence=["cccc3333"])
         cs.crystallize(name="nobody_names_me", level=3, explanation="x")
 
-        dry = cs.ground_empty_evidence(s, dry_run=True)
-        assert dry == {"derive_dont_invent": [hit.id[:8]], "nobody_names_me": []}
+        dry = cs.ground_empty_evidence(s, dry_run=True, limit=1)
+        assert dry["derive_dont_invent"].status == "would_ground"
+        assert dry["derive_dont_invent"].evidence == [first.id[:8]]   # OLDEST first
+        assert dry["nobody_names_me"].status == "no_episode"
+        assert "has_evidence" not in dry
         assert cs.get("derive_dont_invent")["evidence"] == []
 
-        assert cs.ground_empty_evidence(s) == dry
-        got = cs.get("derive_dont_invent")
-        assert got["evidence"] == [hit.id[:8]] and "ground_empty_evidence" in got["notes"][-1]
+        got = cs.ground_empty_evidence(s)
+        assert got["derive_dont_invent"].evidence == [first.id[:8], later.id[:8]]
+        rec = cs.get("derive_dont_invent")
+        assert rec["evidence"] == [first.id[:8], later.id[:8]]
+        assert rec[PROVISIONAL_EVIDENCE] == rec["evidence"]
         assert cs.get("has_evidence")["evidence"] == ["cccc3333"]
-        assert cs.ground_empty_evidence(s) == {"nobody_names_me": []}  # idempotent
+        assert list(cs.ground_empty_evidence(s)) == ["nobody_names_me"]   # idempotent
+
+        # the first REAL evidence replaces the provisional ids
+        cs.crystallize(name="derive_dont_invent", level=4, explanation="y",
+                       evidence=["dddd4444"])
+        rec = cs.get("derive_dont_invent")
+        assert rec["evidence"] == ["dddd4444"] and PROVISIONAL_EVIDENCE not in rec
+    finally:
+        s.close()
+
+
+def test_an_episode_naming_several_live_patterns_is_not_used(tmp_path):
+    """L2 1007 [run]: an end-of-day log naming many patterns, used as everyone's
+    evidence, becomes a hub the evidence edge discounts for all of them."""
+    s, cs = _store(tmp_path)
+    try:
+        s.record("EOD: alpha_pattern, beta_pattern and gamma_pattern all fired", "observation")
+        own = s.record("the beta_pattern incident itself", "observation")
+        for n in ("alpha_pattern", "beta_pattern", "gamma_pattern"):
+            cs.crystallize(name=n, level=3, explanation="x")
+        got = cs.ground_empty_evidence(s)
+        assert got["beta_pattern"].evidence == [own.id[:8]]
+        assert got["beta_pattern"].hubs_skipped == 1
+        assert got["alpha_pattern"].status == "no_episode"
+        assert got["alpha_pattern"].hubs_skipped == 1
     finally:
         s.close()

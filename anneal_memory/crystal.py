@@ -191,6 +191,20 @@ class CrystalError(AnnealMemoryError):
     """
 
 
+# Field on a crystal record listing evidence ids ground_empty_evidence recorded (KL-09).
+PROVISIONAL_EVIDENCE = "provisional_evidence"
+# How many naming episodes ground_empty_evidence reads per pattern before picking.
+_GROUNDING_SCAN_CAP = 5000
+
+
+class GroundingResult(NamedTuple):
+    """One pattern's outcome in :meth:`CrystalStore.ground_empty_evidence`."""
+
+    status: str  # grounded | would_ground | no_episode | conflict
+    evidence: list[str]
+    hubs_skipped: int  # naming episodes skipped because they name other live patterns
+
+
 class CrystalConflictError(CrystalError):
     """A compare-and-mutate (``expect=``) found a different revision than the
     caller expected, so NOTHING was written.
@@ -638,7 +652,11 @@ class CrystalStore:
         and belongs in the working set). There is NO UPPER BOUND — the level is the
         strength axis and a pattern re-earned many times keeps climbing. ``evidence``
         is the list of episode ids that grounded the pattern — the substrate for
-        associative retrieval (query → matched evidence episode → pattern).
+        associative retrieval (query → matched evidence episode → pattern). Evidence
+        ACCUMULATES: an upsert adds the given ids to the stored ones, and a revive
+        with none keeps the retired row's. Ids recorded by
+        :meth:`ground_empty_evidence` are provisional and the first real evidence
+        replaces them. To set or prune evidence, use :meth:`update`.
         ``permanence`` × ``activation_mode`` is the 2-axis routing record; the store
         holds the ``timeless`` × ``just-in-time`` bulk, but the tags are kept on every
         row so a later re-route is auditable.
@@ -688,11 +706,18 @@ class CrystalStore:
                 existing["explanation"] = explanation
                 # KL-09 (2026-10-07): evidence accumulates. A re-crystallize from a
                 # carried-forward line has no [evidence:] tag, and replacing with it
-                # erased the episodes the evidence edge recalls through. update()
-                # stays the explicit way to set or prune evidence.
+                # erased the episodes the evidence edge recalls through. Ids that
+                # ground_empty_evidence recorded are provisional: the first real
+                # evidence replaces them. update() stays the explicit way to set or
+                # prune evidence.
+                row = cast(dict, existing)
+                provisional = set(row.get(PROVISIONAL_EVIDENCE) or [])
                 prior_evidence = [e for e in (existing.get("evidence") or [])
-                                  if isinstance(e, str)]
+                                  if isinstance(e, str)
+                                  and not (evidence_clean and e in provisional)]
                 existing["evidence"] = list(dict.fromkeys([*prior_evidence, *evidence_clean]))
+                if evidence_clean:
+                    row.pop(PROVISIONAL_EVIDENCE, None)
                 existing["permanence"] = permanence
                 existing["activation_mode"] = activation_mode
                 existing["tags"] = tags_clean
@@ -728,6 +753,14 @@ class CrystalStore:
                 for key in ("surfaced_count", "last_surfaced_on"):
                     if key in prior_row:
                         cast(dict, item)[key] = prior_row[key]
+                # KL-09: a revive with no evidence keeps the retired row's (and its
+                # provisional mark); a revive WITH evidence starts from it alone.
+                if not evidence_clean:
+                    item["evidence"] = [e for e in (revived.get("evidence") or [])
+                                        if isinstance(e, str)]
+                    if prior_row.get(PROVISIONAL_EVIDENCE):
+                        cast(dict, item)[PROVISIONAL_EVIDENCE] = list(
+                            prior_row[PROVISIONAL_EVIDENCE])
                 prior: RetirementDict | dict = revived.get("retirement") or {}
                 item["notes"] = [
                     f"[{now}] re-crystallized after retirement "
@@ -928,38 +961,75 @@ class CrystalStore:
         limit: int = 4,
         dry_run: bool = False,
         today: date | None = None,
-    ) -> dict[str, list[str]]:
-        """Fill the evidence of each live pattern that has none, from the newest
-        ``limit`` live (not superseded) episodes in ``store`` whose content contains
-        the pattern's exact name, as a whole word (KL-09).
+    ) -> dict[str, GroundingResult]:
+        """Fill the evidence of each live pattern that has none, from the OLDEST
+        ``limit`` live (not superseded) episodes in ``store`` that name the pattern as
+        a whole word and name no other live pattern (KL-09).
 
-        Lexical grounding only: an episode that names the pattern is a citation of
-        it, not proof it supports the claim. Returns ``{name: ids}`` for every
-        pattern that had no evidence, ``[]`` where no episode names it. Patterns
-        that already carry evidence are never touched. With ``dry_run`` nothing is
-        written. Each write is compare-and-mutate on the record read here, so a
-        pattern changed concurrently is skipped (reported with ``[]``) rather than
-        overwritten."""
+        Oldest, because the first episodes to name a pattern sit nearest the incident
+        that produced it; later ones are mostly summaries. An episode naming two or
+        more live patterns (an end-of-day or desk log) is skipped: as shared evidence
+        it would become a hub, and the evidence edge discounts a hub for every
+        pattern that cites it, including ones already grounded on it. Lexical
+        grounding only: an episode that names a pattern cites it, it does not prove
+        it. The ids are recorded as provisional; the first real evidence a
+        crystallize brings replaces them.
+
+        Returns ``{name: GroundingResult}`` for every live pattern that had no
+        evidence. ``status`` is ``grounded`` (or ``would_ground`` with ``dry_run``),
+        ``no_episode`` or ``conflict`` (the pattern changed while this ran; it is
+        left as it is). Patterns that already have evidence are never touched."""
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
             raise ValueError(f"limit must be a positive int (got {limit!r}).")
-        out: dict[str, list[str]] = {}
-        for item in self.active():
+        live = self.active()
+        bounded = {c["name"]: re.compile(
+            rf"(?<![a-z0-9_\-]){re.escape(c['name'].lower())}(?![a-z0-9_\-])")
+            for c in live}
+        out: dict[str, GroundingResult] = {}
+        for item in live:
             if any(isinstance(e, str) for e in (item.get("evidence") or [])):
                 continue
             name = item["name"]
-            found, _, _ = store.keyword_candidates([name], limit_per_keyword=limit * 5)
-            whole = re.compile(rf"(?<![a-z0-9_]){re.escape(name.lower())}(?![a-z0-9_])")
-            ids = [i[:8] for i, ep in found.items() if whole.search(ep.content.lower())][:limit]
-            out[name] = ids
-            if ids and not dry_run:
-                try:
-                    self.update(
-                        name, evidence=ids, expect=item["rev"], today=today,
-                        add_note=f"evidence grounded from {len(ids)} episode(s) "
-                                 "naming the pattern (ground_empty_evidence)")
-                except CrystalConflictError:
-                    out[name] = []
+            found, _, _ = store.keyword_candidates(
+                [name], limit_per_keyword=_GROUNDING_SCAN_CAP)
+            ids: list[str] = []
+            hubs = 0
+            for ep in sorted(found.values(), key=lambda e: (e.timestamp, e.id)):
+                text = ep.content.lower()
+                if not bounded[name].search(text):
+                    continue
+                if sum(1 for rx in bounded.values() if rx.search(text)) > 1:
+                    hubs += 1
+                    continue
+                ids.append(ep.id[:8])
+                if len(ids) == limit:
+                    break
+            status = "no_episode"
+            if ids:
+                status = "would_ground" if dry_run else "grounded"
+                if not dry_run:
+                    try:
+                        self._set_provisional_evidence(name, ids, item["rev"], today)
+                    except CrystalConflictError:
+                        status, ids = "conflict", []
+            out[name] = GroundingResult(status=status, evidence=ids, hubs_skipped=hubs)
         return out
+
+    def _set_provisional_evidence(
+        self, name: str, ids: list[str], expect: str, today: date | None,
+    ) -> None:
+        stamp = (today or date.today()).isoformat()
+        with self._transaction() as data:
+            self._check_expect(data, name, expect)
+            item = self._require_live(data, name)
+            item["evidence"] = list(ids)
+            cast(dict, item)[PROVISIONAL_EVIDENCE] = list(ids)
+            if not isinstance(item.get("notes"), list):
+                item["notes"] = []
+            item["notes"].append(
+                f"[{stamp}] provisional evidence from {len(ids)} episode(s) naming the "
+                f"pattern (ground_empty_evidence)")
+            item["rev"] = _rev(cast(dict, item), live=True)
 
     # --- public API: retire (the membrane out — crystallized ≠ immortal) ----
 

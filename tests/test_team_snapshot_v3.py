@@ -797,8 +797,14 @@ def test_unmanaged_rewired_counts_imported_team_entries_only(tmp_path):
                             "VALUES (?, ?, 'rewired')", (old, local.id))
         s._conn.commit()
         assert s.team_snapshot_status()["unmanaged_rewired"] == 1
-        # a malformed metadata row elsewhere must not zero the count
-        s._conn.execute("UPDATE episodes SET metadata = '{not json' WHERE id = ?", (local.id,))
+        # L1 1007: malformed metadata, or a non-string entry id, on a team-labelled
+        # OLD endpoint is not a team entry and must not fail the whole status
+        s._conn.execute("UPDATE episodes SET metadata = '{not json' WHERE id = ?", (fake.id,))
+        s._conn.commit()
+        st = s.team_snapshot_status()
+        assert st["unmanaged_rewired"] == 1 and st["protected_episodes"] >= 0
+        s._conn.execute("""UPDATE episodes SET metadata = '{"team": {"entry_id": 7}}'
+                           WHERE id = ?""", (fake.id,))
         s._conn.commit()
         assert s.team_snapshot_status()["unmanaged_rewired"] == 1
     finally:
@@ -827,4 +833,23 @@ def test_team_status_cli_shows_unmanaged_with_no_keys(tmp_path, capsys, monkeypa
     monkeypatch.setattr(sys, "argv", ["anneal-memory", "--db", str(db), "team-status"])
     main()
     out = capsys.readouterr().out
-    assert "No team snapshot" in out and "hiding an imported team entry" in out and out.rstrip().endswith("1")
+    assert "No team snapshot" in out and "no snapshot owns, hiding" in out and out.rstrip().endswith("1")
+
+
+def test_an_existing_unowned_rewired_row_is_never_adopted_by_a_stream_that_honours_it(tmp_path):
+    """L1 1007 (mutation-backed): the importer's "an existing unowned row is the
+    operator's" branch. Unconditional adoption passed every other team test."""
+    a = ledger("alice", [{**RULING, "ts": "2026-01-01T00:00:00Z"}])[0]
+    c = ledger("cy", [{"type": "retire", "supersedes": [A0], "ts": "2026-01-03T00:00:00Z"}])[0]
+    s = Store(tmp_path / "op.db", audit=False)
+    try:
+        import_ledger(s, [a, c])                                   # no links
+        ea, ec = ep(s, A0), ep(s, f"{_prefix('cy')}-20261004120000-00000000")
+        s._conn.execute("INSERT INTO supersessions (old_id, new_id, source) "
+                        "VALUES (?, ?, 'rewired')", (ea, ec))
+        s._conn.commit()
+        import_ledger(s, v3([(a, True, []), (c, True, [A0])]))     # honours (A, C)
+        assert (ea, ec) in links(s) and not s.team_owned(old_id=ea, new_id=ec)
+        assert s.team_snapshot_status()["unmanaged_rewired"] == 1
+    finally:
+        s.close()

@@ -322,23 +322,30 @@ def _is_patterns_heading(line: str) -> bool:
     return _is_graduating_heading(line)
 
 
-# Stop words for explanation overlap checking: function words only (pronouns,
-# determiners, prepositions, conjunctions, auxiliaries, number words). KL-01,
-# 2026-10-07: the old list let "while"/"only"/"when"/"one" count as shared
-# vocabulary, and the cross-session gate demoted real patterns on them (flow's save
-# audit). Content words stay meaningful on purpose: grounding needs them.
+# Stop words for explanation overlap checking (grounding: check 2, the preservation
+# novelty check, and the store's supersession floor).
 _STOP_WORDS = frozenset(
-    "a an the is are was were be been being have has had having do does did doing "
-    "will would shall should may might must can could this that these those "
-    "it its itself he him himself she hers herself they them themselves we us "
-    "ourselves you your yours yourself i me my myself mine our ours his her their "
-    "theirs what which who whom whose in on at to for of by with from about against "
-    "between into through during before after above below up down out off over "
-    "under again further then once here there when where why how all any both each "
-    "few more most other some such and or but not no nor so if as because until "
-    "while than too very only own same just now also still even ever yet already "
-    "much many another within without upon across since though although whether "
-    "unless via every one two three four five six seven eight nine ten am".split()
+    "a an the is are was were be been being have has had do does did "
+    "will would shall should may might can could this that these those "
+    "it its he she they we you i me my our his her their in on at to "
+    "for of by with from and or but not no nor so if as".split()
+)
+
+# KL-01 (2026-10-07): the cross-session-overlap check (check 3 and carryforward's guard)
+# also drops every other function word and the number words. With the grounding list
+# alone, "while"/"only"/"when"/"one" counted as shared vocabulary and real patterns were
+# demoted on them (flow's save audit). Grounding keeps the shorter list on purpose: an
+# explanation like "down again after restart" grounds on words such as "down" and "two",
+# and a longer list there demotes real citations (L2 1007, run).
+_SYCOPHANCY_STOP_WORDS = _STOP_WORDS | frozenset(
+    "having doing must itself him himself hers herself them themselves us ourselves "
+    "your yours yourself myself mine ours theirs what which who whom whose about "
+    "against between into through during before after above below up down out off "
+    "over under again further then once here there when where why how all any both "
+    "each few more most other some such because until while than too very only own "
+    "same just now also still even ever yet already much many another within without "
+    "upon across since though although whether unless via every one two three four "
+    "five six seven eight nine ten am".split()
 )
 
 
@@ -911,7 +918,8 @@ def validate_graduations(
                             best_overlap: set[str] = set()
                             best_prior = ""
                             for prior in prior_explanations:
-                                shared = _meaningful_word_overlap(explanation, prior)
+                                shared = _meaningful_word_overlap(
+                                    explanation, prior, stop=_SYCOPHANCY_STOP_WORDS)
                                 if len(shared) > len(best_overlap):
                                     best_overlap = shared
                                     best_prior = prior
@@ -1145,7 +1153,9 @@ def validate_graduations(
     )
 
 
-def _meaningful_word_overlap(text_a: str, text_b: str) -> set[str]:
+def _meaningful_word_overlap(
+    text_a: str, text_b: str, *, stop: frozenset[str] = _STOP_WORDS
+) -> set[str]:
     """Return the set of meaningful words shared by two explanation texts.
 
     Uses the same tokenization rule as :func:`check_explanation_overlap`:
@@ -1154,16 +1164,16 @@ def _meaningful_word_overlap(text_a: str, text_b: str) -> set[str]:
     surface which specific words triggered a cross-session collision —
     valuable for the audit log and for operator review.
     """
-    return _meaningful_words(text_a) & _meaningful_words(text_b)
+    return _meaningful_words(text_a, stop=stop) & _meaningful_words(text_b, stop=stop)
 
 
-def _meaningful_words(text: str) -> set[str]:
+def _meaningful_words(text: str, *, stop: frozenset[str] = _STOP_WORDS) -> set[str]:
     """The meaningful-word set of a text: lowercased alnum tokens of length >2,
     minus stop words. Shared tokenizer for :func:`_meaningful_word_overlap` and
     the AM-PRESERVE fresh-specific-grounding novelty check (codex L3)."""
     return {
         w for w in re.split(r"[^a-zA-Z0-9]+", text.lower())
-        if len(w) > 2 and w not in _STOP_WORDS
+        if len(w) > 2 and w not in stop
     }
 
 
@@ -2117,7 +2127,9 @@ def _carryforward_decision(
             history.get("last_seen_at"), today, carryforward_cold_days
         ):
             for prior in priors:
-                if len(_meaningful_word_overlap(explanation, prior)) >= cross_session_overlap_threshold:
+                if len(_meaningful_word_overlap(
+                        explanation, prior, stop=_SYCOPHANCY_STOP_WORDS,
+                )) >= cross_session_overlap_threshold:
                     return None
     # AM-PROVENANCE (Slice A, L1 MED-2): thread provenance through the CITED path
     # too, symmetric with the bare path. A warm at-peak line whose fresh

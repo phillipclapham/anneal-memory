@@ -2853,6 +2853,13 @@ def validated_save_continuity(
 
     if not text or not text.strip():
         raise ValueError("Continuity text cannot be empty")
+    # NOTHING UN-CANONICAL ENTERS (Phill 12:13, "(A)"; graduation.canonical_continuity_text).
+    # The pipeline has two inputs, and both are made canonical where they enter:
+    # the caller's text here, the prior continuity where it is loaded below. Every
+    # parser after this line (the rederive strip, the durable carry-forward and
+    # its drop markers, the gate) reads one grammar. L3 r8: an NBSP-indented
+    # ``[drop-durable:]`` and a VT-hidden ``## State`` verdict were parsed raw.
+    text = canonical_continuity_text(text)
 
     # Validate structure (all sections declared by the store's schema). The
     # schema is read once here and reused for the schema-aware graduation gate
@@ -2867,6 +2874,8 @@ def validated_save_continuity(
     # Loaded once here and reused by the durable-facts invariant just below,
     # the catastrophic-shrink gate and the silent-omission audit further down.
     prior_continuity = store.load_continuity()
+    if prior_continuity is not None:
+        prior_continuity = canonical_continuity_text(prior_continuity)
     # Durable facts (B1): before anything validates, hashes or writes the text,
     # carry every prior durable line forward (re-inserting what the composer
     # left out) and apply the composer's drop markers. Never a refusal. A
@@ -2874,10 +2883,8 @@ def validated_save_continuity(
     text, durable_report = enforce_durable_facts(
         prior_continuity, text, section_schema
     )
-    # One text grammar for the FINAL text, after the rederive strip and the durable
-    # carry-forward, before anything parses it (graduation.canonical_continuity_text;
-    # L3 r7: canonicalising the caller's text first let a re-inserted prior line
-    # carry a terminator past the gate).
+    # Backstop: both inputs are already canonical, so this is the identity unless a
+    # step above introduced a non-canonical character itself (idempotent, cheap).
     text = canonical_continuity_text(text)
     grad_headings = graduating_headings(section_schema)
     # Reject ambiguous merged headings (e.g. "## Patterns and Understanding")

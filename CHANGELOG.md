@@ -23,8 +23,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   Renaming a pattern to its own name changes nothing. A name's level is its highest line across graduating sections. Only a line's own marker earns the
   rung. Co-citation links from a validated line still form when the line is cut (the episodes were cited together
   and grounded; the cut is about the level).
-- One text grammar before the gate reads anything. `validated_save_continuity` makes the FINAL text (after the
-  rederive strip and the durable carry-forward) canonical before any check parses it: every line terminator other
+- One text grammar before the gate reads anything. `validated_save_continuity` makes both of its inputs canonical
+  where they enter (the caller's text, and the prior continuity as loaded), so the rederive strip, the durable
+  carry-forward and its drop markers, and the gate all read one grammar (the final text is canonicalised again as
+  an idempotent backstop): every line terminator other
   than the newline (CR, VT, FF, FS, GS, RS, NEL, U+2028, U+2029) becomes a newline (the CR of a CRLF pair is kept,
   so a CRLF file still saves as CRLF), every other Unicode space becomes an ASCII space, and non-ASCII digits in a
   `| Nx (YYYY-MM-DD)` marker become ASCII. `## Notes<CR>## Patterns<CR>- x | 999x` was one non-graduating heading

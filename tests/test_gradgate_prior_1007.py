@@ -648,5 +648,57 @@ def test_durable_line_carrying_a_terminator_cannot_hide_a_section(tmp_path):
     finally:
         store.close()
     assert "\x0b" not in saved
+    # Since r8 (A) the PRIOR is canonical as loaded, so ``sneaky`` is a prior
+    # Patterns line, not part of a durable fact: never carried forward, and the
+    # 999x never reaches the file. Absent or bounded, never above 1x.
     levels = [int(m.group(1)) for m in re.finditer(r"sneaky\s*\|\s*(\d+)x", saved)]
-    assert levels and max(levels) <= 1, saved
+    assert not levels or max(levels) <= 1, saved
+
+
+# --- L3 r8 (1008+11), Phill 12:13 "(A)": nothing un-canonical enters the pipeline ----
+def test_an_nbsp_indented_drop_marker_is_applied_in_the_same_save(tmp_path):
+    """codex r8 HIGH: enforce_durable_facts ran before the canonicaliser, so an
+    NBSP-indented ``[drop-durable: …]`` was not a marker; the fact was re-inserted
+    and the now-ASCII marker deleted it one wrap late. Canonical at entry, the
+    drop applies in THIS save and no marker text persists."""
+    import warnings
+    from tests.test_durable import ALLERGY, FLOW_SCHEMA, partnership_text
+    fact = ALLERGY[2:]
+    store = Store(tmp_path / "d.db", project_name="T", section_schema=FLOW_SCHEMA)
+    try:
+        for n, body in enumerate((ALLERGY, " [drop-durable: " + fact + "]")):
+            store.record(f"episode {n}", EpisodeType.OBSERVATION)
+            prepare_wrap(store)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                validated_save_continuity(store, partnership_text(body), today=TODAY)
+        saved = store.load_continuity()
+    finally:
+        store.close()
+    assert "tree nut" not in saved and "drop-durable" not in saved, saved
+
+
+def test_a_prior_with_a_hidden_durable_heading_is_read_canonically(tmp_path):
+    """The prior continuity as loaded is canonical too: a raw-saved prior whose
+    Durable section opens behind a VT carries its fact forward like any other."""
+    import warnings
+    from tests.test_durable import FLOW_SCHEMA, partnership_text
+    store = Store(tmp_path / "d.db", project_name="T", section_schema=FLOW_SCHEMA)
+    try:
+        store.record("episode", EpisodeType.OBSERVATION)
+        prepare_wrap(store)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            validated_save_continuity(store, partnership_text(None), today=TODAY)
+        raw = partnership_text(None).replace(
+            "## Patterns", "## Notes\x0b## Durable Facts\x0b- kept fact\n\n## Patterns")
+        store.save_continuity(raw)  # raw, outside the gate
+        store.record("episode 2", EpisodeType.OBSERVATION)
+        prepare_wrap(store)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            validated_save_continuity(store, partnership_text(None), today=TODAY)
+        saved = store.load_continuity()
+    finally:
+        store.close()
+    assert saved.count("- kept fact") == 1 and "\x0b" not in saved, saved

@@ -312,8 +312,10 @@ def test_the_worklist_takes_only_validated_lines_and_any_level(tmp_path):  # cod
         s.close()
 
 
-@pytest.mark.parametrize("tok", ["1" + "0" * 19, "1" + "0" * 4300, "02", "٢", "٢٢", "００", "0"],
-                         ids=["20d", "4301d", "zero-pad", "arabic", "arabic2", "fullwidth", "zero"])
+@pytest.mark.parametrize(
+    "tok", ["1" + "0" * 19, "1" + "0" * 4300, "02", "٢", "٢٢", "００", "0", "፪", "²", "②"],
+    ids=["20d", "4301d", "zero-pad", "arabic", "arabic2", "fullwidth", "zero", "ethiopic",
+         "superscript", "circled"])
 def test_an_oversized_level_neither_raises_nor_graduates(tmp_path, tok):  # codex MED/LOW
     import warnings
     s = Store(tmp_path / "m.db", project_name="t")

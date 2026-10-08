@@ -107,7 +107,7 @@ try:  # POSIX advisory locking; absent on Windows (see CrystalStore._transaction
 except ImportError:  # pragma: no cover - exercised only on non-POSIX platforms
     fcntl = None  # type: ignore[assignment]
 
-from .graduation import _SCAFFOLD_TAG_RE, _STATE_PAREN_RE
+from .graduation import _LEVEL_ATOM, _SCAFFOLD_TAG_RE, _STATE_PAREN_RE
 from .store import AnnealMemoryError, Store
 
 CRYSTAL_SCHEMA_VERSION = 1
@@ -1292,10 +1292,10 @@ def _extract_pattern_meta(wrap_text: str, name: str) -> tuple[int | None, str, l
     # drops a mid-prose ``… name | Nx`` decoy outright (it isn't at the structural
     # start). Per-line search (no MULTILINE) so ``^`` anchors the line. The marker date
     # is captured HERE (group 2), not searched line-wide, so a date elsewhere can't fake
-    # ``has_date``; digits bounded (``\d{1,3}``) so a giant ``Nx`` can't ``ValueError``
-    # int() (no-raise contract). ``structural_invariants_beat_discipline``.
+    # ``has_date``; the level is graduation's one atom (no leading zero, below 10**9), so
+    # no non-canonical ``Nx`` reads as a level and none can ``ValueError`` int(). ``structural_invariants_beat_discipline``.
     marker_re = re.compile(
-        rf"^[ \t]*(?:[-*•>!✓][ \t]*)*{re.escape(name)}[ \t]*\|[ \t]*([0-9]{{1,3}})x\b"
+        rf"^[ \t]*(?:[-*•>!✓][ \t]*)*{re.escape(name)}[ \t]*\|[ \t]*({_LEVEL_ATOM})x\b"
         rf"[ \t]*(\(\d{{4}}-\d{{2}}-\d{{2}}\))?"
     )
     best_key: tuple[int, int, int] | None = None  # (has_date, level, order)

@@ -91,6 +91,15 @@ def test_metadata_pulled_from_matched_pattern_line():
     assert d.level == 3
     assert d.evidence_ids == ["a1b2c3d4", "e5f6g7h8"]
     assert d.explanation == "verify or surface before acting on cached state."
+    # One level atom (L3 r6): a canonical 4-digit level is read whole, and a
+    # non-canonical spelling is not read as a level at all.
+    for tok, want in (("1234", 1234), ("999999999", 999999999), ("02", None), ("007", None),
+                      ("١٢", None), ("1000000000", None)):
+        wrap = _wrap("verify_or_surface | crystallize | timeless | just-in-time",
+                     patterns=f"- verify_or_surface | {tok}x (2026-05-12) "
+                              f'[evidence: a1b2c3d4 "verify or surface."]')
+        (d,) = parse_crystal_decisions(wrap)
+        assert d.level == want, tok
 
 
 def test_pattern_line_without_evidence_tag():

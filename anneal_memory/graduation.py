@@ -99,12 +99,14 @@ _BARE_GRADUATION_RE = re.compile(
     rf"\|\s*{_PROVEN_LEVEL}x\s*\(([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})\)(?![ \t]*\[evidence:)[ \t]*"
 )
 
-# The one normalizer (see validate_graduations): any ``| <digits>x`` marker whose digits
-# are not exactly the atom. \d is Unicode on purpose here, to catch what the ASCII atom
-# refuses. Groups: (1) pipe, (2) digits, (3) optional date, (4) optional evidence tag.
+# The one normalizer (see validate_graduations): any ``| <token>x`` marker. The token is any
+# run of characters other than space, ``|``, ``()`` and ``[]``, so numerals the ASCII atom
+# refuses (Unicode digits, ``²``, ``①``) are candidates; _cap() classifies them. Groups:
+# (1) pipe, (2) token, (3) optional date, (4) optional evidence tag (its body bounded, so a
+# line of unterminated tags cannot make the scan quadratic).
 _ANY_LEVEL_MARKER_RE = re.compile(
-    r"(\|\s*)(\d+)x\b((?:\s*\([0-9]{4}-[0-9]{2}-[0-9]{2}\))?)"
-    r'(\s*\[evidence:(?:[^\]"]|"[^"]*")*\])?'
+    r"(\|\s*)([^\s|()\[\]]+?)x\b((?:\s*\([0-9]{4}-[0-9]{2}-[0-9]{2}\))?)"
+    r'(\s*\[evidence:(?:[^\]"]|"[^"]*"){0,4096}\])?'
 )
 _LEVEL_ATOM_RE = re.compile(_LEVEL_ATOM)
 
@@ -688,8 +690,9 @@ def validate_graduations(
 
     def _cap(m: "re.Match[str]") -> str:
         nonlocal level_capped
-        if _LEVEL_ATOM_RE.fullmatch(m.group(2)) and m.group(2).isascii():
-            return m.group(0)
+        tok = m.group(2)
+        if _LEVEL_ATOM_RE.fullmatch(tok) or not tok.isnumeric():
+            return m.group(0)  # canonical, or not a level token at all
         level_capped += 1
         return f"{m.group(1)}1x{m.group(3)} (level-capped)"
 

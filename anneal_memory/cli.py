@@ -343,6 +343,11 @@ def _existing_db_path(args: argparse.Namespace, *, require_file: bool = False) -
     if require_file and not is_file:
         print(f"Error: not a database file: {db_path}", file=sys.stderr)
         sys.exit(1)
+    try:  # every --db command passes here: an SQLite URI refuses once, cleanly
+        sqlite_path(db_path)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     return db_path
 
 
@@ -1903,18 +1908,24 @@ def cmd_export(args: argparse.Namespace) -> None:
         out = Path(args.output) if args.output else Path(f"anneal-export-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db")
         try:  # both paths checked before either connection opens (walopen L3 r7)
             src_target, dst_target = sqlite_path(db_path), sqlite_path(out)
+            if dst_target == ":memory:":
+                raise ValueError("an export needs a file to write; ':memory:' is not one")
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
-        src_conn = sqlite3.connect(src_target)
         try:
-            dst_conn = sqlite3.connect(dst_target)
+            src_conn = sqlite3.connect(src_target)
             try:
-                src_conn.backup(dst_conn)
+                dst_conn = sqlite3.connect(dst_target)
+                try:
+                    src_conn.backup(dst_conn)
+                finally:
+                    dst_conn.close()
             finally:
-                dst_conn.close()
-        finally:
-            src_conn.close()
+                src_conn.close()
+        except (ValueError, OSError, sqlite3.Error) as exc:  # NUL in a path, unwritable dir…
+            print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
+            sys.exit(1)
         if args.json:
             _print_json({"format": "sqlite", "path": str(out), "size_bytes": out.stat().st_size})
         else:
@@ -3574,7 +3585,7 @@ def _outcome_store_id(db_path: Path, *, mint: bool) -> str | None:
             if not _is_anneal_schema(store._conn):
                 refuse(not_anneal)
             sid = store.store_id
-    except (StoreError, OSError, sqlite3.Error) as exc:
+    except (StoreError, OSError, sqlite3.Error, ValueError) as exc:
         refuse(exc)
     if sid is not None or not mint:
         return sid

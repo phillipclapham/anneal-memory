@@ -376,6 +376,19 @@ class TestCmdSetSchema:
 # -- cmd_status tests --
 
 class TestCmdStatus:
+    def test_a_uri_db_path_refuses_cleanly(self, base_args, tmp_path, capsys, monkeypatch):
+        """walopen L3 r8 complement MED (reproduced 1008+11): `--db ./file:x.db`
+        with that file present reached Store() and raised a raw ValueError for
+        every command that opens the store. _existing_db_path refuses it once."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "file:x.db").write_bytes(b"")
+        base_args.db = "./file:x.db"
+        with pytest.raises(SystemExit) as exc:
+            cmd_status(base_args)
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert err.startswith("Error:") and "SQLite URI" in err
+
     def test_status_empty_store(self, base_args, capsys):
         # Create the store first
         store = Store(base_args.db)
@@ -1414,7 +1427,17 @@ class TestCmdExport:
         assert exc.value.code == 1
         err = capsys.readouterr().err
         assert err.startswith("Error:") and "SQLite URI" in err and "Traceback" not in err
-        assert not any(p.name.startswith("file") for p in tmp_path.iterdir())
+        assert not (tmp_path / "file:x.db?mode=rwc").exists()
+
+    @pytest.mark.parametrize("output", [":memory:", "bad\x00name.db"])
+    def test_export_sqlite_to_a_non_file_refuses_cleanly(self, base_args_with_data, output, capsys):
+        base_args_with_data.format = "sqlite"
+        base_args_with_data.output = output
+        with pytest.raises(SystemExit) as exc:
+            cmd_export(base_args_with_data)
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert err.startswith("Error:") and "Traceback" not in err
 
     def test_export_sqlite_json(self, base_args_with_data, tmp_path, capsys):
         out = str(tmp_path / "copy.db")

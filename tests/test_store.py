@@ -2,7 +2,10 @@
 
 import json
 import os
+import sqlite3
 import tempfile
+import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -4384,8 +4387,6 @@ class TestTheWriterSchemaFunctionLetsABumpRefuseOpenWriters:
 
 
 # --- WAL switch at open (moved from test_continuity_lock: not fcntl-gated, runs on Windows) ---
-import sqlite3 as _sqlite3_wal  # noqa: E402
-import time  # noqa: E402
 
 
 def test_new_store_open_survives_a_peer_holding_the_file_at_the_wal_switch(tmp_path):
@@ -4395,8 +4396,6 @@ def test_new_store_open_survives_a_peer_holding_the_file_at_the_wal_switch(tmp_p
     "database is locked" at t=0 (4 racing openers, ~1 run in 10). The open
     must retry the switch within the connection's busy budget instead.
     """
-    import sqlite3  # noqa: F811
-    import threading
 
     db = tmp_path / "fresh.db"
     holder = sqlite3.connect(str(db), isolation_level=None, check_same_thread=False)
@@ -4411,9 +4410,9 @@ def test_new_store_open_survives_a_peer_holding_the_file_at_the_wal_switch(tmp_p
         holder.execute("COMMIT")
 
     worker = threading.Thread(target=release, daemon=True)
+    started = time.monotonic()  # before the release clock starts (L3 r2 codex LOW)
     worker.start()
     try:
-        started = time.monotonic()
         s = Store(db)
         waited = time.monotonic() - started
         s.close()
@@ -4435,6 +4434,8 @@ def test_a_switch_that_reports_a_non_wal_mode_is_refused():
             self.v = v
         def fetchone(self):
             return self.v
+        def fetchall(self):
+            return [self.v]
 
     class _Conn:
         def execute(self, sql):
@@ -4442,5 +4443,16 @@ def test_a_switch_that_reports_a_non_wal_mode_is_refused():
 
     fake = Store.__new__(Store)
     fake._conn = _Conn()
-    with pytest.raises(_sqlite3_wal.OperationalError, match="WAL was not enabled"):
+    with pytest.raises(sqlite3.OperationalError, match="WAL was not enabled"):
         fake._enable_wal_with_retry()
+
+
+def test_an_in_memory_store_still_opens(tmp_path):
+    """L3 r2 (codex reproduced): SQLite reports ``memory`` for ``:memory:``,
+    which can never be WAL; the non-wal refusal must not break it."""
+    s = Store(":memory:", audit=False)
+    try:
+        s.record("an in-memory episode", "observation")
+        assert s._conn.execute("PRAGMA journal_mode").fetchone()[0] == "memory"
+    finally:
+        s.close()

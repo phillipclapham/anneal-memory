@@ -7169,14 +7169,15 @@ class Store:
         A switch that succeeds but reports a mode other than ``wal`` (SQLite
         returns the old mode when WAL cannot be enabled, e.g. a VFS without
         shared memory) is refused: the store's concurrency assumes WAL
-        (L3 r1, codex MED; it was accepted silently before).
+        (L3 r1, codex MED; it was accepted silently before). An in-memory
+        database reports ``memory`` and is accepted.
         """
         budget = self._conn.execute("PRAGMA busy_timeout").fetchone()[0] / 1000.0
         deadline = time.monotonic() + budget
         delay = 0.005
         while True:
             try:
-                row = self._conn.execute("PRAGMA journal_mode=WAL").fetchone()
+                rows = self._conn.execute("PRAGMA journal_mode=WAL").fetchall()
                 break
             except sqlite3.OperationalError as exc:
                 contended = _sqlite_error_is_contention(exc)
@@ -7185,8 +7186,11 @@ class Store:
                     raise
                 time.sleep(min(delay, remaining))
                 delay = min(delay * 2, 0.1)
-        mode = str(row[0]).lower() if row else ""
-        if mode != "wal":
+        mode = str(rows[0][0]).lower() if rows else ""
+        # ``memory`` is what SQLite reports for an in-memory database, which can
+        # never be WAL (L3 r2, codex reproduced: ``Store(":memory:")`` broke); a
+        # file-backed store reporting anything but ``wal`` is refused.
+        if mode not in ("wal", "memory"):
             raise sqlite3.OperationalError(
                 f"journal_mode=WAL was not enabled (SQLite reports {mode!r}); "
                 "anneal-memory needs WAL, which this filesystem or VFS refused"

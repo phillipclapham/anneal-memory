@@ -2960,9 +2960,9 @@ class AuditTrail:
         this: three entries deleted, reopen, one append, ``verify()`` valid with
         no gap). Within a week nothing on disk but the active file said it had
         entries. ``active_begun`` is that record, and it survives a restart.
-        Not refused: a week that is now sealed (``files`` has its period; a
-        rotation or adoption took it) or one ``audit-repair`` already recorded
-        as a gap."""
+        Not refused once the record is cleared: by a seal or adoption of that
+        file, or by ``audit-repair`` (a gap, or a sealed week whose first entry is
+        the recorded one)."""
         begun = vanished_active_week(manifest)
         if begun is None:
             return

@@ -4658,3 +4658,18 @@ def test_audit_repair_names_a_missing_active_file_as_lost_not_moved(tmp_path):
     assert out.returncode == 0, out.stderr
     assert "Recorded the missing active audit file m.audit.jsonl" in out.stdout
     assert "Set aside sealed file" not in out.stdout
+
+
+
+def test_a_uri_db_refuses_cleanly_for_a_command_that_builds_a_store_directly(tmp_path, monkeypatch):
+    """walopen L3 r9 codex MED (reproduced): `crystal recall` (and init, serve)
+    construct Store directly, past _existing_db_path. main() is the one boundary."""
+    import subprocess, sys
+    (tmp_path / "file:x.db").write_bytes(b"")
+    r = subprocess.run(
+        [sys.executable, "-m", "anneal_memory.cli", "--db", "./file:x.db",
+         "crystal", "recall", "two words"],
+        capture_output=True, text=True, cwd=tmp_path, timeout=60,
+    )
+    assert r.returncode == 1, r.stderr
+    assert r.stderr.startswith("Error:") and "Traceback" not in r.stderr, r.stderr

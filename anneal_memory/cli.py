@@ -40,6 +40,7 @@ Zero dependencies beyond Python stdlib.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import errno
 import json
 import os
@@ -133,6 +134,7 @@ from .crystal import (
 )
 from .retrieval import retrieve_patterns, retrieve_relevant, MAX_PATTERNS
 from .store import (
+    StorePathError,
     sqlite_path,
     register_writer_schema,
     Store,
@@ -1913,6 +1915,7 @@ def cmd_export(args: argparse.Namespace) -> None:
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
+        out_existed = out.exists()
         try:
             src_conn = sqlite3.connect(src_target)
             try:
@@ -1923,13 +1926,17 @@ def cmd_export(args: argparse.Namespace) -> None:
                     dst_conn.close()
             finally:
                 src_conn.close()
+            size = out.stat().st_size
         except (ValueError, OSError, sqlite3.Error) as exc:  # NUL in a path, unwritable dir…
+            if not out_existed:  # never leave a half-made file that looks like an export
+                with contextlib.suppress(OSError, ValueError):
+                    out.unlink()
             print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
             sys.exit(1)
         if args.json:
-            _print_json({"format": "sqlite", "path": str(out), "size_bytes": out.stat().st_size})
+            _print_json({"format": "sqlite", "path": str(out), "size_bytes": size})
         else:
-            print(f"Exported SQLite database to {out} ({out.stat().st_size:,} bytes)", file=sys.stderr)
+            print(f"Exported SQLite database to {out} ({size:,} bytes)", file=sys.stderr)
         return
 
     with _open_store(args) as store:
@@ -4785,6 +4792,12 @@ def main() -> None:
     # written. One boundary, all subcommands.
     try:
         args.func(args)
+    except StorePathError as exc:
+        # Any subcommand that reaches Store/sqlite_path with a URI-shaped path
+        # (crystal recall, init, serve build a Store directly): one clean refusal
+        # here, not one handler per call site (walopen L3 r9, codex, reproduced).
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     except StoreDatabaseError as exc:
         if not _is_write_lock_contention(exc):
             raise

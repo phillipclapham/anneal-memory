@@ -1855,6 +1855,12 @@ _PROTECTED_TEAM_EPISODES = (
 )
 
 
+class StorePathError(ValueError):
+    """A database path that reaches SQLite as a URI (see :func:`sqlite_path`).
+    A ``ValueError``, so existing callers are unchanged; its own class so the CLI
+    boundary can turn it into one clean refusal for every subcommand."""
+
+
 def sqlite_path(path: str | Path) -> str:
     """The exact string handed to ``sqlite3.connect`` for a database path; refuses
     an SQLite URI.
@@ -1870,7 +1876,7 @@ def sqlite_path(path: str | Path) -> str:
     """
     final = str(Path(path))
     if final.startswith("file:"):
-        raise ValueError(
+        raise StorePathError(
             f"Database path {str(path)!r} reaches SQLite as {final!r}, an SQLite URI; "
             "pass a filesystem path (or ':memory:'). URIs are not supported."
         )

@@ -40,7 +40,6 @@ Zero dependencies beyond Python stdlib.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import errno
 import json
 import os
@@ -1915,7 +1914,6 @@ def cmd_export(args: argparse.Namespace) -> None:
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
-        out_existed = out.exists()
         try:
             src_conn = sqlite3.connect(src_target)
             try:
@@ -1926,12 +1924,15 @@ def cmd_export(args: argparse.Namespace) -> None:
                     dst_conn.close()
             finally:
                 src_conn.close()
-            size = out.stat().st_size
         except (ValueError, OSError, sqlite3.Error) as exc:  # NUL in a path, unwritable dir…
-            if not out_existed:  # never leave a half-made file that looks like an export
-                with contextlib.suppress(OSError, ValueError):
-                    out.unlink()
+            # No cleanup of the destination: deciding "this file is mine" by an
+            # earlier exists() check deleted a peer's export (L3 r10, codex HIGH).
             print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            size = out.stat().st_size
+        except OSError as exc:
+            print(f"Error: exported to {out}, but cannot read it back: {exc}", file=sys.stderr)
             sys.exit(1)
         if args.json:
             _print_json({"format": "sqlite", "path": str(out), "size_bytes": size})
@@ -4768,7 +4769,11 @@ def main() -> None:
         # server-specific flags (--no-audit, --skip-integrity, etc.). Its own
         # stdin/stdout reconfigure above is now a harmless no-op re-assertion.
         from .server import main as server_main
-        server_main()
+        try:  # the legacy no-subcommand server path: same boundary (walopen L3 r10)
+            server_main()
+        except StorePathError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
         return
 
     # CLI subcommand present — reject any unrecognized arguments

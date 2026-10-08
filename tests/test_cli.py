@@ -4664,12 +4664,17 @@ def test_audit_repair_names_a_missing_active_file_as_lost_not_moved(tmp_path):
 def test_a_uri_db_refuses_cleanly_for_a_command_that_builds_a_store_directly(tmp_path, monkeypatch):
     """walopen L3 r9 codex MED (reproduced): `crystal recall` (and init, serve)
     construct Store directly, past _existing_db_path. main() is the one boundary."""
-    import subprocess, sys
+    import os, subprocess, sys
+    import anneal_memory
     (tmp_path / "file:x.db").write_bytes(b"")
-    r = subprocess.run(
-        [sys.executable, "-m", "anneal_memory.cli", "--db", "./file:x.db",
-         "crystal", "recall", "two words"],
-        capture_output=True, text=True, cwd=tmp_path, timeout=60,
-    )
-    assert r.returncode == 1, r.stderr
-    assert r.stderr.startswith("Error:") and "Traceback" not in r.stderr, r.stderr
+    # the package under test, whatever the cwd (complement r10: a source checkout)
+    env = dict(os.environ, PYTHONPATH=str(Path(anneal_memory.__file__).parents[1]))
+    for argv in (["crystal", "recall", "two words"],  # builds a Store directly
+                 ["--skip-integrity", "--no-audit"]):  # the legacy no-subcommand server
+        r = subprocess.run(
+            [sys.executable, "-m", "anneal_memory.cli", "--db", "./file:x.db", *argv],
+            capture_output=True, text=True, cwd=tmp_path, timeout=60, env=env,
+            stdin=subprocess.DEVNULL,
+        )
+        assert r.returncode == 1, (argv, r.stderr)
+        assert r.stderr.startswith("Error:") and "Traceback" not in r.stderr, (argv, r.stderr)

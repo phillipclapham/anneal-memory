@@ -922,9 +922,17 @@ def cmd_trust(args: argparse.Namespace) -> None:
             print(f"Error: no episode {args.episode_id!r}.", file=sys.stderr)
             sys.exit(1)
         current = store.trust_map([args.episode_id]).get(args.episode_id, DEFAULT_TRUST)
+        effective = store.effective_trust_map([args.episode_id]).get(
+            args.episode_id, DEFAULT_TRUST)
     if args.level is None:
+        # The class graduation and supersession judge by is the effective one; a
+        # summary derived from an external page printed its own "agent" (run,
+        # 1009+22). The stored class is what a change below sets and gates on.
         if args.json:
-            _print_json({"id": args.episode_id, "trust": current})
+            _print_json({"id": args.episode_id, "trust": effective, "stored": current})
+        elif effective != current:
+            print(f"{args.episode_id}: {effective} (stored {current}; lowered by what "
+                  "it was derived from)")
         else:
             print(f"{args.episode_id}: {current}")
         return

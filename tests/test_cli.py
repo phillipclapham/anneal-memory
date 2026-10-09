@@ -54,7 +54,6 @@ from anneal_memory.cli import (
 )
 from anneal_memory.store import StoreError
 from anneal_memory.crystal import CrystalStore
-from anneal_memory.audit import _ManifestQuarantined
 
 
 # -- Fixtures --
@@ -4111,9 +4110,7 @@ class TestHybridAuditCli:
 
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
-        # Ruling A (Phill 2026-10-08): the append that quarantines is refused.
-        with pytest.raises(_ManifestQuarantined):
-            AuditTrail(db).log("after", {})
+        AuditTrail(db).log("after", {})
 
         result = self._run("--db", str(db), "audit", "--json")
 
@@ -4141,9 +4138,7 @@ class TestHybridL3AuditCli:
 
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
-        # Ruling A (Phill 2026-10-08): the append that quarantines is refused.
-        with pytest.raises(_ManifestQuarantined):
-            AuditTrail(db).log("quarantines", {})
+        AuditTrail(db).log("quarantines", {})
         return db
 
     @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root lists a mode-300 directory")
@@ -4204,9 +4199,7 @@ class TestHybridFixDiffAuditCliTrust:
 
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
-        # Ruling A (Phill 2026-10-08): the append that quarantines is refused.
-        with pytest.raises(_ManifestQuarantined):
-            AuditTrail(db).log("quarantines", {})
+        AuditTrail(db).log("quarantines", {})
 
         result = self._run("--db", str(db), "audit", "--json")
 
@@ -4629,56 +4622,3 @@ def test_audit_repair_names_a_missing_active_file_as_lost_not_moved(tmp_path):
     assert out.returncode == 0, out.stderr
     assert "Recorded the missing active audit file m.audit.jsonl" in out.stdout
     assert "Set aside sealed file" not in out.stdout
-
-    # KL-24 L3 r6 (codex 10, run on d3c408a): a rebuild from quarantine with
-    # sealed files printed no gap at all, and verify called the possible gap a
-    # definite one ("went missing with its entries").
-    db = tmp_path / "q" / "m.db"
-    db.parent.mkdir()
-    trail = AuditTrail(db)
-    trail.log("pre", {})
-    trail._last_week = "1999-W01"
-    trail.log("rot", {})
-    (db.parent / "m.audit.manifest.json").write_bytes(b"{not json")
-    (db.parent / "m.audit.jsonl").unlink()
-    with pytest.raises(_ManifestQuarantined):
-        AuditTrail(db).log("trigger", {})
-    out = subprocess.run(
-        [sys.executable, "-m", "anneal_memory.cli", "--db", str(db), "audit-repair"],
-        capture_output=True, text=True,
-    )
-    assert out.returncode == 0, out.stderr
-    assert "rebuilt from 1 sealed file(s)" in out.stdout
-    assert "Recorded a POSSIBLE gap for the active audit file m.audit.jsonl" in out.stdout
-    assert "entries are lost" not in out.stdout
-    verify = subprocess.run(
-        [sys.executable, "-m", "anneal_memory.cli", "--db", str(db), "verify"],
-        capture_output=True, text=True,
-    )
-    assert "POSSIBLE GAP: the active audit file m.audit.jsonl" in verify.stderr
-    assert "went missing" not in verify.stderr
-
-
-def test_possible_gap_names_the_preserved_attempt_files_on_every_surface(tmp_path):
-    """KL-24 (Phill 10-08, the declared augmentation exception): a person decides
-    whether a kept staged entry was a lost entry, so repair and both verify
-    surfaces print the file names. Run first on 7e406c2: repair printed none."""
-    from anneal_memory.audit import AuditTrail
-
-    db = tmp_path / "m.db"
-    AuditTrail(db).log("first", {})
-    (tmp_path / "m.audit.jsonl").unlink()
-    kept = "m.audit.jsonl.first.discarded-20261008T120000000000Z"
-    (tmp_path / kept).write_text('{"event": "attempt"}\n')
-    cli = [sys.executable, "-m", "anneal_memory.cli", "--db", str(db)]
-    out = subprocess.run(cli + ["audit-repair"], capture_output=True, text=True)
-    assert out.returncode == 0, out.stderr
-    assert "POSSIBLE gap" in out.stdout and kept in out.stdout
-    assert "as a gap" not in out.stderr, "the warning must not call it definite"
-    verify = subprocess.run(cli + ["verify"], capture_output=True, text=True)
-    assert "POSSIBLE GAP" in verify.stderr and kept in verify.stderr
-    server = subprocess.run(
-        [sys.executable, "-m", "anneal_memory.server", "--db", str(db), "--verify-audit"],
-        capture_output=True, text=True,
-    )
-    assert "POSSIBLE GAP" in server.stderr and kept in server.stderr

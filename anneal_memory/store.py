@@ -4128,7 +4128,22 @@ class Store:
                                   f"{old_ep} is an earlier text of this entry, which this "
                                   "store no longer holds; it shows in recall"))
                 continue
-            if by_entry[entry].get("n", 1) == 1 and (old_ep, head) not in overrides:
+            if by_entry[entry].get("n", 1) > 1:
+                notes.append(("several_episodes", entry, f"earlier text {old_ep} stays shown"))
+                continue
+            back_link = conn.execute(
+                "SELECT source FROM supersessions WHERE old_id = ? AND new_id = ?",
+                (head, old_ep)).fetchone()
+            if back_link is not None and str(back_link[0]).startswith("team:"):
+                # An earlier text of this entry hiding its current one is a team link
+                # this replace no longer holds (left unowned by a released key, L3 r1
+                # run): it goes, or the link below is refused as a cycle every time.
+                conn.execute("DELETE FROM supersessions WHERE old_id = ? AND new_id = ?",
+                             (head, old_ep))
+                self._drop_ownership(head, old_ep)
+                rep["links_removed"].append({"old": head, "new": old_ep,
+                                             "target": entry, "linker": entry})
+            if (old_ep, head) not in overrides:
                 wanted[(old_ep, head)] = (entry, entry)
         for target, linker in honours:
             if linker not in linker_ep or target not in by_entry:
@@ -4326,7 +4341,7 @@ class Store:
                         "offered_hash": rec["hash"],
                     })
                 continue
-            ep_id = self._insert_team_row(rec, session_id)
+            ep_id, _ = self._store_team_copy(rec, session_id)
             if back:
                 # Not an operator's removal, and the stream enforces it: it comes back.
                 self._conn.execute(
@@ -4405,13 +4420,7 @@ class Store:
         here: :meth:`_snapshot_replace` derives it on every replace, with every team
         link's checks. Returns ``{id, old, new, revived}``."""
         old = known["ep"]
-        new = self._retired_copy(rec)
-        revived = new is not None
-        if new is None:
-            new = self._insert_team_row(rec, session_id)
-        else:
-            self._conn.execute("UPDATE episodes SET metadata = ? WHERE id = ?",
-                               (json.dumps(rec["metadata"]), new))
+        new, revived = self._store_team_copy(rec, session_id)
         self._retire_team_row(old, rec["entry_id"], known["hash"])
         self._conn.execute(
             "UPDATE team_entries SET hash = ?, episode_id = ?, removal = NULL "
@@ -4421,16 +4430,28 @@ class Store:
         return {"id": rec["entry_id"], "old": old, "new": new, "revived": revived,
                 "type": rec["type"], "content": rec["content"], "source": rec["source"]}
 
+    def _store_team_copy(self, rec: dict[str, Any],
+                         session_id: str | None) -> tuple[str, bool]:
+        """Every team record that becomes an entry's episode comes through here: the
+        stored row this entry once had with exactly this copy, revived (its metadata
+        names the entry again), else a new episode. Returns ``(id, revived)``."""
+        kept = self._retired_copy(rec)
+        if kept is None:
+            return self._insert_team_row(rec, session_id), False
+        self._conn.execute("UPDATE episodes SET metadata = ? WHERE id = ?",
+                           (json.dumps(rec["metadata"]), kept))
+        return kept, True
+
     def _retired_copy(self, rec: dict[str, Any]) -> str | None:
         """The id of a stored row this entry left whose text, timestamp, type and
-        source are this record's (the ids a fresh import would try, in order)."""
+        source are this record's, among every id a fresh import could have given it."""
         id_input = f"{rec['entry_id']}\0{rec['content']}"
         for nonce in range(64):
             row = self._conn.execute(
                 "SELECT timestamp, type, content, source, metadata FROM episodes "
                 "WHERE id = ?", (_episode_id(id_input, rec["timestamp"], nonce),)).fetchone()
             if row is None:
-                return None
+                continue  # a lower slot may have been freed since (L3 r1, both seats)
             if (row["timestamp"], row["type"], row["content"], row["source"]) == (
                     rec["timestamp"], rec["type"], rec["content"], rec["source"]) \
                     and _team_replaced_entry_of(row["metadata"]) == rec["entry_id"]:

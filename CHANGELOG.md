@@ -448,7 +448,8 @@ raised `RecursionError`). The graduation
   operator-raised text stays visible beside the new one), reported in `links_refused` (which now
   names the `old` and `new` episodes of every refused link) and team-status on every replace until
   the trust allows it. A head deleted by a library call and brought back by the stream is linked
-  again; an operator's removal of the link is kept (an override, as for any team link); a
+  again (and is the kept row, revived, when it has one); a team link left behind by a released key
+  that hides the entry's current text behind an earlier one is removed; an operator's removal of the link is kept (an override, as for any team link); a
   `set_trust` lowering leaves it (`team_supersessions_left`).
 - A copy with the same text, timestamp, type and source under a new hash records the new hash
   only (`rehashed`, renamed from `replaced_in_place`; CLI "re-hashed (same text)").

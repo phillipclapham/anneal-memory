@@ -103,7 +103,7 @@ def test_a_save_validated_against_the_old_text_cannot_commit_on_the_new(store):
 def test_the_link_and_the_ids_are_derived_again_on_every_replace(tmp_path, store):
     """L1 r1 (run): a deleted head re-imported left the old text shown with no link,
     for good. L2 r1 (run): X -> Y -> X minted a nonce twin of X, so this store's
-    head id differed from a store that only ever saw X."""
+    head id differed from a store that only ever saw X. L3 r1: below."""
     old = held(store)
     import_ledger(store, v3([(D_Y, True, [])], seq=2))
     new = held(store)
@@ -118,3 +118,14 @@ def test_the_link_and_the_ids_are_derived_again_on_every_replace(tmp_path, store
         assert held(fresh) == held(store) == old
     assert [e.id for e in store.recall(limit=20).episodes
             if e.id in (old, back)] == [old]
+    # L3 r1 complement (run): a released key left Y -> X unowned, and the flip
+    # to Y was refused as a cycle every time, hiding the current text.
+    store.team_forget_key("k1")
+    r = import_ledger(store, v3([(D_Y, True, [])], seq=5))
+    assert held(store) == back and (back, old) in {(l["old"], l["new"]) for l in r.links_removed}
+    assert [e.id for e in store.recall(limit=20).episodes if e.id in (old, back)] == [back]
+    # L3 r1 codex (run): a head deleted, then an earlier copy enforced, minted a
+    # twin through the re-import path instead of reviving the kept row.
+    assert store.delete(back)
+    r = import_ledger(store, v3([(D_X, True, [])], seq=6))
+    assert r.reimported == [D_ID] and held(store) == old

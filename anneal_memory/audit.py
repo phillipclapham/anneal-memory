@@ -1054,7 +1054,12 @@ class AuditTrail:
                 os.replace(first_tmp, active)
                 _fsync_dir(active.parent)
             else:
-                with open(active, "a", encoding="utf-8") as f:
+                # ``newline=""``: the bytes written are the payload's own, so the
+                # tip recorded below names this entry on Windows too. Text mode
+                # wrote a torn tail's boundary ``\n`` as ``\r\n`` there, and the
+                # tip at ``resume_at + 1`` named the LF (KL-24 CI-fix L3 r1,
+                # codex, run 37973885945).
+                with open(active, "a", encoding="utf-8", newline="") as f:
                     f.write(payload)
                     f.flush()
                     os.fsync(f.fileno())

@@ -701,6 +701,38 @@ class TestL3Round1:
         finally:
             st.close()
 
+    def test_a_trust_change_before_the_ground_read_refuses_the_save(self, tmp_path):
+        # L3 r2 1009+22 (codex #3, run before its fix): the change landed after the
+        # [supersedes:] pre-check but before ground_state's baseline, so the
+        # lock-time re-read saw no move and the save committed on a link that
+        # was then rejected.
+        db = tmp_path / "m.db"
+        st = Store(db, project_name="T")
+        try:
+            old = st.record("The deploy key lives in the vault.", EpisodeType.OBSERVATION,
+                            timestamp="2026-10-08T09:00:00Z")
+            new = st.record("The deploy key lives in the vault and in the CI secrets now.",
+                            EpisodeType.OBSERVATION, timestamp="2026-10-08T10:00:00Z")
+            assert prepare_wrap(st)["status"] == "ready"
+            real = st.ground_state
+            calls: list[int] = []
+
+            def racing(ids):
+                if not calls:
+                    calls.append(1)
+                    with Store(db) as other:
+                        other.set_trust(new.id, "external")
+                return real(ids)
+
+            st.ground_state = racing  # type: ignore[method-assign]
+            text = (HEAD + "## Patterns\n- deploy_key | 1x (2026-10-08)\n\n"
+                    f"## Decisions\n[supersedes: {old.id} by {new.id}]\n\n## Context\nx\n")
+            with pytest.raises(ValueError, match="changed while this save ran"):
+                validated_save_continuity(st, text, today="2026-10-08")
+            assert st.status().wrap_in_progress
+        finally:
+            st.close()
+
 
 # --- C#11 rework (1008+3) ------------------------------------------------------
 
@@ -1267,3 +1299,21 @@ class TestIntegrationL3Round1:
             r = import_ledger(s, v3([(a, True, []), (b, True, [A0])], seq=2))
             assert r.replaced_in_place == [B0] and s.get(e).content != "reviewed text"
             assert s.trust_map([e]) == {} and s.derived_edges([e]) == {}
+
+
+# --- CAP-08 integration L3 r2 (1009+22), run before its fix -------------------
+
+
+def test_deleting_a_source_drops_the_link_its_summary_can_no_longer_hold(store):
+    """complement #1: delete() lowered a descendant to external (the gone mark)
+    and left its link hiding an agent fact; set_trust re-checked, delete did not."""
+    t = TestIntegrationL3Round1.T
+    fact = store.record("The office wifi password is tango alpha.",
+                        EpisodeType.OBSERVATION, timestamp=t[0])
+    note = store.record("A note says the office wifi password is tango bravo.",
+                        EpisodeType.OBSERVATION, timestamp=t[1])
+    summary = store.record("The office wifi password is tango bravo.", EpisodeType.OBSERVATION,
+                           timestamp=t[2], derived_from=[note.id], supersedes=[fact.id])
+    store.delete(note.id)
+    assert store.effective_trust_map([summary.id]) == {summary.id: "external"}
+    assert not store.supersession_exists(old_id=fact.id, new_id=summary.id)

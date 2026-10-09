@@ -5306,9 +5306,14 @@ class Store:
                     row["id"], linker_of)
             links_removed = self._detach_supersessions([row["id"]])
             self._remember_team_rows([row], "operator" if team_operator else "auto")
+            # Read before the DELETE: the trigger below stops the closure walk at it.
+            descendants = self._derivation_descendants([row["id"]]) - {row["id"]}
             # The episode_gone_marks_rows trigger marks every row that cited it
             # external: a deletion is a failed ground (CAP-08 D3 R3).
             self._conn.execute("DELETE FROM episodes WHERE id = ?", (episode_id,))
+            # That lowered its descendants' effective trust, so their links are
+            # re-checked after it, as set_trust does (L3 r2 1009+22).
+            trust_removed, team_left = self._drop_links_trust_invalidated(descendants)
             # 10.5c.5 L4 Fix: batch-aware commit for consistency with
             # record() and the other write-path methods. No current
             # caller invokes delete() inside a _batch(), but making it
@@ -5325,6 +5330,8 @@ class Store:
             "type": row["type"],
             "content_hash": _content_hash(row["content"]),
             **({"supersession_links_removed": links_removed} if links_removed else {}),
+            **({"supersessions_removed": trust_removed} if trust_removed else {}),
+            **({"team_supersessions_left": team_left} if team_left else {}),
         }, method="delete", committed="the deletion")
 
         return True

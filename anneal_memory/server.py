@@ -468,22 +468,26 @@ class Server:
                         f"Error: {name} must be an integer", is_error=True
                     )
                 args[name] = max(0, value)
-        result = self._recall_episodes(args)
         keyword = args.get("keyword")
-        # Durable facts are not episodes: they go on a plain keyword recall's first page,
-        # and not on a call that filters episodes (since/until/source/episode_type) or one
-        # that asks for none (limit 0, which returns nothing at all, facts included).
-        if (
-            result.get("isError")
-            or not isinstance(keyword, str)
-            or args.get("offset", 0) != 0
-            or args.get("limit", _RECALL_DEFAULT_LIMIT) <= 0
-            or any(args.get(f) for f in ("since", "until", "source", "episode_type"))
-        ):
-            return result
+        # One snapshot for the list and the replaced block (L3 r2 1009+22): read apart,
+        # a link committed in between showed A live above and replaced below.
+        with self._store._db_boundary("recall"), self._store._read_snapshot():
+            result = self._recall_episodes(args)
+            # Durable facts are not episodes: they go on a plain keyword recall's first
+            # page, and not on a call that filters episodes (since/until/source/
+            # episode_type) or one that asks for none (limit 0, which returns nothing
+            # at all, facts included).
+            if (
+                result.get("isError")
+                or not isinstance(keyword, str)
+                or args.get("offset", 0) != 0
+                or args.get("limit", _RECALL_DEFAULT_LIMIT) <= 0
+                or any(args.get(f) for f in ("since", "until", "source", "episode_type"))
+            ):
+                return result
+            replaced = ("" if args.get("include_superseded") is True
+                        else self._replaced_block(keyword))
         block = _durable_block(self._cued_facts(keyword, "query"))
-        replaced = ("" if args.get("include_superseded") is True
-                    else self._replaced_block(keyword))
         if not block and not replaced:
             return result
         text = result["content"][0]["text"]

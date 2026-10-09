@@ -918,12 +918,15 @@ def cmd_trust(args: argparse.Namespace) -> None:
     raising needs the operator (a yes on a terminal, or ANNEAL_OPERATOR=1)."""
     args.episode_id = args.episode_id.strip().lower()
     with _open_store(args) as store:
-        if store.get(args.episode_id) is None:
+        # One read snapshot, so stored and effective come from one state (L3 r2).
+        with store._db_boundary("trust_map"), store._read_snapshot():
+            found = store.get(args.episode_id) is not None
+            current = store.trust_map([args.episode_id]).get(args.episode_id, DEFAULT_TRUST)
+            effective = store.effective_trust_map([args.episode_id]).get(
+                args.episode_id, DEFAULT_TRUST)
+        if not found:
             print(f"Error: no episode {args.episode_id!r}.", file=sys.stderr)
             sys.exit(1)
-        current = store.trust_map([args.episode_id]).get(args.episode_id, DEFAULT_TRUST)
-        effective = store.effective_trust_map([args.episode_id]).get(
-            args.episode_id, DEFAULT_TRUST)
     if args.level is None:
         # The class graduation and supersession judge by is the effective one; a
         # summary derived from an external page printed its own "agent" (run,

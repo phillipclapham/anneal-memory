@@ -3173,29 +3173,37 @@ def validated_save_continuity(
     # a cycle with an earlier one is refused at record time, so it must not
     # make its target uncitable here (reproduced: "A by B" then "B by A" left
     # live B uncitable).
-    edges: dict[str, set[str]] = {}
-    for link in store.supersession_links():
-        edges.setdefault(link["old_id"], set()).add(link["new_id"])
+    # Run again under the write lock (L3 r2 1009+22): this read precedes the
+    # ground_state baseline, so a trust change between them moved no ground the
+    # lock-time re-read compares, yet changed which links are accepted here.
+    def _accepted_supersedes() -> list[tuple[str, str]]:
+        edges: dict[str, set[str]] = {}
+        for link in store.supersession_links():
+            edges.setdefault(link["old_id"], set()).add(link["new_id"])
 
-    def _reaches(start: str, goal: str) -> bool:
-        seen, todo = set(), [start]
-        while todo:
-            cur = todo.pop()
-            if cur == goal:
-                return True
-            if cur not in seen:
-                seen.add(cur)
-                todo.extend(edges.get(cur, ()))
-        return False
+        def _reaches(start: str, goal: str) -> bool:
+            seen, todo = set(), [start]
+            while todo:
+                cur = todo.pop()
+                if cur == goal:
+                    return True
+                if cur not in seen:
+                    seen.add(cur)
+                    todo.extend(edges.get(cur, ()))
+            return False
 
-    for m in _SUPERSEDES_RE.finditer(text):
-        old_id, new_id = m.group(1).lower(), m.group(2).lower()
-        if new_id not in valid_ids or _reaches(new_id, old_id):
-            continue
-        if store.supersession_problem(old_id=old_id, new_id=new_id) is None:
-            edges.setdefault(old_id, set()).add(new_id)
-            if old_id in valid_ids:
-                superseded_in_window.add(old_id)
+        accepted: list[tuple[str, str]] = []
+        for m in _SUPERSEDES_RE.finditer(text):
+            old_id, new_id = m.group(1).lower(), m.group(2).lower()
+            if new_id not in valid_ids or _reaches(new_id, old_id):
+                continue
+            if store.supersession_problem(old_id=old_id, new_id=new_id) is None:
+                edges.setdefault(old_id, set()).add(new_id)
+                accepted.append((old_id, new_id))
+        return accepted
+
+    accepted_supersedes = _accepted_supersedes()
+    superseded_in_window |= {o for o, _ in accepted_supersedes if o in valid_ids}
     citable_ids = valid_ids - superseded_in_window
 
     # Check citation history
@@ -3462,6 +3470,10 @@ def validated_save_continuity(
                     name, today=today_str
                 )
 
+            # The [supersedes:] links accepted above decided what was citable:
+            # recompute that decision under the lock, before this save records any
+            # link, and refuse below (after the narrower checks) if it moved.
+            _supersedes_moved = _accepted_supersedes() != accepted_supersedes
             supersessions_recorded, supersessions_rejected = \
                 _record_wrap_supersessions(store, grad_result.text, valid_ids)
             # Re-read under the batch's write lock (codex L3, reproduced: a link
@@ -3502,6 +3514,13 @@ def validated_save_continuity(
                     f"while this save ran. Nothing was saved and the wrap is still "
                     f"open; save again.",
                     operation="save_continuity",
+                )
+            if _supersedes_moved:
+                raise ValueError(
+                    "validated_save_continuity: the [supersedes:] links this text "
+                    "proposes changed while this save ran (a trust change or another "
+                    "writer's link). Nothing was saved and the wrap is still open; "
+                    "save again so citability reads the current links."
                 )
 
             # The bound's next prior, recorded in this transaction so it commits

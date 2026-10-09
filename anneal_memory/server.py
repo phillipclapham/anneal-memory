@@ -801,6 +801,14 @@ class Server:
             lines.append(
                 f"Citation gaming suspects: {', '.join(result['gaming_suspects'])}"
             )
+        # The prior-state bound's cuts travel in the text: the UserWarning is
+        # post-commit and never reaches an MCP client (L2 r1, run).
+        for cap in cast("dict[str, Any]", result).get("level_capped") or []:
+            lines.append(
+                f"Level capped: {cap['name']} {cap['written_level']}x -> "
+                f"{cap['capped_to']}x (a new pattern enters at 1x; a validated Nx "
+                f"becomes (N+1)x)"
+            )
 
         if result["associations_formed"] or result["associations_strengthened"]:
             lines.append(

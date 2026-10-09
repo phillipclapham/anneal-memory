@@ -20,6 +20,7 @@ Zero dependencies beyond Python stdlib.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import dataclasses
 import re
@@ -27,7 +28,7 @@ import uuid
 import logging
 import warnings
 from dataclasses import asdict
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -39,7 +40,9 @@ from .graduation import (
     detect_stale_patterns,
     extract_pattern_names,
     extract_pattern_summaries,
+    pattern_line_levels,
     validate_graduations,
+    canonical_continuity_text,
     _NAMED_PATTERN_RE,
     _NAMED_PATTERN_WITH_EVIDENCE_RE,
     _is_graduating_heading,
@@ -700,6 +703,41 @@ def format_episodes_for_wrap(episodes: list[Episode]) -> str:
             lines.append(f"- ({ep.id}) {ep.content}{source_info}{replaced}")
 
     return "\n".join(lines)
+
+
+def _wrap_started_extras(store: Store, token_bound: bool, today: str) -> dict[str, Any]:
+    """Keyword arguments only a newer ``wrap_started`` takes. ``token_bound`` only
+    when the caller supplied the token, so a Store subclass that overrides
+    wrap_started with the pre-0.9.30 signature still works for every call that
+    does not use the new feature (codex L3, run); ``today`` (the day the
+    instructions told the composer to stamp) skipped for an override that
+    predates it (the save then reconstructs it)."""
+    extras: dict[str, Any] = {}
+    if token_bound:
+        extras["token_bound"] = True
+    if "today" in inspect.signature(store.wrap_started).parameters:
+        extras["today"] = today
+    return extras
+
+
+def _wrap_local_date(store: Store) -> str:
+    """The local date the wrap in progress was PREPARED on, else today.
+
+    The fallback when the wrap has no stored ``wrap_today`` (started by an
+    earlier version, or a ``wrap_started`` override without the argument).
+    prepare_wrap tells the composer to stamp ``({today})`` with the date it ran
+    on; a save after midnight read the next day and dropped every graduation the
+    composer stamped correctly (L2 r1, run). ``wrap_started_at`` is that moment
+    in UTC, read in the saver's timezone."""
+    started = store._get_metadata("wrap_started_at")
+    if started:
+        try:
+            moment = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+            if moment.tzinfo is not None:
+                return moment.astimezone().date().isoformat()
+        except ValueError:
+            pass
+    return date.today().isoformat()
 
 
 def _crystal_active_safe(crystal_store: CrystalStore | None) -> list:
@@ -2099,10 +2137,7 @@ def prepare_wrap(
             gated_session_id=session_id,
             expect_last_wrap_id=window_last_wrap_id,
             derive_roots=frozen_identities,
-            # Only when the caller supplied the token, so a Store subclass that
-            # overrides wrap_started with the pre-0.9.30 signature still works for
-            # every call that does not use the new feature (codex L3, run).
-            **({"token_bound": True} if token_bound else {}),
+            **_wrap_started_extras(store, token_bound, package["today"]),
         )
     except WrapWindowMovedError:
         return _downgraded_empty(
@@ -2438,12 +2473,15 @@ def _durable_cue_state(
 
 
 def _prior_levels(
-    prior_text: str | None, schema: list[SectionSpec], crystal_store: CrystalStore | None,
-    store: Store,
+    prior_text: str | None, schema: list[SectionSpec],
+    saved_levels: dict[tuple[str, str], int] | None, store: Store,
 ) -> dict[str, int] | None:
     """Where a held line's level comes from: each pattern's level in the continuity
-    being replaced, plus each live crystal's (a crystallized pattern re-added to the
-    working set is a recoverable move, not a new claim). None when there is no prior
+    being replaced, plus each named level the store last saved (the ``pattern_levels``
+    record, so a pattern re-added after leaving the file is held at the level the store
+    saved for it). Never a crystal's level: the crystal store is caller-writable, so a
+    crystal re-added to the working set is a new claim (spore-676 (A) as Phill ruled
+    2026-10-08 13:17: the held level comes from pattern_levels). None when there is no prior
     continuity at all and no pattern history (a first save): nothing to derive from,
     so the claimed level stands as before. A blank prior over a store that has history
     is a truncated file, not a first save: each pattern's recorded high-water mark
@@ -2462,9 +2500,8 @@ def _prior_levels(
             return None
     else:
         levels = _pattern_levels(prior_text, schema)
-    for c in _crystal_active_safe(crystal_store):
-        name, level = c.get("name"), c.get("level")
-        if isinstance(name, str) and isinstance(level, int) and name not in levels:
+    for (kind, name), level in (saved_levels or {}).items():
+        if kind == "name" and name not in levels:
             levels[name] = level
     return levels
 
@@ -2929,6 +2966,14 @@ def validated_save_continuity(
 
     if not text or not text.strip():
         raise ValueError("Continuity text cannot be empty")
+    # NOTHING UN-CANONICAL ENTERS (Phill 12:13, "(A)"; graduation.canonical_continuity_text).
+    # The pipeline has two inputs, and both are made canonical where they enter:
+    # the caller's text here, and every prior continuity read through
+    # Store.load_continuity (the one load point, canonical itself). Every
+    # parser after this line (the rederive strip, the durable carry-forward and
+    # its drop markers, the gate) reads one grammar. L3 r8: an NBSP-indented
+    # ``[drop-durable:]`` and a VT-hidden ``## State`` verdict were parsed raw.
+    text = canonical_continuity_text(text)
 
     # Validate structure (all sections declared by the store's schema). The
     # schema is read once here and reused for the schema-aware graduation gate
@@ -2942,7 +2987,7 @@ def validated_save_continuity(
         text = strip_rederive_output(text, section_schema)
     # Loaded once here and reused by the durable-facts invariant just below,
     # the catastrophic-shrink gate and the silent-omission audit further down.
-    prior_continuity = store.load_continuity()
+    prior_continuity = store.load_continuity()  # canonical: Store.load_continuity
     # Durable facts (B1): before anything validates, hashes or writes the text,
     # carry every prior durable line forward (re-inserting what the composer
     # left out) and apply the composer's drop markers. Never a refusal. A
@@ -2950,6 +2995,9 @@ def validated_save_continuity(
     text, durable_report = enforce_durable_facts(
         prior_continuity, text, section_schema
     )
+    # Backstop: both inputs are already canonical, so this is the identity unless a
+    # step above introduced a non-canonical character itself (idempotent, cheap).
+    text = canonical_continuity_text(text)
     grad_headings = graduating_headings(section_schema)
     # Reject ambiguous merged headings (e.g. "## Patterns and Understanding")
     # with a clear message before the generic all-sections check: one header
@@ -3112,7 +3160,15 @@ def validated_save_continuity(
     # Validate graduations (demotes bad citations in-place).
     # Caller may pin ``today`` for deterministic test runs; default is
     # wall-clock. Same pattern _build_wrap_package already uses.
-    today_str = today if today is not None else date.today().isoformat()
+    today_str = today if today is not None else (store.wrap_today() or _wrap_local_date(store))
+    # The bound's prior: the store's own record of the levels it last saved.
+    # ⛔ NO CRYSTAL SEED (L3 r4, 1008+3, DELETED): a crystal level seeded the
+    # first bounded save and was defeated a new way three rounds running (a
+    # caller-set crystallized_on, a caller-set level, then a caller-writable
+    # pattern_history bound). A pattern crystallized out before the record
+    # existed re-enters the continuity as new and re-earns its rungs; its crystal
+    # is untouched.
+    saved_levels = store.saved_pattern_levels()
     grad_result = validate_graduations(
         text=text,
         valid_ids=citable_ids,
@@ -3136,7 +3192,13 @@ def validated_save_continuity(
         carryforward_cold_days=carryforward_cold_days,
         # L3 1007 (complement, codex): a held line's level is derived, never taken
         # from the composer (see _prior_levels).
-        prior_levels=_prior_levels(prior_continuity, section_schema, crystal_store, store),
+        prior_levels=_prior_levels(prior_continuity, section_schema, saved_levels, store),
+        # The prior-state bound (1007+29): every line is cut to the level the
+        # STORED prior continuity entitles it to (new -> 1x, validated -> +1),
+        # whatever date, level or tag shape the composer wrote. "" = no prior
+        # file, so every line is new.
+        prior_text=prior_continuity or "",
+        saved_levels=saved_levels,
     )
 
     # The hard maximum is measured on the text that will be WRITTEN: graduation
@@ -3334,6 +3396,14 @@ def validated_save_continuity(
                     f"saved and the wrap is still open; save again (cite the replacing "
                     f"episode instead)."
                 )
+
+            # The bound's next prior, recorded in this transaction so it commits
+            # with the wrap or not at all.
+            store._record_pattern_levels(
+                pattern_line_levels(grad_result.text, grad_headings), today_str,
+                lower_to=pattern_line_levels(prior_continuity or "", grad_headings),
+                first_tombstones=pattern_line_levels(prior_continuity or "", grad_headings),
+            )
 
             wrap_result = store.wrap_completed(
                 episodes_compressed=len(episodes),
@@ -3691,6 +3761,10 @@ def validated_save_continuity(
             # wrap — operators and downstream review (Diogenes,
             # consultation, audit-chain queries) can see what was
             # dropped without re-reading prior continuity files.
+            if grad_result.level_capped:
+                audit_payload["level_capped"] = [
+                    asdict(cap) for cap in grad_result.level_capped
+                ]
             if grad_result.omitted_patterns:
                 audit_payload["omitted_patterns"] = [
                     {"name": op.name, "prior_level": op.prior_level}
@@ -3893,7 +3967,7 @@ def validated_save_continuity(
     # signal (no citation = nothing to resolve to zero).
     cited_carried = sum(1 for cf in grad_result.carried_forward if cf.cited)
     cited_graduations = (
-        grad_result.validated + grad_result.demoted - grad_result.level_capped
+        grad_result.validated + grad_result.demoted - grad_result.atom_capped
         + cited_carried
     )
     # Read the GATE-INDEPENDENT resolution signal, NOT any(all_validated_ids):
@@ -4035,7 +4109,23 @@ def validated_save_continuity(
             f"[provenance:] — sits between them): {', '.join(malformed)}. That "
             f"evidence will NOT validate or form a Hebbian link. Move [evidence:] "
             f"immediately after the marker, OR use [provenance:] alone (never both "
-            f"on one line). The line(s) were left unchanged."
+            f"on one line). The line(s) were left unchanged unless they claimed "
+            f"a level above their prior one (then see the level-capped warning)."
+        )
+
+    # The prior-state bound cut a line the composer wrote above what the stored
+    # prior continuity entitles it to. Loud for the same reason as the line
+    # above: the saved text differs from what the composer wrote.
+    if grad_result.level_capped:
+        _warn_after_commit(
+            f"{len(grad_result.level_capped)} pattern line(s) claimed a level "
+            f"the prior continuity does not support and were cut "
+            f"(a new pattern enters at 1x; a validated Nx becomes (N+1)x): "
+            + ", ".join(
+                f"{cap.name} {cap.written_level}x->{cap.capped_to}x"
+                for cap in grad_result.level_capped
+            )
+            + ". Each is marked (level-capped)."
         )
 
     result = SaveContinuityResult(
@@ -4082,6 +4172,8 @@ def validated_save_continuity(
         _warn_after_commit(message)
     if durable_report is not None:
         result["durable_warnings"] = durable_messages
+    if grad_result.level_capped:
+        result["level_capped"] = [asdict(cap) for cap in grad_result.level_capped]
     if stale_state:
         result["stale_state"] = stale_state
         _warn_after_commit("State lines that do not hold at save: " + "; ".join(stale_state))

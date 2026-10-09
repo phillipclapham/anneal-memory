@@ -1,5 +1,6 @@
 """Tests for the SQLite episodic store."""
 
+from tests.prior_seed import seed_prior_levels
 import json
 import os
 import sqlite3
@@ -2506,6 +2507,7 @@ class TestValidatedSaveContinuity:
         ep2 = store.record("Chose caching to improve latency", EpisodeType.DECISION)
 
         # Mark wrap as in progress
+        seed_prior_levels(store, {'thought: database slow under load triggers caching': 1})
         prepare_wrap(store)
 
         # Build continuity with a real 2x citation so graduation fires. Co-cite
@@ -3102,6 +3104,7 @@ class TestValidatedSaveContinuityReturnContract:
             f"## Context\nPinned-date determinism test.\n"
         )
 
+        seed_prior_levels(store, {'thought: slow database impacts throughput': 1})
         prepare_wrap(store)
         result = validated_save_continuity(store, text, today=pinned_today)
 
@@ -3128,6 +3131,7 @@ class TestValidatedSaveContinuityReturnContract:
         )
 
         # No today= parameter → falls back to wall clock
+        seed_prior_levels(store, {"thought: fresh observation drives today's decision": 1})
         prepare_wrap(store)
         result = validated_save_continuity(store, text)
         assert result["graduations_validated"] >= 1

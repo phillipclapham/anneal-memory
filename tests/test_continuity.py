@@ -27,6 +27,8 @@ from anneal_memory.continuity import (
 from anneal_memory.store import Store, StoreError
 from anneal_memory.types import Episode, EpisodeType
 
+from tests.prior_seed import seed_prior_levels as _seed_prior_levels
+
 
 # -- Test data --
 
@@ -1023,6 +1025,7 @@ class TestCrossTransportParity:
         from datetime import date as _date
 
         store = Store(db_path, project_name="ParityTest")
+        _seed_prior_levels(store, {'thought: parity claim about the testing framework': 1})
         ep1 = store.record(
             "testing framework parity assertion",
             EpisodeType.OBSERVATION,
@@ -3906,6 +3909,7 @@ class TestPatternOmissionAudit:
         db = tmp_path / "store.db"
         store = Store(db, project_name="OmissionTest")
         try:
+            _seed_prior_levels(store, {'alpha_proven': 1, 'beta_proven': 1})
             s1_text = (
                 "## State\nsession 1.\n\n"
                 "## Patterns\n"
@@ -3943,6 +3947,7 @@ class TestPatternOmissionAudit:
         db = tmp_path / "store.db"
         store = Store(db, project_name="OmissionTest")
         try:
+            _seed_prior_levels(store, {'alpha_proven': 2})
             s1_text = (
                 "## State\nsession 1.\n\n"
                 "## Patterns\n"
@@ -3971,9 +3976,9 @@ class TestPatternOmissionAudit:
         ]
         saved_events = [
             e for e in events if e.get("event") == "continuity_saved"
-        ]
+        ][1:]  # the first is _seed_prior_levels' raw save
         assert len(saved_events) == 2
-        # First save has no prior continuity -> no omission key
+        # First save drops nothing from the seeded prior -> no omission key
         assert "omitted_patterns" not in saved_events[0]["data"]
         # Second save dropped alpha_proven (3x) -> audit captures it
         assert saved_events[1]["data"]["omitted_patterns"] == [
@@ -4016,6 +4021,7 @@ class TestMove4LibraryLayerIntegration:
         db = tmp_path / "store.db"
         store = Store(db, project_name="Move4Plumbing")
         try:
+            _seed_prior_levels(store, {'alpha_proven': 1, 'beta_proven': 1})
             ep_ids = self._record_episodes(store)
             # Session 1: graduate two Provens with explicit no-contradicts
             # declarations so the discipline is satisfied
@@ -4061,6 +4067,7 @@ class TestMove4LibraryLayerIntegration:
         db = tmp_path / "store.db"
         store = Store(db, project_name="ScanEmit")
         try:
+            _seed_prior_levels(store, {'alpha_proven': 1, 'beta_proven': 1})
             ep_ids = self._record_episodes(store)
             s1 = self._render(
                 "## State\nseed.\n\n## Patterns\n"
@@ -4101,6 +4108,7 @@ class TestMove4LibraryLayerIntegration:
         db = tmp_path / "store.db"
         store = Store(db, project_name="OneSource")
         try:
+            _seed_prior_levels(store, {'alpha_proven': 1, 'beta_proven': 1})
             ep_ids = self._record_episodes(store)
             s1 = self._render(
                 "## State\nseed.\n\n## Patterns\n"
@@ -4135,6 +4143,7 @@ class TestMove4LibraryLayerIntegration:
         db = tmp_path / "store.db"
         store = Store(db, project_name="Move4Plumbing")
         try:
+            _seed_prior_levels(store, {'new_proven_no_declaration': 1})
             ep_ids = self._record_episodes(store)
             s1 = self._render(
                 "## State\nfirst session.\n\n"
@@ -4166,6 +4175,7 @@ class TestMove4LibraryLayerIntegration:
         db = tmp_path / "store.db"
         store = Store(db, project_name="Move4Plumbing")
         try:
+            _seed_prior_levels(store, {'audit_test_proven': 2})
             ep_ids = self._record_episodes(store)
             s1 = self._render(
                 "## State\nfirst.\n\n"
@@ -4192,7 +4202,7 @@ class TestMove4LibraryLayerIntegration:
         ]
         saved_events = [
             e for e in events if e.get("event") == "continuity_saved"
-        ]
+        ][1:]  # the first is _seed_prior_levels' raw save
         assert len(saved_events) == 1
         # The new Proven graduated without contradiction-stance declaration —
         # audit chain captures it for Diogenes operator-review layer
@@ -4914,10 +4924,12 @@ class TestAmWarn:
 
     TODAY = "2026-06-02"
 
-    def _save(self, tmp_path, template, n_episodes=2, **save_kwargs):
+    def _save(self, tmp_path, template, n_episodes=2, seed=None, **save_kwargs):
         """Record n real episodes, substitute {epN} with their ids, save."""
         from anneal_memory import prepare_wrap, validated_save_continuity
         store = Store(tmp_path / "amwarn.db", project_name="AmWarn")
+        if seed:
+            _seed_prior_levels(store, seed)
         ep_ids = []
         for i in range(n_episodes):
             ep = store.record(
@@ -4999,7 +5011,7 @@ class TestAmWarn:
         import warnings as _w
         with _w.catch_warnings(record=True) as caught:
             _w.simplefilter("always")
-            result = self._save(tmp_path, text, n_episodes=1)
+            result = self._save(tmp_path, text, n_episodes=1, seed={'solo_pattern': 1})
         assert not [w for w in caught if issubclass(w.category, UserWarning)]
         assert result["association_warning"] is None
         assert result["associations_formed"] == 0
@@ -5021,7 +5033,7 @@ class TestAmWarn:
         import warnings as _w
         with _w.catch_warnings(record=True) as caught:
             _w.simplefilter("always")
-            result = self._save(tmp_path, text, n_episodes=2)
+            result = self._save(tmp_path, text, n_episodes=2, seed={'single_cited': 1})
         assert not [w for w in caught if issubclass(w.category, UserWarning)]
         assert result["association_warning"] is None
         assert result["associations_formed"] == 0
@@ -5064,6 +5076,7 @@ class TestAmWarn:
         from anneal_memory import prepare_wrap, validated_save_continuity
         import warnings as _w
         store = Store(tmp_path / "xsession.db", project_name="AmWarn")
+        _seed_prior_levels(store, {'recurring': 1})
         try:
             VOCAB = "standup consensus decision agreement architectural rotation"
             # Wrap 1: first graduation of `recurring` — validates and seeds
@@ -5145,7 +5158,7 @@ class TestAmWarn:
         import warnings as _w
         with _w.catch_warnings(record=True) as caught:
             _w.simplefilter("always")  # any AM-WARN warning is recorded
-            result = self._save(tmp_path, text, n_episodes=2)
+            result = self._save(tmp_path, text, n_episodes=2, seed={'pattern_a': 1, 'pattern_b': 1})
         assert not [w for w in caught if issubclass(w.category, UserWarning)]
         assert result["association_warning"] is None
         assert result["associations_formed"] >= 1
@@ -5333,6 +5346,7 @@ class TestAmLinkgateRemoved:
     def _prepared(self, tmp_path, n_episodes=2):
         from anneal_memory import prepare_wrap
         store = Store(tmp_path / "linkgate.db", project_name="Linkgate")
+        _seed_prior_levels(store, {'pattern_a': 1, 'pattern_b': 1})
         ids = [
             store.record(
                 f"substrate observation about discipline rotation memory topic {i}",
@@ -5447,6 +5461,7 @@ class TestBulletlessUpsertIntegration:
         from anneal_memory import prepare_wrap, validated_save_continuity
         store = Store(tmp_path / "bulletless.db", project_name="Bulletless")
         try:
+            _seed_prior_levels(store, {'verify_before_acting': 1})
             VOCAB = "substrate observation discipline rotation memory"
             ep = store.record(f"{VOCAB} seeded in the store",
                               EpisodeType.OBSERVATION)
@@ -5475,6 +5490,7 @@ class TestBulletlessUpsertIntegration:
         from anneal_memory import prepare_wrap, validated_save_continuity
         store = Store(tmp_path / "xsession_bulletless.db",
                       project_name="XSession")
+        _seed_prior_levels(store, {'recurring_claim': 1})
         try:
             VOCAB = "standup consensus decision agreement architectural rotation"
             # Wrap 1: first graduation of a bullet-less member seeds history.
@@ -5522,6 +5538,7 @@ class TestCarryforwardEndToEnd:
         store.record("An observation", EpisodeType.OBSERVATION)
         # Seed a warm (today) high-water mark of 3 for `name`.
         store.seed_pattern_max_level(name, 3, last_seen_at="2026-06-04T00:00:00Z")
+        _seed_prior_levels(store, {name: 3})  # a carried line is in the prior file
         text = (
             "# CF — Memory (v1)\n\n## State\nActive.\n\n## Patterns\n"
             f'- {name} | 3x (2026-06-05) [evidence: {cited} "{expl}"]\n\n'
@@ -5604,6 +5621,7 @@ class TestCarryforwardEndToEnd:
         # HEALTHY hold — the namespace is correct, so AM-WARN Signal A must stay
         # SILENT (association_warning is None) even though the line was held.
         store = Store(str(tmp_path / "cf_healthy.db"), project_name="CF")
+        _seed_prior_levels(store, {'alpha': 3})
         try:
             ep = store.record("the cat sat quietly on a warm rug", EpisodeType.OBSERVATION)
             real_id = ep.id[:8].lower()
@@ -5737,6 +5755,7 @@ class TestWarmRewordedPreservationEndToEnd:
         populates pattern_history (max_level 3, explanation_corpus=EXPL1,
         last_seen 2026-06-04) through the real pipeline."""
         store = Store(str(tmp_path / db), project_name="WR")
+        _seed_prior_levels(store, {"verify_invariant": 2})
         ep = store.record(
             "Phill pushed past a done claim asking to verify against ground "
             "truth not the cached story while reviewing",
@@ -5837,6 +5856,7 @@ class TestBarePreserveEndToEnd:
         store.save_meta(meta)
         # ... with a deterministic warm/cold high-water mark for `name`.
         store.seed_pattern_max_level(name, max_level, last_seen_at=last_seen)
+        _seed_prior_levels(store, {name: max_level})  # carried: in the prior file
         # An (unrelated) episode so prepare_wrap has something to compress.
         store.record("a second-session observation", EpisodeType.OBSERVATION)
         return store
@@ -5958,6 +5978,7 @@ class TestProvenanceEndToEnd:
         meta["citations_seen"] = True
         store.save_meta(meta)
         store.seed_pattern_max_level(name, max_level, last_seen_at=last_seen)
+        _seed_prior_levels(store, {name: max_level})  # carried: in the prior file
         store.record("a second-session observation", EpisodeType.OBSERVATION)
         return store
 
@@ -6053,6 +6074,7 @@ class TestProvenanceEndToEnd:
         # AM-WARN's namespace alarm STILL fires (cited=True; provenance does not
         # mask the real dead-id bug — the masking-hazard guard is preserved).
         store = Store(str(tmp_path / "prov_cited.db"), project_name="PROVCF")
+        _seed_prior_levels(store, {'platform_security': 3})
         store.record("an observation", EpisodeType.OBSERVATION)
         store.seed_pattern_max_level(
             "platform_security", 3, last_seen_at="2026-06-04T00:00:00Z"
@@ -6250,6 +6272,7 @@ class TestCompostSever:
 
         store = Store(str(tmp_path / "g.db"), project_name="G")
         try:
+            _seed_prior_levels(store, {'alpha': 1, 'beta': 1, 'gamma': 1})
             e1 = store.record("wiring guard fires late in prepare", EpisodeType.OBSERVATION)
             e2 = store.record("wiring guard fires late on save", EpisodeType.OBSERVATION)
             token = prepare_wrap(store)["wrap_token"]

@@ -94,6 +94,54 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - The count of unmanaged rewired links now requires the hidden episode to be a team entry as
   the importer reads one (a `team:` source and a string `team.entry_id` in its metadata), not
   only a `team:` source, and the line says it counts link rows that no snapshot owns.
+### Fixed — the graduation gate bounds every pattern line by what the store last saved
+- `validate_graduations` checked only today-dated, well-formed lines. A back-dated line, a bare line on a store
+  whose `citations_seen` is false, a bare line at 4x or above, a line with a non-adjacent `[evidence:]` tag, and a
+  line that jumped several rungs on one valid citation each landed at whatever level it wrote; a brand-new
+  `claim | 9x (yesterday)` was saved at 9x. Reproduced on 8542f49 by `tests/test_gradgate_prior_1007.py`.
+- New last check: each line is cut to `max(1, prior level + 1 if it validated this wrap)`, which is prepare_wrap's
+  own contract (a new pattern enters at 1x; a validated Nx becomes (N+1)x). The prior level is the store's record
+  of the level it last saved for that line (`Store.saved_pattern_levels`, the new additive `pattern_levels` table,
+  written in the wrap's own transaction; `None` until the store's first save under the bound, `{}` after one with
+  no lines). The continuity file may lower it, never raise it, and a lowering survives a wrap that leaves the
+  pattern out; a line in the file the store never saved is new; a named pattern dropped from the file keeps its
+  record, so re-adding it returns to its saved level, not to `pattern_history`'s high-water mark. A store's first
+  save under this version takes the file as the prior and seeds the record with the prior file's named levels. A
+  crystal's level is never a prior: a pattern crystallized out of the file re-enters as new and re-earns its rungs.
+  Every `| Nx` marker on a graduating line is governed, dated or not; a line's identity is the text before its first
+  marker, and a line with none (`- | 9x`) is always new, every marker at 1x.
+  Renaming a pattern to its own name changes nothing. A name's level is its highest line across graduating sections. Only a line's own marker earns the
+  rung. Co-citation links from a validated line still form when the line is cut (the episodes were cited together
+  and grounded; the cut is about the level).
+- Where it meets the 1007-20 changes: a bare line held under spore-676 (A) takes its held level from the store's
+  saved pattern levels, never from the crystal store (a crystal re-added to the working set re-earns from 1x); the
+  graduation worklist (`drift_status()["graduated"]`) lists the level a line was SAVED at, so a line the bound cut
+  below 2x is not on it; and a marker the level-atom normalizer cut is reported in `level_capped` and the
+  after-commit warning like a bound cut, and keeps its `(level-capped)` mark.
+- One text grammar before the gate reads anything. `validated_save_continuity` makes both of its inputs canonical
+  where they enter (the caller's text, and the prior continuity as loaded), so the rederive strip, the durable
+  carry-forward and its drop markers, and the gate all read one grammar (the final text is canonicalised again as
+  an idempotent backstop): every line terminator other
+  than the newline (CR, VT, FF, FS, GS, RS, NEL, U+2028, U+2029) becomes a newline (the CR of a CRLF pair is kept,
+  so a CRLF file still saves as CRLF), every other Unicode space becomes an ASCII space, and non-ASCII digits in a
+  `| Nx (YYYY-MM-DD)` marker become ASCII. `## Notes<CR>## Patterns<CR>- x | 999x` was one non-graduating heading
+  to the gate and a graduating 999x once the file was read back; `|<NBSP>999x` escaped the bound. Both are now
+  bounded like any line. The saved text can differ from what the caller passed in exactly these characters.
+- Scope: the bound governs what `validated_save_continuity` writes. A continuity written by the raw
+  `Store.save_continuity()` or by an older anneal (which ignores the table) is outside it until the next canonical
+  save, which bounds it against the record again.
+  Refusing an older anneal outright needs a schema-version bump (arming the `anneal_writer_schema()` triggers),
+  which also makes every installed older anneal and anything pinned to one refuse the store until upgraded; it is
+  planned for the next schema generation, not this release (ruled 2026-10-08).
+- A cut line is marked `(level-capped)` (cleared once the line stands at an entitled level; a cut carried line
+  loses its `(carried-forward)`) and reported as `level_capped` on the save result (present only when a line was
+  cut), in the MCP save reply and the CLI output, as a `UserWarning`, and in the `continuity_saved` audit event. A
+  validated line cut to 1x no longer counts in `graduations_validated` or seeds co-graduation links.
+- A save with no pinned `today` now dates the wrap by the day `prepare_wrap` gave the composer (stored as the
+  `wrap_today` lifecycle key, `Store.wrap_today()`; a wrap started without it falls back to `wrap_started_at` read
+  in local time), so a wrap saved after midnight or under another `TZ` keeps the graduations it stamped.
+- A first save onto a fresh store has no prior: every pattern line enters at 1x. Direct `validate_graduations`
+  callers that pass no `prior_text` keep the old behavior.
 
 ### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
 - `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one

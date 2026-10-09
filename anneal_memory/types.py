@@ -652,6 +652,10 @@ class _SaveContinuityOptional(TypedDict, total=False):
     # Present ONLY when the store has live CAP-06 drift probes: ``counts`` per status
     # (held / weakened / crystallized / lost) and every probe not ``held``.
     drift: dict[str, Any]
+    # Present ONLY when the prior-state bound cut a pattern line (1007+29):
+    # ``{"name", "written_level", "capped_to", "prior_level", "validated"}`` per
+    # line, also delivered as a UserWarning and recorded in the audit chain.
+    level_capped: list[dict[str, Any]]
 
 
 class SaveContinuityResult(_SaveContinuityOptional):

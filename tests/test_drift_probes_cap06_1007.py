@@ -12,6 +12,7 @@ from anneal_memory import Store, prepare_wrap, validated_save_continuity
 from anneal_memory.crystal import CrystalStore
 from anneal_memory.store import StoreDatabaseError
 from anneal_memory.drift import evaluate_probes
+from tests.prior_seed import seed_prior_levels
 
 
 def _doc(patterns, facts="", understanding="who we are."):
@@ -63,6 +64,7 @@ def test_add_validation(tmp_path):
 def test_every_save_records_the_verdict_and_never_blocks(tmp_path):
     s = Store(tmp_path / "m.db", project_name="t")
     try:
+        seed_prior_levels(s, {"alpha": 2})  # the prior-state bound: genesis is strict
         p1 = s.add_drift_probe(pattern="alpha", min_level=2)
         s.add_drift_probe(fact="the hub runs on soupcan", section="Context")
         r = _wrap(s, _doc("- alpha | 2x (2026-10-01)", facts="the hub runs on soupcan"),
@@ -165,6 +167,7 @@ def test_a_bad_probe_is_unchecked_never_a_gate(tmp_path):
 def test_pattern_probe_defaults_to_its_current_level(tmp_path):
     s = Store(tmp_path / "m.db", project_name="t")
     try:
+        seed_prior_levels(s, {"alpha": 7})
         _wrap(s, _doc("- alpha | 7x (2026-10-01)"), "2026-10-06")
         pid = s.add_drift_probe(pattern="alpha")
         assert [p["min_level"] for p in s.list_drift_probes() if p["id"] == pid] == [7]
@@ -179,6 +182,7 @@ def test_drift_is_in_the_audit_and_the_worklist_lists_graduations(tmp_path):
     import json as _json
     s = Store(tmp_path / "m.db", project_name="t")
     try:
+        seed_prior_levels(s, {"hub_location_is_soupcan": 1})  # a 2x+ graduation needs its prior rung
         s.add_drift_probe(fact="the hub runs on soupcan")
         ep = s.record("we moved the hub to soupcan and it runs there now", "observation")
         token = prepare_wrap(s, max_chars=40000)["wrap_token"]
@@ -243,6 +247,7 @@ def test_a_nameless_crystal_row_does_not_block_a_save(tmp_path):        # codex 
 def test_the_default_level_reads_only_the_patterns_section(tmp_path):  # codex MED
     s = Store(tmp_path / "m.db", project_name="t")
     try:
+        seed_prior_levels(s, {"alpha": 3})
         _wrap(s, _doc("- alpha | 3x (2026-10-01)", facts="- alpha | 12x (old note)"),
               "2026-10-06")
         s.add_drift_probe(pattern="alpha")
@@ -254,6 +259,7 @@ def test_the_default_level_reads_only_the_patterns_section(tmp_path):  # codex M
 def test_an_explanationless_graduation_is_on_the_worklist(tmp_path):   # codex MED
     s = Store(tmp_path / "m.db", project_name="t")
     try:
+        seed_prior_levels(s, {"hub_on_soupcan": 1})  # a 2x+ graduation needs its prior rung
         ep = s.record("we moved the hub to soupcan and it runs there now", "observation")
         token = prepare_wrap(s, max_chars=40000)["wrap_token"]
         validated_save_continuity(
@@ -295,6 +301,7 @@ def test_pattern_levels_read_only_graduating_sections():                  # code
 def test_the_worklist_takes_only_validated_lines_and_any_level(tmp_path):  # codex MEDs
     s = Store(tmp_path / "m.db", project_name="t")
     try:
+        seed_prior_levels(s, {"big_one": 10 ** 8 - 1, "dup": 1})  # a 2x+ graduation needs its prior rung
         ep = s.record("we moved the hub to soupcan and it runs there now", "observation")
         token = prepare_wrap(s, max_chars=40000)["wrap_token"]
         big = 10 ** 8
@@ -333,12 +340,17 @@ def test_an_oversized_level_neither_raises_nor_graduates(tmp_path, tok):  # code
         # a cap is not a lost citation (L3 r5: it raised the "resolved to ZERO" warning)
         assert not any("ZERO" in str(w.message) for w in caught)
         assert r["drift"]["probes"][0]["status"] != "held"
-        assert s.get_pattern_history("big_one") is None
+        # Arabic-Indic digits are made ASCII before the gate reads (gradgate's one
+        # grammar), so "٢" is a real 2 on a new line: cut to 1x, history at most 1.
+        hist = s.get_pattern_history("big_one")
+        assert hist is None or hist["max_level_reached"] == 1
         assert [g["name"] for g in s.drift_status()["graduated"]] == []
-        # each bad marker is cut to 1x on its own; the valid second marker keeps its tag
+        # each bad marker is cut to 1x; the second marker keeps its tag but not its
+        # rung (only a line's own marker earns one, and the line is new)
         saved = s.load_continuity()
-        assert "big_one | 1x (2026-10-07) (level-capped)" in saved
-        assert f"| 2x (2026-10-07) [evidence: {i}" in saved
+        big = next(ln for ln in saved.splitlines() if ln.startswith("- big_one |"))
+        assert big.startswith("- big_one | 1x (2026-10-07)") and big.endswith("(level-capped)")
+        assert f"| 1x (2026-10-07) [evidence: {i}" in saved
         assert f"| {tok}x" not in saved
     finally:
         s.close()
@@ -348,6 +360,7 @@ def test_an_oversized_level_neither_raises_nor_graduates(tmp_path, tok):  # code
 def test_a_failed_instrument_write_fails_the_whole_save(tmp_path, verb):   # codex HIGH
     s = Store(tmp_path / "m.db", project_name="t")
     try:
+        seed_prior_levels(s, {"hub_on_soupcan": 1})  # a 2x+ graduation needs its prior rung
         ep = s.record("we moved the hub to soupcan and it runs there now", "observation")
         token = prepare_wrap(s, max_chars=40000)["wrap_token"]
         s._conn.execute(

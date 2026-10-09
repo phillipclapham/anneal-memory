@@ -108,32 +108,42 @@ def test_a_cited_hold_also_keeps_the_prior_level():
     assert [c.held_level for c in r.carried_forward] == [3] and "- p | 3x (" in r.text
 
 
-def test_rewarm_from_the_crystal_store_is_held_and_a_new_claim_is_not(tmp_path):
-    """L3 1007 r2: through the real save. A crystallized pattern re-added to the working
-    set keeps its crystal level; a pattern in neither the prior file nor the crystal
-    store is a new claim and demotes."""
+def test_rewarm_is_held_at_the_saved_level_and_a_crystal_level_is_never_a_prior(tmp_path):
+    """Through the real save, as Phill ruled 2026-10-08 13:17: the held level comes from
+    the store's pattern_levels record, never the crystal store (it is caller-writable).
+    A pattern the store saved at 5x, dropped and re-added is held at 5x; a crystal
+    re-added to the working set is a new claim and re-earns from 1x, as is a pattern
+    in no record at all."""
     from anneal_memory import Store, prepare_wrap, validated_save_continuity
     from anneal_memory.crystal import CrystalStore
+    from tests.prior_seed import seed_prior_levels
     s = Store(tmp_path / "m.db", project_name="t")
     cs = CrystalStore(tmp_path / "m.crystal.json")
     base = "## State\n.\n\n## Patterns\n{p}\n\n## Decisions\n.\n\n## Context\n.\n"
     try:
-        for n in ("rewarmed", "invented"):
+        for n in ("kept", "rewarmed", "invented"):
             s.upsert_pattern_history(n, level=5, explanation="x", seen_at="2026-10-05")
         cs.crystallize(name="rewarmed", level=5, explanation="x")
+        seed_prior_levels(s, {"kept": 5})
         seed = s.record("the seed pattern grounded substrate observation", "observation")
-        for day, pats in (("2026-10-06", f'- seed | 2x (2026-10-06) [evidence: {seed.id[:8]} '
-                                         f'"seed pattern grounded substrate"]'),
-                          ("2026-10-07", f"- rewarmed | 5x (2026-10-07)\n"
-                                         f"- invented | 5x (2026-10-07)")):
-            if day == "2026-10-07":
-                s.record(f"episode {day}: a substrate observation about the topic.",
-                         "observation")
+        cite = f'- seed | 2x (2026-10-06) [evidence: {seed.id[:8]} "seed pattern grounded substrate"]'
+        for day, pats in (("2026-10-06", "- kept | 5x (2026-10-06)\n" + cite),
+                          ("2026-10-07", "- other | 1x (2026-10-07)"),
+                          ("2026-10-08", "- kept | 5x (2026-10-08)\n"
+                                         "- rewarmed | 5x (2026-10-08)\n"
+                                         "- invented | 5x (2026-10-08)")):
+            s.record(f"episode {day}: a substrate observation about the topic.",
+                     "observation")
             token = prepare_wrap(s, max_chars=40000)["wrap_token"]
             r = validated_save_continuity(s, base.format(p=pats), today=day,
-                                          wrap_token=token, crystal_store=cs)
+                                      wrap_token=token, crystal_store=cs)
         saved = s.load_continuity()
-        assert "- rewarmed | 5x (2026-10-07) (carried-forward)" in saved
-        assert "- invented | 4x" in saved and r["bare_demoted"] == 1
+        assert s.saved_pattern_levels()[("name", "kept")] == 5
+        assert "- kept | 5x (2026-10-08) (carried-forward)" in saved
+        assert r["bare_demoted"] == 2  # rewarmed and invented: no saved record, new claims
+        for name in ("rewarmed", "invented"):
+            line = next(ln for ln in saved.splitlines() if ln.startswith(f"- {name} |"))
+            assert line.startswith(f"- {name} | 1x"), line
+        assert cs.get("rewarmed")["level"] == 5  # the crystal itself is untouched
     finally:
         s.close()

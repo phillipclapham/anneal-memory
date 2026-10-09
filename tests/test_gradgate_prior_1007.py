@@ -296,11 +296,11 @@ def test_stale_level_capped_mark_is_dropped_once_the_level_is_earned(tmp_path):
     assert not result.get("level_capped")
 
 
-def test_cut_carried_line_loses_its_carried_forward_mark(tmp_path):
+def test_a_hold_never_lifts_a_line_above_the_bound(tmp_path):
     # L1 #5 (run): a hold the bound overrode still said "(carried-forward)". Since the
-    # merge with 1007-20 a hold takes its level from the prior file, so the bound cuts
-    # a held line only when the file claims more than the store saved: an out-of-band
-    # raise of the file (here 2x saved, 3x in the file).
+    # merge with 1007-20 the hold starts from the bound's own prior (the saved level, the
+    # file only lowering it), so even an out-of-band raise of the file (2x saved, 3x in
+    # the file) is held at the saved level and the bound has nothing to cut.
     store = Store(tmp_path / "gate.db", project_name="Gate")
     try:
         store.save_continuity(_doc(f"- foo | 2x ({YESTERDAY})"))
@@ -326,7 +326,7 @@ def test_cut_carried_line_loses_its_carried_forward_mark(tmp_path):
     finally:
         store.close()
     line = next(l for l in saved.split("\n") if "foo |" in l)
-    assert "(carried-forward)" not in line and "(level-capped)" in line
+    assert "(carried-forward)" in line and "(level-capped)" not in line
     assert _level(saved, "foo") == 2
 
 def test_oversized_level_is_cut_not_a_crash(tmp_path):

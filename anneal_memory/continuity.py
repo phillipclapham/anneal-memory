@@ -2476,18 +2476,26 @@ def _prior_levels(
     prior_text: str | None, schema: list[SectionSpec],
     saved_levels: dict[tuple[str, str], int] | None, store: Store,
 ) -> dict[str, int] | None:
-    """Where a held line's level comes from: each pattern's level in the continuity
-    being replaced, plus each named level the store last saved (the ``pattern_levels``
-    record, so a pattern re-added after leaving the file is held at the level the store
-    saved for it). Never a crystal's level: the crystal store is caller-writable, so a
+    """Where a held line's level comes from: the level the prior-state bound would
+    start the name from (``graduation._prior_base`` on its named key), so the hold and
+    the bound agree. Once the store has saved under the bound, its ``pattern_levels``
+    record is the prior, the prior file may only lower it, and a name it never saved is
+    a new claim. Never a crystal's level: the crystal store is caller-writable, so a
     crystal re-added to the working set is a new claim (spore-676 (A) as Phill ruled
-    2026-10-08 13:17: the held level comes from pattern_levels). None when there is no prior
-    continuity at all and no pattern history (a first save): nothing to derive from,
-    so the claimed level stands as before. A blank prior over a store that has history
-    is a truncated file, not a first save: each pattern's recorded high-water mark
-    bounds a hold instead (L3 r3, complement)."""
-    if not prior_text or not prior_text.strip():
+    2026-10-08 13:17: the held level comes from pattern_levels). A store that has not
+    saved under the bound yet falls back to the prior file, or, when that is blank over
+    a store with history (a truncated file, L3 r3 complement), to each pattern's
+    recorded high-water mark. None when there is nothing to derive from (a first save)."""
+    if saved_levels is not None:
+        file_levels = (_pattern_levels(prior_text, schema)
+                       if prior_text and prior_text.strip() else {})
         levels: dict[str, int] = {}
+        for (kind, name), level in saved_levels.items():
+            if kind == "name":
+                levels[name] = min(level, file_levels.get(name, level))
+        return levels
+    if not prior_text or not prior_text.strip():
+        levels = {}
         try:
             for n in store.pattern_history_names():
                 hist = store.get_pattern_history(n) or {}
@@ -2498,12 +2506,8 @@ def _prior_levels(
             levels = {"": 0}  # a bound that holds nothing: fail closed
         if not levels:
             return None
-    else:
-        levels = _pattern_levels(prior_text, schema)
-    for (kind, name), level in (saved_levels or {}).items():
-        if kind == "name" and name not in levels:
-            levels[name] = level
-    return levels
+        return levels
+    return _pattern_levels(prior_text, schema)
 
 
 def _crystal_levels_snapshot(

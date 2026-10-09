@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from datetime import datetime as _datetime, date as _date
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, NamedTuple
 
 from .schema import DEFAULT_GRADUATING
@@ -730,36 +730,38 @@ def validate_graduations(
     # and in ``atom_capped`` (which the citation-resolution warning excludes).
     atom_capped = 0
     atom_capped_lines: set[int] = set()
-    # Each cut is also reported as a LevelCapped (with the bound's cuts), so the
-    # caller's result and the after-commit warning name it: the saved text differs
-    # from what the composer wrote either way.
+    # A cut of a line's OWN marker (its first) is also reported as a LevelCapped, with
+    # the bound's cuts, so the result and the after-commit warning name it; a cut of a
+    # later marker changes no level the line is read at, so it is only counted.
     atom_caps: list[tuple[int, LevelCapped]] = []
-    atom_written = 0
     capped_section = False
 
     def _cap(m: "re.Match[str]") -> str:
-        nonlocal atom_capped, atom_written
+        nonlocal atom_capped
         tok = m.group(2)
         if _LEVEL_ATOM_RE.fullmatch(tok) or not tok.isnumeric():
             return m.group(0)  # canonical, or not a level token at all
         atom_capped += 1
-        level = (int(tok) if tok.isdecimal() and len(tok) <= _MAX_LEVEL_DIGITS
-                 else 10 ** _MAX_LEVEL_DIGITS)
-        atom_written = max(atom_written, level)
         return f"{m.group(1)}1x{m.group(3)} (level-capped)"
 
     for i, line in enumerate(lines):
         if line.startswith("## "):
             capped_section = _is_graduating_heading(line, graduating_headings)
         elif capped_section:
-            before, atom_written = atom_capped, 0
+            before = atom_capped
+            first = _ANY_LEVEL_MARKER_RE.search(line)
             lines[i] = _ANY_LEVEL_MARKER_RE.sub(_cap, line)
             if atom_capped != before:
                 atom_capped_lines.add(i)
-                parsed = _line_levels(lines[i])
-                atom_caps.append((i, LevelCapped(
-                    name=parsed[0][1] if parsed else "", written_level=atom_written,
-                    capped_to=1, prior_level=None, validated=False)))
+                tok = first.group(2) if first else ""
+                if first and not _LEVEL_ATOM_RE.fullmatch(tok) and tok.isnumeric():
+                    parsed = _line_levels(lines[i])
+                    atom_caps.append((i, LevelCapped(
+                        name=parsed[0][1] if parsed else "",
+                        written_level=(int(tok) if tok.isdecimal()
+                                       and len(tok) <= _MAX_LEVEL_DIGITS
+                                       else 10 ** _MAX_LEVEL_DIGITS),
+                        capped_to=1, prior_level=None, validated=False)))
     demoted += atom_capped
 
     for i, line in enumerate(lines):
@@ -1307,9 +1309,14 @@ def validate_graduations(
         kept_records.append((name, level, expl))
     graduated_records = kept_records
     # The atom normalizer's cuts join the report after the bound's bookkeeping
-    # (they never validated, so they move no count). A line both cut is reported once.
-    level_capped = sorted(level_capped + [c for c in atom_caps if c[0] not in cut],
-                          key=lambda c: c[0])
+    # (they never validated, so they move no count). A line both cut is reported once,
+    # with the higher level it claimed.
+    atom_by_line = dict(atom_caps)
+    level_capped = sorted(
+        [(ln, replace(c, written_level=max(c.written_level, atom_by_line[ln].written_level))
+          if ln in atom_by_line else c) for ln, c in level_capped]
+        + [c for c in atom_caps if c[0] not in cut],
+        key=lambda c: c[0])
 
     reuse_max = max(citation_counts.values()) if citation_counts else 0
     gaming_suspects = detect_citation_gaming(citation_counts)
@@ -1529,7 +1536,7 @@ def _apply_prior_bound(
         if i in carried_lines:
             new_line = _drop_mark(new_line, _CARRIED_MARK)
         body = new_line.rstrip()
-        if not body.endswith(_LEVEL_CAPPED_MARK):
+        if not body.endswith(_LEVEL_CAPPED_MARK) and i not in atom_capped_lines:
             new_line = body + " " + _LEVEL_CAPPED_MARK + new_line[len(body):]
         lines[i] = new_line
         capped.append((i, LevelCapped(

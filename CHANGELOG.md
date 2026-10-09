@@ -407,6 +407,15 @@ raised `RecursionError`). The graduation
   run a version that takes the lock: an anneal-memory without it, writing alongside, breaks the
   chain as before, and nothing on the new side can detect it.
 
+### Known limit, to close before any release — a team snapshot reuses an episode id for changed content
+
+- `import_team_snapshot` replaces a team episode's content IN PLACE under its content-derived id
+  (`_replace_team_episode`). Grounding, incoming derivations and non-team links earned by the old
+  text stay attached to the new text, and a save that validated the old text can commit grounding
+  whose id now resolves to the new one (CAP-08 integration L3 r2, codex, traced). Ruled by Phill
+  2026-10-09, option (A): changed content becomes a NEW episode, superseded from the old one by a
+  team-owned link. Not built yet; until it is, this is a known limit and no release ships with it.
+
 ### Known limit, by design — a crash during a week's first audit append (KL-24)
 - After a crash in one window (the week's first entry staged and set aside, the process stopped
   before the manifest's record of it was withdrawn), whether that entry committed is not

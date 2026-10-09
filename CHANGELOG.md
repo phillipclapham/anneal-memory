@@ -324,7 +324,6 @@ raised `RecursionError`). The graduation
   re-validated on the same citations); now every tag up to the line's next level marker goes,
   and a later marker's own tags are left alone. The next marker is found outside `[...]` tags, so
   a quoted `| 2x` in an explanation is text, not a marker.
-- Team-owned links and a lowered trust class (CAP-08 integration L3 r1, codex). When `set_trust` lowers an episode that a team-snapshot-owned supersession link touches, the link stays: the team ledger is authoritative (strict), and a human holds it by design, the augmentation exception. The `trust_set` audit event lists it under `team_supersessions_left`, and recall labels the lower-trust replacing episode with its class and names what it replaced (MCP `recall`: by id under "Replaced since"; `retrieve_relevant`: `ReplacedEpisode` with its text and trust), so the operator can see it and correct it in the team ledger (Phill 2026-10-09, option (1)).
 
 ### Fixed — the audit chain stays valid under concurrent writer processes (KL-24)
 - Several processes (or several `AuditTrail` instances) writing one store broke the hash chain:

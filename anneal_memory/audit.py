@@ -2492,12 +2492,12 @@ class AuditTrail:
                     error=f"Cannot inspect the active audit file: {e}; nothing was written.",
                 )
             if not active_entry:
-                # ``set_aside_as`` "" marks it: there is no file to move. While the
-                # begun record is not withdrawn, anneal cannot tell from disk
-                # whether the first entry committed (Phill 10-09, ruling (b) on
-                # the 10-08 exception): ALWAYS POSSIBLE, naming EVERY preserved
-                # ``.first.discarded-*`` file (none is still POSSIBLE). A person
-                # inspects them.
+                # ``set_aside_as`` "" marks it: there is no file to move. Phill's 10-08
+                # exception, as ruled ((b), 10-09): only in the crash window (the begun
+                # record still set AND a staged attempt preserved as
+                # ``.first.discarded-*``) can anneal not tell from disk whether the first
+                # entry committed, so the gap is POSSIBLE and names EVERY preserved file
+                # for a person to inspect. With none preserved it is a definite gap.
                 try:
                     preserved = trail._preserved_attempt_names()
                 except OSError as e:
@@ -2511,14 +2511,18 @@ class AuditTrail:
                     "period": begun["period"],
                     "cause": (
                         "the active file was deleted or emptied after its first entry "
-                        f"(hash {begun['first_hash']}) was recorded; whether that entry "
-                        "committed cannot be told from disk, so this is a possible "
-                        "gap: inspect any preserved attempt files"
+                        f"(hash {begun['first_hash']}) was recorded"
                     ),
                     "at": stamp,
-                    "certainty": _POSSIBLE,
                 }
                 if preserved:
+                    vanished["cause"] = (
+                        "the active file was deleted or emptied after its first entry "
+                        f"(hash {begun['first_hash']}) was recorded; whether that entry "
+                        "committed cannot be told from disk, so this is a possible "
+                        "gap: inspect the preserved attempt files"
+                    )
+                    vanished["certainty"] = _POSSIBLE
                     vanished["preserved_attempts"] = preserved
         if not new and vanished is None and not stale_cleared:
             return AuditRepairResult(repaired=False, error=_NOTHING_TO_REPAIR)

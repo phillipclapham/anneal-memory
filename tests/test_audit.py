@@ -9302,7 +9302,7 @@ class TestADeletedActiveFileIsNotASilentLoss:
         after = AuditTrail.verify(db)
         assert after.valid is True and after.total_entries == 1, after.error
         [line] = set_aside_report_lines(after.set_aside, db)
-        assert line.startswith("POSSIBLE GAP: the active audit file m.audit.jsonl")
+        assert line.startswith("GAP: the active audit file m.audit.jsonl")
 
     def test_a_second_deletion_in_the_same_week_is_refused_again(self, tmp_path):
         db = self._deleted(tmp_path)

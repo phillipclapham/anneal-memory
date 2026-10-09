@@ -4627,7 +4627,7 @@ def test_audit_repair_names_a_missing_active_file_as_lost_not_moved(tmp_path):
         capture_output=True, text=True,
     )
     assert out.returncode == 0, out.stderr
-    assert "Recorded a POSSIBLE gap for the active audit file m.audit.jsonl" in out.stdout
+    assert "Recorded the missing active audit file m.audit.jsonl" in out.stdout
     assert "Set aside sealed file" not in out.stdout
 
     # KL-24 L3 r6 (codex 10, run on d3c408a): a rebuild from quarantine with

@@ -2011,6 +2011,17 @@ def _team_entry_id_of(metadata: Any) -> str | None:
     return entry if isinstance(entry, str) else None
 
 
+def _team_replaced_entry_of(metadata: Any) -> str | None:
+    """The ledger entry id a team row that entry left records (``team.replaced``)."""
+    try:
+        team = json.loads(metadata).get("team") if metadata else None
+    except (ValueError, TypeError, AttributeError):
+        return None
+    left = team.get("replaced") if isinstance(team, dict) else None
+    entry = left.get("entry_id") if isinstance(left, dict) else None
+    return entry if isinstance(entry, str) else None
+
+
 def _hidden_by_supersession_sql(until: str | None) -> tuple[str, list[str]]:
     """SQL selecting every episode id hidden by a supersession, and its params.
 
@@ -3561,7 +3572,7 @@ class Store:
           operator overrides; then the episodes import (an enforced entry with no
           episode comes back unless an operator removed it; a stored copy whose hash
           no enforced line carries is replaced: its metadata when the text and
-          timestamp are the same (``replaced_in_place``), else by a NEW episode linked
+          timestamp are the same (``rehashed``), else by a NEW episode linked
           over it by a link this key owns (``replaced``)); then removals; then
           additions (existence, cycle and trust checks).
         - The first replace on a root with no snapshot adopts each unowned
@@ -3582,7 +3593,7 @@ class Store:
             "links_removed": [], "links_refused": [], "links_adopted": 0,
             "overrides_recorded": [], "stream_problems": [], "stream_notes": [],
             "unmappable": [],
-            "reimported": [], "replaced_in_place": [], "replaced": [],
+            "reimported": [], "rehashed": [], "replaced": [],
         }
         notes: list[tuple[str, str, str]] = []
         with self._db_boundary("import_team_snapshot"):
@@ -3625,19 +3636,11 @@ class Store:
                     "SELECT entry_id FROM team_entries WHERE removal = 'operator'")}
                 ins = self._insert_team_episodes(
                     records, by_entry, gone, session_id, replace=enforced, final=final,
-                    root=root, takers=takers, blocked={u["id"] for u in unmappable},
-                    key=key)
+                    root=root, takers=takers, blocked={u["id"] for u in unmappable})
                 rep["reimported"] = ins["reimported"]
-                rep["replaced_in_place"] = ins["replaced"]
-                for item in ins["superseded"]:
-                    rep["replaced"].append({k: item[k] for k in ("id", "old", "new")}
-                                           | {"linked": item["link_problem"] is None})
-                    if item["link_problem"] is not None:
-                        rep["links_refused"].append({"id": item["id"], "target": item["id"],
-                                                     "reason": item["link_problem"]})
-                        notes.append(("refused", item["id"],
-                                      f"over its own earlier text {item['old']}: "
-                                      f"{item['link_problem']}"[:200]))
+                rep["rehashed"] = ins["replaced"]
+                rep["replaced"] = [{k: item[k] for k in ("id", "old", "new", "revived")}
+                                   for item in ins["superseded"]]
                 for u in unmappable:
                     twin = by_entry.get(u["id"])
                     stale = twin is not None and u.get("verified", True) \
@@ -3706,12 +3709,9 @@ class Store:
                     "episode_id": item["new"], "type": item["type"],
                     "content_hash": _content_hash(item["content"]),
                     "source": item["source"], "replaces_episode": item["old"],
-                }, method="import_team_snapshot", committed="the episode", actor=item["source"])
-                if item["link_problem"] is None:
-                    self._audit_log_after_commit("supersede", {
-                        "old_id": item["old"], "new_id": item["new"], "source": item["source"],
-                    }, method="import_team_snapshot", committed="the supersession",
-                        actor=item["source"])
+                    **({"revived": True} if item["revived"] else {}),
+                }, method="import_team_snapshot",
+                    committed="the entry's move to this episode", actor=item["source"])
             for link in rep["links_added"] + rep["links_added_legacy"]:
                 self._audit_log_after_commit("supersede", {
                     "old_id": link["old"], "new_id": link["new"], "source": link["source"],
@@ -4085,6 +4085,10 @@ class Store:
             conn.execute(f"DELETE FROM team_snapshot_rows WHERE key IN ({marks})", takers)
         ep_entry = {v["ep"]: e for e, v in by_entry.items()}
         line_of = {v["ep"]: (e, v["hash"]) for e, v in by_entry.items()}
+        # Rows an entry left for a later copy (slice (A), Phill 2026-10-09): each is
+        # hidden by the entry's current episode, derived on every replace like any
+        # honoured pair, so a refusal is re-checked and a re-imported head re-linked.
+        retired = self._team_retired()
 
         if legacy:
             adopt = set()
@@ -4115,6 +4119,17 @@ class Store:
                      if [v["hash"]] == enforced.get(e)}
         honoured = set(honours)
         wanted: dict[tuple[str, str], tuple[str, str]] = {}
+        for old_ep, entry in sorted(retired.items()):
+            head = linker_ep.get(entry)
+            if head is None:
+                if entry not in by_entry and not conn.execute(
+                        "SELECT 1 FROM supersessions WHERE old_id = ?", (old_ep,)).fetchone():
+                    notes.append(("retired_shown", entry,
+                                  f"{old_ep} is an earlier text of this entry, which this "
+                                  "store no longer holds; it shows in recall"))
+                continue
+            if by_entry[entry].get("n", 1) == 1 and (old_ep, head) not in overrides:
+                wanted[(old_ep, head)] = (entry, entry)
         for target, linker in honours:
             if linker not in linker_ep or target not in by_entry:
                 continue
@@ -4127,7 +4142,7 @@ class Store:
         owned = {(r[0], r[1]) for r in conn.execute(
             "SELECT old_id, new_id FROM team_snapshot_rows WHERE key = ?", (key,)).fetchall()}
         for old, new in sorted(owned):
-            if (old, new) in wanted or ep_entry.get(old) not in enforced:
+            if (old, new) in wanted or (ep_entry.get(old) or retired.get(old)) not in enforced:
                 continue
             if ({ep_entry.get(new)} | {r[0] for r in conn.execute(
                     "SELECT standin_new FROM rewire_origin WHERE old_id = ? AND new_id = ?",
@@ -4169,7 +4184,7 @@ class Store:
                                                  check_grounds=False, check_order=False)
             if problem:
                 rep["links_refused"].append({"id": linker, "target": target,
-                                             "reason": problem})
+                                             "old": old, "new": new, "reason": problem})
                 notes.append(("refused", linker, f"over {target}: {problem}"[:200]))
                 continue
             conn.execute("INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
@@ -4189,7 +4204,7 @@ class Store:
         # source and uses idx_episodes_source.
         by_entry: dict[str, dict[str, Any]] = {}
         for row in self._conn.execute(
-            "SELECT id, source, timestamp, content, metadata FROM episodes "
+            "SELECT id, source, timestamp, type, content, metadata FROM episodes "
             "WHERE source >= 'team:' AND source < 'team;' ORDER BY timestamp, id"
         ).fetchall():
             try:
@@ -4209,7 +4224,7 @@ class Store:
                     "retire": team.get("type") == "retire",
                     "words": str(team.get("words") or "").strip(),
                     "content": row["content"], "ts": row["timestamp"],
-                    "source": row["source"],
+                    "source": row["source"], "type": row["type"],
                 }
         # Entries imported before 0.9.40 have no team_entries row yet.
         self._remember_team_entries(
@@ -4232,27 +4247,27 @@ class Store:
         gone: dict[str, str], session_id: str | None, *,
         replace: dict[str, list[str]] | None = None, final: frozenset[str] | set[str] = frozenset(),
         root: str = "", takers: list[str] | None = None, blocked: set[str] | None = None,
-        key: str = "",
     ) -> dict[str, Any]:
         """Inside the caller's write transaction: insert each record not held, keyed by
         ledger id (a held id with another hash is a conflict; a removed id stays
         removed). Updates ``by_entry`` in place. Returns ``imported``, ``already``,
         ``conflicts``, ``removed``, ``fresh`` (the ledger ids inserted), ``reimported``,
-        ``replaced`` (same text, new hash: the row's metadata only), ``replaced_audit``
+        ``replaced`` (same text, new hash: the row's hash only), ``replaced_audit``
         and ``superseded`` (changed text: a new episode, see below).
 
-        ``replace`` (a v3 replace by snapshot ``key``: the enforced ids and their
+        ``replace`` (a v3 replace: the enforced ids and their
         hashes; every record is enforced): a removed id comes back unless it is in
         ``final`` (an operator's delete), and a stored copy whose hash no enforced line
         carries is replaced. While both copies are enforced (a live twin) the stored one
         stays and the conflict is reported.
 
         ⛔ An episode id names one text (it is derived from it), so a replace that
-        changes the text or timestamp never rewrites the stored row: the enforced copy
-        becomes a NEW episode, linked over the old one by a link ``key`` owns, and the
-        old row keeps its id, text, trust, derivations, grounding and links (Phill
-        2026-10-09, (A); codex L3 r2 1009+22, run: a save validated against the old
-        text committed grounding on an id the import had rewritten)."""
+        changes the text, timestamp, type or source never rewrites the stored row: the
+        enforced copy becomes another episode (:meth:`_supersede_team_episode`), which
+        :meth:`_snapshot_replace` links over the old one, and the old row keeps its id,
+        text, trust, derivations, grounding and links (Phill 2026-10-09, (A); codex L3
+        r2 1009+22, run: a save validated against the old text committed grounding on
+        an id the import had rewritten)."""
         imported: list[dict[str, str]] = []
         already: list[str] = []
         conflicts: list[dict[str, str]] = []
@@ -4280,7 +4295,11 @@ class Store:
                                                        takers)):
                     # one authoritative hash (no unmappable line names the id), and
                     # no other ledger's active key enforces the stored copy
-                    if (known["content"], known["ts"]) == (rec["content"], rec["timestamp"]):
+                    text = str(known["content"])
+                    if text.startswith(_STALE_TWIN_MARK):
+                        text = text[len(_STALE_TWIN_MARK):]
+                    if (text, known["ts"], known["type"], known["source"]) == (
+                            rec["content"], rec["timestamp"], rec["type"], rec["source"]):
                         self._rehash_team_episode(rec, known)
                         replaced.append(rec["entry_id"])
                         replaced_audit.append({"episode": known["ep"], "type": rec["type"],
@@ -4288,7 +4307,7 @@ class Store:
                                                "source": rec["source"]})
                     else:
                         superseded.append(self._supersede_team_episode(
-                            rec, known, session_id, key))
+                            rec, known, session_id))
                 else:
                     conflicts.append({
                         "id": rec["entry_id"], "stored_hash": str(known["hash"]),
@@ -4337,6 +4356,7 @@ class Store:
             "retire": team_meta.get("type") == "retire",
             "words": str(team_meta.get("words") or "").strip(),
             "content": rec["content"], "ts": rec["timestamp"], "source": rec["source"],
+            "type": rec["type"],
         }
 
     def _insert_team_row(self, rec: dict[str, Any], session_id: str | None) -> str:
@@ -4361,55 +4381,88 @@ class Store:
         raise AssertionError("unreachable")  # the loop returns or raises
 
     def _rehash_team_episode(self, rec: dict[str, Any], known: dict[str, Any]) -> None:
-        """The enforced copy has the stored row's text and timestamp under a new hash:
-        record the hash; the text, and so the id, is the same."""
+        """The enforced copy has the stored row's text, timestamp, type and source
+        under a new hash: record the hash (and drop a stale-twin mark: the copy is
+        current again); the text, and so the id, is the same."""
         self._conn.execute(
-            "UPDATE episodes SET type = ?, source = ?, metadata = ? WHERE id = ?",
-            (rec["type"], rec["source"], json.dumps(rec["metadata"]), known["ep"]))
+            "UPDATE episodes SET content = ?, metadata = ? WHERE id = ?",
+            (rec["content"], json.dumps(rec["metadata"]), known["ep"]))
         self._conn.execute(
             "UPDATE team_entries SET hash = ?, episode_id = ?, removal = NULL "
             "WHERE entry_id = ?", (rec["hash"], known["ep"], rec["entry_id"]))
         known.update(self._team_held_fields(rec, known["ep"]))
 
     def _supersede_team_episode(
-        self, rec: dict[str, Any], known: dict[str, Any], session_id: str | None, key: str,
+        self, rec: dict[str, Any], known: dict[str, Any], session_id: str | None,
     ) -> dict[str, Any]:
-        """The enforced copy of a stored entry changes its text: insert it as a new
-        episode, move the entry to it, and link it over the old one with a link the
-        snapshot ``key`` owns. The old row's metadata stops naming the entry (it keeps
-        ``team.replaced``), so it is no longer a copy of it: not a twin, and removing it
-        later records nothing about the entry. Nothing else on the old row changes.
-        The link takes :meth:`_supersession_problem`'s existence, cycle and trust checks,
-        as every team link does: a lower-trust copy does not hide the old text, and the
-        refusal is returned. Returns ``{id, old, new, link_problem}`` plus audit fields."""
+        """The enforced copy of a stored entry changes its text, timestamp, type or
+        source: store it as another episode and move the entry to it. That episode is
+        the stored row this entry once had with exactly this copy, if one is kept
+        (a flip back: its id is the one a store that never saw the flip derives),
+        else a new one. The row the entry leaves stops naming it (its metadata keeps
+        ``team.replaced``), so it is not a twin and removing it later records nothing
+        about the entry; nothing else on it changes. The link over it is not made
+        here: :meth:`_snapshot_replace` derives it on every replace, with every team
+        link's checks. Returns ``{id, old, new, revived}``."""
         old = known["ep"]
-        new = self._insert_team_row(rec, session_id)
-        row = self._conn.execute("SELECT metadata FROM episodes WHERE id = ?",
-                                 (old,)).fetchone()
-        meta = json.loads(row["metadata"]) if row is not None and row["metadata"] else {}
-        team = meta.get("team") if isinstance(meta, dict) else None
-        if isinstance(team, dict):
-            team.pop("entry_id", None)
-            team["replaced"] = {"entry_id": rec["entry_id"], "hash": known["hash"],
-                                "by": new}
+        new = self._retired_copy(rec)
+        revived = new is not None
+        if new is None:
+            new = self._insert_team_row(rec, session_id)
+        else:
             self._conn.execute("UPDATE episodes SET metadata = ? WHERE id = ?",
-                               (json.dumps(meta), old))
+                               (json.dumps(rec["metadata"]), new))
+        self._retire_team_row(old, rec["entry_id"], known["hash"])
         self._conn.execute(
             "UPDATE team_entries SET hash = ?, episode_id = ?, removal = NULL "
             "WHERE entry_id = ?", (rec["hash"], new, rec["entry_id"]))
-        problem = self._supersession_problem(old, new, rec["content"], rec["timestamp"],
-                                             check_grounds=False, check_order=False)
-        if problem is None:
-            self._conn.execute(
-                "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
-                (old, new, rec["source"]))
-            self._conn.execute(
-                "INSERT OR IGNORE INTO team_snapshot_rows (key, old_id, new_id) "
-                "VALUES (?, ?, ?)", (key, old, new))
         known.clear()
         known.update({"n": 1, **self._team_held_fields(rec, new)})
-        return {"id": rec["entry_id"], "old": old, "new": new, "link_problem": problem,
+        return {"id": rec["entry_id"], "old": old, "new": new, "revived": revived,
                 "type": rec["type"], "content": rec["content"], "source": rec["source"]}
+
+    def _retired_copy(self, rec: dict[str, Any]) -> str | None:
+        """The id of a stored row this entry left whose text, timestamp, type and
+        source are this record's (the ids a fresh import would try, in order)."""
+        id_input = f"{rec['entry_id']}\0{rec['content']}"
+        for nonce in range(64):
+            row = self._conn.execute(
+                "SELECT timestamp, type, content, source, metadata FROM episodes "
+                "WHERE id = ?", (_episode_id(id_input, rec["timestamp"], nonce),)).fetchone()
+            if row is None:
+                return None
+            if (row["timestamp"], row["type"], row["content"], row["source"]) == (
+                    rec["timestamp"], rec["type"], rec["content"], rec["source"]) \
+                    and _team_replaced_entry_of(row["metadata"]) == rec["entry_id"]:
+                return _episode_id(id_input, rec["timestamp"], nonce)
+        return None
+
+    def _retire_team_row(self, ep_id: str, entry_id: str, hash_: Any) -> None:
+        row = self._conn.execute("SELECT metadata FROM episodes WHERE id = ?",
+                                 (ep_id,)).fetchone()
+        try:
+            meta = json.loads(row["metadata"]) if row is not None and row["metadata"] else {}
+        except (TypeError, ValueError):
+            meta = {}
+        team = meta.get("team") if isinstance(meta, dict) else None
+        if isinstance(team, dict):
+            team.pop("entry_id", None)
+            team["replaced"] = {"entry_id": entry_id, "hash": hash_}
+            self._conn.execute("UPDATE episodes SET metadata = ? WHERE id = ?",
+                               (json.dumps(meta), ep_id))
+
+    def _team_retired(self) -> dict[str, str]:
+        """Inside the caller's transaction: each stored ``team:`` row an entry left
+        (:meth:`_supersede_team_episode`) -> that entry's ledger id."""
+        out: dict[str, str] = {}
+        for row in self._conn.execute(
+            "SELECT id, metadata FROM episodes "
+            "WHERE source >= 'team:' AND source < 'team;'"
+        ).fetchall():
+            entry = _team_replaced_entry_of(row["metadata"])
+            if entry is not None and _team_entry_id_of(row["metadata"]) is None:
+                out[row["id"]] = entry
+        return out
 
     def import_team_entries(
         self,

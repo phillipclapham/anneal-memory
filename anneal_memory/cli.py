@@ -2456,7 +2456,7 @@ def cmd_team_import(args: argparse.Namespace) -> None:
                   f"{data['links_adopted']} adopted, "
                   f"{len(data['overrides_recorded'])} operator removal(s) recorded, "
                   f"{len(data['reimported'])} entr(ies) re-imported, "
-                  f"{len(data['replaced_in_place'])} re-hashed (same text), "
+                  f"{len(data['rehashed'])} re-hashed (same text), "
                   f"{len(data['replaced'])} replaced by a new episode, "
                   f"{len(data['sanitised'])} sanitised",
                   file=sys.stderr)

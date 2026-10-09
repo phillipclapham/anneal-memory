@@ -175,7 +175,7 @@ def test_s7_s8_legacy_and_twins(store):
     # so the real line's pair maps again and stays
     before = ep(store, B0)
     r = import_ledger(store, v3([(a, True, []), (b, True, [A0])], seq=2))
-    assert r.replaced_in_place == [B0] and not r.links_removed
+    assert r.rehashed == [B0] and not r.links_removed
     assert ep(store, B0) == before and (ep(store, A0), before) in links(store)
 
 
@@ -651,7 +651,7 @@ def test_l3r1_1006_twin_adoption_and_cross_root_rewrite(tmp_path):
         import_ledger(s, v3([(a, True, []), (b, True, [A0])], key="k1", root="r1"))
         before = s.get(ep(s, B0)).content
         r = import_ledger(s, v3([(a, True, []), (b_twin, True, [A0])], key="k2", root="r2"))
-        assert not r.replaced_in_place and r.conflicts
+        assert not r.rehashed and r.conflicts
         assert s.get(ep(s, B0)).content == before
     finally:
         s.close()
@@ -663,7 +663,7 @@ def test_l3r1_1006_twin_adoption_and_cross_root_rewrite(tmp_path):
         b_twin2 = ledger("bob", [{**RETIRE, "reason": "twin two"}])[0]
         r = import_ledger(s, v3([(a, True, []), (b_twin, True, [A0]), (b_twin2, True, [A0])],
                                 seq=2))
-        assert not r.replaced_in_place and s.get(ep(s, B0)).content == before
+        assert not r.rehashed and s.get(ep(s, B0)).content == before
     finally:
         s.close()
 
@@ -705,7 +705,7 @@ def test_l3r2_1006_named_fixes(store, tmp_path):
     b_bad = ledger("bob", [{**RETIRE, "v": True}])[0]
     before = store.get(ep(store, B0)).content
     r = import_ledger(store, v3([(a, True, []), (b2, True, [A0]), (b_bad, True, [])], seq=3))
-    assert not r.replaced_in_place and store.get(ep(store, B0)).content.endswith(before)
+    assert not r.rehashed and store.get(ep(store, B0)).content.endswith(before)
     # complement r2 #4: an operator removal is never downgraded by a later auto one
     store._conn.execute("UPDATE team_entries SET removal = 'operator' WHERE entry_id = ?",
                         (B0,))

@@ -433,23 +433,28 @@ raised `RecursionError`). The graduation
   by X before such a change stayed on the id as well (CAP-08 integration L3 r2, codex, two HIGHs).
   An episode id is derived from its text, so the in-place rewrite (`_replace_team_episode`) is
   deleted, not guarded.
-- When the enforced copy of a stored entry has another text or timestamp, `import_team_snapshot`
-  inserts it as a new episode (its id derived from the new text, so two stores importing the same
-  snapshots agree on it), moves the entry to it, and links it over the old episode with a link the
-  importing snapshot key owns. The old episode keeps its id, text, trust, derivations, grounding,
-  associations and links; its metadata stops naming the entry (`team.replaced` records the entry,
-  its old hash and the new episode), so it is no longer a copy of the entry and removing it later
-  records nothing about the entry. Reported in the new `replaced` (`{id, old, new, linked}`; CLI
-  "replaced by a new episode"); the import is audited as a `record` with `replaces_episode` and a
-  `supersede`.
-- The link takes the existence, cycle and trust checks every team link takes: a copy of lower
-  effective trust does not hide the old text (an operator-raised text stays visible beside the new
-  one), and the refusal is in `links_refused` and team-status. Once made, the link is team-owned,
-  so a later `set_trust` lowering leaves it (`team_supersessions_left`).
-- A copy with the same text and timestamp under a new hash updates the stored row's metadata and
-  hash only (`replaced_in_place`, CLI "re-hashed (same text)"), as before minus every text write.
-- Deleting the new episode detaches its links like any delete, so the old text shows in recall
-  again, as A does when B is deleted from A -> B.
+- When the enforced copy of a stored entry has another text, timestamp, type or source,
+  `import_team_snapshot` stores it as another episode and moves the entry to it: the row this
+  entry once had with exactly that copy when one is kept (a flip back, X -> Y -> X, ends on X's
+  original id, the one a store that only saw X holds), else a new episode whose id is derived from
+  its text. The old episode keeps its id, text, trust, derivations, grounding, associations and
+  links; its metadata stops naming the entry (`team.replaced` records the entry and its old hash),
+  so it is not a copy of the entry and removing it later records nothing about the entry.
+  Reported in the new `replaced` (`{id, old, new, revived}`; CLI "replaced by a new episode") and
+  audited as a `record` with `replaces_episode`.
+- Every replace derives the link hiding each such row behind its entry's current episode, as it
+  does an honoured pair, and the link is team-owned. It takes the existence, cycle and trust checks
+  every team link takes: a copy of lower effective trust does not hide the old text (an
+  operator-raised text stays visible beside the new one), reported in `links_refused` (which now
+  names the `old` and `new` episodes of every refused link) and team-status on every replace until
+  the trust allows it. A head deleted by a library call and brought back by the stream is linked
+  again; an operator's removal of the link is kept (an override, as for any team link); a
+  `set_trust` lowering leaves it (`team_supersessions_left`).
+- A copy with the same text, timestamp, type and source under a new hash records the new hash
+  only (`rehashed`, renamed from `replaced_in_place`; CLI "re-hashed (same text)").
+- Deleting the current episode of an entry with the CLI's confirm is final for the entry, so the
+  old text shows in recall again, as A does when B is deleted from A -> B; team-status notes it
+  (`retired_shown`).
 
 ### Known limit, by design — a crash during a week's first audit append (KL-24)
 - After a crash in one window (the week's first entry staged and set aside, the process stopped

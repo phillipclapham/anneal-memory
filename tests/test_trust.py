@@ -1300,16 +1300,50 @@ class TestIntegrationL3Round1:
             s._conn.commit()
             r = import_ledger(s, v3([(a, True, []), (b, True, [A0])], seq=2))
             new = ep(s, B0)
-            assert r.replaced == [{"id": B0, "old": e, "new": new, "linked": False}]
-            assert "lower-trust" in r.links_refused[0]["reason"]
+            assert r.replaced == [{"id": B0, "old": e, "new": new, "revived": False}]
+            refused = [x for x in r.links_refused if x["old"] == e]
+            assert refused and "lower-trust" in refused[0]["reason"]
             assert s.get(e).content == "reviewed text"
             assert s.trust_map([e]) == {e: "operator"} and s.derived_edges([e])
             assert s.trust_map([new]) == {} and s.derived_edges([new]) == {}
             shown = {x.id for x in s.recall(limit=20).episodes}
             assert {e, new} <= shown
+            # L1 r1 (run): the refusal was never re-checked. Every replace derives it.
+            again = import_ledger(s, v3([(a, True, []), (b, True, [A0])], seq=3))
+            assert any(x["old"] == e for x in again.links_refused)
+            s.set_trust(e, "agent")
+            import_ledger(s, v3([(a, True, []), (b, True, [A0])], seq=4))
+            assert s.supersession_exists(old_id=e, new_id=new)
 
 
 # --- CAP-08 integration L3 r2 (1009+22), run before its fix -------------------
+
+
+def test_delete_holds_the_write_lock_while_it_reads_the_descendants(tmp_path):
+    """codex r3 MED (1009+22), run on b92234f: another writer recorded N derived
+    from S, superseding F, between delete(S)'s descendant read and its DELETE, and
+    N kept hiding F as external. No writer may get in between now. Without
+    tombstones nothing before the read wrote, so nothing held the lock."""
+    store = Store(tmp_path / "m.db", project_name="T", keep_tombstones=False)
+    src = store.record("A note says the gate is open.", EpisodeType.OBSERVATION)
+    real, seen = store._derivation_descendants, []
+
+    def racing(ids):
+        if not seen:
+            other = sqlite3.connect(store.path, timeout=0.1)
+            try:
+                with pytest.raises(sqlite3.OperationalError, match="locked"):
+                    other.execute("BEGIN IMMEDIATE")
+                seen.append(1)
+            finally:
+                other.close()
+        return real(ids)
+
+    store._derivation_descendants = racing  # type: ignore[method-assign]
+    try:
+        assert store.delete(src.id) and seen
+    finally:
+        store.close()
 
 
 def test_deleting_a_source_drops_the_link_its_summary_can_no_longer_hold(store):

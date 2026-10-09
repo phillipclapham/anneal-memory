@@ -65,7 +65,8 @@ def test_grounding_earned_by_the_old_text_stays_with_the_old_text(store):
     assert save(store, _line(old, own.id), "2026-10-08")["graduations_validated"] == 1
     r = import_ledger(store, v3([(D_Y, True, [])], seq=2))
     new = held(store)
-    assert r.replaced == [{"id": D_ID, "old": old, "new": new, "linked": True}]
+    assert r.replaced == [{"id": D_ID, "old": old, "new": new, "revived": False}]
+    assert [(l["old"], l["new"]) for l in r.links_added] == [(old, new)]
     assert new != old and X in store.get(old).content and Y in store.get(new).content
     grounded = {i for rung in store.pattern_grounding()["deploy_gate"].values()
                 for g in rung for i in g["episodes"]}
@@ -97,3 +98,23 @@ def test_a_save_validated_against_the_old_text_cannot_commit_on_the_new(store):
         save(store, _line(old, own.id), "2026-10-08")
     assert store.status().wrap_in_progress
     assert X in store.get(old).content and store.pattern_grounding() == {}
+
+
+def test_the_link_and_the_ids_are_derived_again_on_every_replace(tmp_path, store):
+    """L1 r1 (run): a deleted head re-imported left the old text shown with no link,
+    for good. L2 r1 (run): X -> Y -> X minted a nonce twin of X, so this store's
+    head id differed from a store that only ever saw X."""
+    old = held(store)
+    import_ledger(store, v3([(D_Y, True, [])], seq=2))
+    new = held(store)
+    assert store.delete(new)  # a library delete: the stream brings the entry back
+    r = import_ledger(store, v3([(D_Y, True, [])], seq=3))
+    back = held(store)
+    assert r.reimported == [D_ID] and store.supersession_exists(old_id=old, new_id=back)
+    r = import_ledger(store, v3([(D_X, True, [])], seq=4))
+    assert r.replaced == [{"id": D_ID, "old": back, "new": old, "revived": True}]
+    with Store(tmp_path / "fresh.db", project_name="T") as fresh:
+        import_ledger(fresh, v3([(D_X, True, [])], seq=1))
+        assert held(fresh) == held(store) == old
+    assert [e.id for e in store.recall(limit=20).episodes
+            if e.id in (old, back)] == [old]

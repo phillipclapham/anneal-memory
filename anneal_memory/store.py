@@ -4186,9 +4186,17 @@ class Store:
             problem = self._supersession_problem(old, new, lk["content"], lk["ts"],
                                                  check_grounds=False, check_order=False)
             if problem:
+                if linker == target and conn.execute(
+                        "SELECT 1 FROM supersessions WHERE old_id = ? AND new_id = ?",
+                        (new, old)).fetchone():
+                    # A link no key owns (team-forget-key leaves its links so) hides
+                    # this entry's current text behind its earlier one. The operator
+                    # released it and holds it: name the one command that ends it.
+                    problem += (f"; the link {new} -> {old} is no key's: "
+                                f"`anneal-memory unsupersede --old {new} --new {old}`")
                 rep["links_refused"].append({"id": linker, "target": target,
                                              "old": old, "new": new, "reason": problem})
-                notes.append(("refused", linker, f"over {target}: {problem}"[:200]))
+                notes.append(("refused", linker, f"over {target}: {problem}"[:300]))
                 continue
             conn.execute("INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
                          (old, new, lk["source"]))

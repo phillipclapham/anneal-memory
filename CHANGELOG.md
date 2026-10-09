@@ -448,11 +448,17 @@ raised `RecursionError`). The graduation
   operator-raised text stays visible beside the new one), reported in `links_refused` (which now
   names the `old` and `new` episodes of every refused link) and team-status on every replace until
   the trust allows it. A head deleted by a library call and brought back by the stream is linked
-  again (and is the kept row, revived, when it has one); a link the importer does not own is never
-  removed to make room (a key released with `team-forget-key` leaves its links unowned, as that
-  command says, so one hiding the current text behind an earlier one stays, and the refusal of the
-  derived link names the cycle on every replace until the operator `unsupersede`s it); an operator's removal of the link is kept (an override, as for any team link); a
-  `set_trust` lowering leaves it (`team_supersessions_left`).
+  again (and is the kept row, revived, when it has one); an operator's removal of the link is kept
+  (an override, as for any team link); a `set_trust` lowering leaves it (`team_supersessions_left`).
+- ⚠ Held by the operator, by design (the augmentation exception): a key released with
+  `team-forget-key` leaves its links unowned, as that command says, and no key holds them again
+  until the operator decides. If the entry then flips back to an earlier text, the released link
+  from the current episode to that earlier one still hides the current text, and the link this
+  replace derives the other way is refused as a cycle. The refusal is reported on every replace
+  (`links_refused`, team-status) and names the one command that ends it:
+  `anneal-memory unsupersede --old <current> --new <earlier>`. anneal does not infer that the
+  released link is the ledger's: two attempts to (by its `team:` label, then by what its endpoints
+  record) removed links an operator or another ledger held (L3 r2, r3, codex, run).
 - A copy with the same text, timestamp, type and source under a new hash records the new hash
   only (`rehashed`, renamed from `replaced_in_place`; CLI "re-hashed (same text)").
 - Deleting the current episode of an entry with the CLI's confirm is final for the entry, so the

@@ -4659,10 +4659,10 @@ def test_audit_repair_names_a_missing_active_file_as_lost_not_moved(tmp_path):
     assert "went missing" not in verify.stderr
 
 
-def test_possible_gap_names_the_preserved_attempt_files_on_every_surface(tmp_path):
-    """KL-24 (Phill 10-08, the declared augmentation exception): a person decides
-    whether a kept staged entry was a lost entry, so repair and both verify
-    surfaces print the file names. Run first on 7e406c2: repair printed none."""
+def test_a_vanished_active_file_is_a_definite_gap_with_pointers_on_every_surface(tmp_path):
+    """KL-24 (Phill 10-08, the declared augmentation exception): repair and both
+    verify surfaces print the kept staged entries' names as files to inspect,
+    beside a definite gap (it was POSSIBLE before; the 10-09 ruling)."""
     from anneal_memory.audit import AuditTrail
 
     db = tmp_path / "m.db"
@@ -4673,12 +4673,14 @@ def test_possible_gap_names_the_preserved_attempt_files_on_every_surface(tmp_pat
     cli = [sys.executable, "-m", "anneal_memory.cli", "--db", str(db)]
     out = subprocess.run(cli + ["audit-repair"], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
-    assert "POSSIBLE gap" in out.stdout and kept in out.stdout
-    assert "as a gap" not in out.stderr, "the warning must not call it definite"
+    assert "POSSIBLE" not in out.stdout and kept in out.stdout
+    assert "its entries are lost" in out.stdout
     verify = subprocess.run(cli + ["verify"], capture_output=True, text=True)
-    assert "POSSIBLE GAP" in verify.stderr and kept in verify.stderr
+    assert "GAP: the active audit file" in verify.stderr and "POSSIBLE" not in verify.stderr
+    assert kept in verify.stderr
     server = subprocess.run(
         [sys.executable, "-m", "anneal_memory.server", "--db", str(db), "--verify-audit"],
         capture_output=True, text=True,
     )
-    assert "POSSIBLE GAP" in server.stderr and kept in server.stderr
+    assert "GAP: the active audit file" in server.stderr and "POSSIBLE" not in server.stderr
+    assert kept in server.stderr

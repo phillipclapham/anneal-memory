@@ -329,14 +329,32 @@ def _discarded_name_pattern(stem: str) -> "re.Pattern[str]":
     ``<stem>.audit.jsonl.first.discarded-<UTC stamp>[-n]``; group 1 is the stamp."""
     return re.compile(
         re.escape(f"{stem}.audit.jsonl.first.{_DISCARDED_REASON}-")
-        + r"([0-9]{8}T[0-9]{12}Z)(?:-[0-9]+)?",
+        + r"([0-9]{8}T[0-9]{12}Z)(?:-[1-9][0-9]*)?",
         re.ASCII,
     )
 
 
-def _week_start_stamp(period: str) -> str | None:
-    """The first instant of ISO week ``period`` (``YYYY-Www``) in the stamp
-    format of a set-aside name, or None when ``period`` does not parse."""
+def _canonical_stamp(stamp: str) -> bool:
+    """True when ``stamp`` is a UTC stamp ``_set_aside`` could have written: it
+    parses and formats back to the same text."""
+    try:
+        return datetime.strptime(stamp, "%Y%m%dT%H%M%S%fZ").strftime(
+            "%Y%m%dT%H%M%S%fZ"
+        ) == stamp
+    except ValueError:
+        return False
+
+
+def _discarded_name_ok(stem: str, name: str) -> bool:
+    """``name`` is exactly a set-aside staged-entry name of ``stem``'s trail."""
+    match = _discarded_name_pattern(stem).fullmatch(name)
+    return match is not None and _canonical_stamp(match[1])
+
+
+def _week_bounds(period: str) -> tuple[str, str] | None:
+    """The first instant of ISO week ``period`` (``YYYY-Www``) and of the NEXT
+    ISO week, in the stamp format of a set-aside name; None when ``period``
+    does not parse."""
     match = re.fullmatch(r"([0-9]{4})-W([0-9]{2})", period, re.ASCII)
     if match is None:
         return None
@@ -344,7 +362,10 @@ def _week_start_stamp(period: str) -> str | None:
         start = datetime.fromisocalendar(int(match[1]), int(match[2]), 1)
     except ValueError:
         return None
-    return start.strftime("%Y%m%dT%H%M%S%fZ")
+    fmt = "%Y%m%dT%H%M%S%fZ"
+    return start.strftime(fmt), (start + timedelta(days=7)).strftime(fmt)
+
+
 _NOTHING_TO_REPAIR = "The manifest is valid; there is nothing to repair."
 # The manifest's ``active_begun`` record: the week of the active file's first
 # entry, that entry's hash, and the ``prev_hash`` it chained from, saved once per
@@ -469,14 +490,15 @@ def _parse_manifest_bytes(raw: bytes, stem: str) -> dict[str, Any]:
         for r in rated
     ):
         raise TypeError("manifest field 'set_aside' holds an invalid 'certainty'")
-    # ``preserved_attempts``: names of kept staged entries, on a possible-gap
+    # ``preserved_attempts``: names of kept staged entries, on an active-file
     # record only.
     if not all(
         "preserved_attempts" not in r or (
-            "certainty" in r
+            r["set_aside_as"] == ""
+            and r["filename"] == f"{stem}.audit.jsonl"
             and isinstance(r["preserved_attempts"], list)
             and all(
-                isinstance(n, str) and _discarded_name_pattern(stem).fullmatch(n)
+                isinstance(n, str) and _discarded_name_ok(stem, n)
                 for n in r["preserved_attempts"]
             )
         )
@@ -2214,8 +2236,9 @@ class AuditTrail:
             )
         possible_gap: list[dict[str, Any]] = []
         if not active_holds_entry:
+            period = _iso_week_now()
             try:
-                preserved = trail._discarded_staged_names(_iso_week_now())
+                preserved = trail._discarded_staged_names(period)
             except OSError as e:
                 return AuditRepairResult(
                     repaired=False,
@@ -2228,7 +2251,7 @@ class AuditTrail:
                 # r6, codex 10, run: the CLI and verify printed it as a definite
                 # GAP, "went missing with its entries").
                 "certainty": _POSSIBLE,
-                "period": _iso_week_now(),
+                "period": period,
                 "cause": (
                     "the manifest was rebuilt from quarantine and the active file holds "
                     "no entry; whether it held entries before cannot be known, so this "
@@ -2480,11 +2503,11 @@ class AuditTrail:
                     error=f"Cannot inspect the active audit file: {e}; nothing was written.",
                 )
             if not active_entry:
-                # ``set_aside_as`` "" marks it: there is no file to move. With a
-                # set-aside staged entry beside it the loss may be only a rolled-back
-                # append whose record was never withdrawn: a POSSIBLE gap naming the
-                # files, never silently cleared (KL-24 L3 r9: a hash reconcile
-                # suppressed real losses and is deleted).
+                # ``set_aside_as`` "" marks it: there is no file to move. A vanished
+                # active file is a definite loss whatever else is on disk; set-aside
+                # staged entries are listed as pointers only (KL-24 L3 r7, r8: every
+                # rule that let a directory listing change the certainty drew a new
+                # finding, so none remains).
                 try:
                     preserved = trail._discarded_staged_names(begun["period"])
                 except OSError as e:
@@ -2503,12 +2526,7 @@ class AuditTrail:
                     "at": stamp,
                 }
                 if preserved:
-                    vanished["certainty"] = _POSSIBLE
                     vanished["preserved_attempts"] = preserved
-                    vanished["cause"] += (
-                        "; kept staged entries may be the rolled-back append that record "
-                        "named, so this may not be a loss"
-                    )
         if not new and vanished is None and not stale_cleared:
             return AuditRepairResult(repaired=False, error=_NOTHING_TO_REPAIR)
         taken = [r["set_aside_as"] for r in new if os.path.lexists(audit_dir / r["set_aside_as"])]
@@ -2561,7 +2579,7 @@ class AuditTrail:
             _emit_warning(
                 f"Recorded the missing active audit file {vanished['filename']} "
                 f"({vanished['period']}) as a "
-                + ("POSSIBLE gap" if vanished.get("certainty") == _POSSIBLE else "gap")
+                + "gap"
             )
         return AuditRepairResult(
             repaired=True, set_aside=new + ([vanished] if vanished else [])
@@ -3283,21 +3301,28 @@ class AuditTrail:
 
     def _discarded_staged_names(self, period: str) -> list[str]:
         """Names of the set-aside staged entries beside the active file
-        (``<active>.first.discarded-<stamp>[-n]``) that could belong to a loss in
-        ISO week ``period``, sorted: regular files only, stamped at or after the
-        week's first instant (the manifest's record of the first entry carries a
-        week, not a time). A period that does not parse yields none, so the loss
-        stays definite. Never renamed or deleted; ``audit-repair`` names them in
-        the possible gap it records so a person can inspect them. A listing or
-        ``lstat`` error propagates."""
-        floor = _week_start_stamp(period)
-        if floor is None:
+        (``<active>.first.discarded-<stamp>[-n]``) stamped within ISO week
+        ``period``, sorted: regular files only, stamped at or after the week's
+        first instant and before the next week's (the manifest's record of the
+        first entry carries a week, not a time). A period that does not parse
+        yields none. These are POINTERS for a person to inspect: they never
+        change a record's certainty. Never renamed or deleted. A listing error
+        propagates; a file that vanishes before its ``lstat`` is skipped."""
+        bounds = _week_bounds(period)
+        if bounds is None:
             return []
+        floor, ceiling = bounds
         pattern = _discarded_name_pattern(self._db_path.stem)
         names = []
         for p in self._active_path.parent.iterdir():
             match = pattern.fullmatch(p.name)
-            if match and match[1] >= floor and stat.S_ISREG(os.lstat(p).st_mode):
+            if not (match and floor <= match[1] < ceiling and _canonical_stamp(match[1])):
+                continue
+            try:
+                is_file = stat.S_ISREG(os.lstat(p).st_mode)
+            except FileNotFoundError:
+                continue
+            if is_file:
                 names.append(p.name)
         return sorted(names)
 
@@ -4749,7 +4774,9 @@ def set_aside_report_lines(
     they cannot drift apart. A record whose set-aside file is on disk is a GAP.
     A record marked ``certainty: possible`` (a manifest rebuilt from quarantine
     over an active file with no entry) is a POSSIBLE GAP: whether that file
-    ever held entries cannot be known (KL-24 L3 r6, codex 10).
+    ever held entries cannot be known (KL-24 L3 r6, codex 10). A vanished active
+    file is a definite GAP; any ``preserved_attempts`` are printed as files to
+    inspect and never change that.
     One whose file is missing is reported as such, not as a gap: the week was
     renamed back (adopted if before any write; after one it stays unmanifested
     and must be renamed to its set-aside name again), or a repair stopped
@@ -4767,11 +4794,13 @@ def set_aside_report_lines(
                 + (f"; set-aside staged entries to inspect: {', '.join(kept)}" if kept else "")
             )
         elif record["set_aside_as"] == "":
+            kept = record.get("preserved_attempts")
             lines.append(
                 f"GAP: the active audit file {record['filename']} ({record['period']}) "
                 f"went missing with its entries; audit-repair recorded it at "
                 f"{record['at']}: {record['cause']}; its entries are not in the "
                 "verified chain"
+                + (f"; set-aside staged entries (files to inspect): {', '.join(kept)}" if kept else "")
             )
         elif os.path.lexists(audit_dir / record["set_aside_as"]):
             lines.append(

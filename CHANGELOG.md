@@ -448,10 +448,12 @@ raised `RecursionError`). The graduation
   operator-raised text stays visible beside the new one), reported in `links_refused` (which now
   names the `old` and `new` episodes of every refused link) and team-status on every replace until
   the trust allows it. A head deleted by a library call and brought back by the stream is linked
-  again (and is the kept row, revived, when it has one); a link the importer does not own is never
-  removed to make room (a key released with `team-forget-key` leaves its links unowned, as that
-  command says, so one hiding the current text behind an earlier one stays, and the refusal of the
-  derived link names the cycle on every replace until the operator `unsupersede`s it); an operator's removal of the link is kept (an override, as for any team link); a
+  again (and is the kept row, revived, when it has one); a key released with `team-forget-key` leaves its
+  links unowned, as that command says, and the next first replace on the ledger adopts a team link
+  from an entry's current episode to an earlier text of the same entry (both name the entry in the
+  metadata the importer wrote) and drops it if the verdict no longer wants it, so a flip back after
+  a release is not refused as a cycle; a link the importer does not own is never removed by its
+  label alone, and a pair the operator overrode is never adopted; an operator's removal of the link is kept (an override, as for any team link); a
   `set_trust` lowering leaves it (`team_supersessions_left`).
 - A copy with the same text, timestamp, type and source under a new hash records the new hash
   only (`rehashed`, renamed from `replaced_in_place`; CLI "re-hashed (same text)").

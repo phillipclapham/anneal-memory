@@ -4099,6 +4099,19 @@ class Store:
             ).fetchall():
                 if ep_entry.get(r["old_id"]) not in enforced:
                     continue
+                # A link from an entry's current episode to a row that same entry left
+                # (both endpoints name the entry in the metadata the importer wrote)
+                # can only be this ledger's: its replacement link, from before a flip
+                # back, left unowned by team-forget-key. Adopted, it goes like any
+                # owned row the verdict no longer wants (L3 r1-r3 1009+30; never an
+                # operator's override pair).
+                if str(r["source"]).startswith("team:") \
+                        and retired.get(r["new_id"]) == ep_entry[r["old_id"]] \
+                        and not conn.execute(
+                            "SELECT 1 FROM team_overrides WHERE old_id = ? AND new_id = ?",
+                            (r["old_id"], r["new_id"])).fetchone():
+                    adopt.add((r["old_id"], r["new_id"]))
+                    continue
                 # Only a ``team:``-labelled row whose physical linker is a line of
                 # this stream by (entry_id, hash), enforced or not. A label alone is
                 # a name, not provenance, and an id alone matches a twin. A rewired

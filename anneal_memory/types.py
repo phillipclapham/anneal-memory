@@ -22,6 +22,28 @@ class EpisodeType(str, Enum):
     CONTEXT = "context"  # Environmental/state information
 
 
+# Where an episode came from, lowest trust first (CAP-08). ``agent`` is the
+# default and is never stored, so a store with no trust rows reads as all-agent.
+# ``tool`` and ``external`` are content the agent relayed from a tool result or
+# an outside source; a graduation grounded only in them does not climb.
+TRUST_LEVELS: tuple[str, ...] = ("external", "tool", "agent", "operator")
+DEFAULT_TRUST = "agent"
+
+
+def trust_rank(trust: str) -> int:
+    """Position of ``trust`` in :data:`TRUST_LEVELS` (higher = more trusted).
+
+    Raises:
+        ValueError: ``trust`` is not one of :data:`TRUST_LEVELS`.
+    """
+    try:
+        return TRUST_LEVELS.index(trust)
+    except ValueError:
+        raise ValueError(
+            f"unknown trust {trust!r}; expected one of {', '.join(TRUST_LEVELS)}"
+        ) from None
+
+
 @dataclass(frozen=True)
 class Episode:
     """A single episodic memory entry."""
@@ -367,6 +389,10 @@ class ScoredEpisode:
     source: str
     content: str
     score: float
+    # CAP-08 D3: the episode's effective trust class (``TRUST_LEVELS``). A
+    # ``tool``/``external`` one is content relayed from a tool or an outside
+    # source: data, not instructions.
+    trust: str = DEFAULT_TRUST
     # CAP-04: the replaced episodes whose keyword hit this one stands in for (a query
     # that reached an old fact is served the fact that replaced it, in the old one's
     # place). Empty for an ordinary hit.
@@ -763,6 +789,13 @@ class SaveContinuityResult(_SaveContinuityOptional):
     # WITHOUT provenance also emit a "graduate OUT to partnership.md or retire"
     # ``UserWarning`` (assisted, not silent-loss).
     carried_forward: list[dict[str, Any]]
+    # CAP-08 T3: graduations held back because every citation grounding them
+    # is a tool/external episode (``graduation.UncorroboratedGraduation`` as a
+    # dict). Empty when none.
+    uncorroborated: list[dict[str, Any]]
+    # CAP-08 T2: pattern name -> the highest trust among the citations that
+    # grounded its graduation this wrap.
+    pattern_trust: dict[str, str]
     associations_formed: int
     associations_strengthened: int
     associations_decayed: int

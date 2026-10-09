@@ -23,6 +23,7 @@ import time
 import unicodedata
 import uuid
 import warnings
+from collections import deque
 from collections.abc import Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timedelta, timezone
@@ -249,6 +250,8 @@ from .types import (
     AffectiveState,
     AssociationPair,
     AssociationStats,
+    DEFAULT_TRUST,
+    TRUST_LEVELS,
     Episode,
     EpisodeType,
     PatternAssociationPair,
@@ -260,6 +263,7 @@ from .types import (
     WrapRecord,
     WrapResult,
     WrapSnapshot,
+    trust_rank,
 )
 
 class AnnealMemoryError(Exception):
@@ -359,6 +363,11 @@ StoreOperation = Literal[
     "drift_probes",
     "supersession_exists",
     "superseded_by_map",
+    # CAP-08 provenance trust
+    "trust_map",
+    "trust_counts",
+    "set_trust",
+    "derived_edges",
     "supersession_problem",
     "supersession_links",
     "set_state_key",
@@ -407,6 +416,8 @@ StoreOperation = Literal[
     "seed_pattern_max_level",
     # The graduation bound's receiver record (1007+29)
     "saved_pattern_levels",
+    # CAP-08 D2: the episodes that grounded each earned rung
+    "pattern_grounding",
     "prune",
     "schema_init",
     "batch_begin",
@@ -1457,6 +1468,47 @@ CREATE INDEX IF NOT EXISTS idx_episodes_type ON episodes(type);
 CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
 CREATE INDEX IF NOT EXISTS idx_episodes_source ON episodes(source);
 
+-- CAP-08: an episode's trust class when it is not the default 'agent'
+-- (types.TRUST_LEVELS). Absence = 'agent', so every existing row reads as agent.
+CREATE TABLE IF NOT EXISTS episode_trust (
+    episode_id TEXT PRIMARY KEY,
+    -- The schema refuses a class trust_rank cannot rank (glm r1: a hand-edited
+    -- row crashed every reader with ValueError). Spelled out, not derived.
+    trust TEXT NOT NULL CHECK (trust IN ('external', 'tool', 'agent', 'operator'))
+);
+
+-- A trust row never outlives its episode, whatever path deletes it: episode
+-- ids are 8 hex characters, and a stale row would label the next episode that
+-- happened to get the same id.
+CREATE TRIGGER IF NOT EXISTS episode_trust_follows_delete
+AFTER DELETE ON episodes
+BEGIN
+    DELETE FROM episode_trust WHERE episode_id = OLD.id;
+END;
+
+-- CAP-08 D3 (C#11): the episodes an episode was derived from (an agent's
+-- summary of a page it fetched). For the graduation trust check an episode
+-- counts at most as trusted as the most trusted of its sources, so a summary of
+-- an external page cannot corroborate that page. Written with the episode, in
+-- its transaction; a row leaves with its derived episode. gone_trust is NULL
+-- while the source lives (its trust is then computed, never stored) and is set,
+-- for good, when the source is removed (episode_gone_marks_rows below; prune sets
+-- it first). Recording another episode under the source's id never clears it.
+CREATE TABLE IF NOT EXISTS episode_derived (
+    episode_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    gone_trust TEXT DEFAULT NULL
+        CHECK (gone_trust IS NULL
+               OR gone_trust IN ('external', 'tool', 'agent', 'operator')),
+    PRIMARY KEY (episode_id, source_id)
+);
+
+CREATE TRIGGER IF NOT EXISTS episode_derived_follows_delete
+AFTER DELETE ON episodes
+BEGIN
+    DELETE FROM episode_derived WHERE episode_id = OLD.id;
+END;
+
 CREATE TABLE IF NOT EXISTS tombstones (
     id TEXT PRIMARY KEY,
     timestamp TEXT NOT NULL,
@@ -1658,6 +1710,49 @@ CREATE TABLE IF NOT EXISTS pattern_levels (
     saved_at TEXT NOT NULL,
     PRIMARY KEY (kind, key)
 );
+
+-- CAP-08 D2 (C#11): the episodes that grounded each rung a named pattern
+-- earned, written by the save in the wrap's transaction beside pattern_levels.
+-- When every episode recorded for a rung has since been lowered to tool or
+-- external, the graduation bound cuts the pattern's prior back below that rung
+-- at the next wrap. One group of rows per time a rung was earned (`earning`;
+-- earned_on is the wrap's day), each under the rule check 4 admitted it by: 'checked' (a quoted
+-- explanation named which citations ground it; revoked when ALL of them are now
+-- tool/external) or 'unchecked' (nothing did; revoked when ANY is). A rung stands
+-- while any of its groups does. A rung saved before the table has no rows and is
+-- never revoked. Additive.
+CREATE TABLE IF NOT EXISTS pattern_grounding (
+    name TEXT NOT NULL,
+    level INTEGER NOT NULL,
+    earned_on TEXT NOT NULL,
+    -- One earning: the wrap's token plus the line's ordinal in it. Two earnings
+    -- of the same rung on the same day stay two (codex r3 #5).
+    earning TEXT NOT NULL,
+    rule TEXT NOT NULL CHECK (rule IN ('checked', 'unchecked')),
+    episode_id TEXT NOT NULL,
+    -- As episode_derived.gone_trust: NULL while the episode lives, set for good
+    -- when it is removed. The grounding reads it when set, else the episode's
+    -- effective trust now.
+    gone_trust TEXT DEFAULT NULL
+        CHECK (gone_trust IS NULL
+               OR gone_trust IN ('external', 'tool', 'agent', 'operator')),
+    PRIMARY KEY (name, level, earning, rule, episode_id)
+);
+
+-- CAP-08 D3 R3: a removal leaves a sticky marker on every row that cited the id,
+-- whatever path removed it (raw SQL included): an unexplained removal is a
+-- failed ground (codex r3 #1). Store.prune sets the marker to the episode's
+-- effective trust first, so aging out is not a retraction. A row already marked
+-- keeps its marker, so a later episode under the same id never inherits a row
+-- written for the one before it.
+CREATE TRIGGER IF NOT EXISTS episode_gone_marks_rows
+AFTER DELETE ON episodes
+BEGIN
+    UPDATE episode_derived SET gone_trust = 'external'
+        WHERE source_id = OLD.id AND gone_trust IS NULL;
+    UPDATE pattern_grounding SET gone_trust = 'external'
+        WHERE episode_id = OLD.id AND gone_trust IS NULL;
+END;
 """
 
 # Appended separately so existing DBs get the new table via CREATE IF NOT EXISTS
@@ -2083,6 +2178,14 @@ class Store:
             which contends with a concurrent single-writer wrap. Assumes the db
             already exists and is schema-current (a reader cannot migrate); audit is
             disabled. Default False (full read-write store).
+        trust_ceiling: The highest trust class (``types.TRUST_LEVELS``) a write
+            through this Store may carry: ``record(trust=)``, :meth:`set_trust`, and
+            so the CLI's JSON import. Above it a write is refused with ``ValueError``
+            before anything is written. Default ``"agent"``. The code that constructs
+            the Store is the host: only it sets the ceiling, and the labels it writes
+            (``trust``, ``trust_via``, ``actor``) are its statement, held by the
+            human who configured it. The MCP server opens at ``"agent"``; the CLI
+            opens at ``"operator"`` only after its operator gate.
     """
 
     def __init__(
@@ -2096,8 +2199,16 @@ class Store:
         audit_retention_days: int | None = None,
         on_audit_event: Callable | None = None,
         read_only: bool = False,
+        trust_ceiling: str = DEFAULT_TRUST,
     ) -> None:
         self._path = Path(path)
+        # CAP-08 (C#11): the highest trust class any write through this instance
+        # may carry. The code that constructs the Store is the host, so the host
+        # sets it; no call argument moves it (record, set_trust and the CLI's JSON
+        # import all go through it). Refused, never capped, above it: a capped
+        # label would read as the one the caller asked for.
+        trust_rank(trust_ceiling)
+        self._trust_ceiling: str = trust_ceiling
         # Read-only mode (per-turn recall consumers): the connection rejects writes and
         # the DB-setup branch below skips ALL init writes, so a per-prompt open can't
         # contend with a concurrent single-writer wrap. See the schema_init block.
@@ -2720,6 +2831,10 @@ class Store:
         timestamp: str | None = None,
         supersedes: list[str] | tuple[str, ...] | None = None,
         state_key: str | None = None,
+        trust: str = DEFAULT_TRUST,
+        *,
+        trust_via: str | None = None,
+        derived_from: list[str] | tuple[str, ...] | None = None,
     ) -> Episode:
         """Record a new episode.
 
@@ -2745,10 +2860,30 @@ class Store:
                 the shared key is the writer's claim that the facts fill one slot,
                 and anneal judges nothing semantic. See :func:`normalize_state_key`,
                 :meth:`set_state_key` and :meth:`clear_state_key`.
+            trust: Where the content came from (``types.TRUST_LEVELS``):
+                ``agent`` (default), ``tool`` (a tool result the agent relays),
+                ``external`` (a web page, a document, another party), or
+                ``operator``. A graduation whose grounding citations are all
+                ``tool``/``external`` does not climb (CAP-08). Stored with the
+                episode in one transaction; :meth:`set_trust` changes it later.
+                Refused above the Store's ``trust_ceiling``.
+            trust_via: How the host's gate vouched for ``trust`` (the CLI passes
+                ``cli:operator-terminal`` or ``cli:operator-env``). The host's
+                statement, recorded in the audit event as given; the library does
+                not check it.
+            derived_from: Ids of the episodes this content was derived from (an
+                agent's summary of a page it recorded as ``external``). Each must
+                exist; on refusal nothing is recorded. Stored with the episode in
+                one transaction. For the graduation trust check the episode counts
+                at most as trusted as its most trusted source
+                (:meth:`effective_trust_map`).
 
         Raises:
             SupersessionError: a ``supersedes`` link failed validation.
             ValueError: ``state_key`` is not a valid key.
+            ValueError: ``trust`` is not a known trust class, or is above the
+                Store's ``trust_ceiling``, or a ``derived_from`` source does not
+                exist.
 
         Returns:
             The recorded Episode.
@@ -2765,6 +2900,7 @@ class Store:
         if isinstance(episode_type, str):
             episode_type = EpisodeType(episode_type)
 
+        self._check_trust_ceiling("record", trust)  # before anything is written
         ts = timestamp or _now_utc()
         meta_json = json.dumps(metadata) if metadata is not None else None
         old_ids = _normalize_supersedes(supersedes)
@@ -2777,6 +2913,16 @@ class Store:
                     f"precision; {ts!r} is not one")
             ts = canonical
         key_links: list[tuple[str, str]] = []
+        if derived_from is not None and not isinstance(derived_from, (list, tuple)):
+            raise ValueError(
+                f"derived_from must be a list of episode ids, not {type(derived_from).__name__}"
+            )
+        source_ids: list[str] = []
+        for raw in derived_from or ():
+            if not isinstance(raw, str) or not raw.strip():
+                raise ValueError(f"derived_from: {raw!r} is not an episode id")
+            if raw.strip().lower() not in source_ids:
+                source_ids.append(raw.strip().lower())
 
         # Retry with incrementing nonce on ID collision (birthday or duplicate content).
         # 10.5c.5 L3 Fix #17: batch-aware commit. If this method is
@@ -2818,11 +2964,17 @@ class Store:
             # cannot vanish between the check and the link. ⛔ The refusal is
             # raised AFTER this block (see _db_boundary's docstring).
             problem = next(
-                (p for p in (self._supersession_problem(o, None, content, ts)
+                (p for p in (self._supersession_problem(o, None, content, ts, new_trust=trust)
                              for o in old_ids) if p),
                 None,
             )
-            if problem is None:
+            missing_sources = [
+                sid for sid in source_ids
+                if self._conn.execute(
+                    "SELECT 1 FROM episodes WHERE id = ?", (sid,)
+                ).fetchone() is None
+            ]
+            if problem is None and not missing_sources:
                 for nonce in range(max_retries):
                     ep_id = _episode_id(content, ts, nonce)
                     try:
@@ -2836,6 +2988,11 @@ class Store:
                         if nonce == max_retries - 1:
                             raise
                         continue
+                if trust != DEFAULT_TRUST:
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO episode_trust (episode_id, trust) VALUES (?, ?)",
+                        (ep_id, trust),
+                    )
                 for old_id in old_ids:
                     self._conn.execute(
                         "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
@@ -2846,12 +3003,24 @@ class Store:
                     # a live chain end and so leads nowhere: no link can close a cycle.
                     key_links = self._apply_state_key(
                         ep_id, key, self._state_key_plan(ep_id, ts, key), source)
+                # No trust is stored with a live source: it is computed
+                # (effective_trust_map), and marked only when the source goes.
+                self._conn.executemany(
+                    "INSERT OR IGNORE INTO episode_derived "
+                    "(episode_id, source_id) VALUES (?, ?)",
+                    [(ep_id, sid) for sid in source_ids],
+                )
             # On a refusal this commits an empty transaction (releasing the
             # lock); inside a batch it leaves the batch's writes alone.
             if not self._defer_commit:
                 self._conn.commit()
         if problem:
             raise SupersessionError(problem)
+        if missing_sources:
+            raise ValueError(
+                f"derived_from: no episode {', '.join(map(repr, missing_sources))}. "
+                "Nothing was recorded."
+            )
 
         episode = Episode(
             id=ep_id,
@@ -2868,12 +3037,21 @@ class Store:
         # 2026-09-04: a bare emit raised a raw OSError with the episode already
         # persisted, so the caller was told record() failed and would write it
         # again — a duplicate-episode path.
-        self._audit_log_after_commit("record", {
+        record_event: dict[str, Any] = {
             "episode_id": ep_id,
             "type": episode_type.value,
             "content_hash": _content_hash(content),
             "source": source,
-        }, method="record", committed="the episode", actor=source)
+        }
+        if trust != DEFAULT_TRUST:
+            record_event["trust"] = trust  # absent = agent, as in the store
+        if trust_via is not None:
+            record_event["trust_via"] = trust_via
+        if source_ids:
+            record_event["derived_from"] = source_ids
+        self._audit_log_after_commit(
+            "record", record_event, method="record", committed="the episode", actor=source,
+        )
         for old_id in old_ids:
             self._audit_log_after_commit("supersede", {
                 "old_id": old_id,
@@ -4482,11 +4660,17 @@ class Store:
         self, old_id: str, new_id: str | None, new_content: str, new_ts: str,
         *, check_grounds: bool = True, check_order: bool = True,
         key_link: bool = False,
+        new_trust: str | None = None,
     ) -> str | None:
         """Why one link fails validation, or None if it passes. Never raises a
         refusal (callers raise outside their ``_db_boundary``). Runs inside the
         caller's write transaction. ``new_id`` is None when the new episode is
-        not yet inserted (``record``)."""
+        not yet inserted (``record``), which then passes its ``new_trust``.
+
+        ⛔ A NEWER EPISODE OF LOWER TRUST CANNOT SUPERSEDE (CAP-08, L1 + L2 r1,
+        run): an external episode recorded with ``supersedes=`` hid an operator
+        fact from recall and made it uncitable, so a page's text became the
+        live fact and the corroboration it needed was gone."""
         if new_id is not None and old_id == new_id:
             return f"supersede: {old_id!r} cannot supersede itself"
         row = self._conn.execute(
@@ -4527,6 +4711,19 @@ class Store:
                 f"supersede: {new_id!r} already leads, through recorded links, to "
                 f"{old_id!r}; this link would close a cycle and hide every episode on it"
             )
+        if self._has_trust_table():
+            trust_rows = dict(self._conn.execute(
+                "SELECT episode_id, trust FROM episode_trust WHERE episode_id IN (?, ?)",
+                (old_id, new_id or ""),
+            ).fetchall())
+            old_trust = trust_rows.get(old_id, DEFAULT_TRUST)
+            if new_trust is None:
+                new_trust = trust_rows.get(new_id or "", DEFAULT_TRUST)
+            if trust_rank(new_trust) < trust_rank(old_trust):
+                return (
+                    f"supersede: {old_id!r} is {old_trust!r} and the replacing episode is "
+                    f"{new_trust!r}; a lower-trust episode cannot supersede a higher-trust one"
+                )
         if check_grounds and not _supersession_grounds(new_content, row["content"]):
             return (
                 f"supersede: the new text shares too little with {old_id!r} to ground as "
@@ -4553,6 +4750,349 @@ class Store:
         return self._conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'supersessions'"
         ).fetchone() is not None
+
+    def _has_trust_table(self) -> bool:
+        """As :meth:`_has_supersessions_table`, for ``episode_trust`` (CAP-08)."""
+        return self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'episode_trust'"
+        ).fetchone() is not None
+
+    def trust_map(self, episode_ids: Iterable[str]) -> dict[str, str]:
+        """Trust class of each listed episode that is NOT the default ``agent``.
+        Ids absent from the result are ``agent`` (or do not exist)."""
+        # Lowercased like set_trust (glm + complement r1): an id typed in
+        # capitals read as agent here while set_trust found its real class.
+        ids = sorted({str(i).strip().lower() for i in episode_ids})
+        with self._db_boundary("trust_map"), self._read_snapshot():
+            if not ids or not self._has_trust_table():
+                return {}
+            out: dict[str, str] = {}
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                marks = ",".join("?" * len(chunk))
+                for row in self._conn.execute(
+                    f"SELECT episode_id, trust FROM episode_trust WHERE episode_id IN ({marks})",
+                    chunk,
+                ):
+                    out[row[0]] = row[1]
+            return out
+
+    def effective_trust_map(
+        self, episode_ids: Iterable[str], *, missing: str | None = None,
+        missing_for: Iterable[str] | None = None,
+    ) -> dict[str, str]:
+        """As :meth:`trust_map`, but each episode's class is the lower of its own
+        and the highest class among the episodes it was derived from
+        (``record(derived_from=)``), through every level of derivation (CAP-08
+        D3). An agent summary of an external page reads ``external``. Absent =
+        ``agent``.
+
+        ⛔ A FIXED POINT, NOT A WALK (D3 redesign R1, 1008+11). ``eff(e) =
+        min(own(e), max over sources s of src(e, s))``, where ``src`` is ``eff(s)``
+        while the source lives and the edge's ``gone_trust`` once it was removed
+        (an edge to a source that is absent with no marker reads ``external``).
+        Every episode reachable from the queried ids starts at its own class and is
+        only ever lowered, by a worklist, until nothing changes: the greatest fixed
+        point of a monotone function on a finite lattice, so the answer for an id
+        is the same whatever else was asked and whatever the visit order, and a
+        cycle gets the meet of its members' contributions. A depth-first walk that
+        skipped the source on its path answered by query set and id order, and
+        graduated a relayed claim (lane B, ``p1d.py``).
+
+        ``missing``: the class an id with NO episode reads as (default: the same
+        ``agent`` absence reads as), for the ids in ``missing_for`` (default: all
+        of them). A caller judging grounding passes ``"external"`` so a deleted
+        episode is a failed ground, not a default one (codex r3 #1)."""
+        wanted = {str(i).strip().lower() for i in episode_ids}
+        if not wanted:
+            return {}
+        # episode -> [(live source id, None) | (None, the class the edge fixes)]
+        sources: dict[str, list[tuple[str | None, str | None]]] = {}
+        closure: set[str] = set()
+        absent: set[str] = set()
+        with self._db_boundary("trust_map"), self._read_snapshot():
+            if missing is not None:
+                ordered = sorted(
+                    wanted if missing_for is None
+                    else wanted & {str(i).strip().lower() for i in missing_for}
+                )
+                for start in range(0, len(ordered), 500):
+                    chunk = ordered[start:start + 500]
+                    marks = ",".join("?" * len(chunk))
+                    live_ids = {r[0] for r in self._conn.execute(
+                        f"SELECT id FROM episodes WHERE id IN ({marks})", chunk)}
+                    absent.update(set(chunk) - live_ids)
+            closure = wanted - absent
+            has_derived = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'episode_derived'"
+            ).fetchone() is not None
+            frontier = sorted(closure) if has_derived else []
+            while frontier:
+                found: set[str] = set()
+                for start in range(0, len(frontier), 500):
+                    chunk = frontier[start:start + 500]
+                    marks = ",".join("?" * len(chunk))
+                    for ep_id, src, gone, live in self._conn.execute(
+                        f"SELECT d.episode_id, d.source_id, d.gone_trust, "
+                        f"e.id IS NOT NULL FROM episode_derived d "
+                        f"LEFT JOIN episodes e ON e.id = d.source_id "
+                        f"WHERE d.episode_id IN ({marks})", chunk,
+                    ):
+                        if gone is not None:
+                            sources.setdefault(ep_id, []).append((None, gone))
+                        elif live:
+                            sources.setdefault(ep_id, []).append((src, None))
+                            found.add(src)
+                        else:
+                            sources.setdefault(ep_id, []).append((None, "external"))
+                frontier = sorted(found - closure)
+                closure |= found
+            own = self.trust_map(closure)
+
+        val = {n: own.get(n, DEFAULT_TRUST) for n in closure}
+        dependents: dict[str, set[str]] = {}
+        for ep_id, srcs in sources.items():
+            for src, _fixed in srcs:
+                if src is not None:
+                    dependents.setdefault(src, set()).add(ep_id)
+        work = deque(sorted(sources))
+        queued = set(work)
+        while work:
+            node = work.popleft()
+            queued.discard(node)
+            best = max(
+                (val[src] if src is not None else (fixed or "external")
+                 for src, fixed in sources[node]),
+                key=trust_rank,
+            )
+            new = min(val[node], best, key=trust_rank)
+            if new != val[node]:
+                val[node] = new
+                for dep in sorted(dependents.get(node, ())):
+                    if dep not in queued:
+                        work.append(dep)
+                        queued.add(dep)
+
+        out: dict[str, str] = {}
+        for ep_id in wanted:
+            level = missing if ep_id in absent else val[ep_id]
+            if level is not None and level != DEFAULT_TRUST:
+                out[ep_id] = level
+        return out
+
+    def ground_state(self, episode_ids: Iterable[str]) -> dict[str, tuple[bool, str]]:
+        """``{id: (exists, effective trust)}`` for each listed id, read in one
+        view: what a save judged its grounds on, and re-reads under its write lock
+        to see whether any of them moved (CAP-08 D3 R4: comparing trust alone
+        missed a ground that vanished while the save ran). An absent id reads
+        ``(False, "agent")``; the caller decides what absence means."""
+        ids = sorted({str(i).strip().lower() for i in episode_ids})
+        out: dict[str, tuple[bool, str]] = {}
+        with self._db_boundary("trust_map"), self._read_snapshot():
+            live: set[str] = set()
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                marks = ",".join("?" * len(chunk))
+                live.update(r[0] for r in self._conn.execute(
+                    f"SELECT id FROM episodes WHERE id IN ({marks})", chunk))
+            eff = self.effective_trust_map(ids)
+        for i in ids:
+            out[i] = (i in live, eff.get(i, DEFAULT_TRUST))
+        return out
+
+    def derived_edges(
+        self, episode_ids: Iterable[str],
+    ) -> dict[str, list[tuple[str, str | None]]]:
+        """``{episode id: [(source id, gone_trust), ...]}`` for each listed episode
+        derived from others (``record(derived_from=)``). ``gone_trust`` is None
+        while the source lives, else the class the edge was marked with when the
+        source was removed. Read-only; what an export carries (codex r3 #3)."""
+        ids = sorted({str(i).strip().lower() for i in episode_ids})
+        out: dict[str, list[tuple[str, str | None]]] = {}
+        with self._db_boundary("derived_edges"), self._read_snapshot():
+            if not ids or self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'episode_derived'"
+            ).fetchone() is None:
+                return out
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                marks = ",".join("?" * len(chunk))
+                for ep_id, src, gone in self._conn.execute(
+                    f"SELECT episode_id, source_id, gone_trust FROM episode_derived "
+                    f"WHERE episode_id IN ({marks}) ORDER BY episode_id, source_id",
+                    chunk,
+                ):
+                    out.setdefault(ep_id, []).append((src, gone))
+        return out
+
+    def trust_counts(self) -> dict[str, int]:
+        """Number of live episodes in each trust class, every class listed."""
+        with self._db_boundary("trust_counts"), self._read_snapshot():
+            total = self._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+            counts = {t: 0 for t in reversed(TRUST_LEVELS)}
+            if self._has_trust_table():
+                for row in self._conn.execute(
+                    """SELECT t.trust, COUNT(*) FROM episode_trust t
+                       JOIN episodes e ON e.id = t.episode_id GROUP BY t.trust"""
+                ):
+                    counts[row[0]] = counts.get(row[0], 0) + row[1]
+            counts[DEFAULT_TRUST] = total - sum(
+                n for t, n in counts.items() if t != DEFAULT_TRUST
+            )
+            return counts
+
+    @property
+    def trust_ceiling(self) -> str:
+        """The highest trust class a write through this Store may carry, set by
+        whoever constructed it (CAP-08)."""
+        return self._trust_ceiling
+
+    def _ceiling_problem(self, operation: str, trust: str) -> str | None:
+        """The refusal text when ``trust`` is above the ceiling, else None."""
+        if trust_rank(trust) > trust_rank(self._trust_ceiling):
+            return (
+                f"{operation}: trust {trust!r} is above this store's ceiling "
+                f"{self._trust_ceiling!r}; only the code that opens the Store sets "
+                f"the ceiling (Store(..., trust_ceiling=...)). Nothing was written."
+            )
+        return None
+
+    def _check_trust_ceiling(self, operation: str, trust: str) -> int:
+        """Rank of ``trust``; ValueError when it is unknown or above the ceiling."""
+        rank = trust_rank(trust)
+        problem = self._ceiling_problem(operation, trust)
+        if problem:
+            raise ValueError(problem)
+        return rank
+
+    def set_trust(
+        self, episode_id: str, trust: str, *, actor: str = "agent",
+        expect: str | None = None,
+    ) -> str:
+        """Change an episode's trust class; returns the class it had.
+
+        Any class up to this Store's ``trust_ceiling`` may be set, lowering or
+        raising; above it is refused. So raising anything above ``agent`` needs
+        a Store the host opened with ``trust_ceiling="operator"`` (the CLI does
+        only after its operator gate; the MCP server never does). Setting the
+        class the episode already has writes nothing and succeeds, whatever the
+        ceiling. ``actor`` is the host's statement of who asked, recorded as
+        given. Audited as ``trust_set``. A supersession link the change makes
+        invalid (the replacing episode now ranks below the one it hides) is
+        removed in the same transaction and named in the audit event, unless a
+        team snapshot owns it.
+
+        ``expect``: the class the caller read before deciding this change was
+        allowed. If the episode's class is no longer that one when the write
+        transaction reads it, nothing is changed and ``ValueError`` names the
+        conflict (a gate decided on a stale read must not be applied).
+
+        What was derived from this episode (``derived_from``) follows the change
+        with no pass of its own: its trust is computed from this one
+        (:meth:`effective_trust_map`), never stored while this episode lives.
+
+        Raises:
+            ValueError: unknown ``trust``, ``trust`` above the ceiling, no such
+                episode, or ``expect`` no longer matches.
+        """
+        trust_rank(trust)
+        if expect is not None:
+            trust_rank(expect)
+        episode_id = str(episode_id).strip().lower()
+        problem: str | None = None
+        old = DEFAULT_TRUST
+        removed: list[dict[str, str]] = []
+        team_left: list[dict[str, str]] = []
+        # Refusals are computed inside and raised after the block: the boundary
+        # rolls back on any exception, which inside a caller's batch would
+        # discard its earlier writes (see _db_boundary).
+        with self._db_boundary("set_trust"):
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")
+            if self._conn.execute(
+                "SELECT 1 FROM episodes WHERE id = ?", (episode_id,)
+            ).fetchone() is None:
+                problem = f"set_trust: no episode {episode_id!r}"
+            else:
+                row = self._conn.execute(
+                    "SELECT trust FROM episode_trust WHERE episode_id = ?", (episode_id,)
+                ).fetchone()
+                old = row[0] if row is not None else DEFAULT_TRUST
+                if expect is not None and old != expect:
+                    problem = (
+                        f"set_trust: {episode_id!r} is {old!r} now, not the "
+                        f"{expect!r} the change was decided on. Nothing was changed."
+                    )
+                elif old != trust and self._ceiling_problem("set_trust", trust):
+                    problem = self._ceiling_problem("set_trust", trust)
+                elif old != trust:
+                    if trust == DEFAULT_TRUST:
+                        self._conn.execute(
+                            "DELETE FROM episode_trust WHERE episode_id = ?",
+                            (episode_id,),
+                        )
+                    else:
+                        self._conn.execute(
+                            "INSERT OR REPLACE INTO episode_trust "
+                            "(episode_id, trust) VALUES (?, ?)",
+                            (episode_id, trust),
+                        )
+                    removed, team_left = self._drop_links_trust_invalidated(episode_id)
+            if not self._defer_commit:
+                self._conn.commit()
+        if problem:
+            raise ValueError(problem)
+        if old != trust:
+            event: dict[str, Any] = {"episode_id": episode_id, "from": old, "to": trust}
+            if removed:
+                event["supersessions_removed"] = removed
+            if team_left:
+                event["team_supersessions_left"] = team_left
+            self._audit_log_after_commit(
+                "trust_set", event, method="set_trust",
+                committed="the trust change", actor=actor,
+            )
+        return old
+
+    def _drop_links_trust_invalidated(
+        self, episode_id: str
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        """After a trust change, remove each link touching ``episode_id`` in which
+        the replacing episode now ranks below the one it hides (codex r1 #5, run:
+        lowering the newer episode to ``external`` left it hiding an agent fact).
+        The rule is :meth:`_supersession_problem`'s, re-checked for links already on
+        record. A link a team snapshot owns stays: the ledger rules it, and the
+        caller hears it in the audit. Runs inside the caller's transaction.
+        Returns ``(removed, team_owned_left)``."""
+        removed: list[dict[str, str]] = []
+        team_left: list[dict[str, str]] = []
+        if not self._has_supersessions_table():
+            return removed, team_left
+        links = self._conn.execute(
+            "SELECT old_id, new_id FROM supersessions WHERE old_id = ? OR new_id = ?",
+            (episode_id, episode_id),
+        ).fetchall()
+        for old_id, new_id in ((r[0], r[1]) for r in links):
+            trusts = dict(self._conn.execute(
+                "SELECT episode_id, trust FROM episode_trust WHERE episode_id IN (?, ?)",
+                (old_id, new_id),
+            ).fetchall())
+            if trust_rank(trusts.get(new_id, DEFAULT_TRUST)) >= trust_rank(
+                trusts.get(old_id, DEFAULT_TRUST)
+            ):
+                continue
+            link = {"old_id": old_id, "new_id": new_id}
+            if self._team_owned(old_id, new_id):
+                team_left.append(link)
+                continue
+            self._conn.execute(
+                "DELETE FROM supersessions WHERE old_id = ? AND new_id = ?",
+                (old_id, new_id),
+            )
+            removed.append(link)
+        return removed, team_left
 
     def get(self, episode_id: str) -> Episode | None:
         """Get a single episode by ID.
@@ -4627,6 +5167,8 @@ class Store:
                     row["id"], linker_of)
             links_removed = self._detach_supersessions([row["id"]])
             self._remember_team_rows([row], "operator" if team_operator else "auto")
+            # The episode_gone_marks_rows trigger marks every row that cited it
+            # external: a deletion is a failed ground (CAP-08 D3 R3).
             self._conn.execute("DELETE FROM episodes WHERE id = ?", (episode_id,))
             # 10.5c.5 L4 Fix: batch-aware commit for consistency with
             # record() and the other write-path methods. No current
@@ -6772,6 +7314,57 @@ class Store:
                 return None
             return {(row[0], row[1]): int(row[2]) for row in rows if row[0] != "init"}
 
+    def pattern_grounding(self) -> dict[str, dict[int, list[dict[str, Any]]]]:
+        """CAP-08 D2: ``{pattern name: {level: [group, ...]}}``, one group per time
+        a save recorded the rung as earned: ``{"earned_on": day, "rule":
+        "checked" | "unchecked", "episodes": [ids]}`` (the rule check 4 admitted
+        it by). A group whose episodes include one since removed also carries
+        ``"gone": {id: class}``, the class its row was marked with (CAP-08 D3 R3);
+        the grounding reads that, not whatever episode now holds the id. Empty
+        when none were recorded (or on a read-only store from before the table).
+        Read-only."""
+        with self._db_boundary("pattern_grounding"), self._read_snapshot():
+            if self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'pattern_grounding'"
+            ).fetchone() is None:
+                return {}
+            groups: dict[tuple[str, int, str], dict[str, Any]] = {}
+            for name, level, earned_on, earning, rule, ep_id, gone in self._conn.execute(
+                "SELECT name, level, earned_on, earning, rule, episode_id, gone_trust "
+                "FROM pattern_grounding "
+                "ORDER BY name, level, earned_on, rowid"
+            ):
+                grp = groups.setdefault(
+                    (name, int(level), earning),
+                    {"earned_on": earned_on, "rule": rule, "episodes": []},
+                )
+                grp["episodes"].append(ep_id)
+                if gone is not None:
+                    grp.setdefault("gone", {})[ep_id] = gone
+            out: dict[str, dict[int, list[dict[str, Any]]]] = {}
+            for (name, level, _earning), grp in groups.items():
+                grp["episodes"].sort()
+                out.setdefault(name, {}).setdefault(level, []).append(grp)
+            return out
+
+    def _record_pattern_grounding(
+        self, rungs: Iterable[tuple[str, int, str, Iterable[str]]], earned_on: str,
+        wrap_id: str | None = None,
+    ) -> None:
+        """Add the grounding episodes of each rung this save validated, as
+        ``(name, level, rule, ids)``. Each rung is one earning, identified by
+        ``wrap_id`` (the save's wrap token; random when not given) and its place
+        in ``rungs``. Runs inside the save's batch, like
+        :meth:`_record_pattern_levels`."""
+        wrap_id = wrap_id or uuid.uuid4().hex
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO pattern_grounding "
+            "(name, level, earned_on, earning, rule, episode_id) VALUES (?, ?, ?, ?, ?, ?)",
+            [(name, int(level), earned_on, f"{wrap_id}:{n}", rule, str(cid).strip().lower())
+             for n, (name, level, rule, ids) in enumerate(rungs) for cid in ids],
+        )
+
     def _has_pattern_levels_table(self) -> bool:
         return self._conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pattern_levels'"
@@ -7378,6 +7971,13 @@ class Store:
                 level_moved = self._conn.execute(
                     "DELETE FROM pattern_levels WHERE kind = 'name' AND key = ?",
                     (old_name,)).rowcount > 0 or level_moved
+            # So does its grounding record (CAP-08 D2): the rungs the old name
+            # earned stay revocable under the new one.
+            self._conn.execute(
+                "UPDATE OR IGNORE pattern_grounding SET name = ? WHERE name = ?",
+                (new_name, old_name))
+            self._conn.execute(
+                "DELETE FROM pattern_grounding WHERE name = ?", (old_name,))
             rekeyed = _rename_pattern(
                 self._conn, old_name, new_name, day, commit=not self._defer_commit
             )
@@ -7440,6 +8040,30 @@ class Store:
 
     # -- Pruning --
 
+    def _mark_aged_out(self, episode_ids: list[str]) -> None:
+        """Before a prune deletes these episodes, mark every row that cited one
+        (``episode_derived`` as a source, ``pattern_grounding``) with its
+        effective trust now, where not marked already. Aging out is not a
+        retraction, so it must not read as the ``external`` the delete trigger
+        would otherwise write (CAP-08 D3 R3, complement r4 MED 1). Runs inside
+        the prune's transaction, before the deletes."""
+        if not episode_ids:
+            return
+        eff = self.effective_trust_map(episode_ids)
+        tables = [t for t in ("episode_derived", "pattern_grounding")
+                  if self._conn.execute(
+                      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                      (t,)).fetchone() is not None]
+        for table, column in (("episode_derived", "source_id"),
+                              ("pattern_grounding", "episode_id")):
+            if table not in tables:
+                continue
+            self._conn.executemany(
+                f"UPDATE {table} SET gone_trust = ? "
+                f"WHERE {column} = ? AND gone_trust IS NULL",
+                [(eff.get(i, DEFAULT_TRUST), i) for i in episode_ids],
+            )
+
     def prune(self, older_than_days: int | None = None) -> int:
         """Prune old episodes, optionally creating tombstones.
 
@@ -7497,6 +8121,7 @@ class Store:
             links_removed = self._detach_supersessions([row["id"] for row in rows])
             self._remember_team_rows(rows)
             pruned = 0
+            self._mark_aged_out([row["id"] for row in rows])
             for row in rows:
                 if self._keep_tombstones:
                     self._conn.execute(
@@ -9143,6 +9768,7 @@ class Store:
 
         - :meth:`record` (episode writes)
         - :meth:`supersede` / :meth:`unsupersede` (supersession links)
+        - :meth:`set_trust` (CAP-08 trust class)
         - :meth:`import_team_entries` (``dry_run`` is refused inside a batch)
         - :meth:`import_team_snapshot` (``dry_run`` is refused inside a batch)
         - :meth:`team_forget_key`

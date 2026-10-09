@@ -41,7 +41,9 @@ from .graduation import (
     detect_stale_patterns,
     extract_pattern_names,
     extract_pattern_summaries,
+    CAP_REASON_REVOKED,
     pattern_line_levels,
+    revoked_pattern_levels,
     validate_graduations,
     canonical_continuity_text,
     _NAMED_PATTERN_RE,
@@ -102,6 +104,7 @@ from .store import (
     _safe_unlink,
 )
 from .types import (
+    DEFAULT_TRUST,
     AffectiveState,
     Episode,
     FeltCurrency,
@@ -1355,6 +1358,10 @@ names so the immune system can protect your patterns.
 - Patterns marked `(cross-session-overlap)` were demoted because today's explanation
   reused too much vocabulary from prior sessions; compose new evidence with
   genuinely distinct words to re-graduate.
+- Patterns marked `(uncorroborated)` were set back to 1x because every citation
+  grounding them was a tool result or outside source the agent relayed (trust
+  `tool`/`external`), not something observed. They re-graduate only when an episode
+  of your own (or the operator's) also grounds the claim.
 - Patterns at 3x AND ABOVE: extract the PRINCIPLE, not the surface observations.
 - Patterns older than 7 days with no new validation → remove (stale).
 - Group related patterns visually with a header line above them if you like —
@@ -2592,6 +2599,36 @@ def _drift_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
             "probes": [{"id": r["probe_id"], "status": r["status"]} for r in results]}
 
 
+def _grounded_trust(
+    store: Store, grounds: set[str], others: set[str],
+) -> tuple[dict[str, str], dict[str, tuple[bool, str]]]:
+    """Effective trust of the episodes a save leans on, and the
+    :meth:`Store.ground_state` it was read from. A ground (a cited or previously
+    grounding episode) that no longer exists reads ``external``: a deleted ground
+    is a failed one, never a default ``agent`` one (codex r3 #1). ``others``
+    (``[supersedes:]`` endpoints) keep the plain reading."""
+    state = store.ground_state(grounds | others)
+    trust: dict[str, str] = {}
+    for cid, (exists, eff) in state.items():
+        level = "external" if (not exists and cid in grounds) else eff
+        if level != DEFAULT_TRUST:
+            trust[cid] = level
+    return trust, state
+
+
+def _gone_marks(
+    grounding: dict[str, dict[int, list[dict[str, Any]]]],
+) -> dict[str, tuple[str, ...]]:
+    """Each episode id's removal marks across the grounding record (D3 R3)."""
+    marks: dict[str, list[str]] = {}
+    for rungs in grounding.values():
+        for groups in rungs.values():
+            for g in groups:
+                for cid, mark in g.get("gone", {}).items():
+                    marks.setdefault(cid, []).append(mark)
+    return {cid: tuple(sorted(m)) for cid, m in marks.items()}
+
+
 def validated_save_continuity(
     store: Store,
     text: str,
@@ -3177,6 +3214,28 @@ def validated_save_continuity(
     # existed re-enters the continuity as new and re-earns its rungs; its crystal
     # is untouched.
     saved_levels = store.saved_pattern_levels()
+    # CAP-08 T3: where each citable episode came from (absent = agent), so a
+    # graduation grounded only in tool/external episodes does not climb.
+    # Plus every [supersedes:] endpoint: a trust change on one decides whether its
+    # link is recorded, which decides what was citable (codex r2, the race).
+    _marker_ids = {
+        i.lower() for mm in _SUPERSEDES_RE.finditer(text) for i in (mm.group(1), mm.group(2))
+    }
+    # CAP-08 D2 (C#11): a rung whose recorded grounding is all tool/external
+    # under today's trust no longer counts toward the pattern's prior.
+    grounding = store.pattern_grounding()
+    _grounding_ids = {
+        cid for rungs in grounding.values() for groups in rungs.values()
+        for g in groups for cid in g["episodes"]
+    }
+    # Effective trust (D3): an episode derived from others counts at most as
+    # trusted as its most trusted source.
+    window_trust, window_state = _grounded_trust(
+        store, citable_ids | _grounding_ids, _marker_ids)
+    window_gone = _gone_marks(grounding)
+    revoked_levels = revoked_pattern_levels(
+        grounding, lambda cid: window_trust.get(cid, DEFAULT_TRUST)
+    )
     grad_result = validate_graduations(
         text=text,
         valid_ids=citable_ids,
@@ -3207,6 +3266,8 @@ def validated_save_continuity(
         # file, so every line is new.
         prior_text=prior_continuity or "",
         saved_levels=saved_levels,
+        trust_of=lambda cid: window_trust.get(cid, DEFAULT_TRUST),
+        revoked_levels=revoked_levels,
     )
 
     # The hard maximum is measured on the text that will be WRITTEN: graduation
@@ -3418,9 +3479,36 @@ def validated_save_continuity(
                     f"saved and the wrap is still open; save again (cite the replacing "
                     f"episode instead)."
                 )
+            # The same re-read for the grounds (codex r1 #4; CAP-08 D3 R4): per
+            # cited id, whether it exists, its removal marks and its effective
+            # trust. Another writer moving any of them after validation read them
+            # would let the save commit a graduation judged on the old state (a
+            # deleted external ground read the same class before and after, so
+            # comparing trust alone missed it). Raising rolls the batch back.
+            _cited = set(grad_result.citation_counts) | _marker_ids | _grounding_ids
+            _, _state_now = _grounded_trust(
+                store, set(grad_result.citation_counts) | _grounding_ids, _marker_ids)
+            _gone_now = _gone_marks(store.pattern_grounding())
+            _absent = (False, DEFAULT_TRUST)
+            _trust_moved = sorted(
+                cid for cid in _cited
+                if (_state_now.get(cid, _absent), _gone_now.get(cid, ()))
+                != (window_state.get(cid, _absent), window_gone.get(cid, ()))
+            )
+            if _trust_moved:
+                raise StoreError(
+                    f"validated_save_continuity: cited episode(s) "
+                    f"{', '.join(_trust_moved)} were removed or changed trust class "
+                    f"while this save ran. Nothing was saved and the wrap is still "
+                    f"open; save again.",
+                    operation="save_continuity",
+                )
 
             # The bound's next prior, recorded in this transaction so it commits
-            # with the wrap or not at all.
+            # with the wrap or not at all, with the episodes that grounded each
+            # rung validated today (CAP-08 D2).
+            store._record_pattern_grounding(
+                grad_result.pattern_grounding, today_str, wrap_id=snapshot["token"])
             # A composted name's level row was deleted with its edges above; the
             # first save's tombstone seed must not bring it back (codex L3 r1 HIGH 2).
             _prior_line_levels = pattern_line_levels(prior_continuity or "", grad_headings)
@@ -3824,6 +3912,21 @@ def validated_save_continuity(
                     {"name": p.name, "level": p.level}
                     for p in proven_without_declaration
                 ]
+            # CAP-08: graduations held back for tool/external-only grounding,
+            # and any graduation grounded above the default trust. Lean when
+            # empty, like the keys above.
+            if grad_result.uncorroborated:
+                audit_payload["uncorroborated"] = [
+                    {"name": u.name, "level": u.level, "trust": u.trust,
+                     "citations": list(u.citations)}
+                    for u in grad_result.uncorroborated
+                ]
+            raised_trust = {
+                name: t for name, t in grad_result.pattern_trust.items()
+                if t != DEFAULT_TRUST
+            }
+            if raised_trust:
+                audit_payload["pattern_trust"] = raised_trust
             # Durable facts (B1): a drop by marker is recorded here, and only
             # here, so the hash-chained audit log is the trail of every durable
             # line that left the store. Re-insertions ride along, lean when
@@ -4149,9 +4252,23 @@ def validated_save_continuity(
             f"(a new pattern enters at 1x; a validated Nx becomes (N+1)x): "
             + ", ".join(
                 f"{cap.name} {cap.written_level}x->{cap.capped_to}x"
+                + (f" ({cap.reason})" if cap.reason == CAP_REASON_REVOKED else "")
                 for cap in grad_result.level_capped
             )
             + ". Each is marked (level-capped)."
+            + (" A revoked one lost a rung whose grounding episodes were since "
+               "lowered to tool/external (CAP-08)."
+               if any(c.reason == CAP_REASON_REVOKED for c in grad_result.level_capped)
+               else "")
+        )
+
+    if grad_result.uncorroborated:
+        held_back = sorted({u.name for u in grad_result.uncorroborated})
+        _warn_after_commit(
+            f"{len(held_back)} graduation(s) did not climb because every citation "
+            f"grounding them is a tool or external episode (content relayed, not "
+            f"observed): {', '.join(held_back)}. They climb once an agent or "
+            f"operator episode also grounds them (CAP-08)."
         )
 
     result = SaveContinuityResult(
@@ -4169,6 +4286,8 @@ def validated_save_continuity(
         cross_session_collisions=cross_session_collisions_payload,
         proven_without_contradicts_declaration=proven_without_declaration_payload,
         carried_forward=carried_forward_payload,
+        uncorroborated=[asdict(u) for u in grad_result.uncorroborated],
+        pattern_trust=dict(grad_result.pattern_trust),
         # Both 0 on a wrap that graduated patterns is the former AM-WARN
         # Signal C case, which went quiet in 0.9.26: these counts are its record.
         associations_formed=assoc_formed,

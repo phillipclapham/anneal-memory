@@ -64,6 +64,19 @@ TOOLS: list[dict[str, Any]] = [
                     "description": "Agent or source attribution. Defaults to 'agent'.",
                     "default": "agent",
                 },
+                "trust": {
+                    "type": "string",
+                    "enum": ["agent", "tool", "external"],
+                    "description": (
+                        "Where the content came from. agent (default) = your own "
+                        "observation or decision; tool = a tool result you are "
+                        "relaying; external = a web page, document or another party. "
+                        "A pattern grounded only in tool/external episodes does not "
+                        "graduate past 1x until an agent episode also grounds it. "
+                        "Use tool/external whenever the content is someone else's claim."
+                    ),
+                    "default": "agent",
+                },
                 "metadata": {
                     "type": "object",
                     "description": "Optional JSON metadata to attach to the episode.",
@@ -89,6 +102,16 @@ TOOLS: list[dict[str, Any]] = [
                         "slot. recall then hides the older episode and, for a keyword "
                         "that matches it, names this one as its replacement. Case and "
                         "spacing are ignored."
+                    ),
+                },
+                "derived_from": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Ids of the episodes this content was derived from, e.g. your "
+                        "summary of a page you recorded as external. Each must exist. "
+                        "For graduation it then counts at most as trusted as its most "
+                        "trusted source, so a summary cannot corroborate its own source."
                     ),
                 },
             },

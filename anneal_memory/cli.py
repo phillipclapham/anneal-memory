@@ -148,7 +148,15 @@ from .store import (
     _parse_format_version,
     normalize_state_key,
 )
-from .types import AffectiveState, AssociationStats, EpisodeType, RelevantPattern
+from .types import (
+    DEFAULT_TRUST,
+    TRUST_LEVELS,
+    AffectiveState,
+    AssociationStats,
+    EpisodeType,
+    RelevantPattern,
+    trust_rank,
+)
 from .worth import (
     DEFAULT_FOLD_SKEW_SECONDS,
     FOLLOWED_VALUES,
@@ -346,14 +354,16 @@ def _existing_db_path(args: argparse.Namespace, *, require_file: bool = False) -
     return db_path
 
 
-def _open_store(args: argparse.Namespace) -> Store:
-    """Open a Store from CLI args."""
+def _open_store(args: argparse.Namespace, *, trust_ceiling: str = DEFAULT_TRUST) -> Store:
+    """Open a Store from CLI args. ``trust_ceiling`` is ``"operator"`` only for a
+    command whose operator gate (:func:`_operator_ok`) said yes (CAP-08)."""
     db_path = _existing_db_path(args)
     try:
         return Store(
             path=db_path,
             project_name=getattr(args, "project_name", "Agent"),
             audit=True,
+            trust_ceiling=trust_ceiling,
         )
     except StoreDatabaseError as exc:
         # ⚠ THE OPERATOR'S FIRST MESSAGE, AND IT USED TO READ LIKE CORRUPTION.
@@ -854,7 +864,19 @@ def cmd_record(args: argparse.Namespace) -> None:
     else:
         content = args.content
 
-    with _open_store(args) as store:
+    trust = getattr(args, "trust", "agent")
+    via = None
+    if trust == "operator":
+        # Kept for the audit (codex r1 #8): which form of the gate vouched.
+        via = _operator_ok(
+            "Record this episode as the OPERATOR's own (trusted above the agent)?"
+        )
+        if via is None:
+            print("Error: --trust operator needs a yes on a terminal, or "
+                  "ANNEAL_OPERATOR=1. Nothing was recorded.", file=sys.stderr)
+            sys.exit(1)
+
+    with _open_store(args, trust_ceiling="operator" if via else DEFAULT_TRUST) as store:
         metadata = None
         if args.tags:
             metadata = {"tags": [t.strip() for t in args.tags.split(",")]}
@@ -867,9 +889,15 @@ def cmd_record(args: argparse.Namespace) -> None:
                 metadata=metadata,
                 supersedes=getattr(args, "supersedes", None),
                 state_key=getattr(args, "state_key", None),
+                trust=trust,
+                trust_via=f"cli:operator-{via}" if via else None,
+                derived_from=getattr(args, "derived_from", None),
             )
         except (SupersessionError, ValueError) as exc:
             print(f"Error: {exc}. Nothing was recorded.", file=sys.stderr)
+            sys.exit(1)
+        except ValueError as exc:  # a derived_from source that does not exist
+            print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
 
         if args.json:
@@ -878,10 +906,52 @@ def cmd_record(args: argparse.Namespace) -> None:
                 "timestamp": episode.timestamp,
                 "type": episode.type.value,
                 "source": episode.source,
+                "trust": trust,
             })
             return
 
         print(f"Recorded episode {episode.id} ({episode.type.value})")
+
+
+def cmd_trust(args: argparse.Namespace) -> None:
+    """Show or change an episode's trust class (CAP-08). Lowering is open;
+    raising needs the operator (a yes on a terminal, or ANNEAL_OPERATOR=1)."""
+    args.episode_id = args.episode_id.strip().lower()
+    with _open_store(args) as store:
+        if store.get(args.episode_id) is None:
+            print(f"Error: no episode {args.episode_id!r}.", file=sys.stderr)
+            sys.exit(1)
+        current = store.trust_map([args.episode_id]).get(args.episode_id, DEFAULT_TRUST)
+    if args.level is None:
+        if args.json:
+            _print_json({"id": args.episode_id, "trust": current})
+        else:
+            print(f"{args.episode_id}: {current}")
+        return
+    raising = trust_rank(args.level) > trust_rank(current)
+    via = None
+    if raising:
+        via = _operator_ok(f"Raise {args.episode_id} from {current} to {args.level}?")
+        if via is None:
+            print(f"Error: raising trust ({current} -> {args.level}) needs a yes on a "
+                  "terminal, or ANNEAL_OPERATOR=1. Unchanged.", file=sys.stderr)
+            sys.exit(1)
+    # The gate's yes is what opens the Store at operator; the actor says how the
+    # gate was passed, not more than that.
+    with _open_store(args, trust_ceiling="operator" if via else DEFAULT_TRUST) as store:
+        try:
+            # expect: the class the gate above was decided on; if another writer
+            # moved it since, the write refuses instead of applying a stale gate.
+            old = store.set_trust(args.episode_id, args.level,
+                                  actor=f"cli:operator-{via}" if via else "cli",
+                                  expect=current)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if args.json:
+            _print_json({"id": args.episode_id, "from": old, "to": args.level})
+        else:
+            print(f"{args.episode_id}: {old} -> {args.level}")
 
 
 def cmd_search(args: argparse.Namespace) -> None:
@@ -919,6 +989,24 @@ def cmd_search(args: argparse.Namespace) -> None:
             print(f"  [{ep.id}] {ep.type.value:<12} {age}{replaced}")
             print(f"           {content}")
             print()
+
+
+def _operator_ok(question: str) -> str | None:
+    """How the operator said yes to a CAP-08 trust claim an agent must not make:
+    ``"terminal"`` (a yes on a terminal), ``"env"`` (``ANNEAL_OPERATOR=1`` for one
+    command), or None. ⚠ The env form is a convenience, not a boundary: any
+    process that can run this CLI can set it, so it binds only where the agent
+    has no shell (MCP never offers it). The audit records which form was used."""
+    if os.environ.get("ANNEAL_OPERATOR") == "1":
+        return "env"
+    if sys.stdin.isatty() and sys.stderr.isatty():
+        print(f"{question} [y/N] ", end="", file=sys.stderr, flush=True)
+        try:
+            answer = sys.stdin.readline().strip().lower()
+        except (EOFError, OSError):
+            answer = ""
+        return "terminal" if answer in ("y", "yes") else None
+    return None
 
 
 def _team_override_ok(store: Any, args: argparse.Namespace) -> bool:
@@ -1610,7 +1698,8 @@ def cmd_save_continuity(args: argparse.Namespace) -> None:
                 f"Bare graduations demoted (no evidence): {result['bare_demoted']}"
             )
         for cap in result.get("level_capped", []):
-            print(f"Level capped: {cap['name']} {cap['written_level']}x -> {cap['capped_to']}x")
+            why = f" ({cap['reason']})" if cap.get("reason", "prior") != "prior" else ""
+            print(f"Level capped: {cap['name']} {cap['written_level']}x -> {cap['capped_to']}x{why}")
         if result["skipped_non_today"]:
             # Carried-forward graduations from prior sessions are
             # normal. A non-zero count with no new validations is
@@ -1989,6 +2078,22 @@ def cmd_export(args: argparse.Namespace) -> None:
         # delete), so an export carries them, marked, plus the links.
         result = store.recall(limit=100000, include_superseded=True)
         episodes = [_episode_dict(ep) for ep in result.episodes]
+        # CAP-08: the trust class rides along when it is not the default, so a
+        # JSON round trip does not turn an external episode into an agent one.
+        # It is the EFFECTIVE class (an agent summary of an external page exports
+        # as external), so a round trip never raises an episode's trust (codex r3
+        # #3). The derivation edges are written for the record only: import does
+        # not read them (a file cannot vouch, and a merged edge could; L3 r5).
+        export_trust = store.effective_trust_map(ep["id"] for ep in episodes)
+        export_edges = store.derived_edges(ep["id"] for ep in episodes)
+        for ep in episodes:
+            if ep["id"] in export_trust:
+                ep["trust"] = export_trust[ep["id"]]
+            if ep["id"] in export_edges:
+                ep["derived_from"] = [
+                    {"id": src, **({"gone_trust": gone} if gone is not None else {})}
+                    for src, gone in export_edges[ep["id"]]
+                ]
         supersessions = store.supersession_links()
         continuity = store.load_continuity()
         meta = store.load_meta()
@@ -2169,7 +2274,8 @@ def cmd_import(args: argparse.Namespace) -> None:
                         file=sys.stderr,
                     )
         if args.json:
-            _print_json({"imported": 0, "skipped": 0, "errors": 0})
+            _print_json({"imported": 0, "skipped": 0, "errors": 0, "trust_lowered": 0,
+                         "trust_capped": 0})
         else:
             print("No episodes to import.")
         return
@@ -2181,31 +2287,61 @@ def cmd_import(args: argparse.Namespace) -> None:
         skipped = 0
         errors = 0
 
+        lowered = 0
+        capped = 0
         for ep_data in episodes:
             try:
+                # CAP-08: an export file is plain JSON anyone can edit, so it can
+                # lower trust but never vouch: anything above agent comes in as
+                # agent, counted in the output so the cap is not silent (C#11).
+                # The Store is opened at agent, so it would refuse it anyway.
+                raw_trust = ep_data.get("trust")
+                ep_trust = raw_trust if raw_trust is not None else DEFAULT_TRUST
+                was_capped = trust_rank(ep_trust) > trust_rank(DEFAULT_TRUST)
+                if was_capped:
+                    ep_trust = DEFAULT_TRUST
+
                 # Check if episode already exists
                 existing = store.get(ep_data["id"])
                 if existing is not None:
+                    # An existing id still takes a LOWER trust from the file
+                    # (codex r1 #6), but only from a class the file states at or
+                    # below agent: a missing field, or an operator one the file
+                    # cannot vouch for, asserts nothing, so re-importing a store's
+                    # own export never demotes its operator episodes (codex +
+                    # complement r2).
+                    current = store.trust_map([existing.id]).get(existing.id, DEFAULT_TRUST)
+                    if (raw_trust is not None
+                            and trust_rank(raw_trust) <= trust_rank(DEFAULT_TRUST)
+                            and trust_rank(raw_trust) < trust_rank(current)):
+                        store.set_trust(existing.id, ep_trust, actor="cli:import")
+                        lowered += 1
                     skipped += 1
                     continue
 
-                store.record(
+                recorded = store.record(
                     content=ep_data["content"],
                     episode_type=ep_data["type"],
                     source=ep_data.get("source", "import"),
                     metadata=ep_data.get("metadata"),
                     timestamp=ep_data.get("timestamp"),
+                    trust=ep_trust,
                 )
                 imported += 1
+                capped += was_capped
             except Exception as e:
                 errors += 1
                 if not args.json:
                     print(f"  Error importing episode {ep_data.get('id', '?')}: {e}", file=sys.stderr)
 
         if args.json:
-            _print_json({"imported": imported, "skipped": skipped, "errors": errors})
+            _print_json({"imported": imported, "skipped": skipped, "errors": errors,
+                         "trust_lowered": lowered, "trust_capped": capped})
         else:
-            print(f"Import complete: {imported} imported, {skipped} skipped (already exist), {errors} errors")
+            print(f"Import complete: {imported} imported, {skipped} skipped (already exist), {errors} errors"
+                  + (f", trust lowered on {lowered} existing" if lowered else "")
+                  + (f", {capped} brought in as agent (the file cannot vouch for "
+                     "operator)" if capped else ""))
 
 
 def cmd_team_import(args: argparse.Namespace) -> None:
@@ -4281,6 +4417,19 @@ def build_parser() -> argparse.ArgumentParser:
              "the same key replaces this one, and this one replaces older holders; "
              "the key is your claim that the facts fill one slot (see `state`).",
     )
+    sub.add_argument(
+        "--derived-from", action="append", metavar="ID", default=None,
+        help="Id of an episode this content was derived from (repeatable), e.g. a "
+             "summary of a page recorded as external. Each must exist. For graduation "
+             "the episode counts at most as trusted as its most trusted source.",
+    )
+    sub.add_argument(
+        "--trust", choices=list(TRUST_LEVELS), default=DEFAULT_TRUST,
+        help="Where the content came from (default: agent). tool = a relayed tool "
+             "result, external = a web page, document or another party; a pattern "
+             "grounded only in those does not graduate past 1x. operator needs a yes "
+             "on a terminal, or ANNEAL_OPERATOR=1.",
+    )
     sub.set_defaults(func=cmd_record)
 
     # -- state (CAP-04 state keys) --
@@ -4294,6 +4443,18 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--unset", metavar="EPISODE_ID", default=None,
                       help="Take this episode out of its slot (the undo for a wrong key)")
     sub.set_defaults(func=cmd_state)
+
+    # -- trust --
+    sub = subparsers.add_parser(
+        "trust", help="Show or change an episode's trust class", parents=[json_parent]
+    )
+    sub.add_argument("episode_id", help="Episode id")
+    sub.add_argument(
+        "level", nargs="?", choices=list(TRUST_LEVELS), default=None,
+        help="New class. Lowering is open; raising needs a yes on a terminal, or "
+             "ANNEAL_OPERATOR=1. Omit to show the current class.",
+    )
+    sub.set_defaults(func=cmd_trust)
 
     # -- search (alias: recall) --
     # `recall` is the verb the library (Store.recall) and MCP tool expose, and

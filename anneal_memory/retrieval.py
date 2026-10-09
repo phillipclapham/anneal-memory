@@ -1040,6 +1040,16 @@ def retrieve_relevant(
         if redirect:
             episodes = _swap_replaced(store, keywords, seed_episodes, max_episodes,
                                       until=until, mode=mode)
+        if episodes:
+            # CAP-08 D3: each shown episode carries its effective trust, so a hook
+            # can render relayed content as data. Read in the same snapshot, after
+            # the redirect, so a replacing episode carries its own class.
+            episode_trust = store.effective_trust_map(ep.id for ep in episodes)
+            episodes = [
+                dataclasses.replace(ep, trust=episode_trust[ep.id])
+                if ep.id in episode_trust else ep
+                for ep in episodes
+            ]
     # One regime-matched precision bar + anchor for every tier this call scores: the
     # lower IDF bar + the √N distinctiveness anchor when the weights are corpus-IDF, the
     # length-proxy bar + no anchor (0.0) otherwise.

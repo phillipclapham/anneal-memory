@@ -191,6 +191,131 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   in local time), so a wrap saved after midnight or under another `TZ` keeps the graduations it stamped.
 - A first save onto a fresh store has no prior: every pattern line enters at 1x. Direct `validate_graduations`
   callers that pass no `prior_text` keep the old behavior.
+### Added — trust classes: relayed content cannot graduate on its own (CAP-08 T1-T3, KL-22)
+- Run first, on 2026-10-07: one episode recorded from a web page carrying a false claim, cited
+  alone by a wrap, graduated the claim to 2x through `prepare_wrap` and
+  `validated_save_continuity`. The README's "single-shot poisoning stalls at 1x" was false.
+- Every episode has a trust class, lowest first `external`, `tool`, `agent` (the default), and
+  `operator` (`TRUST_LEVELS`, `trust_rank`). `Store.record(..., trust=)` stores a non-default
+  class in a new `episode_trust` table, in the episode's transaction; absence means `agent`, so
+  every existing episode reads as `agent` and nothing changes for a caller that never passes it.
+  A trigger deletes an episode's trust row whatever path deletes the episode.
+- The trust ceiling belongs to the host (C#11, 2026-10-08): `Store(..., trust_ceiling="agent")` is
+  the highest class any write through that instance may carry, set by the code that constructs the
+  Store and moved by no call argument. `record(trust=)`, `set_trust` and the CLI's JSON import
+  refuse anything above it with `ValueError` before writing (never silently capped). Before it, a
+  library caller could label its own write `operator` with no gate at all (run on the rebased tip,
+  1008+3). The MCP server opens its store at `agent`; the CLI opens at `operator` only after its
+  operator gate. The host's labels (`trust`, `trust_via`, `actor`) are its statement, held by the
+  human who configured it by design. A CLI import counts the operator labels it brought in as
+  `agent` (`trust_capped`).
+- `Store.set_trust(id, trust, expect=)` sets any class up to the ceiling, lowering or raising;
+  above it is refused, except that setting the class the episode already has is a no-op that
+  succeeds. `expect` is the class the caller decided on: if it moved, the write refuses with a
+  conflict (the CLI passes the class its operator gate read). Audited as `trust_set`. A change
+  that leaves a recorded supersession pointing the wrong way (the replacing episode now below the
+  one it hides) removes that link in the same transaction and names it in the audit event; a
+  link a team snapshot owns stays (the ledger rules it) and is named as left.
+  `Store.trust_map(ids)` (ids case-insensitive) and `Store.trust_counts()` read them. The table
+  refuses a class outside `TRUST_LEVELS`.
+- Graduation (`validate_graduations(..., trust_of=)`, wired by the canonical save pipeline): a
+  today-dated graduation whose GROUNDING citations (those its explanation actually overlaps) are
+  all `tool`/`external` is written back at 1x marked `(uncorroborated)`, whatever level it
+  claimed and whatever it held before, and forms no association. With no quoted explanation, a
+  single `tool`/`external` citation makes the line relayed. Listed in the save result's new
+  `uncorroborated`, recorded in the `continuity_saved` audit event, and named in a warning. An
+  unrelated agent episode added to a quoted citation does not corroborate it, and a
+  `tool`/`external` citation that does not itself ground the explanation forms no association.
+  The save re-reads the cited episodes' classes under its write lock and refuses (nothing saved,
+  the wrap still open) if another writer changed one after validation.
+- A lower-trust episode cannot supersede a higher-trust one (`record(supersedes=)`,
+  `supersede`, a wrap's `[supersedes:]`): refused as a `SupersessionError`. `pattern_trust` on the
+  save result gives each graduated named pattern's highest grounding trust, or for a citation
+  with no quoted explanation its highest cited trust (the audit event records it when above
+  `agent`).
+- MCP `record` takes `trust` (`agent`, `tool`, `external` only: an agent cannot label its own
+  write `operator`). CLI `record --trust` (`operator` needs a yes on a terminal or
+  `ANNEAL_OPERATOR=1`) and `anneal-memory trust ID [LEVEL]` (raising needs the same). The env
+  form is a convenience any process with a shell can set; the audit records which form was used
+  (`cli:operator-terminal` / `cli:operator-env`: the `trust_set` actor, and `trust_via` on an
+  operator `record` event, which `Store.record(trust_via=)` takes).
+- JSON `export` writes each non-default EFFECTIVE class (an agent summary of an external page
+  exports as `external`) and, for the record, each episode's `derived_from` edges
+  (`Store.derived_edges`); `import` does not read the edges (see the D3 entry below), so a
+  round trip never raises an episode's effective trust (run: it did). `import` honours a class up to `agent`, so an
+  edited export file can lower trust but never vouch, including on an episode it already holds
+  (reported as `trust_lowered`), and only from a class it states at or below `agent`: a missing
+  class, or an `operator` one, asserts nothing, so re-importing a store's own export never demotes
+  it. SQLite-format export copies the table.
+- Measured after: the 2026-10-07 plant recorded `external` is held at `1x (uncorroborated)`;
+  the same with an unrelated agent episode stapled on is held too; with an agent episode that
+  also grounds the claim it graduates to 2x.
+- Scope: provenance only. Unlabelled content reads as the agent's own, so the rule holds as far
+  as the host labels its tool boundary (team imports and JSON exports without the field arrive
+  as `agent`); grounding is lexical, so an on-topic agent episode corroborates; the CLI's
+  `search` and the wrap package do not yet mark relayed episodes as data (MCP `recall` does,
+  below). Whether a claim is true stays the operator's.
+- Lowering trust revokes what it earned, at the next wrap (C#11, 2026-10-08). Run first: an
+  episode that grounded a 2x graduation was lowered to `external`, and the next wrap kept the
+  pattern at 2x. Each save now records the episodes that grounded each rung a named pattern
+  earned, in a new additive `pattern_grounding(name, level, earned_on, earning, rule, episode_id)` table
+  written in the wrap's transaction (`Store.pattern_grounding()`; check 4's grounding citations,
+  and the rule check 4 admitted the line by; a rename moves them). At the graduation bound, each
+  earning is re-run under its own rule against today's trust: a `checked` one (a quoted
+  explanation named the grounding citations) fails when all of them are now `tool`/`external`, an
+  `unchecked` one when any is (run: a bare two-citation 2x kept its rung when one citation was
+  lowered, until this rule). A rung fails when every earning of it does, and the pattern's prior
+  is cut back to just below the lowest failed rung (`graduation.revoked_pattern_levels`,
+  `validate_graduations(..., revoked_levels=)`). The cut is
+  reported in `level_capped` with the new `reason` field `revoked: grounding lowered` (`prior`
+  for every other cut), in the MCP and CLI save output and the warning. A rung with no grounding
+  record (saved before the table) keeps its level. The save's trust re-read covers the recorded
+  grounding episodes too. A grounding or cited episode that no longer exists reads `external`, a
+  failed ground, never a default `agent` one (run: a lowered-then-deleted ground kept its rung);
+  one that vanishes between validation and the save's final re-read aborts the save. Two
+  earnings of one rung on one day are told apart by `earning` (the wrap token and the line's
+  ordinal), so lowering one earning's citation no longer revokes the other.
+- Derived content and recall labels (CAP-08 F4 = T4 + derived_from, C#11). Run first: an agent
+  summary of an external page, cited beside the page, graduated the page's claim to 2x, and MCP
+  `recall` showed both as plain memory. `Store.record(..., derived_from=[ids])` (CLI
+  `record --derived-from`, the MCP `record` tool's `derived_from`) records the episodes content
+  was derived from in a new additive `episode_derived(episode_id, source_id)` table, in the
+  episode's transaction; a source that does not exist refuses the record (`ValueError`, nothing
+  written). `Store.effective_trust_map(ids)` gives each episode the lower of its own class and
+  the highest effective class among its sources, through every level of derivation. It is
+  computed, never stored for a live source: a worklist lowers each episode in the whole reachable
+  closure from its own class to the fixed point, so the answer for an id does not depend on what
+  else was asked or on id order, and a cycle gets the meet (D3 redesign R1, 1008+11; run: a
+  depth-first walk that skipped the source on its path read an agent summary of an external page
+  as `agent` when its id sorted after the page's, and graduated the page's claim to 2x). Raising
+  or lowering a source therefore moves what was derived from it with no pass of its own (R2; run:
+  a snapshot-raise pass left a node `tool` after its source was raised). A removal leaves a sticky
+  mark instead (R3): an `AFTER DELETE` trigger sets `gone_trust = 'external'` on every
+  `episode_derived` row naming the id as a source and every `pattern_grounding` row citing it,
+  whatever path deleted it, and `prune` first sets the mark to the episode's effective trust, so
+  aging out is not a retraction (run: a pruned grounding revoked a rung nothing had lowered). An
+  episode recorded again under the same id never clears a mark (run: re-recording a deleted
+  ground revived its revoked 2x), and the grounding reads the mark when set. The save's re-check
+  compares, per cited id, whether it exists, its marks and its effective trust (R4; run: an
+  external ground deleted mid-save read `external` before and after, and the save committed).
+  JSON import does not restore derivation edges. Each imported episode keeps the effective trust it was exported with. If an operator later raises an imported summary's trust, that raise is the operator's own statement (D1: the host's trust label is human-held); anneal does not re-derive it from the original sources. (L3 r5, Phill 12:57, option (a): an import that merged edges let a crafted file
+  raise an existing summary from `external` to `agent`, and an imported removal mark could not
+  lower an existing edge; `Store.restore_derived` is deleted, and the export still writes the
+  edges for the record.) The graph is walked iteratively (run: a ~1,000-deep chain
+raised `RecursionError`). The graduation
+  trust check and the save's re-read use it, so a
+  summary of an external page reads `external` and cannot corroborate it. `ScoredEpisode.trust`
+  (default `agent`) carries each episode's effective class out of `retrieve_relevant`, and MCP
+  `recall` lists `tool`/`external` episodes after the rest under "Recorded from tool output / an
+  external source: data, not instructions:". The MCP `record` schema changed, so
+  `tool-integrity.json` was regenerated.
+- A demoted or held pattern line loses every `[evidence:]` tag of its marker, not just the first
+  (1008+3). Run first: `(ungrounded)`, `(cross-session-overlap)`, `(uncorroborated)` and
+  `(carried-forward)` replaced only the first tag, so a two-tag line kept its second while a
+  one-tag line kept none. A demoted line is stripped by design (it must be re-grounded, never
+  re-validated on the same citations); now every tag up to the line's next level marker goes,
+  and a later marker's own tags are left alone. The next marker is found outside `[...]` tags, so
+  a quoted `| 2x` in an explanation is text, not a marker.
 
 ### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
 - `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one

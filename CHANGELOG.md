@@ -192,6 +192,106 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - A first save onto a fresh store has no prior: every pattern line enters at 1x. Direct `validate_graduations`
   callers that pass no `prior_text` keep the old behavior.
 
+### Fixed — the audit chain stays valid under concurrent writer processes (KL-24)
+- Several processes (or several `AuditTrail` instances) writing one store broke the hash chain:
+  each chained from its own cached tip. Reproduced on 2026-10-07: three processes recording 200
+  episodes each, every episode landed, `verify` reported a hash mismatch, and `status` counted no
+  audit failure. The same break on a copy of a real 14,733-entry store.
+- Each append now holds a cross-process lock, `<stem>.audit-append.lock` (taken before the
+  manifest lock, never inside it), and first re-syncs the chain's tip from the active file: when
+  the bytes where this instance's tip was written still hash to it, the chain continues from the
+  last valid entry after them; anything else (another file, a reused inode, a truncation, a
+  rewrite) re-initialises through the manifest, as an open does.
+- A lost active file (deleted, truncated below the tip, or replaced) is refused once at the next
+  append ("is gone"), from the instance's own record, even when the manifest's best-effort record
+  of the file is missing. This includes a file another writer sealed by rotating the week: a
+  sealed-looking filename is not proof that the lost file was sealed (a stale same-week orphan
+  hid a deletion), so a peer's rotation costs each other writer one refused, counted append, and
+  the next append re-reads the trail.
+- `AuditTrail.stats()` reads `entry_count` from the active file on every call (its last valid
+  entry's `seq` + 1), so it includes other writers' entries; it takes no lock and changes no
+  state, so a status read never waits on a writer and never consumes the lost-file refusal. An
+  active file with no valid entry that the manifest, or the instance itself, records as having held
+  some reads as unknown (`audit_entry_count` None in `status`), not as 0 entries; so does an
+  unparseable manifest.
+- A sealed week with the same period no longer clears the manifest's record of an active file that
+  went missing: after a clock rollback a new active file could begin in an already-sealed week, and
+  its deletion read as sealed, with the chain continuing over the lost entries (reproduced). A seal
+  by an older release that left the record set now reads as a vanished file until `audit-repair`,
+  which clears it when the sealed week's first entry is the one the record names (no gap recorded).
+- The manifest's record of an active file's first entry is saved BEFORE that entry is written
+  (write-ahead); a save that fails refuses the append with nothing written. Saved after the entry and
+  best-effort, a failed save left a later deletion of the file undetected: the chain restarted and
+  `verify` read valid (reproduced). The first entry is staged in a temp file and renamed into place
+  after its record is saved, so a crash between the two is finished on the next append instead of
+  reading as a deleted file. A staged entry is never deleted: one that does not commit is set aside
+  as `<active>.first.discarded-<UTC stamp>`. The next append decides it only after the quarantine
+  check and only from a readable manifest; `audit-repair` takes the append lock and then the
+  manifest lock and resolves a staged entry first, by the same rule, before any gap decision
+  (`AuditRepairResult.staged_first_entry`). Run first: repair over a crash's staged entry recorded
+  a permanent gap and the next append deleted it; a quarantine let the next append delete it; a
+  rename that failed with no active file left it and its record, and the retry committed the entry
+  whose append had failed. The temp is created exclusively (no `O_NOFOLLOW`, which Windows lacks:
+  every first append raised `AttributeError`) and written with a full-write loop (a short
+  `os.write` renamed half an entry in and reported success). A sealed week repair checks against
+  the first-entry record that is not a regular file, or cannot be read, refuses the repair instead
+  of recording a gap.
+- Audit appends FAIL CLOSED when the manifest lock cannot be taken or the manifest is quarantined
+  (ruled 2026-10-08, superseding the 2026-10-03 "degrade with a warning" and the 2026-09-13
+  "appending continues while quarantined"): each refused append is counted as a dropped audit write
+  (`audit_write_failures` in `status`) and its message names `anneal-memory audit-repair`; episodes
+  still commit. Reproduced first: with the manifest quarantined and the active file deleted, appends
+  went on, and after `audit-repair` `verify` read valid with that week's entries gone and no gap.
+  `audit-repair` rebuilding a quarantined manifest over an active file with no entry now records a
+  possible gap, since nothing left on disk says whether the file held entries.
+- Also fail closed (L3 r6, each run first): an audit directory that cannot be listed to rule out a
+  quarantine marker (superseding round 10b's "an unlistable directory must not block writes": an
+  initialized writer appended past a marker at mode 0300), and a manifest lock that cannot be
+  taken by an already-initialized writer (it appended without ever taking the lock): every append
+  now takes the manifest lock briefly, with no manifest read when nothing else needs one. Measured
+  on 1,000 appends, interleaved runs under the same load: median 244-263 µs per append before,
+  284-305 µs after.
+- The possible-gap record carries `certainty: "possible"`, and `verify` (CLI, `--verify-audit`)
+  and `audit-repair` report it as a POSSIBLE GAP, never as entries that went missing; the human
+  `audit-repair` output prints every record it returns (a rebuild with sealed files printed none).
+- `stats()` reads as unknown whenever a quarantine marker or a staged first entry is on disk, or the
+  directory cannot be listed to rule those out, whatever the active file holds (an active file
+  with entries beside a marker read as a normal count).
+- The append lock is released with `LOCK_UN` before its close, as the manifest lock now is, so a
+  child forked while it was held does not keep it.
+- An append waits at most 30 seconds for another holder; past that, or when the lock file cannot
+  be opened (a directory, symlink or FIFO at its path), the append is refused and counted as a
+  dropped audit write (`audit_write_failures`, `dropped_before`), never appended unserialized.
+  Its location is recorded as unknown, since without the lock the cached tip is not current.
+- After the fix: six processes x 250 episodes leave one valid chain of 1,500 entries, four
+  processes appending across a week rotation leave one valid chain (800 minus at most one
+  refused append per non-rotating writer), and four writer
+  processes on a copy of a real store add exactly 600 entries to a chain that stays valid.
+- Known limits: where advisory locks do not exist (Windows, silently, as the README's Windows
+  section says; or a filesystem without `flock`, warned on stderr once per lock path) appends are
+  not serialized and the trail needs one writer at
+  a time; writers that take turns stay chained through the re-sync. Every concurrent writer must
+  run a version that takes the lock: an anneal-memory without it, writing alongside, breaks the
+  chain as before, and nothing on the new side can detect it.
+
+### Known limit, by design — a crash during a week's first audit append (KL-24)
+- After a crash in one window (the week's first entry staged and set aside, the process stopped
+  before the manifest's record of it was withdrawn), whether that entry committed is not
+  decidable from disk. A hash reconcile that tried to decide it drew a new HIGH in each of three
+  review rounds (a discarded file's bytes can equal a later real entry; two matching files; consume
+  and clear not crash-atomic), so it was deleted (Phill, 2026-10-08).
+- What anneal does instead: After a crash during a week's first audit append, anneal cannot always tell from disk whether that entry committed. It refuses further appends until you run `audit-repair`, which records a POSSIBLE gap and names the preserved attempt files (`.first.discarded-*`). Inspect them to decide. anneal keeps them and never deletes them.
+  A vanished active file is a POSSIBLE gap (`certainty: "possible"`) only in that crash window: the
+  manifest's begun record is still set AND at least one attempt is preserved; `preserved_attempts`
+  then names every preserved regular file of that trail. Otherwise it is a definite gap. The rebuild
+  from a quarantined manifest stays POSSIBLE and names any preserved files the same way.
+  `audit-repair`, `verify` and `--verify-audit` print the names.
+- Manifest validation: `certainty` must be `"possible"` on an active-file record (its own
+  filename, `set_aside_as` empty); `preserved_attempts` must be a list of exact set-aside file names (`<stem>.audit.jsonl.first.discarded-<stamp>[-n]`, a real stamp, `n` from 1) on such a record.
+- `AuditTrail.stats()` waits (bounded, 2s) on a peer's append lock when only a staged first entry
+  makes the trail look unknown, then re-reads; a staged file with no holder still reads unknown.
+- Audit-repair's stderr warning calls a possible gap "POSSIBLE", not a plain gap.
+
 ### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
 - `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one
   ledger clone's complete verdict, with each line marked `enforced` and the links it `honours`.

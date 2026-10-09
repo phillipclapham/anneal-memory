@@ -351,7 +351,8 @@ def test_unset_takes_a_wrong_key_out_and_it_stays_out(tmp_path):   # L2 H3
                           state_key="user.home_city")
         live = {e.id for e in st.recall(limit=10).episodes}
         assert live == {wrong.id, later.id}          # the unkeyed one is never re-hidden
-        assert st.clear_state_key(wrong.id) == {"key": None, "removed": [], "added": []}
+        assert st.clear_state_key(wrong.id) == {"key": None, "removed": [], "added": [],
+                                                   "left_live": []}
 
 
 def test_unset_in_the_middle_of_a_chain_re_forms_the_slot(tmp_path):

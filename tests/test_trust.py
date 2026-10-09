@@ -678,7 +678,10 @@ class TestL3Round1:
             new = st.record("The deploy key lives in the vault and in the CI secrets now.",
                             EpisodeType.OBSERVATION, timestamp="2026-10-08T10:00:00Z")
             assert prepare_wrap(st)["status"] == "ready"
-            real = st.trust_map
+            # The race lands after the save's trust read (ground_state), not on the
+            # first trust_map call: the [supersedes:] pre-check reads effective trust
+            # too now (L3 r1 1009+22), and runs earlier.
+            real = st.ground_state
             calls: list[int] = []
 
             def racing(ids):
@@ -689,7 +692,7 @@ class TestL3Round1:
                         other.set_trust(new.id, "external")
                 return out
 
-            st.trust_map = racing  # type: ignore[method-assign]
+            st.ground_state = racing  # type: ignore[method-assign]
             text = (HEAD + "## Patterns\n- deploy_key | 1x (2026-10-08)\n\n"
                     f"## Decisions\n[supersedes: {old.id} by {new.id}]\n\n## Context\nx\n")
             with pytest.raises(StoreError, match="trust class"):
@@ -1192,3 +1195,75 @@ class TestImportCarriesNoDerivation:
             t.set_trust(sm.id, "agent")
             assert t.effective_trust_map([sm.id]) == {}
             assert t.derived_edges([sm.id]) == {}
+
+
+# --- CAP-08 integration L3 r1 (1009+22), each run before its fix --------------
+
+
+class TestIntegrationL3Round1:
+    T = ("2026-10-01T00:00:00+00:00", "2026-10-02T00:00:00+00:00",
+         "2026-10-03T00:00:00+00:00")
+
+    def test_clearing_a_key_never_reforms_a_lower_trust_link(self, host_store):
+        """complement + codex: clear_state_key re-formed the slot with no trust
+        check, so agent C came to hide operator A. Both now stay live."""
+        a, b, c = (host_store.record(f"The deploy target is staging {n}.",
+                                     EpisodeType.OBSERVATION, timestamp=t,
+                                     state_key="deploy.target")
+                   for n, t in zip(("one", "two", "three"), self.T))
+        host_store.set_trust(a.id, "operator")
+        out = host_store.clear_state_key(b.id)
+        assert out["added"] == [] and out["left_live"] == [(a.id, c.id)]
+        assert not host_store.supersession_exists(old_id=a.id, new_id=c.id)
+        assert {a.id, c.id} <= {e.id for e in host_store.recall(limit=10).episodes}
+
+    def test_a_summary_of_an_external_page_cannot_hide_an_agent_fact(self, store):
+        """consensus: the rule compared the stored class, so an agent summary
+        derived from an external page (external for graduation) hid an agent
+        fact; and lowering the page later left an existing such link in place."""
+        from anneal_memory.store import SupersessionError
+
+        fact = store.record("The office wifi password is tango alpha.",
+                            EpisodeType.OBSERVATION, timestamp=self.T[0])
+        page = store.record("A page says the office wifi password is tango bravo.",
+                            EpisodeType.OBSERVATION, timestamp=self.T[1], trust="external")
+        with pytest.raises(SupersessionError, match="lower-trust"):
+            store.record("The office wifi password is tango bravo.", EpisodeType.OBSERVATION,
+                         timestamp=self.T[2], derived_from=[page.id], supersedes=[fact.id])
+        store.set_trust(page.id, "agent")
+        summary = store.record("The office wifi password is tango bravo.",
+                               EpisodeType.OBSERVATION, timestamp=self.T[2],
+                               derived_from=[page.id], supersedes=[fact.id])
+        store.set_trust(page.id, "external")  # the summary's class moves with it
+        assert not store.supersession_exists(old_id=fact.id, new_id=summary.id)
+
+    def test_severing_a_concept_takes_its_grounding_record(self, store):
+        """consensus: a homonym inherited the old concept's grounding groups."""
+        ep = store.record("gate evidence", EpisodeType.OBSERVATION)
+        with store._batch():
+            store._record_pattern_grounding([("gate", 2, "unchecked", [ep.id])], "2026-10-08")
+        store.sever_pattern_concept("gate")
+        assert "gate" not in store.pattern_grounding()
+
+    def test_a_team_replace_that_changes_the_text_keeps_no_vouching(self, tmp_path):
+        """codex HIGH: an operator raise of text X stayed on the text Y that a
+        newer snapshot wrote in place, with X's derivation edges."""
+        from anneal_memory.team import import_ledger
+        from tests.test_team_snapshot_v3 import A0, B0, ep, lines, v3
+
+        with Store(tmp_path / "m.db", project_name="p", trust_ceiling="operator") as s:
+            a, b = lines()
+            import_ledger(s, v3([(a, True, []), (b, True, [A0])]))
+            e = ep(s, B0)
+            s._conn.execute("UPDATE team_entries SET hash='x' WHERE entry_id=?", (B0,))
+            s._conn.execute("UPDATE episodes SET content='reviewed text', "
+                            "metadata=json_set(metadata,'$.team.hash','x') WHERE id=?", (e,))
+            s._conn.commit()
+            s.set_trust(e, "operator")
+            page = s.record("some page", EpisodeType.OBSERVATION, trust="external")
+            s._conn.execute("INSERT INTO episode_derived (episode_id, source_id) "
+                            "VALUES (?, ?)", (e, page.id))
+            s._conn.commit()
+            r = import_ledger(s, v3([(a, True, []), (b, True, [A0])], seq=2))
+            assert r.replaced_in_place == [B0] and s.get(e).content != "reviewed text"
+            assert s.trust_map([e]) == {} and s.derived_edges([e]) == {}

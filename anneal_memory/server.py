@@ -504,16 +504,19 @@ class Server:
         for ep in found.episodes:
             if ep.superseded_by:
                 by_head.setdefault(ep.superseded_by, []).append(ep.id)
-        lines = []
+        rows = []
         for head_id, olds in by_head.items():
             head = found.heads.get(head_id)
             if head is None:
                 continue
-            lines.append(
+            rows.append((head.id, (
                 f"- ({head.id}) [{head.type.value}] {head.timestamp} replaces "
-                f"{', '.join('(' + o + ')' for o in olds)}: {_truncate(head.content, 300)}")
-        if not lines:
+                f"{', '.join('(' + o + ')' for o in olds)}: {_truncate(head.content, 300)}")))
+        if not rows:
             return ""
+        # A relayed head is labelled like any recall line (L3 r1 1009+22), by the
+        # trust read in replaced_matches' own snapshot.
+        lines = self._label_relayed(rows, trust=found.trust)
         # What the store's caps cut is said, never dropped silently.
         more = []
         if found.more_heads:
@@ -524,11 +527,16 @@ class Server:
             lines.append(f"- (+ {' and '.join(more)} not listed; narrow the keyword)")
         return "Replaced since (the current fact for an older match):\n" + "\n".join(lines)
 
-    def _label_relayed(self, rows: list[tuple[str, str]]) -> list[str]:
+    def _label_relayed(
+        self, rows: list[tuple[str, str]], *, trust: dict[str, str] | None = None,
+    ) -> list[str]:
         """Recall lines in order, except that each ``(episode id, line)`` whose
         episode's effective trust is tool/external moves under
-        :data:`_RELAYED_LABEL`, after the rest (CAP-08 D3)."""
-        trust = self._store.effective_trust_map(ep_id for ep_id, _ in rows)
+        :data:`_RELAYED_LABEL`, after the rest (CAP-08 D3). ``trust``: the
+        effective trust map the rows were read with; without it, it is read now,
+        so the caller holds the snapshot the rows came from."""
+        if trust is None:
+            trust = self._store.effective_trust_map(ep_id for ep_id, _ in rows)
         relayed = {
             ep_id for ep_id, t in trust.items()
             if trust_rank(t) < trust_rank(DEFAULT_TRUST)
@@ -544,6 +552,13 @@ class Server:
         return durable_facts_for(self._store, query, mode=mode)
 
     def _recall_episodes(self, args: dict[str, Any]) -> dict[str, Any]:
+        # One read snapshot for the rows and the trust that labels them (L3 r1
+        # 1009+22): read apart, an external episode deleted in between rendered
+        # unlabelled. The store's own snapshots nest inside it.
+        with self._store._db_boundary("recall"), self._store._read_snapshot():
+            return self._recall_episodes_in_snapshot(args)
+
+    def _recall_episodes_in_snapshot(self, args: dict[str, Any]) -> dict[str, Any]:
         episode_type = args.get("episode_type")
         if episode_type is not None and (
             not isinstance(episode_type, str)

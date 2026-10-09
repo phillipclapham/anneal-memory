@@ -1085,7 +1085,9 @@ def cmd_state(args: argparse.Namespace) -> None:
             if args.json:
                 _print_json({"episode_id": args.unset, "key": out["key"],
                              "removed": [{"old_id": o, "new_id": n} for o, n in out["removed"]],
-                             "added": [{"old_id": o, "new_id": n} for o, n in out["added"]]})
+                             "added": [{"old_id": o, "new_id": n} for o, n in out["added"]],
+                             "left_live": [{"old_id": o, "new_id": n}
+                                           for o, n in out["left_live"]]})
             elif out["key"] is None:
                 print(f"{args.unset} has no state key.")
             else:
@@ -1094,6 +1096,9 @@ def cmd_state(args: argparse.Namespace) -> None:
                     print(f"  removed: {n} supersedes {o}")
                 for o, n in out["added"]:
                     print(f"  re-formed: {n} supersedes {o}")
+                for o, n in out["left_live"]:
+                    print(f"  both live: {n} ranks below {o} in trust, so it cannot "
+                          f"replace it")
             return
         if args.set:
             if args.key is None:

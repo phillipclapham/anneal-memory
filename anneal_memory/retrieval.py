@@ -82,6 +82,7 @@ from .crystal import CrystalDict, CrystalStore, activation_tier
 from .store import Store
 from .durable import DurableFact, parse_durable_facts
 from .types import (
+    DEFAULT_TRUST,
     Episode,
     EpisodeType,
     RelevantFact,
@@ -1043,11 +1044,16 @@ def retrieve_relevant(
         if episodes:
             # CAP-08 D3: each shown episode carries its effective trust, so a hook
             # can render relayed content as data. Read in the same snapshot, after
-            # the redirect, so a replacing episode carries its own class.
-            episode_trust = store.effective_trust_map(ep.id for ep in episodes)
+            # the redirect, so a replacing episode carries its own class, and each
+            # replaced episode it carries (whose text it shows) carries its own.
+            episode_trust = store.effective_trust_map(
+                [ep.id for ep in episodes] + [r.id for ep in episodes for r in ep.replaces])
             episodes = [
-                dataclasses.replace(ep, trust=episode_trust[ep.id])
-                if ep.id in episode_trust else ep
+                dataclasses.replace(
+                    ep, trust=episode_trust.get(ep.id, DEFAULT_TRUST),
+                    replaces=tuple(
+                        dataclasses.replace(r, trust=episode_trust.get(r.id, DEFAULT_TRUST))
+                        for r in ep.replaces))
                 for ep in episodes
             ]
     # One regime-matched precision bar + anchor for every tier this call scores: the

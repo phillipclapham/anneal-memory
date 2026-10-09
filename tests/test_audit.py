@@ -9610,6 +9610,27 @@ class TestKL24ConcurrentWriters:
         assert result.valid, result.error
         assert result.total_entries == 5
 
+    def test_the_tip_after_a_torn_tail_points_at_the_entry_written(self, tmp_path):
+        """KL-24 CI-fix L3 r1 (codex MED, reasoned on Windows): the append
+        opened the file in text mode, so on Windows the boundary ``\n``
+        written after a torn tail landed as ``\r\n`` while the tip was
+        recorded one byte past ``resume_at``. The tip then named the LF, the
+        next re-sync read other bytes there and refused the write as a
+        replaced file. Every platform: the bytes at the recorded tip are the
+        entry, and the next two appends go through."""
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        trail.log("first", {})
+        active = tmp_path / "m.audit.jsonl"
+        with open(active, "ab") as f:
+            f.write(b'{"v": 1, "seq": 1, "to')  # a torn tail, no newline
+        trail.log("second", {})
+        _, _, at, length, _ = trail._tip
+        line = active.read_bytes()[at : at + length]
+        assert json.loads(line)["seq"] == 1, line
+        trail.log("third", {})
+        trail.log("fourth", {})
+
     def test_an_unlocked_writers_entry_after_this_append_is_still_read(
         self, tmp_path, monkeypatch
     ):

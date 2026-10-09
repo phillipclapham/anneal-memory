@@ -4079,17 +4079,19 @@ class Store:
         if not conn.execute("SELECT 1 FROM supersessions WHERE old_id = ? AND new_id = ?",
                             (new, old)).fetchone() or self._team_owned(new, old):
             return ""
+        # Undone on the normal path only. An exception propagates as it is: the
+        # caller's boundary rolls back the whole transaction, savepoint included,
+        # as record_state_key's does (L3 r5 codex, run: a ROLLBACK TO in a finally
+        # raised "no such savepoint" over the original error).
         conn.execute("SAVEPOINT released_reverse")
-        try:
-            conn.execute("DELETE FROM supersessions WHERE old_id = ? AND new_id = ?",
-                         (new, old))
-            content, ts = conn.execute("SELECT content, timestamp FROM episodes "
-                                       "WHERE id = ?", (new,)).fetchone()
-            clear = self._supersession_problem(old, new, content, ts,
-                                               check_grounds=False, check_order=False) is None
-        finally:
-            conn.execute("ROLLBACK TO released_reverse")
-            conn.execute("RELEASE released_reverse")
+        conn.execute("DELETE FROM supersessions WHERE old_id = ? AND new_id = ?",
+                     (new, old))
+        content, ts = conn.execute("SELECT content, timestamp FROM episodes "
+                                   "WHERE id = ?", (new,)).fetchone()
+        clear = self._supersession_problem(old, new, content, ts,
+                                           check_grounds=False, check_order=False) is None
+        conn.execute("ROLLBACK TO released_reverse")
+        conn.execute("RELEASE released_reverse")
         if not clear:
             return ""
         return (f"; the link {new} -> {old} is no key's, and removing it ends this: "
@@ -4218,7 +4220,7 @@ class Store:
                                              "old": old, "new": new,
                                              "reason": problem + hint})
                 notes.append(("refused", linker,
-                              f"over {target}: {problem}"[:300 - len(hint)] + hint))
+                              f"over {target}: {problem}"[:max(0, 300 - len(hint))] + hint))
                 continue
             conn.execute("INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
                          (old, new, lk["source"]))

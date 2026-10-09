@@ -455,7 +455,8 @@ raised `RecursionError`). The graduation
   until the operator decides. If the entry then flips back to an earlier text, the released link
   from the current episode to that earlier one still hides the current text, and the link this
   replace derives the other way is refused as a cycle. The refusal is reported on every replace
-  (`links_refused`, team-status) and names the one command that ends it:
+  (`links_refused`, team-status) and, when no key owns the reverse link and removing it lets the
+  derived link pass (tried and rolled back, not assumed), names the one command that ends it:
   `anneal-memory unsupersede --old <current> --new <earlier>`. anneal does not infer that the
   released link is the ledger's: two attempts to (by its `team:` label, then by what its endpoints
   record) removed links an operator or another ledger held (L3 r2, r3, codex, run).

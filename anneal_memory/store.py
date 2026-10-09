@@ -4068,6 +4068,33 @@ class Store:
         self._conn.execute(
             "DELETE FROM rewire_origin WHERE old_id = ? AND new_id = ?", (old_id, new_id))
 
+    def _released_reverse_hint(self, old: str, new: str) -> str:
+        """For a refused link ``old`` <- ``new`` between two texts of one entry: when
+        the reverse link ``new`` -> ``old`` exists, no key owns it (team-forget-key
+        leaves its links so; the operator holds them, the augmentation exception)
+        and removing it is what lets this link pass, the one command that ends the
+        refusal; else "". Measured, not inferred (L3 r4 1009+30): the removal is
+        tried inside a savepoint and rolled back."""
+        conn = self._conn
+        if not conn.execute("SELECT 1 FROM supersessions WHERE old_id = ? AND new_id = ?",
+                            (new, old)).fetchone() or self._team_owned(new, old):
+            return ""
+        conn.execute("SAVEPOINT released_reverse")
+        try:
+            conn.execute("DELETE FROM supersessions WHERE old_id = ? AND new_id = ?",
+                         (new, old))
+            content, ts = conn.execute("SELECT content, timestamp FROM episodes "
+                                       "WHERE id = ?", (new,)).fetchone()
+            clear = self._supersession_problem(old, new, content, ts,
+                                               check_grounds=False, check_order=False) is None
+        finally:
+            conn.execute("ROLLBACK TO released_reverse")
+            conn.execute("RELEASE released_reverse")
+        if not clear:
+            return ""
+        return (f"; the link {new} -> {old} is no key's, and removing it ends this: "
+                f"`anneal-memory unsupersede --old {new} --new {old}`")
+
     def _snapshot_replace(
         self, rep: dict[str, Any], notes: list[tuple[str, str, str]],
         by_entry: dict[str, dict[str, Any]], key: str, legacy: bool,
@@ -4186,17 +4213,12 @@ class Store:
             problem = self._supersession_problem(old, new, lk["content"], lk["ts"],
                                                  check_grounds=False, check_order=False)
             if problem:
-                if linker == target and conn.execute(
-                        "SELECT 1 FROM supersessions WHERE old_id = ? AND new_id = ?",
-                        (new, old)).fetchone():
-                    # A link no key owns (team-forget-key leaves its links so) hides
-                    # this entry's current text behind its earlier one. The operator
-                    # released it and holds it: name the one command that ends it.
-                    problem += (f"; the link {new} -> {old} is no key's: "
-                                f"`anneal-memory unsupersede --old {new} --new {old}`")
+                hint = self._released_reverse_hint(old, new) if linker == target else ""
                 rep["links_refused"].append({"id": linker, "target": target,
-                                             "old": old, "new": new, "reason": problem})
-                notes.append(("refused", linker, f"over {target}: {problem}"[:300]))
+                                             "old": old, "new": new,
+                                             "reason": problem + hint})
+                notes.append(("refused", linker,
+                              f"over {target}: {problem}"[:300 - len(hint)] + hint))
                 continue
             conn.execute("INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
                          (old, new, lk["source"]))

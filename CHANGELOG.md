@@ -325,6 +325,25 @@ raised `RecursionError`). The graduation
   and a later marker's own tags are left alone. The next marker is found outside `[...]` tags, so
   a quoted `| 2x` in an explanation is text, not a marker.
 
+### Fixed — CAP-08 integration review (L3 rounds 1 to 3, 1009+22)
+- Lower trust never supersedes on any link path: the rule compares EFFECTIVE trust (an agent
+  summary of an external page counts as `external`), and `record` judges its not-yet-recorded
+  episode by its `trust` and `derived_from` together.
+- `clear_state_key` re-formed a slot's links with no trust check (run): a refused pair is skipped,
+  both holders stay live, and it is reported as `left_live` (`anneal-memory state --unset` prints
+  it). `record(state_key=)`'s refusal says how to free the slot.
+- Composting a pattern (`sever_pattern_concept`) deletes its `pattern_grounding` rows; a rename
+  moves them only when the target has none (run: a homonym inherited the old concept's grounding).
+- `ReplacedEpisode` gained `trust` (default `agent`), and MCP recall's "Replaced since" block labels
+  a relayed replacing episode. ⚠ `ScoredEpisode.trust` moved to the LAST field: a caller building a
+  `ScoredEpisode` positionally must pass `replaces` before it.
+- MCP `recall` reads its rows and their trust in one snapshot; `anneal-memory trust ID` shows the
+  effective class, and the stored one when they differ.
+- `delete` re-checks the links of everything derived from the deleted episode (its removal lowers
+  them to `external`), takes the write lock before reading them (run: a writer recorded a derived,
+  superseding episode in between), and names removed links in its audit event.
+- A wrap's `[supersedes:]` decision is recomputed under the save's write lock.
+
 ### Fixed — the audit chain stays valid under concurrent writer processes (KL-24)
 - Several processes (or several `AuditTrail` instances) writing one store broke the hash chain:
   each chained from its own cached tip. Reproduced on 2026-10-07: three processes recording 200
@@ -407,14 +426,30 @@ raised `RecursionError`). The graduation
   run a version that takes the lock: an anneal-memory without it, writing alongside, breaks the
   chain as before, and nothing on the new side can detect it.
 
-### Known limit, to close before any release — a team snapshot reuses an episode id for changed content
-
-- `import_team_snapshot` replaces a team episode's content IN PLACE under its content-derived id
-  (`_replace_team_episode`). Grounding, incoming derivations and non-team links earned by the old
-  text stay attached to the new text, and a save that validated the old text can commit grounding
-  whose id now resolves to the new one (CAP-08 integration L3 r2, codex, traced). Ruled by Phill
-  2026-10-09, option (A): changed content becomes a NEW episode, superseded from the old one by a
-  team-owned link. Not built yet; until it is, this is a known limit and no release ships with it.
+### Fixed — a team snapshot that changes an entry's text makes a NEW episode (Phill 2026-10-09, (A))
+- Run first, on 5227fc4: a save validated a 2x graduation against team episode text X, a snapshot
+  import landed between that read and the save's lock and rewrote the episode to unrelated text Y
+  under the same id, and the save committed grounding on an id that then read Y. Grounding earned
+  by X before such a change stayed on the id as well (CAP-08 integration L3 r2, codex, two HIGHs).
+  An episode id is derived from its text, so the in-place rewrite (`_replace_team_episode`) is
+  deleted, not guarded.
+- When the enforced copy of a stored entry has another text or timestamp, `import_team_snapshot`
+  inserts it as a new episode (its id derived from the new text, so two stores importing the same
+  snapshots agree on it), moves the entry to it, and links it over the old episode with a link the
+  importing snapshot key owns. The old episode keeps its id, text, trust, derivations, grounding,
+  associations and links; its metadata stops naming the entry (`team.replaced` records the entry,
+  its old hash and the new episode), so it is no longer a copy of the entry and removing it later
+  records nothing about the entry. Reported in the new `replaced` (`{id, old, new, linked}`; CLI
+  "replaced by a new episode"); the import is audited as a `record` with `replaces_episode` and a
+  `supersede`.
+- The link takes the existence, cycle and trust checks every team link takes: a copy of lower
+  effective trust does not hide the old text (an operator-raised text stays visible beside the new
+  one), and the refusal is in `links_refused` and team-status. Once made, the link is team-owned,
+  so a later `set_trust` lowering leaves it (`team_supersessions_left`).
+- A copy with the same text and timestamp under a new hash updates the stored row's metadata and
+  hash only (`replaced_in_place`, CLI "re-hashed (same text)"), as before minus every text write.
+- Deleting the new episode detaches its links like any delete, so the old text shows in recall
+  again, as A does when B is deleted from A -> B.
 
 ### Known limit, by design — a crash during a week's first audit append (KL-24)
 - After a crash in one window (the week's first entry staged and set aside, the process stopped
@@ -456,7 +491,7 @@ raised `RecursionError`). The graduation
 - Team episodes follow the verdict too: an entry the stream enforces that was pruned or deleted
   by a library or MCP call comes back at the next replace; only a delete the CLI confirmed (on a
   terminal, or with `ANNEAL_TEAM_OVERRIDE=1`) stays final. A stored copy whose hash no enforced
-  line carries is replaced in place, keeping its episode id and links.
+  line carries is replaced (see the Fixed entry above: a changed text is a new episode).
 - Retention `prune` keeps every team episode an active key's last stream enforces; an explicit
   `delete` of one is allowed and logged. A rewired link made from a link a snapshot owns carries
   that ownership and the pair it stands in for, and stays while that pair is honoured.

@@ -3560,8 +3560,10 @@ class Store:
         - Inside the replace: owned rows missing while both episodes exist become
           operator overrides; then the episodes import (an enforced entry with no
           episode comes back unless an operator removed it; a stored copy whose hash
-          no enforced line carries is replaced in place); then removals; then
-          additions (existence and cycle checks only).
+          no enforced line carries is replaced: its metadata when the text and
+          timestamp are the same (``replaced_in_place``), else by a NEW episode linked
+          over it by a link this key owns (``replaced``)); then removals; then
+          additions (existence, cycle and trust checks).
         - The first replace on a root with no snapshot adopts each unowned
           ``team:`` row whose target is enforced and whose linker is a line of this
           stream by ``(entry_id, hash)``; rewired rows are never adopted. Wanted
@@ -3580,7 +3582,7 @@ class Store:
             "links_removed": [], "links_refused": [], "links_adopted": 0,
             "overrides_recorded": [], "stream_problems": [], "stream_notes": [],
             "unmappable": [],
-            "reimported": [], "replaced_in_place": [],
+            "reimported": [], "replaced_in_place": [], "replaced": [],
         }
         notes: list[tuple[str, str, str]] = []
         with self._db_boundary("import_team_snapshot"):
@@ -3623,9 +3625,19 @@ class Store:
                     "SELECT entry_id FROM team_entries WHERE removal = 'operator'")}
                 ins = self._insert_team_episodes(
                     records, by_entry, gone, session_id, replace=enforced, final=final,
-                    root=root, takers=takers, blocked={u["id"] for u in unmappable})
+                    root=root, takers=takers, blocked={u["id"] for u in unmappable},
+                    key=key)
                 rep["reimported"] = ins["reimported"]
                 rep["replaced_in_place"] = ins["replaced"]
+                for item in ins["superseded"]:
+                    rep["replaced"].append({k: item[k] for k in ("id", "old", "new")}
+                                           | {"linked": item["link_problem"] is None})
+                    if item["link_problem"] is not None:
+                        rep["links_refused"].append({"id": item["id"], "target": item["id"],
+                                                     "reason": item["link_problem"]})
+                        notes.append(("refused", item["id"],
+                                      f"over its own earlier text {item['old']}: "
+                                      f"{item['link_problem']}"[:200]))
                 for u in unmappable:
                     twin = by_entry.get(u["id"])
                     stale = twin is not None and u.get("verified", True) \
@@ -3686,11 +3698,20 @@ class Store:
                 self._audit_log_after_commit("record", {
                     "episode_id": item["episode"], "type": item["type"],
                     "content_hash": _content_hash(item["content"]),
-                    "replaced_content_hash": item["old_hash"],
                     "source": item["source"],
-                    **item["changes"],
-                }, method="import_team_snapshot", committed="the episode replaced in place",
+                }, method="import_team_snapshot", committed="the new hash of an unchanged episode",
                     actor=item["source"])
+            for item in ins["superseded"]:
+                self._audit_log_after_commit("record", {
+                    "episode_id": item["new"], "type": item["type"],
+                    "content_hash": _content_hash(item["content"]),
+                    "source": item["source"], "replaces_episode": item["old"],
+                }, method="import_team_snapshot", committed="the episode", actor=item["source"])
+                if item["link_problem"] is None:
+                    self._audit_log_after_commit("supersede", {
+                        "old_id": item["old"], "new_id": item["new"], "source": item["source"],
+                    }, method="import_team_snapshot", committed="the supersession",
+                        actor=item["source"])
             for link in rep["links_added"] + rep["links_added_legacy"]:
                 self._audit_log_after_commit("supersede", {
                     "old_id": link["old"], "new_id": link["new"], "source": link["source"],
@@ -4211,18 +4232,27 @@ class Store:
         gone: dict[str, str], session_id: str | None, *,
         replace: dict[str, list[str]] | None = None, final: frozenset[str] | set[str] = frozenset(),
         root: str = "", takers: list[str] | None = None, blocked: set[str] | None = None,
+        key: str = "",
     ) -> dict[str, Any]:
         """Inside the caller's write transaction: insert each record not held, keyed by
         ledger id (a held id with another hash is a conflict; a removed id stays
         removed). Updates ``by_entry`` in place. Returns ``imported``, ``already``,
-        ``conflicts``, ``removed``, ``fresh`` (the ledger ids inserted), ``reimported``
-        and ``replaced``.
+        ``conflicts``, ``removed``, ``fresh`` (the ledger ids inserted), ``reimported``,
+        ``replaced`` (same text, new hash: the row's metadata only), ``replaced_audit``
+        and ``superseded`` (changed text: a new episode, see below).
 
-        ``replace`` (a v3 replace: the enforced ids and their hashes; every record is
-        enforced): a removed id comes back unless it is in ``final`` (an operator's
-        delete), and a stored copy whose hash no enforced line carries is replaced IN
-        PLACE (same episode id, so its links survive). While both copies are enforced
-        (a live twin) the stored one stays and the conflict is reported."""
+        ``replace`` (a v3 replace by snapshot ``key``: the enforced ids and their
+        hashes; every record is enforced): a removed id comes back unless it is in
+        ``final`` (an operator's delete), and a stored copy whose hash no enforced line
+        carries is replaced. While both copies are enforced (a live twin) the stored one
+        stays and the conflict is reported.
+
+        ⛔ An episode id names one text (it is derived from it), so a replace that
+        changes the text or timestamp never rewrites the stored row: the enforced copy
+        becomes a NEW episode, linked over the old one by a link ``key`` owns, and the
+        old row keeps its id, text, trust, derivations, grounding and links (Phill
+        2026-10-09, (A); codex L3 r2 1009+22, run: a save validated against the old
+        text committed grounding on an id the import had rewritten)."""
         imported: list[dict[str, str]] = []
         already: list[str] = []
         conflicts: list[dict[str, str]] = []
@@ -4231,6 +4261,7 @@ class Store:
         reimported: list[str] = []
         replaced: list[str] = []
         replaced_audit: list[dict[str, Any]] = []
+        superseded: list[dict[str, Any]] = []
         for rec in records:
             known = by_entry.get(rec["entry_id"])
             if known is not None:
@@ -4249,13 +4280,15 @@ class Store:
                                                        takers)):
                     # one authoritative hash (no unmappable line names the id), and
                     # no other ledger's active key enforces the stored copy
-                    old_hash = _content_hash(known["content"])
-                    changes = self._replace_team_episode(rec, known)
-                    replaced.append(rec["entry_id"])
-                    replaced_audit.append({"episode": known["ep"], "type": rec["type"],
-                                           "content": rec["content"],
-                                           "source": rec["source"], "old_hash": old_hash,
-                                           "changes": changes})
+                    if (known["content"], known["ts"]) == (rec["content"], rec["timestamp"]):
+                        self._rehash_team_episode(rec, known)
+                        replaced.append(rec["entry_id"])
+                        replaced_audit.append({"episode": known["ep"], "type": rec["type"],
+                                               "content": rec["content"],
+                                               "source": rec["source"]})
+                    else:
+                        superseded.append(self._supersede_team_episode(
+                            rec, known, session_id, key))
                 else:
                     conflicts.append({
                         "id": rec["entry_id"], "stored_hash": str(known["hash"]),
@@ -4274,23 +4307,7 @@ class Store:
                         "offered_hash": rec["hash"],
                     })
                 continue
-            meta_json = json.dumps(rec["metadata"])
-            # The ledger id is part of the id input, so entries with identical
-            # text and timestamp still get distinct episode ids.
-            id_input = f"{rec['entry_id']}\0{rec['content']}"
-            for nonce in range(64):
-                ep_id = _episode_id(id_input, rec["timestamp"], nonce)
-                try:
-                    self._conn.execute(
-                        "INSERT INTO episodes (id, timestamp, type, content, source, "
-                        "session_id, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (ep_id, rec["timestamp"], rec["type"], rec["content"],
-                         rec["source"], session_id, meta_json),
-                    )
-                    break
-                except sqlite3.IntegrityError:
-                    if nonce == 63:
-                        raise
+            ep_id = self._insert_team_row(rec, session_id)
             if back:
                 # Not an operator's removal, and the stream enforces it: it comes back.
                 self._conn.execute(
@@ -4299,83 +4316,100 @@ class Store:
                 reimported.append(rec["entry_id"])
             else:
                 self._remember_team_entries([(rec["entry_id"], rec["hash"], ep_id)])
-            team_meta = rec["metadata"].get("team") or {}
-            owner = team_meta.get("owner")
-            by_entry[rec["entry_id"]] = {
-                "n": 1,
-                "ep": ep_id, "hash": rec["hash"], "kind": team_meta.get("kind"),
-                "owner": owner if isinstance(owner, str) else None,
-                "retire": team_meta.get("type") == "retire",
-                "words": str(team_meta.get("words") or "").strip(),
-                "content": rec["content"], "ts": rec["timestamp"],
-                "source": rec["source"],
-            }
+            by_entry[rec["entry_id"]] = {"n": 1, **self._team_held_fields(rec, ep_id)}
             fresh.add(rec["entry_id"])
             imported.append({"id": rec["entry_id"], "episode": ep_id,
                              "source": rec["source"], "type": rec["type"],
                              "content": rec["content"]})
         return {"imported": imported, "already": already, "conflicts": conflicts,
                 "removed": removed, "fresh": fresh, "reimported": reimported,
-                "replaced": replaced, "replaced_audit": replaced_audit}
+                "replaced": replaced, "replaced_audit": replaced_audit,
+                "superseded": superseded}
 
-    def _replace_team_episode(
-        self, rec: dict[str, Any], known: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Rewrite a stored team episode with the enforced copy of its entry, keeping
-        the episode id (links and associations survive), and record the new hash.
-
-        ⛔ When the CONTENT changes, nothing vouched for the old text carries over
-        (codex L3 r1 1009+22 HIGH, run: an operator raise of text X stayed on text Y):
-        its trust goes back to a team import's (``agent``: no ``episode_trust`` row),
-        its own ``derived_from`` edges go, and every supersession link the change
-        makes invalid is removed as :meth:`set_trust` would. ``pattern_grounding`` is
-        left alone. Returns what changed, for the audit event."""
-        changes: dict[str, Any] = {}
-        before = self._conn.execute(
-            "SELECT content FROM episodes WHERE id = ?", (known["ep"],)).fetchone()
-        self._conn.execute(
-            "UPDATE episodes SET timestamp = ?, type = ?, content = ?, source = ?, "
-            "metadata = ? WHERE id = ?",
-            (rec["timestamp"], rec["type"], rec["content"], rec["source"],
-             json.dumps(rec["metadata"]), known["ep"]))
-        self._conn.execute(
-            "UPDATE team_entries SET hash = ?, episode_id = ?, removal = NULL "
-            "WHERE entry_id = ?", (rec["hash"], known["ep"], rec["entry_id"]))
-        # Associations were derived from the old text: they do not carry over.
-        try:
-            self._conn.execute(
-                "DELETE FROM associations WHERE episode_a = ? OR episode_b = ?",
-                (known["ep"], known["ep"]))
-        except sqlite3.OperationalError:  # no associations table in this store
-            pass
-        if before is not None and before["content"] != rec["content"]:
-            row = self._conn.execute(
-                "SELECT trust FROM episode_trust WHERE episode_id = ?",
-                (known["ep"],)).fetchone()
-            if row is not None:
-                self._conn.execute(
-                    "DELETE FROM episode_trust WHERE episode_id = ?", (known["ep"],))
-                changes["trust_reset_from"] = row[0]
-            dropped = self._conn.execute(
-                "DELETE FROM episode_derived WHERE episode_id = ?", (known["ep"],)).rowcount
-            if dropped:
-                changes["derived_from_dropped"] = dropped
-            removed, team_left = self._drop_links_trust_invalidated(
-                self._derivation_descendants([known["ep"]]))
-            if removed:
-                changes["supersessions_removed"] = removed
-            if team_left:
-                changes["team_supersessions_left"] = team_left
+    @staticmethod
+    def _team_held_fields(rec: dict[str, Any], ep_id: str) -> dict[str, Any]:
+        """What ``by_entry`` keeps of an entry stored as episode ``ep_id``."""
         team_meta = rec["metadata"].get("team") or {}
         owner = team_meta.get("owner")
-        known.update({
-            "hash": rec["hash"], "kind": team_meta.get("kind"),
+        return {
+            "ep": ep_id, "hash": rec["hash"], "kind": team_meta.get("kind"),
             "owner": owner if isinstance(owner, str) else None,
             "retire": team_meta.get("type") == "retire",
             "words": str(team_meta.get("words") or "").strip(),
             "content": rec["content"], "ts": rec["timestamp"], "source": rec["source"],
-        })
-        return changes
+        }
+
+    def _insert_team_row(self, rec: dict[str, Any], session_id: str | None) -> str:
+        """Insert one team record as a new episode; returns its id."""
+        meta_json = json.dumps(rec["metadata"])
+        # The ledger id is part of the id input, so entries with identical
+        # text and timestamp still get distinct episode ids.
+        id_input = f"{rec['entry_id']}\0{rec['content']}"
+        for nonce in range(64):
+            ep_id = _episode_id(id_input, rec["timestamp"], nonce)
+            try:
+                self._conn.execute(
+                    "INSERT INTO episodes (id, timestamp, type, content, source, "
+                    "session_id, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (ep_id, rec["timestamp"], rec["type"], rec["content"],
+                     rec["source"], session_id, meta_json),
+                )
+                return ep_id
+            except sqlite3.IntegrityError:
+                if nonce == 63:
+                    raise
+        raise AssertionError("unreachable")  # the loop returns or raises
+
+    def _rehash_team_episode(self, rec: dict[str, Any], known: dict[str, Any]) -> None:
+        """The enforced copy has the stored row's text and timestamp under a new hash:
+        record the hash; the text, and so the id, is the same."""
+        self._conn.execute(
+            "UPDATE episodes SET type = ?, source = ?, metadata = ? WHERE id = ?",
+            (rec["type"], rec["source"], json.dumps(rec["metadata"]), known["ep"]))
+        self._conn.execute(
+            "UPDATE team_entries SET hash = ?, episode_id = ?, removal = NULL "
+            "WHERE entry_id = ?", (rec["hash"], known["ep"], rec["entry_id"]))
+        known.update(self._team_held_fields(rec, known["ep"]))
+
+    def _supersede_team_episode(
+        self, rec: dict[str, Any], known: dict[str, Any], session_id: str | None, key: str,
+    ) -> dict[str, Any]:
+        """The enforced copy of a stored entry changes its text: insert it as a new
+        episode, move the entry to it, and link it over the old one with a link the
+        snapshot ``key`` owns. The old row's metadata stops naming the entry (it keeps
+        ``team.replaced``), so it is no longer a copy of it: not a twin, and removing it
+        later records nothing about the entry. Nothing else on the old row changes.
+        The link takes :meth:`_supersession_problem`'s existence, cycle and trust checks,
+        as every team link does: a lower-trust copy does not hide the old text, and the
+        refusal is returned. Returns ``{id, old, new, link_problem}`` plus audit fields."""
+        old = known["ep"]
+        new = self._insert_team_row(rec, session_id)
+        row = self._conn.execute("SELECT metadata FROM episodes WHERE id = ?",
+                                 (old,)).fetchone()
+        meta = json.loads(row["metadata"]) if row is not None and row["metadata"] else {}
+        team = meta.get("team") if isinstance(meta, dict) else None
+        if isinstance(team, dict):
+            team.pop("entry_id", None)
+            team["replaced"] = {"entry_id": rec["entry_id"], "hash": known["hash"],
+                                "by": new}
+            self._conn.execute("UPDATE episodes SET metadata = ? WHERE id = ?",
+                               (json.dumps(meta), old))
+        self._conn.execute(
+            "UPDATE team_entries SET hash = ?, episode_id = ?, removal = NULL "
+            "WHERE entry_id = ?", (rec["hash"], new, rec["entry_id"]))
+        problem = self._supersession_problem(old, new, rec["content"], rec["timestamp"],
+                                             check_grounds=False, check_order=False)
+        if problem is None:
+            self._conn.execute(
+                "INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, ?)",
+                (old, new, rec["source"]))
+            self._conn.execute(
+                "INSERT OR IGNORE INTO team_snapshot_rows (key, old_id, new_id) "
+                "VALUES (?, ?, ?)", (key, old, new))
+        known.clear()
+        known.update({"n": 1, **self._team_held_fields(rec, new)})
+        return {"id": rec["entry_id"], "old": old, "new": new, "link_problem": problem,
+                "type": rec["type"], "content": rec["content"], "source": rec["source"]}
 
     def import_team_entries(
         self,

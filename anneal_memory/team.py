@@ -169,6 +169,9 @@ class TeamImportReport:
     sanitised: list[str] = field(default_factory=list)
     reimported: list[str] = field(default_factory=list)
     replaced_in_place: list[str] = field(default_factory=list)
+    # changed text: {id, old, new, linked}; the old episode stays, hidden by the new
+    # one when ``linked``
+    replaced: list[dict] = field(default_factory=list)
     snapshot_notes: list[str] = field(default_factory=list)  # informational, not a problem
 
     @property
@@ -211,6 +214,7 @@ class TeamImportReport:
                 "sanitised": self.sanitised,
                 "reimported": self.reimported,
                 "replaced_in_place": self.replaced_in_place,
+                "replaced": self.replaced,
                 "snapshot_notes": self.snapshot_notes}
                if self.framing == "v3" else {}),
         }
@@ -936,6 +940,7 @@ def _import_v3(store: Store, lines: Iterable[str], report: TeamImportReport,
     report.unmappable = result["unmappable"]
     report.reimported = result["reimported"]
     report.replaced_in_place = result["replaced_in_place"]
+    report.replaced = result["replaced"]
     return report
 
 

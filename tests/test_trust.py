@@ -1279,7 +1279,9 @@ class TestIntegrationL3Round1:
 
     def test_a_team_replace_that_changes_the_text_keeps_no_vouching(self, tmp_path):
         """codex HIGH: an operator raise of text X stayed on the text Y that a
-        newer snapshot wrote in place, with X's derivation edges."""
+        newer snapshot wrote in place, with X's derivation edges. Now Y is a new
+        episode with nothing vouched, the raise stays on X, and agent-trust Y may
+        not hide operator-trust X (CAP-08's rule for every team link)."""
         from anneal_memory.team import import_ledger
         from tests.test_team_snapshot_v3 import A0, B0, ep, lines, v3
 
@@ -1292,13 +1294,19 @@ class TestIntegrationL3Round1:
                             "metadata=json_set(metadata,'$.team.hash','x') WHERE id=?", (e,))
             s._conn.commit()
             s.set_trust(e, "operator")
-            page = s.record("some page", EpisodeType.OBSERVATION, trust="external")
+            note = s.record("my own note", EpisodeType.OBSERVATION, trust="operator")
             s._conn.execute("INSERT INTO episode_derived (episode_id, source_id) "
-                            "VALUES (?, ?)", (e, page.id))
+                            "VALUES (?, ?)", (e, note.id))
             s._conn.commit()
             r = import_ledger(s, v3([(a, True, []), (b, True, [A0])], seq=2))
-            assert r.replaced_in_place == [B0] and s.get(e).content != "reviewed text"
-            assert s.trust_map([e]) == {} and s.derived_edges([e]) == {}
+            new = ep(s, B0)
+            assert r.replaced == [{"id": B0, "old": e, "new": new, "linked": False}]
+            assert "lower-trust" in r.links_refused[0]["reason"]
+            assert s.get(e).content == "reviewed text"
+            assert s.trust_map([e]) == {e: "operator"} and s.derived_edges([e])
+            assert s.trust_map([new]) == {} and s.derived_edges([new]) == {}
+            shown = {x.id for x in s.recall(limit=20).episodes}
+            assert {e, new} <= shown
 
 
 # --- CAP-08 integration L3 r2 (1009+22), run before its fix -------------------

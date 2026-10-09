@@ -436,7 +436,7 @@ raised `RecursionError`). The graduation
 - When the enforced copy of a stored entry has another text, timestamp, type or source,
   `import_team_snapshot` stores it as another episode and moves the entry to it: the row this
   entry once had with exactly that copy when one is kept (a flip back, X -> Y -> X, ends on X's
-  original id, the one a store that only saw X holds), else a new episode whose id is derived from
+  original id, the one a store that only saw X holds unless a deletion freed a lower id), else a new episode whose id is derived from
   its text. The old episode keeps its id, text, trust, derivations, grounding, associations and
   links; its metadata stops naming the entry (`team.replaced` records the entry and its old hash),
   so it is not a copy of the entry and removing it later records nothing about the entry.
@@ -448,8 +448,10 @@ raised `RecursionError`). The graduation
   operator-raised text stays visible beside the new one), reported in `links_refused` (which now
   names the `old` and `new` episodes of every refused link) and team-status on every replace until
   the trust allows it. A head deleted by a library call and brought back by the stream is linked
-  again (and is the kept row, revived, when it has one); a team link left behind by a released key
-  that hides the entry's current text behind an earlier one is removed; an operator's removal of the link is kept (an override, as for any team link); a
+  again (and is the kept row, revived, when it has one); a link the importer does not own is never
+  removed to make room (a key released with `team-forget-key` leaves its links unowned, as that
+  command says, so one hiding the current text behind an earlier one stays, and the refusal of the
+  derived link names the cycle on every replace until the operator `unsupersede`s it); an operator's removal of the link is kept (an override, as for any team link); a
   `set_trust` lowering leaves it (`team_supersessions_left`).
 - A copy with the same text, timestamp, type and source under a new hash records the new hash
   only (`rehashed`, renamed from `replaced_in_place`; CLI "re-hashed (same text)").

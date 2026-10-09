@@ -4131,18 +4131,6 @@ class Store:
             if by_entry[entry].get("n", 1) > 1:
                 notes.append(("several_episodes", entry, f"earlier text {old_ep} stays shown"))
                 continue
-            back_link = conn.execute(
-                "SELECT source FROM supersessions WHERE old_id = ? AND new_id = ?",
-                (head, old_ep)).fetchone()
-            if back_link is not None and str(back_link[0]).startswith("team:"):
-                # An earlier text of this entry hiding its current one is a team link
-                # this replace no longer holds (left unowned by a released key, L3 r1
-                # run): it goes, or the link below is refused as a cycle every time.
-                conn.execute("DELETE FROM supersessions WHERE old_id = ? AND new_id = ?",
-                             (head, old_ep))
-                self._drop_ownership(head, old_ep)
-                rep["links_removed"].append({"old": head, "new": old_ep,
-                                             "target": entry, "linker": entry})
             if (old_ep, head) not in overrides:
                 wanted[(old_ep, head)] = (entry, entry)
         for target, linker in honours:
@@ -4444,18 +4432,20 @@ class Store:
 
     def _retired_copy(self, rec: dict[str, Any]) -> str | None:
         """The id of a stored row this entry left whose text, timestamp, type and
-        source are this record's, among every id a fresh import could have given it."""
+        source are this record's, among every id a fresh import could have given it
+        (the lowest such slot)."""
         id_input = f"{rec['entry_id']}\0{rec['content']}"
-        for nonce in range(64):
-            row = self._conn.execute(
-                "SELECT timestamp, type, content, source, metadata FROM episodes "
-                "WHERE id = ?", (_episode_id(id_input, rec["timestamp"], nonce),)).fetchone()
-            if row is None:
-                continue  # a lower slot may have been freed since (L3 r1, both seats)
-            if (row["timestamp"], row["type"], row["content"], row["source"]) == (
+        slots = [_episode_id(id_input, rec["timestamp"], nonce) for nonce in range(64)]
+        rows = {r["id"]: r for r in self._conn.execute(
+            f"SELECT id, timestamp, type, content, source, metadata FROM episodes "
+            f"WHERE id IN ({','.join('?' * len(slots))})", slots).fetchall()}
+        for ep_id in slots:
+            row = rows.get(ep_id)
+            if row is not None and (row["timestamp"], row["type"], row["content"],
+                                    row["source"]) == (
                     rec["timestamp"], rec["type"], rec["content"], rec["source"]) \
                     and _team_replaced_entry_of(row["metadata"]) == rec["entry_id"]:
-                return _episode_id(id_input, rec["timestamp"], nonce)
+                return ep_id
         return None
 
     def _retire_team_row(self, ep_id: str, entry_id: str, hash_: Any) -> None:

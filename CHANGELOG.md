@@ -93,10 +93,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   review rounds (a discarded file's bytes can equal a later real entry; two matching files; consume
   and clear not crash-atomic), so it was deleted (Phill, 2026-10-08).
 - What anneal does instead: After a crash during a week's first audit append, anneal cannot always tell from disk whether that entry committed. It refuses further appends until you run `audit-repair`, which records a POSSIBLE gap and names the preserved attempt files (`.first.discarded-*`). Inspect them to decide. anneal keeps them and never deletes them.
-  While the manifest's begun record is not withdrawn, a vanished active file is always a POSSIBLE
-  gap (`certainty: "possible"`), and `preserved_attempts` names every preserved regular file of that
-  trail (zero files is still POSSIBLE); the rebuild from a quarantined manifest names them the same
-  way. `audit-repair`, `verify` and `--verify-audit` print the names.
+  A vanished active file is a POSSIBLE gap (`certainty: "possible"`) only in that crash window: the
+  manifest's begun record is still set AND at least one attempt is preserved; `preserved_attempts`
+  then names every preserved regular file of that trail. Otherwise it is a definite gap. The rebuild
+  from a quarantined manifest stays POSSIBLE and names any preserved files the same way. `audit-repair`, `verify` and `--verify-audit` print the names.
 - Manifest validation: `certainty` must be `"possible"` on an active-file record (its own
   filename, `set_aside_as` empty); `preserved_attempts` must be a list of exact set-aside file names (`<stem>.audit.jsonl.first.discarded-<stamp>[-n]`, a real stamp, `n` from 1) on such a record.
 - `AuditTrail.stats()` waits (bounded, 2s) on a peer's append lock when only a staged first entry

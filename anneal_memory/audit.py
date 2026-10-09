@@ -475,11 +475,13 @@ def _parse_manifest_bytes(raw: bytes, stem: str) -> dict[str, Any]:
         for r in rated
     ):
         raise TypeError("manifest field 'set_aside' holds an invalid 'certainty'")
-    # ``preserved_attempts``: names of kept staged entries, on an active-file
-    # record only.
+    # ``preserved_attempts``: names of kept staged entries, on a POSSIBLE
+    # active-file record only (a definite record naming them would read as a
+    # loss with evidence attached; KL-24 r11, codex LOW).
     if not all(
         "preserved_attempts" not in r or (
-            r["set_aside_as"] == ""
+            r.get("certainty") == _POSSIBLE
+            and r["set_aside_as"] == ""
             and r["filename"] == f"{stem}.audit.jsonl"
             and isinstance(r["preserved_attempts"], list)
             and all(

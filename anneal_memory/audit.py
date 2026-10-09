@@ -721,12 +721,13 @@ class AuditTrail:
         # ``log()`` on one of them is refused rather than deadlocked.
         self._append_threads: set[int] = set()
         # Where the entry this instance's chain state was taken from sits in the
-        # active file: ``(st_dev, st_ino, offset, length)``. None whenever the
-        # tip is not in the active file (``_active_has_entry`` False: a fresh
-        # file, a seed from the manifest, a seal). ``_resync_with_disk`` checks
-        # those bytes still hash to ``_prev_hash`` before trusting anything
-        # after them (L2 r1: a reused inode made a size check unsound).
-        self._tip: tuple[int, int, int, int] | None = None
+        # active file: ``(st_dev, st_ino, offset, length, line_hash)``, where
+        # ``line_hash`` is that entry's own hash. None whenever the tip is not
+        # in the active file (``_active_has_entry`` False: a fresh file, a seed
+        # from the manifest, a seal). ``_resync_with_disk`` checks those bytes
+        # still hash to ``line_hash`` before trusting anything after them (L2
+        # r1: a reused inode made a size check unsound).
+        self._tip: tuple[int, int, int, int, str] | None = None
         # The ISO week of the tip entry's own timestamp (see _lost_active).
         self._tip_week = ""
 
@@ -1053,7 +1054,12 @@ class AuditTrail:
                 os.replace(first_tmp, active)
                 _fsync_dir(active.parent)
             else:
-                with open(active, "a", encoding="utf-8") as f:
+                # ``newline=""``: the bytes written are the payload's own, so the
+                # tip recorded below names this entry on Windows too. Text mode
+                # wrote a torn tail's boundary ``\n`` as ``\r\n`` there, and the
+                # tip at ``resume_at + 1`` named the LF (KL-24 CI-fix L3 r1,
+                # codex, run 37973885945).
+                with open(active, "a", encoding="utf-8", newline="") as f:
                     f.write(payload)
                     f.flush()
                     os.fsync(f.fileno())
@@ -1391,6 +1397,7 @@ class AuditTrail:
                 st_after.st_ino,
                 resume_at + (1 if needs_boundary else 0),
                 len(json_line.encode("utf-8")),
+                new_prev_hash,
             )
             self._tip_week = _week_of_ts(ts)
 
@@ -2780,13 +2787,14 @@ class AuditTrail:
         :meth:`log` calls it under :meth:`_append_lock`; nothing else does.
 
         With a tip in the active file (``self._tip``): if that file is still
-        the same one AND the tip's bytes still hash to ``_prev_hash``, the
-        chain continues from the last valid entry after the tip (another
-        writer's), or from the tip itself when nothing valid follows. Any
-        other answer (no file, another inode, shorter than the tip, different
-        bytes there) means the cache says nothing reliable: ``_initialized``
-        is cleared and the caller re-derives everything through
-        :meth:`_initialize`, which also refuses a deleted active file.
+        the same one AND the tip's bytes still hash to the hash recorded with
+        the tip AND that is ``_prev_hash``, the chain continues from the last
+        valid entry after the tip (another writer's), or from the tip itself
+        when nothing valid follows. No file, another inode, a file shorter
+        than the tip, or other bytes at the tip is a lost file (below). The
+        tip intact while ``_prev_hash`` moved past it is this instance's own
+        interrupted update: ``_initialized`` is cleared and the caller
+        re-derives everything through :meth:`_initialize`.
         Without a tip (the chain's tip is in the manifest or a sealed file):
         any valid entry now in the active file was written by someone else,
         so the same full re-derivation runs.
@@ -2818,7 +2826,7 @@ class AuditTrail:
                 if _last_valid_entry_in(f, 0)[0]:
                     self._initialized = False
                 return
-            dev, ino, at, length = self._tip
+            dev, ino, at, length, tip_hash = self._tip
             st = os.fstat(f.fileno())
             if (st.st_dev, st.st_ino) != (dev, ino):
                 self._lost_active("replaced")
@@ -2831,7 +2839,18 @@ class AuditTrail:
                 tip_line = f.read(length).decode("utf-8").strip()
             except UnicodeDecodeError:
                 tip_line = ""
-            if not tip_line or self._compute_hash(tip_line) != self._prev_hash:
+            if not tip_line or self._compute_hash(tip_line) != tip_hash:
+                # Not the entry this instance recorded: the file was replaced
+                # even though the inode number came back (KL-24 CI, Linux,
+                # run 37968093093: ext4 handed a peer's rotated-in file the
+                # sealed file's inode, and this check read it as the case
+                # below, so a lost file was followed silently).
+                self._lost_active("replaced")
+                return
+            if tip_hash != self._prev_hash:
+                # The tip is intact but ``_prev_hash`` moved past it: this
+                # instance's own update was interrupted between the two (see
+                # the order note below). Re-derive from disk.
                 self._initialized = False
                 return
             last_line, last_at, last_len = _last_valid_entry_in(f, at + length)
@@ -2848,7 +2867,7 @@ class AuditTrail:
             self._seq = last_entry["seq"] + 1
             self._prev_hash = self._compute_hash(last_line)
             self._tip_week = _week_of_ts(last_entry["ts"]) or self._tip_week
-            self._tip = (dev, ino, last_at, last_len)
+            self._tip = (dev, ino, last_at, last_len, self._prev_hash)
 
     def _lost_active(self, what: str) -> None:
         """The active file holding this instance's tip was ``what``: refuse
@@ -3006,10 +3025,10 @@ class AuditTrail:
             last_entry = json.loads(last_line)  # Guaranteed valid by helper
             self._seq = last_entry.get("seq", 0) + 1
             self._active_has_entry = True
-            self._tip = (st_scan.st_dev, st_scan.st_ino, last_at, last_len)
-            self._tip_week = _week_of_ts(last_entry.get("ts", ""))
             # Hash the line from disk, not a re-serialization
             self._prev_hash = self._compute_hash(last_line)
+            self._tip = (st_scan.st_dev, st_scan.st_ino, last_at, last_len, self._prev_hash)
+            self._tip_week = _week_of_ts(last_entry.get("ts", ""))
             # Recover week from last entry timestamp
             ts = last_entry.get("ts", "")
             if ts:

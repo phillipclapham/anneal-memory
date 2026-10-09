@@ -90,9 +90,9 @@ Patterns graduate 1x → 2x → 3x → 4x → … with **no top rung** — the l
 
 Report findings naturally — "from prior sessions there was a tension between X and Y", not "the recall tool returned…". Don't narrate tool calls; just use them and share what's relevant. When continuity marks a pattern at 2x or above, trust it — it earned that level through validated evidence, and the level has no ceiling: a pattern re-earned many times keeps climbing.
 
-## Single-process invariant (load-bearing)
+## One store per entity (load-bearing)
 
-Only one process should operate against a given store at a time. The library is **not** thread-safe, task-safe, or reentrant. Multi-tenant deployments sharing a store break the hash-chained audit trail by construction. If you need multiple agents, give each its own store path.
+A store is one entity's memory: there is no tenant scoping inside it, so if you need multiple agents, give each its own store path. One `Store` object is **not** thread-safe, task-safe, or reentrant; use one per thread. Several processes of the same entity (a CLI beside an MCP server) may record into one store: SQLite serializes the episodes and the audit trail serializes its appends with a cross-process lock, provided every writer runs a version that takes that lock (an older anneal-memory writing alongside breaks the hash chain). Windows has no such lock, so keep to one writer at a time there.
 
 ## Affective layer (optional)
 

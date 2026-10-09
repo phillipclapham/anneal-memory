@@ -146,9 +146,13 @@ def _search_outside_explanations(
     returned match is on ``line`` itself, so its groups carry the real text. A mask
     changes only characters between a pair of quotes, which a level regex either
     never reaches (no quote in its grammar) or reads as ``[^"]*``, so the same span
-    matches on ``line``."""
+    matches on ``line``. Were that ever false the masked match is returned: its
+    structure groups are the real ones and a blanked explanation grounds nothing,
+    so the line fails closed instead of being skipped (L1 r2)."""
     m = regex.search(_mask_explanations(line))
-    return regex.match(line, m.start()) if m else None
+    if m is None:
+        return None
+    return regex.match(line, m.start()) or m
 
 # Matches any pattern with temporal marker (Nx)
 _PATTERN_RE = re.compile(

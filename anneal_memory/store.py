@@ -6894,14 +6894,16 @@ class Store:
 
     def sever_pattern_concept(self, name: str, today: str | None = None) -> int:
         """Homonym guard: a pattern's concept left (composted/retired) → delete
-        its edges + bump its generation so a future homonym starts clean. Returns
+        its edges, delete its saved level (``pattern_levels``), and bump its
+        generation, so a future homonym starts clean and enters the graduation
+        bound at 1x. Returns the number of edges severed. A wrap that composts a
+        name its own text still carries saves that line's bounded level again.
 
         Warns:
             UserWarning: if the audit event could not be written. The
                 operation still SUCCEEDED — the audit trail is missing
                 this event. Also counted on ``status().audit_write_failures``
-                and logged; see :meth:`_audit_log_after_commit`.
-        edges severed."""
+                and logged; see :meth:`_audit_log_after_commit`."""
         day = today or _today_local()
         with self._db_boundary("sever_pattern_concept"):
             # The concept's earned level leaves with it (codex L3 r1 HIGH 2): a

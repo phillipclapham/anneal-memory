@@ -111,6 +111,45 @@ _ANY_LEVEL_MARKER_RE = re.compile(
 )
 _LEVEL_ATOM_RE = re.compile(_LEVEL_ATOM)
 
+# ONE LEXER FOR LEVELS (gradgate L3 r1, codex HIGH, run): the quoted explanation of a
+# well-formed ``[evidence: <ids> "..."]`` tag is an opaque span, the way a CommonMark code
+# span or a Python string literal is one token whose content no other rule parses. Every
+# unanchored level reader (the bound, the atom normalizer, and each ``.search`` of a level
+# regex) scans the MASKED line, so they all agree on which ``| Nx`` tokens exist; masking
+# the bound alone would let a ``.search`` reader believe a dated marker the bound skipped.
+# Line-anchored readers bind the first marker after the name, which a quote cannot precede.
+_EXPLANATION_SPAN_RE = re.compile(
+    r'\[evidence:\s*[a-fA-F0-9][a-fA-F0-9, ]*\s+"([^"]*)"\s*\]'
+)
+
+
+def _mask_explanations(line: str) -> str:
+    """``line`` with each evidence explanation's content blanked to ``_`` (same
+    length, quotes kept), so offsets into the mask are offsets into ``line``."""
+    parts: list[str] = []
+    last = 0
+    for m in _EXPLANATION_SPAN_RE.finditer(line):
+        start, end = m.span(1)
+        parts.append(line[last:start])
+        parts.append("_" * (end - start))
+        last = end
+    if not parts:
+        return line
+    parts.append(line[last:])
+    return "".join(parts)
+
+
+def _search_outside_explanations(
+    regex: "re.Pattern[str]", line: str
+) -> "re.Match[str] | None":
+    """``regex.search(line)`` that never starts a match inside an explanation; the
+    returned match is on ``line`` itself, so its groups carry the real text. A mask
+    changes only characters between a pair of quotes, which a level regex either
+    never reaches (no quote in its grammar) or reads as ``[^"]*``, so the same span
+    matches on ``line``."""
+    m = regex.search(_mask_explanations(line))
+    return regex.match(line, m.start()) if m else None
+
 # Matches any pattern with temporal marker (Nx)
 _PATTERN_RE = re.compile(
     rf"\|\s*({_LEVEL_ATOM})x\s*\(([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})\)"
@@ -703,6 +742,7 @@ def validate_graduations(
     # the cortical pattern-graph seeds weak links across. Re-derived from the line
     # at the validated site (not the conditionally-set ``pattern_name`` var).
     graduated_names: list[str] = []
+    name_line: list[int] = []  # the line each graduated name came from
     graduated_records: list[tuple[str, int, str]] = []
     record_line: list[int] = []  # the line each graduated record came from
     # AM-WARN (v0.4.2): tracked independent of the cross-session immune gate
@@ -736,21 +776,36 @@ def validate_graduations(
     atom_caps: list[tuple[int, LevelCapped]] = []
     capped_section = False
 
-    def _cap(m: "re.Match[str]") -> str:
+    def _cap(m: "re.Match[str]") -> str | None:
         nonlocal atom_capped
         tok = m.group(2)
         if _LEVEL_ATOM_RE.fullmatch(tok) or not tok.isnumeric():
-            return m.group(0)  # canonical, or not a level token at all
+            return None  # canonical, or not a level token at all
         atom_capped += 1
         return f"{m.group(1)}1x{m.group(3)} (level-capped)"
+
+    def _cap_line(line: str) -> tuple[str, "re.Match[str] | None"]:
+        # Markers are found on the masked line (one lexer: an explanation is not
+        # parsed) and replaced in the real one; an untouched marker keeps its text.
+        parts: list[str] = []
+        last = 0
+        first = None
+        for m in _ANY_LEVEL_MARKER_RE.finditer(_mask_explanations(line)):
+            first = first or m
+            new = _cap(m)
+            if new is not None:
+                parts.append(line[last:m.start()])
+                parts.append(new)
+                last = m.end()
+        parts.append(line[last:])
+        return "".join(parts), first
 
     for i, line in enumerate(lines):
         if line.startswith("## "):
             capped_section = _is_graduating_heading(line, graduating_headings)
         elif capped_section:
             before = atom_capped
-            first = _ANY_LEVEL_MARKER_RE.search(line)
-            lines[i] = _ANY_LEVEL_MARKER_RE.sub(_cap, line)
+            lines[i], first = _cap_line(line)
             if atom_capped != before:
                 atom_capped_lines.add(i)
                 tok = first.group(2) if first else ""
@@ -773,7 +828,7 @@ def validate_graduations(
             continue
 
         # Check for citations with evidence tags
-        match = _GRADUATION_RE.search(line)
+        match = _search_outside_explanations(_GRADUATION_RE, line)
         if match:
             # Bounded parse: ``int`` refuses more than 4300 digits (codex r2 #3).
             level = _token_level(match)
@@ -1088,6 +1143,7 @@ def validate_graduations(
                 grad_name_match = _NAMED_PATTERN_WITH_EVIDENCE_RE.match(line)
                 if grad_name_match is not None and grad_name_match.group(2) == str(level):
                     graduated_names.append(grad_name_match.group(1))
+                    name_line.append(i)
                     graduated_records.append(
                         (grad_name_match.group(1), level, explanation or ""))
                     record_line.append(i)
@@ -1184,7 +1240,7 @@ def validate_graduations(
         if not citations_seen:
             continue
 
-        bare_match = _BARE_GRADUATION_RE.search(line)
+        bare_match = _search_outside_explanations(_BARE_GRADUATION_RE, line)
         if not bare_match:
             continue
 
@@ -1271,6 +1327,7 @@ def validate_graduations(
         lines[i] = f"{line[:bstart]}{new_marker} (needs-evidence){sep}{rest}"
 
     level_capped: list[tuple[int, LevelCapped]] = []
+    ungraduated_lines: set[int] = set()
     if prior_text is not None:
         level_capped = _apply_prior_bound(
             lines,
@@ -1288,12 +1345,17 @@ def validate_graduations(
             if c_line in carried_by_line:
                 carried_by_line[c_line].held_level = cap.capped_to
             # A validated line that did not graduate must not count, seed
-            # co-graduation links, or name a graduation: cut to 1x (L1 r1, run),
-            # or validated only through a decoy marker (complement r2 #3).
+            # co-GRADUATION (pattern-to-pattern) links, or name a graduation: cut to
+            # 1x (L1 r1, run), or validated only through a decoy marker (complement
+            # r2 #3). Its evidence still forms co-CITATION (episode-to-episode) links,
+            # by design (1007+29: the episodes were cited together; the level is what
+            # was not earned). Names drop by LINE, never by value: a same-name line
+            # elsewhere may have graduated (codex L3 r1 MED 3, run).
             if c_line in validated_lines and (not cap.validated or cap.capped_to < 2):
                 validated -= 1
-                if cap.name in graduated_names:
-                    graduated_names.remove(cap.name)
+                ungraduated_lines.add(c_line)
+        graduated_names = [n for n, ln in zip(graduated_names, name_line)
+                           if ln not in ungraduated_lines]
     # The review worklist names what was SAVED: a record whose line the bound cut
     # carries the cut level, and one cut below 2x (or validated only through a
     # decoy marker) is not a graduation at all. (An atom cap never touches the
@@ -1397,6 +1459,7 @@ def canonical_continuity_text(text: str) -> str:
 _LEVEL_TOKEN_RE = re.compile(r"\|\s*(\d+)x(?:\s*\(\d{4}-\d{2}-\d{2}\))?")
 _LEVEL_CAPPED_MARK = "(level-capped)"
 _CARRIED_MARK = "(carried-forward)"
+_CARRIED_AFTER_TOKEN_RE = re.compile(r"\s*" + re.escape(_CARRIED_MARK))  # the carry writer keeps _GRADUATION_RE's \s
 _FREEFORM_PREFIX_RE = re.compile(r"^[ \t]*(?:-[ \t]+)?(?:(?:!+|\?|✓|\*)[ \t]+)?")
 # A level token longer than this is not a level anyone wrote; it reads as
 # "above any bound" (``int`` refuses more than 4300 digits: L1 r1, run).
@@ -1416,7 +1479,7 @@ def _line_levels(line: str) -> tuple[tuple[str, str], list[re.Match]] | None:
     line by its normalised text before its earliest level token, so rewording it
     makes it new, and with no text there it is anonymous.
     """
-    tokens = list(_LEVEL_TOKEN_RE.finditer(line))
+    tokens = list(_LEVEL_TOKEN_RE.finditer(_mask_explanations(line)))
     if not tokens:
         return None
     # ONE GRAMMAR RULE, GOVERNING EVERY TOKEN (L3 r3 + r4, codex HIGH, run): on a
@@ -1528,13 +1591,22 @@ def _apply_prior_bound(
             if i not in atom_capped_lines:
                 lines[i] = _drop_trailing_mark(line, _LEVEL_CAPPED_MARK)
             continue
+        # The carry mark is the one _carryforward_line put where an evidence tag
+        # followed a marker; prose that says "(carried-forward)" elsewhere stays
+        # (codex L3 r1 MED 5, run). Edits go right to left so spans hold.
+        carry_at = None
+        if i in carried_lines:
+            carry_at = next((m.end() for m in marks
+                             if _CARRIED_AFTER_TOKEN_RE.match(line, m.end())), None)
         new_line = line
         for m in reversed(marks):
+            if m.end() == carry_at:
+                tail = _CARRIED_AFTER_TOKEN_RE.match(new_line, m.end())
+                assert tail is not None
+                new_line = new_line[:tail.start()] + new_line[tail.end():]
             if _token_level(m) > allowed:
                 start, end = m.span(1)
                 new_line = new_line[:start] + str(allowed) + new_line[end:]
-        if i in carried_lines:
-            new_line = _drop_mark(new_line, _CARRIED_MARK)
         body = new_line.rstrip()
         if not body.endswith(_LEVEL_CAPPED_MARK) and i not in atom_capped_lines:
             new_line = body + " " + _LEVEL_CAPPED_MARK + new_line[len(body):]
@@ -1544,11 +1616,6 @@ def _apply_prior_bound(
             prior_level=prior_level, validated=validated,
         )))
     return capped
-
-
-def _drop_mark(line: str, mark: str) -> str:
-    """Remove every occurrence of ``mark`` and the space before it."""
-    return re.sub(r"[ \t]*" + re.escape(mark), "", line)
 
 
 def _drop_trailing_mark(line: str, mark: str) -> str:
@@ -1720,7 +1787,7 @@ def detect_stale_patterns(
         if not in_patterns:
             continue
 
-        match = _PATTERN_RE.search(line)
+        match = _search_outside_explanations(_PATTERN_RE, line)
         if not match:
             continue
 
@@ -2205,7 +2272,7 @@ def detect_proven_without_declaration(
             # Already recorded a line at this level or higher (first-wins
             # on ties) — keep the graduating line's coherent record.
             continue
-        date_match = _PATTERN_RE.search(line)
+        date_match = _search_outside_explanations(_PATTERN_RE, line)
         line_date = date_match.group(2) if date_match is not None else None
         # Contradiction stance on THIS line. Evidence-stripped so an
         # explanation that quotes "[no-contradicts]"/"[contradicts: X]"

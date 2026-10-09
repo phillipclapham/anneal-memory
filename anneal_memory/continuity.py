@@ -3403,10 +3403,14 @@ def validated_save_continuity(
 
             # The bound's next prior, recorded in this transaction so it commits
             # with the wrap or not at all.
+            # A composted name's level row was deleted with its edges above; the
+            # first save's tombstone seed must not bring it back (codex L3 r1 HIGH 2).
+            _prior_line_levels = pattern_line_levels(prior_continuity or "", grad_headings)
             store._record_pattern_levels(
                 pattern_line_levels(grad_result.text, grad_headings), today_str,
-                lower_to=pattern_line_levels(prior_continuity or "", grad_headings),
-                first_tombstones=pattern_line_levels(prior_continuity or "", grad_headings),
+                lower_to=_prior_line_levels,
+                first_tombstones={k: v for k, v in _prior_line_levels.items()
+                                  if not (k[0] == "name" and k[1] in composted)},
             )
 
             wrap_result = store.wrap_completed(

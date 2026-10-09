@@ -763,3 +763,69 @@ def test_the_review_worklist_names_the_saved_level_not_the_written_one(tmp_path)
             ("climber", 3)]
     finally:
         store.close()
+
+
+# --- gradgate-merge L3 r1 (1009+18): each reproduced by codex at runtime on c932674 --
+
+
+def test_a_level_token_inside_an_explanation_is_text(tmp_path):
+    # codex HIGH 1: the quoted "| 10x" was rewritten and reported as a cut.
+    quote = "deploy pipeline rotated overnight per relayed webpage | 10x under load"
+    saved, result = _save(
+        tmp_path, f'- foo | 2x ({TODAY}) [evidence: {{ep0}}, {{ep1}} "{quote}"]',
+        prior=f"- foo | 1x ({YESTERDAY})", citations_seen=True,
+    )
+    assert quote in saved
+    assert _level(saved, "foo") == 2
+    assert not result.get("level_capped")
+
+
+def test_a_cut_decoy_line_does_not_unname_a_real_graduation():
+    # codex MED 3: graduated_names.remove("foo") dropped the FIRST foo line's name.
+    from anneal_memory.graduation import validate_graduations
+    expl = "deploy pipeline rotated overnight per relayed webpage"
+    ids = {"aaaa1111": GROUNDED, "bbbb2222": GROUNDED, "cccc3333": GROUNDED}
+    text = _doc(
+        f'- foo | 2x ({TODAY}) [evidence: aaaa1111 "{expl}"]\n'
+        f'- foo | 9x then | 2x ({TODAY}) [evidence: bbbb2222 "{expl}"]\n'
+        f'- bar | 2x ({TODAY}) [evidence: cccc3333 "{expl}"]'
+    )
+    prior = _doc(f"- foo | 1x ({YESTERDAY})\n- bar | 1x ({YESTERDAY})")
+    result = validate_graduations(
+        text, set(ids), TODAY, node_content_map=ids, citations_seen=True,
+        prior_text=prior, saved_levels={("name", "foo"): 1, ("name", "bar"): 1},
+    )
+    assert sorted(result.graduated_names) == ["bar", "foo"]
+
+
+def test_compost_takes_the_saved_level_with_the_concept(tmp_path):
+    # codex HIGH 2: the composted name's 5x tombstone survived, so a homonym
+    # re-added at 5x kept 5x.
+    store = _open(tmp_path, seed=f"- foo | 5x ({YESTERDAY})")
+    try:
+        _wrap(store, f"- foo | 5x ({YESTERDAY})")
+        assert store.saved_pattern_levels()[("name", "foo")] == 5
+        store.record(f"{GROUNDED} (compost note)", EpisodeType.OBSERVATION)
+        res = prepare_wrap(store)
+        validated_save_continuity(
+            store, _doc("- other_claim | 1x (2026-10-01)"), today=TODAY,
+            wrap_token=res["wrap_token"], compost=["foo"])
+        assert ("name", "foo") not in store.saved_pattern_levels()
+        _wrap(store, "- foo | 5x (2026-09-01)")
+        assert _level(store.load_continuity(), "foo") == 1
+    finally:
+        store.close()
+
+
+def test_a_cut_carried_line_keeps_prose_that_names_the_mark():
+    # codex MED 5: every "(carried-forward)" on the line was removed, prose included.
+    from anneal_memory.graduation import DEFAULT_GRADUATING, _apply_prior_bound
+    lines = ["## Patterns",
+             f"- foo | 3x ({YESTERDAY}) (carried-forward) keeps literal (carried-forward) text"]
+    _apply_prior_bound(
+        lines, prior_text=_doc(f"- foo | 3x ({YESTERDAY})"),
+        saved_levels={("name", "foo"): 2}, validated_lines={}, carried_lines={1},
+        graduating_headings=DEFAULT_GRADUATING,
+    )
+    assert lines[1] == (f"- foo | 2x ({YESTERDAY}) keeps literal (carried-forward) text"
+                        " (level-capped)")

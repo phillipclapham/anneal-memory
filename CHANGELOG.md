@@ -27,8 +27,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   leading zero, and every parser reads it through the same pattern. In a graduating section
   any other `| <digits>x` marker (10 or more digits, a leading zero, non-ASCII digits, 0) is
   cut to `1x` on its own, with its own evidence tag replaced by `(level-capped)`, counted in
-  `demoted` (and in the new `GraduationResult.level_capped`, which the "resolved to ZERO
-  episodes" warning excludes). Before, such a line matched no validator yet read as a level
+  `demoted` (and in the new int `GraduationResult.atom_capped`, which the "resolved to ZERO
+  episodes" warning excludes; `GraduationResult.level_capped` is the list of cut lines,
+  below). Before, such a line matched no validator yet read as a level
   to the other parsers, so it saved untouched and held a probe. A failed write of a probe
   result or worklist row fails the whole save, atomically, as a `StoreDatabaseError`. The
   worklist is the validator's own records, not a re-read of the text.
@@ -133,6 +134,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   Refusing an older anneal outright needs a schema-version bump (arming the `anneal_writer_schema()` triggers),
   which also makes every installed older anneal and anything pinned to one refuse the store until upgraded; it is
   planned for the next schema generation, not this release (ruled 2026-10-08).
+- A level token inside a well-formed evidence tag's quoted explanation is text, not a level: the bound, the
+  level-atom normalizer and every graduation reader skip it alike (`[evidence: ab12 "latency | 10x under load"]`
+  is saved as written and reports no cut). Composting a pattern also deletes its saved level, so a later reuse of
+  the name starts at 1x; a rename that moves only a saved level is audited.
 - A cut line is marked `(level-capped)` (cleared once the line stands at an entitled level; a cut carried line
   loses its `(carried-forward)`) and reported as `level_capped` on the save result (present only when a line was
   cut), in the MCP save reply and the CLI output, as a `UserWarning`, and in the `continuity_saved` audit event. A

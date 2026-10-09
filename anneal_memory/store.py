@@ -6869,20 +6869,24 @@ class Store:
             # The bound's record follows the rename (complement L3 r2): the old
             # name's level moves to the new one unless the new name already has
             # its own, which stays (a rename never raises a level).
+            level_moved = False
             if self._has_pattern_levels_table():
-                self._conn.execute(
+                level_moved = self._conn.execute(
                     "UPDATE OR IGNORE pattern_levels SET key = ? "
-                    "WHERE kind = 'name' AND key = ?", (new_name, old_name))
-                self._conn.execute(
+                    "WHERE kind = 'name' AND key = ?", (new_name, old_name)).rowcount > 0
+                level_moved = self._conn.execute(
                     "DELETE FROM pattern_levels WHERE kind = 'name' AND key = ?",
-                    (old_name,))
+                    (old_name,)).rowcount > 0 or level_moved
             rekeyed = _rename_pattern(
                 self._conn, old_name, new_name, day, commit=not self._defer_commit
             )
-        if rekeyed:
+        # A level record that moved or left is a change to the bound's prior, so it
+        # gets a receipt even when no edge moved (codex L3 r1 MED 4).
+        if rekeyed or level_moved:
             self._audit_log_after_commit(
                 "pattern_association_renamed",
-                {"old": old_name, "new": new_name, "rekeyed": rekeyed},
+                {"old": old_name, "new": new_name, "rekeyed": rekeyed,
+                 "level_moved": level_moved},
                 method="rename_pattern_association",
                 committed="the rename",
             )
@@ -6900,6 +6904,13 @@ class Store:
         edges severed."""
         day = today or _today_local()
         with self._db_boundary("sever_pattern_concept"):
+            # The concept's earned level leaves with it (codex L3 r1 HIGH 2): a
+            # later homonym enters the bound as new, at 1x. Same transaction as
+            # the edge delete (committed by it, or by the enclosing batch).
+            if self._has_pattern_levels_table():
+                self._conn.execute(
+                    "DELETE FROM pattern_levels WHERE kind = 'name' AND key = ?",
+                    (name,))
             severed = _sever_pattern_concept(
                 self._conn, name, day, commit=not self._defer_commit
             )

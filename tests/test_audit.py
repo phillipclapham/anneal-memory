@@ -31,6 +31,18 @@ def _first_append_never_completed(db):
     m["active_begun"] = None
     mp.write_text(_json.dumps(m))
 
+
+def _frozen_clock():
+    """A ``datetime`` stand-in whose ``now()`` is 2026-10-08 12:00 UTC (ISO week 41)."""
+    from datetime import datetime as real_dt
+
+    class Frozen(real_dt):
+        @classmethod
+        def now(cls, tz=None):
+            return real_dt(2026, 10, 8, 12, 0, 0, 0, tzinfo=tz)
+
+    return Frozen
+
 class TestAuditBasics:
     """Basic audit trail operations."""
 
@@ -591,7 +603,7 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
         )
         log = next(
             n for n in cls.body
-            if isinstance(n, ast.FunctionDef) and n.name == "log"
+            if isinstance(n, ast.FunctionDef) and n.name == "_log_locked"
         )
         # ⛔ ANCHORED TO THE HANDLER, AND TO THE SNAPSHOT IT RESTORES FROM.
         # This search was ``ast.walk(log)`` for any single-target tuple
@@ -805,7 +817,7 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
         )
         log = next(
             n for n in cls.body
-            if isinstance(n, ast.FunctionDef) and n.name == "log"
+            if isinstance(n, ast.FunctionDef) and n.name == "_log_locked"
         )
         guarded = [
             n for n in ast.walk(log)
@@ -960,7 +972,11 @@ class TestTheAppendIsAllOrNothingForTerminalExceptionsToo:
             f"the restore is either incomplete or clobbering"
         )
 
-        allowed = {"open", "f.write", "f.flush", "os.fsync", "f.fileno"}
+        # ``os.replace`` and ``_fsync_dir`` (KL-24 r6: the first entry of an
+        # active file is a staged temp renamed into place) are module-level
+        # calls on paths; neither can reach ``self``.
+        allowed = {"open", "f.write", "f.flush", "os.fsync", "f.fileno",
+                   "os.replace", "_fsync_dir"}
         for node in ast.walk(try_node):
             if not isinstance(node, ast.Call):
                 continue
@@ -1024,8 +1040,13 @@ class TestAZeroByteActiveFileIsNotAnActiveFile:
         calls = {"n": 0}
 
         def fsync_failing_once(fd):
-            calls["n"] += 1
-            if calls["n"] == 1:
+            # Only the first entry's own fsync: it is staged in a temp that is
+            # renamed into place, after its manifest record is saved (KL-24 r6).
+            st = audit_mod.os.fstat(fd)
+            target = trail._first_entry_path()
+            if (calls["n"] == 0 and target.exists()
+                    and (st.st_dev, st.st_ino) == (target.stat().st_dev, target.stat().st_ino)):
+                calls["n"] += 1
                 raise OSError(5, "injected fsync failure")
             return real_fsync(fd)
 
@@ -1039,8 +1060,10 @@ class TestAZeroByteActiveFileIsNotAnActiveFile:
             audit_mod.os.fsync = real_fsync
         active = trail._active_path
 
-        # what a rolled-back first-append-into-a-fresh-file leaves behind
-        assert active.exists() and active.stat().st_size == 0
+        # what a rolled-back first-append-into-a-fresh-file leaves behind: no
+        # active file (its first entry is staged and renamed in, KL-24 r6), or
+        # an empty one
+        assert not active.exists() or active.stat().st_size == 0
 
         AuditTrail(db).log("next_process", {})
 
@@ -1171,12 +1194,14 @@ class TestWeeklyRotation:
         db = tmp_path / "test.db"
         trail = AuditTrail(db)
         trail.log("record", {"id": "1"})
+        synced_dirs.clear()  # the first entry's own rename (KL-24 r6) is not rotation's
         trail._last_week = "2026-W01"
         trail.log("record", {"id": "2"})  # triggers rotation
 
-        assert len(synced_dirs) == 3, (
+        assert len(synced_dirs) == 4, (
             "rotation must fsync its directory 3 times: the seal rename, "
-            "the gzip atomic replace, and the manifest save"
+            "the gzip atomic replace, and the manifest save; the 4th is the "
+            "new active file's first entry renamed into place"
         )
         assert all(d == tmp_path for d in synced_dirs)
 
@@ -6910,7 +6935,12 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         (tmp_path / "m.audit.1998-W43.jsonl.gz.tmp").write_bytes(gzip.compress(body(43))[:20])
         (tmp_path / "m.audit.1998-W44.jsonl.gz").write_bytes(gzip.compress(body(44))[:30])  # lone corrupt
         keep_out = {"m.audit.jsonl", "m.audit.manifest.json"}
-        before = [p.read_bytes() for p in tmp_path.iterdir() if p.name not in keep_out]
+        # Lock files hold no bytes (two of them are both empty), so they are
+        # not fixture blobs.
+        before = [
+            p.read_bytes() for p in tmp_path.iterdir()
+            if p.name not in keep_out and not p.name.endswith(".lock")
+        ]
         assert len(before) == len(set(before)), "fixture blobs must be unique"
 
         AuditTrail(db).log("after", {})
@@ -7486,24 +7516,36 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         assert result.total_entries == 5 + 4  # sealed, then rot/later/again/still
 
     @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root lists a mode-300 directory")
-    def test_a_directory_that_cannot_be_listed_does_not_block_writes(self, tmp_path):
-        """LOW, L1, round 10, reproduced: with the audit directory writable but
-        not listable (mode 0o300), recovery's listing raised and every
-        ``log()`` failed.
-
-        ⛔ MUTATION-CHECKED: let recovery's listing raise ``OSError`` and this
-        fails.
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="chmod 0o300 does not make a directory unlistable on Windows"
+    )
+    def test_a_directory_that_cannot_be_listed_refuses_writes(self, tmp_path):
+        """Round 10 (L1) made writes in a writable but unlistable directory
+        (mode 0o300) go through, because recovery's listing raised and every
+        ``log()`` failed with a raw ``OSError``. Ruling A (Phill 2026-10-08:
+        fail closed when the manifest cannot be checked) supersedes that: a
+        directory that cannot be listed cannot rule out a quarantine marker,
+        and KL-24 L3 r6 (codex 2, run) had an initialized writer append past a
+        marker there. So the append is refused as ``_ManifestUnavailable`` (a
+        counted drop, naming the listing), never a raw traceback, and nothing is
+        written; once the directory is listable again, writes resume.
         """
         store = tmp_path / "store"
         store.mkdir()
         db = store / "m.db"
-        AuditTrail(db).log("first", {})
+        trail = AuditTrail(db)
+        trail.log("first", {})
+        before = (store / "m.audit.jsonl").read_bytes()
         store.chmod(0o300)
         try:
-            AuditTrail(db).log("second", {})  # must NOT raise
+            for writer in (AuditTrail(db), trail):  # a new and an initialized one
+                with pytest.raises(audit_module._ManifestUnavailable, match="cannot be listed"):
+                    writer.log("second", {})
         finally:
             store.chmod(0o700)
 
+        assert (store / "m.audit.jsonl").read_bytes() == before
+        trail.log("third", {})
         assert AuditTrail.verify(db).total_entries == 2
 
     @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root lists a mode-300 directory")
@@ -7791,33 +7833,51 @@ class TestHybridManifestQuarantine:
         db = self._two_sealed_weeks(tmp_path)
         manifest = tmp_path / "m.audit.manifest.json"
         manifest.write_bytes(b"{not json")
+        active = tmp_path / "m.audit.jsonl"
+        before = active.read_bytes()
 
-        AuditTrail(db).log("after", {})
-        AuditTrail(db).log("again", {})
+        # Ruling A (Phill 2026-10-08), superseding the 09-13 hybrid's "appending
+        # continues": the append that discovers the invalid manifest is refused,
+        # and so is every later one until audit-repair.
+        for event in ("after", "again"):
+            with pytest.raises(audit_module._ManifestQuarantined, match="audit-repair"):
+                AuditTrail(db).log(event, {})
 
         markers = audit_module._quarantine_markers(tmp_path, "m")
         assert len(markers) == 1
         assert (tmp_path / markers[0]).read_bytes() == b"{not json"
         assert not manifest.exists(), "no fresh manifest may be written over the quarantine"
-        events = [json.loads(l)["event"] for l in (tmp_path / "m.audit.jsonl").read_text().splitlines()]
-        assert events[-2:] == ["after", "again"], "appending continues"
+        assert active.read_bytes() == before, "nothing appended"
         result = AuditTrail.verify(db)
         assert result.valid is False and "quarantined" in (result.error or "")
 
+        assert AuditTrail.repair_manifest(db).repaired is True
+        AuditTrail(db).log("resumed", {})
+        assert json.loads(active.read_text().splitlines()[-1])["event"] == "resumed"
+        assert AuditTrail.verify(db).valid
+
     def test_rotation_and_retention_pause_while_quarantined(self, tmp_path):
+        """Ruling A (Phill 2026-10-08): the append itself is refused while
+        quarantined, superseding the 09-13 hybrid's "appending continues"; what
+        this still pins is that nothing is sealed and retention deletes nothing."""
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
         trail = AuditTrail(db)
-        trail.log("quarantines", {})
+        # The append that discovers the invalid manifest quarantines it, and is
+        # refused (ruling A).
+        with pytest.raises(audit_module._ManifestQuarantined):
+            trail.log("quarantines", {})
+        assert audit_module._quarantine_markers(tmp_path, "m")
         sealed = self._sealed_names(tmp_path)
+        before = (tmp_path / "m.audit.jsonl").read_bytes()
 
         trail._last_week = "1999-W03"
-        trail.log("would-rotate", {})
+        with pytest.raises(audit_module._ManifestQuarantined, match="audit-repair"):
+            trail.log("would-rotate", {})
 
         assert self._sealed_names(tmp_path) == sealed
         assert trail._last_week == "1999-W03", "left for a later log() to retry"
-        last = (tmp_path / "m.audit.jsonl").read_text().splitlines()[-1]
-        assert json.loads(last)["event"] == "would-rotate"
+        assert (tmp_path / "m.audit.jsonl").read_bytes() == before, "nothing appended"
         trail._retention_days = 0
         with trail._operation_span():
             assert trail._cleanup() == 0
@@ -7830,6 +7890,26 @@ class TestHybridManifestQuarantine:
         raw = gzip.decompress((tmp_path / "m.audit.1999-W02.jsonl.gz").read_bytes())
         tail = [l for l in raw.splitlines() if l.strip()][-1].decode("utf-8")
 
+        # Ruling A (Phill 2026-10-08): refused while quarantined, nothing written.
+        with pytest.raises(audit_module._ManifestQuarantined, match="audit-repair"):
+            AuditTrail(db).log("seeded", {})
+        assert not (tmp_path / "m.audit.jsonl").exists()
+
+        # The repair cannot know whether the deleted active file held entries, so
+        # it records one possible gap, reported by the repair and by verify.
+        repaired = AuditTrail.repair_manifest(db)
+        assert repaired.repaired is True, repaired.error
+        [gap] = repaired.set_aside
+        assert "possible gap" in gap["cause"] and gap["set_aside_as"] == ""
+        assert gap["filename"] == "m.audit.jsonl"
+        # KL-24 L3 r6 (codex 10, run): marked explicitly and reported as a
+        # POSSIBLE gap, never as entries that definitely went missing.
+        assert gap["certainty"] == "possible"
+        [line] = audit_module.set_aside_report_lines([gap], db)
+        assert line.startswith("POSSIBLE GAP:") and "went missing" not in line
+        assert AuditTrail.verify(db).set_aside == [gap]
+
+        # With the gap on record, the next append seeds from the sealed tail.
         AuditTrail(db).log("seeded", {})
 
         first = json.loads((tmp_path / "m.audit.jsonl").read_text().splitlines()[0])
@@ -7877,7 +7957,8 @@ class TestHybridManifestQuarantine:
     def test_repair_rebuilds_in_order_and_releases_the_marker(self, tmp_path):
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
-        AuditTrail(db).log("after", {})
+        with pytest.raises(audit_module._ManifestQuarantined):  # ruling A: refused
+            AuditTrail(db).log("after", {})
         [marker] = audit_module._quarantine_markers(tmp_path, "m")
 
         result = AuditTrail.repair_manifest(db)
@@ -7909,7 +7990,8 @@ class TestHybridManifestQuarantine:
         week = tmp_path / "m.audit.1999-W01.jsonl.gz"
         week.write_bytes(week.read_bytes()[:25])
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
-        AuditTrail(db).log("after", {})
+        with pytest.raises(audit_module._ManifestQuarantined):  # ruling A: refused
+            AuditTrail(db).log("after", {})
         before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
 
         result = AuditTrail.repair_manifest(db)
@@ -7964,7 +8046,9 @@ class TestHybridL3Fixes:
     def _quarantined(self, tmp_path):
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
-        AuditTrail(db).log("quarantines", {})
+        # Ruling A (Phill 2026-10-08): the append that quarantines is refused.
+        with pytest.raises(audit_module._ManifestQuarantined):
+            AuditTrail(db).log("quarantines", {})
         return db
 
     @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root lists a mode-300 directory")
@@ -8523,7 +8607,10 @@ class TestManifestLock:
         monkeypatch.setattr(audit_module.fcntl, "flock", no_locks)
         db = self._two_sealed_weeks(tmp_path)
         (tmp_path / "m.audit.manifest.json").write_bytes(b"{not json")
-        AuditTrail(db).log("after", {})
+        # No locks at all is not a lock failure: the refusal is the quarantine's
+        # (ruling A), never _ManifestUnavailable.
+        with pytest.raises(audit_module._ManifestQuarantined):
+            AuditTrail(db).log("after", {})
         assert len(audit_module._quarantine_markers(tmp_path, "m")) == 1
         assert AuditTrail.repair_manifest(db).repaired is True
         assert AuditTrail.verify(db).valid
@@ -8718,8 +8805,13 @@ class TestManifestLockFile:
         lock.unlink(missing_ok=True)
         lock.mkdir()
         trail._last_week = "1999-W01"
-        trail.log("not-rotated", {})
+        before = (tmp_path / "m.audit.jsonl").read_bytes()
+        # Ruling A (Phill 2026-10-08): the append fails closed without the lock,
+        # superseding the 10-03 degrade; still nothing is sealed.
+        with pytest.raises(audit_module._ManifestUnavailable, match="lock cannot be taken"):
+            trail.log("not-rotated", {})
         assert not list(tmp_path.glob("m.audit.1999-W01*"))
+        assert (tmp_path / "m.audit.jsonl").read_bytes() == before, "nothing appended"
         assert AuditTrail.verify(db).valid
 
 
@@ -8777,19 +8869,25 @@ class TestManifestLockL3:
         boom = Boom()
         log.addHandler(boom)
         try:
-            (tmp_path / "m.audit-manifest.lock").mkdir()
+            lock = tmp_path / "m.audit-manifest.lock"
+            lock.mkdir()
             trail = AuditTrail(tmp_path / "m.db")
-            trail.log("x", {"a": 1})
-            assert (tmp_path / "m.audit.jsonl").stat().st_size > 0
+            # Ruling A (Phill 2026-10-08): without the lock the append fails
+            # closed, and the refusal is _ManifestUnavailable, never the
+            # handler's RuntimeError, on the first log() and every later one.
+            with pytest.raises(audit_module._ManifestUnavailable):
+                trail.log("x", {"a": 1})
             # L3 on 81cc968 (run): a refused ROTATION with the same handler raised
             # on every later log(), because the refusal flag was set after the
             # warning. Every diagnostic now goes through a logger that cannot raise.
             trail._last_week = "1999-W01"
-            before = (tmp_path / "m.audit.jsonl").stat().st_size
-            trail.log("y", {"b": 2})
-            trail.log("z", {"c": 3})
-            assert (tmp_path / "m.audit.jsonl").stat().st_size > before
-            assert trail._rotation_refusal_logged
+            for event in ("y", "z"):
+                with pytest.raises(audit_module._ManifestUnavailable):
+                    trail.log(event, {"b": 2})
+            assert not (tmp_path / "m.audit.jsonl").exists(), "nothing appended"
+            lock.rmdir()
+            trail.log("after", {"c": 3})
+            assert (tmp_path / "m.audit.jsonl").stat().st_size > 0
         finally:
             log.removeHandler(boom)
 
@@ -8808,8 +8906,15 @@ class TestManifestLockL3:
         boom = BoomFilter()
         log.addFilter(boom)
         try:
-            (tmp_path / "m.audit-manifest.lock").mkdir()
+            lock = tmp_path / "m.audit-manifest.lock"
+            lock.mkdir()
             trail = AuditTrail(tmp_path / "m.db")
+            # Ruling A (Phill 2026-10-08): refused without the lock, as
+            # _ManifestUnavailable, never the filter's RuntimeError.
+            with pytest.raises(audit_module._ManifestUnavailable):
+                trail.log("x", {"a": 1})
+            assert not (tmp_path / "m.audit.jsonl").exists(), "nothing appended"
+            lock.rmdir()
             trail.log("x", {"a": 1})
             assert (tmp_path / "m.audit.jsonl").stat().st_size > 0
         finally:
@@ -9087,8 +9192,17 @@ class TestOneSpanPerOperation:
                 trail.log("outer", {})
         finally:
             log.removeHandler(handler)
-        assert inner and isinstance(inner[0], RuntimeError), inner
-        assert "not reentrant" in str(inner[0])
+        # Ruling A (Phill 2026-10-08): the outer log() now refuses before it logs
+        # any diagnostic, so no handler runs inside its span and the reentry is
+        # driven directly: a nested span inside the failed outer one is refused
+        # as not reentrant, and the outer failure survives it.
+        assert inner == []
+        with trail._operation_span():
+            with pytest.raises(RuntimeError, match="not reentrant"):
+                with trail._operation_span():
+                    pass
+            with pytest.raises(audit_module._ManifestUnavailable):
+                trail._refuse_without_manifest_lock()
 
     def test_a_repair_in_another_process_cannot_land_between_adoption_and_seed(
         self, tmp_path, monkeypatch
@@ -9140,7 +9254,16 @@ class TestOneSpanPerOperation:
             return adopted
 
         monkeypatch.setattr(AuditTrail, "_adopt_orphaned_files", adopt_then_repair_in_another_process)
-        AuditTrail(db).log("x", {})  # must NOT raise
+        # Ruling A (Phill 2026-10-08): this append found a quarantined manifest,
+        # so it is refused as quarantined, never with adoption's stale "did not
+        # complete" (the bug this pins). The quarantine check after the span can
+        # also run after the waiting repair has finished, and then the append
+        # goes ahead on the rebuilt manifest (run, lane C 10-08: verify valid, the
+        # possible gap recorded); both are ruled outcomes, so either is accepted.
+        try:
+            AuditTrail(db).log("x", {})
+        except audit_module._ManifestQuarantined:
+            pass
         out = state["proc"].communicate(timeout=30)[0]
         monkeypatch.undo()
 
@@ -9323,3 +9446,978 @@ def test_a_gap_is_not_suppressed_for_an_orphan_adoption_will_reject(tmp_path):
     AuditTrail(db).log("after", {})
     result = AuditTrail.verify(db)
     assert result.valid is False and "Unmanifested" in (result.error or "")
+
+
+class TestKL24ConcurrentWriters:
+    """KL-24 (run 2026-10-07): writer processes sharing one database broke the
+    chain while every episode landed and ``status()`` reported 0 failures.
+    Each append now holds the append lock and re-syncs the tip from disk."""
+
+    def test_two_instances_taking_turns_stay_chained(self, tmp_path):
+        """The deterministic shape of KL-24: no concurrency needed, only a
+        cached tip. ⛔ MUTATION-CHECKED: make ``_resync_with_disk`` return at
+        once and this reads valid=False."""
+        db = tmp_path / "m.db"
+        a, b = AuditTrail(db), AuditTrail(db)
+        for i in range(5):
+            a.log("ev", {"a": i})
+            b.log("ev", {"b": i})
+        result = AuditTrail.verify(db)
+        assert result.valid, result.error
+        assert result.total_entries == 10
+        seqs = [json.loads(line)["seq"] for line in (tmp_path / "m.audit.jsonl").read_text().splitlines()]
+        assert seqs == list(range(10))
+
+    def test_a_peer_rotation_is_refused_once_then_followed_not_resealed(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A peer seals the week and writes into the new file. This instance's
+        next append is refused once (ruled 10-08, option (b): a filename is not
+        proof of a peer's seal, so every lost file is refused); the one after it
+        re-initialises from the new file instead of chaining from the sealed tip
+        or rotating again. The whole module's clock jumps a week, so entry
+        timestamps and the week agree, as they do outside a test."""
+        db = tmp_path / "m.db"
+        a, b = AuditTrail(db), AuditTrail(db)
+        a.log("ev", {"n": 0})
+        b.log("ev", {"n": 1})
+        real_datetime = audit_module.datetime
+
+        class _NextWeek(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return real_datetime.now(tz) + timedelta(days=7)
+
+        monkeypatch.setattr(audit_module, "datetime", _NextWeek)
+        b.log("ev", {"n": 2})  # b rotates and writes the first new-week entry
+        with caplog.at_level(logging.WARNING, logger="anneal-memory.audit"):
+            with pytest.raises(audit_module._ManifestUnavailable, match="is gone"):
+                a.log("ev", {"n": 3})
+            a.log("ev", {"n": 4})
+        assert not [r for r in caplog.records if "Not rotating" in r.getMessage()]
+        result = AuditTrail.verify(db)
+        assert result.valid, result.error
+        assert result.total_entries == 4
+        assert len(list(tmp_path.glob("m.audit.*.jsonl.gz"))) == 1
+
+    def test_stats_counts_a_peers_entries(self, tmp_path):
+        db = tmp_path / "m.db"
+        a, b = AuditTrail(db), AuditTrail(db)
+        a.log("ev", {})
+        assert a.stats()["entry_count"] == 1
+        b.log("ev", {})
+        b.log("ev", {})
+        assert a.stats()["entry_count"] == 3
+
+    def test_a_nested_log_inside_the_append_lock_is_refused_not_deadlocked(
+        self, tmp_path, monkeypatch
+    ):
+        """A logging handler reaching back into the trail while the lock is held
+        would open a second descriptor and wait on its own thread forever."""
+        trail = AuditTrail(tmp_path / "m.db")
+        trail.log("ev", {})
+        seen: list[BaseException] = []
+        real = AuditTrail._resync_with_disk
+
+        def nested(self):
+            try:
+                self.log("nested", {})
+            except RuntimeError as e:
+                seen.append(e)
+            real(self)
+
+        monkeypatch.setattr(AuditTrail, "_resync_with_disk", nested)
+        trail.log("outer", {})
+        assert len(seen) == 1 and "not reentrant" in str(seen[0])
+        assert AuditTrail.verify(tmp_path / "m.db").valid
+
+    def test_on_event_may_still_log_after_the_lock_is_released(self, tmp_path):
+        db = tmp_path / "m.db"
+        calls: list[str] = []
+
+        def on_event(entry):
+            if entry["event"] == "first":
+                calls.append("nested")
+                trail.log("from_callback", {})
+
+        trail = AuditTrail(db, on_event=on_event)
+        trail.log("first", {})
+        assert calls == ["nested"]
+        result = AuditTrail.verify(db)
+        assert result.valid and result.total_entries == 2
+
+    @pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+    def test_writer_processes_at_once_keep_one_valid_chain(self, tmp_path):
+        """The KL-24 run itself, smaller: real processes, each its own trail,
+        appending at the same time. ⛔ MUTATION-CHECKED: take no lock in
+        ``_append_lock`` (re-sync kept) and this reads valid=False."""
+        import subprocess
+
+        db = tmp_path / "m.db"
+        go = tmp_path / "go"
+        n_proc, n_each = 4, 150
+        script = (
+            "import sys, time; from pathlib import Path\n"
+            "from anneal_memory.audit import AuditTrail\n"
+            f"t = AuditTrail({str(db)!r})\n"
+            f"while not Path({str(go)!r}).exists(): time.sleep(0.005)\n"
+            f"for i in range({n_each}): t.log('ev', {{'w': sys.argv[1], 'i': i}})\n"
+        )
+        cwd = str(Path(audit_module.__file__).parent.parent)
+        procs = [
+            subprocess.Popen([sys.executable, "-c", script, str(w)], cwd=cwd)
+            for w in range(n_proc)
+        ]
+        go.write_text("x")
+        for p in procs:
+            assert p.wait(timeout=120) == 0
+        result = AuditTrail.verify(db)
+        assert result.valid, result.error
+        assert result.total_entries == n_proc * n_each
+
+    def test_a_reused_inode_with_other_bytes_is_refused_once_not_read_on(
+        self, tmp_path, monkeypatch
+    ):
+        """L2 r1 (run with a simulated inode): a rotation frees the inode and
+        the new active file can get the same number (ext4, xfs). Simulated by
+        handing the cached tip the new file's real inode, so this runs on
+        every platform. KL-24 CI (run 37968093093, Linux): the file is a
+        replaced one, so ruling (b) refuses the next append once, as
+        ``test_a_peer_rotation_is_refused_once_then_followed_not_resealed``
+        does without the simulation; it had re-derived quietly. Skip the
+        tip's hash check and this reads valid=False."""
+        db = tmp_path / "m.db"
+        a, b = AuditTrail(db), AuditTrail(db)
+        for i in range(3):
+            a.log("ev", {"a": i})
+        real_datetime = audit_module.datetime
+
+        class _NextWeek(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return real_datetime.now(tz) + timedelta(days=7)
+
+        monkeypatch.setattr(audit_module, "datetime", _NextWeek)
+        b.log("ev", {"pad": "y" * 900})  # rotates; the new file outgrows a's tip
+        st = os.stat(tmp_path / "m.audit.jsonl")
+        _, _, at, length, tip_hash = a._tip
+        assert st.st_size > at + length
+        a._tip = (st.st_dev, st.st_ino, at, length, tip_hash)
+        with pytest.raises(audit_module._ManifestUnavailable, match="replaced"):
+            a.log("ev", {"a": "refused"})
+        a.log("ev", {"a": "after"})
+        result = AuditTrail.verify(db)
+        assert result.valid, result.error
+        assert result.total_entries == 5
+
+    def test_the_tip_after_a_torn_tail_points_at_the_entry_written(self, tmp_path):
+        """KL-24 CI-fix L3 r1 (codex MED, reasoned on Windows): the append
+        opened the file in text mode, so on Windows the boundary ``\n``
+        written after a torn tail landed as ``\r\n`` while the tip was
+        recorded one byte past ``resume_at``. The tip then named the LF, the
+        next re-sync read other bytes there and refused the write as a
+        replaced file. Every platform: the bytes at the recorded tip are the
+        entry, and the next two appends go through."""
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        trail.log("first", {})
+        active = tmp_path / "m.audit.jsonl"
+        with open(active, "ab") as f:
+            f.write(b'{"v": 1, "seq": 1, "to')  # a torn tail, no newline
+        trail.log("second", {})
+        _, _, at, length, _ = trail._tip
+        line = active.read_bytes()[at : at + length]
+        assert json.loads(line)["seq"] == 1, line
+        trail.log("third", {})
+        trail.log("fourth", {})
+
+    def test_an_unlocked_writers_entry_after_this_append_is_still_read(
+        self, tmp_path, monkeypatch
+    ):
+        """L2 r1 (run): the tip after an append comes from the append itself,
+        so an entry an unlocked writer (an anneal from before the lock) lands
+        right after it is read by the next re-sync, not skipped."""
+        import contextlib
+
+        db = tmp_path / "m.db"
+        a, old = AuditTrail(db), AuditTrail(db)
+        monkeypatch.setattr(old, "_append_lock", contextlib.nullcontext)
+        a.log("a", {})
+        old.log("o", {})
+        real_fsync = os.fsync
+        fired: list[int] = []
+
+        def racing_fsync(fd):
+            out = real_fsync(fd)
+            if not fired:
+                fired.append(1)
+                old.log("o-race", {})
+            return out
+
+        monkeypatch.setattr(audit_module.os, "fsync", racing_fsync)
+        a.log("a-racy", {})
+        monkeypatch.setattr(audit_module.os, "fsync", real_fsync)
+        a.log("a-next", {})
+        result = AuditTrail.verify(db)
+        assert fired and result.valid, result.error
+        assert result.total_entries == 5
+
+    def test_taking_turns_without_fcntl_stays_chained(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(audit_module, "fcntl", None)
+        db = tmp_path / "m.db"
+        a, b = AuditTrail(db), AuditTrail(db)
+        for i in range(4):
+            a.log("ev", {"a": i})
+            b.log("ev", {"b": i})
+        result = AuditTrail.verify(db)
+        assert result.valid and result.total_entries == 8
+
+    def test_a_lost_active_file_is_refused_even_without_the_manifest_record(
+        self, tmp_path, monkeypatch
+    ):
+        """L1 r1 (run): the manifest's ``active_begun`` record is best-effort.
+        Without it the re-derivation continued the chain over the deleted
+        entries and counted nothing; the instance's own tip refuses once."""
+        monkeypatch.setattr(AuditTrail, "_record_active_begun", lambda self, *a: None)
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("ev", {"i": i})
+        (tmp_path / "m.audit.jsonl").unlink()
+        with pytest.raises(audit_module._ManifestUnavailable, match="is gone"):
+            trail.log("after", {})
+
+    def test_a_stale_same_week_sealed_file_does_not_hide_a_deleted_active_file(
+        self, tmp_path, monkeypatch
+    ):
+        """L3 r2 codex HIGH: a sealed-name file for the tip's week (a stale
+        orphan or ``.gz.tmp``) was read as a peer's seal, and the deletion was
+        followed silently. Every lost file is refused now (ruled 10-08 (b)).
+        The manifest's best-effort ``active_begun`` record is off, as when its
+        save failed, so only the instance's own refusal stands."""
+        monkeypatch.setattr(AuditTrail, "_record_active_begun", lambda self, *a: None)
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        for i in range(3):
+            trail.log("ev", {"i": i})
+        week = trail._tip_week
+        assert week
+        sealed = tmp_path / audit_module._sealed_filename("m", week)
+        Path(str(sealed.with_suffix(".jsonl.gz")) + ".tmp").write_bytes(b"stale")
+        (tmp_path / "m.audit.jsonl").unlink()
+        with pytest.raises(audit_module._ManifestUnavailable, match="is gone"):
+            trail.log("after", {})
+
+    @pytest.mark.parametrize("shape", ["recorded", "no_record", "bad_manifest"])
+    def test_status_reports_a_lost_trail_as_unknown_not_zero(
+        self, tmp_path, monkeypatch, shape
+    ):
+        """L3 r2 codex MED: a deleted active file read as a healthy 0 entries.
+        L3 r3: also when the manifest's best-effort record was never saved
+        (codex MED), and when the manifest is ``[]`` (a TypeError crashed the
+        status call)."""
+        from anneal_memory.store import Store
+        from anneal_memory.types import EpisodeType
+
+        if shape == "no_record":
+            monkeypatch.setattr(AuditTrail, "_record_active_begun", lambda self, *a: None)
+        store = Store(tmp_path / "m.db")
+        try:
+            store.record("an episode", EpisodeType.OBSERVATION)
+            assert store.status().audit_entry_count
+            (tmp_path / "m.audit.jsonl").unlink()
+            if shape == "bad_manifest":
+                (tmp_path / "m.audit.manifest.json").write_text("[]")
+            assert store.status().audit_entry_count is None
+        finally:
+            store.close()
+
+    def test_the_first_entry_record_is_written_ahead_and_repair_matches_seals(
+        self, tmp_path, monkeypatch
+    ):
+        """L3 r4 codex HIGH (run): the first entry's manifest record was saved
+        after the entry and best-effort, so a failed save left a deletion of the
+        file followed from genesis with verify valid. It is now saved first, and
+        a failed save refuses the append with nothing written. Codex MED (run):
+        audit-repair recorded a false gap for an older release's stale record of
+        a week that is sealed and manifested; it now matches the sealed file's
+        first entry and clears the record."""
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        real = AuditTrail._save_manifest
+        failed = []
+
+        def flaky(self, manifest):
+            if not failed and manifest.get("active_begun"):
+                failed.append(1)
+                raise OSError(28, "No space left on device")
+            return real(self, manifest)
+
+        monkeypatch.setattr(AuditTrail, "_save_manifest", flaky)
+        with pytest.raises(audit_module._ManifestUnavailable):
+            trail.log("first", {})
+        active = tmp_path / "m.audit.jsonl"
+        assert not active.exists() or active.stat().st_size == 0
+        trail.log("second", {})
+        monkeypatch.setattr(AuditTrail, "_save_manifest", real)
+        active.unlink()
+        with pytest.raises(audit_module._ManifestUnavailable):
+            trail.log("after", {})
+
+        # An older release's seal: the sealed week's own record left set.
+        db2 = tmp_path / "o" / "m.db"
+        db2.parent.mkdir()
+        t2 = AuditTrail(db2)
+        t2.log("w0", {})
+        manifest_path = db2.parent / "m.audit.manifest.json"
+        begun = json.loads(manifest_path.read_text())["active_begun"]
+        real_dt = audit_module.datetime
+
+        class _NextWeek(real_dt):
+            @classmethod
+            def now(cls, tz=None):
+                return real_dt.now(tz) + timedelta(days=7)
+
+        monkeypatch.setattr(audit_module, "datetime", _NextWeek)
+        t2.log("w1", {})
+        m = json.loads(manifest_path.read_text())
+        m["active_begun"] = begun
+        manifest_path.write_text(json.dumps(m))
+        (db2.parent / "m.audit.jsonl").write_text("")
+        assert AuditTrail.repair_manifest(db2).repaired
+        assert AuditTrail.verify(db2).set_aside == []
+
+    @staticmethod
+    def _crash_after_staging(db):
+        """A child process appends the first entry of a fresh active file and
+        dies between saving its record and renaming the staged temp in."""
+        import subprocess
+
+        code = (
+            "import os, sys\n"
+            "import anneal_memory.audit as am\n"
+            "real = am.os.replace\n"
+            "def die(src, dst, *a, **k):\n"
+            "    if str(src).endswith('.first'): os._exit(9)\n"
+            "    return real(src, dst, *a, **k)\n"
+            "am.os.replace = die\n"
+            "am.AuditTrail(sys.argv[1]).log('staged', {})\n"
+        )
+        env = {**os.environ, "PYTHONPATH": str(Path(audit_module.__file__).parent.parent)}
+        assert subprocess.run([sys.executable, "-c", code, str(db)], env=env).returncode == 9
+        assert (db.parent / "m.audit.jsonl.first").exists()
+
+    def test_a_staged_first_entry_is_finished_or_set_aside_never_deleted(
+        self, tmp_path, monkeypatch
+    ):
+        """KL-24 L3 r6, each run first on d3c408a. complement 1 + codex 1:
+        audit-repair over a crash's staged entry recorded a permanent gap and
+        the next append deleted the entry; repair now finishes it. codex 5 + glm
+        1: with the manifest quarantined, the next append deleted the staged
+        entry before refusing; it is kept, and repair sets it aside under the
+        rebuild's possible gap. codex 8 + complement 2: a rename that failed with
+        no active file left the temp and its record, and the retry committed
+        the failed entry; the temp is set aside and the record withdrawn."""
+        db = tmp_path / "a" / "m.db"
+        db.parent.mkdir()
+        self._crash_after_staging(db)
+        result = AuditTrail.repair_manifest(db)
+        assert result.repaired and result.set_aside == [], result.error
+        assert result.staged_first_entry.startswith("finished")
+        AuditTrail(db).log("next", {})
+        events = [json.loads(line)["event"] for line in (db.parent / "m.audit.jsonl").read_text().splitlines()]
+        assert events == ["staged", "next"]
+        assert AuditTrail.verify(db).valid and AuditTrail.verify(db).set_aside == []
+
+        db = tmp_path / "b" / "m.db"
+        db.parent.mkdir()
+        self._crash_after_staging(db)
+        manifest = db.parent / "m.audit.manifest.json"
+        manifest.rename(db.parent / "m.audit.manifest.json.corrupt-20261008T000000000000Z")
+        with pytest.raises(audit_module._ManifestQuarantined):
+            AuditTrail(db).log("next", {})
+        assert (db.parent / "m.audit.jsonl.first").exists(), "kept while undecidable"
+        result = AuditTrail.repair_manifest(db)
+        assert result.repaired and result.staged_first_entry.startswith("set aside")
+        [kept] = [p for p in db.parent.iterdir() if ".first.discarded-" in p.name]
+        assert b'"event":"staged"' in kept.read_bytes()
+        assert [r["certainty"] for r in result.set_aside] == ["possible"]
+
+        db = tmp_path / "c" / "m.db"
+        db.parent.mkdir()
+        real = audit_module.os.replace
+
+        def refuse_the_rename(src, dst, *a, **k):
+            if str(src).endswith(".first"):
+                raise PermissionError(13, "rename refused")
+            return real(src, dst, *a, **k)
+
+        monkeypatch.setattr(audit_module.os, "replace", refuse_the_rename)
+        with pytest.raises(PermissionError):
+            AuditTrail(db).log("failed", {})
+        monkeypatch.setattr(audit_module.os, "replace", real)
+        assert not (db.parent / "m.audit.jsonl.first").exists()
+        assert [p for p in db.parent.iterdir() if ".first.discarded-" in p.name]
+        assert json.loads((db.parent / "m.audit.manifest.json").read_text())["active_begun"] is None
+        AuditTrail(db).log("retry", {})
+        events = [json.loads(line)["event"] for line in (db.parent / "m.audit.jsonl").read_text().splitlines()]
+        assert events == ["retry"]
+
+    @pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+    def test_stats_waits_out_a_peers_staged_window(self, tmp_path):
+        """KL-24 L3 r7, complement MED 1, each run first on 5de42b3: stats()
+        (no lock) read "unknown" for the instant a peer's first append of the
+        week held its staged file. It waits for the append lock now; a staged
+        file with no holder stays unknown."""
+        import threading
+
+        db = tmp_path / "m.db"
+        writer = AuditTrail(db)
+        staged, go = threading.Event(), threading.Event()
+        real = writer._record_active_begun
+
+        def paused(*a, **k):
+            real(*a, **k)
+            staged.set()
+            assert go.wait(10)
+
+        writer._record_active_begun = paused
+        t = threading.Thread(target=lambda: writer.log("first", {}))
+        t.start()
+        try:
+            assert staged.wait(10)
+            assert (tmp_path / "m.audit.jsonl.first").exists()
+            threading.Timer(0.3, go.set).start()
+            assert AuditTrail(db).stats()["entry_count"] == 1
+        finally:
+            go.set()
+            t.join()
+        # No holder, staged file left by a crash: still unknown.
+        db2 = tmp_path / "x" / "m.db"
+        db2.parent.mkdir()
+        self._crash_after_staging(db2)
+        with pytest.raises(OSError, match="staged first audit entry"):
+            AuditTrail(db2).stats()
+
+    @staticmethod
+    def _rollback_crash(db, monkeypatch, frozen=False):
+        """Inject the rollback crash: the staged file is set aside and the process
+        stops before ``active_begun`` is withdrawn. ``frozen`` pins the clock so
+        an identical retried event hashes the same."""
+        real_replace, real_aside = audit_module.os.replace, audit_module._set_aside
+
+        def refuse(src, dst, *a, **k):
+            if str(src).endswith(".first"):
+                raise PermissionError(13, "rename refused")
+            return real_replace(src, dst, *a, **k)
+
+        def aside_then_die(path, reason, *attempt):
+            kept = real_aside(path, reason, *attempt)
+            if str(path).endswith(".first"):
+                raise KeyboardInterrupt
+            return kept
+
+        Frozen = _frozen_clock()
+
+        with monkeypatch.context() as m:
+            if frozen:
+                m.setattr(audit_module, "datetime", Frozen)
+                m.setattr(audit_module, "_iso_week_now", lambda: "2026-W41")
+            m.setattr(audit_module.os, "replace", refuse)
+            m.setattr(audit_module, "_set_aside", aside_then_die)
+            with pytest.raises(KeyboardInterrupt):
+                AuditTrail(db).log("same", {})
+
+    def test_a_rollback_crash_window_is_a_possible_gap_naming_the_kept_files(
+        self, tmp_path, monkeypatch
+    ):
+        """KL-24 L3 r9 (the hash reconcile is deleted). A stop between the
+        rollback's set-aside and the withdrawal of ``active_begun`` refuses the
+        next append (ruling A); ``audit-repair`` records a POSSIBLE gap naming the
+        kept ``.first.discarded-*`` file, never a definite one; no file is renamed."""
+        db = tmp_path / "m.db"
+        self._rollback_crash(db, monkeypatch)
+        before = sorted(p.name for p in db.parent.iterdir() if ".first.discarded-" in p.name)
+        assert len(before) == 1
+        with pytest.raises(audit_module._ManifestUnavailable):
+            AuditTrail(db).log("retry", {})
+        assert not AuditTrail.verify(db).valid
+        result = AuditTrail.repair_manifest(db)
+        assert result.repaired, result.error
+        [rec] = result.set_aside
+        assert rec["certainty"] == "possible" and rec["set_aside_as"] == ""
+        assert rec["preserved_attempts"] == before
+        assert sorted(p.name for p in db.parent.iterdir() if ".first.discarded-" in p.name) == before
+        assert not [p for p in db.parent.iterdir() if "reconciled" in p.name]
+        lines = audit_module.set_aside_report_lines(AuditTrail.verify(db).set_aside, db)
+        assert lines and lines[0].startswith("POSSIBLE GAP") and before[0] in lines[0]
+        AuditTrail(db).log("after", {})
+        assert AuditTrail.verify(db).valid
+
+    @pytest.mark.parametrize("copies", [0, 1])
+    def test_a_stale_discarded_file_never_suppresses_a_real_loss(
+        self, tmp_path, monkeypatch, copies
+    ):
+        """KL-24 L3 r8 + r9, each run first on 6c50aec (r9: two matching files,
+        the append was accepted and verify read valid with no gap). Frozen clock:
+        the retried event commits the same hash the discarded file holds; the
+        active file is then deleted. The append refuses, verify reads invalid, and
+        repair records a POSSIBLE gap (begun is not withdrawn: ruling (b))."""
+        import shutil
+
+        db = tmp_path / "m.db"
+        self._rollback_crash(db, monkeypatch, frozen=True)
+        [f] = [p for p in db.parent.iterdir() if ".first.discarded-" in p.name]
+        for n in range(copies):
+            shutil.copy(f, f.with_name(f.name + f"-{n + 1}"))
+        with monkeypatch.context() as m:
+            m.setattr(audit_module, "datetime", _frozen_clock())
+            m.setattr(audit_module, "_iso_week_now", lambda: "2026-W41")
+            with pytest.raises(audit_module._ManifestUnavailable):
+                AuditTrail(db).log("same", {})  # refused: the record is still set
+            result = AuditTrail.repair_manifest(db)
+            assert result.repaired, result.error
+            [first] = result.set_aside
+            assert first["certainty"] == "possible"
+            assert len(first["preserved_attempts"]) == 1 + copies
+            AuditTrail(db).log("same", {})  # commits the same hash again
+            (db.parent / "m.audit.jsonl").unlink()
+            with pytest.raises(audit_module._ManifestUnavailable):
+                AuditTrail(db).log("after", {})
+            assert not AuditTrail.verify(db).valid
+            result = AuditTrail.repair_manifest(db)
+        assert result.repaired, result.error
+        [rec] = result.set_aside
+        assert rec["certainty"] == "possible" and len(rec["preserved_attempts"]) == 1 + copies
+        assert AuditTrail.verify(db).set_aside, "manifest still loads"
+        assert not [x for x in db.parent.iterdir() if "corrupt" in x.name]
+
+    def test_begun_not_withdrawn_is_possible_naming_every_preserved_file(
+        self, tmp_path, monkeypatch
+    ):
+        """KL-24 ruling (b), Phill 10-09. While ``active_begun`` is not withdrawn a
+        vanished active file is POSSIBLE and ``preserved_attempts`` names EVERY
+        ``.first.discarded-*`` regular file (stale, earlier-week, later-week, with
+        or without a suffix); a directory under such a name is not named. Frozen
+        clock. Run first on 5fd3cdd: DEFINITE, naming only an id-bound file."""
+        db = tmp_path / "m.db"
+        self._rollback_crash(db, monkeypatch, frozen=True)
+        [own] = [p.name for p in tmp_path.iterdir() if ".first.discarded-" in p.name]
+        extra = [
+            "m.audit.jsonl.first.discarded-20200101T000000000000Z",
+            "m.audit.jsonl.first.discarded-20261008T110000000000Z",
+            "m.audit.jsonl.first.discarded-20261020T110000000000Z-2",
+        ]
+        for n in extra:
+            (tmp_path / n).write_text("{}\n")
+        (tmp_path / "m.audit.jsonl.first.discarded-20261008T110000000000Z-9x").write_text("{}\n")
+        (tmp_path / "m.audit.jsonl.first.discarded-20261008T130000000000Z").mkdir()
+        with pytest.raises(audit_module._ManifestUnavailable):
+            AuditTrail(db).log("again", {})
+        result = AuditTrail.repair_manifest(db)
+        assert result.repaired, result.error
+        [rec] = result.set_aside
+        assert rec["certainty"] == "possible" and rec["set_aside_as"] == ""
+        assert rec["preserved_attempts"] == sorted([own, *extra])
+
+    def test_a_vanished_active_file_with_no_begun_record_records_no_possible_gap(
+        self, tmp_path
+    ):
+        """KL-24 ruling (b): outside the window (no unwithdrawn begun record) the
+        discarded files change nothing: repair finds nothing to record, so no
+        POSSIBLE gap is invented from a directory listing. (Passes on 5fd3cdd too:
+        it guards the over-reach, not the fix.)"""
+        db = tmp_path / "m.db"
+        AuditTrail(db).log("one", {})
+        mpath = tmp_path / "m.audit.manifest.json"
+        m = json.loads(mpath.read_text())
+        m["active_begun"] = None
+        mpath.write_text(json.dumps(m))
+        (tmp_path / "m.audit.jsonl").unlink()
+        (tmp_path / "m.audit.jsonl.first.discarded-20261008T110000000000Z").write_text("{}\n")
+        result = AuditTrail.repair_manifest(db)
+        assert not result.set_aside
+
+    def test_a_rebuild_names_the_attempt_it_set_aside(self, tmp_path):
+        """KL-24 L3 r7, codex MED, run first on b41635f: the rebuild's possible-gap
+        record carried no ``preserved_attempts`` for the file it had just set aside."""
+        db = tmp_path / "m.db"
+        self._crash_after_staging(db)
+        (tmp_path / "m.audit.manifest.json").rename(
+            tmp_path / "m.audit.manifest.json.corrupt-20261008T000000000000Z"
+        )
+        result = AuditTrail.repair_manifest(db)
+        assert result.repaired and result.staged_first_entry.startswith("set aside")
+        [kept] = [p.name for p in tmp_path.iterdir() if ".first.discarded-" in p.name]
+        [rec] = result.set_aside
+        assert rec["certainty"] == "possible" and rec["preserved_attempts"] == [kept]
+        assert AuditTrail.verify(db).set_aside[0]["preserved_attempts"] == [kept]
+
+
+    def test_certainty_is_validated_in_the_manifest(self, tmp_path):
+        """KL-24 L3 r7, codex LOW, each run first on 5de42b3: any ``certainty``
+        value, on any record, parsed."""
+        base = {
+            "version": 1, "files": [],
+            "set_aside": [{"filename": "m.audit.jsonl", "set_aside_as": "", "period": "2026-W41",
+                           "cause": "c", "at": "t", "certainty": "possible"}],
+        }
+        audit_module._parse_manifest_bytes(json.dumps(base).encode(), "m")
+        for bad in ({"certainty": "maybe"}, {"certainty": 1}, {"set_aside_as": "x.jsonl"}):
+            m = json.loads(json.dumps(base))
+            m["set_aside"][0].update(bad)
+            with pytest.raises(audit_module._CORRUPT_MANIFEST):
+                audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
+        for bad in ("x", ["a", 1], 5):
+            m = json.loads(json.dumps(base))
+            m["set_aside"][0]["preserved_attempts"] = bad
+            with pytest.raises(audit_module._CORRUPT_MANIFEST):
+                audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
+        m = json.loads(json.dumps(base))
+        del m["set_aside"][0]["certainty"]
+        m["set_aside"][0]["preserved_attempts"] = ["a"]
+        with pytest.raises(audit_module._CORRUPT_MANIFEST):
+            audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
+        m = json.loads(json.dumps(base))
+        m["set_aside"][0]["preserved_attempts"] = [
+            "m.audit.jsonl.first.discarded-20261008T120000000000Z",
+            "m.audit.jsonl.first.discarded-20261008T120000000000Z-2",
+        ]
+        audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
+        for bad in (
+            "m.audit.jsonl.first.discarded-x",
+            "\ud800",
+            "m.audit.jsonl.first.discarded-20261008T120000000000Z\nGAP: forged",
+            "other.audit.jsonl.first.discarded-20261008T120000000000Z",
+            "m.audit.jsonl.first.discarded-\u0662\u0660261008T120000000000Z",
+        ):
+            m["set_aside"][0]["preserved_attempts"] = [bad]
+            with pytest.raises(audit_module._CORRUPT_MANIFEST):
+                audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
+        m["set_aside"][0]["preserved_attempts"] = ["m.audit.jsonl.first.discarded-20261008T120000000000Z"]
+        # r8: only the active file's own name.
+        m = json.loads(json.dumps(base))
+        m["set_aside"][0]["filename"] = "other.audit.jsonl"
+        with pytest.raises(audit_module._CORRUPT_MANIFEST):
+            audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
+        # Two possible-gap records (two repairs of a loss in one week) are valid.
+        m = json.loads(json.dumps(base))
+        m["set_aside"].append(dict(m["set_aside"][0]))
+        audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
+
+    def test_an_oserror_deciding_a_staged_entry_is_a_manifest_refusal(
+        self, tmp_path, monkeypatch
+    ):
+        """KL-24 L3 r7, complement LOW 2, each run first on 5de42b3: a failing
+        rename in the staged-entry recovery escaped ``log()`` as a bare OSError."""
+        db = tmp_path / "m.db"
+        self._crash_after_staging(db)
+        real = audit_module.os.replace
+
+        def eio(src, dst, *a, **k):
+            if str(src).endswith(".first"):
+                raise OSError(5, "I/O error")
+            return real(src, dst, *a, **k)
+
+        monkeypatch.setattr(audit_module.os, "replace", eio)
+        with pytest.raises(audit_module._ManifestUnavailable):
+            AuditTrail(db).log("next", {})
+
+    def test_a_staged_entry_finished_in_a_later_week_is_sealed_under_its_own(
+        self, tmp_path, monkeypatch
+    ):
+        """KL-24 L3 r7, complement LOW 5, run on 5de42b3: NOT a defect. A staged
+        entry finished after the week flipped is renamed in and then sealed by the
+        rotation under its own week; the chain stays valid with both entries.
+        Pinned so a period check is not added without a failing case."""
+        db = tmp_path / "m.db"
+        self._crash_after_staging(db)
+        week = audit_module._iso_week_now()
+        monkeypatch.setattr(
+            audit_module, "_iso_week_now", lambda: f"{int(week[:4]) + 1}-W01"
+        )
+        AuditTrail(db).log("next", {})
+        assert [p.name for p in db.parent.iterdir() if p.name.endswith(f"{week}.jsonl.gz")]
+        result = AuditTrail.verify(db)
+        assert result.valid and result.total_entries == 2
+
+    @pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+    def test_every_append_preflights_the_lock_and_stages_portably(self, tmp_path, monkeypatch):
+        """KL-24 L3 r6, each run first on d3c408a. codex 3: an initialized
+        same-week writer appended with the manifest lock unopenable, never
+        taking the lock. codex 4: without ``os.O_NOFOLLOW`` (Windows) every
+        first-entry append raised ``AttributeError``. codex 7: a short
+        ``os.write`` renamed half an entry in and reported success."""
+        db = tmp_path / "a" / "m.db"
+        db.parent.mkdir()
+        trail = AuditTrail(db)
+        trail.log("a", {})
+        lock = db.parent / "m.audit-manifest.lock"
+        lock.unlink()
+        lock.mkdir()
+        with pytest.raises(audit_module._ManifestUnavailable, match="lock cannot be taken"):
+            trail.log("b", {})
+        lock.rmdir()
+        trail.log("c", {})
+        assert AuditTrail.verify(db).total_entries == 2
+
+        db = tmp_path / "b" / "m.db"
+        db.parent.mkdir()
+        monkeypatch.delattr(audit_module.os, "O_NOFOLLOW")
+        monkeypatch.setattr(audit_module, "fcntl", None)
+        AuditTrail(db).log("windows", {})
+        monkeypatch.undo()
+        assert AuditTrail.verify(db).total_entries == 1
+
+        db = tmp_path / "c" / "m.db"
+        db.parent.mkdir()
+        real_write = audit_module.os.write
+        monkeypatch.setattr(
+            audit_module.os, "write",
+            lambda fd, data: real_write(fd, data[: max(1, len(data) // 2)]),
+        )
+        AuditTrail(db).log("short", {"pad": "x" * 300})
+        assert AuditTrail.verify(db).valid
+        monkeypatch.setattr(audit_module.os, "write", lambda fd, data: 0)
+        db = tmp_path / "d" / "m.db"
+        db.parent.mkdir()
+        with pytest.raises(OSError, match="no progress"):
+            AuditTrail(db).log("stuck", {})
+        monkeypatch.undo()
+        assert not (db.parent / "m.audit.jsonl").exists()
+
+    def test_stats_and_repair_refuse_what_they_cannot_rule_out(self, tmp_path):
+        """KL-24 L3 r6, each run first on d3c408a. codex 6: ``stats()`` read an
+        active file with entries beside a quarantine marker as a normal count,
+        and a staged entry beside a manifest with no record as a healthy 0.
+        codex 9: with the manifested sealed week the record names replaced by a
+        directory, repair recorded a permanent gap instead of refusing."""
+        db = tmp_path / "a" / "m.db"
+        db.parent.mkdir()
+        trail = AuditTrail(db)
+        trail.log("a", {})
+        manifest = db.parent / "m.audit.manifest.json"
+        marker = db.parent / "m.audit.manifest.json.corrupt-20261008T000000000000Z"
+        manifest.rename(marker)
+        with pytest.raises(OSError, match="quarantined"):
+            AuditTrail(db).stats()
+        marker.rename(manifest)
+        (db.parent / "m.audit.jsonl.first").write_text("{}\n")
+        with pytest.raises(OSError, match="staged first audit entry"):
+            AuditTrail(db).stats()
+
+        db = tmp_path / "b" / "m.db"
+        db.parent.mkdir()
+        trail = AuditTrail(db)
+        trail.log("pre", {})
+        trail._last_week = "1999-W01"
+        trail.log("rot", {})
+        manifest = db.parent / "m.audit.manifest.json"
+        m = json.loads(manifest.read_text())
+        sealed = m["files"][-1]
+        m["active_begun"] = {"period": sealed["period"], "first_hash": "f" * 64,
+                             "first_prev_hash": GENESIS_HASH}
+        manifest.write_text(json.dumps(m))
+        (db.parent / "m.audit.jsonl").unlink()
+        path = db.parent / sealed["filename"]
+        path.unlink()
+        path.mkdir()
+        before = manifest.read_bytes()
+        result = AuditTrail.repair_manifest(db)
+        assert result.repaired is False and "not a regular file" in (result.error or "")
+        assert manifest.read_bytes() == before
+
+    def test_stats_from_inside_this_threads_append_answers_from_the_cache(
+        self, tmp_path, monkeypatch
+    ):
+        trail = AuditTrail(tmp_path / "m.db")
+        trail.log("ev", {})
+        seen: list[int] = []
+        real = AuditTrail._log_locked
+
+        def with_nested_stats(self, *args):
+            seen.append(self.stats()["entry_count"])
+            return real(self, *args)
+
+        monkeypatch.setattr(AuditTrail, "_log_locked", with_nested_stats)
+        trail.log("ev", {})
+        assert seen == [1]
+
+    @pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+    def test_a_lock_path_that_cannot_be_opened_refuses_and_counts(self, tmp_path):
+        """The append is refused, not appended unserialized; the store counts
+        the drop and the episode stays committed."""
+        from anneal_memory.store import Store
+        from anneal_memory.types import EpisodeType
+
+        (tmp_path / "m.audit-append.lock").mkdir()
+        store = Store(tmp_path / "m.db")
+        try:
+            with pytest.warns(UserWarning, match="could not be written"):
+                store.record("an episode", EpisodeType.OBSERVATION)
+            assert store.status().audit_write_failures == 1
+            assert len(store.recall(limit=10).episodes) == 1
+        finally:
+            store.close()
+
+
+def _hold_append_lock(lock_path, held, release):
+    """A subprocess that holds ``lock_path`` with ``flock`` until ``release``."""
+    import subprocess
+
+    return subprocess.Popen([
+        sys.executable, "-c",
+        "import fcntl, os, time; from pathlib import Path\n"
+        f"fd = os.open({str(lock_path)!r}, os.O_RDWR | os.O_CREAT, 0o644)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+        f"Path({str(held) + '.tmp'!r}).write_text('x')\n"
+        f"Path({str(held) + '.tmp'!r}).replace({str(held)!r})\n"
+        f"while not Path({str(release)!r}).exists(): time.sleep(0.01)\n",
+    ])
+
+
+@pytest.mark.skipif(audit_module.fcntl is None, reason="needs fcntl")
+class TestKL24AppendLockHolders:
+    """The append lock against a holder that does not let go (L1 + L2 r1)."""
+
+    def _held(self, tmp_path):
+        held, release = tmp_path / "held", tmp_path / "release"
+        child = _hold_append_lock(tmp_path / "m.audit-append.lock", held, release)
+        deadline = datetime.now() + timedelta(seconds=20)
+        while not held.exists():
+            assert datetime.now() < deadline, "the holder never took the lock"
+        return child, release
+
+    def test_a_stopped_holder_times_out_into_a_counted_drop(self, tmp_path, monkeypatch):
+        from anneal_memory.store import Store
+        from anneal_memory.types import EpisodeType
+
+        monkeypatch.setattr(audit_module, "_APPEND_LOCK_TIMEOUT_SECONDS", 0.3)
+        store = Store(tmp_path / "m.db")
+        store.record("first", EpisodeType.OBSERVATION)
+        child, release = self._held(tmp_path)
+        try:
+            start = datetime.now()
+            with pytest.warns(UserWarning, match="timed out"):
+                store.record("second", EpisodeType.OBSERVATION)
+            waited = (datetime.now() - start).total_seconds()
+        finally:
+            release.write_text("x")
+            child.wait(timeout=20)
+        try:
+            assert 0.25 <= waited < 5, waited
+            assert store.status().audit_write_failures == 1
+            store.record("third", EpisodeType.OBSERVATION)
+        finally:
+            store.close()
+        assert AuditTrail.verify(tmp_path / "m.db").valid
+
+    def test_stats_does_not_wait_for_the_append_lock(self, tmp_path):
+        trail = AuditTrail(tmp_path / "m.db")
+        trail.log("ev", {})
+        child, release = self._held(tmp_path)
+        try:
+            start = datetime.now()
+            assert trail.stats()["entry_count"] == 1
+            took = (datetime.now() - start).total_seconds()
+        finally:
+            release.write_text("x")
+            child.wait(timeout=20)
+        assert took < 1.0, took
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
+    def test_a_child_forked_while_the_lock_is_held_does_not_keep_it(
+        self, tmp_path, monkeypatch
+    ):
+        """L2 r1 (run): ``flock`` belongs to the open file description, so a
+        close alone left the lock with the forked child for its lifetime.
+        ⛔ MUTATION-CHECKED: drop the ``LOCK_UN`` and the second writer waits."""
+        import subprocess
+        import time
+
+        db = tmp_path / "m.db"
+        trail = AuditTrail(db)
+        trail.log("warm", {})
+        real_fsync = os.fsync
+        children: list[int] = []
+
+        def forking_fsync(fd):
+            if not children:
+                pid = os.fork()
+                if pid == 0:  # pragma: no cover - the child only sleeps
+                    time.sleep(4)
+                    os._exit(0)
+                children.append(pid)
+            return real_fsync(fd)
+
+        monkeypatch.setattr(audit_module.os, "fsync", forking_fsync)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)  # fork with threads
+            trail.log("x", {})
+        monkeypatch.setattr(audit_module.os, "fsync", real_fsync)
+        try:
+            start = time.monotonic()
+            subprocess.run([
+                sys.executable, "-c",
+                "from anneal_memory.audit import AuditTrail\n"
+                f"AuditTrail({str(db)!r}).log('y', {{}})\n",
+            ], cwd=str(Path(audit_module.__file__).parent.parent), check=True, timeout=30)
+            took = time.monotonic() - start
+        finally:
+            os.waitpid(children[0], 0)
+        assert took < 3.0, f"the second writer waited {took:.2f}s on the child's copy"
+        assert AuditTrail.verify(db).valid
+
+    def test_writer_processes_across_a_week_rotation_keep_one_chain(self, tmp_path):
+        """The cross-process rotation run, pinned (L1 r1: it was a hand run).
+        Each process's whole clock jumps a week when FLAG exists, so entry
+        timestamps and the week agree, as outside a test."""
+        import subprocess
+        import time
+
+        db, go, flag = tmp_path / "m.db", tmp_path / "go", tmp_path / "FLAG"
+        n_proc, n_each = 3, 100
+        script = (
+            "import os, sys, time\n"
+            "from datetime import datetime as _dt, timedelta\n"
+            "from pathlib import Path\n"
+            "import anneal_memory.audit as A\n"
+            "class C(_dt):\n"
+            "    @classmethod\n"
+            "    def now(cls, tz=None):\n"
+            "        n = _dt.now(tz)\n"
+            f"        return n + timedelta(days=7) if os.path.exists({str(flag)!r}) else n\n"
+            "A.datetime = C\n"
+            f"t = A.AuditTrail({str(db)!r})\n"
+            f"while not Path({str(go)!r}).exists(): time.sleep(0.005)\n"
+            "refused = 0\n"
+            f"for i in range({n_each}):\n"
+            "    try:\n"
+            "        t.log('ev', {'w': sys.argv[1], 'i': i})\n"
+            "    except A._ManifestUnavailable as e:\n"
+            "        assert 'is gone' in str(e), e\n"
+            "        refused += 1\n"
+            "    time.sleep(0.003)\n"
+            f"Path({str(tmp_path)!r}, 'refused-' + sys.argv[1]).write_text(str(refused))\n"
+        )
+        cwd = str(Path(audit_module.__file__).parent.parent)
+        procs = [subprocess.Popen([sys.executable, "-c", script, str(w)], cwd=cwd)
+                 for w in range(n_proc)]
+        go.write_text("x")
+        time.sleep(0.25)
+        flag.write_text("x")
+        for p in procs:
+            assert p.wait(timeout=120) == 0
+        # Ruled 10-08 (option (b)): a peer whose tip sat in the sealed file is
+        # refused once, loudly, and never followed silently. One rotation, so
+        # at most one refusal per process other than the one that rotated.
+        refused = sum(int((tmp_path / f"refused-{w}").read_text()) for w in range(n_proc))
+        assert refused <= n_proc - 1
+        result = AuditTrail.verify(db)
+        assert result.valid, result.error
+        assert result.total_entries == n_proc * n_each - refused
+        sealed = list(tmp_path.glob("m.audit.*.jsonl.gz"))
+        active = (tmp_path / "m.audit.jsonl").read_text().splitlines()
+        # Both sides hold entries, so the rotation happened mid-run.
+        assert len(sealed) == 1 and active
+        assert len(active) < n_proc * n_each

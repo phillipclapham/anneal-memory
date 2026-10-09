@@ -1407,32 +1407,49 @@ def cmd_audit_repair(args: argparse.Namespace) -> None:
             "chain_anchor_recovered": result.chain_anchor_recovered,
             "untracked": result.untracked,
             "set_aside": result.set_aside,
+            "staged_first_entry": result.staged_first_entry,
             "error": result.error,
         })
-    elif result.repaired and result.set_aside and not result.files:
+    elif result.repaired:
+        if result.staged_first_entry:
+            print(f"Staged first audit entry {result.staged_first_entry}")
+        if result.files or not (result.set_aside or result.staged_first_entry):
+            print(f"Audit manifest rebuilt from {len(result.files)} sealed file(s)")
+            if result.chain_anchor_recovered:
+                print(
+                    "  Chain anchor RECOVERED from the first sealed file: verify reports "
+                    "anchor_trusted=False, and entries before it cannot be verified"
+                )
+            if result.untracked:
+                print(f"  Left on disk, not in the manifest: {', '.join(result.untracked)}")
+        # Every returned record is printed, whatever else repair did (KL-24 L3
+        # r6, codex 10, run: a rebuild with sealed files printed none, and with
+        # none a possible gap read as definitely lost entries).
         for record in result.set_aside:
-            if record["set_aside_as"] == "":
+            if record.get("certainty") == "possible":
+                print(
+                    f"Recorded a POSSIBLE gap for the active audit file {record['filename']} "
+                    f"({record['period']}): it holds no entry, and whether it held entries "
+                    "before cannot be known. Writes continue, and verify reports it."
+                    + (
+                        " Set-aside staged entries to inspect (kept, never deleted): "
+                        + ", ".join(record["preserved_attempts"])
+                        if record.get("preserved_attempts") else ""
+                    )
+                )
+            elif record["set_aside_as"] == "":
                 print(
                     f"Recorded the missing active audit file {record['filename']} "
                     f"({record['period']}) as a gap ({record['cause']}); its entries are "
                     "lost. Writes continue past this gap, and verify reports it."
                 )
-                continue
-            print(
-                f"Set aside sealed file {record['filename']} as "
-                f"{record['set_aside_as']} ({record['cause']}); kept on disk and "
-                "recorded in the manifest. Writes continue past this gap, and "
-                "verify reports it. It can be renamed back only before the next write."
-            )
-    elif result.repaired:
-        print(f"Audit manifest rebuilt from {len(result.files)} sealed file(s)")
-        if result.chain_anchor_recovered:
-            print(
-                "  Chain anchor RECOVERED from the first sealed file: verify reports "
-                "anchor_trusted=False, and entries before it cannot be verified"
-            )
-        if result.untracked:
-            print(f"  Left on disk, not in the manifest: {', '.join(result.untracked)}")
+            else:
+                print(
+                    f"Set aside sealed file {record['filename']} as "
+                    f"{record['set_aside_as']} ({record['cause']}); kept on disk and "
+                    "recorded in the manifest. Writes continue past this gap, and "
+                    "verify reports it. It can be renamed back only before the next write."
+                )
     else:
         print(f"Audit repair refused: {result.error}", file=sys.stderr)
 

@@ -7516,6 +7516,9 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         assert result.total_entries == 5 + 4  # sealed, then rot/later/again/still
 
     @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root lists a mode-300 directory")
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="chmod 0o300 does not make a directory unlistable on Windows"
+    )
     def test_a_directory_that_cannot_be_listed_refuses_writes(self, tmp_path):
         """Round 10 (L1) made writes in a writable but unlistable directory
         (mode 0o300) go through, because recovery's listing raised and every
@@ -9572,13 +9575,17 @@ class TestKL24ConcurrentWriters:
         assert result.valid, result.error
         assert result.total_entries == n_proc * n_each
 
-    def test_a_reused_inode_with_other_bytes_is_rederived_not_read_on(
+    def test_a_reused_inode_with_other_bytes_is_refused_once_not_read_on(
         self, tmp_path, monkeypatch
     ):
         """L2 r1 (run with a simulated inode): a rotation frees the inode and
         the new active file can get the same number (ext4, xfs). Simulated by
-        handing the cached tip the new file's real inode. ⛔ MUTATION-CHECKED:
-        skip the tip's hash check and this reads valid=False."""
+        handing the cached tip the new file's real inode, so this runs on
+        every platform. KL-24 CI (run 37968093093, Linux): the file is a
+        replaced one, so ruling (b) refuses the next append once, as
+        ``test_a_peer_rotation_is_refused_once_then_followed_not_resealed``
+        does without the simulation; it had re-derived quietly. Skip the
+        tip's hash check and this reads valid=False."""
         db = tmp_path / "m.db"
         a, b = AuditTrail(db), AuditTrail(db)
         for i in range(3):
@@ -9593,9 +9600,11 @@ class TestKL24ConcurrentWriters:
         monkeypatch.setattr(audit_module, "datetime", _NextWeek)
         b.log("ev", {"pad": "y" * 900})  # rotates; the new file outgrows a's tip
         st = os.stat(tmp_path / "m.audit.jsonl")
-        _, _, at, length = a._tip
+        _, _, at, length, tip_hash = a._tip
         assert st.st_size > at + length
-        a._tip = (st.st_dev, st.st_ino, at, length)
+        a._tip = (st.st_dev, st.st_ino, at, length, tip_hash)
+        with pytest.raises(audit_module._ManifestUnavailable, match="replaced"):
+            a.log("ev", {"a": "refused"})
         a.log("ev", {"a": "after"})
         result = AuditTrail.verify(db)
         assert result.valid, result.error

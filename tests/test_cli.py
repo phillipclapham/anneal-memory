@@ -4627,7 +4627,7 @@ def test_audit_repair_names_a_missing_active_file_as_lost_not_moved(tmp_path):
         capture_output=True, text=True,
     )
     assert out.returncode == 0, out.stderr
-    assert "Recorded the missing active audit file m.audit.jsonl" in out.stdout
+    assert "Recorded a POSSIBLE gap for the active audit file m.audit.jsonl" in out.stdout
     assert "Set aside sealed file" not in out.stdout
 
     # KL-24 L3 r6 (codex 10, run on d3c408a): a rebuild from quarantine with
@@ -4668,8 +4668,7 @@ def test_possible_gap_names_the_preserved_attempt_files_on_every_surface(tmp_pat
     db = tmp_path / "m.db"
     AuditTrail(db).log("first", {})
     (tmp_path / "m.audit.jsonl").unlink()
-    attempt = json.loads((tmp_path / "m.audit.manifest.json").read_text())["active_begun"]["attempt"]
-    kept = f"m.audit.jsonl.first.discarded-20261008T120000000000Z-{attempt}"
+    kept = "m.audit.jsonl.first.discarded-20261008T120000000000Z"
     (tmp_path / kept).write_text('{"event": "attempt"}\n')
     cli = [sys.executable, "-m", "anneal_memory.cli", "--db", str(db)]
     out = subprocess.run(cli + ["audit-repair"], capture_output=True, text=True)

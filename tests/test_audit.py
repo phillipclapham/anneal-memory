@@ -9302,7 +9302,7 @@ class TestADeletedActiveFileIsNotASilentLoss:
         after = AuditTrail.verify(db)
         assert after.valid is True and after.total_entries == 1, after.error
         [line] = set_aside_report_lines(after.set_aside, db)
-        assert line.startswith("GAP: the active audit file m.audit.jsonl")
+        assert line.startswith("POSSIBLE GAP: the active audit file m.audit.jsonl")
 
     def test_a_second_deletion_in_the_same_week_is_refused_again(self, tmp_path):
         db = self._deleted(tmp_path)
@@ -9881,8 +9881,8 @@ class TestKL24ConcurrentWriters:
                 raise PermissionError(13, "rename refused")
             return real_replace(src, dst, *a, **k)
 
-        def aside_then_die(path, reason, attempt=None):
-            kept = real_aside(path, reason, attempt)
+        def aside_then_die(path, reason, *attempt):
+            kept = real_aside(path, reason, *attempt)
             if str(path).endswith(".first"):
                 raise KeyboardInterrupt
             return kept
@@ -9932,8 +9932,7 @@ class TestKL24ConcurrentWriters:
         the append was accepted and verify read valid with no gap). Frozen clock:
         the retried event commits the same hash the discarded file holds; the
         active file is then deleted. The append refuses, verify reads invalid, and
-        repair records a DEFINITE gap: the kept files belong to an earlier attempt
-        id, not to the begun record of the file that vanished (KL-24 L3 r9)."""
+        repair records a POSSIBLE gap (begun is not withdrawn: ruling (b))."""
         import shutil
 
         db = tmp_path / "m.db"
@@ -9959,78 +9958,55 @@ class TestKL24ConcurrentWriters:
             result = AuditTrail.repair_manifest(db)
         assert result.repaired, result.error
         [rec] = result.set_aside
-        assert "certainty" not in rec and "preserved_attempts" not in rec
+        assert rec["certainty"] == "possible" and len(rec["preserved_attempts"]) == 1 + copies
         assert AuditTrail.verify(db).set_aside, "manifest still loads"
         assert not [x for x in db.parent.iterdir() if "corrupt" in x.name]
 
-    def test_only_attempts_from_the_losses_week_on_regular_files_downgrade_a_loss(
-        self, tmp_path
+    def test_begun_not_withdrawn_is_possible_naming_every_preserved_file(
+        self, tmp_path, monkeypatch
     ):
-        """KL-24 L3 r7 (complement MED 1, codex LOW), each run first on b41635f: a
-        stale ``.first.discarded-*`` file from an earlier week, and a directory
-        carrying a reserved name, turned a definite loss into a possible one."""
-        db = tmp_path / "m.db"
-        AuditTrail(db).log("one", {})
-        (tmp_path / "m.audit.jsonl.first.discarded-20200101T000000000000Z").write_text("{}\n")
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        (tmp_path / f"m.audit.jsonl.first.discarded-{stamp}").mkdir()
-        (tmp_path / "m.audit.jsonl").unlink()
-        with pytest.raises(audit_module._ManifestUnavailable):
-            AuditTrail(db).log("two", {})
-        result = AuditTrail.repair_manifest(db)
-        assert result.repaired, result.error
-        [rec] = result.set_aside
-        assert "certainty" not in rec and "preserved_attempts" not in rec
-
-    def test_a_rollback_crash_names_only_its_own_attempt_id(self, tmp_path, monkeypatch):
-        """KL-24 L3 r9 (codex MED 1+2, complement LOW 1), run first on 8ffcbb4: the
-        ruled exception is POSSIBLE when an attempt of THIS begun record is kept
-        (8ffcbb4 read it definite). A file carrying an earlier attempt id and one
-        stamped in a later week are not its attempts and are not named. Frozen
-        clock (week 41)."""
+        """KL-24 ruling (b), Phill 10-09. While ``active_begun`` is not withdrawn a
+        vanished active file is POSSIBLE and ``preserved_attempts`` names EVERY
+        ``.first.discarded-*`` regular file (stale, earlier-week, later-week, with
+        or without a suffix); a directory under such a name is not named. Frozen
+        clock. Run first on 5fd3cdd: DEFINITE, naming only an id-bound file."""
         db = tmp_path / "m.db"
         self._rollback_crash(db, monkeypatch, frozen=True)
         [own] = [p.name for p in tmp_path.iterdir() if ".first.discarded-" in p.name]
-        begun = json.loads((tmp_path / "m.audit.manifest.json").read_text())["active_begun"]
-        assert own.endswith(f"-{begun['attempt']}")
-        other = "0123456789abcdef"
-        stale = f"m.audit.jsonl.first.discarded-20261008T110000000000Z-{other}"
-        later = f"m.audit.jsonl.first.discarded-20261020T110000000000Z-{other}"
-        legacy = "m.audit.jsonl.first.discarded-20261008T110000000000Z"
-        for n in (stale, later, legacy):
+        extra = [
+            "m.audit.jsonl.first.discarded-20200101T000000000000Z",
+            "m.audit.jsonl.first.discarded-20261008T110000000000Z",
+            "m.audit.jsonl.first.discarded-20261020T110000000000Z-2",
+        ]
+        for n in extra:
             (tmp_path / n).write_text("{}\n")
+        (tmp_path / "m.audit.jsonl.first.discarded-20261008T110000000000Z-9x").write_text("{}\n")
+        (tmp_path / "m.audit.jsonl.first.discarded-20261008T130000000000Z").mkdir()
         with pytest.raises(audit_module._ManifestUnavailable):
             AuditTrail(db).log("again", {})
         result = AuditTrail.repair_manifest(db)
         assert result.repaired, result.error
         [rec] = result.set_aside
         assert rec["certainty"] == "possible" and rec["set_aside_as"] == ""
-        assert rec["preserved_attempts"] == [own]
-        [line] = audit_module.set_aside_report_lines([rec], db)
-        assert line.startswith("POSSIBLE GAP") and own in line and stale not in line
+        assert rec["preserved_attempts"] == sorted([own, *extra])
 
-    def test_a_vanished_active_file_without_its_attempt_is_definite(self, tmp_path, monkeypatch):
-        """KL-24 L3 r9, run first on 8ffcbb4: unrelated set-aside files stamped in
-        the same week (a legacy-grammar name, and one carrying another attempt id)
-        were named as the loss's pointers. A record whose attempt has no preserved
-        file is a DEFINITE gap whatever else is on disk. Frozen clock."""
+    def test_a_vanished_active_file_with_no_begun_record_records_no_possible_gap(
+        self, tmp_path
+    ):
+        """KL-24 ruling (b): outside the window (no unwithdrawn begun record) the
+        discarded files change nothing: repair finds nothing to record, so no
+        POSSIBLE gap is invented from a directory listing. (Passes on 5fd3cdd too:
+        it guards the over-reach, not the fix.)"""
         db = tmp_path / "m.db"
-        with monkeypatch.context() as m:
-            m.setattr(audit_module, "datetime", _frozen_clock())
-            m.setattr(audit_module, "_iso_week_now", lambda: "2026-W41")
-            AuditTrail(db).log("one", {})
-            for n in ("m.audit.jsonl.first.discarded-20261008T110000000000Z",
-                      "m.audit.jsonl.first.discarded-20261008T110000000000Z-0123456789abcdef"):
-                (tmp_path / n).write_text("{}\n")
-            (tmp_path / "m.audit.jsonl").unlink()
-            with pytest.raises(audit_module._ManifestUnavailable):
-                AuditTrail(db).log("two", {})
-            result = AuditTrail.repair_manifest(db)
-        assert result.repaired, result.error
-        [rec] = result.set_aside
-        assert "certainty" not in rec and "preserved_attempts" not in rec
-        [line] = audit_module.set_aside_report_lines([rec], db)
-        assert line.startswith("GAP:")
+        AuditTrail(db).log("one", {})
+        mpath = tmp_path / "m.audit.manifest.json"
+        m = json.loads(mpath.read_text())
+        m["active_begun"] = None
+        mpath.write_text(json.dumps(m))
+        (tmp_path / "m.audit.jsonl").unlink()
+        (tmp_path / "m.audit.jsonl.first.discarded-20261008T110000000000Z").write_text("{}\n")
+        result = AuditTrail.repair_manifest(db)
+        assert not result.set_aside
 
     def test_a_rebuild_names_the_attempt_it_set_aside(self, tmp_path):
         """KL-24 L3 r7, codex MED, run first on b41635f: the rebuild's possible-gap

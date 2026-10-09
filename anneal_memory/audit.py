@@ -326,12 +326,10 @@ _POSSIBLE = "possible"
 
 def _discarded_name_pattern(stem: str) -> "re.Pattern[str]":
     """The exact ASCII name of a set-aside staged entry of ``stem``'s trail:
-    ``<stem>.audit.jsonl.first.discarded-<UTC stamp>-<attempt>[-n]`` (group 1 the
-    stamp, group 2 the 16-hex attempt id), or the LEGACY grammar an older build
-    wrote, ``...discarded-<UTC stamp>[-n]`` (group 2 None)."""
+    ``<stem>.audit.jsonl.first.discarded-<UTC stamp>[-n]``; group 1 is the stamp."""
     return re.compile(
         re.escape(f"{stem}.audit.jsonl.first.{_DISCARDED_REASON}-")
-        + r"([0-9]{8}T[0-9]{12}Z)(?:-([0-9a-f]{16}))?(?:-[1-9][0-9]*)?",
+        + r"([0-9]{8}T[0-9]{12}Z)(?:-[1-9][0-9]*)?",
         re.ASCII,
     )
 
@@ -353,9 +351,6 @@ def _discarded_name_ok(stem: str, name: str) -> bool:
     return match is not None and _canonical_stamp(match[1])
 
 
-_ATTEMPT_RE = re.compile(r"[0-9a-f]{16}", re.ASCII)
-
-
 _NOTHING_TO_REPAIR = "The manifest is valid; there is nothing to repair."
 # The manifest's ``active_begun`` record: the week of the active file's first
 # entry, that entry's hash, and the ``prev_hash`` it chained from, saved once per
@@ -363,8 +358,6 @@ _NOTHING_TO_REPAIR = "The manifest is valid; there is nothing to repair."
 # ``files`` and by an adoption of the orphan that starts from that ``prev_hash``
 # (a rotation that crashed before its manifest save).
 _ACTIVE_BEGUN_KEYS = ("period", "first_hash", "first_prev_hash")
-# Optional beside them: ``attempt``, the 16-hex id the staged first entry's
-# set-aside name carries; absent on a record an older build wrote.
 
 
 def _parse_manifest_bytes(raw: bytes, stem: str) -> dict[str, Any]:
@@ -501,10 +494,6 @@ def _parse_manifest_bytes(raw: bytes, stem: str) -> dict[str, Any]:
     if begun is not None and not (
         isinstance(begun, dict)
         and all(isinstance(begun.get(k), str) for k in _ACTIVE_BEGUN_KEYS)
-        and ("attempt" not in begun or (
-            isinstance(begun["attempt"], str)
-            and _ATTEMPT_RE.fullmatch(begun["attempt"]) is not None
-        ))
     ):
         raise TypeError("manifest field 'active_begun' is not an active-file record")
     manifest["files"] = files
@@ -1053,9 +1042,8 @@ class AuditTrail:
         # The temp is what recovery finishes (:meth:`_finish_first_entry`); the
         # same order as LevelDB publishing a new MANIFEST through CURRENT.
         first_tmp: Path | None = None
-        attempt: str | None = None
         if not had_entry:
-            first_tmp, attempt = self._stage_first_entry(
+            first_tmp = self._stage_first_entry(
                 active, payload, new_prev_hash, saved_chain_state[0]
             )
         try:
@@ -1365,7 +1353,7 @@ class AuditTrail:
                     # The record names an entry that is not on disk. A staged
                     # temp that was not renamed in is set aside, never deleted.
                     if not_renamed and first_tmp is not None:
-                        _set_aside(first_tmp, _DISCARDED_REASON, attempt)
+                        _set_aside(first_tmp, _DISCARDED_REASON)
                     self._withdraw_active_begun(new_prev_hash)
             else:
                 # Disk is the authority now — see the block above.
@@ -2094,12 +2082,7 @@ class AuditTrail:
         if current is not None:
             result = cls._set_aside_unreadable_locked(trail, current, set_aside_unreadable)
         else:
-            # The file this very call set aside is bound by the act, not by a listing.
-            just_kept = (staged or "").partition(" and is kept as ")[2]
-            result = cls._rebuild_locked(
-                trail, markers, nothing,
-                [just_kept] if _discarded_name_ok(trail._db_path.stem, just_kept) else [],
-            )
+            result = cls._rebuild_locked(trail, markers, nothing)
         if staged is None:
             return result
         if not result.repaired and result.error == _NOTHING_TO_REPAIR:
@@ -2113,8 +2096,7 @@ class AuditTrail:
 
     @classmethod
     def _rebuild_locked(
-        cls, trail: "AuditTrail", markers: list[str], nothing: str,
-        just_set_aside: list[str] | None = None,
+        cls, trail: "AuditTrail", markers: list[str], nothing: str
     ) -> AuditRepairResult:
         """:meth:`_repair_locked`'s rebuild of a quarantined or missing manifest
         from the sealed files on disk; the caller holds both locks."""
@@ -2241,10 +2223,16 @@ class AuditTrail:
         if not active_holds_entry:
             period = _iso_week_now()
             # The begun record is in the quarantined manifest and is not readable
-            # here, so no attempt id binds a file to this gap. The only file named
-            # is the one this repair call set aside itself (``just_set_aside``),
-            # never a directory listing (KL-24 L3 r7-r9).
-            preserved = list(just_set_aside or [])
+            # here: POSSIBLE, naming EVERY preserved attempt file of this trail
+            # (the ruled KL-24 exception; the names come from the grammar-checked,
+            # lstat'd directory selection, never from a status string).
+            try:
+                preserved = trail._preserved_attempt_names()
+            except OSError as e:
+                return AuditRepairResult(
+                    repaired=False,
+                    error=f"Cannot list the audit directory: {e}; {nothing}",
+                )
             possible_gap = [{
                 "filename": trail._active_path.name,
                 "set_aside_as": "",
@@ -2504,14 +2492,14 @@ class AuditTrail:
                     error=f"Cannot inspect the active audit file: {e}; nothing was written.",
                 )
             if not active_entry:
-                # ``set_aside_as`` "" marks it: there is no file to move. The files
-                # preserved are those whose name carries THIS begun record's
-                # attempt id: one is the ruled KL-24 exception (anneal cannot tell
-                # whether that entry committed: POSSIBLE, a person inspects it);
-                # none is a definite loss. No time window or directory-wide rule
-                # decides it (KL-24 L3 r7-r9: each drew a finding).
+                # ``set_aside_as`` "" marks it: there is no file to move. While the
+                # begun record is not withdrawn, anneal cannot tell from disk
+                # whether the first entry committed (Phill 10-09, ruling (b) on
+                # the 10-08 exception): ALWAYS POSSIBLE, naming EVERY preserved
+                # ``.first.discarded-*`` file (none is still POSSIBLE). A person
+                # inspects them.
                 try:
-                    preserved = trail._preserved_attempt_names(begun)
+                    preserved = trail._preserved_attempt_names()
                 except OSError as e:
                     return AuditRepairResult(
                         repaired=False,
@@ -2523,19 +2511,15 @@ class AuditTrail:
                     "period": begun["period"],
                     "cause": (
                         "the active file was deleted or emptied after its first entry "
-                        f"(hash {begun['first_hash']}) was recorded"
+                        f"(hash {begun['first_hash']}) was recorded; whether that entry "
+                        "committed cannot be told from disk, so this is a possible "
+                        "gap: inspect any preserved attempt files"
                     ),
                     "at": stamp,
+                    "certainty": _POSSIBLE,
                 }
                 if preserved:
-                    vanished["certainty"] = _POSSIBLE
                     vanished["preserved_attempts"] = preserved
-                    vanished["cause"] = (
-                        "the active file was deleted or emptied after its first entry "
-                        f"(hash {begun['first_hash']}) was recorded; an attempt at "
-                        "that entry was set aside and kept, so this may not be a "
-                        "loss: inspect the preserved attempt files"
-                    )
         if not new and vanished is None and not stale_cleared:
             return AuditRepairResult(repaired=False, error=_NOTHING_TO_REPAIR)
         taken = [r["set_aside_as"] for r in new if os.path.lexists(audit_dir / r["set_aside_as"])]
@@ -3187,8 +3171,6 @@ class AuditTrail:
                 "period": self._last_week,
                 "first_hash": first_hash,
                 "first_prev_hash": prev if isinstance(prev, str) else "",
-                # No staged file bears it: a later loss of this file is definite.
-                "attempt": secrets.token_hex(8),
             }
             self._save_manifest(manifest)
         except Exception:
@@ -3242,7 +3224,7 @@ class AuditTrail:
 
     def _stage_first_entry(
         self, active: Path, payload: str, first_hash: str, first_prev_hash: str
-    ) -> tuple[Path, str]:
+    ) -> Path:
         """Write the active file's current bytes (none, or a torn fragment kept
         as evidence) plus ``payload`` to the staging temp, fsynced, then save
         its record (:meth:`_record_active_begun`). Any failure sets the temp
@@ -3258,10 +3240,6 @@ class AuditTrail:
         than asked without raising (codex 7, run: half an entry was renamed in
         and reported as written)."""
         tmp = self._first_entry_path()
-        # The attempt id: saved in ``active_begun`` and carried by the name this
-        # staged file is set aside under, so a crash leaves a name the manifest
-        # binds (RocksDB repair decides by what the manifest references).
-        attempt = secrets.token_hex(8)
         try:
             existing = _read_regular_bytes(active)
         except FileNotFoundError:
@@ -3279,17 +3257,17 @@ class AuditTrail:
             os.fsync(fd)
         except BaseException:
             os.close(fd)
-            _set_aside(tmp, _DISCARDED_REASON, attempt)
+            _set_aside(tmp, _DISCARDED_REASON)
             raise
         os.close(fd)
         try:
-            self._record_active_begun(first_hash, first_prev_hash, attempt)
+            self._record_active_begun(first_hash, first_prev_hash)
         except BaseException:
-            _set_aside(tmp, _DISCARDED_REASON, attempt)
+            _set_aside(tmp, _DISCARDED_REASON)
             # The save may have landed before the failure that raised.
             self._withdraw_active_begun(first_hash)
             raise
-        return tmp, attempt
+        return tmp
 
     def _staged_entry_commits(self, manifest: dict[str, Any] | None) -> bool:
         """Whether the staged first entry is the one ``manifest`` records as the
@@ -3314,22 +3292,18 @@ class AuditTrail:
             and not active_holds_entry
         )
 
-    def _preserved_attempt_names(self, begun: dict[str, Any]) -> list[str]:
-        """Names of the set-aside staged entries (regular files) beside the
-        active file that belong to ``begun``, sorted: those whose name carries
-        ``begun["attempt"]``. A record with no ``attempt`` was written by an
-        older build, whose names carry none and cannot be bound to it, so every
-        legacy-grammar file of this trail is named and the caller records
-        POSSIBLE for a person to decide. Never renamed or deleted. A listing
-        error propagates; a file that vanishes before its ``lstat`` is skipped."""
-        attempt = begun.get("attempt")
+    def _preserved_attempt_names(self) -> list[str]:
+        """Names of EVERY set-aside staged entry beside the active file
+        (``<active>.first.discarded-<stamp>[-n]``), sorted: regular files only
+        (``lstat``), exact ASCII name grammar with a canonical stamp. No time
+        window, no id, no content match: the ruled KL-24 exception names them
+        all for a person to inspect. Never renamed or deleted. A listing error
+        propagates; a file that vanishes before its ``lstat`` is skipped."""
         pattern = _discarded_name_pattern(self._db_path.stem)
         names = []
         for p in self._active_path.parent.iterdir():
             match = pattern.fullmatch(p.name)
             if not (match and _canonical_stamp(match[1])):
-                continue
-            if match[2] != attempt:  # attempt None (legacy record) matches legacy names
                 continue
             try:
                 is_file = stat.S_ISREG(os.lstat(p).st_mode)
@@ -3351,18 +3325,7 @@ class AuditTrail:
             os.replace(tmp, self._active_path)
             _fsync_dir(self._active_path.parent)
             return f"finished: {tmp.name} renamed into place as {self._active_path.name}"
-        attempt = None
-        begun = manifest.get("active_begun") if isinstance(manifest, dict) else None
-        if isinstance(begun, dict) and isinstance(begun.get("attempt"), str):
-            # Bound to the record's attempt only when it is that record's entry.
-            try:
-                with _open_regular(tmp) as f:
-                    staged = _last_valid_entry_in(f, 0)[0]
-                if staged and self._compute_hash(staged) == begun.get("first_hash"):
-                    attempt = begun["attempt"]
-            except OSError:
-                pass
-        kept = _set_aside(tmp, _DISCARDED_REASON, attempt)
+        kept = _set_aside(tmp, _DISCARDED_REASON)
         if kept is None:
             raise OSError(f"the staged first entry {tmp.name} did not commit and could not be set aside")
         return f"set aside: {tmp.name} did not commit and is kept as {kept}"
@@ -3414,9 +3377,7 @@ class AuditTrail:
             # L3 r7, complement LOW 2).
             raise _ManifestUnavailable(f"{undecided}: {e}") from e
 
-    def _record_active_begun(
-        self, first_hash: str, first_prev_hash: str, attempt: str
-    ) -> None:
+    def _record_active_begun(self, first_hash: str, first_prev_hash: str) -> None:
         """Save ``active_begun`` for the active file this call is about to
         start, BEFORE its first entry is written (see :meth:`_log_locked`), so a
         restart can tell a deleted active file from an empty one (see
@@ -3437,7 +3398,7 @@ class AuditTrail:
                 manifest = self._load_manifest()
                 manifest["active_begun"] = {
                     "period": self._last_week, "first_hash": first_hash,
-                    "first_prev_hash": first_prev_hash, "attempt": attempt,
+                    "first_prev_hash": first_prev_hash,
                 }
                 self._save_manifest(manifest)
         except _ManifestUnavailable:
@@ -4801,8 +4762,8 @@ def set_aside_report_lines(
     A record marked ``certainty: possible`` (a manifest rebuilt from quarantine
     over an active file with no entry) is a POSSIBLE GAP: whether that file
     ever held entries cannot be known (KL-24 L3 r6, codex 10). A vanished active
-    file is a definite GAP, or a POSSIBLE one when a set-aside attempt of its
-    own begun record is preserved (the declared KL-24 exception).
+    file with an unwithdrawn begun record is a POSSIBLE gap naming every
+    preserved ``.first.discarded-*`` file (the ruled KL-24 exception).
     One whose file is missing is reported as such, not as a gap: the week was
     renamed back (adopted if before any write; after one it stays unmanifested
     and must be renamed to its set-aside name again), or a repair stopped
@@ -4865,7 +4826,7 @@ def _set_aside_records_on_disk(audit_dir: Path, stem: str) -> list[dict[str, str
     return records
 
 
-def _set_aside(path: Path, reason: str, attempt: str | None = None) -> str | None:
+def _set_aside(path: Path, reason: str) -> str | None:
     """Rename ``path`` to ``<name>.<reason>-<UTC stamp>`` in the same
     directory — the only way recovery takes a file off its name. Returns the
     new name, or None when it could not be moved.
@@ -4878,13 +4839,12 @@ def _set_aside(path: Path, reason: str, attempt: str | None = None) -> str | Non
     invalid verdict on that trail waits out ``_ROTATION_SETTLE_MAX_SECONDS``.
     """
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    tail = f"{stamp}-{attempt}" if attempt else stamp
-    target = path.with_name(f"{path.name}.{reason}-{tail}")
+    target = path.with_name(f"{path.name}.{reason}-{stamp}")
     suffix = 0
     try:
         while os.path.lexists(target):
             suffix += 1
-            target = path.with_name(f"{path.name}.{reason}-{tail}-{suffix}")
+            target = path.with_name(f"{path.name}.{reason}-{stamp}-{suffix}")
         os.rename(path, target)
     except OSError:
         _log(logging.WARNING,

@@ -4782,8 +4782,8 @@ def set_aside_report_lines(
             kept = record.get("preserved_attempts")
             lines.append(
                 f"POSSIBLE GAP: the active audit file {record['filename']} "
-                f"({record['period']}) has no entry on disk (audit-repair recorded "
-                f"the gap at {record['at']}); whether it held entries before cannot "
+                f"({record['period']}) had no valid entry on disk when audit-repair "
+                f"recorded the gap at {record['at']}; whether it held entries before cannot "
                 f"be known: {record['cause']}"
                 + (f"; set-aside staged entries to inspect: {', '.join(kept)}" if kept else "")
             )

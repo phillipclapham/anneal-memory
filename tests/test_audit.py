@@ -31,6 +31,18 @@ def _first_append_never_completed(db):
     m["active_begun"] = None
     mp.write_text(_json.dumps(m))
 
+
+def _frozen_clock():
+    """A ``datetime`` stand-in whose ``now()`` is 2026-10-08 12:00 UTC (ISO week 41)."""
+    from datetime import datetime as real_dt
+
+    class Frozen(real_dt):
+        @classmethod
+        def now(cls, tz=None):
+            return real_dt(2026, 10, 8, 12, 0, 0, 0, tzinfo=tz)
+
+    return Frozen
+
 class TestAuditBasics:
     """Basic audit trail operations."""
 
@@ -9862,8 +9874,6 @@ class TestKL24ConcurrentWriters:
         """Inject the rollback crash: the staged file is set aside and the process
         stops before ``active_begun`` is withdrawn. ``frozen`` pins the clock so
         an identical retried event hashes the same."""
-        from datetime import datetime as real_dt
-
         real_replace, real_aside = audit_module.os.replace, audit_module._set_aside
 
         def refuse(src, dst, *a, **k):
@@ -9877,10 +9887,7 @@ class TestKL24ConcurrentWriters:
                 raise KeyboardInterrupt
             return kept
 
-        class Frozen(real_dt):
-            @classmethod
-            def now(cls, tz=None):
-                return real_dt(2026, 10, 8, 12, 0, 0, 0, tzinfo=tz)
+        Frozen = _frozen_clock()
 
         with monkeypatch.context() as m:
             if frozen:
@@ -9934,14 +9941,7 @@ class TestKL24ConcurrentWriters:
         for n in range(copies):
             shutil.copy(f, f.with_name(f.name + f"-{n + 1}"))
         with monkeypatch.context() as m:
-            from datetime import datetime as real_dt
-
-            class Frozen(real_dt):
-                @classmethod
-                def now(cls, tz=None):
-                    return real_dt(2026, 10, 8, 12, 0, 0, 0, tzinfo=tz)
-
-            m.setattr(audit_module, "datetime", Frozen)
+            m.setattr(audit_module, "datetime", _frozen_clock())
             m.setattr(audit_module, "_iso_week_now", lambda: "2026-W41")
             with pytest.raises(audit_module._ManifestUnavailable):
                 AuditTrail(db).log("same", {})  # refused: the record is still set
@@ -9954,11 +9954,46 @@ class TestKL24ConcurrentWriters:
             assert not AuditTrail.verify(db).valid
             result = AuditTrail.repair_manifest(db)
         assert result.repaired, result.error
-        [rec] = [r for r in result.set_aside if r["period"] == "2026-W41" and r.get("certainty")][-1:]
+        [rec] = [r for r in result.set_aside if r.get("preserved_attempts")]
         assert rec["certainty"] == "possible"
         assert AuditTrail.verify(db).set_aside, "manifest still loads"
         assert not [x for x in db.parent.iterdir() if "corrupt" in x.name]
         assert len(rec["preserved_attempts"]) == 1 + copies
+
+    def test_only_attempts_from_the_losses_week_on_regular_files_downgrade_a_loss(
+        self, tmp_path
+    ):
+        """KL-24 L3 r7 (complement MED 1, codex LOW), each run first on b41635f: a
+        stale ``.first.discarded-*`` file from an earlier week, and a directory
+        carrying a reserved name, turned a definite loss into a possible one."""
+        db = tmp_path / "m.db"
+        AuditTrail(db).log("one", {})
+        (tmp_path / "m.audit.jsonl.first.discarded-20200101T000000000000Z").write_text("{}\n")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        (tmp_path / f"m.audit.jsonl.first.discarded-{stamp}").mkdir()
+        (tmp_path / "m.audit.jsonl").unlink()
+        with pytest.raises(audit_module._ManifestUnavailable):
+            AuditTrail(db).log("two", {})
+        result = AuditTrail.repair_manifest(db)
+        assert result.repaired, result.error
+        [rec] = result.set_aside
+        assert "certainty" not in rec and "preserved_attempts" not in rec
+
+    def test_a_rebuild_names_the_attempt_it_set_aside(self, tmp_path):
+        """KL-24 L3 r7, codex MED, run first on b41635f: the rebuild's possible-gap
+        record carried no ``preserved_attempts`` for the file it had just set aside."""
+        db = tmp_path / "m.db"
+        self._crash_after_staging(db)
+        (tmp_path / "m.audit.manifest.json").rename(
+            tmp_path / "m.audit.manifest.json.corrupt-20261008T000000000000Z"
+        )
+        result = AuditTrail.repair_manifest(db)
+        assert result.repaired and result.staged_first_entry.startswith("set aside")
+        [kept] = [p.name for p in tmp_path.iterdir() if ".first.discarded-" in p.name]
+        [rec] = result.set_aside
+        assert rec["certainty"] == "possible" and rec["preserved_attempts"] == [kept]
+        assert AuditTrail.verify(db).set_aside[0]["preserved_attempts"] == [kept]
+
 
     def test_certainty_is_validated_in_the_manifest(self, tmp_path):
         """KL-24 L3 r7, codex LOW, each run first on 5de42b3: any ``certainty``
@@ -9985,8 +10020,22 @@ class TestKL24ConcurrentWriters:
         with pytest.raises(audit_module._CORRUPT_MANIFEST):
             audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
         m = json.loads(json.dumps(base))
-        m["set_aside"][0]["preserved_attempts"] = ["m.audit.jsonl.first.discarded-x"]
+        m["set_aside"][0]["preserved_attempts"] = [
+            "m.audit.jsonl.first.discarded-20261008T120000000000Z",
+            "m.audit.jsonl.first.discarded-20261008T120000000000Z-2",
+        ]
         audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
+        for bad in (
+            "m.audit.jsonl.first.discarded-x",
+            "\ud800",
+            "m.audit.jsonl.first.discarded-20261008T120000000000Z\nGAP: forged",
+            "other.audit.jsonl.first.discarded-20261008T120000000000Z",
+            "m.audit.jsonl.first.discarded-\u0662\u0660261008T120000000000Z",
+        ):
+            m["set_aside"][0]["preserved_attempts"] = [bad]
+            with pytest.raises(audit_module._CORRUPT_MANIFEST):
+                audit_module._parse_manifest_bytes(json.dumps(m).encode(), "m")
+        m["set_aside"][0]["preserved_attempts"] = ["m.audit.jsonl.first.discarded-20261008T120000000000Z"]
         # r8: only the active file's own name.
         m = json.loads(json.dumps(base))
         m["set_aside"][0]["filename"] = "other.audit.jsonl"

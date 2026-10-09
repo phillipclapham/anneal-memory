@@ -322,6 +322,29 @@ _DISCARDED_REASON = "discarded"
 # rebuilt from quarantine over an active file with no entry cannot know whether
 # it ever held one. A record without the field is a definite gap.
 _POSSIBLE = "possible"
+
+
+def _discarded_name_pattern(stem: str) -> "re.Pattern[str]":
+    """The exact ASCII name of a set-aside staged entry of ``stem``'s trail:
+    ``<stem>.audit.jsonl.first.discarded-<UTC stamp>[-n]``; group 1 is the stamp."""
+    return re.compile(
+        re.escape(f"{stem}.audit.jsonl.first.{_DISCARDED_REASON}-")
+        + r"([0-9]{8}T[0-9]{12}Z)(?:-[0-9]+)?",
+        re.ASCII,
+    )
+
+
+def _week_start_stamp(period: str) -> str | None:
+    """The first instant of ISO week ``period`` (``YYYY-Www``) in the stamp
+    format of a set-aside name, or None when ``period`` does not parse."""
+    match = re.fullmatch(r"([0-9]{4})-W([0-9]{2})", period, re.ASCII)
+    if match is None:
+        return None
+    try:
+        start = datetime.fromisocalendar(int(match[1]), int(match[2]), 1)
+    except ValueError:
+        return None
+    return start.strftime("%Y%m%dT%H%M%S%fZ")
 _NOTHING_TO_REPAIR = "The manifest is valid; there is nothing to repair."
 # The manifest's ``active_begun`` record: the week of the active file's first
 # entry, that entry's hash, and the ``prev_hash`` it chained from, saved once per
@@ -452,7 +475,10 @@ def _parse_manifest_bytes(raw: bytes, stem: str) -> dict[str, Any]:
         "preserved_attempts" not in r or (
             "certainty" in r
             and isinstance(r["preserved_attempts"], list)
-            and all(isinstance(n, str) for n in r["preserved_attempts"])
+            and all(
+                isinstance(n, str) and _discarded_name_pattern(stem).fullmatch(n)
+                for n in r["preserved_attempts"]
+            )
         )
         for r in set_aside
     ):
@@ -2186,8 +2212,15 @@ class AuditTrail:
                 repaired=False,
                 error=f"Could not read the active audit file: {e}; {nothing}",
             )
-        possible_gap: list[dict[str, str]] = []
+        possible_gap: list[dict[str, Any]] = []
         if not active_holds_entry:
+            try:
+                preserved = trail._discarded_staged_names(_iso_week_now())
+            except OSError as e:
+                return AuditRepairResult(
+                    repaired=False,
+                    error=f"Cannot list the audit directory: {e}; {nothing}",
+                )
             possible_gap = [{
                 "filename": trail._active_path.name,
                 "set_aside_as": "",
@@ -2202,6 +2235,7 @@ class AuditTrail:
                     "is recorded as a possible gap"
                 ),
                 "at": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"),
+                **({"preserved_attempts": preserved} if preserved else {}),
             }]
             carried = list(carried or []) + possible_gap
         if carried:
@@ -2452,7 +2486,7 @@ class AuditTrail:
                 # files, never silently cleared (KL-24 L3 r9: a hash reconcile
                 # suppressed real losses and is deleted).
                 try:
-                    preserved = trail._discarded_staged_names()
+                    preserved = trail._discarded_staged_names(begun["period"])
                 except OSError as e:
                     return AuditRepairResult(
                         repaired=False,
@@ -3247,18 +3281,25 @@ class AuditTrail:
             and not active_holds_entry
         )
 
-    def _discarded_staged_names(self) -> list[str]:
+    def _discarded_staged_names(self, period: str) -> list[str]:
         """Names of the set-aside staged entries beside the active file
-        (``<active>.first.discarded-<stamp>[-n]``), sorted. Never renamed or
-        deleted; ``audit-repair`` names them in the possible gap it records so a
-        person can inspect them. A listing error propagates."""
-        pattern = re.compile(
-            re.escape(self._first_entry_path().name)
-            + rf"\.{_DISCARDED_REASON}-\d{{8}}T\d{{12}}Z(?:-\d+)?"
-        )
-        return sorted(
-            p.name for p in self._active_path.parent.iterdir() if pattern.fullmatch(p.name)
-        )
+        (``<active>.first.discarded-<stamp>[-n]``) that could belong to a loss in
+        ISO week ``period``, sorted: regular files only, stamped at or after the
+        week's first instant (the manifest's record of the first entry carries a
+        week, not a time). A period that does not parse yields none, so the loss
+        stays definite. Never renamed or deleted; ``audit-repair`` names them in
+        the possible gap it records so a person can inspect them. A listing or
+        ``lstat`` error propagates."""
+        floor = _week_start_stamp(period)
+        if floor is None:
+            return []
+        pattern = _discarded_name_pattern(self._db_path.stem)
+        names = []
+        for p in self._active_path.parent.iterdir():
+            match = pattern.fullmatch(p.name)
+            if match and match[1] >= floor and stat.S_ISREG(os.lstat(p).st_mode):
+                names.append(p.name)
+        return sorted(names)
 
     def _resolve_staged_entry(self, manifest: dict[str, Any] | None) -> str | None:
         """Finish or set aside a staged first entry under ``manifest`` (see

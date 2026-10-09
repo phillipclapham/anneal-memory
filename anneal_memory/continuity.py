@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .graduation import (
+    mask_explanations_text,
     CrossSessionCollision,
     OmittedPattern,
     PatternSummary,
@@ -419,7 +420,10 @@ def _crystallization_credit(
     # pattern's line) is still detected here → NOT credited as departed. Over-detect
     # = under-credit = the gate stays strict. This is the cancel-credit side; the
     # earn-credit side below stays strict-anchored.
-    new_present = {m.group(1) for m in _ANY_GRADUATION_MARKER_RE.finditer(new_body_text)}
+    # One lexer (codex L3 r2 MED): a name quoted inside an explanation is text, not
+    # a marker, so it neither keeps a departed pattern "present" nor counts below.
+    new_present = {m.group(1) for m in _ANY_GRADUATION_MARKER_RE.finditer(
+        mask_explanations_text(new_body_text))}
 
     credit = 0
     for line in prior_body:
@@ -432,7 +436,7 @@ def _crystallization_credit(
         # pattern may NOT be recoverable (not in the store), masking a recency-trap of
         # its mass. A well-formed pattern line has exactly one marker; a multi-marker
         # line earns ZERO credit (its mass stays in the protected baseline). Safe bias.
-        if len(_ANY_GRADUATION_MARKER_RE.findall(line)) != 1:
+        if len(_ANY_GRADUATION_MARKER_RE.findall(mask_explanations_text(line))) != 1:
             continue
         owner = m.group(1)
         if owner in crystallized_names and owner not in new_present:
@@ -3289,7 +3293,7 @@ def validated_save_continuity(
     # are the committed state awaiting externalization. Pre-commit
     # cleanup is unchanged (pre-wrap state is restored cleanly).
     sections = measure_sections(grad_result.text)
-    patterns = len(re.findall(r"\|\s*\d+x", grad_result.text))
+    patterns = len(re.findall(r"\|\s*\d+x", mask_explanations_text(grad_result.text)))
     total_demoted = grad_result.demoted + grad_result.bare_demoted
     # Hoisted out of the try block so ``path`` is unambiguously bound
     # on every code path (including the residual-window recovery
@@ -3374,6 +3378,20 @@ def validated_save_continuity(
             meta_tmp = store._prepare_meta_write(
                 meta, token_hex=tmp_pair_id
             )
+
+            # The bound ran on levels read before this batch took the write lock.
+            # A sever or rename committed in between would be undone by the record
+            # below (codex L3 r2 HIGH): re-read under the lock, before this wrap's own
+            # compost below, and refuse on any change. Raising rolls the batch back:
+            # nothing saved, the wrap stays open.
+            if store.saved_pattern_levels() != saved_levels:
+                # A ValueError, which every transport surfaces as a refused save.
+                raise ValueError(
+                    "validated_save_continuity: the store's saved pattern levels "
+                    "changed while this save ran (a sever, rename or another save "
+                    "committed). Nothing was saved and the wrap is still open; save "
+                    "again so the graduation bound reads the current levels."
+                )
 
             # Compost severance, in THIS transaction so it commits or rolls
             # back with the wrap row below. Inside the batch the Store method

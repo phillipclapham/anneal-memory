@@ -118,8 +118,12 @@ _LEVEL_ATOM_RE = re.compile(_LEVEL_ATOM)
 # regex) scans the MASKED line, so they all agree on which ``| Nx`` tokens exist; masking
 # the bound alone would let a ``.search`` reader believe a dated marker the bound skipped.
 # Line-anchored readers bind the first marker after the name, which a quote cannot precede.
+# The id run is ``_GRADUATION_RE``'s language (``[hex][hex, ]*`` then whitespace),
+# written so a space inside it must be followed by an id character: whitespace before
+# the quote then has one parse, not one per split point (quadratic on a long space run,
+# codex L3 r2 HIGH, run: 3.4 s for one call at 50,000 spaces).
 _EXPLANATION_SPAN_RE = re.compile(
-    r'\[evidence:\s*[a-fA-F0-9][a-fA-F0-9, ]*\s+"([^"]*)"\s*\]'
+    r'\[evidence:\s*[a-fA-F0-9][a-fA-F0-9,]*(?: +[a-fA-F0-9,]+)*\s+"([^"]*)"\s*\]'
 )
 
 
@@ -137,6 +141,11 @@ def _mask_explanations(line: str) -> str:
         return line
     parts.append(line[last:])
     return "".join(parts)
+
+
+def mask_explanations_text(text: str) -> str:
+    """:func:`_mask_explanations` per line (a quote never spans lines here)."""
+    return "\n".join(_mask_explanations(line) for line in text.split("\n"))
 
 
 def _search_outside_explanations(
@@ -1450,7 +1459,20 @@ def canonical_continuity_text(text: str) -> str:
     """
     text = _LINE_TERMINATORS_RE.sub("\n", text)
     text = _EXOTIC_SPACE_RE.sub(" ", text)
-    return _MARKER_DIGITS_RE.sub(_canonical_marker, text)
+    # Markers only outside explanations: a quoted ``| ١٠x`` is text and is saved as
+    # written, like a quoted ``| 10x`` (codex L3 r2 LOW).
+    out: list[str] = []
+    for line in text.split("\n"):
+        parts: list[str] = []
+        last = 0
+        for m in _MARKER_DIGITS_RE.finditer(_mask_explanations(line)):
+            new = _canonical_marker(_MARKER_DIGITS_RE.match(line, m.start()) or m)
+            parts.append(line[last:m.start()])
+            parts.append(new)
+            last = m.end()
+        parts.append(line[last:])
+        out.append("".join(parts))
+    return "\n".join(out)
 
 
 # The prior-state bound's own parser. A level token is ``| Nx`` with an optional

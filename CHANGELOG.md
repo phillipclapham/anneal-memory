@@ -136,7 +136,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   planned for the next schema generation, not this release (ruled 2026-10-08).
 - A level token inside a well-formed evidence tag's quoted explanation is text, not a level: the bound, the
   level-atom normalizer and every graduation reader skip it alike (`[evidence: ab12 "latency | 10x under load"]`
-  is saved as written and reports no cut). Composting a pattern also deletes its saved level, so a later reuse of
+  is saved as written and reports no cut, and non-ASCII digits there are not canonicalised). A save also refuses,
+  with nothing written, when the store's saved levels changed between the bound's read and the save's write lock. Composting a pattern also deletes its saved level, so a later reuse of
   the name starts at 1x; a rename that moves only a saved level is audited.
 - A cut line is marked `(level-capped)` (cleared once the line stands at an entitled level; a cut carried line
   loses its `(carried-forward)`) and reported as `level_capped` on the save result (present only when a line was

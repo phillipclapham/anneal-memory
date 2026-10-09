@@ -1288,11 +1288,6 @@ def cmd_audit_repair(args: argparse.Namespace) -> None:
                     f"Recorded the missing active audit file {record['filename']} "
                     f"({record['period']}) as a gap ({record['cause']}); its entries are "
                     "lost. Writes continue past this gap, and verify reports it."
-                    + (
-                        " Set-aside staged entries (kept, never deleted; files to inspect): "
-                        + ", ".join(record["preserved_attempts"])
-                        if record.get("preserved_attempts") else ""
-                    )
                 )
             else:
                 print(

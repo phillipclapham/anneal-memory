@@ -93,16 +93,18 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   review rounds (a discarded file's bytes can equal a later real entry; two matching files; consume
   and clear not crash-atomic), so it was deleted (Phill, 2026-10-08).
 - What anneal does instead: the next append refuses (`verify` is INVALID) until
-  `anneal-memory audit-repair`, which records the vanished active file as a DEFINITE gap. It was
-  POSSIBLE before (a set-aside file beside it downgraded the record); that downgrade is deleted,
-  because every rule that let a directory listing change the certainty (stale files, later-week
-  files, the rebuild's week) drew a new finding. The kept `<active>.first.discarded-*` regular files
-  stamped within the lost ISO week are listed in `preserved_attempts` as pointers only (the
-  rebuild from a quarantined manifest lists them too). `audit-repair`, `verify` and
-  `--verify-audit` print the names as files to inspect; a person reads the plain-JSONL files.
-  Nothing is renamed or deleted. A rebuild over an active file with no entry is still a POSSIBLE gap.
+  `anneal-memory audit-repair`. Each first-entry attempt carries a random id (`attempt`, 16 lowercase
+  hex) saved in the manifest's `active_begun` record and in the set-aside file's name
+  (`<active>.first.discarded-<stamp>-<attempt>`). A vanished active file is a POSSIBLE gap
+  (`certainty: "possible"`; the declared exception) when a regular file carrying THAT record's
+  attempt id is preserved, and it is named in `preserved_attempts`; with none it is a DEFINITE gap.
+  No stamp, week or directory listing decides it. A record from an older build has no id, so every
+  legacy-named file is named and the gap is POSSIBLE for a person to decide. The rebuild from a
+  quarantined manifest cannot read the record and names only the file that repair call set aside
+  itself. `audit-repair`, `verify` and `--verify-audit` print the names; a person inspects the
+  plain-JSONL files and decides. Nothing is renamed or deleted.
 - Manifest validation: `certainty` must be `"possible"` on an active-file record (its own
-  filename, `set_aside_as` empty); `preserved_attempts` must be a list of exact set-aside file names (`<stem>.audit.jsonl.first.discarded-<stamp>[-n]`, a real stamp, `n` from 1) on such a record.
+  filename, `set_aside_as` empty); `preserved_attempts` must be a list of exact set-aside file names (`<stem>.audit.jsonl.first.discarded-<stamp>-<16 hex>[-n]`, or the legacy `...-<stamp>[-n]`; a real stamp, `n` from 1) on such a record; `active_begun.attempt`, when present, must be 16 lowercase hex.
 - `AuditTrail.stats()` waits (bounded, 2s) on a peer's append lock when only a staged first entry
   makes the trail look unknown, then re-reads; a staged file with no holder still reads unknown.
 - Audit-repair's stderr warning calls a possible gap "POSSIBLE", not a plain gap.

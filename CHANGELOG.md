@@ -96,7 +96,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   A vanished active file is a POSSIBLE gap (`certainty: "possible"`) only in that crash window: the
   manifest's begun record is still set AND at least one attempt is preserved; `preserved_attempts`
   then names every preserved regular file of that trail. Otherwise it is a definite gap. The rebuild
-  from a quarantined manifest stays POSSIBLE and names any preserved files the same way. `audit-repair`, `verify` and `--verify-audit` print the names.
+  from a quarantined manifest stays POSSIBLE and names any preserved files the same way.
+  `audit-repair`, `verify` and `--verify-audit` print the names.
 - Manifest validation: `certainty` must be `"possible"` on an active-file record (its own
   filename, `set_aside_as` empty); `preserved_attempts` must be a list of exact set-aside file names (`<stem>.audit.jsonl.first.discarded-<stamp>[-n]`, a real stamp, `n` from 1) on such a record.
 - `AuditTrail.stats()` waits (bounded, 2s) on a peer's append lock when only a staged first entry

@@ -4768,8 +4768,9 @@ def set_aside_report_lines(
     A record marked ``certainty: possible`` (a manifest rebuilt from quarantine
     over an active file with no entry) is a POSSIBLE GAP: whether that file
     ever held entries cannot be known (KL-24 L3 r6, codex 10). A vanished active
-    file with an unwithdrawn begun record is a POSSIBLE gap naming every
-    preserved ``.first.discarded-*`` file (the ruled KL-24 exception).
+    file with an unwithdrawn begun record AND at least one preserved attempt is a
+    POSSIBLE gap naming every preserved ``.first.discarded-*`` file (the ruled
+    KL-24 exception); with none preserved it is a definite GAP.
     One whose file is missing is reported as such, not as a gap: the week was
     renamed back (adopted if before any write; after one it stays unmanifested
     and must be renamed to its set-aside name again), or a repair stopped
@@ -4781,7 +4782,7 @@ def set_aside_report_lines(
             kept = record.get("preserved_attempts")
             lines.append(
                 f"POSSIBLE GAP: the active audit file {record['filename']} "
-                f"({record['period']}) held no entry when audit-repair recorded it "
+                f"({record['period']}) had no entry on disk when audit-repair recorded it "
                 f"at {record['at']}; whether it held entries before cannot "
                 f"be known: {record['cause']}"
                 + (f"; set-aside staged entries to inspect: {', '.join(kept)}" if kept else "")

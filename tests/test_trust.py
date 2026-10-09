@@ -362,6 +362,28 @@ class TestSupersessionRespectsTrust:
         with pytest.raises(SupersessionError, match="lower-trust"):
             store.supersede(old_id=fact.id, new_id=page.id)
 
+    def test_a_lower_trust_episode_cannot_take_a_state_key_from_a_higher_one(
+        self, host_store
+    ):
+        """CAP-08 x CAP-04 integration (run, 1009+22): ``record(state_key=)``
+        wrote its key links without the trust check ``set_state_key`` runs, so
+        a newer external episode keyed ``user.home_city`` replaced the operator's
+        fact. Refused like ``supersedes=``, and nothing is written."""
+        from anneal_memory.store import SupersessionError
+
+        store = host_store
+        fact = store.record("The user lives in Columbus.", EpisodeType.OBSERVATION,
+                            trust="operator", state_key="user.home_city")
+        with pytest.raises(SupersessionError, match="lower-trust"):
+            store.record("The user lives in Lyon.", EpisodeType.OBSERVATION,
+                         trust="external", state_key="user.home_city")
+        assert [e.id for e in store.recall(limit=10).episodes] == [fact.id]
+        assert store.superseded_by_map([fact.id]) == {}
+        newer = store.record("The user lives in Columbus, downtown.",
+                             EpisodeType.OBSERVATION, trust="operator",
+                             state_key="user.home_city")
+        assert store.superseded_by_map([fact.id]) == {fact.id: newer.id}
+
     def test_equal_or_higher_trust_still_supersedes(self, store):
         old = store.record("The deploy key lives in the vault.", EpisodeType.OBSERVATION,
                            trust="external")

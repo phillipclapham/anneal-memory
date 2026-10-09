@@ -2975,6 +2975,9 @@ class Store:
                 ).fetchone() is None
             ]
             if problem is None and not missing_sources:
+                # The key plan needs the inserted row (its rowid breaks a timestamp
+                # tie), so a refused key link is undone back to here.
+                self._conn.execute("SAVEPOINT record_state_key")
                 for nonce in range(max_retries):
                     ep_id = _episode_id(content, ts, nonce)
                     try:
@@ -3001,15 +3004,29 @@ class Store:
                 if key is not None:
                     # Every planned link points at the slot's newest holder, which is
                     # a live chain end and so leads nowhere: no link can close a cycle.
-                    key_links = self._apply_state_key(
-                        ep_id, key, self._state_key_plan(ep_id, ts, key), source)
-                # No trust is stored with a live source: it is computed
-                # (effective_trust_map), and marked only when the source goes.
-                self._conn.executemany(
-                    "INSERT OR IGNORE INTO episode_derived "
-                    "(episode_id, source_id) VALUES (?, ?)",
-                    [(ep_id, sid) for sid in source_ids],
-                )
+                    plan = self._state_key_plan(ep_id, ts, key)
+                    # ⛔ The same check set_state_key runs on each key link (CAP-08
+                    # x CAP-04 integration, run): without it a newer external
+                    # episode keyed into an operator fact's slot replaced it.
+                    problem = next(
+                        (p for p in (self._supersession_problem(
+                            o, n, "", "", check_grounds=False, check_order=False,
+                            key_link=True) for o, n in plan) if p),
+                        None,
+                    )
+                    if problem is None:
+                        key_links = self._apply_state_key(ep_id, key, plan, source)
+                if problem is None:
+                    # No trust is stored with a live source: it is computed
+                    # (effective_trust_map), and marked only when the source goes.
+                    self._conn.executemany(
+                        "INSERT OR IGNORE INTO episode_derived "
+                        "(episode_id, source_id) VALUES (?, ?)",
+                        [(ep_id, sid) for sid in source_ids],
+                    )
+                else:
+                    self._conn.execute("ROLLBACK TO record_state_key")
+                self._conn.execute("RELEASE record_state_key")
             # On a refusal this commits an empty transaction (releasing the
             # lock); inside a batch it leaves the batch's writes alone.
             if not self._defer_commit:

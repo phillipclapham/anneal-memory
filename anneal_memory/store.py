@@ -5282,10 +5282,17 @@ class Store:
                 and logged; see :meth:`_audit_log_after_commit`.
         """
         with self._db_boundary("delete"):
+            # The write lock is taken before any read (L3 r3 1009+22, codex): the
+            # descendant set below must be the one the DELETE's trigger lowers, so
+            # no writer may record a new derivation from this episode in between.
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")
             row = self._conn.execute(
                 "SELECT * FROM episodes WHERE id = ?", (episode_id,)
             ).fetchone()
             if not row:
+                if not self._defer_commit:
+                    self._conn.commit()
                 return False
 
             if self._keep_tombstones:

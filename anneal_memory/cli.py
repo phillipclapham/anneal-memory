@@ -2105,8 +2105,8 @@ def _backup_sqlite(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection) -
 
     ``Connection.backup`` retries a BUSY or LOCKED status forever, so the
     progress callback raises once such a status is seen past the deadline. The
-    source is opened with ``timeout=0``, so the busy handler returns at once and
-    this callback, not SQLite's own wait, is the bound.
+    caller sets the source's ``busy_timeout`` to 0 first, so SQLite's own wait
+    does not run inside each step and this callback is the bound.
     """
     deadline = time.monotonic() + _EXPORT_BUSY_DEADLINE_S
 
@@ -2122,47 +2122,24 @@ def _fold(path: str) -> str:
     return unicodedata.normalize("NFC", path).casefold()
 
 
-def _read_source_identity(src_conn: sqlite3.Connection) -> tuple[int, str]:
-    """The source's page count and SQLite's own filename for it, retried while
-    the database is locked until the export deadline (the connection has no
-    busy wait of its own)."""
-    deadline = time.monotonic() + _EXPORT_BUSY_DEADLINE_S
-    while True:
-        try:
-            pages = src_conn.execute("PRAGMA page_count").fetchone()[0]
-            canon = src_conn.execute("PRAGMA database_list").fetchone()[2]
-            return pages, canon or ""
-        except sqlite3.OperationalError as exc:
-            if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
-                raise
-            if time.monotonic() > deadline:
-                raise _ExportBusyError from exc
-            time.sleep(0.05)
-
-
 def _publish_no_clobber(tmp: Path, out: Path) -> None:
     """Publish the finished ``tmp`` at the absent ``out`` without replacing a file.
 
-    Raises FileExistsError when ``out`` exists. A hard link is atomic and
-    create-only. Where the filesystem has no hard links (FAT, exFAT, many SMB
-    shares) the target is claimed with an exclusive create and the finished copy
-    renamed over that claim (git's lockfile, with the target as the lock), so the
-    content still appears at once and a concurrent creator is refused. A crash
-    between the claim and the rename can leave an empty file.
+    Raises FileExistsError when ``out`` exists. The target is claimed with an
+    exclusive create and the finished copy renamed over that claim (git's
+    lockfile, with the target as the lock), so the content appears at once and a
+    concurrent creator is refused. It needs no hard links, so it is the same on
+    every filesystem (FAT, exFAT and many SMB shares have none). A crash between
+    the claim and the rename can leave an empty file.
     """
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666)
+    os.close(fd)
     try:
-        os.link(tmp, out)
-    except FileExistsError:
-        raise
+        os.replace(tmp, out)
     except OSError:
-        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666)
-        os.close(fd)
-        try:
-            os.replace(tmp, out)
-        except OSError:
-            with contextlib.suppress(OSError):
-                os.unlink(out)  # the empty claim this call created
-            raise
+        with contextlib.suppress(OSError):
+            os.unlink(out)  # the empty claim this call created
+        raise
     _fsync_dir(out.parent)
 
 
@@ -2188,20 +2165,17 @@ def cmd_export(args: argparse.Namespace) -> None:
         # backup all see the one file SQLite opened (walopen r15: a retargeted
         # symlink or a deleted source must not export a different or empty DB).
         try:
-            src_conn = sqlite_connect(src_target, timeout=0)
+            src_conn = sqlite_connect(src_target, timeout=_EXPORT_BUSY_DEADLINE_S)
         except (sqlite3.Error, OSError) as exc:
             print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
             sys.exit(1)
         try:
             try:
-                page_count, canon = _read_source_identity(src_conn)
-            except _ExportBusyError:
-                print(
-                    f"Error: export to {out} failed: the database being exported stayed locked for "
-                    f"{_EXPORT_BUSY_DEADLINE_S:g}s",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+                # SQLite's busy wait (the connection's timeout) bounds these reads;
+                # from here on the backup's progress callback is the bound.
+                page_count = src_conn.execute("PRAGMA page_count").fetchone()[0]
+                canon = src_conn.execute("PRAGMA database_list").fetchone()[2] or ""
+                src_conn.execute("PRAGMA busy_timeout = 0")
             except sqlite3.Error as exc:
                 print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
                 sys.exit(1)

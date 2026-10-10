@@ -919,6 +919,27 @@ class TestExpectedVersion:
         assert store.path.read_bytes() == before
         store.update("spore-001", text="y")  # an unguarded write is unchanged
 
+    @_NEEDS_LOCK
+    def test_a_falsy_version_of_is_still_the_one_called(self, store):
+        store.add(type="task", text="x", today=T0)
+
+        class Falsy:
+            def __bool__(self):
+                return False
+
+            def __call__(self, sp):
+                return "mine"
+
+        with pytest.raises(SporeError, match="changed since read"):
+            store.update("spore-001", text="y", expected_version=spore_version(store.get("spore-001")),
+                         version_of=Falsy())
+        store.update("spore-001", text="y", expected_version="mine", version_of=Falsy())
+
+    def test_a_non_callable_version_of_is_a_value_error(self, store):
+        store.add(type="task", text="x", today=T0)
+        with pytest.raises(ValueError, match="must be callable"):
+            store.update("spore-001", text="y", expected_version="v", version_of=0)  # type: ignore[arg-type]
+
     def test_an_explicit_default_version_of_without_expected_version_is_a_value_error(self, store):
         store.add(type="task", text="x", today=T0)
         with pytest.raises(ValueError, match="without expected_version"):

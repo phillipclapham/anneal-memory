@@ -290,7 +290,8 @@ def _check_expected_version(
     if expected_version is None:
         return
     # A copy: the callback must not be able to change what this transaction saves.
-    found = (version_of or spore_version)(copy.deepcopy(item))
+    fn = version_of if version_of is not None else spore_version
+    found = fn(copy.deepcopy(item))
     if not isinstance(found, str):
         raise TypeError(f"version_of must return a str (got {type(found).__name__}).")
     if found != expected_version:
@@ -307,6 +308,8 @@ def _validate_guards(
     there is no file lock (no ``fcntl``: Windows), neither compare (``expected_version``
     or ``expect_disposition``) can be made atomic with the write, so a guarded write
     is refused rather than checked against a state another process may replace."""
+    if version_of is not None and not callable(version_of):
+        raise ValueError(f"version_of must be callable (got {version_of!r}).")
     if expected_version is None:
         if version_of is not None:
             raise ValueError("version_of was passed without expected_version; nothing would be compared.")

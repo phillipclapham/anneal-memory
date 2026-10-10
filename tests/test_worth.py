@@ -1078,3 +1078,15 @@ def test_fold_surfaced_reads_a_repeated_path_once(tmp_path):
     assert result.receipts_folded == 1
     assert result.duplicates_skipped == 0  # read once: no event seen twice
     assert result.paths_missing == []
+
+
+
+def test_crystal_get_records_a_pull_for_a_store_path_with_uri_characters(tmp_path):
+    """c-pull-label: the store id is read through store.connect's escaped URI."""
+    sub = tmp_path / "a #?% b"
+    sub.mkdir()
+    db, sid = _pull_store(sub)
+    got = _pull_cli(db, "crystal", "get", "derive_dont_invent")
+    assert got.returncode == 0 and got.stderr == "", got.stderr
+    (rec,) = _log_lines(db)
+    assert rec["store"] == sid

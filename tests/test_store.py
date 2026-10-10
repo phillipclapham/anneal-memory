@@ -4644,3 +4644,24 @@ def test_every_sqlite_connect_goes_through_the_one_opener():
             if isinstance(root, ast.Name) and root.id in aliases and id(node) not in allowed:
                 offenders.append(f"{f.name}:{node.lineno}")
     assert offenders == [], offenders
+
+
+def test_connect_read_only_opens_an_existing_file_and_refuses_writes(tmp_path):
+    """c-pull-label: the pull's store-id read moved onto the one opener."""
+    import sqlite3
+
+    from anneal_memory.store import connect
+
+    db = tmp_path / "ro #?%.db"  # URI-special characters, escaped by the opener
+    with Store(db, audit=False):
+        pass
+    conn = connect(db, read_only=True)
+    try:
+        assert conn.execute("SELECT count(*) FROM episodes").fetchone()[0] == 0
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            conn.execute("INSERT INTO metadata (key, value) VALUES ('x', 'y')")
+    finally:
+        conn.close()
+    with pytest.raises(sqlite3.OperationalError):
+        connect(tmp_path / "absent.db", read_only=True)
+    assert not (tmp_path / "absent.db").exists()

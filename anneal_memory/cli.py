@@ -52,7 +52,6 @@ import time
 import unicodedata
 import uuid
 import sys
-import urllib.parse
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -3843,7 +3842,7 @@ def _pull_store_id(db_path: Path) -> str | None:
         sid, why = _read_store_id_bounded(db_path, _PULL_DB_TIMEOUT_SECONDS)
     except _StoreBusy:
         raise _PullSkipped("store busy") from None
-    except (OSError, sqlite3.Error) as exc:
+    except (OSError, ValueError, sqlite3.Error) as exc:  # ValueError: a NUL or non-UTF-8 path
         raise _PullSkipped(f"cannot read the store id of {db_path}: {exc}") from None
     if why is not None:
         raise _PullSkipped(f"cannot read the store id of {db_path}: {why}")
@@ -4178,10 +4177,11 @@ def _read_store_id_bounded(db_path: Path, timeout: float) -> tuple[str | None, s
     its default busy timeout, several seconds). Applies the same refusals as the
     library open: not an anneal store, written by a newer anneal. Raises
     :class:`_StoreBusy` when the db stays locked."""
-    uri = "file:" + urllib.parse.quote(str(db_path.resolve())) + "?mode=ro"
     conn: sqlite3.Connection | None = None
     try:
-        conn = sqlite3.connect(uri, uri=True, timeout=timeout)
+        # The package's one opener (every byte of the path percent-escaped, NUL
+        # and non-UTF-8 names refused), read-only: no hand-built URI here.
+        conn = sqlite_connect(db_path, read_only=True, timeout=timeout)
         if not _is_anneal_schema(conn):
             return None, "not an anneal store (no episodes table or no format_version); nothing written"
         found = _parse_format_version(conn.execute(

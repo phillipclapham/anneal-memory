@@ -3122,9 +3122,12 @@ class TestTextExportsNeverOverwrite:
         assert out.read_bytes() == b"sectors"
 
     @pytest.mark.skipif(os.name != "posix", reason="/dev/fd is POSIX")
-    @pytest.mark.parametrize("name", ["/dev/fd/2147483648", "/dev/fd/99999999999999999999"])
+    @pytest.mark.parametrize(
+        "name", ["/dev/fd/2147483648", "/dev/fd/99999999999999999999", "/dev/fd/" + "9" * 4301, "/dev/fd/\u0661"]
+    )
     def test_an_out_of_range_fd_name_is_a_clean_error(self, db, capsys, name):
-        """L3 r2 (complement + codex): os.dup raised OverflowError, a traceback."""
+        """L3 r2: os.dup raised OverflowError; L3 r4: 4301 digits made int() raise
+        ValueError, and \\d took an Arabic-Indic one as fd 1. Each a traceback or a wrong write."""
         with pytest.raises(SystemExit) as exc:
             self._run("export", "json", db, Path(name))
         assert exc.value.code == 1

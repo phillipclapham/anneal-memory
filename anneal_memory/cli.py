@@ -2207,7 +2207,9 @@ def _publish_by_claim(tmp: Path, out: Path) -> None:
         raise
 
 
-_OWN_FD_NAME = re.compile(r"/dev/(?:stdout|stderr|fd/(\d+))|/proc/self/fd/(\d+)")
+# Any leading zeros, then at most 10 ASCII digits: int() never meets its 4300-digit
+# limit and \d would admit non-ASCII digits (L3 r4).
+_OWN_FD_NAME = re.compile(r"/dev/(?:stdout|stderr|fd/0*([0-9]{1,10}))|/proc/self/fd/0*([0-9]{1,10})")
 
 
 def _own_fd_alias(out: Path) -> int | None:

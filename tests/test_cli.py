@@ -1567,7 +1567,7 @@ class TestCmdExport:
         with pytest.raises(KeyboardInterrupt):
             cmd_export(base_args_with_data)
         assert out.exists() and out.stat().st_size == 0
-        assert "inspect that path" in capsys.readouterr().err
+        assert "inspect it before removing anything" in capsys.readouterr().err
         assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
 
     def test_export_sqlite_claim_replace_exists_error_is_not_reported_as_a_new_file(
@@ -1594,6 +1594,46 @@ class TestCmdExport:
         err = capsys.readouterr().err
         assert exc.value.code == 1
         assert "publishing over the claim failed" in err
+        assert "appeared during the export" not in err
+
+    def test_export_sqlite_claim_close_failure_still_gets_the_note(
+        self, base_args_with_data, tmp_path, capsys, monkeypatch
+    ):
+        """walopen L3 r21 (codex MED + complement LOW): a close that raised after
+        the exclusive create had made the claim bypassed the note."""
+        import builtins
+        import errno
+        from anneal_memory import cli
+
+        def _nolink(*a, **k):
+            raise OSError(errno.ENOTSUP, "no hard links here")
+
+        real_open = builtins.open
+        out = tmp_path / "copy.db"
+
+        class _BadClose:
+            def __init__(self, f):
+                self._f = f
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self._f.close()
+                raise OSError(errno.EIO, "close failed")
+
+        def _open(file, mode="r", *a, **k):
+            f = real_open(file, mode, *a, **k)
+            return _BadClose(f) if str(file) == str(out) and mode == "xb" else f
+
+        monkeypatch.setattr(cli.os, "link", _nolink)
+        monkeypatch.setattr(cli, "open", _open, raising=False)
+        base_args_with_data.format = "sqlite"
+        base_args_with_data.output = str(out)
+        with pytest.raises(SystemExit):
+            cmd_export(base_args_with_data)
+        err = capsys.readouterr().err
+        assert "inspect it before removing anything" in err
         assert "appeared during the export" not in err
 
     def test_export_sqlite_publishes_by_hard_link(self, base_args_with_data, tmp_path):

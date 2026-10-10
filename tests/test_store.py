@@ -4540,6 +4540,7 @@ def test_existing_file_uri_names_exactly_the_path(abs_path):
     assert urllib.parse.unquote_to_bytes(body) == os.fsencode(abs_path)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Win32 resolves link/.. by text, as abspath does")
 def test_connect_must_exist_does_not_collapse_dotdot(tmp_path, monkeypatch):
     """walopen L3 r17 (complement): abspath collapsed link/.. by text, naming a
     different file than the OS resolves."""

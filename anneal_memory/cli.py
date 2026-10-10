@@ -2177,24 +2177,32 @@ def _publish_by_claim(tmp: Path, out: Path) -> None:
     empty file (walopen L3 r17, codex HIGH + glm HIGH + complement MED). So
     nothing here deletes a file at ``out``.
     """
-    # An owning file object, not a bare descriptor: an interrupt can never strand
-    # the fd, and its one close is never retried (walopen L3 r19-r20).
-    open(out, "xb").close()
+    # Staged (walopen L3 r21): a FileExistsError from the exclusive create is
+    # another process's file and passes through untouched; any other failure,
+    # from the create on (a close that raises after creating, an interrupt before
+    # the rename), gets the note. The claim is an owning file object, so no bare
+    # descriptor is ever stranded, and its one close is never retried.
+    stage = "claim"
     try:
+        with open(out, "xb"):
+            pass
+        stage = "replace"
         os.replace(tmp, out)
     except BaseException as exc:
-        # State-neutral: after the claim, what sits at ``out`` cannot be known
-        # here (another process may have replaced it), so the note never says it
-        # is empty or ours (walopen L3 r18).
+        if stage == "claim" and isinstance(exc, FileExistsError):
+            raise
+        # State-neutral: what sits at ``out`` cannot be known here (another
+        # process may have replaced the claim), so the note asserts nothing about
+        # it (walopen L3 r18).
         with contextlib.suppress(Exception):
             print(
-                f"Note: the export was interrupted after claiming {out}; inspect that path "
-                "before removing anything there.",
+                f"Note: the export stopped while publishing {out}; if a file is there, "
+                "inspect it before removing anything.",
                 file=sys.stderr,
             )
         if isinstance(exc, FileExistsError):
-            # Not "someone created --output": the claim was ours (L3 r18).
-            # No errno: OSError(EEXIST, ...) would itself construct a FileExistsError.
+            # Not "someone created --output": the claim was ours (L3 r18). No
+            # errno: OSError(EEXIST, ...) would construct a FileExistsError.
             raise OSError(f"publishing over the claim failed: {exc}") from exc
         raise
 

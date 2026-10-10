@@ -250,17 +250,22 @@ def _full_fsync(fd: int) -> None:
     os.fsync(fd)
 
 
-def _fsync_dir(dir_path: Path) -> None:
-    """Flush the directory so the rename itself is durable (:func:`_full_fsync`).
-    Windows (which cannot open a directory) or a filesystem that cannot flush one is
-    skipped; any other failure raises, after the rename: the write is in place, so a
-    keyed retry finds it."""
-    try:
-        fd = os.open(dir_path, os.O_RDONLY)
-    except OSError:
-        if os.name == "nt":
-            return
-        raise
+def _open_dir(dir_path: Path) -> int | None:
+    """An fd on ``dir_path`` for :func:`_flush_dir`, opened BEFORE the rename so a
+    directory that cannot be opened fails the write before it commits (L3 r2: a
+    failure after the rename made a committed keyless add look failed, and its
+    retry duplicated the spore). None on Windows, which cannot open a directory."""
+    if os.name == "nt":
+        return None
+    return os.open(dir_path, os.O_RDONLY)
+
+
+def _flush_dir(fd: int | None) -> None:
+    """Flush the directory so the rename itself is durable (:func:`_full_fsync`), then
+    close ``fd``. A filesystem that cannot flush a directory is skipped; any other
+    failure raises, after the rename: the write is in place, so a keyed retry finds it."""
+    if fd is None:
+        return
     try:
         _full_fsync(fd)
     except OSError as exc:
@@ -630,15 +635,21 @@ class SporeStore:
     def _save(self, data: dict) -> None:
         target_dir = self.path.parent
         os.makedirs(target_dir, exist_ok=True)
+        dir_fd = _open_dir(target_dir)
         # A UNIQUE tmp sibling, never a fixed ``<name>.tmp``: two writers must not
         # collide on one tmp path (the bug that made a fixed tmp's ``os.replace``
         # raise FileNotFoundError under concurrency). Mirrors ``store.py``'s
         # unique-suffix atomic-write idiom. The lock in :meth:`_transaction`
         # already serializes our own writers; the unique tmp also protects against
         # a leftover sidecar and any non-cooperating writer.
-        fd, tmp_name = tempfile.mkstemp(
-            dir=target_dir, prefix=self.path.name + ".", suffix=".tmp"
-        )
+        try:
+            fd, tmp_name = tempfile.mkstemp(
+                dir=target_dir, prefix=self.path.name + ".", suffix=".tmp"
+            )
+        except BaseException:
+            if dir_fd is not None:
+                os.close(dir_fd)
+            raise
         tmp_path = Path(tmp_name)
         try:
             try:
@@ -653,13 +664,16 @@ class SporeStore:
                 _full_fsync(f.fileno())
             os.replace(tmp_path, self.path)
         except BaseException:
-            # Never leak the tmp sidecar if the write or replace failed.
+            # Never leak the tmp sidecar (or the directory fd) if the write or
+            # replace failed.
             try:
                 tmp_path.unlink()
             except OSError:
                 pass
+            if dir_fd is not None:
+                os.close(dir_fd)
             raise
-        _fsync_dir(target_dir)
+        _flush_dir(dir_fd)
 
     @contextmanager
     def _transaction(self, backfilled: list[int] | None = None) -> Iterator[dict]:

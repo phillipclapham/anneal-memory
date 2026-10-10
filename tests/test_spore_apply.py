@@ -6,6 +6,7 @@ K2b broker, K2B_DESIGN.md §4.1)."""
 from __future__ import annotations
 
 import json
+import os
 import multiprocessing as mp
 from datetime import date
 from unittest import mock
@@ -429,3 +430,37 @@ def test_a_mistyped_clock_arg_is_refused(store, args):
         store.apply(SporeApply(op="descend", origin_key=KEY, args=args,
                                expected_version=seeded.version,
                                postcondition={"status": "resolved", ("resolution", "kind"): "done"}))
+
+
+# --- code L3 r2 ---------------------------------------------------------------
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows opens no directory")
+def test_a_directory_that_cannot_be_opened_fails_the_write_before_it_commits(store, monkeypatch):
+    # r2 (codex MED): a failure after the rename made a committed keyless add look
+    # failed, so its retry duplicated the spore. The open now precedes the commit.
+    store.add(type="task", text="first", today=DAY)
+    before = _raw(store)
+    real_open = os.open
+
+    def deny_dir(path, flags, *a):
+        if os.path.isdir(path):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_open(path, flags, *a)
+
+    monkeypatch.setattr(_spores.os, "open", deny_dir)
+    with pytest.raises(PermissionError):
+        store.add(type="task", text="second", today=DAY)
+    monkeypatch.undo()
+    assert _raw(store) == before
+    assert [p.name for p in store.path.parent.iterdir() if p.suffix == ".tmp"] == []
+
+
+def test_delete_locked_removes_only_the_row_it_was_given():
+    # r2 (complement LOW): the identity filter, reached directly (apply's shared-id
+    # guard pre-empts it from the public path).
+    a = {"id": "spore-001", "origin_key": "a"}
+    b = {"id": "spore-001", "origin_key": "b"}
+    data = {"spores": [a], "resolved": [b]}
+    SporeStore("/nonexistent/spores.json")._delete_locked(data, a, DAY, None)
+    assert data["spores"] == [] and data["resolved"] == [b]
+    assert [r["origin_key"] for r in data["deleted"]] == ["a"]

@@ -43,7 +43,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, NamedTuple
 
 try:  # POSIX advisory locking; absent on Windows (see AuditTrail._manifest_lock).
     import fcntl
@@ -604,6 +604,17 @@ class _SealedScan:
     error: OSError | None = None  # the read error that ended the last attempt
 
 
+class _Tip(NamedTuple):
+    """Where this instance's last entry sits in the active file (see
+    ``AuditTrail._tip``): the file's identity, the entry's byte span, its hash."""
+
+    dev: int
+    ino: int
+    at: int
+    length: int
+    line_hash: str
+
+
 class AuditTrail:
     """Hash-chained JSONL audit trail.
 
@@ -727,7 +738,7 @@ class AuditTrail:
         # from the manifest, a seal). ``_resync_with_disk`` checks those bytes
         # still hash to ``line_hash`` before trusting anything after them (L2
         # r1: a reused inode made a size check unsound).
-        self._tip: tuple[int, int, int, int, str] | None = None
+        self._tip: _Tip | None = None
         # The ISO week of the tip entry's own timestamp (see _lost_active).
         self._tip_week = ""
 
@@ -1392,7 +1403,7 @@ class AuditTrail:
             self._tip = None
             self._initialized = False
         else:
-            self._tip = (
+            self._tip = _Tip(
                 st_after.st_dev,
                 st_after.st_ino,
                 resume_at + (1 if needs_boundary else 0),
@@ -2867,7 +2878,7 @@ class AuditTrail:
             self._seq = last_entry["seq"] + 1
             self._prev_hash = self._compute_hash(last_line)
             self._tip_week = _week_of_ts(last_entry["ts"]) or self._tip_week
-            self._tip = (dev, ino, last_at, last_len, self._prev_hash)
+            self._tip = _Tip(dev, ino, last_at, last_len, self._prev_hash)
 
     def _lost_active(self, what: str) -> None:
         """The active file holding this instance's tip was ``what``: refuse
@@ -3027,7 +3038,9 @@ class AuditTrail:
             self._active_has_entry = True
             # Hash the line from disk, not a re-serialization
             self._prev_hash = self._compute_hash(last_line)
-            self._tip = (st_scan.st_dev, st_scan.st_ino, last_at, last_len, self._prev_hash)
+            self._tip = _Tip(
+                st_scan.st_dev, st_scan.st_ino, last_at, last_len, self._prev_hash
+            )
             self._tip_week = _week_of_ts(last_entry.get("ts", ""))
             # Recover week from last entry timestamp
             ts = last_entry.get("ts", "")

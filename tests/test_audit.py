@@ -7549,6 +7549,7 @@ class TestFixDiffRound10RecoveryNeverDeletes:
         assert AuditTrail.verify(db).total_entries == 2
 
     @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root lists a mode-300 directory")
+    @pytest.mark.skipif(sys.platform == "win32", reason="chmod cannot make a directory unlistable on Windows")
     def test_an_unlistable_directory_cannot_hide_a_quarantine(self, tmp_path):
         """Rebase of the hybrid onto round 10b, reproduced by a probe first.
         With the manifest quarantined, the active file gone and the directory
@@ -9093,6 +9094,7 @@ class TestManifestLockL3:
         assert AuditTrail.verify(db).valid
 
     @pytest.mark.skipif(_RUNS_AS_ROOT, reason="root lists a mode-300 directory")
+    @pytest.mark.skipif(sys.platform == "win32", reason="chmod cannot make a directory unlistable on Windows")
     def test_no_chain_start_from_the_manifest_after_an_unlisted_adoption(self, tmp_path):
         """codex MED, L3 r2 [run before the fix]: the same crash shape as the test
         above, with the directory unlistable instead of the lock unavailable.
@@ -9600,9 +9602,9 @@ class TestKL24ConcurrentWriters:
         monkeypatch.setattr(audit_module, "datetime", _NextWeek)
         b.log("ev", {"pad": "y" * 900})  # rotates; the new file outgrows a's tip
         st = os.stat(tmp_path / "m.audit.jsonl")
-        _, _, at, length, tip_hash = a._tip
-        assert st.st_size > at + length
-        a._tip = (st.st_dev, st.st_ino, at, length, tip_hash)
+        tip = a._tip
+        assert st.st_size > tip.at + tip.length
+        a._tip = tip._replace(dev=st.st_dev, ino=st.st_ino)
         with pytest.raises(audit_module._ManifestUnavailable, match="replaced"):
             a.log("ev", {"a": "refused"})
         a.log("ev", {"a": "after"})
@@ -9610,14 +9612,23 @@ class TestKL24ConcurrentWriters:
         assert result.valid, result.error
         assert result.total_entries == 5
 
-    def test_the_tip_after_a_torn_tail_points_at_the_entry_written(self, tmp_path):
+    def test_the_tip_after_a_torn_tail_points_at_the_entry_written(self, tmp_path, monkeypatch):
         """KL-24 CI-fix L3 r1 (codex MED, reasoned on Windows): the append
         opened the file in text mode, so on Windows the boundary ``\n``
         written after a torn tail landed as ``\r\n`` while the tip was
         recorded one byte past ``resume_at``. The tip then named the LF, the
         next re-sync read other bytes there and refused the write as a
-        replaced file. Every platform: the bytes at the recorded tip are the
-        entry, and the next two appends go through."""
+        replaced file. Windows' text-mode translation is forced here (L3 r2
+        LOW: on POSIX the test could not fail), so every platform checks that
+        the append writes its own bytes."""
+        real_open = open
+
+        def _windows_text_open(file, mode="r", *a, **kw):
+            if "b" not in mode and kw.get("newline") is None:
+                kw["newline"] = "\r\n"
+            return real_open(file, mode, *a, **kw)
+
+        monkeypatch.setattr(audit_module, "open", _windows_text_open, raising=False)
         db = tmp_path / "m.db"
         trail = AuditTrail(db)
         trail.log("first", {})
@@ -9625,8 +9636,8 @@ class TestKL24ConcurrentWriters:
         with open(active, "ab") as f:
             f.write(b'{"v": 1, "seq": 1, "to')  # a torn tail, no newline
         trail.log("second", {})
-        _, _, at, length, _ = trail._tip
-        line = active.read_bytes()[at : at + length]
+        tip = trail._tip
+        line = active.read_bytes()[tip.at : tip.at + tip.length]
         assert json.loads(line)["seq"] == 1, line
         trail.log("third", {})
         trail.log("fourth", {})

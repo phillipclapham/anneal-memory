@@ -31,13 +31,18 @@ class _StoreCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.path = Path(self._tmp.name) / "m.db"
         self.store = Store(self.path)
+        self._conns: list[sqlite3.Connection] = []
 
     def tearDown(self) -> None:
+        for c in self._conns:  # Windows cannot delete a file a connection holds
+            c.close()
         self.store.close()
         self._tmp.cleanup()
 
     def raw(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path)
+        c = sqlite3.connect(self.path)
+        self._conns.append(c)
+        return c
 
 
 class TestMint(_StoreCase):
@@ -229,8 +234,14 @@ class TestExportImport(unittest.TestCase):
             cli("--db", b, "init")
             cli("--db", b, "import", j)
             cli("--db", a, "export", "--format", "sqlite", "--output", c)
-            imported = sqlite3.connect(b).execute("SELECT origin_key FROM episodes").fetchall()
-            copied = sqlite3.connect(c).execute("SELECT origin_key FROM episodes").fetchall()
+            def rows(path: str) -> list:
+                conn = sqlite3.connect(path)
+                try:
+                    return conn.execute("SELECT origin_key FROM episodes").fetchall()
+                finally:
+                    conn.close()
+
+            imported, copied = rows(b), rows(c)
             self.assertEqual(len(imported), 1)
             self.assertNotEqual(imported[0][0], "ex:1")
             self.assertTrue(origin_key_usable(imported[0][0]))

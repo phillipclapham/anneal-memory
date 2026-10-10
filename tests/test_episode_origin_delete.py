@@ -30,13 +30,18 @@ class _Case(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.path = Path(self._tmp.name) / "m.db"
         self.store = Store(self.path)
+        self._conns: list[sqlite3.Connection] = []
 
     def tearDown(self) -> None:
+        for c in self._conns:  # Windows cannot delete a file a connection holds
+            c.close()
         self.store.close()
         self._tmp.cleanup()
 
     def raw(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path)
+        c = sqlite3.connect(self.path)
+        self._conns.append(c)
+        return c
 
     def versioned(self, key: str) -> str:
         got = self.store.read_episode_versioned(key)

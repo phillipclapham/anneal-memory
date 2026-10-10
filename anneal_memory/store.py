@@ -5796,7 +5796,7 @@ class Store:
 
     # -- Origin keys (P(2), design project_memory/episode_origin_key_design_1010.md r6) --
 
-    def _require_origin_key_column(self, operation: str) -> None:
+    def _require_origin_key_column(self, operation: StoreOperation) -> None:
         # Checked per call, never cached: a read-only handle opened before the
         # migration sees the column as soon as a write-capable open adds it.
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(episodes)")}

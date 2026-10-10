@@ -4405,16 +4405,30 @@ def _section_text(lines: list[str]) -> str:
     return "\n".join(lines[start:end])
 
 
+@dataclasses.dataclass(frozen=True)
+class _SectionSpan:
+    spec: SectionSpec
+    raw_lines: list[str]
+    start: int
+    end: int
+    text: str
+
+
+@dataclasses.dataclass(frozen=True)
+class _SectionMiss:
+    reason: str
+    message: str
+
+
 def _locate_section(
     raw: str, schema: list[SectionSpec], heading: str
-) -> tuple[SectionSpec, list[str], int, int, str] | tuple[str, str]:
+) -> _SectionSpan | _SectionMiss:
     """Find ``heading``'s one section in the raw continuity text.
 
-    Returns ``(spec, raw_lines, header_index, end_index, text)``: ``raw_lines``
-    keep their terminators, the section's lines are ``header_index + 1 ..
-    end_index - 1``, and ``text`` is the section as :meth:`Store.load_continuity`
-    shows it (:func:`_section_text` of the canonical lines). Or ``(reason,
-    message)`` when it cannot: ``no_such_section``, ``section_absent``,
+    Returns a :class:`_SectionSpan`: ``raw_lines`` keep their terminators, the
+    section's lines are ``start + 1 .. end - 1``, and ``text`` is the section as
+    :meth:`Store.load_continuity` shows it (:func:`_section_text` of the
+    canonical lines). Or a :class:`_SectionMiss` when it cannot: ``no_such_section``, ``section_absent``,
     ``ambiguous_heading``.
 
     Header lines are matched as the gate matches them (``## `` lines, through
@@ -4426,7 +4440,7 @@ def _locate_section(
     want = heading.strip().lower()
     spec = next((sp for sp in schema if sp["heading"].lower() == want), None)
     if spec is None:
-        return ("no_such_section", f"{heading!r} is not a section of this store's schema")
+        return _SectionMiss("no_such_section", f"{heading!r} is not a section of this store's schema")
     raw_lines = raw.splitlines(keepends=True)
     # Line i of the load_continuity form, by construction (see the docstring).
     canon = [canonical_continuity_text(line.splitlines()[0]) for line in raw_lines]
@@ -4438,15 +4452,15 @@ def _locate_section(
         matched = _header_matches(line.lower(), schema)
         if target in matched:
             if len(matched) > 1:
-                return ("ambiguous_heading", f"header line {i + 1} matches more than one section")
+                return _SectionMiss("ambiguous_heading", f"header line {i + 1} matches more than one section")
             hits.append(i)
     if not hits:
-        return ("section_absent", f"no ## {spec['heading']} section in the continuity file")
+        return _SectionMiss("section_absent", f"no ## {spec['heading']} section in the continuity file")
     if len(hits) > 1:
-        return ("ambiguous_heading", f"{len(hits)} header lines claim ## {spec['heading']}")
+        return _SectionMiss("ambiguous_heading", f"{len(hits)} header lines claim ## {spec['heading']}")
     start = hits[0]
     end = next((j for j in range(start + 1, len(canon)) if canon[j].startswith("## ")), len(canon))
-    return spec, raw_lines, start, end, _section_text(canon[start + 1:end])
+    return _SectionSpan(spec, raw_lines, start, end, _section_text(canon[start + 1:end]))
 
 
 def _read_raw_continuity(store: "Store") -> str | None:
@@ -4467,13 +4481,11 @@ def read_section(store: "Store", heading: str) -> tuple[str, str] | None:
     if raw is None:
         return None
     found = _locate_section(raw, store.section_schema, heading)
-    if len(found) == 2:
-        reason, message = found  # type: ignore[misc]
-        if reason == "section_absent":
+    if isinstance(found, _SectionMiss):
+        if found.reason == "section_absent":
             return None
-        raise SectionError(reason, message)
-    text = found[4]  # type: ignore[misc]
-    return text, _section_version(text)
+        raise SectionError(found.reason, found.message)
+    return found.text, _section_version(found.text)
 
 
 _REFUSAL_MESSAGES: dict[str, str] = {
@@ -4544,18 +4556,19 @@ def replace_section(
             elif _pipeline_tmp_present(store):
                 result = refused("pipeline_tmp_present")
             else:
+                found: _SectionSpan | _SectionMiss
                 try:
                     raw = _read_raw_continuity(store)
                 except UnicodeDecodeError:
-                    raw, found = None, ("unreadable", "the continuity file is not UTF-8")
+                    found = _SectionMiss("unreadable", "the continuity file is not UTF-8")
                 else:
                     found = _locate_section(raw, schema, heading) if raw is not None else (
-                        "section_absent", "no continuity file")
-                if len(found) == 2:
-                    result = refused(found[0])  # type: ignore[index]
+                        _SectionMiss("section_absent", "no continuity file"))
+                if isinstance(found, _SectionMiss):
+                    result = refused(found.reason)
                 else:
-                    _, raw_lines, start, end, text = found  # type: ignore[misc]
-                    old_version = _section_version(text)
+                    raw_lines, start, end = found.raw_lines, found.start, found.end
+                    old_version = _section_version(found.text)
                     if old_version != expected_version:
                         result = SectionWriteResult(
                             outcome="version_mismatch", heading=heading, version=old_version)
@@ -4576,7 +4589,7 @@ def replace_section(
                         after = _locate_section(new_raw, schema, heading)
                         new_canon = canonical_continuity_text(
                             new_raw.replace("\r\n", "\n").replace("\r", "\n"))
-                        if (len(after) == 2 or after[4] != new_body  # type: ignore[misc]
+                        if (isinstance(after, _SectionMiss) or after.text != new_body
                                 or not validate_structure(new_canon, schema)):
                             result = refused("invalid_body")
                         else:

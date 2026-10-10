@@ -18,6 +18,12 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   (inode, mode and symlink kept, left as it was on failure); an absent one is built in a temp file of the export's
   own and published with a no-clobber link. `--output` equal to `--db` is refused, and a bad `--output` prints
   `Error: …` instead of a traceback.
+### Fixed — a database error names the operation the caller called
+- A `StoreDatabaseError` raised inside a nested store boundary now carries the OUTER
+  method's `operation`, with the same SQLite `__cause__` and `cause_type_name`. A team
+  import, `supersede` or `record(supersedes=)` failing inside the trust lookup used to
+  report `operation="trust_map"`. The phase names `schema_init`, `batch_commit`,
+  `batch_begin` and `supersession_repair` are kept as raised.
 
 ### Added — current-state recall: state keys and the recall redirect (CAP-04)
 - **Redirect.** When the store has supersession links, `retrieve_relevant` keeps its live hits

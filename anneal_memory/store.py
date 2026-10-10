@@ -426,6 +426,12 @@ StoreOperation = Literal[
     "close",
 ]
 
+# The phase operations :meth:`Store._db_boundary` names in its docstring: a nested
+# boundary under one of these names keeps it, every other nested name becomes the
+# outer operation's.
+_PHASE_OPERATIONS: frozenset[str] = frozenset(
+    {"schema_init", "batch_commit", "batch_begin", "supersession_repair"})
+
 
 class StoreError(AnnealMemoryError):
     """Raised when a store I/O or integrity operation fails.
@@ -9907,6 +9913,14 @@ class Store:
         raise ``sqlite3.OperationalError`` ("unable to commit") so it
         must sit inside the boundary, not after.
 
+        **Nesting.** A boundary entered inside another one (a public method
+        calling another) raises under the OUTERMOST operation, the method the
+        caller called, with the name of the boundary nested directly inside it
+        in the message (one level: a deeper name is not kept) and the same
+        SQLite ``__cause__``. The phase names in :data:`_PHASE_OPERATIONS` are
+        the exception: they keep their own name at any depth. A non-database
+        :class:`StoreError` keeps the name it was raised with.
+
         **Identifier naming.** Most operation values match the public
         method name verbatim (``record``, ``recall``, ``wrap_completed``,
         etc.) so grep lands on the raise site and the caller-facing
@@ -9951,6 +9965,25 @@ class Store:
             )
         try:
             yield
+        except StoreDatabaseError as exc:
+            # A boundary nested inside this one already wrapped the error under its
+            # own name. The caller called THIS method, so the error carries this
+            # operation, with the same SQLite cause (1010+14, run: a team import's
+            # failure inside the trust lookup read ``operation="trust_map"``). The
+            # phase names the docstring lists stay as raised: they name a part of
+            # this call that a caller can act on.
+            self._rollback_quietly()
+            cause = exc.__cause__
+            if (exc.operation == operation or exc.operation in _PHASE_OPERATIONS
+                    or not isinstance(cause, sqlite3.DatabaseError)):
+                raise
+            raise StoreDatabaseError(
+                f"SQLite {operation} failed on {exc.path or self._path} "
+                f"(in {exc.operation}): {cause}",
+                operation=operation,
+                path=exc.path or str(self._path),
+                cause_type_name=exc.cause_type_name,
+            ) from cause
         except sqlite3.DatabaseError as exc:
             # 10.5c.6 L2 #2: catch ``sqlite3.DatabaseError`` (the
             # runtime-failure root) rather than ``sqlite3.Error`` (the

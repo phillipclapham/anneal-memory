@@ -1094,6 +1094,25 @@ class TestOriginKey:
         flow_key = _uuid.uuid4().hex  # flow's spores.py add stamps this form
         assert store.add(type="task", text="flow", origin_key=flow_key, today=T0)["origin_key"] == flow_key
 
+    def test_a_read_returns_what_it_keyed_not_a_reload(self, store, monkeypatch):
+        store.add(type="task", text="a", today=T0)
+        data = json.loads(store.path.read_text())
+        del data["spores"][0]["origin_key"]
+        store.path.write_text(json.dumps(data))
+        real_save = type(store)._save
+
+        def save_then_older_writer_appends(self_, doc):
+            real_save(self_, doc)  # an older anneal's add lands right after the release
+            on_disk = json.loads(self_.path.read_text())
+            on_disk["spores"].append({**on_disk["spores"][0], "id": "spore-009"})
+            del on_disk["spores"][-1]["origin_key"]
+            self_.path.write_text(json.dumps(on_disk))
+
+        monkeypatch.setattr(type(store), "_save", save_then_older_writer_appends)
+        rows = store.list_open()
+        assert [r["id"] for r in rows] == ["spore-001"]
+        assert all(r.get("origin_key") for r in rows)
+
     def test_a_read_never_takes_another_users_file_or_fails_on_a_write_error(self, store, monkeypatch):
         import errno as _errno
         store.add(type="task", text="a", today=T0)

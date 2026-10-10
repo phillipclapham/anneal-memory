@@ -5940,8 +5940,9 @@ class Store:
         blank lines removed. Pass the version to :meth:`replace_section`.
 
         Raises:
-            SectionError: the heading is not in the store's schema, or the file
-                does not hold exactly one unambiguous section under it.
+            SectionError: the heading is not in the store's schema, the file
+                does not hold exactly one unambiguous section under it, or the
+                file is not UTF-8 (``reason == "unreadable"``).
         """
         from .continuity import read_section as _read_section
 
@@ -5956,7 +5957,10 @@ class Store:
         The body is stored as :func:`~anneal_memory.origin.canonical_section_markdown`
         returns it; every line outside the section, the header line included,
         is kept byte for byte. Refused while a wrap is open or a wrap's pipeline
-        tmp sits beside the file (a committed wrap not yet renamed). Holds
+        tmp sits beside the file (a committed wrap not yet renamed). It cannot
+        run inside :meth:`_batch` or an open transaction (it raises
+        :class:`StoreError`); a write failure on the file raises
+        :class:`StoreError` and leaves the file unchanged. Holds
         :meth:`continuity_lock` (``require=True``: it raises
         :class:`ContinuityLockUnavailable` where no lock exists, as on Windows)
         and the store's write lock across the read, the check and the replace.

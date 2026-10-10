@@ -4477,7 +4477,10 @@ def _section_version(text: str) -> str:
 
 def read_section(store: "Store", heading: str) -> tuple[str, str] | None:
     """:meth:`Store.read_section`."""
-    raw = _read_raw_continuity(store)
+    try:
+        raw = _read_raw_continuity(store)
+    except UnicodeDecodeError as exc:
+        raise SectionError("unreadable", f"the continuity file is not UTF-8: {exc}") from exc
     if raw is None:
         return None
     found = _locate_section(raw, store.section_schema, heading)
@@ -4534,6 +4537,12 @@ def replace_section(
     result: SectionWriteResult
     old_version: str | None = None
     spec: SectionSpec | None = None
+    if store._conn.in_transaction:
+        # Its lock order is the file lock, then the store's: inside a batch the
+        # store's lock is already held, so it cannot run there (L3 r1).
+        raise StoreError(
+            "replace_section cannot run inside a batch or an open transaction",
+            operation="replace_section", path=str(store.continuity_path))
     with store.continuity_lock(require=True):
         conn = store._conn
         try:
@@ -4618,19 +4627,32 @@ def _write_continuity_in_place(store: "Store", text: str) -> None:
     directory (named so the wrap-orphan scan never matches it), the original's
     mode, fsync, ``os.replace``, then the directory fsync."""
     path = store.continuity_path
+    tmp_name: str | None = None
     try:
-        mode = os.stat(path).st_mode & 0o7777
-    except FileNotFoundError:
-        mode = 0o644
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix="." + path.name + ".", suffix=".section-edit")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
-            os.fchmod(f.fileno(), mode) if hasattr(os, "fchmod") else None
+        try:
+            mode = os.stat(path).st_mode & 0o7777
+        except FileNotFoundError:
+            mode = 0o644
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix="." + path.name + ".", suffix=".section-edit")
+        try:
+            f = os.fdopen(fd, "w", encoding="utf-8", newline="")
+        except BaseException:
+            os.close(fd)
+            raise
+        with f:
+            if hasattr(os, "fchmod"):
+                os.fchmod(f.fileno(), mode)
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_name, path)
-    except BaseException:
-        _safe_unlink(Path(tmp_name))
-        raise
+        tmp_name = None
+    except OSError as exc:
+        # A full disk or a permission error reaches the caller as the store's
+        # own error type (L3 r1, codex); the file is unchanged.
+        raise StoreError(f"replace_section could not write {path}: {exc}",
+                         operation="replace_section", path=str(path)) from exc
+    finally:
+        if tmp_name is not None:
+            _safe_unlink(Path(tmp_name))
     _fsync_dir(path.parent)

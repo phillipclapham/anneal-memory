@@ -90,6 +90,12 @@ class TestRead(_Case):
         self.assertEqual(r.outcome, "written")
         self.assertIn("## State of Mind\n\nfresh\n\n## Durable Facts", self.raw())
 
+    def test_a_file_that_is_not_utf8_is_unreadable(self) -> None:
+        self.store.continuity_path.write_bytes(DOC.encode() + b"\xff")
+        with self.assertRaises(SectionError) as cm:
+            self.store.read_section("State")
+        self.assertEqual(cm.exception.reason, "unreadable")
+
     def test_missing_file(self) -> None:
         self.store.continuity_path.unlink()
         self.assertIsNone(self.store.read_section("State"))
@@ -190,6 +196,30 @@ class TestReplace(_Case):
             self.store.replace_section("State", "x", expected_version=v)
         self.assertIn("schema", str(cm.exception).lower())
         self.assertIn("old state line", self.raw())
+
+    def test_inside_a_batch_it_raises_and_writes_nothing(self) -> None:
+        from anneal_memory.store import StoreError
+        _, v = self.store.read_section("State")
+        before = self.raw()
+        with self.assertRaises(StoreError), self.store._batch():
+            self.store.replace_section("State", "x", expected_version=v)
+        self.assertEqual(self.raw(), before)
+
+    def test_a_write_error_is_a_store_error_and_the_file_is_unchanged(self) -> None:
+        import errno
+        from unittest import mock
+        from anneal_memory.store import StoreError
+        _, v = self.store.read_section("State")
+        before = self.raw()
+
+        def full(*a, **k):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        with mock.patch("anneal_memory.continuity.os.replace", full), self.assertRaises(StoreError):
+            self.store.replace_section("State", "x", expected_version=v)
+        self.assertEqual(self.raw(), before)
+        left = [p.name for p in self.store.continuity_path.parent.iterdir() if "section-edit" in p.name]
+        self.assertEqual(left, [])
 
     def test_a_glob_character_in_the_store_name_still_sees_the_tmp(self) -> None:
         store = Store(Path(self._tmp.name) / "my[ab].db")  # L2 #4, run

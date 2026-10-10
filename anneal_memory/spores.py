@@ -561,11 +561,14 @@ class SporeStore:
         try:
             if hasattr(os, "geteuid") and os.stat(self.path).st_uid != os.geteuid():
                 return data
-            with self._transaction():
+            # Return the document the transaction keyed and saved, not a reload:
+            # an older writer waiting on the lock could append a keyless row
+            # between the release and a second read (L3 r1, codex).
+            with self._transaction() as keyed:
                 pass
         except OSError:
             return data
-        return self._load()
+        return keyed
 
     @staticmethod
     def _backfill_origin_keys(data: dict) -> int:

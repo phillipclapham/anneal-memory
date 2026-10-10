@@ -27,9 +27,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   says to inspect that path; a crash or SIGTERM can leave the empty claim too. The published file keeps the permissions SQLite
   gave the temp it was built in.
 - A source removed between the existence check and the export is an error; it is no longer recreated as an empty
-  database at its path. (A source whose path is not valid UTF-8 cannot use the URI form that makes this exact, as
-  SQLite leaves such a name undefined; it is checked and then opened, so only a removal in the instant between the
-  two recreates it.)
+  database at its path. A source whose path is not valid UTF-8 is refused with a message to rename it: SQLite
+  leaves such a name undefined in the existing-only form, and opening it any other way could recreate a source
+  removed mid-export.
 - Export refuses the database or any of its `-wal`, `-shm` or `-journal` files by name, as given, resolved, or as
   SQLite names the file it opened (compared case- and Unicode-folded). The source is opened once, before these
   checks, so the copy is of the file they checked; an empty source is refused.

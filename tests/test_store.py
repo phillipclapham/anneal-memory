@@ -4564,42 +4564,16 @@ def test_connect_must_exist_does_not_collapse_dotdot(tmp_path, monkeypatch):
         c.close()
 
 
-def test_connect_must_exist_opens_a_non_utf8_name_without_a_uri(monkeypatch):
-    """walopen L3 r17-r18 (codex, glm, complement): SQLite leaves a URI that
-    decodes to invalid UTF-8 undefined, so such a name is checked and opened
-    plain by its anchored path; a missing one is never created."""
-    import sqlite3
+def test_connect_must_exist_refuses_a_non_utf8_name(monkeypatch):
+    """walopen L3 r17-r20 (codex): SQLite leaves a URI that decodes to invalid
+    UTF-8 undefined, and a check-then-open fallback can recreate a removed file,
+    so such a name is refused and nothing is opened."""
     import anneal_memory.store as store_mod
     seen = []
     monkeypatch.setattr(store_mod.sqlite3, "connect", lambda *a, **k: seen.append((a, k)))
-    monkeypatch.setattr(store_mod.os.path, "exists", lambda p: p == "/tmp/caf\udce9.db")
-    store_mod.connect("/tmp/caf\udce9.db", must_exist=True)
-    assert seen == [(("/tmp/caf\udce9.db",), {})]
-    with pytest.raises(sqlite3.OperationalError):
-        store_mod.connect("/tmp/gone\udce9.db", must_exist=True)
-    assert len(seen) == 1
-
-
-def test_connect_must_exist_fallback_never_creates_a_dangling_links_target(tmp_path, monkeypatch):
-    """walopen L3 r19 (codex + complement): on the non-UTF-8 fallback a dangling
-    symlink passed lexists and the plain open created its target."""
-    import os
-    import sqlite3
-    import anneal_memory.store as store_mod
-    target = tmp_path / "missing-target.db"
-    link = tmp_path / "link.db"
-    try:
-        link.symlink_to(target)
-    except OSError:
-        pytest.skip("cannot create a symlink here")
-    real_fsencode = os.fsencode
-    # Force the non-UTF-8 branch: APFS cannot hold a non-UTF-8 name.
-    monkeypatch.setattr(store_mod.os, "fsencode",
-                        lambda p: b"\xff" if str(p) == str(link) else real_fsencode(p))
-    with pytest.raises(sqlite3.OperationalError):
-        store_mod.connect(link, must_exist=True)
-    assert not target.exists()
-
+    with pytest.raises(store_mod.StorePathError, match="not valid UTF-8"):
+        store_mod.connect("/tmp/caf\udce9.db", must_exist=True)
+    assert seen == []
 
 def test_existing_file_uri_refuses_a_nul():
     """walopen L3 r16 (codex + complement): SQLite ends the name at a NUL, so

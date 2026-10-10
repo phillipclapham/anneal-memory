@@ -2177,11 +2177,10 @@ def _publish_by_claim(tmp: Path, out: Path) -> None:
     empty file (walopen L3 r17, codex HIGH + glm HIGH + complement MED). So
     nothing here deletes a file at ``out``.
     """
-    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666)
+    # An owning file object, not a bare descriptor: an interrupt can never strand
+    # the fd, and its one close is never retried (walopen L3 r19-r20).
+    open(out, "xb").close()
     try:
-        # Closed once and never retried: a close that raised may still have
-        # released the number, which another thread can already hold (L3 r19).
-        os.close(fd)
         os.replace(tmp, out)
     except BaseException as exc:
         # State-neutral: after the claim, what sits at ``out`` cannot be known

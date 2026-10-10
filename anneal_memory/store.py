@@ -2185,14 +2185,13 @@ def connect(path: str | Path, *, must_exist: bool = False, **kwargs: Any) -> sql
             os.fsencode(full).decode("utf-8")
         except UnicodeDecodeError:
             # SQLite leaves a URI that decodes to invalid UTF-8 undefined
-            # (sqlite.org/c3ref/open.html, walopen L3 r17 codex). Such a name is
-            # checked, then opened plain by its anchored path: only the instant
-            # between the two can recreate a removed file (L3 r18).
-            # exists, not lexists: a dangling symlink would be followed and its
-            # target created (L3 r19).
-            if not os.path.exists(full):
-                raise sqlite3.OperationalError("unable to open database file")
-            return sqlite3.connect(full, **kwargs)
+            # (sqlite.org/c3ref/open.html), and every non-URI way to keep
+            # must-exist was a check then an open that a removal in between
+            # defeats (walopen L3 r17-r20, codex): refused, never weakened.
+            raise StorePathError(
+                f"Database path {target!r} is not valid UTF-8; it cannot be opened as an "
+                "existing-only database. Rename it to a UTF-8 name."
+            ) from None
         return sqlite3.connect(_existing_file_uri(full), uri=True, **kwargs)
     return sqlite3.connect(target, **kwargs)
 

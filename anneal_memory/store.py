@@ -9878,7 +9878,8 @@ class Store:
 
         **Nesting.** A boundary entered inside another one (a public method
         calling another) raises under the OUTERMOST operation, the method the
-        caller called, with the inner name kept in the message and the same
+        caller called, with the name of the boundary nested directly inside it
+        in the message (one level: a deeper name is not kept) and the same
         SQLite ``__cause__``. The phase names in :data:`_PHASE_OPERATIONS` are
         the exception: they keep their own name at any depth. A non-database
         :class:`StoreError` keeps the name it was raised with.

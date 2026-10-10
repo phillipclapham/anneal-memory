@@ -2179,13 +2179,11 @@ def _publish_by_claim(tmp: Path, out: Path) -> None:
     """
     fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666)
     try:
+        # Closed once and never retried: a close that raised may still have
+        # released the number, which another thread can already hold (L3 r19).
         os.close(fd)
-        fd = -1
         os.replace(tmp, out)
     except BaseException as exc:
-        if fd >= 0:
-            with contextlib.suppress(OSError):
-                os.close(fd)
         # State-neutral: after the claim, what sits at ``out`` cannot be known
         # here (another process may have replaced it), so the note never says it
         # is empty or ours (walopen L3 r18).

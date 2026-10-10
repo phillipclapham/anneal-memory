@@ -4572,12 +4572,33 @@ def test_connect_must_exist_opens_a_non_utf8_name_without_a_uri(monkeypatch):
     import anneal_memory.store as store_mod
     seen = []
     monkeypatch.setattr(store_mod.sqlite3, "connect", lambda *a, **k: seen.append((a, k)))
-    monkeypatch.setattr(store_mod.os.path, "lexists", lambda p: p == "/tmp/caf\udce9.db")
+    monkeypatch.setattr(store_mod.os.path, "exists", lambda p: p == "/tmp/caf\udce9.db")
     store_mod.connect("/tmp/caf\udce9.db", must_exist=True)
     assert seen == [(("/tmp/caf\udce9.db",), {})]
     with pytest.raises(sqlite3.OperationalError):
         store_mod.connect("/tmp/gone\udce9.db", must_exist=True)
     assert len(seen) == 1
+
+
+def test_connect_must_exist_fallback_never_creates_a_dangling_links_target(tmp_path, monkeypatch):
+    """walopen L3 r19 (codex + complement): on the non-UTF-8 fallback a dangling
+    symlink passed lexists and the plain open created its target."""
+    import os
+    import sqlite3
+    import anneal_memory.store as store_mod
+    target = tmp_path / "missing-target.db"
+    link = tmp_path / "link.db"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("cannot create a symlink here")
+    real_fsencode = os.fsencode
+    # Force the non-UTF-8 branch: APFS cannot hold a non-UTF-8 name.
+    monkeypatch.setattr(store_mod.os, "fsencode",
+                        lambda p: b"\xff" if str(p) == str(link) else real_fsencode(p))
+    with pytest.raises(sqlite3.OperationalError):
+        store_mod.connect(link, must_exist=True)
+    assert not target.exists()
 
 
 def test_existing_file_uri_refuses_a_nul():

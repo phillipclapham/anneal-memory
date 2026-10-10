@@ -2222,7 +2222,10 @@ def _is_named_sink(fd: int) -> bool:
         null = os.stat(os.devnull)
     except OSError:
         return False
-    return stat.S_ISCHR(null.st_mode) and st.st_rdev == null.st_rdev
+    # Windows stat results carry no st_rdev; without a device number to match,
+    # the device is not known to be the null device, so it is refused (L3 r9).
+    rdev = getattr(st, "st_rdev", None)
+    return rdev is not None and stat.S_ISCHR(null.st_mode) and rdev == getattr(null, "st_rdev", None)
 
 
 def _pin_parent(out: Path) -> Path:

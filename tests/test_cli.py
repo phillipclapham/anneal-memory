@@ -3114,7 +3114,7 @@ class TestTextExportsNeverOverwrite:
                 return st
             fields = list(st)
             fields[0] = fake_mode | 0o660
-            return os.stat_result(fields)  # st_rdev None: not the null device (Windows has no st_rdev field)
+            return os.stat_result(fields)  # no device number (None, or absent on Windows): not the null device
 
         monkeypatch.setattr(cli.os, "fstat", _disk)
         with pytest.raises(SystemExit) as exc:

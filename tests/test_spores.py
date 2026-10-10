@@ -1053,10 +1053,37 @@ class TestOriginKey:
         store.add(type="task", text="b", today=T0)
         assert store.get("spore-001")["origin_key"]
 
-    @pytest.mark.parametrize("bad", ["", "   ", 5])
+    @pytest.mark.parametrize("bad", ["", "   ", 5, " k", "k ", "k\x07", "k\u200b", None])
     def test_a_malformed_key_is_a_value_error(self, store, bad):
+        if bad is not None:
+            with pytest.raises(ValueError, match="origin_key"):
+                store.add(type="task", text="a", origin_key=bad, today=T0)  # type: ignore[arg-type]
         with pytest.raises(ValueError, match="origin_key"):
-            store.add(type="task", text="a", origin_key=bad, today=T0)  # type: ignore[arg-type]
+            store.get_by_origin_key(bad)  # type: ignore[arg-type]
+
+    def test_a_keyless_legacy_spore_is_never_found_by_a_missing_key(self, store):
+        store.add(type="task", text="a", today=T0)
+        data = json.loads(store.path.read_text())
+        del data["spores"][0]["origin_key"]
+        store.path.write_text(json.dumps(data))
+        with pytest.raises(ValueError):
+            store.get_by_origin_key(None)  # type: ignore[arg-type]
+        assert store._find_by_origin_key(json.loads(store.path.read_text()), None) is None  # type: ignore[arg-type]
+
+    def test_a_retried_create_does_not_rewrite_the_file(self, store, monkeypatch):
+        store.add(type="task", text="a", origin_key="pend-1", today=T0)
+        calls = []
+        monkeypatch.setattr(store, "_save", lambda data: calls.append(1))
+        again = store.add(type="task", text="a", origin_key="pend-1", today=T0)
+        assert again["id"] == "spore-001" and calls == []
+
+    def test_a_backfill_count_is_per_call(self, store, monkeypatch):
+        store.add(type="task", text="a", today=T0)
+        data = json.loads(store.path.read_text())
+        del data["spores"][0]["origin_key"]
+        store.path.write_text(json.dumps(data))
+        assert not hasattr(store, "_last_backfill")
+        assert store.backfill_origin_keys() == 1
 
 
 class TestNormalizer:
@@ -1074,6 +1101,18 @@ class TestNormalizer:
         store.update(s2["id"], text=self.FIXTURE, domain=self.FIXTURE, disposition=self.FIXTURE)
         stored2 = SporeStore(store.path).get(s2["id"])
         assert stored2["text"] == want and stored2["domain"] == want and stored2["disposition"] == want
+
+    def test_a_lone_surrogate_is_dropped_and_the_spore_saves(self, store):
+        s = store.add(type="task", text="a\ud800b", today=T0)
+        assert SporeStore(store.path).get(s["id"])["text"] == "ab"
+
+    def test_joiners_and_emoji_tags_are_kept(self):
+        from anneal_memory import normalize_spore_field
+
+        family = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
+        england = "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f"
+        assert normalize_spore_field(family) == family
+        assert normalize_spore_field(england) == england
 
     def test_it_is_idempotent(self):
         from anneal_memory import normalize_spore_field

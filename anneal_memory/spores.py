@@ -283,13 +283,15 @@ _BIDI_CONTROLS = frozenset(
 def normalize_spore_field(value: str) -> str:
     """The text a spore stores for ``text``, ``domain`` and ``disposition``, as
     :meth:`SporeStore.add` and :meth:`SporeStore.update` write it: NFC, ``\\r\\n``
-    and ``\\r`` as ``\\n``, bidi controls and every other control character but
+    and ``\\r`` as ``\\n``, bidi controls, lone surrogates and every other control character but
     ``\\n`` and ``\\t`` removed, and trailing whitespace stripped from each line and
-    from the end. Exported so a caller can compute the stored value before writing."""
+    from the end. Other format characters (zero-width joiners, emoji tag characters)
+    are kept: they carry meaning in emoji and in some scripts. Exported so a caller
+    can compute the stored value before writing."""
     v = value.replace("\r\n", "\n").replace("\r", "\n")
     v = "".join(
         ch for ch in v
-        if ch in "\n\t" or (ch not in _BIDI_CONTROLS and unicodedata.category(ch) != "Cc")
+        if ch in "\n\t" or (ch not in _BIDI_CONTROLS and unicodedata.category(ch) not in ("Cc", "Cs"))
     )
     v = "\n".join(line.rstrip() for line in v.split("\n")).rstrip()
     # Last: a removed character can leave a base and a combining mark adjacent.
@@ -297,8 +299,17 @@ def normalize_spore_field(value: str) -> str:
 
 
 def _validate_origin_key(origin_key: object) -> None:
-    if origin_key is not None and (not isinstance(origin_key, str) or not origin_key.strip()):
-        raise ValueError(f"origin_key must be a non-empty string or None (got {origin_key!r}).")
+    """A key is compared exactly, so one a copy could alter unseen (padding,
+    control or format characters) is refused rather than stored."""
+    if not (
+        isinstance(origin_key, str)
+        and origin_key
+        and origin_key == origin_key.strip()
+        and origin_key.isprintable()
+    ):
+        raise ValueError(
+            f"origin_key must be a non-empty printable string without surrounding spaces (got {origin_key!r})."
+        )
 
 
 def spore_version(spore: SporeDict) -> str:
@@ -383,7 +394,6 @@ class SporeStore:
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self.path = Path(path)
-        self._last_backfill = 0
 
     # --- io -----------------------------------------------------------------
 
@@ -476,7 +486,7 @@ class SporeStore:
         _fsync_dir(target_dir)
 
     @contextmanager
-    def _transaction(self) -> Iterator[dict]:
+    def _transaction(self, backfilled: list[int] | None = None) -> Iterator[dict]:
         """Serialize a full load→mutate→save against concurrent processes.
 
         The prospective layer is inherently MULTI-writer (parallel sessions +
@@ -488,7 +498,7 @@ class SporeStore:
         fd closes or the process dies, so a crashed holder can never strand it.
         NOT reentrant — a mutator must never call another mutator (``flock`` is
         per-fd, so the same process re-acquiring would self-deadlock); today no
-        mutator does. :meth:`_save` runs only on a clean exit; an exception in the
+        mutator does. :meth:`_save` runs only on a clean exit that changed the document; an exception in the
         body (a bad ``kind``, an unknown id) skips the save and releases the lock.
 
         Reads (:meth:`get` / :meth:`list_open` / :meth:`surface`) stay lock-free:
@@ -514,9 +524,14 @@ class SporeStore:
                 lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
                 fcntl.flock(lock_fd, fcntl.LOCK_EX)
             data = self._load()
-            self._last_backfill = self._backfill_origin_keys(data)
+            loaded = copy.deepcopy(data)
+            n = self._backfill_origin_keys(data)
+            if backfilled is not None:
+                backfilled.append(n)
             yield data
-            self._save(data)
+            # A body that changed nothing (a retried create, a no-op) writes nothing.
+            if data != loaded:
+                self._save(data)
         finally:
             if lock_fd is not None:
                 os.close(lock_fd)
@@ -536,9 +551,10 @@ class SporeStore:
     def backfill_origin_keys(self) -> int:
         """Assign an ``origin_key`` to every spore that has none, now, and return
         how many were assigned (0 on a store that already has them all)."""
-        with self._transaction():
+        backfilled: list[int] = []
+        with self._transaction(backfilled):
             pass
-        return self._last_backfill
+        return backfilled[0]
 
     # --- internal lookups ---------------------------------------------------
 
@@ -565,7 +581,8 @@ class SporeStore:
     @staticmethod
     def _find_by_origin_key(data: dict, origin_key: str) -> SporeDict | None:
         for item in list(data.get("spores", [])) + list(data.get("resolved", [])):
-            if isinstance(item, dict) and item.get("origin_key") == origin_key:
+            key = item.get("origin_key") if isinstance(item, dict) else None
+            if isinstance(key, str) and key and key == origin_key:
                 return cast("SporeDict", item)
         return None
 
@@ -642,7 +659,8 @@ class SporeStore:
         # blind to the Tray taxonomy); the disposition-aware layer gates the vocabulary.
         if disposition is not None and not isinstance(disposition, str):
             raise ValueError(f"disposition must be a string or None (got {disposition!r}).")
-        _validate_origin_key(origin_key)
+        if origin_key is not None:
+            _validate_origin_key(origin_key)
         text = normalize_spore_field(text)
         if not text:
             raise ValueError("text is required and must be a non-empty string (the open loop).")

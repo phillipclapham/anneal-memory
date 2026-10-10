@@ -4,6 +4,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.9.43] — 2026-10-10
+
 ### Added — `SporeStore.apply`: land one decided spore effect at most once, with a typed outcome
 - `apply(SporeApply(op, origin_key, ...))` for `add`, `update`, `descend`, `ascend` and `delete`, in one locked
   transaction, addressed by the spore's `origin_key`. It returns `already` when the effect's postcondition already holds

@@ -16,11 +16,6 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - `anneal-memory export --format sqlite --output PATH` now refuses a `PATH` that already exists (a file, a directory
   or a dangling symlink) and exits 1; earlier releases overwrote it. The error names the path: choose another
   `--output` or remove the file first.
-### Changed — `export --format sqlite` never overwrites an existing `--output`
-- Earlier releases overwrote an existing `--output` file. Export now refuses it, as SQLite's `VACUUM INTO` does:
-  choose another `--output`, or remove the file first. The default output name carries a timestamp, so an export
-  without `--output` is not affected.
-
 ### Fixed — a failed `export --format sqlite` no longer leaves a file at `--output`
 - A failed backup (a source that is not a database, a full disk) left an empty or partial file at the output path
   that looked like an export. The copy is now built in a private temp in the output's directory and published

@@ -65,6 +65,8 @@ import hashlib
 import json
 import os
 import tempfile
+import unicodedata
+import uuid
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -174,6 +176,10 @@ class SporeDict(TypedDict):
     resolution: ResolutionDict | None
     pointer: str | None
     notes: list[str]
+    # Immutable identity, assigned at creation and never reused (a fresh UUID unless
+    # the creator names one). A spore stored before 0.9.42-era stores carries none
+    # until the next write transaction backfills it (see SporeStore._transaction).
+    origin_key: str
     # NOTE — ``disposition`` is DELIBERATELY NOT a field here. It is an opaque
     # operator-I/O routing tag (the Levain/flow Tray layer's ``seed``/``handoff``/
     # ``agenda`` vs the default ``loop``) that anneal carries verbatim but never
@@ -263,8 +269,36 @@ def germination_tier(spore: SporeDict, today: date | None = None) -> Germination
 # ---------------------------------------------------------------------------
 
 # Stored fields a spore's version leaves out: ``seen`` records engagement, not
-# content. (A touch that clears an elapsed ``next`` still changes the version.)
-SPORE_VERSION_EXCLUDED: frozenset[str] = frozenset({"seen"})
+# content (a touch that clears an elapsed ``next`` still changes the version), and
+# ``origin_key`` never changes once set, so its backfill must not stale a read.
+SPORE_VERSION_EXCLUDED: frozenset[str] = frozenset({"seen", "origin_key"})
+
+# Format characters that reorder displayed text (the "Trojan Source" class): the
+# embeddings, overrides and isolates, and the implicit marks.
+_BIDI_CONTROLS = frozenset(
+    "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200e\u200f\u061c"
+)
+
+
+def normalize_spore_field(value: str) -> str:
+    """The text a spore stores for ``text``, ``domain`` and ``disposition``, as
+    :meth:`SporeStore.add` and :meth:`SporeStore.update` write it: NFC, ``\\r\\n``
+    and ``\\r`` as ``\\n``, bidi controls and every other control character but
+    ``\\n`` and ``\\t`` removed, and trailing whitespace stripped from each line and
+    from the end. Exported so a caller can compute the stored value before writing."""
+    v = value.replace("\r\n", "\n").replace("\r", "\n")
+    v = "".join(
+        ch for ch in v
+        if ch in "\n\t" or (ch not in _BIDI_CONTROLS and unicodedata.category(ch) != "Cc")
+    )
+    v = "\n".join(line.rstrip() for line in v.split("\n")).rstrip()
+    # Last: a removed character can leave a base and a combining mark adjacent.
+    return unicodedata.normalize("NFC", v)
+
+
+def _validate_origin_key(origin_key: object) -> None:
+    if origin_key is not None and (not isinstance(origin_key, str) or not origin_key.strip()):
+        raise ValueError(f"origin_key must be a non-empty string or None (got {origin_key!r}).")
 
 
 def spore_version(spore: SporeDict) -> str:
@@ -349,6 +383,7 @@ class SporeStore:
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self.path = Path(path)
+        self._last_backfill = 0
 
     # --- io -----------------------------------------------------------------
 
@@ -479,11 +514,31 @@ class SporeStore:
                 lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
                 fcntl.flock(lock_fd, fcntl.LOCK_EX)
             data = self._load()
+            self._last_backfill = self._backfill_origin_keys(data)
             yield data
             self._save(data)
         finally:
             if lock_fd is not None:
                 os.close(lock_fd)
+
+    @staticmethod
+    def _backfill_origin_keys(data: dict) -> int:
+        """Give every stored spore (open and resolved) without an ``origin_key`` a
+        fresh one. Runs inside each write transaction, so the first write after an
+        upgrade persists them all; returns how many were assigned."""
+        n = 0
+        for item in list(data.get("spores", [])) + list(data.get("resolved", [])):
+            if isinstance(item, dict) and not item.get("origin_key"):
+                item["origin_key"] = uuid.uuid4().hex
+                n += 1
+        return n
+
+    def backfill_origin_keys(self) -> int:
+        """Assign an ``origin_key`` to every spore that has none, now, and return
+        how many were assigned (0 on a store that already has them all)."""
+        with self._transaction():
+            pass
+        return self._last_backfill
 
     # --- internal lookups ---------------------------------------------------
 
@@ -504,6 +559,13 @@ class SporeStore:
     def _find_open(data: dict, spore_id: str) -> SporeDict | None:
         for item in data.get("spores", []):
             if item.get("id") == spore_id:
+                return cast("SporeDict", item)
+        return None
+
+    @staticmethod
+    def _find_by_origin_key(data: dict, origin_key: str) -> SporeDict | None:
+        for item in list(data.get("spores", [])) + list(data.get("resolved", [])):
+            if isinstance(item, dict) and item.get("origin_key") == origin_key:
                 return cast("SporeDict", item)
         return None
 
@@ -543,6 +605,7 @@ class SporeStore:
         pointer: str | None = None,
         disposition: str | None = None,
         today: date | None = None,
+        origin_key: str | None = None,
     ) -> SporeDict:
         """Plant a new spore. ``pointer`` is an optional link to fuller context for
         the open loop *as it stands* (a project path, a file, a doc) — distinct from
@@ -554,7 +617,13 @@ class SporeStore:
         stores a truthy value verbatim and NEVER interprets it (the disposition-aware
         layer owns the taxonomy + value-validation, mirroring how germination is
         computed outside the store). Pass ``None`` for a normal loop, which stays
-        key-free (store-minimal, backward-identical)."""
+        key-free (store-minimal, backward-identical).
+
+        ``origin_key`` is the spore's immutable identity; omitted, a fresh UUID is
+        assigned. Planting with a key some stored spore (open or resolved) already
+        carries writes nothing and returns that spore, so a retried create lands
+        once. ``text``, ``domain`` and ``disposition`` are stored as
+        :func:`normalize_spore_field` returns them."""
         if type not in VALID_TYPES:
             raise ValueError(f"type must be one of {VALID_TYPES} (got {type!r}).")
         if tier not in VALID_TIERS:
@@ -573,9 +642,20 @@ class SporeStore:
         # blind to the Tray taxonomy); the disposition-aware layer gates the vocabulary.
         if disposition is not None and not isinstance(disposition, str):
             raise ValueError(f"disposition must be a string or None (got {disposition!r}).")
+        _validate_origin_key(origin_key)
+        text = normalize_spore_field(text)
+        if not text:
+            raise ValueError("text is required and must be a non-empty string (the open loop).")
+        domain = normalize_spore_field(domain)
+        if disposition is not None:
+            disposition = normalize_spore_field(disposition)
         next_validated = _validate_date(next, "next")
         now = (today or date.today()).isoformat()
         with self._transaction() as data:
+            if origin_key is not None:
+                existing = self._find_by_origin_key(data, origin_key)
+                if existing is not None:
+                    return existing
             item: SporeDict = {
                 "id": self._next_id(data),
                 "type": type,
@@ -590,6 +670,7 @@ class SporeStore:
                 "resolution": None,
                 "pointer": pointer or None,
                 "notes": [],
+                "origin_key": origin_key if origin_key is not None else uuid.uuid4().hex,
             }
             # A truthy disposition is stored verbatim; a normal loop stays key-free.
             # Set via a loosely-typed view: disposition is an opaque extra key, not a
@@ -609,6 +690,13 @@ class SporeStore:
             if item.get("id") == spore_id:
                 return cast("SporeDict", item)
         return None
+
+    def get_by_origin_key(self, origin_key: str) -> SporeDict | None:
+        """The spore (open or resolved) carrying ``origin_key``, or None. A spore
+        stored before keys existed is found only after a write has backfilled it
+        (:meth:`backfill_origin_keys`)."""
+        _validate_origin_key(origin_key)
+        return self._find_by_origin_key(self._load(), origin_key)
 
     def list_open(
         self,
@@ -782,9 +870,9 @@ class SporeStore:
             if not isinstance(next, _Unset):
                 item["next"] = _validate_date(next, "next")
             if not isinstance(text, _Unset):
-                if not isinstance(text, str) or not text.strip():
+                if not isinstance(text, str) or not normalize_spore_field(text):
                     raise ValueError("text must be a non-empty string (cannot clear to empty).")
-                item["text"] = text
+                item["text"] = normalize_spore_field(text)
             if not isinstance(salience, _Unset):
                 if not isinstance(salience, int) or isinstance(salience, bool) or not 0 <= salience <= 3:
                     raise ValueError(f"salience must be an int 0–3 (got {salience!r}).")
@@ -792,7 +880,7 @@ class SporeStore:
             if not isinstance(domain, _Unset):
                 if domain is not None and not isinstance(domain, str):
                     raise ValueError(f"domain must be a string or None (got {domain!r}).")
-                item["domain"] = domain or ""
+                item["domain"] = normalize_spore_field(domain) if domain else ""
             if not isinstance(pointer, _Unset):
                 if pointer is not None and not isinstance(pointer, str):
                     raise ValueError(f"pointer must be a string or None (got {pointer!r}).")
@@ -803,8 +891,9 @@ class SporeStore:
                 if disposition is not None and not isinstance(disposition, str):
                     raise ValueError(f"disposition must be a string or None (got {disposition!r}).")
                 _view = cast("dict[str, object]", item)
-                if disposition:
-                    _view["disposition"] = disposition
+                stored = normalize_spore_field(disposition) if disposition else ""
+                if stored:
+                    _view["disposition"] = stored
                 else:  # None / "" → metabolize back to a plain (key-free) loop
                     _view.pop("disposition", None)
             if add_note:

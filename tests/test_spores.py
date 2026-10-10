@@ -988,3 +988,107 @@ class TestExpectedVersion:
         assert waited >= 0.45  # the update really queued behind the held lock
         expected_text = "edited by the other writer" if with_version else "late write"
         assert SporeStore(path).get("spore-001")["text"] == expected_text
+
+
+# -- origin_key and the stored-text normaliser (cockpit slice P, second half) --
+
+
+class TestOriginKey:
+    def test_every_new_spore_gets_a_distinct_key(self, store):
+        a = store.add(type="task", text="a", today=T0)
+        b = store.add(type="task", text="b", today=T0)
+        assert a["origin_key"] and b["origin_key"] and a["origin_key"] != b["origin_key"]
+
+    def test_the_same_key_planted_twice_is_one_spore_and_returns_the_first(self, store):
+        first = store.add(type="task", text="a", origin_key="pend-1", today=T0)
+        second = store.add(type="task", text="a retried", origin_key="pend-1", today=T0)
+        assert second["id"] == first["id"]
+        assert len(SporeStore(store.path).list_open()) == 1
+        assert SporeStore(store.path).get(first["id"])["text"] == "a"
+
+    def test_a_resolved_spore_still_holds_its_key(self, store):
+        first = store.add(type="task", text="a", origin_key="pend-1", today=T0)
+        store.descend(first["id"], kind="done", today=T0)
+        again = store.add(type="task", text="a", origin_key="pend-1", today=T0)
+        assert again["id"] == first["id"] and again["status"] == "resolved"
+        assert store.list_open() == []
+
+    def test_lookup(self, store):
+        s = store.add(type="task", text="a", today=T0)
+        assert store.get_by_origin_key(s["origin_key"])["id"] == s["id"]
+        assert store.get_by_origin_key("nope") is None
+
+    @_NEEDS_LOCK
+    def test_writes_keep_the_key(self, store):
+        s = store.add(type="question", text="a", today=T0)
+        key = s["origin_key"]
+        store.update(s["id"], text="b", tier="hot", domain="d", disposition="seed", add_note="n",
+                     expected_version=spore_version(s))
+        store.touch(s["id"], today=T0 + timedelta(days=1))
+        store.ascend(s["id"], kind="pattern", ref="r", today=T0)
+        assert SporeStore(store.path).get(s["id"])["origin_key"] == key
+
+    def test_a_store_without_keys_is_backfilled_once_and_versions_do_not_move(self, store):
+        store.add(type="task", text="a", today=T0)
+        store.add(type="task", text="b", today=T0)
+        store.descend("spore-002", kind="done", today=T0)
+        data = json.loads(store.path.read_text())
+        for item in data["spores"] + data["resolved"]:
+            del item["origin_key"]
+        store.path.write_text(json.dumps(data))
+        before = spore_version(store.get("spore-001"))
+        assert store.get_by_origin_key("anything") is None
+        assert store.backfill_origin_keys() == 2
+        assert store.backfill_origin_keys() == 0
+        a, b = store.get("spore-001"), store.get("spore-002")
+        assert a["origin_key"] and b["origin_key"] and a["origin_key"] != b["origin_key"]
+        assert spore_version(a) == before
+        assert store.get_by_origin_key(b["origin_key"])["id"] == "spore-002"
+
+    def test_any_write_backfills(self, store):
+        store.add(type="task", text="a", today=T0)
+        data = json.loads(store.path.read_text())
+        del data["spores"][0]["origin_key"]
+        store.path.write_text(json.dumps(data))
+        store.add(type="task", text="b", today=T0)
+        assert store.get("spore-001")["origin_key"]
+
+    @pytest.mark.parametrize("bad", ["", "   ", 5])
+    def test_a_malformed_key_is_a_value_error(self, store, bad):
+        with pytest.raises(ValueError, match="origin_key"):
+            store.add(type="task", text="a", origin_key=bad, today=T0)  # type: ignore[arg-type]
+
+
+class TestNormalizer:
+    FIXTURE = "  A‮B⁦C‏  \r\nline two\x07\x00\t \r\ne‎́nd  \n\n"
+
+    def test_what_the_normaliser_returns_is_what_add_and_update_store(self, store):
+        from anneal_memory import normalize_spore_field
+
+        want = normalize_spore_field(self.FIXTURE)
+        assert want == "  ABC\nline two\nénd"
+        s = store.add(type="task", text=self.FIXTURE, domain=self.FIXTURE, disposition=self.FIXTURE, today=T0)
+        stored = SporeStore(store.path).get(s["id"])
+        assert stored["text"] == want and stored["domain"] == want and stored["disposition"] == want
+        s2 = store.add(type="task", text="x", today=T0)
+        store.update(s2["id"], text=self.FIXTURE, domain=self.FIXTURE, disposition=self.FIXTURE)
+        stored2 = SporeStore(store.path).get(s2["id"])
+        assert stored2["text"] == want and stored2["domain"] == want and stored2["disposition"] == want
+
+    def test_it_is_idempotent(self):
+        from anneal_memory import normalize_spore_field
+
+        once = normalize_spore_field(self.FIXTURE)
+        assert normalize_spore_field(once) == once
+
+    def test_text_that_normalises_to_nothing_is_refused(self, store):
+        with pytest.raises(ValueError, match="text"):
+            store.add(type="task", text="‮\x07  ", today=T0)
+        store.add(type="task", text="x", today=T0)
+        with pytest.raises(ValueError, match="text"):
+            store.update("spore-001", text="⁦ \r\n")
+
+    def test_a_disposition_that_normalises_to_nothing_clears_the_key(self, store):
+        store.add(type="task", text="x", disposition="seed", today=T0)
+        store.update("spore-001", disposition="‮ ")
+        assert "disposition" not in SporeStore(store.path).get("spore-001")

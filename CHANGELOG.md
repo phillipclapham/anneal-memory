@@ -4,6 +4,16 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added — every spore has an immutable `origin_key`, and its stored text has an exported normaliser
+- `SporeStore.add` assigns each new spore an `origin_key` (a fresh UUID, or the one the caller passes). Planting with
+  a key a stored spore already carries, open or resolved, writes nothing and returns that spore, so a retried create
+  lands once. `get_by_origin_key` finds a spore by it; no write changes it. Spores stored without one are given one
+  by the next write transaction, or now by `backfill_origin_keys()`. It is not part of `spore_version`, so the
+  backfill does not stale a caller's read.
+- `text`, `domain` and `disposition` are stored as `normalize_spore_field` (exported) returns them: line endings as
+  `\n`, bidi controls and other control characters except tab and newline removed, trailing whitespace stripped per
+  line and at the end, then NFC. Text that normalises to nothing is refused, and a disposition that does clears it.
+
 ### Added — a spore write can require the version its caller read
 - `SporeStore.update`, `touch`, `descend` and `ascend` take `expected_version`. It is compared with the stored
   spore under the store's lock, after any concurrent writer's commit, and a mismatch raises `SporeError` and

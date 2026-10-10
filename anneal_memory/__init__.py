@@ -112,6 +112,7 @@ from .spores import (
     germination_tier,
     spore_version,
     SPORE_VERSION_EXCLUDED,
+    normalize_spore_field,
 )
 from .crystal import (
     RETIRE_KINDS,
@@ -239,6 +240,7 @@ __all__ = [
     "germination_tier",
     "spore_version",
     "SPORE_VERSION_EXCLUDED",
+    "normalize_spore_field",
     "VALID_TYPES",
     "VALID_TIERS",
     "DESCEND_BY_TYPE",

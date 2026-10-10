@@ -2209,6 +2209,107 @@ def _publish_by_claim(tmp: Path, out: Path) -> None:
         raise
 
 
+def _is_named_sink(fd: int) -> bool:
+    """True when ``fd`` is a FIFO, the null device or a terminal: the only
+    existing outputs written in place. A device class is not enough: a block
+    device is a disk (L3 r2) and so is a macOS raw disk, a character device (L3 r3)."""
+    st = os.fstat(fd)
+    if stat.S_ISFIFO(st.st_mode):
+        return True
+    if not stat.S_ISCHR(st.st_mode):
+        return False
+    if os.isatty(fd):
+        return True
+    try:
+        null = os.stat(os.devnull)
+    except OSError:
+        return False
+    # Windows stat results carry no st_rdev; without a device number to match,
+    # the device is not known to be the null device, so it is refused (L3 r9).
+    rdev = getattr(st, "st_rdev", None)
+    null_rdev = getattr(null, "st_rdev", None)
+    return rdev is not None and stat.S_ISCHR(null.st_mode) and rdev == null_rdev
+
+
+def _pin_parent(out: Path) -> Path:
+    """``out`` with its directory resolved once, so the temp, the publish and the
+    cleanup all happen in one directory even if a symlink in the path is
+    retargeted mid-export (L3 r1, codex: the temp leaked in the old one)."""
+    return Path(os.path.realpath(out.parent)) / out.name
+
+
+def _refuse_existing_output(out: Path) -> NoReturn:
+    """Exit 1: every export format refuses an existing --output the same way."""
+    print(
+        f"Error: {out} exists; export never overwrites a file. "
+        "Remove it or choose another --output.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _write_text_no_clobber(text: str, out: Path) -> None:
+    """Write ``text`` at ``out`` as the sqlite export publishes its copy.
+
+    Refuses an existing file, directory or dangling symlink at ``out``; the text
+    goes to a private temp beside ``out`` and is published by
+    :func:`_publish_no_clobber`, so a failed write never leaves a partial file at
+    ``out`` (without hard links, an interrupted publish can leave its empty claim).
+    Text mode, as ``Path.write_text`` was: platform newlines, UTF-8.
+
+    An existing FIFO, null device or terminal (see :func:`_is_named_sink`) holds no
+    file to clobber, so it is written in place, as the shell's noclobber (``set -C``)
+    allows ``>/dev/null`` (L2 r1: the refusal had broken ``-o /dev/stdout`` and pipes).
+    It is opened without create or truncate and checked on the open descriptor,
+    so a regular file put there in between is refused, never truncated. The rule
+    is the name's, as the shells' noclobber has it (bash ``set -C`` and zsh both
+    refuse ``>/dev/stdout`` when stdout is redirected to a file, measured 10-10):
+    ``-o /dev/stdout`` writes to a terminal or pipe and is refused when stdout is a
+    file. An exception for our own streams was beaten a new way in L3 r2-r6 and is
+    deleted (spore-813).
+    """
+    try:
+        dest = _pin_parent(out)
+    except (ValueError, OSError) as exc:
+        print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if os.path.lexists(dest):
+        try:
+            fd = os.open(dest, os.O_WRONLY | getattr(os, "O_NOCTTY", 0))
+        except (ValueError, OSError):
+            _refuse_existing_output(out)  # a directory, a dangling symlink…
+        try:
+            fh = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            os.close(fd)
+            raise
+        try:
+            with fh:  # owns the descriptor from here
+                refuse = not _is_named_sink(fh.fileno())
+                if not refuse:
+                    fh.write(text)
+        except (ValueError, OSError) as exc:
+            print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if refuse:
+            _refuse_existing_output(out)
+        return
+    tmp = dest.parent / f".{os.getpid()}-{uuid.uuid4().hex}.export-tmp"
+    try:
+        with open(tmp, "x", encoding="utf-8") as fh:
+            fh.write(text)
+        _publish_no_clobber(tmp, dest)
+    except FileExistsError:
+        print(f"Error: {out} appeared during the export; nothing was overwritten", file=sys.stderr)
+        sys.exit(1)
+    except (ValueError, OSError) as exc:  # NUL in a path, unwritable dir…
+        print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+
+
 def cmd_export(args: argparse.Namespace) -> None:
     """Export store data."""
     fmt = args.format
@@ -2273,22 +2374,18 @@ def cmd_export(args: argparse.Namespace) -> None:
                         file=sys.stderr,
                     )
                     sys.exit(1)
+                dest = _pin_parent(out)
             except (OSError, ValueError) as exc:
                 print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
                 sys.exit(1)
             # Export never writes into an existing path (as SQLite's VACUUM INTO
             # refuses a non-empty target): lexists also catches a dangling symlink.
-            if os.path.lexists(out):
-                print(
-                    f"Error: {out} exists; export never overwrites a file. "
-                    "Remove it or choose another --output.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+            if os.path.lexists(dest):
+                _refuse_existing_output(out)
             # The copy is built in a private temp in --output's directory and
             # published without replacing a file, so a failed export leaves nothing
             # at --output and deletes only its own temp.
-            tmp = out.parent / f".{os.getpid()}-{uuid.uuid4().hex}.export-tmp"
+            tmp = dest.parent / f".{os.getpid()}-{uuid.uuid4().hex}.export-tmp"
             size = 0
             try:
                 tmp_conn = sqlite_connect(sqlite_path(tmp))
@@ -2297,7 +2394,7 @@ def cmd_export(args: argparse.Namespace) -> None:
                 finally:
                     tmp_conn.close()
                 size = tmp.stat().st_size
-                _publish_no_clobber(tmp, out)
+                _publish_no_clobber(tmp, dest)
             except FileExistsError:
                 print(f"Error: {out} appeared during the export; nothing was overwritten", file=sys.stderr)
                 sys.exit(1)
@@ -2392,7 +2489,7 @@ def cmd_export(args: argparse.Namespace) -> None:
             }
             if args.output:
                 out = Path(args.output)
-                out.write_text(json.dumps(export_data, indent=2, default=str), encoding="utf-8")
+                _write_text_no_clobber(json.dumps(export_data, indent=2, default=str), out)
                 if args.json:
                     _print_json({"format": "json", "path": str(out), "episodes": len(episodes)})
                 else:
@@ -2440,7 +2537,7 @@ def cmd_export(args: argparse.Namespace) -> None:
             text = "\n".join(lines)
             if args.output:
                 out = Path(args.output)
-                out.write_text(text, encoding="utf-8")
+                _write_text_no_clobber(text, out)
                 if args.json:
                     _print_json({"format": "markdown", "path": str(out), "episodes": len(episodes)})
                 else:
@@ -3158,16 +3255,18 @@ def cmd_graph(args: argparse.Namespace) -> None:
         result = store.recall(limit=100000, include_superseded=True)
         all_ids = [ep.id for ep in result.episodes]
 
-        if not all_ids:
+        if not all_ids and not args.output:
             if args.json:
                 _print_json({"nodes": [], "edges": []})
             else:
                 print("No episodes in store.")
             return
 
-        pairs = store.get_associations(all_ids, min_strength=args.min_strength, limit=100000)
+        pairs = store.get_associations(all_ids, min_strength=args.min_strength, limit=100000) if all_ids else []
 
-        if not pairs:
+        # With --output an empty graph is still written (and an existing file
+        # still refused) through the same writer (L3 r1, codex).
+        if not pairs and not args.output:
             if args.json:
                 _print_json({"nodes": [], "edges": [], "message": "No associations above threshold"})
             else:
@@ -3209,7 +3308,7 @@ def cmd_graph(args: argparse.Namespace) -> None:
             }
             if args.output:
                 out = Path(args.output)
-                out.write_text(json.dumps(graph_data, indent=2), encoding="utf-8")
+                _write_text_no_clobber(json.dumps(graph_data, indent=2), out)
                 if args.json:
                     _print_json({"format": "json", "path": str(out), "nodes": len(nodes), "edges": len(pairs)})
                 else:
@@ -3252,7 +3351,7 @@ def cmd_graph(args: argparse.Namespace) -> None:
 
             if args.output:
                 out = Path(args.output)
-                out.write_text(text, encoding="utf-8")
+                _write_text_no_clobber(text, out)
                 if args.json:
                     _print_json({"format": "dot", "path": str(out), "nodes": len(nodes), "edges": len(pairs)})
                 else:

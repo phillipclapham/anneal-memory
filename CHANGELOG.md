@@ -4,6 +4,17 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.9.42] — 2026-10-10
+
+Behaviour changes to read before upgrading (each is detailed in its section below):
+- `export` (every format) and `graph` refuse an existing `--output` instead of overwriting it. `--output /dev/stdout`
+  writes to a terminal or a pipe and is refused when stdout is redirected to a file, as bash `set -C` and zsh do.
+- Named limit: export works by pathname. If another process renames the output's directory mid-export, the copy can
+  land in the renamed directory.
+- `SporeStore`: on a platform with no file lock (Windows), a write carrying `expected_version` or
+  `expect_disposition` raises `SporeError` instead of running unlocked.
+- `Store("file:...")` raises `ValueError`; pass a filesystem path or `":memory:"`.
+
 ### Added — a spore write can require the version its caller read
 - `SporeStore.update`, `touch`, `descend` and `ascend` take `expected_version`. It is compared with the stored
   spore under the store's lock, after any concurrent writer's commit, and a mismatch raises `SporeError` and

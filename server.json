@@ -6,12 +6,12 @@
     "url": "https://github.com/phillipclapham/anneal-memory",
     "source": "github"
   },
-  "version": "0.9.42.dev0",
+  "version": "0.9.42",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "anneal-memory",
-      "version": "0.9.42.dev0",
+      "version": "0.9.42",
       "transport": {
         "type": "stdio"
       },

@@ -588,9 +588,14 @@ def test_fold_surfaced_reads_a_repeated_path_once(tmp_path):
     from anneal_memory.worth import fold_surfaced
     rec = tmp_path / "r.jsonl"
     rec.write_text(json.dumps({"event_id": "e", "ts": "2026-10-01T00:00:00Z",
-                               "surfaced": {"crystals": ["p"]}}) + "\n", encoding="utf-8")
+                               "exposed": [{"pattern": "p"}]}) + "\n", encoding="utf-8")
     store = CrystalStore(tmp_path / "c.crystal.json")
     store.crystallize(name="p", level=3, explanation="x", evidence=["e1"])
-    result = fold_surfaced(store, [rec, str(rec), rec])
-    assert result.duplicates_skipped == 0
+    import os
+    entry = next(e for e in os.scandir(tmp_path) if e.name == "r.jsonl")
+    # L3 r9 (codex): a path-like (DirEntry) dedupes by its path, not its repr.
+    result = fold_surfaced(store, [rec, str(rec), entry, rec],
+                           now=datetime(2026, 10, 2, tzinfo=timezone.utc))
+    assert result.receipts_folded == 1
+    assert result.duplicates_skipped == 0  # read once: no event seen twice
     assert result.paths_missing == []

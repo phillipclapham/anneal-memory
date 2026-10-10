@@ -788,7 +788,9 @@ def fold_surfaced(
         raise ValueError("skew_seconds must be >= 0.")
     # One entry per path: the same file named twice adds nothing (event ids
     # dedupe), and duplicate entries were the race surface of L3 r6-r8.
-    paths = [Path(p) for p in dict.fromkeys(str(p) for p in receipt_paths)]
+    # os.fspath, not str: a path-like (an os.DirEntry) names its path, and a
+    # non-path entry still raises (L3 r9).
+    paths = list(dict.fromkeys(Path(os.fspath(p)) for p in receipt_paths))
     if not paths:
         raise ValueError("fold_surfaced needs at least one receipt path.")
     cutoff = (now or datetime.now(timezone.utc)).astimezone(timezone.utc) - timedelta(

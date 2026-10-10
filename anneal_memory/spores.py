@@ -63,7 +63,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import errno
 import os
 import tempfile
 import unicodedata
@@ -548,22 +547,24 @@ class SporeStore:
         A spore an older anneal appended (0.9.42 edits the document as raw dicts,
         so it keeps every other row's key and only its own new rows lack one) is
         keyed here: the read takes the write transaction, which backfills and
-        saves, then reloads. Only when the store cannot be written (a read-only
-        directory or file: ``EACCES``, ``EPERM``, ``EROFS``) does it return the
-        rows as stored, the unkeyed ones with no ``origin_key``; a caller treats
-        that as "no label resource yet" and never invents a key. Any other error
-        propagates (design r6 §11.2, §12.4)."""
+        saves, then reloads. It returns the rows as stored, the unkeyed ones with
+        no ``origin_key``, when the file belongs to another user (a read must not
+        hand this user the file: ``_save`` writes a new file as the writer) or when
+        the write fails with any ``OSError`` (a read-only or full disk, a
+        filesystem without locks), so a read never fails where it used to work.
+        A caller treats a missing key as "no label resource yet" and never
+        invents one. A ``SporeError`` (an unreadable document) propagates
+        (design r6 §11.2, §12.4)."""
         data = self._load()
         if not any(self._needs_key(i) for i in data.get("spores", []) + data.get("resolved", [])):
             return data
         try:
+            if hasattr(os, "geteuid") and os.stat(self.path).st_uid != os.geteuid():
+                return data
             with self._transaction():
                 pass
-        except OSError as exc:
-            if not isinstance(exc, PermissionError) and exc.errno not in (
-                errno.EACCES, errno.EPERM, errno.EROFS
-            ):
-                raise
+        except OSError:
+            return data
         return self._load()
 
     @staticmethod

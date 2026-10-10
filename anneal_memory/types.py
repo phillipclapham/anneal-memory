@@ -110,7 +110,7 @@ class SectionWriteResult:
     ``"version_mismatch"`` (nothing written; ``version`` is the current one) ·
     ``"refused"`` (nothing written; ``reason`` says why: ``wrap_in_progress``,
     ``pipeline_tmp_present``, ``graduating``, ``no_such_section``,
-    ``section_absent``, ``ambiguous_heading``, ``invalid_body``,
+    ``section_absent``, ``ambiguous_heading``, ``invalid_body``, ``unreadable``,
     ``store_busy``)."""
 
     outcome: str

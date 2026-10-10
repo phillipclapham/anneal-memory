@@ -160,6 +160,25 @@ class TestReplace(_Case):
         r = self.replace("State", "x")
         self.assertEqual((r.outcome, r.reason), ("refused", "pipeline_tmp_present"))
 
+    def test_a_glob_character_in_the_store_name_still_sees_the_tmp(self) -> None:
+        store = Store(Path(self._tmp.name) / "my[ab].db")  # L2 #4, run
+        try:
+            store.continuity_path.write_text(DOC)
+            tmp = store.continuity_path.parent / f"{store.continuity_path.stem}.abcdef123456-0a1b2c3d.md.tmp"
+            tmp.write_text("a committed wrap not yet renamed")
+            _, v = store.read_section("State")
+            r = store.replace_section("State", "x", expected_version=v)
+            self.assertEqual((r.outcome, r.reason), ("refused", "pipeline_tmp_present"))
+            self.assertIn(tmp, store._find_orphan_tmp_files())
+        finally:
+            store.close()
+
+    def test_a_file_that_is_not_utf8_is_refused(self) -> None:
+        _, v = self.store.read_section("State")
+        self.store.continuity_path.write_bytes(DOC.encode() + b"\xff\xfe")
+        r = self.store.replace_section("State", "x", expected_version=v)
+        self.assertEqual((r.outcome, r.reason), ("refused", "unreadable"))
+
     def test_an_open_wrap_refuses(self) -> None:
         self.store.record("an episode for the wrap window", "observation")
         prep = prepare_wrap(self.store)

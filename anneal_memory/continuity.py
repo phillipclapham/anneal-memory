@@ -24,6 +24,7 @@ import inspect
 import json
 import dataclasses
 import re
+import glob
 import os
 import sqlite3
 import tempfile
@@ -4477,7 +4478,7 @@ def read_section(store: "Store", heading: str) -> tuple[str, str] | None:
 
 def _pipeline_tmp_present(store: "Store") -> bool:
     parent = store.continuity_path.parent
-    return parent.exists() and any(parent.glob(f"{store.continuity_path.stem}.*.md.tmp"))
+    return parent.exists() and any(parent.glob(f"{glob.escape(store.continuity_path.stem)}.*.md.tmp"))
 
 
 def replace_section(
@@ -4522,9 +4523,13 @@ def replace_section(
             elif _pipeline_tmp_present(store):
                 result = refused("pipeline_tmp_present")
             else:
-                raw = _read_raw_continuity(store)
-                found = _locate_section(raw, schema, heading) if raw is not None else (
-                    "section_absent", "no continuity file")
+                try:
+                    raw = _read_raw_continuity(store)
+                except UnicodeDecodeError:
+                    raw, found = None, ("unreadable", "the continuity file is not UTF-8")
+                else:
+                    found = _locate_section(raw, schema, heading) if raw is not None else (
+                        "section_absent", "no continuity file")
                 if len(found) == 2:
                     result = refused(found[0])  # type: ignore[index]
                 else:

@@ -16,6 +16,7 @@ import inspect
 import hashlib
 import logging
 import json
+import glob
 import os
 import urllib.parse
 import re
@@ -342,6 +343,7 @@ StoreOperation = Literal[
     "read_episode_versioned",
     "origin_key_status",
     "delete_by_origin_key",
+    "replace_section",
     # File-write + integrity surfaces (10.5c.3 / 10.5c.4 / 10.5c.5)
     "save_continuity",
     "save_meta",
@@ -5966,7 +5968,10 @@ class Store:
         """
         from .continuity import replace_section as _replace_section
 
-        return _replace_section(self, heading, body, expected_version=expected_version)
+        # SQLite failures inside reach the caller as StoreDatabaseError, like
+        # every other store operation.
+        with self._db_boundary("replace_section"):
+            return _replace_section(self, heading, body, expected_version=expected_version)
 
     def recall(
         self,
@@ -11008,7 +11013,7 @@ class Store:
         if cont_parent.exists():
             candidates.extend(
                 sorted(
-                    cont_parent.glob(f"{cont_stem}.*.md.tmp")
+                    cont_parent.glob(f"{glob.escape(cont_stem)}.*.md.tmp")
                 )
             )
         meta_parent = self.meta_path.parent
@@ -11016,7 +11021,7 @@ class Store:
         if meta_parent.exists():
             candidates.extend(
                 sorted(
-                    meta_parent.glob(f"{meta_stem}.*.json.tmp")
+                    meta_parent.glob(f"{glob.escape(meta_stem)}.*.json.tmp")
                 )
             )
 

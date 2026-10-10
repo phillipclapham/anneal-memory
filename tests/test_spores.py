@@ -1094,6 +1094,27 @@ class TestOriginKey:
         flow_key = _uuid.uuid4().hex  # flow's spores.py add stamps this form
         assert store.add(type="task", text="flow", origin_key=flow_key, today=T0)["origin_key"] == flow_key
 
+    def test_a_read_never_takes_another_users_file_or_fails_on_a_write_error(self, store, monkeypatch):
+        import errno as _errno
+        store.add(type="task", text="a", today=T0)
+        data = json.loads(store.path.read_text())
+        del data["spores"][0]["origin_key"]
+        store.path.write_text(json.dumps(data))
+        before = store.path.read_bytes()
+        if hasattr(os, "geteuid"):  # L2 #1: the file belongs to someone else
+            real = os.geteuid()
+            monkeypatch.setattr(os, "geteuid", lambda: real + 1)
+            assert "origin_key" not in store.get("spore-001")
+            assert store.path.read_bytes() == before
+            monkeypatch.setattr(os, "geteuid", lambda: real)
+
+        def full(*a, **k):  # L2 #2: a full disk at the save
+            raise OSError(_errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr(type(store), "_save", full)
+        assert "origin_key" not in store.get("spore-001")
+        assert store.path.read_bytes() == before
+
     def test_any_write_backfills(self, store):
         store.add(type="task", text="a", today=T0)
         data = json.loads(store.path.read_text())

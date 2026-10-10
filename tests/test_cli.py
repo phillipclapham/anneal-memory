@@ -1652,6 +1652,42 @@ class TestCmdExport:
             conn.close()
         assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
 
+    def test_export_sqlite_inode_zero_is_never_our_own_link(
+        self, base_args_with_data, tmp_path, capsys, monkeypatch
+    ):
+        """walopen L3 r16 (codex HIGH): where stat reports st_ino 0 (some
+        Windows/SMB), another process's file at --output compared equal to our
+        temp and the export reported success. Inode 0 is never ours."""
+        import os
+        from anneal_memory import cli
+        real_stat, real_lstat = cli.os.stat, cli.os.lstat
+
+        class _Zero:
+            def __init__(self, st):
+                self._st = st
+                self.st_ino = 0
+                self.st_dev = st.st_dev
+
+            def __getattr__(self, name):
+                return getattr(self._st, name)
+
+        def _race(src, dst, *a, **k):
+            with open(dst, "wb") as f:
+                f.write(b"someone else's file")
+            raise FileExistsError(17, "File exists")
+
+        monkeypatch.setattr(cli.os, "link", _race)
+        monkeypatch.setattr(cli.os, "stat", lambda p, *a, **k: _Zero(real_stat(p, *a, **k)))
+        monkeypatch.setattr(cli.os, "lstat", lambda p, *a, **k: _Zero(real_lstat(p, *a, **k)))
+        out = tmp_path / "copy.db"
+        base_args_with_data.format = "sqlite"
+        base_args_with_data.output = str(out)
+        with pytest.raises(SystemExit) as exc:
+            cmd_export(base_args_with_data)
+        assert exc.value.code == 1
+        assert "appeared during the export" in capsys.readouterr().err
+        assert out.read_bytes() == b"someone else's file"
+
     def test_export_sqlite_without_hard_links_claims_then_renames(
         self, base_args_with_data, tmp_path, capsys, monkeypatch
     ):

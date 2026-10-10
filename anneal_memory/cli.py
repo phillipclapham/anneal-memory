@@ -2142,7 +2142,10 @@ def _publish_no_clobber(tmp: Path, out: Path) -> None:
     still refused, but a process that deletes the claim and writes its own file
     before the rename is overwritten (walopen L3 r15). An error or an interrupt
     after the claim removes it if it is still the empty file this call created;
-    a crash or SIGTERM there can leave it.
+    a crash or SIGTERM there can leave it. That removal is a check and then an
+    unlink by name, so a file another process puts in the claim's place between
+    the two is removed (walopen L3 r16, codex): the same window, on the same
+    filesystems, as the overwrite above.
     """
     fd = os.open(tmp, os.O_RDWR | getattr(os, "O_BINARY", 0))
     try:
@@ -2153,9 +2156,16 @@ def _publish_no_clobber(tmp: Path, out: Path) -> None:
         os.link(tmp, out)
     except FileExistsError:
         # NFS may answer a retransmitted LINK with EEXIST after the first one
-        # succeeded (open(2)): if ``out`` is our own inode, it was published.
-        mine, there = os.stat(tmp), os.lstat(out)
-        if (mine.st_dev, mine.st_ino) != (there.st_dev, there.st_ino):
+        # succeeded (open(2)): if ``out`` is our own inode, it was published. An
+        # inode number of 0 identifies nothing (some Windows/SMB stat results),
+        # so it never counts as ours (walopen L3 r16, codex).
+        try:
+            mine, there = os.stat(tmp), os.lstat(out)
+        except OSError:
+            mine = there = None
+        if mine is None or there is None or not mine.st_ino or (
+            (mine.st_dev, mine.st_ino) != (there.st_dev, there.st_ino)
+        ):
             raise
     except OSError:
         _publish_by_claim(tmp, out)
@@ -2181,7 +2191,7 @@ def _publish_by_claim(tmp: Path, out: Path) -> None:
                 os.close(fd)
         if claim is not None:
             with contextlib.suppress(OSError):
-                now = os.stat(out)
+                now = os.lstat(out)
                 if (now.st_dev, now.st_ino, now.st_size) == (claim.st_dev, claim.st_ino, 0):
                     os.unlink(out)
         raise
@@ -2213,7 +2223,7 @@ def cmd_export(args: argparse.Namespace) -> None:
             # must_exist: a source removed since the check above is an error, never
             # recreated empty at the user's path (walopen L3 r15, codex).
             src_conn = sqlite_connect(src_target, must_exist=True, timeout=_EXPORT_BUSY_DEADLINE_S)
-        except (sqlite3.Error, OSError) as exc:
+        except (sqlite3.Error, OSError, ValueError) as exc:
             print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
             sys.exit(1)
         try:

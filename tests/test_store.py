@@ -4,6 +4,7 @@ from tests.prior_seed import seed_prior_levels
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -4498,14 +4499,15 @@ def test_connect_must_exist_never_creates_the_file(tmp_path):
     """walopen L3 r15 (codex MED): must_exist opens an existing database only."""
     import sqlite3
     from anneal_memory.store import StorePathError, connect
-    missing = tmp_path / "gone dir %3F" / "x?y#z.db"
+    odd = "x?y#z.db" if sys.platform != "win32" else "x y#z.db"  # ? is illegal on Windows
+    missing = tmp_path / "gone dir %3F" / odd
     missing.parent.mkdir()
     with pytest.raises(sqlite3.OperationalError):
         connect(missing, must_exist=True)
     assert not missing.exists()
     with pytest.raises(StorePathError):
         connect(":memory:", must_exist=True)
-    real = tmp_path / "odd %20 name?#.db"
+    real = tmp_path / ("odd %20 name?#.db" if sys.platform != "win32" else "odd %20 name#.db")
     c = connect(real)
     c.execute("create table t(x)")
     c.close()
@@ -4516,18 +4518,49 @@ def test_connect_must_exist_never_creates_the_file(tmp_path):
         c.close()
 
 
-@pytest.mark.parametrize("abs_path, windows, uri", [
-    ("/a b/x%?#.db", False, "file:///a%20b/x%25%3F%23.db?mode=rw"),
-    ("C:\\Users\\x y\\a.db", True, "file:///C:/Users/x%20y/a.db?mode=rw"),
-    ("\\\\srv\\share\\a.db", True, "file:////srv/share/a.db?mode=rw"),
-    ("\\\\?\\C:\\long\\a.db", True, "file:///C:/long/a.db?mode=rw"),
-    ("\\\\?\\UNC\\srv\\share\\a.db", True, "file:////srv/share/a.db?mode=rw"),
+@pytest.mark.parametrize("abs_path", [
+    "/a b/x%?#.db",
+    "C:\\Users\\x y\\a.db",
+    "\\\\srv\\share\\a.db",
+    "\\\\?\\C:\\data\\store.",
+    "\\\\?\\Volume{0b6f}\\a.db",
+    "/caf\udce9.db",  # a non-UTF-8 POSIX name, surrogate-escaped
 ])
-def test_existing_file_uri_has_an_empty_authority(abs_path, windows, uri):
-    """walopen L1+L2 r16: Path.as_uri() put a UNC server in the authority, which
-    SQLite refuses ("invalid uri authority")."""
+def test_existing_file_uri_names_exactly_the_path(abs_path):
+    """walopen L3 r16 (codex + complement): rewriting a path into a URI lost or
+    changed verbatim, volume and non-UTF-8 names. The URI has no authority and
+    decodes back to the path's exact bytes."""
+    import os
+    import urllib.parse
     from anneal_memory.store import _existing_file_uri
-    assert _existing_file_uri(abs_path, windows=windows) == uri
+    uri = _existing_file_uri(abs_path)
+    assert uri.startswith("file:") and uri.endswith("?mode=rw")
+    body = uri[len("file:"):-len("?mode=rw")]
+    assert "/" not in body and "?" not in body and "#" not in body
+    assert urllib.parse.unquote_to_bytes(body) == os.fsencode(abs_path)
+
+
+def test_existing_file_uri_refuses_a_nul():
+    """walopen L3 r16 (codex + complement): SQLite ends the name at a NUL, so
+    'real.db\\0x' would have opened real.db."""
+    from anneal_memory.store import StorePathError, _existing_file_uri
+    with pytest.raises(StorePathError):
+        _existing_file_uri("/tmp/real.db\0missing")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="verbatim paths are Windows-only")
+def test_connect_must_exist_opens_a_verbatim_windows_path(tmp_path):
+    """walopen L3 r16: a \\\\?\\ path reaches SQLite unchanged and opens."""
+    from anneal_memory.store import connect
+    real = tmp_path / "v.db"
+    c = connect(real)
+    c.execute("create table t(x)")
+    c.close()
+    c = connect("\\\\?\\" + str(real), must_exist=True)
+    try:
+        assert c.execute("select name from sqlite_master").fetchone()[0] == "t"
+    finally:
+        c.close()
 
 
 def test_every_sqlite_connect_goes_through_the_one_opener():

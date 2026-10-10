@@ -2171,28 +2171,23 @@ def connect(path: str | Path, *, must_exist: bool = False, **kwargs: Any) -> sql
     if must_exist:
         if target == ":memory:":
             raise StorePathError("':memory:' is not an existing database file")
-        uri = _existing_file_uri(os.path.abspath(target), windows=os.name == "nt")
+        uri = _existing_file_uri(os.path.abspath(target))
         return sqlite3.connect(uri, uri=True, **kwargs)
     return sqlite3.connect(target, **kwargs)
 
 
-def _existing_file_uri(abs_path: str, *, windows: bool) -> str:
-    """An SQLite ``mode=rw`` URI for an absolute path, with an EMPTY authority.
+def _existing_file_uri(abs_path: str) -> str:
+    """An SQLite ``mode=rw`` URI that names exactly ``abs_path``.
 
-    ``Path.as_uri()`` puts a Windows UNC server in the authority
-    (``file://srv/share/x.db``), which SQLite refuses (walopen L1+L2 r16), so the
-    URI is built here: ``/a/b`` -> ``file:///a/b``, ``C:\\x`` -> ``file:///C:/x``,
-    ``\\\\srv\\share\\x`` -> ``file:////srv/share/x``; ``%``, ``?`` and ``#`` are escaped."""
-    p = abs_path
-    if windows:
-        if p.startswith("\\\\?\\UNC\\"):
-            p = "\\\\" + p[8:]
-        elif p.startswith("\\\\?\\"):
-            p = p[4:]
-        p = p.replace("\\", "/")
-    if not p.startswith("/"):
-        p = "/" + p
-    return "file://" + urllib.parse.quote(p, safe="/:") + "?mode=rw"
+    Every byte of the filesystem-encoded path is percent-escaped, ``/`` and
+    ``\\`` included, so the URI has no authority and SQLite decodes the very
+    string it was given, on every platform: no drive-letter, UNC or verbatim
+    (``\\\\?\\``) rewriting, which lost or changed paths (walopen L3 r16, codex
+    + complement), and a non-UTF-8 POSIX name is passed as its bytes. A NUL,
+    which SQLite would read as the end of the name, is refused."""
+    if "\0" in abs_path:
+        raise StorePathError(f"Database path {abs_path!r} contains a NUL character")
+    return "file:" + urllib.parse.quote_from_bytes(os.fsencode(abs_path), safe="") + "?mode=rw"
 
 
 class StorePathError(ValueError):

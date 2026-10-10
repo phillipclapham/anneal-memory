@@ -426,6 +426,12 @@ StoreOperation = Literal[
     "close",
 ]
 
+# The phase operations :meth:`Store._db_boundary` names in its docstring: a nested
+# boundary under one of these names keeps it, every other nested name becomes the
+# outer operation's.
+_PHASE_OPERATIONS: frozenset[str] = frozenset(
+    {"schema_init", "batch_commit", "batch_begin", "supersession_repair"})
+
 
 class StoreError(AnnealMemoryError):
     """Raised when a store I/O or integrity operation fails.
@@ -9914,6 +9920,23 @@ class Store:
             )
         try:
             yield
+        except StoreDatabaseError as exc:
+            # A boundary nested inside this one already wrapped the error under its
+            # own name. The caller called THIS method, so the error carries this
+            # operation, with the same SQLite cause (1010+14, run: a team import's
+            # failure inside the trust lookup read ``operation="trust_map"``). The
+            # phase names the docstring lists stay as raised: they name a part of
+            # this call that a caller can act on.
+            self._rollback_quietly()
+            if exc.operation == operation or exc.operation in _PHASE_OPERATIONS:
+                raise
+            cause = exc.__cause__ if isinstance(exc.__cause__, sqlite3.DatabaseError) else exc
+            raise StoreDatabaseError(
+                f"SQLite {operation} failed on {self._path}: {cause}",
+                operation=operation,
+                path=str(self._path),
+                cause_type_name=exc.cause_type_name,
+            ) from cause
         except sqlite3.DatabaseError as exc:
             # 10.5c.6 L2 #2: catch ``sqlite3.DatabaseError`` (the
             # runtime-failure root) rather than ``sqlite3.Error`` (the

@@ -4,6 +4,13 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — a database error names the operation the caller called
+- A `StoreDatabaseError` raised inside a nested store boundary now carries the OUTER
+  method's `operation`, with the same SQLite `__cause__` and `cause_type_name`. A team
+  import, `supersede` or `record(supersedes=)` failing inside the trust lookup used to
+  report `operation="trust_map"`. The phase names `schema_init`, `batch_commit`,
+  `batch_begin` and `supersession_repair` are kept as raised.
+
 ### Added — current-state recall: state keys and the recall redirect (CAP-04)
 - **Redirect.** When the store has supersession links, `retrieve_relevant` keeps its live hits
   exactly as ranked before, adds the keyword hits on replaced episodes (scored with weights

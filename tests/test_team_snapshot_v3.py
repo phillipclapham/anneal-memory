@@ -853,3 +853,24 @@ def test_an_existing_unowned_rewired_row_is_never_adopted_by_a_stream_that_honou
         assert s.team_snapshot_status()["unmanaged_rewired"] == 1
     finally:
         s.close()
+
+
+def test_a_database_failure_inside_the_trust_lookup_carries_the_import_operation(
+        store, monkeypatch):
+    # Reproduced 1010+14 before the fix: the trust lookup's
+    # own boundary labelled a team import's SQLite failure "trust_map".
+    import sqlite3
+    from anneal_memory.store import StoreDatabaseError
+
+    def boom(self):
+        raise sqlite3.OperationalError("injected")
+    a, b = lines()
+    monkeypatch.setattr(Store, "_has_trust_table", boom)
+    with pytest.raises(StoreDatabaseError) as err:
+        import_ledger(store, v3([(a, True, []), (b, True, [A0])]))
+    assert err.value.operation == "import_team_snapshot"
+    assert isinstance(err.value.__cause__, sqlite3.OperationalError)
+    assert err.value.cause_type_name == "OperationalError"
+    monkeypatch.undo()
+    assert not store._conn.in_transaction
+    assert store._conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0] == 0

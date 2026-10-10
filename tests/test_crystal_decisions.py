@@ -41,6 +41,9 @@ miss corrupts the substrate.
 
 
 def _wrap(block_body: str, patterns: str = PATTERNS) -> str:
+    # Grounding reads only graduating sections, so bare pattern lines get the heading.
+    if not patterns.lstrip().startswith("## "):
+        patterns = "## Patterns\n" + patterns
     return f"{patterns}\nSome narrative prose.\n\n```crystal-decisions\n{block_body}\n```\n"
 
 
@@ -91,6 +94,15 @@ def test_metadata_pulled_from_matched_pattern_line():
     assert d.level == 3
     assert d.evidence_ids == ["a1b2c3d4", "e5f6g7h8"]
     assert d.explanation == "verify or surface before acting on cached state."
+    # One level atom (L3 r6): a canonical 4-digit level is read whole, and a
+    # non-canonical spelling is not read as a level at all.
+    for tok, want in (("1234", 1234), ("999999999", 999999999), ("02", None), ("007", None),
+                      ("١٢", None), ("1000000000", None)):
+        wrap = _wrap("verify_or_surface | crystallize | timeless | just-in-time",
+                     patterns=f"- verify_or_surface | {tok}x (2026-05-12) "
+                              f'[evidence: a1b2c3d4 "verify or surface."]')
+        (d,) = parse_crystal_decisions(wrap)
+        assert d.level == want, tok
 
 
 def test_pattern_line_without_evidence_tag():
@@ -341,6 +353,7 @@ def test_explanation_not_hijacked_by_emdash_inside_evidence_quote():
     # em-dash; a naive split('—') would fire INSIDE the quote and corrupt the
     # explanation fed to crystallize. The evidence span must be stripped first.
     wrap = (
+        "## Patterns\n"
         '- p | 3x (2026-06-06) [evidence: aa11bb22 "the harness fires hooks '
         'interactively — but skips them headless"] — the real felt prose.\n'
         "\n```crystal-decisions\np | crystallize | timeless | just-in-time\n```"
@@ -354,6 +367,7 @@ def test_quoted_only_why_falls_back_to_the_quote():
     # L1 MEDIUM: a line whose only explanation is the quoted "why" (no felt-prose
     # tail) must not yield "" (which ValueErrors in crystallize) — fall back to it.
     wrap = (
+        "## Patterns\n"
         '- p | 2x (2026-06-06) [evidence: aa11bb22 "the only explanation here"]\n'
         "\n```crystal-decisions\np | crystallize | phase-specific | just-in-time\n```"
     )
@@ -366,6 +380,7 @@ def test_regraduated_pattern_grounds_on_the_highest_level_line():
     # L2 MEDIUM: a sharpened-in-place pattern leaves a stale 2x line ABOVE the
     # fresh 3x line; first-match would ground on the stale one. Best-line wins.
     wrap = (
+        "## Patterns\n"
         '- foo | 2x (2026-05-01) [evidence: STALE001 "old"] — old graduation.\n'
         '- foo | 3x (2026-06-06) [evidence: FRESH001 "new"] — new graduation.\n'
         "\n```crystal-decisions\nfoo | crystallize | timeless | just-in-time\n```"
@@ -380,6 +395,7 @@ def test_undated_prose_decoy_does_not_win_over_dated_graduation_line():
     # L1 LOW: an undated `name | Nx` mention in prose before the real graduation
     # line must not out-rank it. A dated line beats an undated one regardless of level.
     wrap = (
+        "## Patterns\n"
         "Earlier I mentioned bar | 9x in passing, with no date.\n"
         '- bar | 2x (2026-06-06) [evidence: real0001 "grounded"] — the real line.\n'
         "\n```crystal-decisions\nbar | crystallize | timeless | just-in-time\n```"
@@ -415,6 +431,7 @@ def test_hyphenated_longer_name_does_not_false_match_short_name():
     # codex L3 MEDIUM: '_' is a word char but '-'/'.' are not, so the old [^\w]
     # boundary let 'bar' grab 'foo-bar | 3x'. The name-alphabet lookbehind fixes it.
     wrap = (
+        "## Patterns\n"
         '- foo-bar | 3x (2026-06-06) [evidence: wrong1 "wrong"] — wrong longer pattern.\n'
         '- bar | 2x (2026-06-06) [evidence: right1 "right"] — right short pattern.\n'
         "\n```crystal-decisions\nbar | crystallize | timeless | just-in-time\n```"
@@ -427,6 +444,7 @@ def test_hyphenated_longer_name_does_not_false_match_short_name():
 
 def test_dotted_longer_name_does_not_false_match_short_name():
     wrap = (
+        "## Patterns\n"
         '- a.bar | 3x (2026-06-06) [evidence: wrong1 "wrong"] — dotted longer.\n'
         '- bar | 2x (2026-06-06) [evidence: right1 "right"] — short.\n'
         "\n```crystal-decisions\nbar | crystallize | timeless | just-in-time\n```"
@@ -440,6 +458,7 @@ def test_dated_prose_decoy_does_not_fake_has_date():
     # The marker date is now captured at the marker, so a 'Reminder (date): p | 9x'
     # prose decoy reads as undated and loses to the real dated graduation line.
     wrap = (
+        "## Patterns\n"
         "Reminder (2026-06-06): p | 9x was a joke in prose, not a pattern line.\n"
         '- p | 2x (2026-06-06) [evidence: real1 "real"] — real pattern line.\n'
         "\n```crystal-decisions\np | crystallize | timeless | just-in-time\n```"
@@ -482,6 +501,7 @@ def test_huge_level_digits_do_not_raise():
     # so the giant marker is simply ungrounded — never a raise.
     huge = "9" * 5000
     wrap = (
+        "## Patterns\n"
         f"- p | {huge}x (2026-06-06) — huge level.\n"
         "\n```crystal-decisions\np | crystallize | timeless | just-in-time\n```"
     )
@@ -494,6 +514,7 @@ def test_bracket_inside_evidence_quote_does_not_close_the_tag():
     # codex L3 MEDIUM: ']' inside the quoted why must not close [evidence: …] early
     # (the same explanation-corruption class as the em-dash HIGH, via a bracket).
     wrap = (
+        "## Patterns\n"
         '- p | 3x (2026-06-06) [evidence: aa11bb22 "why has ] — quoted tail"] — '
         "real felt prose.\n"
         "\n```crystal-decisions\np | crystallize | timeless | just-in-time\n```"
@@ -507,6 +528,7 @@ def test_balanced_brackets_inside_evidence_quote():
     # complement L3 FINDING 1: a '[edge cases]' bracket pair inside the quoted why
     # (no em-dash, evidence-terminated line) — the quote-aware regex consumes both.
     wrap = (
+        "## Patterns\n"
         '- foo | 2x (2026-06-06) [evidence: abc123 "handles [edge cases] properly"]\n'
         "\n```crystal-decisions\nfoo | crystallize | phase-specific | just-in-time\n```"
     )
@@ -519,6 +541,7 @@ def test_crlf_line_endings_parse():
     # complement "might be wrong about" #2: a CRLF wrap (Windows transport) must
     # still parse — row.strip() eats the \r, the fence anchors survive.
     wrap = (
+        "## Patterns\n"
         "- verify_or_surface | 3x (2026-06-06) [evidence: aa11 \"x\"] — prose.\r\n"
         "\r\n```crystal-decisions\r\n"
         "verify_or_surface | crystallize | timeless | just-in-time\r\n"
@@ -536,6 +559,7 @@ def test_unicode_dash_longer_name_does_not_false_match_short_name():
     # 'bar' grounds on the longer 'foo—bar | 3x' sibling (the '—' before 'bar' isn't
     # in the boundary alphabet, so the lookbehind wrongly passes).
     wrap = (
+        "## Patterns\n"
         '- foo—bar | 3x (2026-06-02) [evidence: wrong "w"] — wrong longer line.\n'
         '- bar | 2x (2026-06-01) [evidence: right "r"] — right short line.\n'
         "\n```crystal-decisions\nbar | crystallize | timeless | just-in-time\n```"
@@ -553,6 +577,7 @@ def test_suffix_name_never_false_matches_longer_sibling_structural(longer):
     # token after the bullet/marker prefix) ends the class — 'bar' can't ground on any
     # 'foo<sep>bar' longer sibling, whatever the separator char.
     wrap = (
+        "## Patterns\n"
         f'- {longer} | 3x (2026-06-02) [evidence: wrong "w"] — wrong longer line.\n'
         '- bar | 2x (2026-06-01) [evidence: right "r"] — right short line.\n'
         "\n```crystal-decisions\nbar | crystallize | timeless | just-in-time\n```"
@@ -566,6 +591,7 @@ def test_suffix_name_never_false_matches_longer_sibling_structural(longer):
 def test_name_with_internal_slash_grounds_to_its_own_line():
     # the structural anchor must still GROUND a legitimate exotic-char name to its line.
     wrap = (
+        "## Patterns\n"
         '- a/b | 3x (2026-06-02) [evidence: real "r"] — the slash-named pattern.\n'
         "\n```crystal-decisions\na/b | crystallize | timeless | just-in-time\n```"
     )
@@ -579,6 +605,7 @@ def test_marker_prefixed_graduation_line_grounds():
     # FlowScript priority/done markers (! !! ✓) precede the name on a graduation line;
     # the prefix run must still let the name ground.
     wrap = (
+        "## Patterns\n"
         '  ! clean_room | 3x (2026-06-02) [evidence: ev1 "x"] — felt prose.\n'
         '✓ done_thing | 2x (2026-06-01) [evidence: ev2 "y"] — done prose.\n'
         "\n```crystal-decisions\n"
@@ -598,6 +625,7 @@ def test_emdash_name_does_not_fold_into_ascii_hyphen_sibling():
     # ground onto a DIFFERENT ascii-hyphen pattern line (wrong-line match, silent
     # mis-grounding — NOT a safe miss). The name cell now preserves exact dashes.
     wrap = (
+        "## Patterns\n"
         '- foo-bar | 2x (2026-06-01) [evidence: ascii1 "a"] — ascii line.\n'
         '- foo—bar | 3x (2026-06-02) [evidence: uni1 "u"] — unicode line.\n'
         "\n```crystal-decisions\nfoo—bar | crystallize | timeless | just-in-time\n```"
@@ -614,6 +642,7 @@ def test_emphasis_on_pattern_line_name_is_a_safe_miss():
     # decision row) won't ground — documented as a SAFE miss (level None), not a
     # corruption. The instruction directs plain names; this locks the safe behavior.
     wrap = (
+        "## Patterns\n"
         '- **foo_pattern** | 3x (2026-06-06) [evidence: abc "why"] — prose.\n'
         "\n```crystal-decisions\nfoo_pattern | crystallize | timeless | just-in-time\n```"
     )
@@ -629,6 +658,7 @@ def test_status_markers_are_never_a_patterns_explanation():
     # ('(carried-forward) [no-contradicts]'); a line WITH a quoted why plus a trailing
     # marker returned '[no-contradicts]' over the why. Empty is the refusal signal.
     wrap = (
+        "## Patterns\n"
         "- !! invisible_infrastructure_failure | 5x (2026-09-16) (carried-forward) "
         "[no-contradicts]\n"
         '- !! the_device_is_the_oracle | 20x (2026-09-23) [evidence: 24535293, '
@@ -666,6 +696,7 @@ def test_em_dash_inside_an_unparsed_evidence_quote_is_not_the_separator():
     # unbalances the quote, the evidence tag fails to parse, and the whole-tail split
     # fired on the em-dash INSIDE the why, returning 'clipped"] [no-contradicts]'.
     wrap = (
+        "## Patterns\n"
         '- !! p | 3x (2026-09-23) [evidence: a1 "the 6.1" screen — clipped"] '
         "[no-contradicts]\n"
         "\n```crystal-decisions\np | crystallize | timeless | just-in-time\n```"
@@ -673,3 +704,47 @@ def test_em_dash_inside_an_unparsed_evidence_quote_is_not_the_separator():
     (d,) = parse_crystal_decisions(wrap)
     assert d.level == 3
     assert d.explanation == ""
+
+
+# --------------------------------------------------------------------------- #
+# grounding reads only graduating sections (L3 r7 codex HIGH)
+# --------------------------------------------------------------------------- #
+
+_DECOY_WRAP = (
+    "## State\n"
+    '- verify_or_surface | 999x (2026-10-08) [evidence: aaaa1111 "decoy"] — decoy.\n\n'
+    + PATTERNS
+    + "\n```crystal-decisions\n"
+    "verify_or_surface | crystallize | timeless | just-in-time\n```\n"
+)
+
+
+def test_state_section_decoy_cannot_outrank_the_graduating_line():
+    (d,) = parse_crystal_decisions(_DECOY_WRAP)
+    assert d.level == 3
+    assert "decoy" not in d.explanation
+    assert d.evidence_ids == ["a1b2c3d4", "e5f6g7h8"]
+
+
+def test_custom_schema_graduating_heading_is_honoured():
+    wrap = (
+        "## Patterns\n- foo | 999x (2026-10-08) — decoy in a non-graduating section.\n\n"
+        "## Proven\n- foo | 2x (2026-10-08) [evidence: bbbb2222 \"real\"] — real.\n\n"
+        "```crystal-decisions\nfoo | crystallize | timeless | just-in-time\n```\n"
+    )
+    (d,) = parse_crystal_decisions(wrap, frozenset({"## proven"}))
+    assert d.level == 2 and d.evidence_ids == ["bbbb2222"]
+
+
+@pytest.mark.parametrize("sep", ["\u2028", "\x85", "\x0b", "\x0c", "\x1c", "\u2029"])
+def test_a_non_newline_terminator_cannot_open_a_graduating_section(sep):
+    """L3 r8 codex MED: the validator splits on "\\n"; so must the grounding walk."""
+    wrap = (
+        "## State\n- s" + sep + "## Patterns" + sep
+        + '- verify_or_surface | 999x (2026-10-08) [evidence: aaaa1111 "decoy"] — decoy.\n\n'
+        + PATTERNS
+        + "\n```crystal-decisions\n"
+        "verify_or_surface | crystallize | timeless | just-in-time\n```\n"
+    )
+    (d,) = parse_crystal_decisions(wrap)
+    assert d.level == 3 and "decoy" not in d.explanation

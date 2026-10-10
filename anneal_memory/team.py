@@ -168,7 +168,10 @@ class TeamImportReport:
     unmappable: list[dict] = field(default_factory=list)
     sanitised: list[str] = field(default_factory=list)
     reimported: list[str] = field(default_factory=list)
-    replaced_in_place: list[str] = field(default_factory=list)
+    rehashed: list[str] = field(default_factory=list)
+    # changed text: {id, old, new, revived}; the old episode stays, and the link
+    # hiding it is in links_added (or links_refused) of this or a later replace
+    replaced: list[dict] = field(default_factory=list)
     snapshot_notes: list[str] = field(default_factory=list)  # informational, not a problem
 
     @property
@@ -210,7 +213,8 @@ class TeamImportReport:
                 "unmappable": self.unmappable,
                 "sanitised": self.sanitised,
                 "reimported": self.reimported,
-                "replaced_in_place": self.replaced_in_place,
+                "rehashed": self.rehashed,
+                "replaced": self.replaced,
                 "snapshot_notes": self.snapshot_notes}
                if self.framing == "v3" else {}),
         }
@@ -935,7 +939,8 @@ def _import_v3(store: Store, lines: Iterable[str], report: TeamImportReport,
     report.overrides_recorded = result["overrides_recorded"]
     report.unmappable = result["unmappable"]
     report.reimported = result["reimported"]
-    report.replaced_in_place = result["replaced_in_place"]
+    report.rehashed = result["rehashed"]
+    report.replaced = result["replaced"]
     return report
 
 

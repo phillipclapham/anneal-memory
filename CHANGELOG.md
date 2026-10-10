@@ -17,6 +17,486 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   that looked like an export. The export now writes a temp file of its own in the destination directory and moves it
   into place only on success; on failure `--output` is untouched (absent, or the previous file).
 
+### Added — current-state recall: state keys and the recall redirect (CAP-04)
+- **Redirect.** When the store has supersession links, `retrieve_relevant` keeps its live hits
+  exactly as ranked before, adds the keyword hits on replaced episodes (scored with weights
+  counted over every episode, so a link never raises a hit's score), and swaps each of those,
+  IN ITS OWN SLOT, for the live episode at the end of its chain. A
+  query that names the old state ("still in Seattle?") gets the current fact, which by
+  construction shares none of its words. The served episode's new `ScoredEpisode.replaces`
+  holds a `ReplacedEpisode` (id, timestamp, text cut to 300 characters) for each hit it stands
+  in for (it takes the slot and score of the best of them). A hit whose path to that episode
+  crosses a wrap-proposed (`source='wrap'`) or delete-rewired link is dropped, not swapped.
+  The associative seed set is unchanged. With links present this costs one more candidate
+  scan per call. MCP `recall` with a plain
+  keyword (and without `include_superseded`) adds a "Replaced since" block naming the fact
+  that replaced each hidden match (scanning only the hidden set, so live matches cannot crowd
+  it out). New `Store.has_supersessions`, `Store.redirectable_ids`, `Store.replaced_matches`.
+- **State keys.** `record(..., state_key=)`, `Store.set_state_key(id, key)`,
+  `Store.clear_state_key(id)`, `Store.state_key_report(key=None)`, `normalize_state_key`; CLI
+  `record --state-key KEY` and `state [KEY] [--set ID | --unset ID]`; MCP `record` takes
+  `state_key` (tool-integrity manifests regenerated). A slot holds one value: of its live keyed
+  episodes and the new one, the newest by the instant its timestamp names (then insertion
+  order) replaces every other. A keyed episode is replaced only through its key: an explicit,
+  wrap-proposed or team link from it is refused, even to an episode with the same key (`record` and
+  `supersede` raise; a wrap reports it in `supersessions_rejected`). The links are ordinary
+  `supersessions` rows with `source='state_key'` (the link's kind; who asked is in the audit
+  event, which names the key), so hiding, delete/prune rewiring and the audit chain apply;
+  they are made without the lexical floor: the key is the writer's claim. A keyed episode's
+  timestamp is stored in UTC (offsets converted; finer than a microsecond is refused) so SQL
+  cutoffs and the key rule agree on order; `set_state_key` refuses an episode stored in another form. `clear_state_key` removes
+  the episode's key and the links keys made to it, and re-forms the slot.
+  Keys are NFKC-normalised, case-folded, whitespace-collapsed, 1-200 characters, with no
+  control or format characters. An episode keeps one key; a different key, or keying an
+  episode already replaced, is refused. New additive table `state_keys` with a trigger that
+  drops an episode's key row when any version deletes the episode; an older binary otherwise
+  ignores it.
+- Measured: `scripts/stale_probe.py --supersede explicit` on reworded updates, scored recall's
+  current fact at the top went from 7 of 16 (main) to 15 of 16; restate and negate stay at 16
+  of 16, links a wrap proposed give main's numbers (they hide, never serve), and the never-updated control is
+  unchanged (15 of 16). On 100 STALE scenarios with keys placed on the true old and new turns
+  (through `set_state_key` and `retrieve_relevant` on this build), the old-state question
+  served the old fact turn 93 times and the new one 0 times before, and the new one 93 times
+  and the old one 0 times keyed (prompt mode, k=10; mechanism counts, no reader or judge). How
+  well a model assigns keys is NOT measured.
+
+### Added — drift probes, the operator's instrument for meaning drift (CAP-06)
+- `anneal-memory probe add --pattern NAME [--min-level N]` / `--fact TEXT [--section H]`,
+  `probe list [--all]`, `probe retire ID`, `probe status`; library `Store.add_drift_probe`,
+  `list_drift_probes`, `retire_drift_probe`, `drift_status`, and `anneal_memory.drift`.
+  Every save checks each live probe against the saved text and records its status with that
+  wrap (`probe status` shows each with its detail; the save result's `drift` and the
+  `continuity_saved` audit event carry the counts and each probe's id and status only):
+  `held`, `changed` (every word kept but a negation flipped), `weakened` (a pattern below
+  its level), `crystallized` (moved to the crystal store), `lost`, or `unchecked` (a probe
+  this version cannot read; a probe never blocks a save). A pattern probe's level defaults
+  to the level the pattern holds when the probe is added. A fact matches within one
+  sentence or bullet; numbers (any token with a digit), negators and ordering words count.
+  Probes are read and checked inside the save's own transaction. Probes are not part of the
+  wrap package. The check is lexical: a change that keeps every word (two roles swapped)
+  reads `held`, and that is the operator's to judge, as the README now says plainly.
+- `probe status` also lists what the latest save graduated with a validated citation at
+  2x and up: the operator's worklist for truth and for contradiction with Proven patterns.
+- Three additive tables, `drift_probes`, `drift_results` and `wrap_graduations`; an older
+  binary ignores them. Adding and retiring a probe are audited.
+- One level atom: a graduation level is an ASCII number from 1 to 999,999,999 with no
+  leading zero, and every parser reads it through the same pattern. In a graduating section
+  any other `| <digits>x` marker (10 or more digits, a leading zero, non-ASCII digits, 0) is
+  cut to `1x` on its own, with its own evidence tag replaced by `(level-capped)`, counted in
+  `demoted` (and in the new int `GraduationResult.atom_capped`, which the "resolved to ZERO
+  episodes" warning excludes; `GraduationResult.level_capped` is the list of cut lines,
+  below). Before, such a line matched no validator yet read as a level
+  to the other parsers, so it saved untouched and held a probe. A failed write of a probe
+  result or worklist row fails the whole save, atomically, as a `StoreDatabaseError`. The
+  worklist is the validator's own records, not a re-read of the text.
+- Run through the real save pipeline on a copy of a real store: 25 probes held, and a
+  planted wrong number read `lost` and a planted flipped claim read `changed`.
+
+### Fixed — the cross-session check stopped grading function words (KL-01)
+- The cross-session-overlap check (a re-graduation whose explanation shares 3 or more
+  meaningful words with the prior one demotes) now drops every common function word and the
+  number words, not only the short list it shared with grounding. Before, "while", "only",
+  "when" and "one" counted as shared vocabulary and real patterns were demoted on them.
+  Replayed against one real store's recorded demotions, about a third would not have tripped.
+  Grounding (the explanation must share 2 meaningful words with a cited episode) and the
+  supersession floor keep the shorter list, so their behaviour and the published supersession
+  numbers are unchanged. The same longer list is used by carryforward's sycophancy guard, so
+  fewer cited lines are refused the hold on function-word overlap. A re-worded explanation that shares three content words still demotes.
+
+### Changed — a bare graduation is held, not eroded, at every level (spore-676; changes 0.5.0)
+- A pattern line at 4x or higher with no `[evidence:]` tag matched neither graduation regex,
+  so it was never validated or demoted, whatever its level. Bare lines now use the same
+  "2 and up" level as cited ones.
+- **Behaviour change from 0.5.0, ruled by the operator:** a today-dated bare line at or
+  below its recorded high-water mark is HELD at every level, warm or cold. A warm one
+  (grounded within `carryforward_cold_days`) is marked `(carried-forward)` as before. A COLD
+  one is no longer demoted a level: it is held, its date is set back to its last grounding,
+  it is reported with `cold: true` in `carried_forward`, and a warning asks the operator to
+  re-exercise it with fresh evidence, graduate it out or retire it. Before, a cold bare 2x or
+  3x lost a level on every wrap that re-dated it, so its decay tracked the consolidator's
+  dating habit rather than the pattern. A bare line with no history, or above its mark, still
+  demotes. Cited lines are unchanged: a cold line whose citation fails still demotes.
+- A hold keeps a level and never raises one, warm or cold, cited or bare: a line above its
+  level in the continuity being replaced (an eroded pattern re-asserted at its old peak)
+  is an inflation and demotes, even at or below its all-time high-water mark.
+  `validate_graduations(prior_levels=...)` carries those levels; the save pipeline passes them.
+- Run on a copy of a real store before the change, every bare line re-dated to the wrap day:
+  all 15 were held (11 warm, 4 cold and dated back), none eroded; over five simulated daily
+  wraps that re-dated every line, no level moved.
+
+### Added — a shrink-gate override leaves an audit trace (KL-14)
+- Every `continuity_saved` audit event now carries `allow_shrink`: `requested` says whether
+  the save passed `allow_shrink=True` (CLI `--allow-shrink`, MCP `"allow_shrink": true`). When
+  it did, `refusal_suppressed` says whether the shrink gate would have refused without it, and
+  `refusal` carries the text it suppressed. An event without the field comes from an older
+  version.
+
+### Fixed / Added — crystal evidence is never erased, and empty evidence can be grounded (KL-09)
+- Crystal evidence now accumulates. Re-crystallizing a live pattern adds the new evidence ids
+  to the stored ones, and reviving a retired pattern with no evidence keeps the retired
+  record's. Before, a re-crystallize from a carried-forward line (no `[evidence:]` tag) left
+  the pattern with no evidence, so associative recall could no longer reach it.
+  `CrystalStore.update(evidence=...)` still sets or prunes evidence explicitly.
+- `CrystalStore.ground_empty_evidence(store, limit=4, dry_run=False)` and
+  `anneal-memory crystal ground-evidence [--limit N] [--dry-run]`: for each live pattern with
+  no evidence, record the oldest live episodes that name the pattern as a whole word and name
+  no other live pattern. An episode naming several patterns (an end-of-day log) would become
+  a hub that recall discounts for every pattern citing it, so it is skipped and counted. The
+  ids are marked provisional (`provisional_evidence`); the first real evidence a crystallize
+  brings, or an explicit `update(evidence=...)`, replaces them. "Another pattern" is any
+  live or retired crystal or any name in the store's pattern history. This is lexical grounding: an episode that names a
+  pattern cites it, it does not prove it.
+
+### Fixed — team-status counts imported team entries only (L3 on the v3 seam)
+- The count of unmanaged rewired links now requires the hidden episode to be a team entry as
+  the importer reads one (a `team:` source and a string `team.entry_id` in its metadata), not
+  only a `team:` source, and the line says it counts link rows that no snapshot owns.
+### Fixed — the graduation gate bounds every pattern line by what the store last saved
+- `validate_graduations` checked only today-dated, well-formed lines. A back-dated line, a bare line on a store
+  whose `citations_seen` is false, a bare line at 4x or above, a line with a non-adjacent `[evidence:]` tag, and a
+  line that jumped several rungs on one valid citation each landed at whatever level it wrote; a brand-new
+  `claim | 9x (yesterday)` was saved at 9x. Reproduced on 8542f49 by `tests/test_gradgate_prior_1007.py`.
+- New last check: each line is cut to `max(1, prior level + 1 if it validated this wrap)`, which is prepare_wrap's
+  own contract (a new pattern enters at 1x; a validated Nx becomes (N+1)x). The prior level is the store's record
+  of the level it last saved for that line (`Store.saved_pattern_levels`, the new additive `pattern_levels` table,
+  written in the wrap's own transaction; `None` until the store's first save under the bound, `{}` after one with
+  no lines). The continuity file may lower it, never raise it, and a lowering survives a wrap that leaves the
+  pattern out; a line in the file the store never saved is new; a named pattern dropped from the file keeps its
+  record, so re-adding it returns to its saved level, not to `pattern_history`'s high-water mark. A store's first
+  save under this version takes the file as the prior and seeds the record with the prior file's named levels. A
+  crystal's level is never a prior: a pattern crystallized out of the file re-enters as new and re-earns its rungs.
+  Every `| Nx` marker on a graduating line is governed, dated or not; a line's identity is the text before its first
+  marker, and a line with none (`- | 9x`) is always new, every marker at 1x.
+  Renaming a pattern to its own name changes nothing. A name's level is its highest line across graduating sections. Only a line's own marker earns the
+  rung. Co-citation links from a validated line still form when the line is cut (the episodes were cited together
+  and grounded; the cut is about the level).
+- Where it meets the 1007-20 changes: a bare line held under spore-676 (A) takes its held level from the store's
+  saved pattern levels, never from the crystal store (a crystal re-added to the working set re-earns from 1x); the
+  graduation worklist (`drift_status()["graduated"]`) lists the level a line was SAVED at, so a line the bound cut
+  below 2x is not on it; and a marker the level-atom normalizer cut is reported in `level_capped` and the
+  after-commit warning like a bound cut, and keeps its `(level-capped)` mark.
+- One text grammar before the gate reads anything. `validated_save_continuity` makes both of its inputs canonical
+  where they enter (the caller's text, and the prior continuity as loaded), so the rederive strip, the durable
+  carry-forward and its drop markers, and the gate all read one grammar (the final text is canonicalised again as
+  an idempotent backstop): every line terminator other
+  than the newline (CR, VT, FF, FS, GS, RS, NEL, U+2028, U+2029) becomes a newline (the CR of a CRLF pair is kept,
+  so a CRLF file still saves as CRLF), every other Unicode space becomes an ASCII space, and non-ASCII digits in a
+  `| Nx (YYYY-MM-DD)` marker become ASCII. `## Notes<CR>## Patterns<CR>- x | 999x` was one non-graduating heading
+  to the gate and a graduating 999x once the file was read back; `|<NBSP>999x` escaped the bound. Both are now
+  bounded like any line. The saved text can differ from what the caller passed in exactly these characters.
+- Scope: the bound governs what `validated_save_continuity` writes. A continuity written by the raw
+  `Store.save_continuity()` or by an older anneal (which ignores the table) is outside it until the next canonical
+  save, which bounds it against the record again.
+  Refusing an older anneal outright needs a schema-version bump (arming the `anneal_writer_schema()` triggers),
+  which also makes every installed older anneal and anything pinned to one refuse the store until upgraded; it is
+  planned for the next schema generation, not this release (ruled 2026-10-08).
+- A level token inside a well-formed evidence tag's quoted explanation is text, not a level: the bound, the
+  level-atom normalizer and every graduation reader skip it alike (`[evidence: ab12 "latency | 10x under load"]`
+  is saved as written and reports no cut, and non-ASCII digits there are not canonicalised). A save also refuses,
+  with nothing written, when the store's saved levels changed between the bound's read and the save's write lock. Composting a pattern also deletes its saved level, so a later reuse of
+  the name starts at 1x; a rename that moves only a saved level is audited.
+- A cut line is marked `(level-capped)` (cleared once the line stands at an entitled level; a cut carried line
+  loses its `(carried-forward)`) and reported as `level_capped` on the save result (present only when a line was
+  cut), in the MCP save reply and the CLI output, as a `UserWarning`, and in the `continuity_saved` audit event. A
+  validated line cut to 1x no longer counts in `graduations_validated` or seeds co-graduation links.
+- A save with no pinned `today` now dates the wrap by the day `prepare_wrap` gave the composer (stored as the
+  `wrap_today` lifecycle key, `Store.wrap_today()`; a wrap started without it falls back to `wrap_started_at` read
+  in local time), so a wrap saved after midnight or under another `TZ` keeps the graduations it stamped.
+- A first save onto a fresh store has no prior: every pattern line enters at 1x. Direct `validate_graduations`
+  callers that pass no `prior_text` keep the old behavior.
+### Added — trust classes: relayed content cannot graduate on its own (CAP-08 T1-T3, KL-22)
+- Run first, on 2026-10-07: one episode recorded from a web page carrying a false claim, cited
+  alone by a wrap, graduated the claim to 2x through `prepare_wrap` and
+  `validated_save_continuity`. The README's "single-shot poisoning stalls at 1x" was false.
+- Every episode has a trust class, lowest first `external`, `tool`, `agent` (the default), and
+  `operator` (`TRUST_LEVELS`, `trust_rank`). `Store.record(..., trust=)` stores a non-default
+  class in a new `episode_trust` table, in the episode's transaction; absence means `agent`, so
+  every existing episode reads as `agent` and nothing changes for a caller that never passes it.
+  A trigger deletes an episode's trust row whatever path deletes the episode.
+- The trust ceiling belongs to the host (C#11, 2026-10-08): `Store(..., trust_ceiling="agent")` is
+  the highest class any write through that instance may carry, set by the code that constructs the
+  Store and moved by no call argument. `record(trust=)`, `set_trust` and the CLI's JSON import
+  refuse anything above it with `ValueError` before writing (never silently capped). Before it, a
+  library caller could label its own write `operator` with no gate at all (run on the rebased tip,
+  1008+3). The MCP server opens its store at `agent`; the CLI opens at `operator` only after its
+  operator gate. The host's labels (`trust`, `trust_via`, `actor`) are its statement, held by the
+  human who configured it by design. A CLI import counts the operator labels it brought in as
+  `agent` (`trust_capped`).
+- `Store.set_trust(id, trust, expect=)` sets any class up to the ceiling, lowering or raising;
+  above it is refused, except that setting the class the episode already has is a no-op that
+  succeeds. `expect` is the class the caller decided on: if it moved, the write refuses with a
+  conflict (the CLI passes the class its operator gate read). Audited as `trust_set`. A change
+  that leaves a recorded supersession pointing the wrong way (the replacing episode now below the
+  one it hides) removes that link in the same transaction and names it in the audit event; a
+  link a team snapshot owns stays (the ledger rules it) and is named as left.
+  `Store.trust_map(ids)` (ids case-insensitive) and `Store.trust_counts()` read them. The table
+  refuses a class outside `TRUST_LEVELS`.
+- When `set_trust` lowers an episode that a supersession link owned by a team snapshot touches,
+  the link stays: the team ledger is authoritative (strict) and a human holds it by design (the
+  augmentation exception). The audit event names it under `team_supersessions_left`. Recall
+  labels the lower-trust replacing episode with its trust class and shows what it replaced, so
+  the operator can see it and correct it in the team ledger: `retrieve_relevant` returns it with
+  `ScoredEpisode.trust` and the replaced episode's text in `replaces` (each `ReplacedEpisode`
+  with its own `trust`), and MCP `recall` lists it under "Recorded from tool output / an
+  external source", in its "Replaced since" block too, naming the replaced episode by id.
+- Graduation (`validate_graduations(..., trust_of=)`, wired by the canonical save pipeline): a
+  today-dated graduation whose GROUNDING citations (those its explanation actually overlaps) are
+  all `tool`/`external` is written back at 1x marked `(uncorroborated)`, whatever level it
+  claimed and whatever it held before, and forms no association. With no quoted explanation, a
+  single `tool`/`external` citation makes the line relayed. Listed in the save result's new
+  `uncorroborated`, recorded in the `continuity_saved` audit event, and named in a warning. An
+  unrelated agent episode added to a quoted citation does not corroborate it, and a
+  `tool`/`external` citation that does not itself ground the explanation forms no association.
+  The save re-reads the cited episodes' classes under its write lock and refuses (nothing saved,
+  the wrap still open) if another writer changed one after validation.
+- A lower-trust episode cannot supersede a higher-trust one (`record(supersedes=)`,
+  `supersede`, a wrap's `[supersedes:]`): refused as a `SupersessionError`. `pattern_trust` on the
+  save result gives each graduated named pattern's highest grounding trust, or for a citation
+  with no quoted explanation its highest cited trust (the audit event records it when above
+  `agent`).
+- MCP `record` takes `trust` (`agent`, `tool`, `external` only: an agent cannot label its own
+  write `operator`). CLI `record --trust` (`operator` needs a yes on a terminal or
+  `ANNEAL_OPERATOR=1`) and `anneal-memory trust ID [LEVEL]` (raising needs the same). The env
+  form is a convenience any process with a shell can set; the audit records which form was used
+  (`cli:operator-terminal` / `cli:operator-env`: the `trust_set` actor, and `trust_via` on an
+  operator `record` event, which `Store.record(trust_via=)` takes).
+- JSON `export` writes each non-default EFFECTIVE class (an agent summary of an external page
+  exports as `external`) and, for the record, each episode's `derived_from` edges
+  (`Store.derived_edges`); `import` does not read the edges (see the D3 entry below), so a
+  round trip never raises an episode's effective trust (run: it did). `import` honours a class up to `agent`, so an
+  edited export file can lower trust but never vouch, including on an episode it already holds
+  (reported as `trust_lowered`), and only from a class it states at or below `agent`: a missing
+  class, or an `operator` one, asserts nothing, so re-importing a store's own export never demotes
+  it. SQLite-format export copies the table.
+- Measured after: the 2026-10-07 plant recorded `external` is held at `1x (uncorroborated)`;
+  the same with an unrelated agent episode stapled on is held too; with an agent episode that
+  also grounds the claim it graduates to 2x.
+- Scope: provenance only. Unlabelled content reads as the agent's own, so the rule holds as far
+  as the host labels its tool boundary (team imports and JSON exports without the field arrive
+  as `agent`); grounding is lexical, so an on-topic agent episode corroborates; the CLI's
+  `search` and the wrap package do not yet mark relayed episodes as data (MCP `recall` does,
+  below). Whether a claim is true stays the operator's.
+- Lowering trust revokes what it earned, at the next wrap (C#11, 2026-10-08). Run first: an
+  episode that grounded a 2x graduation was lowered to `external`, and the next wrap kept the
+  pattern at 2x. Each save now records the episodes that grounded each rung a named pattern
+  earned, in a new additive `pattern_grounding(name, level, earned_on, earning, rule, episode_id)` table
+  written in the wrap's transaction (`Store.pattern_grounding()`; check 4's grounding citations,
+  and the rule check 4 admitted the line by; a rename moves them). At the graduation bound, each
+  earning is re-run under its own rule against today's trust: a `checked` one (a quoted
+  explanation named the grounding citations) fails when all of them are now `tool`/`external`, an
+  `unchecked` one when any is (run: a bare two-citation 2x kept its rung when one citation was
+  lowered, until this rule). A rung fails when every earning of it does, and the pattern's prior
+  is cut back to just below the lowest failed rung (`graduation.revoked_pattern_levels`,
+  `validate_graduations(..., revoked_levels=)`). The cut is
+  reported in `level_capped` with the new `reason` field `revoked: grounding lowered` (`prior`
+  for every other cut), in the MCP and CLI save output and the warning. A rung with no grounding
+  record (saved before the table) keeps its level. The save's trust re-read covers the recorded
+  grounding episodes too. A grounding or cited episode that no longer exists reads `external`, a
+  failed ground, never a default `agent` one (run: a lowered-then-deleted ground kept its rung);
+  one that vanishes between validation and the save's final re-read aborts the save. Two
+  earnings of one rung on one day are told apart by `earning` (the wrap token and the line's
+  ordinal), so lowering one earning's citation no longer revokes the other.
+- Derived content and recall labels (CAP-08 F4 = T4 + derived_from, C#11). Run first: an agent
+  summary of an external page, cited beside the page, graduated the page's claim to 2x, and MCP
+  `recall` showed both as plain memory. `Store.record(..., derived_from=[ids])` (CLI
+  `record --derived-from`, the MCP `record` tool's `derived_from`) records the episodes content
+  was derived from in a new additive `episode_derived(episode_id, source_id)` table, in the
+  episode's transaction; a source that does not exist refuses the record (`ValueError`, nothing
+  written). `Store.effective_trust_map(ids)` gives each episode the lower of its own class and
+  the highest effective class among its sources, through every level of derivation. It is
+  computed, never stored for a live source: a worklist lowers each episode in the whole reachable
+  closure from its own class to the fixed point, so the answer for an id does not depend on what
+  else was asked or on id order, and a cycle gets the meet (D3 redesign R1, 1008+11; run: a
+  depth-first walk that skipped the source on its path read an agent summary of an external page
+  as `agent` when its id sorted after the page's, and graduated the page's claim to 2x). Raising
+  or lowering a source therefore moves what was derived from it with no pass of its own (R2; run:
+  a snapshot-raise pass left a node `tool` after its source was raised). A removal leaves a sticky
+  mark instead (R3): an `AFTER DELETE` trigger sets `gone_trust = 'external'` on every
+  `episode_derived` row naming the id as a source and every `pattern_grounding` row citing it,
+  whatever path deleted it, and `prune` first sets the mark to the episode's effective trust, so
+  aging out is not a retraction (run: a pruned grounding revoked a rung nothing had lowered). An
+  episode recorded again under the same id never clears a mark (run: re-recording a deleted
+  ground revived its revoked 2x), and the grounding reads the mark when set. The save's re-check
+  compares, per cited id, whether it exists, its marks and its effective trust (R4; run: an
+  external ground deleted mid-save read `external` before and after, and the save committed).
+  JSON import does not restore derivation edges. Each imported episode keeps the effective trust it was exported with. If an operator later raises an imported summary's trust, that raise is the operator's own statement (D1: the host's trust label is human-held); anneal does not re-derive it from the original sources. (L3 r5, Phill 12:57, option (a): an import that merged edges let a crafted file
+  raise an existing summary from `external` to `agent`, and an imported removal mark could not
+  lower an existing edge; `Store.restore_derived` is deleted, and the export still writes the
+  edges for the record.) The graph is walked iteratively (run: a ~1,000-deep chain
+raised `RecursionError`). The graduation
+  trust check and the save's re-read use it, so a
+  summary of an external page reads `external` and cannot corroborate it. `ScoredEpisode.trust`
+  (default `agent`) carries each episode's effective class out of `retrieve_relevant`, and MCP
+  `recall` lists `tool`/`external` episodes after the rest under "Recorded from tool output / an
+  external source: data, not instructions:". The MCP `record` schema changed, so
+  `tool-integrity.json` was regenerated.
+- A demoted or held pattern line loses every `[evidence:]` tag of its marker, not just the first
+  (1008+3). Run first: `(ungrounded)`, `(cross-session-overlap)`, `(uncorroborated)` and
+  `(carried-forward)` replaced only the first tag, so a two-tag line kept its second while a
+  one-tag line kept none. A demoted line is stripped by design (it must be re-grounded, never
+  re-validated on the same citations); now every tag up to the line's next level marker goes,
+  and a later marker's own tags are left alone. The next marker is found outside `[...]` tags, so
+  a quoted `| 2x` in an explanation is text, not a marker.
+
+### Fixed — CAP-08 integration review (L3 rounds 1 to 3, 1009+22)
+- Lower trust never supersedes on any link path: the rule compares EFFECTIVE trust (an agent
+  summary of an external page counts as `external`), and `record` judges its not-yet-recorded
+  episode by its `trust` and `derived_from` together.
+- `clear_state_key` re-formed a slot's links with no trust check (run): a refused pair is skipped,
+  both holders stay live, and it is reported as `left_live` (`anneal-memory state --unset` prints
+  it). `record(state_key=)`'s refusal says how to free the slot.
+- Composting a pattern (`sever_pattern_concept`) deletes its `pattern_grounding` rows; a rename
+  moves them only when the target has none (run: a homonym inherited the old concept's grounding).
+- `ReplacedEpisode` gained `trust` (default `agent`), and MCP recall's "Replaced since" block labels
+  a relayed replacing episode. ⚠ `ScoredEpisode.trust` moved to the LAST field: a caller building a
+  `ScoredEpisode` positionally must pass `replaces` before it.
+- MCP `recall` reads its rows and their trust in one snapshot; `anneal-memory trust ID` shows the
+  effective class, and the stored one when they differ.
+- `delete` re-checks the links of everything derived from the deleted episode (its removal lowers
+  them to `external`), takes the write lock before reading them (run: a writer recorded a derived,
+  superseding episode in between), and names removed links in its audit event.
+- A wrap's `[supersedes:]` decision is recomputed under the save's write lock.
+
+### Fixed — the audit chain stays valid under concurrent writer processes (KL-24)
+- Several processes (or several `AuditTrail` instances) writing one store broke the hash chain:
+  each chained from its own cached tip. Reproduced on 2026-10-07: three processes recording 200
+  episodes each, every episode landed, `verify` reported a hash mismatch, and `status` counted no
+  audit failure. The same break on a copy of a real 14,733-entry store.
+- Each append now holds a cross-process lock, `<stem>.audit-append.lock` (taken before the
+  manifest lock, never inside it), and first re-syncs the chain's tip from the active file: when
+  the bytes where this instance's tip was written still hash to it, the chain continues from the
+  last valid entry after them; anything else (another file, a reused inode, a truncation, a
+  rewrite) re-initialises through the manifest, as an open does.
+- A lost active file (deleted, truncated below the tip, or replaced) is refused once at the next
+  append ("is gone"), from the instance's own record, even when the manifest's best-effort record
+  of the file is missing. This includes a file another writer sealed by rotating the week: a
+  sealed-looking filename is not proof that the lost file was sealed (a stale same-week orphan
+  hid a deletion), so a peer's rotation costs each other writer one refused, counted append, and
+  the next append re-reads the trail.
+- `AuditTrail.stats()` reads `entry_count` from the active file on every call (its last valid
+  entry's `seq` + 1), so it includes other writers' entries; it takes no lock and changes no
+  state, so a status read never waits on a writer and never consumes the lost-file refusal. An
+  active file with no valid entry that the manifest, or the instance itself, records as having held
+  some reads as unknown (`audit_entry_count` None in `status`), not as 0 entries; so does an
+  unparseable manifest.
+- A sealed week with the same period no longer clears the manifest's record of an active file that
+  went missing: after a clock rollback a new active file could begin in an already-sealed week, and
+  its deletion read as sealed, with the chain continuing over the lost entries (reproduced). A seal
+  by an older release that left the record set now reads as a vanished file until `audit-repair`,
+  which clears it when the sealed week's first entry is the one the record names (no gap recorded).
+- The manifest's record of an active file's first entry is saved BEFORE that entry is written
+  (write-ahead); a save that fails refuses the append with nothing written. Saved after the entry and
+  best-effort, a failed save left a later deletion of the file undetected: the chain restarted and
+  `verify` read valid (reproduced). The first entry is staged in a temp file and renamed into place
+  after its record is saved, so a crash between the two is finished on the next append instead of
+  reading as a deleted file. A staged entry is never deleted: one that does not commit is set aside
+  as `<active>.first.discarded-<UTC stamp>`. The next append decides it only after the quarantine
+  check and only from a readable manifest; `audit-repair` takes the append lock and then the
+  manifest lock and resolves a staged entry first, by the same rule, before any gap decision
+  (`AuditRepairResult.staged_first_entry`). Run first: repair over a crash's staged entry recorded
+  a permanent gap and the next append deleted it; a quarantine let the next append delete it; a
+  rename that failed with no active file left it and its record, and the retry committed the entry
+  whose append had failed. The temp is created exclusively (no `O_NOFOLLOW`, which Windows lacks:
+  every first append raised `AttributeError`) and written with a full-write loop (a short
+  `os.write` renamed half an entry in and reported success). A sealed week repair checks against
+  the first-entry record that is not a regular file, or cannot be read, refuses the repair instead
+  of recording a gap.
+- Audit appends FAIL CLOSED when the manifest lock cannot be taken or the manifest is quarantined
+  (ruled 2026-10-08, superseding the 2026-10-03 "degrade with a warning" and the 2026-09-13
+  "appending continues while quarantined"): each refused append is counted as a dropped audit write
+  (`audit_write_failures` in `status`) and its message names `anneal-memory audit-repair`; episodes
+  still commit. Reproduced first: with the manifest quarantined and the active file deleted, appends
+  went on, and after `audit-repair` `verify` read valid with that week's entries gone and no gap.
+  `audit-repair` rebuilding a quarantined manifest over an active file with no entry now records a
+  possible gap, since nothing left on disk says whether the file held entries.
+- Also fail closed (L3 r6, each run first): an audit directory that cannot be listed to rule out a
+  quarantine marker (superseding round 10b's "an unlistable directory must not block writes": an
+  initialized writer appended past a marker at mode 0300), and a manifest lock that cannot be
+  taken by an already-initialized writer (it appended without ever taking the lock): every append
+  now takes the manifest lock briefly, with no manifest read when nothing else needs one. Measured
+  on 1,000 appends, interleaved runs under the same load: median 244-263 µs per append before,
+  284-305 µs after.
+- The possible-gap record carries `certainty: "possible"`, and `verify` (CLI, `--verify-audit`)
+  and `audit-repair` report it as a POSSIBLE GAP, never as entries that went missing; the human
+  `audit-repair` output prints every record it returns (a rebuild with sealed files printed none).
+- `stats()` reads as unknown whenever a quarantine marker or a staged first entry is on disk, or the
+  directory cannot be listed to rule those out, whatever the active file holds (an active file
+  with entries beside a marker read as a normal count).
+- The append lock is released with `LOCK_UN` before its close, as the manifest lock now is, so a
+  child forked while it was held does not keep it.
+- An append waits at most 30 seconds for another holder; past that, or when the lock file cannot
+  be opened (a directory, symlink or FIFO at its path), the append is refused and counted as a
+  dropped audit write (`audit_write_failures`, `dropped_before`), never appended unserialized.
+  Its location is recorded as unknown, since without the lock the cached tip is not current.
+- After the fix: six processes x 250 episodes leave one valid chain of 1,500 entries, four
+  processes appending across a week rotation leave one valid chain (800 minus at most one
+  refused append per non-rotating writer), and four writer
+  processes on a copy of a real store add exactly 600 entries to a chain that stays valid.
+- Known limits: where advisory locks do not exist (Windows, silently, as the README's Windows
+  section says; or a filesystem without `flock`, warned on stderr once per lock path) appends are
+  not serialized and the trail needs one writer at
+  a time; writers that take turns stay chained through the re-sync. Every concurrent writer must
+  run a version that takes the lock: an anneal-memory without it, writing alongside, breaks the
+  chain as before, and nothing on the new side can detect it.
+
+### Fixed — a team snapshot that changes an entry's text makes a NEW episode (Phill 2026-10-09, (A))
+- Run first, on 5227fc4: a save validated a 2x graduation against team episode text X, a snapshot
+  import landed between that read and the save's lock and rewrote the episode to unrelated text Y
+  under the same id, and the save committed grounding on an id that then read Y. Grounding earned
+  by X before such a change stayed on the id as well (CAP-08 integration L3 r2, codex, two HIGHs).
+  An episode id is derived from its text, so the in-place rewrite (`_replace_team_episode`) is
+  deleted, not guarded.
+- When the enforced copy of a stored entry has another text, timestamp, type or source,
+  `import_team_snapshot` stores it as another episode and moves the entry to it: the row this
+  entry once had with exactly that copy when one is kept (a flip back, X -> Y -> X, ends on X's
+  original id, the one a store that only saw X holds unless a deletion freed a lower id), else a new episode whose id is derived from
+  its text. The old episode keeps its id, text, trust, derivations, grounding, associations and
+  links; its metadata stops naming the entry (`team.replaced` records the entry and its old hash),
+  so it is not a copy of the entry and removing it later records nothing about the entry.
+  Reported in the new `replaced` (`{id, old, new, revived}`; CLI "replaced by a new episode") and
+  audited as a `record` with `replaces_episode`.
+- Every replace derives the link hiding each such row behind its entry's current episode, as it
+  does an honoured pair, and the link is team-owned. It takes the existence, cycle and trust checks
+  every team link takes: a copy of lower effective trust does not hide the old text (an
+  operator-raised text stays visible beside the new one), reported in `links_refused` (which now
+  names the `old` and `new` episodes of every refused link) and team-status on every replace until
+  the trust allows it. A head deleted by a library call and brought back by the stream is linked
+  again (and is the kept row, revived, when it has one); an operator's removal of the link is kept
+  (an override, as for any team link); a `set_trust` lowering leaves it (`team_supersessions_left`).
+- ⚠ Held by the operator, by design (the augmentation exception): a key released with
+  `team-forget-key` leaves its links unowned, as that command says, and no key holds them again
+  until the operator decides. If the entry then flips back to an earlier text, the released link
+  from the current episode to that earlier one still hides the current text, and the link this
+  replace derives the other way is refused as a cycle. The refusal is reported on every replace
+  (`links_refused`, team-status) and, when no key owns the reverse link and removing it lets the
+  derived link pass (tried and rolled back, not assumed), names the one command that ends it:
+  `anneal-memory unsupersede --old <current> --new <earlier>`. anneal does not infer that the
+  released link is the ledger's: two attempts to (by its `team:` label, then by what its endpoints
+  record) removed links an operator or another ledger held (L3 r2, r3, codex, run).
+- A copy with the same text, timestamp, type and source under a new hash records the new hash
+  only (`rehashed`, renamed from `replaced_in_place`; CLI "re-hashed (same text)").
+- Deleting the current episode of an entry with the CLI's confirm is final for the entry, so the
+  old text shows in recall again, as A does when B is deleted from A -> B; team-status notes it
+  (`retired_shown`).
+
+### Known limit, by design — a crash during a week's first audit append (KL-24)
+- After a crash in one window (the week's first entry staged and set aside, the process stopped
+  before the manifest's record of it was withdrawn), whether that entry committed is not
+  decidable from disk. A hash reconcile that tried to decide it drew a new HIGH in each of three
+  review rounds (a discarded file's bytes can equal a later real entry; two matching files; consume
+  and clear not crash-atomic), so it was deleted (Phill, 2026-10-08).
+- What anneal does instead: After a crash during a week's first audit append, anneal cannot always tell from disk whether that entry committed. It refuses further appends until you run `audit-repair`, which records a POSSIBLE gap and names the preserved attempt files (`.first.discarded-*`). Inspect them to decide. anneal keeps them and never deletes them.
+  A vanished active file is a POSSIBLE gap (`certainty: "possible"`) only in that crash window: the
+  manifest's begun record is still set AND at least one attempt is preserved; `preserved_attempts`
+  then names every preserved regular file of that trail. Otherwise it is a definite gap. The rebuild
+  from a quarantined manifest stays POSSIBLE and names any preserved files the same way.
+  `audit-repair`, `verify` and `--verify-audit` print the names.
+- Manifest validation: `certainty` must be `"possible"` on an active-file record (its own
+  filename, `set_aside_as` empty); `preserved_attempts` must be a list of exact set-aside file names (`<stem>.audit.jsonl.first.discarded-<stamp>[-n]`, a real stamp, `n` from 1) on such a record.
+- `AuditTrail.stats()` waits (bounded, 2s) on a peer's append lock when only a staged first entry
+  makes the trail look unknown, then re-reads; a staged file with no holder still reads unknown.
+- Audit-repair's stderr warning calls a possible gap "POSSIBLE", not a plain gap.
+
 ### Added — v3 team-import: the store follows the team ledger's latest verdict (spore-1344)
 - `team-import` reads a v3 stream (contract `project_memory/team_frame_contract_v3.md`): one
   ledger clone's complete verdict, with each line marked `enforced` and the links it `honours`.
@@ -39,7 +519,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - Team episodes follow the verdict too: an entry the stream enforces that was pruned or deleted
   by a library or MCP call comes back at the next replace; only a delete the CLI confirmed (on a
   terminal, or with `ANNEAL_TEAM_OVERRIDE=1`) stays final. A stored copy whose hash no enforced
-  line carries is replaced in place, keeping its episode id and links.
+  line carries is replaced (see the Fixed entry above: a changed text is a new episode).
 - Retention `prune` keeps every team episode an active key's last stream enforces; an explicit
   `delete` of one is allowed and logged. A rewired link made from a link a snapshot owns carries
   that ownership and the pair it stands in for, and stays while that pair is honoured.

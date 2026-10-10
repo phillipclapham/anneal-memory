@@ -64,6 +64,19 @@ TOOLS: list[dict[str, Any]] = [
                     "description": "Agent or source attribution. Defaults to 'agent'.",
                     "default": "agent",
                 },
+                "trust": {
+                    "type": "string",
+                    "enum": ["agent", "tool", "external"],
+                    "description": (
+                        "Where the content came from. agent (default) = your own "
+                        "observation or decision; tool = a tool result you are "
+                        "relaying; external = a web page, document or another party. "
+                        "A pattern grounded only in tool/external episodes does not "
+                        "graduate past 1x until an agent episode also grounds it. "
+                        "Use tool/external whenever the content is someone else's claim."
+                    ),
+                    "default": "agent",
+                },
                 "metadata": {
                     "type": "object",
                     "description": "Optional JSON metadata to attach to the episode.",
@@ -77,6 +90,28 @@ TOOLS: list[dict[str, Any]] = [
                         "the shorter text's meaningful words with this content; "
                         "otherwise nothing is recorded. "
                         "recall then hides the old episode by default."
+                    ),
+                },
+                "state_key": {
+                    "type": "string",
+                    "description": (
+                        "The state slot this fact fills, e.g. 'user.home_city'. A newer "
+                        "episode with the same key replaces this one, and this one "
+                        "replaces older episodes with the key, with no word-overlap "
+                        "check: the shared key is your claim that the facts fill one "
+                        "slot. recall then hides the older episode and, for a keyword "
+                        "that matches it, names this one as its replacement. Case and "
+                        "spacing are ignored."
+                    ),
+                },
+                "derived_from": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Ids of the episodes this content was derived from, e.g. your "
+                        "summary of a page you recorded as external. Each must exist. "
+                        "For graduation it then counts at most as trusted as its most "
+                        "trusted source, so a summary cannot corroborate its own source."
                     ),
                 },
             },
@@ -212,7 +247,10 @@ TOOLS: list[dict[str, Any]] = [
             "graduation citations against real episodes (cited IDs must exist), "
             "checks explanation overlap (evidence must reference actual episode "
             "content), detects citation gaming (suspicious reuse of single "
-            "episodes), and may demote ungrounded graduations. Also records "
+            "episodes), and may demote ungrounded graduations. Each pattern's "
+            "level is also capped against the level the store last saved for it: "
+            "a new pattern enters at 1x and a validated Nx becomes at most "
+            "(N+1)x, whatever the line's date says. Also records "
             "Hebbian associations between co-cited episodes (episodes cited "
             "together on the same pattern line form strong links; episodes cited "
             "in the same wrap form weaker links) and decays unreinforced "

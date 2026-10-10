@@ -175,7 +175,7 @@ def test_s7_s8_legacy_and_twins(store):
     # so the real line's pair maps again and stays
     before = ep(store, B0)
     r = import_ledger(store, v3([(a, True, []), (b, True, [A0])], seq=2))
-    assert r.replaced_in_place == [B0] and not r.links_removed
+    assert r.rehashed == [B0] and not r.links_removed
     assert ep(store, B0) == before and (ep(store, A0), before) in links(store)
 
 
@@ -651,7 +651,7 @@ def test_l3r1_1006_twin_adoption_and_cross_root_rewrite(tmp_path):
         import_ledger(s, v3([(a, True, []), (b, True, [A0])], key="k1", root="r1"))
         before = s.get(ep(s, B0)).content
         r = import_ledger(s, v3([(a, True, []), (b_twin, True, [A0])], key="k2", root="r2"))
-        assert not r.replaced_in_place and r.conflicts
+        assert not r.rehashed and r.conflicts
         assert s.get(ep(s, B0)).content == before
     finally:
         s.close()
@@ -663,7 +663,7 @@ def test_l3r1_1006_twin_adoption_and_cross_root_rewrite(tmp_path):
         b_twin2 = ledger("bob", [{**RETIRE, "reason": "twin two"}])[0]
         r = import_ledger(s, v3([(a, True, []), (b_twin, True, [A0]), (b_twin2, True, [A0])],
                                 seq=2))
-        assert not r.replaced_in_place and s.get(ep(s, B0)).content == before
+        assert not r.rehashed and s.get(ep(s, B0)).content == before
     finally:
         s.close()
 
@@ -705,7 +705,7 @@ def test_l3r2_1006_named_fixes(store, tmp_path):
     b_bad = ledger("bob", [{**RETIRE, "v": True}])[0]
     before = store.get(ep(store, B0)).content
     r = import_ledger(store, v3([(a, True, []), (b2, True, [A0]), (b_bad, True, [])], seq=3))
-    assert not r.replaced_in_place and store.get(ep(store, B0)).content.endswith(before)
+    assert not r.rehashed and store.get(ep(store, B0)).content.endswith(before)
     # complement r2 #4: an operator removal is never downgraded by a later auto one
     store._conn.execute("UPDATE team_entries SET removal = 'operator' WHERE entry_id = ?",
                         (B0,))
@@ -767,8 +767,46 @@ def test_seam_doc_l3_1006_unmanaged_rewired_counted_and_never_owned(tmp_path):
         s._conn.execute("INSERT INTO supersessions (old_id, new_id, source) VALUES (?, ?, 'me')",
                         (eb2, c.id))
         s._conn.commit()
+        origin = s._conn.execute("SELECT * FROM rewire_origin ORDER BY 1, 2").fetchall()
         assert s.delete(eb2, team_operator=True)       # rewire A -> C collides
         assert (ea, c.id) in links(s) and not s.team_owned(old_id=ea, new_id=c.id)
+        # L3 1007 (complement): the collision leaves rewire_origin as it was, and a
+        # later import by key y does not adopt the unmanaged row either
+        assert s._conn.execute("SELECT * FROM rewire_origin ORDER BY 1, 2").fetchall() \
+            == origin
+        import_ledger(s, v3([(a, True, []), (b2, True, [A0])], key="y", root="r1",
+                            seq=2))
+        assert not s.team_owned(old_id=ea, new_id=c.id)
+        assert s.team_snapshot_status()["unmanaged_rewired"] == 1
+    finally:
+        s.close()
+
+
+def test_unmanaged_rewired_counts_imported_team_entries_only(tmp_path):
+    """L3 1007 (codex, reproduced): a local record labelled ``team:`` with no ledger
+    metadata is not an imported team entry, so a rewired row hiding it is not one."""
+    s = Store(tmp_path / "lbl.db", audit=False)
+    try:
+        fake = s.record("looks like a team entry", "observation", source="team:mallory")
+        real_a = ledger("alice", [{**RULING, "ts": "2026-01-01T00:00:00Z"}])[0]
+        import_ledger(s, [real_a])
+        real = ep(s, A0)
+        local = s.record("a local replacement", "observation")
+        for old in (fake.id, real):
+            s._conn.execute("INSERT INTO supersessions (old_id, new_id, source) "
+                            "VALUES (?, ?, 'rewired')", (old, local.id))
+        s._conn.commit()
+        assert s.team_snapshot_status()["unmanaged_rewired"] == 1
+        # L1 1007: malformed metadata, or a non-string entry id, on a team-labelled
+        # OLD endpoint is not a team entry and must not fail the whole status
+        s._conn.execute("UPDATE episodes SET metadata = '{not json' WHERE id = ?", (fake.id,))
+        s._conn.commit()
+        st = s.team_snapshot_status()
+        assert st["unmanaged_rewired"] == 1 and st["protected_episodes"] >= 0
+        s._conn.execute("""UPDATE episodes SET metadata = '{"team": {"entry_id": 7}}'
+                           WHERE id = ?""", (fake.id,))
+        s._conn.commit()
+        assert s.team_snapshot_status()["unmanaged_rewired"] == 1
     finally:
         s.close()
 
@@ -795,4 +833,23 @@ def test_team_status_cli_shows_unmanaged_with_no_keys(tmp_path, capsys, monkeypa
     monkeypatch.setattr(sys, "argv", ["anneal-memory", "--db", str(db), "team-status"])
     main()
     out = capsys.readouterr().out
-    assert "No team snapshot" in out and "hiding a team entry" in out and out.rstrip().endswith("1")
+    assert "No team snapshot" in out and "no snapshot owns, hiding" in out and out.rstrip().endswith("1")
+
+
+def test_an_existing_unowned_rewired_row_is_never_adopted_by_a_stream_that_honours_it(tmp_path):
+    """L1 1007 (mutation-backed): the importer's "an existing unowned row is the
+    operator's" branch. Unconditional adoption passed every other team test."""
+    a = ledger("alice", [{**RULING, "ts": "2026-01-01T00:00:00Z"}])[0]
+    c = ledger("cy", [{"type": "retire", "supersedes": [A0], "ts": "2026-01-03T00:00:00Z"}])[0]
+    s = Store(tmp_path / "op.db", audit=False)
+    try:
+        import_ledger(s, [a, c])                                   # no links
+        ea, ec = ep(s, A0), ep(s, f"{_prefix('cy')}-20261004120000-00000000")
+        s._conn.execute("INSERT INTO supersessions (old_id, new_id, source) "
+                        "VALUES (?, ?, 'rewired')", (ea, ec))
+        s._conn.commit()
+        import_ledger(s, v3([(a, True, []), (c, True, [A0])]))     # honours (A, C)
+        assert (ea, ec) in links(s) and not s.team_owned(old_id=ea, new_id=ec)
+        assert s.team_snapshot_status()["unmanaged_rewired"] == 1
+    finally:
+        s.close()

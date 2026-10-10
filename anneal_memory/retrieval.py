@@ -72,6 +72,7 @@ import json
 import re
 from functools import lru_cache
 from collections import Counter
+import dataclasses
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from math import log
@@ -81,11 +82,14 @@ from .crystal import CrystalDict, CrystalStore, activation_tier
 from .store import Store
 from .durable import DurableFact, parse_durable_facts
 from .types import (
+    DEFAULT_TRUST,
     Episode,
     EpisodeType,
     RelevantFact,
     RelevantPattern,
     RelevantResult,
+    REPLACED_CONTENT_MAX,
+    ReplacedEpisode,
     ScoredEpisode,
 )
 
@@ -931,8 +935,8 @@ def retrieve_relevant(
         query: the prompt / text to find relevant memory for.
         max_patterns / max_episodes: caps per kind (precision bias).
         exclude_recent_minutes: if set, episodes newer than this are excluded — the
-            harness's "don't re-surface the live session's own echo" knob (the flow
-            hook passes 45). Patterns are unaffected (they're distilled, not live).
+            harness's "don't re-surface the live session's own echo" knob. Patterns
+            are unaffected (they're distilled, not live).
         now: ISO-8601 UTC instant for the recent-exclusion cutoff (+ determinism);
             defaults to wall-clock. Only consulted when ``exclude_recent_minutes`` is set.
         today: logical date for crystallized-pattern activation tiers (+ determinism);
@@ -979,6 +983,13 @@ def retrieve_relevant(
         keywords or nothing clears the precision threshold — surface nothing rather
         than noise.
 
+    Consistency:
+        A recall reads one committed state, as of its start: an episode deleted or
+        erased before recall begins is never returned; a delete that commits while a
+        recall runs may or may not be reflected, as with any database read. The episode
+        half (candidates, weights, the supersession redirect) runs in one read
+        transaction; the crystal store and durable facts are separate files, read outside.
+
     Raises:
         ValueError: ``mode`` is not ``"prompt"`` or ``"query"``.
     """
@@ -999,27 +1010,52 @@ def retrieve_relevant(
     # corpus-IDF (the precision fix) — so the weighting is corpus-aware exactly when a
     # corpus is being scanned, and the length-proxy otherwise (the keyword-only path).
     want_assoc = associative and crystal_store is not None and max_patterns > 0
-    seed_episodes: list[ScoredEpisode] = []
-    if max_episodes > 0 or want_assoc:
-        until = _recent_cutoff(exclude_recent_minutes, now)
-        candidates, doc_freq, corpus_n = _fetch_episode_candidates(
-            store, keywords, until=until, uncapped=mode == "query"
-        )
-        weights, used_idf = _query_weights(
-            store, keywords, doc_freq, until=until, corpus_n=corpus_n
-        )
-        seed_episodes = _score_candidate_episodes(
-            candidates, keywords, weights,
-            score_threshold=_precision_bar(used_idf, mode),
-            require_anchor=_anchor_floor(used_idf, mode),
-            min_hits=_min_hits(mode),
-            min_len=_min_episode_len(mode),
-        )
-    else:
-        # Keyword-only pattern path (no episode fetch): the length-proxy, byte-identical
-        # to retrieve_patterns (the parity contract holds on this branch by construction).
-        weights, used_idf = _query_weights(store, keywords, None)
-    episodes = seed_episodes[:max_episodes] if max_episodes > 0 else []
+    # The episode half reads ONE committed state (snapshot isolation): candidate fetch,
+    # corpus weights, the supersession check and the redirect all run in a single read
+    # transaction (nested inside a caller's open one, it just joins it). Nothing on this
+    # path writes. The crystal store and durable facts are other files, read outside.
+    with store._db_boundary("recall"), store._read_snapshot():
+        seed_episodes: list[ScoredEpisode] = []
+        redirect = False
+        if max_episodes > 0 or want_assoc:
+            until = _recent_cutoff(exclude_recent_minutes, now)
+            candidates, doc_freq, corpus_n = _fetch_episode_candidates(
+                store, keywords, until=until, uncapped=mode == "query"
+            )
+            weights, used_idf = _query_weights(
+                store, keywords, doc_freq, until=until, corpus_n=corpus_n
+            )
+            seed_episodes = _score_candidate_episodes(
+                candidates, keywords, weights,
+                score_threshold=_precision_bar(used_idf, mode),
+                require_anchor=_anchor_floor(used_idf, mode),
+                min_hits=_min_hits(mode),
+                min_len=_min_episode_len(mode),
+            )
+            redirect = max_episodes > 0 and store.has_supersessions()
+        else:
+            # Keyword-only pattern path (no episode fetch): the length-proxy, byte-identical
+            # to retrieve_patterns (the parity contract holds on this branch by construction).
+            weights, used_idf = _query_weights(store, keywords, None)
+        episodes = seed_episodes[:max_episodes] if max_episodes > 0 else []
+        if redirect:
+            episodes = _swap_replaced(store, keywords, seed_episodes, max_episodes,
+                                      until=until, mode=mode)
+        if episodes:
+            # CAP-08 D3: each shown episode carries its effective trust, so a hook
+            # can render relayed content as data. Read in the same snapshot, after
+            # the redirect, so a replacing episode carries its own class, and each
+            # replaced episode it carries (whose text it shows) carries its own.
+            episode_trust = store.effective_trust_map(
+                [ep.id for ep in episodes] + [r.id for ep in episodes for r in ep.replaces])
+            episodes = [
+                dataclasses.replace(
+                    ep, trust=episode_trust.get(ep.id, DEFAULT_TRUST),
+                    replaces=tuple(
+                        dataclasses.replace(r, trust=episode_trust.get(r.id, DEFAULT_TRUST))
+                        for r in ep.replaces))
+                for ep in episodes
+            ]
     # One regime-matched precision bar + anchor for every tier this call scores: the
     # lower IDF bar + the √N distinctiveness anchor when the weights are corpus-IDF, the
     # length-proxy bar + no anchor (0.0) otherwise.
@@ -1055,6 +1091,75 @@ def retrieve_relevant(
     return RelevantResult(
         patterns=patterns, episodes=episodes, query_keywords=keywords, facts=facts
     )
+
+
+def _swap_replaced(
+    store: Store,
+    keywords: list[str],
+    live: list[ScoredEpisode],
+    max_episodes: int,
+    *,
+    until: str | None,
+    mode: str,
+) -> list[ScoredEpisode]:
+    """The displayed episode tier, CAP-04: the live hits exactly as ranked without this
+    step, merged with the keyword hits on REPLACED episodes, each of which is swapped,
+    in its own slot, for the live episode at the end of its chain. A query that names
+    the old state ("still in Seattle?") is served the current fact, which by
+    construction shares none of its words. Replaced hits are scored with weights counted
+    over every episode, replaced ones included, so a link never raises a hit's score
+    (counted over the live episodes only, a word that survives only in replaced text
+    would read as maximally rare); live hits keep their own weights and scores. The
+    replacement takes the slot, and the score, of the best hit it stands in for (or its
+    own, if it ranks higher as a live hit): the slot the old fact would have held is the
+    update's. It lists every replaced hit it stands in for in ``replaces``. A hit whose path to that episode
+    crosses a wrap-proposed (or delete-rewired) link is dropped, not swapped: a wrap
+    model proposes those in bulk (measured ~1.4% precise on STALE), so they hide but
+    never serve."""
+    every, doc_freq, corpus_n = _fetch_episode_candidates(
+        store, keywords, until=until, uncapped=mode == "query",
+        filters={"include_superseded": True},
+    )
+    replaced = {i: e for i, e in every.items() if e.superseded_by}
+    swap_to = store.redirectable_ids(list(replaced), until) if replaced else {}
+    replaced = {i: e for i, e in replaced.items() if i in swap_to}
+    if not replaced:
+        return live[:max_episodes]
+    weights, used_idf = _query_weights(
+        store, keywords, doc_freq, until=until, corpus_n=corpus_n,
+        filters={"include_superseded": True},
+    )
+    old_hits = _score_candidate_episodes(
+        replaced, keywords, weights,
+        score_threshold=_precision_bar(used_idf, mode),
+        require_anchor=_anchor_floor(used_idf, mode),
+        min_hits=_min_hits(mode),
+        min_len=_min_episode_len(mode),
+    )
+    ranked = sorted([*live, *old_hits], key=lambda e: (e.score, e.timestamp, e.id), reverse=True)
+    slots: list[ScoredEpisode] = []
+    refs: dict[str, list[ReplacedEpisode]] = {}
+    for hit in ranked:
+        if hit.id not in replaced:
+            if hit.id not in refs:
+                refs[hit.id] = []
+                slots.append(hit)
+        else:
+            head = swap_to[hit.id]   # the row redirectable_ids read with its choice
+            head_id = head.id
+            if head_id not in refs:
+                refs[head_id] = []
+                slots.append(ScoredEpisode(
+                    id=head.id, timestamp=head.timestamp,
+                    type=head.type.value if isinstance(head.type, EpisodeType) else str(head.type),
+                    source=head.source or "", content=head.content or "", score=hit.score,
+                ))
+            refs[head_id].append(ReplacedEpisode(
+                id=hit.id, timestamp=hit.timestamp, content=hit.content[:REPLACED_CONTENT_MAX]))
+        if len(slots) >= max_episodes:
+            break
+    return [dataclasses.replace(e, replaces=tuple(refs[e.id])) if refs[e.id] else e
+            for e in slots]
 
 
 def retrieve_patterns(

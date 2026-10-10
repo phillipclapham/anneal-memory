@@ -95,19 +95,26 @@ import json
 import os
 import re
 import tempfile
+import unicodedata
 import warnings
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Iterator, Literal, NamedTuple, TypedDict, cast
+from typing import Any, Iterator, Literal, NamedTuple, TypedDict, cast
 
 try:  # POSIX advisory locking; absent on Windows (see CrystalStore._transaction).
     import fcntl
 except ImportError:  # pragma: no cover - exercised only on non-POSIX platforms
     fcntl = None  # type: ignore[assignment]
 
-from .graduation import _SCAFFOLD_TAG_RE, _STATE_PAREN_RE
-from .store import AnnealMemoryError
+from .graduation import (
+    _LEVEL_ATOM,
+    _SCAFFOLD_TAG_RE,
+    _STATE_PAREN_RE,
+    _is_graduating_heading,
+)
+from .schema import DEFAULT_GRADUATING
+from .store import AnnealMemoryError, Store
 
 CRYSTAL_SCHEMA_VERSION = 1
 
@@ -189,6 +196,24 @@ class CrystalError(AnnealMemoryError):
     catches crystal-store failures in the same boundary as episodic- and
     spore-store ones.
     """
+
+
+# Field on a crystal record listing evidence ids ground_empty_evidence recorded (KL-09).
+PROVISIONAL_EVIDENCE = "provisional_evidence"
+
+
+def _nfc_lower(text: str) -> str:
+    """Composed (NFC) and lower-cased: a combining mark is part of its word, so a
+    decomposed "alpha" + U+0301 does not read as the whole word "alpha"."""
+    return unicodedata.normalize("NFC", text).lower()
+
+
+class GroundingResult(NamedTuple):
+    """One pattern's outcome in :meth:`CrystalStore.ground_empty_evidence`."""
+
+    status: str  # grounded | would_ground | no_episode | conflict
+    evidence: list[str]
+    hubs_skipped: int  # naming episodes skipped because they name other live patterns
 
 
 class CrystalConflictError(CrystalError):
@@ -638,7 +663,11 @@ class CrystalStore:
         and belongs in the working set). There is NO UPPER BOUND — the level is the
         strength axis and a pattern re-earned many times keeps climbing. ``evidence``
         is the list of episode ids that grounded the pattern — the substrate for
-        associative retrieval (query → matched evidence episode → pattern).
+        associative retrieval (query → matched evidence episode → pattern). Evidence
+        ACCUMULATES: an upsert adds the given ids to the stored ones, and a revive
+        with none keeps the retired row's. Ids recorded by
+        :meth:`ground_empty_evidence` are provisional and the first real evidence
+        replaces them. To set or prune evidence, use :meth:`update`.
         ``permanence`` × ``activation_mode`` is the 2-axis routing record; the store
         holds the ``timeless`` × ``just-in-time`` bulk, but the tags are kept on every
         row so a later re-route is auditable.
@@ -686,7 +715,20 @@ class CrystalStore:
                 # drift) is reset to crystallized + retirement cleared.
                 existing["level"] = max(self._safe_level(existing.get("level")), level)
                 existing["explanation"] = explanation
-                existing["evidence"] = evidence_clean
+                # KL-09 (2026-10-07): evidence accumulates. A re-crystallize from a
+                # carried-forward line has no [evidence:] tag, and replacing with it
+                # erased the episodes the evidence edge recalls through. Ids that
+                # ground_empty_evidence recorded are provisional: the first real
+                # evidence replaces them. update() stays the explicit way to set or
+                # prune evidence.
+                row = cast(dict, existing)
+                provisional = set(row.get(PROVISIONAL_EVIDENCE) or [])
+                prior_evidence = [e for e in (existing.get("evidence") or [])
+                                  if isinstance(e, str)
+                                  and not (evidence_clean and e in provisional)]
+                existing["evidence"] = list(dict.fromkeys([*prior_evidence, *evidence_clean]))
+                if evidence_clean:
+                    row.pop(PROVISIONAL_EVIDENCE, None)
                 existing["permanence"] = permanence
                 existing["activation_mode"] = activation_mode
                 existing["tags"] = tags_clean
@@ -722,6 +764,14 @@ class CrystalStore:
                 for key in ("surfaced_count", "last_surfaced_on"):
                     if key in prior_row:
                         cast(dict, item)[key] = prior_row[key]
+                # KL-09: a revive with no evidence keeps the retired row's (and its
+                # provisional mark); a revive WITH evidence starts from it alone.
+                if not evidence_clean:
+                    item["evidence"] = [e for e in (revived.get("evidence") or [])
+                                        if isinstance(e, str)]
+                    if prior_row.get(PROVISIONAL_EVIDENCE):
+                        cast(dict, item)[PROVISIONAL_EVIDENCE] = list(
+                            prior_row[PROVISIONAL_EVIDENCE])
                 prior: RetirementDict | dict = revived.get("retirement") or {}
                 item["notes"] = [
                     f"[{now}] re-crystallized after retirement "
@@ -891,6 +941,8 @@ class CrystalStore:
                 item["level"] = self._validate_level(level)
             if not isinstance(evidence, _Unset):
                 item["evidence"] = _clean_str_list(evidence, "evidence")
+                # An explicit set is the operator's: nothing in it is provisional.
+                cast(dict, item).pop(PROVISIONAL_EVIDENCE, None)
             if not isinstance(permanence, _Unset):
                 if permanence not in VALID_PERMANENCE:
                     raise ValueError(f"permanence must be one of {VALID_PERMANENCE} (got {permanence!r}).")
@@ -914,6 +966,94 @@ class CrystalStore:
                 item["notes"].append(f"[{stamp}] {add_note}")
             item["rev"] = _rev(cast(dict, item), live=True)
             return item
+
+    def ground_empty_evidence(
+        self,
+        store: Store,
+        *,
+        limit: int = 4,
+        dry_run: bool = False,
+        today: date | None = None,
+    ) -> dict[str, GroundingResult]:
+        """Fill the evidence of each live pattern that has none, from the OLDEST
+        ``limit`` live (not superseded) episodes in ``store`` that name the pattern as
+        a whole word and name no other known pattern (KL-09).
+
+        Oldest, because the first episodes to name a pattern sit nearest the incident
+        that produced it; later ones are mostly summaries. An episode naming two or
+        more live patterns (an end-of-day or desk log) is skipped: as shared evidence
+        it would become a hub, and the evidence edge discounts a hub for every
+        pattern that cites it, including ones already grounded on it. Lexical
+        grounding only: an episode that names a pattern cites it, it does not prove
+        it. The ids are recorded as provisional; the first real evidence a
+        crystallize brings replaces them.
+
+        Returns ``{name: GroundingResult}`` for every live pattern that had no
+        evidence. ``status`` is ``grounded`` (or ``would_ground`` with ``dry_run``),
+        ``no_episode`` or ``conflict`` (the pattern changed while this ran; it is
+        left as it is). Patterns that already have evidence are never touched."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError(f"limit must be a positive int (got {limit!r}).")
+        live = self.active()
+        # A hub is an episode naming any OTHER known pattern: live or retired
+        # crystals, or any working-set pattern that ever graduated (L2 1007, run:
+        # a desk log naming one crystal and four working-set patterns was picked
+        # over the incident).
+        retired = [r.get("name") for r in self._load().get("retired", [])]
+        known = {c["name"] for c in live} | {n for n in retired if isinstance(n, str)} \
+            | set(store.pattern_history_names())
+        # A name is whole when no word character touches it, and no "." or "-" joins it
+        # to one ("foo.bar", "foo-bar"); a sentence-final "foo." is whole (L3 1007).
+        bounded = {n: re.compile(
+            rf"(?<!\w)(?<!\w[.\-]){re.escape(_nfc_lower(n))}(?!\w|[.\-]\w)")
+            for n in known}
+        out: dict[str, GroundingResult] = {}
+        for item in live:
+            if any(isinstance(e, str) for e in (item.get("evidence") or [])):
+                continue
+            name = item["name"]
+            ids: list[str] = []
+            hubs = 0
+
+            def visit(ep: Any, name: str = name) -> bool:
+                nonlocal hubs
+                text = _nfc_lower(ep.content)
+                if not bounded[name].search(text):
+                    return False
+                if sum(1 for rx in bounded.values() if rx.search(text)) > 1:
+                    hubs += 1
+                    return False
+                if ep.id[:8] not in ids:
+                    ids.append(ep.id[:8])
+                return len(ids) >= limit
+
+            store._scan_containing_oldest(name, visit)  # oldest first, no cap
+            status = "no_episode"
+            if ids:
+                status = "would_ground" if dry_run else "grounded"
+                if not dry_run:
+                    try:
+                        self._set_provisional_evidence(name, ids, item["rev"], today)
+                    except CrystalConflictError:
+                        status, ids = "conflict", []
+            out[name] = GroundingResult(status=status, evidence=ids, hubs_skipped=hubs)
+        return out
+
+    def _set_provisional_evidence(
+        self, name: str, ids: list[str], expect: str, today: date | None,
+    ) -> None:
+        stamp = (today or date.today()).isoformat()
+        with self._transaction() as data:
+            self._check_expect(data, name, expect)
+            item = self._require_live(data, name)
+            item["evidence"] = list(ids)
+            cast(dict, item)[PROVISIONAL_EVIDENCE] = list(ids)
+            if not isinstance(item.get("notes"), list):
+                item["notes"] = []
+            item["notes"].append(
+                f"[{stamp}] provisional evidence from {len(ids)} episode(s) naming the "
+                f"pattern (ground_empty_evidence)")
+            item["rev"] = _rev(cast(dict, item), live=True)
 
     # --- public API: retire (the membrane out — crystallized ≠ immortal) ----
 
@@ -1125,7 +1265,11 @@ class CrystalDecision(NamedTuple):
 _EVIDENCE_TAG_RE = re.compile(r'\[evidence:\s*((?:[^\]"]|"[^"]*"){0,4096})\]')
 
 
-def _extract_pattern_meta(wrap_text: str, name: str) -> tuple[int | None, str, list[str]]:
+def _extract_pattern_meta(
+    wrap_text: str,
+    name: str,
+    graduating_headings: frozenset[str] = DEFAULT_GRADUATING,
+) -> tuple[int | None, str, list[str]]:
     """Best-effort pull of ``(level, explanation, evidence_ids)`` from ``name``'s own
     ``name | Nx (date) [evidence: id, id "why"] — felt prose`` line in ``wrap_text``.
 
@@ -1158,16 +1302,29 @@ def _extract_pattern_meta(wrap_text: str, name: str) -> tuple[int | None, str, l
     # drops a mid-prose ``… name | Nx`` decoy outright (it isn't at the structural
     # start). Per-line search (no MULTILINE) so ``^`` anchors the line. The marker date
     # is captured HERE (group 2), not searched line-wide, so a date elsewhere can't fake
-    # ``has_date``; digits bounded (``\d{1,3}``) so a giant ``Nx`` can't ``ValueError``
-    # int() (no-raise contract). ``structural_invariants_beat_discipline``.
+    # ``has_date``; the level is graduation's one atom (no leading zero, below 10**9), so
+    # no non-canonical ``Nx`` reads as a level and none can ``ValueError`` int(). ``structural_invariants_beat_discipline``.
     marker_re = re.compile(
-        rf"^[ \t]*(?:[-*•>!✓][ \t]*)*{re.escape(name)}[ \t]*\|[ \t]*(\d{{1,3}})x\b"
+        rf"^[ \t]*(?:[-*•>!✓][ \t]*)*{re.escape(name)}[ \t]*\|[ \t]*({_LEVEL_ATOM})x\b"
         rf"[ \t]*(\(\d{{4}}-\d{{2}}-\d{{2}}\))?"
     )
     best_key: tuple[int, int, int] | None = None  # (has_date, level, order)
     best_line: str | None = None
     best_level: int | None = None
-    for idx, line in enumerate(wrap_text.splitlines()):
+    # Only lines under a GRADUATING ``## `` heading are candidates, walked exactly as
+    # graduation's own validation walks them (``_is_graduating_heading``): a
+    # ``## State`` line ``name | 999x (date)`` is a decoy the validator never touched,
+    # and the highest-level rule would otherwise let it beat the real graduation line.
+    # Lines split on "\n" only, as the validator splits them (L3 r8, codex MED, run):
+    # ``splitlines()`` also broke on U+2028/NEL/VT..., so ``## Patterns<U+2028>- p |
+    # 999x`` was one line to the validator and a graduating decoy here.
+    in_graduating = False
+    for idx, line in enumerate(wrap_text.split("\n")):
+        if line.startswith("## "):
+            in_graduating = _is_graduating_heading(line, graduating_headings)
+            continue
+        if not in_graduating:
+            continue
         m = marker_re.search(line)
         if not m:
             continue
@@ -1297,7 +1454,10 @@ def _structural_dash(text: str) -> int:
     return -1
 
 
-def parse_crystal_decisions(wrap_text: str) -> list[CrystalDecision]:
+def parse_crystal_decisions(
+    wrap_text: str,
+    graduating_headings: frozenset[str] = DEFAULT_GRADUATING,
+) -> list[CrystalDecision]:
     """Parse the ```crystal-decisions``` routing block(s) out of a completed wrap.
 
     Scans ``wrap_text`` for every fenced ``crystal-decisions`` block and returns one
@@ -1313,7 +1473,12 @@ def parse_crystal_decisions(wrap_text: str) -> list[CrystalDecision]:
     every consumer inherits it structurally rather than re-implementing it.
 
     Grounding (``level`` / ``explanation`` / ``evidence_ids``) is pulled best-effort
-    from each pattern's graduation line elsewhere in ``wrap_text``. No matching block
+    from each pattern's graduation line elsewhere in ``wrap_text``, ONLY from sections
+    whose role is graduating (``graduating_headings`` =
+    :func:`anneal_memory.schema.graduating_headings` of the store's schema; the default
+    is ``## Patterns``). ``wrap_text`` must be the POST-validation text
+    (``validate_graduations(...).text``): the raw agent wrap still carries levels the
+    validator would demote or cap. No matching block
     → ``[]``. Duplicate names are returned as-is (the consumer owns conflict
     resolution); the parser stays a pure parser.
 
@@ -1359,7 +1524,9 @@ def parse_crystal_decisions(wrap_text: str) -> list[CrystalDecision]:
                     stacklevel=2,
                 )
                 continue
-            level, explanation, evidence_ids = _extract_pattern_meta(wrap_text, name)
+            level, explanation, evidence_ids = _extract_pattern_meta(
+                wrap_text, name, graduating_headings
+            )
             # route / permanence / activation_mode are narrowed to their Literal
             # types by the ``not in VALID_*`` guards above — no cast needed.
             decisions.append(

@@ -20,6 +20,8 @@ from .store import (
     continuity_lock,
 )
 from .types import (
+    DEFAULT_TRUST,
+    TRUST_LEVELS,
     AffectiveState,
     AssociationPair,
     AssociationStats,
@@ -32,6 +34,7 @@ from .types import (
     RelevantPattern,
     RelevantResult,
     SaveContinuityResult,
+    ReplacedEpisode,
     ScoredEpisode,
     StalePatternDict,
     StoreStatus,
@@ -39,6 +42,7 @@ from .types import (
     WrapPackageDict,
     WrapRecord,
     WrapResult,
+    trust_rank,
 )
 from .audit import AuditRepairResult, AuditTrail, AuditVerifyResult
 from .schema import (
@@ -163,6 +167,9 @@ __all__ = [
     "AssociationStats",
     "Episode",
     "EpisodeType",
+    "TRUST_LEVELS",
+    "DEFAULT_TRUST",
+    "trust_rank",
     "FeltCurrency",
     "PrepareWrapResult",
     "RecallResult",
@@ -259,5 +266,6 @@ __all__ = [
     "RelevantResult",
     "RelevantPattern",
     "RelevantFact",
+    "ReplacedEpisode",
     "ScoredEpisode",
 ]

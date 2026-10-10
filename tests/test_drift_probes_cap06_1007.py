@@ -1,0 +1,417 @@
+"""CAP-06 (2026-10-07): drift probes, the operator's instrument for meaning drift.
+
+The operator declares what must survive; every save checks it lexically against the
+saved text, records the verdict with the wrap, and never blocks or rewrites."""
+import sqlite3
+import subprocess
+import sys
+
+import pytest
+
+from anneal_memory import Store, prepare_wrap, validated_save_continuity
+from anneal_memory.crystal import CrystalStore
+from anneal_memory.store import StoreDatabaseError
+from anneal_memory.drift import evaluate_probes
+from tests.prior_seed import seed_prior_levels
+
+
+def _doc(patterns, facts="", understanding="who we are."):
+    return (f"# t\n\n## State\ns.\n\n## Patterns\n{patterns}\n\n## Decisions\nd.\n\n"
+            f"## Context\n{facts}\n")
+
+
+def _wrap(store, text, today):
+    store.record(f"episode {today}: a substrate observation about the topic.", "observation")
+    token = prepare_wrap(store, max_chars=40000)["wrap_token"]
+    return validated_save_continuity(store, text, today=today, wrap_token=token)
+
+
+def test_evaluate_statuses():
+    probes = [
+        {"id": 1, "kind": "pattern", "name": "alpha", "min_level": 3},
+        {"id": 2, "kind": "pattern", "name": "beta", "min_level": 4},
+        {"id": 3, "kind": "pattern", "name": "gamma", "min_level": 2},
+        {"id": 4, "kind": "pattern", "name": "delta", "min_level": 2},
+        {"id": 5, "kind": "fact", "text": "Desi is a shepherd mix", "section": "Context"},
+        {"id": 6, "kind": "fact", "text": "the baton belongs to the EOD seat"},
+    ]
+    text = _doc("- alpha | 5x (2026-10-01)\n- beta | 3x (2026-10-01)",
+                facts="Desi, the dog, is a shepherd mix.")
+    out = {r["probe_id"]: r["status"] for r in evaluate_probes(
+        text, probes, pattern_levels={"alpha": 5, "beta": 3}, live_crystals=["gamma"])}
+    assert out == {1: "held", 2: "weakened", 3: "crystallized", 4: "lost",
+                   5: "held", 6: "lost"}
+
+
+def test_a_fact_in_the_wrong_section_is_lost():
+    probes = [{"id": 1, "kind": "fact", "text": "Desi is a shepherd mix", "section": "State"}]
+    text = _doc("", facts="Desi is a shepherd mix")
+    assert evaluate_probes(text, probes, pattern_levels={})[0]["status"] == "lost"
+
+
+def test_add_validation(tmp_path):
+    s = Store(tmp_path / "m.db", audit=False)
+    try:
+        for kw in ({}, {"pattern": "a", "fact": "b c"}, {"pattern": "a", "min_level": 1},
+                   {"pattern": "a", "section": "S"}, {"fact": "the of a"},
+                   {"fact": "real words", "min_level": 3}, {"pattern": " "}):
+            with pytest.raises(ValueError):
+                s.add_drift_probe(**kw)
+    finally:
+        s.close()
+
+
+def test_every_save_records_the_verdict_and_never_blocks(tmp_path):
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        seed_prior_levels(s, {"alpha": 2})  # the prior-state bound: genesis is strict
+        p1 = s.add_drift_probe(pattern="alpha", min_level=2)
+        s.add_drift_probe(fact="the hub runs on soupcan", section="Context")
+        r = _wrap(s, _doc("- alpha | 2x (2026-10-01)", facts="the hub runs on soupcan"),
+                  "2026-10-06")
+        assert r["drift"]["counts"]["held"] == 2 and {p["status"] for p in r["drift"]["probes"]} == {"held"}
+        # alpha drops out and the fact is rewritten away: the save still commits
+        r = _wrap(s, _doc("- beta | 2x (2026-10-01)", facts="moved to a new box"),
+                  "2026-10-07")
+        assert r["drift"]["counts"]["lost"] == 2
+        st = s.drift_status()
+        assert st["wrap_id"] == 2
+        assert [p["status"] for p in st["probes"]] == ["lost", "lost"]
+        assert st["probes"][0]["since_wrap"] == 2
+        assert s.retire_drift_probe(p1) and not s.retire_drift_probe(p1)
+        assert [p["id"] for p in s.drift_status()["probes"]] == [p1 + 1]
+    finally:
+        s.close()
+
+
+def test_no_probes_no_key(tmp_path):
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        assert s.drift_status()["wrap_id"] is None
+        r = _wrap(s, _doc("- a | 2x (2026-10-01)"), "2026-10-07")
+        assert "drift" not in r
+        st = s.drift_status()
+        assert st["wrap_id"] == 1 and st["probes"] == []
+    finally:
+        s.close()
+
+
+def test_a_crystallized_pattern_is_a_move_not_a_loss(tmp_path):
+    s = Store(tmp_path / "m.db", project_name="t")
+    cs = CrystalStore(tmp_path / "m.crystal.json")
+    try:
+        s.add_drift_probe(pattern="alpha")
+        cs.crystallize(name="alpha", level=3, explanation="x")
+        s.record("episode: a substrate observation about the topic.", "observation")
+        token = prepare_wrap(s, max_chars=40000)["wrap_token"]
+        r = validated_save_continuity(s, _doc("- beta | 2x (2026-10-01)"),
+                                      today="2026-10-07", wrap_token=token, crystal_store=cs)
+        assert r["drift"]["counts"]["crystallized"] == 1
+    finally:
+        s.close()
+
+
+def test_cli_round_trip(tmp_path):
+    db = str(tmp_path / "c.db")
+    run = lambda *a: subprocess.run([sys.executable, "-m", "anneal_memory.cli", "--db", db, *a],
+                                    capture_output=True, text=True)
+    Store(db).close()
+    assert run("probe", "add", "--pattern", "alpha").returncode == 0
+    assert run("probe", "add", "--fact", "the of").returncode == 1
+    assert "pattern alpha >= 2x" in run("probe", "list").stdout
+    assert "No save yet" in run("probe", "status").stdout
+    assert run("probe", "retire", "9").returncode == 1
+    assert run("probe", "retire", "9", "--json").returncode == 1   # L1 1007
+
+
+
+@pytest.mark.parametrize("fact,saved,status", [
+    # L2 1007 [run]: each read "held" before
+    ("client data does not go to Google", "client data does go to Google now.", "changed"),
+    ("client data goes to Google", "client data never goes to Google.", "changed"),
+    ("the rate is $85 an hour", "the rate is $65 an hour.", "lost"),
+    ("rent due 10-22", "rent due 10-29.", "lost"),
+    ("Arlington audit is billed on her trigger",
+     "Arlington was audited. The hub is billed monthly. Her trigger is a new site.", "lost"),
+    # and false "lost" before
+    ("he decided after the call", "He decides, after the call.", "held"),
+    ("rent is due on the twenty second of the month",
+     "rent is due on the twenty second\nof the month.", "held"),
+    # residue run on flow's store [run]: emphasis around a sentence end, and an
+    # unrelated "no" later in the same sentence
+    ("the EOD is his; he runs it every day and calls it sacred",
+     "**Some rituals are his, not the harness's.** The EOD is one: he runs it every day "
+     "and calls it sacred, and no seat offers to run it for him.", "held"),
+])
+def test_fact_matching(fact, saved, status):
+    probes = [{"id": 1, "kind": "fact", "text": fact}]
+    assert evaluate_probes(_doc("", facts=saved), probes, pattern_levels={})[0]["status"] \
+        == status
+
+
+def test_a_bad_probe_is_unchecked_never_a_gate(tmp_path):
+    """L1 1007 [run]: an unknown kind (a newer version's) or a NULL text refused every save."""
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        s.add_drift_probe(fact="the hub runs on soupcan")
+        s._conn.execute("INSERT INTO drift_probes (kind, name) VALUES ('mood', 'x')")
+        s._conn.execute("INSERT INTO drift_probes (kind, text) VALUES ('fact', NULL)")
+        s._conn.commit()
+        r = _wrap(s, _doc("", facts="the hub runs on soupcan."), "2026-10-07")
+        assert r["drift"]["counts"] == {"held": 1, "changed": 0, "weakened": 0,
+                                        "crystallized": 0, "lost": 0, "unchecked": 2}
+    finally:
+        s.close()
+
+
+def test_pattern_probe_defaults_to_its_current_level(tmp_path):
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        seed_prior_levels(s, {"alpha": 7})
+        _wrap(s, _doc("- alpha | 7x (2026-10-01)"), "2026-10-06")
+        pid = s.add_drift_probe(pattern="alpha")
+        assert [p["min_level"] for p in s.list_drift_probes() if p["id"] == pid] == [7]
+        assert s.list_drift_probes()[0]["min_level"] == 7
+        r = _wrap(s, _doc("- alpha | 3x (2026-10-01)"), "2026-10-07")
+        assert r["drift"]["counts"]["weakened"] == 1
+    finally:
+        s.close()
+
+
+def test_drift_is_in_the_audit_and_the_worklist_lists_graduations(tmp_path):
+    import json as _json
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        seed_prior_levels(s, {"hub_location_is_soupcan": 1})  # a 2x+ graduation needs its prior rung
+        s.add_drift_probe(fact="the hub runs on soupcan")
+        ep = s.record("we moved the hub to soupcan and it runs there now", "observation")
+        token = prepare_wrap(s, max_chars=40000)["wrap_token"]
+        line = (f'- hub_location_is_soupcan | 2x (2026-10-07) '
+                f'[evidence: {ep.id[:8]} "the hub runs on soupcan now"]')
+        validated_save_continuity(s, _doc(line, facts="the hub runs on soupcan."),
+                                  today="2026-10-07", wrap_token=token)
+        events = [_json.loads(x) for x in s._audit._active_path.read_text().splitlines() if x]
+        saved = [e for e in events if e["event"] == "continuity_saved"][-1]["data"]
+        assert saved["drift"]["counts"]["held"] == 1
+        added = [e for e in events if e["event"] == "drift_probe_added"]
+        assert added and added[0]["data"]["kind"] == "fact"
+        g = s.drift_status()["graduated"]
+        assert [(x["name"], x["level"]) for x in g] == [("hub_location_is_soupcan", 2)]
+    finally:
+        s.close()
+
+
+# --- L3 1007 round 1 ---------------------------------------------------------------
+
+@pytest.mark.parametrize("fact,saved,status", [
+    ("retry 5x then stop", "retry 3x then stop.", "lost"),            # complement LOW
+    ("deploy before migrate", "deploy after migrate.", "lost"),        # complement LOW
+    # a tie goes to the sentence whose negation agrees (complement LOW)
+    ("the hub runs on soupcan", "the hub never runs on soupcan. the hub runs on soupcan.",
+     "held"),
+])
+def test_fact_matching_round_1(fact, saved, status):
+    probes = [{"id": 1, "kind": "fact", "text": fact}]
+    assert evaluate_probes(_doc("", facts=saved), probes, pattern_levels={})[0]["status"] \
+        == status
+
+
+def test_a_crystal_below_the_probe_level_is_weakened():                # codex MED
+    probes = [{"id": 1, "kind": "pattern", "name": "alpha", "min_level": 7}]
+    out = evaluate_probes(_doc(""), probes, pattern_levels={}, live_crystals={"alpha": 2})
+    assert out[0]["status"] == "weakened"
+    out = evaluate_probes(_doc(""), probes, pattern_levels={}, live_crystals={"alpha": 9})
+    assert out[0]["status"] == "crystallized"
+
+
+def test_a_nameless_crystal_row_does_not_block_a_save(tmp_path):        # codex MED
+    import json as _json
+    s = Store(tmp_path / "m.db", project_name="t")
+    cpath = tmp_path / "m.crystal.json"
+    cs = CrystalStore(cpath)
+    try:
+        cs.crystallize(name="alpha", level=3, explanation="x")
+        data = _json.loads(cpath.read_text())
+        data["crystal"].append({"status": "crystallized"})
+        cpath.write_text(_json.dumps(data))
+        s.add_drift_probe(pattern="alpha")
+        s.record("episode: a substrate observation about the topic.", "observation")
+        token = prepare_wrap(s, max_chars=40000)["wrap_token"]
+        r = validated_save_continuity(s, _doc("- beta | 2x (2026-10-01)"),
+                                      today="2026-10-07", wrap_token=token, crystal_store=cs)
+        assert r["chars"] > 0
+    finally:
+        s.close()
+
+
+def test_the_default_level_reads_only_the_patterns_section(tmp_path):  # codex MED
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        seed_prior_levels(s, {"alpha": 3})
+        _wrap(s, _doc("- alpha | 3x (2026-10-01)", facts="- alpha | 12x (old note)"),
+              "2026-10-06")
+        s.add_drift_probe(pattern="alpha")
+        assert s.list_drift_probes()[0]["min_level"] == 3
+    finally:
+        s.close()
+
+
+def test_an_explanationless_graduation_is_on_the_worklist(tmp_path):   # codex MED
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        seed_prior_levels(s, {"hub_on_soupcan": 1})  # a 2x+ graduation needs its prior rung
+        ep = s.record("we moved the hub to soupcan and it runs there now", "observation")
+        token = prepare_wrap(s, max_chars=40000)["wrap_token"]
+        validated_save_continuity(
+            s, _doc(f"- hub_on_soupcan | 2x (2026-10-07) [evidence: {ep.id[:8]}]"),
+            today="2026-10-07", wrap_token=token)
+        assert [g["name"] for g in s.drift_status()["graduated"]] == ["hub_on_soupcan"]
+    finally:
+        s.close()
+
+
+def test_the_save_result_carries_ids_and_statuses_not_text(tmp_path):  # complement LOW
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        pid = s.add_drift_probe(fact="the hub runs on soupcan")
+        r = _wrap(s, _doc("", facts="moved."), "2026-10-07")
+        assert r["drift"]["probes"] == [{"id": pid, "status": "lost"}]
+        assert "soupcan" not in str(r["drift"])
+    finally:
+        s.close()
+
+
+# --- L3 1007 round 2 ---------------------------------------------------------------
+
+def test_spin_up_is_not_spin_down():                                       # glm MED
+    probes = [{"id": 1, "kind": "fact", "text": "spin up"}]
+    assert evaluate_probes(_doc("", facts="spin down."), probes,
+                           pattern_levels={})[0]["status"] == "lost"
+
+
+def test_pattern_levels_read_only_graduating_sections():                  # codex MED
+    from anneal_memory import DEFAULT_SCHEMA
+    from anneal_memory.continuity import _pattern_levels
+    text = "## State\n.\n## Patterns\n- alpha | 1x (d)\n## Anti-Patterns\n- alpha | 5x (d)\n"
+    assert _pattern_levels(text, DEFAULT_SCHEMA) == {"alpha": 1}
+    assert _pattern_levels("## Patterns\n- big | 1000000x (d)\n", DEFAULT_SCHEMA) == {
+        "big": 1000000}
+
+
+def test_the_worklist_takes_only_validated_lines_and_any_level(tmp_path):  # codex MEDs
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        seed_prior_levels(s, {"big_one": 10 ** 8 - 1, "dup": 1})  # a 2x+ graduation needs its prior rung
+        ep = s.record("we moved the hub to soupcan and it runs there now", "observation")
+        token = prepare_wrap(s, max_chars=40000)["wrap_token"]
+        big = 10 ** 8
+        i = ep.id[:8]
+        lines = (f"- big_one | {big}x (2026-10-07) [evidence: {i}]\n"
+                 f"- padded | 02x (2026-10-07) [evidence: {i}]\n"
+                 f"- dup | 2x (2026-10-07) [evidence: {i}]\n"
+                 f"- dup | 099x (2026-10-07) [evidence: {i}] trailing | 3x (2026-10-07) "
+                 f"[evidence: {i}]")
+        validated_save_continuity(s, _doc(lines), today="2026-10-07", wrap_token=token)
+        g = s.drift_status()["graduated"]
+        # the second dup line's later marker is not bound to the name: the row stays 2
+        assert [(x["name"], x["level"]) for x in g] == [("big_one", big), ("dup", 2)]
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize(
+    "tok", ["1" + "0" * 19, "1" + "0" * 4300, "02", "٢", "٢٢", "００", "0", "፪", "²", "②"],
+    ids=["20d", "4301d", "zero-pad", "arabic", "arabic2", "fullwidth", "zero", "ethiopic",
+         "superscript", "circled"])
+def test_an_oversized_level_neither_raises_nor_graduates(tmp_path, tok):  # codex MED/LOW
+    import warnings
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        ep = s.record("we moved the hub to soupcan and it runs there now", "observation")
+        s.add_drift_probe(pattern="big_one")
+        token = prepare_wrap(s, max_chars=40000)["wrap_token"]
+        i = ep.id[:8]
+        line = (f'- big_one | {tok}x (2026-10-07) [evidence: {i} "the hub runs on soupcan"]\n'
+                f'- two_markers | {tok}x (2026-10-07) [evidence: {i}] and '
+                f'| 2x (2026-10-07) [evidence: {i} "the hub runs on soupcan"]')
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            r = validated_save_continuity(s, _doc(line), today="2026-10-07", wrap_token=token)
+        # a cap is not a lost citation (L3 r5: it raised the "resolved to ZERO" warning)
+        assert not any("ZERO" in str(w.message) for w in caught)
+        assert r["drift"]["probes"][0]["status"] != "held"
+        # Arabic-Indic digits are made ASCII before the gate reads (gradgate's one
+        # grammar), so "٢" is a real 2 on a new line: cut to 1x, history at most 1.
+        hist = s.get_pattern_history("big_one")
+        assert hist is None or hist["max_level_reached"] == 1
+        assert [g["name"] for g in s.drift_status()["graduated"]] == []
+        # each bad marker is cut to 1x; the second marker keeps its tag but not its
+        # rung (only a line's own marker earns one, and the line is new)
+        saved = s.load_continuity()
+        big = next(ln for ln in saved.splitlines() if ln.startswith("- big_one |"))
+        assert big.startswith("- big_one | 1x (2026-10-07)") and big.endswith("(level-capped)")
+        assert f"| 1x (2026-10-07) [evidence: {i}" in saved
+        assert f"| {tok}x" not in saved
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize("verb", ["ABORT", "ROLLBACK"])
+def test_a_failed_instrument_write_fails_the_whole_save(tmp_path, verb):   # codex HIGH
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        seed_prior_levels(s, {"hub_on_soupcan": 1})  # a 2x+ graduation needs its prior rung
+        ep = s.record("we moved the hub to soupcan and it runs there now", "observation")
+        token = prepare_wrap(s, max_chars=40000)["wrap_token"]
+        s._conn.execute(
+            f"CREATE TRIGGER boom BEFORE INSERT ON wrap_graduations "
+            f"BEGIN SELECT RAISE({verb}, 'x'); END")
+        s._conn.commit()
+        before = s.load_continuity()
+        wraps = s._conn.execute("SELECT COUNT(*) FROM wraps").fetchone()[0]
+        with pytest.raises(StoreDatabaseError) as ei:
+            validated_save_continuity(
+                s, _doc(f"- hub_on_soupcan | 2x (2026-10-07) [evidence: {ep.id[:8]}]"),
+                today="2026-10-07", wrap_token=token)
+        assert isinstance(ei.value.__cause__, sqlite3.DatabaseError)
+        assert s._conn.execute("SELECT COUNT(*) FROM wraps").fetchone()[0] == wraps
+        assert s.load_continuity() == before
+        # the wrap-id read is inside the boundary too (L3 r5: it raised a raw sqlite error)
+        t = Store(tmp_path / "c.db", project_name="t")
+        t._conn.execute("DROP TABLE wraps")
+        with pytest.raises(StoreDatabaseError):
+            t._record_wrap_graduations([("a", 2, "")])
+        with pytest.raises(StoreDatabaseError):
+            t._record_drift_results([{"probe_id": 1, "status": "held", "detail": ""}])
+    finally:
+        s.close()
+
+
+def test_an_unreadable_probe_table_warns_and_the_save_commits(tmp_path):    # codex/complement
+    s = Store(tmp_path / "m.db", project_name="t")
+    try:
+        s.record("episode: a substrate observation about the topic.", "observation")
+        token = prepare_wrap(s, max_chars=40000)["wrap_token"]
+        s._conn.execute("DROP TABLE drift_probes")
+        s._conn.commit()
+        with pytest.warns(UserWarning, match="drift probes were not checked"):
+            r = validated_save_continuity(s, _doc("- a | 2x (2026-10-01)"),
+                                          today="2026-10-07", wrap_token=token)
+        assert r["chars"] > 0 and "drift" not in r
+    finally:
+        s.close()
+
+
+def test_an_unreadable_crystal_store_reads_unchecked_not_lost(tmp_path):   # complement LOW
+    s = Store(tmp_path / "m.db", project_name="t")
+    cpath = tmp_path / "m.crystal.json"
+    cpath.write_text("{not json")
+    try:
+        s.add_drift_probe(pattern="alpha")
+        s.record("episode: a substrate observation about the topic.", "observation")
+        token = prepare_wrap(s, max_chars=40000)["wrap_token"]
+        r = validated_save_continuity(s, _doc("- beta | 2x (2026-10-01)"), today="2026-10-07",
+                                      wrap_token=token, crystal_store=CrystalStore(cpath))
+        assert r["drift"]["probes"][0]["status"] == "unchecked"
+    finally:
+        s.close()

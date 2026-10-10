@@ -1,5 +1,6 @@
 """Tests for the SQLite episodic store."""
 
+from tests.prior_seed import seed_prior_levels
 import json
 import os
 import sqlite3
@@ -2506,6 +2507,7 @@ class TestValidatedSaveContinuity:
         ep2 = store.record("Chose caching to improve latency", EpisodeType.DECISION)
 
         # Mark wrap as in progress
+        seed_prior_levels(store, {'thought: database slow under load triggers caching': 1})
         prepare_wrap(store)
 
         # Build continuity with a real 2x citation so graduation fires. Co-cite
@@ -3102,6 +3104,7 @@ class TestValidatedSaveContinuityReturnContract:
             f"## Context\nPinned-date determinism test.\n"
         )
 
+        seed_prior_levels(store, {'thought: slow database impacts throughput': 1})
         prepare_wrap(store)
         result = validated_save_continuity(store, text, today=pinned_today)
 
@@ -3128,6 +3131,7 @@ class TestValidatedSaveContinuityReturnContract:
         )
 
         # No today= parameter → falls back to wall clock
+        seed_prior_levels(store, {"thought: fresh observation drives today's decision": 1})
         prepare_wrap(store)
         result = validated_save_continuity(store, text)
         assert result["graduations_validated"] >= 1
@@ -4352,16 +4356,20 @@ class TestTheWriterSchemaFunctionLetsABumpRefuseOpenWriters:
 
     def test_triggers_at_this_schema_let_this_release_write(self, tmp_path):
         # positive control: the same triggers with the stamp unchanged pass
-        from anneal_memory.store import _SCHEMA_VERSION
+        from anneal_memory.store import _SCHEMA_VERSION, _WRITER_SCHEMA_FUNCTION
 
         db = tmp_path / "m.db"
         store = Store(db)
         import sqlite3 as _sq
 
         fresh = _sq.connect(str(db))
+        # Schema 1's triggers are CAP-04's key-row cleanup and CAP-08's trust-row
+        # cleanup; neither calls the writer-schema function, so no bump guard
+        # exists before a bump.
         assert fresh.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger'"
-        ).fetchone()[0] == 0, "schema 1 installs no trigger; the first bump does"
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND sql LIKE ?",
+            (f"%{_WRITER_SCHEMA_FUNCTION}%",),
+        ).fetchone()[0] == 0, "schema 1 installs no bump guard; the first bump does"
         fresh.close()
         self._bump(db, _SCHEMA_VERSION)
         store.record("same schema", episode_type="observation")

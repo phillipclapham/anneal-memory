@@ -20,6 +20,7 @@ Zero dependencies beyond Python stdlib.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import dataclasses
 import re
@@ -27,11 +28,12 @@ import uuid
 import logging
 import warnings
 from dataclasses import asdict
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .graduation import (
+    mask_explanations_text,
     CrossSessionCollision,
     OmittedPattern,
     PatternSummary,
@@ -39,7 +41,11 @@ from .graduation import (
     detect_stale_patterns,
     extract_pattern_names,
     extract_pattern_summaries,
+    CAP_REASON_REVOKED,
+    pattern_line_levels,
+    revoked_pattern_levels,
     validate_graduations,
+    canonical_continuity_text,
     _NAMED_PATTERN_RE,
     _NAMED_PATTERN_WITH_EVIDENCE_RE,
     _is_graduating_heading,
@@ -67,6 +73,7 @@ from .schema import (
     schema_role_warning,
 )
 from .crystal import CrystalError, CrystalStore
+from .drift import PROBE_STATUSES, evaluate_probes
 from .durable import (
     enforce_durable_facts,
     is_exact_heading,
@@ -97,6 +104,7 @@ from .store import (
     _safe_unlink,
 )
 from .types import (
+    DEFAULT_TRUST,
     AffectiveState,
     Episode,
     FeltCurrency,
@@ -415,7 +423,10 @@ def _crystallization_credit(
     # pattern's line) is still detected here → NOT credited as departed. Over-detect
     # = under-credit = the gate stays strict. This is the cancel-credit side; the
     # earn-credit side below stays strict-anchored.
-    new_present = {m.group(1) for m in _ANY_GRADUATION_MARKER_RE.finditer(new_body_text)}
+    # One lexer (codex L3 r2 MED): a name quoted inside an explanation is text, not
+    # a marker, so it neither keeps a departed pattern "present" nor counts below.
+    new_present = {m.group(1) for m in _ANY_GRADUATION_MARKER_RE.finditer(
+        mask_explanations_text(new_body_text))}
 
     credit = 0
     for line in prior_body:
@@ -428,7 +439,7 @@ def _crystallization_credit(
         # pattern may NOT be recoverable (not in the store), masking a recency-trap of
         # its mass. A well-formed pattern line has exactly one marker; a multi-marker
         # line earns ZERO credit (its mass stays in the protected baseline). Safe bias.
-        if len(_ANY_GRADUATION_MARKER_RE.findall(line)) != 1:
+        if len(_ANY_GRADUATION_MARKER_RE.findall(mask_explanations_text(line))) != 1:
             continue
         owner = m.group(1)
         if owner in crystallized_names and owner not in new_present:
@@ -699,6 +710,41 @@ def format_episodes_for_wrap(episodes: list[Episode]) -> str:
             lines.append(f"- ({ep.id}) {ep.content}{source_info}{replaced}")
 
     return "\n".join(lines)
+
+
+def _wrap_started_extras(store: Store, token_bound: bool, today: str) -> dict[str, Any]:
+    """Keyword arguments only a newer ``wrap_started`` takes. ``token_bound`` only
+    when the caller supplied the token, so a Store subclass that overrides
+    wrap_started with the pre-0.9.30 signature still works for every call that
+    does not use the new feature (codex L3, run); ``today`` (the day the
+    instructions told the composer to stamp) skipped for an override that
+    predates it (the save then reconstructs it)."""
+    extras: dict[str, Any] = {}
+    if token_bound:
+        extras["token_bound"] = True
+    if "today" in inspect.signature(store.wrap_started).parameters:
+        extras["today"] = today
+    return extras
+
+
+def _wrap_local_date(store: Store) -> str:
+    """The local date the wrap in progress was PREPARED on, else today.
+
+    The fallback when the wrap has no stored ``wrap_today`` (started by an
+    earlier version, or a ``wrap_started`` override without the argument).
+    prepare_wrap tells the composer to stamp ``({today})`` with the date it ran
+    on; a save after midnight read the next day and dropped every graduation the
+    composer stamped correctly (L2 r1, run). ``wrap_started_at`` is that moment
+    in UTC, read in the saver's timezone."""
+    started = store._get_metadata("wrap_started_at")
+    if started:
+        try:
+            moment = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+            if moment.tzinfo is not None:
+                return moment.astimezone().date().isoformat()
+        except ValueError:
+            pass
+    return date.today().isoformat()
 
 
 def _crystal_active_safe(crystal_store: CrystalStore | None) -> list:
@@ -1304,14 +1350,18 @@ names so the immune system can protect your patterns.
     `[evidence:]` may be silently dropped depending on tag order) — use one or the other.
   - **Why re-stamp `({today})` here when "Preserved" above said don't?** The today-stamp
     is exactly what exposes the line to the warmth/level hold gate — so a provenance
-    pattern that goes cold STILL ages out (provenance is not immortality; it only
-    silences the nag). An OLD-dated provenance line is simply skipped like any other
-    preserved line. Do NOT slap provenance on to dodge retirement — it does not stop
-    natural cold-decay, it only records grounding.
+    pattern that goes cold is held but FLAGGED to the operator on every wrap that
+    re-dates it (provenance is not immortality; it does not silence that). An
+    OLD-dated provenance line is simply skipped like any other preserved line. Do NOT
+    slap provenance on to dodge retirement — it only records grounding.
 - Patterns marked `(ungrounded)` need FRESH evidence from THIS session to re-graduate.
 - Patterns marked `(cross-session-overlap)` were demoted because today's explanation
   reused too much vocabulary from prior sessions; compose new evidence with
   genuinely distinct words to re-graduate.
+- Patterns marked `(uncorroborated)` were set back to 1x because every citation
+  grounding them was a tool result or outside source the agent relayed (trust
+  `tool`/`external`), not something observed. They re-graduate only when an episode
+  of your own (or the operator's) also grounds the claim.
 - Patterns at 3x AND ABOVE: extract the PRINCIPLE, not the surface observations.
 - Patterns older than 7 days with no new validation → remove (stale).
 - Group related patterns visually with a header line above them if you like —
@@ -2098,10 +2148,7 @@ def prepare_wrap(
             gated_session_id=session_id,
             expect_last_wrap_id=window_last_wrap_id,
             derive_roots=frozen_identities,
-            # Only when the caller supplied the token, so a Store subclass that
-            # overrides wrap_started with the pre-0.9.30 signature still works for
-            # every call that does not use the new feature (codex L3, run).
-            **({"token_bound": True} if token_bound else {}),
+            **_wrap_started_extras(store, token_bound, package["today"]),
         )
     except WrapWindowMovedError:
         return _downgraded_empty(
@@ -2434,6 +2481,152 @@ def _durable_cue_state(
         return value, warnings_out
     except Exception:  # noqa: BLE001 - see the docstring
         return None, []
+
+
+def _prior_levels(
+    prior_text: str | None, schema: list[SectionSpec],
+    saved_levels: dict[tuple[str, str], int] | None, store: Store,
+) -> dict[str, int] | None:
+    """Where a held line's level comes from: the level the prior-state bound would
+    start the name from (``graduation._prior_base`` on its named key), so the hold and
+    the bound agree. Once the store has saved under the bound, its ``pattern_levels``
+    record is the prior, the prior file may only lower it, and a name it never saved is
+    a new claim. Never a crystal's level: the crystal store is caller-writable, so a
+    crystal re-added to the working set is a new claim (spore-676 (A) as Phill ruled
+    2026-10-08 13:17: the held level comes from pattern_levels). A store that has not
+    saved under the bound yet falls back to the prior file, or, when that is blank over
+    a store with history (a truncated file, L3 r3 complement), to each pattern's
+    recorded high-water mark. None when there is nothing to derive from (a first save)."""
+    if saved_levels is not None:
+        file_levels = (_pattern_levels(prior_text, schema)
+                       if prior_text and prior_text.strip() else {})
+        levels: dict[str, int] = {}
+        for (kind, name), level in saved_levels.items():
+            if kind == "name":
+                levels[name] = min(level, file_levels.get(name, level))
+        return levels
+    if not prior_text or not prior_text.strip():
+        levels = {}
+        try:
+            for n in store.pattern_history_names():
+                hist = store.get_pattern_history(n) or {}
+                mx = hist.get("max_level_reached")
+                if isinstance(mx, int):
+                    levels[n] = mx
+        except Exception:  # noqa: BLE001 - unreadable history is not proof of a first save
+            levels = {"": 0}  # a bound that holds nothing: fail closed
+        if not levels:
+            return None
+        return levels
+    return _pattern_levels(prior_text, schema)
+
+
+def _crystal_levels_snapshot(
+    crystal_store: CrystalStore | None,
+) -> dict[str, Any] | None:
+    """Live crystal names -> levels, read BEFORE the save batch so no crystal-file IO
+    happens under the database write lock (L3 1007, codex). None when the store could
+    not be read: then a pattern probe absent from the file is ``unchecked``, not lost."""
+    if crystal_store is None:
+        return {}
+    try:
+        return {str(c["name"]): c.get("level") for c in crystal_store.active()
+                if isinstance(c, dict) and isinstance(c.get("name"), str)}
+    except Exception:  # noqa: BLE001 - an instrument's input; the wrap path reports faults
+        return None
+
+
+def _evaluate_drift_probes(
+    store: Store, schema: list[SectionSpec], text: str, crystals: dict[str, Any] | None,
+    deferred: list[str],
+) -> list[dict[str, Any]]:
+    """CAP-06: every live drift probe checked against ``text`` (empty when none).
+    Called inside the save batch. Never raises: a probe is an instrument, and an
+    instrument must not refuse a save (L3 1007: a nameless crystal row did)."""
+    try:
+        probes = store._live_drift_probes_in_txn()
+        if probes is None:
+            deferred.append(
+                "drift probes were not checked this save: the probe table could not be "
+                "read")
+            return []
+        if not probes:
+            return []
+        levels = _pattern_levels(text, schema)
+        results = evaluate_probes(text, probes, pattern_levels=levels,
+                                  live_crystals=crystals or {})
+        if crystals is None:  # crystal store unreadable: absence proves nothing
+            for r in results:
+                if r["kind"] == "pattern" and r["status"] == "lost":
+                    r["status"] = "unchecked"
+                    r["detail"] = "not in the file; the crystal store could not be read"
+        return results
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        deferred.append(f"drift probes were not checked this save: {exc!r}")
+        return []
+
+
+def _pattern_levels(text: str, schema: list[SectionSpec]) -> dict[str, int]:
+    """Each pattern named in the graduating section(s) of ``text``, at its highest
+    level there, found exactly as ``validate_graduations`` finds them (same heading
+    test, same line parser; L3 1007, codex: a fuzzy section match read
+    ``## Anti-Patterns``). No level ceiling."""
+    headings = graduating_headings(schema)
+    levels: dict[str, int] = {}
+    inside = False
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            inside = _is_graduating_heading(line, headings)
+            continue
+        m = _NAMED_PATTERN_RE.match(line) if inside else None
+        if m:
+            try:
+                level = int(m.group(2))
+            except ValueError:  # beyond Python's int-string limit
+                continue
+            levels[m.group(1)] = max(levels.get(m.group(1), 0), level)
+    return levels
+
+
+def _drift_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Counts and each probe's id and status. No probe text and no file text: the save
+    result goes back to the composer being measured, and the audit cannot be redacted
+    (L3 1007, complement). The detail is in ``probe status``."""
+    counts = {status: 0 for status in PROBE_STATUSES}
+    for r in results:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    return {"counts": counts,
+            "probes": [{"id": r["probe_id"], "status": r["status"]} for r in results]}
+
+
+def _grounded_trust(
+    store: Store, grounds: set[str], others: set[str],
+) -> tuple[dict[str, str], dict[str, tuple[bool, str]]]:
+    """Effective trust of the episodes a save leans on, and the
+    :meth:`Store.ground_state` it was read from. A ground (a cited or previously
+    grounding episode) that no longer exists reads ``external``: a deleted ground
+    is a failed one, never a default ``agent`` one (codex r3 #1). ``others``
+    (``[supersedes:]`` endpoints) keep the plain reading."""
+    state = store.ground_state(grounds | others)
+    trust: dict[str, str] = {}
+    for cid, (exists, eff) in state.items():
+        level = "external" if (not exists and cid in grounds) else eff
+        if level != DEFAULT_TRUST:
+            trust[cid] = level
+    return trust, state
+
+
+def _gone_marks(
+    grounding: dict[str, dict[int, list[dict[str, Any]]]],
+) -> dict[str, tuple[str, ...]]:
+    """Each episode id's removal marks across the grounding record (D3 R3)."""
+    marks: dict[str, list[str]] = {}
+    for rungs in grounding.values():
+        for groups in rungs.values():
+            for g in groups:
+                for cid, mark in g.get("gone", {}).items():
+                    marks.setdefault(cid, []).append(mark)
+    return {cid: tuple(sorted(m)) for cid, m in marks.items()}
 
 
 def validated_save_continuity(
@@ -2818,6 +3011,14 @@ def validated_save_continuity(
 
     if not text or not text.strip():
         raise ValueError("Continuity text cannot be empty")
+    # NOTHING UN-CANONICAL ENTERS (Phill 12:13, "(A)"; graduation.canonical_continuity_text).
+    # The pipeline has two inputs, and both are made canonical where they enter:
+    # the caller's text here, and every prior continuity read through
+    # Store.load_continuity (the one load point, canonical itself). Every
+    # parser after this line (the rederive strip, the durable carry-forward and
+    # its drop markers, the gate) reads one grammar. L3 r8: an NBSP-indented
+    # ``[drop-durable:]`` and a VT-hidden ``## State`` verdict were parsed raw.
+    text = canonical_continuity_text(text)
 
     # Validate structure (all sections declared by the store's schema). The
     # schema is read once here and reused for the schema-aware graduation gate
@@ -2831,7 +3032,7 @@ def validated_save_continuity(
         text = strip_rederive_output(text, section_schema)
     # Loaded once here and reused by the durable-facts invariant just below,
     # the catastrophic-shrink gate and the silent-omission audit further down.
-    prior_continuity = store.load_continuity()
+    prior_continuity = store.load_continuity()  # canonical: Store.load_continuity
     # Durable facts (B1): before anything validates, hashes or writes the text,
     # carry every prior durable line forward (re-inserting what the composer
     # left out) and apply the composer's drop markers. Never a refusal. A
@@ -2839,6 +3040,9 @@ def validated_save_continuity(
     text, durable_report = enforce_durable_facts(
         prior_continuity, text, section_schema
     )
+    # Backstop: both inputs are already canonical, so this is the identity unless a
+    # step above introduced a non-canonical character itself (idempotent, cheap).
+    text = canonical_continuity_text(text)
     grad_headings = graduating_headings(section_schema)
     # Reject ambiguous merged headings (e.g. "## Patterns and Understanding")
     # with a clear message before the generic all-sections check: one header
@@ -2927,6 +3131,22 @@ def validated_save_continuity(
         prior_continuity, text, section_schema, allow_shrink=allow_shrink,
         crystallized_credit=crystallized_credit,
     )
+    # KL-14 (2026-10-07): an override must leave a trace. When the operator passes
+    # allow_shrink, run the same check without it and record in the audit whether
+    # the override changed the outcome, and the refusal it suppressed.
+    # Always written, so an event without the field means an older version, never
+    # "no override".
+    shrink_override: dict[str, Any] = {"requested": allow_shrink is True}
+    if allow_shrink is True:
+        try:
+            _check_no_catastrophic_shrink(
+                prior_continuity, text, section_schema, allow_shrink=False,
+                crystallized_credit=crystallized_credit,
+            )
+            shrink_override["refusal_suppressed"] = False
+        except ValueError as exc:
+            shrink_override["refusal_suppressed"] = True
+            shrink_override["refusal"] = str(exc)[:2000]
 
     # Get current session's episodes for citation validation.
     # Re-fetch the full post-last-wrap set and filter down to exactly
@@ -2953,29 +3173,37 @@ def validated_save_continuity(
     # a cycle with an earlier one is refused at record time, so it must not
     # make its target uncitable here (reproduced: "A by B" then "B by A" left
     # live B uncitable).
-    edges: dict[str, set[str]] = {}
-    for link in store.supersession_links():
-        edges.setdefault(link["old_id"], set()).add(link["new_id"])
+    # Run again under the write lock (L3 r2 1009+22): this read precedes the
+    # ground_state baseline, so a trust change between them moved no ground the
+    # lock-time re-read compares, yet changed which links are accepted here.
+    def _accepted_supersedes() -> list[tuple[str, str]]:
+        edges: dict[str, set[str]] = {}
+        for link in store.supersession_links():
+            edges.setdefault(link["old_id"], set()).add(link["new_id"])
 
-    def _reaches(start: str, goal: str) -> bool:
-        seen, todo = set(), [start]
-        while todo:
-            cur = todo.pop()
-            if cur == goal:
-                return True
-            if cur not in seen:
-                seen.add(cur)
-                todo.extend(edges.get(cur, ()))
-        return False
+        def _reaches(start: str, goal: str) -> bool:
+            seen, todo = set(), [start]
+            while todo:
+                cur = todo.pop()
+                if cur == goal:
+                    return True
+                if cur not in seen:
+                    seen.add(cur)
+                    todo.extend(edges.get(cur, ()))
+            return False
 
-    for m in _SUPERSEDES_RE.finditer(text):
-        old_id, new_id = m.group(1).lower(), m.group(2).lower()
-        if new_id not in valid_ids or _reaches(new_id, old_id):
-            continue
-        if store.supersession_problem(old_id=old_id, new_id=new_id) is None:
-            edges.setdefault(old_id, set()).add(new_id)
-            if old_id in valid_ids:
-                superseded_in_window.add(old_id)
+        accepted: list[tuple[str, str]] = []
+        for m in _SUPERSEDES_RE.finditer(text):
+            old_id, new_id = m.group(1).lower(), m.group(2).lower()
+            if new_id not in valid_ids or _reaches(new_id, old_id):
+                continue
+            if store.supersession_problem(old_id=old_id, new_id=new_id) is None:
+                edges.setdefault(old_id, set()).add(new_id)
+                accepted.append((old_id, new_id))
+        return accepted
+
+    accepted_supersedes = _accepted_supersedes()
+    superseded_in_window |= {o for o, _ in accepted_supersedes if o in valid_ids}
     citable_ids = valid_ids - superseded_in_window
 
     # Check citation history
@@ -2985,7 +3213,37 @@ def validated_save_continuity(
     # Validate graduations (demotes bad citations in-place).
     # Caller may pin ``today`` for deterministic test runs; default is
     # wall-clock. Same pattern _build_wrap_package already uses.
-    today_str = today if today is not None else date.today().isoformat()
+    today_str = today if today is not None else (store.wrap_today() or _wrap_local_date(store))
+    # The bound's prior: the store's own record of the levels it last saved.
+    # ⛔ NO CRYSTAL SEED (L3 r4, 1008+3, DELETED): a crystal level seeded the
+    # first bounded save and was defeated a new way three rounds running (a
+    # caller-set crystallized_on, a caller-set level, then a caller-writable
+    # pattern_history bound). A pattern crystallized out before the record
+    # existed re-enters the continuity as new and re-earns its rungs; its crystal
+    # is untouched.
+    saved_levels = store.saved_pattern_levels()
+    # CAP-08 T3: where each citable episode came from (absent = agent), so a
+    # graduation grounded only in tool/external episodes does not climb.
+    # Plus every [supersedes:] endpoint: a trust change on one decides whether its
+    # link is recorded, which decides what was citable (codex r2, the race).
+    _marker_ids = {
+        i.lower() for mm in _SUPERSEDES_RE.finditer(text) for i in (mm.group(1), mm.group(2))
+    }
+    # CAP-08 D2 (C#11): a rung whose recorded grounding is all tool/external
+    # under today's trust no longer counts toward the pattern's prior.
+    grounding = store.pattern_grounding()
+    _grounding_ids = {
+        cid for rungs in grounding.values() for groups in rungs.values()
+        for g in groups for cid in g["episodes"]
+    }
+    # Effective trust (D3): an episode derived from others counts at most as
+    # trusted as its most trusted source.
+    window_trust, window_state = _grounded_trust(
+        store, citable_ids | _grounding_ids, _marker_ids)
+    window_gone = _gone_marks(grounding)
+    revoked_levels = revoked_pattern_levels(
+        grounding, lambda cid: window_trust.get(cid, DEFAULT_TRUST)
+    )
     grad_result = validate_graduations(
         text=text,
         valid_ids=citable_ids,
@@ -3007,6 +3265,17 @@ def validated_save_continuity(
         # within carryforward_cold_days (warm). Ungrounded path only; the
         # cross-session immune demotion is untouched. None disables it.
         carryforward_cold_days=carryforward_cold_days,
+        # L3 1007 (complement, codex): a held line's level is derived, never taken
+        # from the composer (see _prior_levels).
+        prior_levels=_prior_levels(prior_continuity, section_schema, saved_levels, store),
+        # The prior-state bound (1007+29): every line is cut to the level the
+        # STORED prior continuity entitles it to (new -> 1x, validated -> +1),
+        # whatever date, level or tag shape the composer wrote. "" = no prior
+        # file, so every line is new.
+        prior_text=prior_continuity or "",
+        saved_levels=saved_levels,
+        trust_of=lambda cid: window_trust.get(cid, DEFAULT_TRUST),
+        revoked_levels=revoked_levels,
     )
 
     # The hard maximum is measured on the text that will be WRITTEN: graduation
@@ -3093,7 +3362,7 @@ def validated_save_continuity(
     # are the committed state awaiting externalization. Pre-commit
     # cleanup is unchanged (pre-wrap state is restored cleanly).
     sections = measure_sections(grad_result.text)
-    patterns = len(re.findall(r"\|\s*\d+x", grad_result.text))
+    patterns = len(re.findall(r"\|\s*\d+x", mask_explanations_text(grad_result.text)))
     total_demoted = grad_result.demoted + grad_result.bare_demoted
     # Hoisted out of the try block so ``path`` is unambiguously bound
     # on every code path (including the residual-window recovery
@@ -3152,6 +3421,10 @@ def validated_save_continuity(
     db_committed = False
     composted: dict[str, int] = {}
     still_graduating: list[str] = []
+    drift_results: list[dict[str, Any]] = []
+    crystal_levels = _crystal_levels_snapshot(crystal_store)
+    # Raised inside the batch, delivered only after it commits.
+    drift_warnings: list[str] = []
 
     try:
         # Phase 2: batched DB DML.
@@ -3175,6 +3448,20 @@ def validated_save_continuity(
                 meta, token_hex=tmp_pair_id
             )
 
+            # The bound ran on levels read before this batch took the write lock.
+            # A sever or rename committed in between would be undone by the record
+            # below (codex L3 r2 HIGH): re-read under the lock, before this wrap's own
+            # compost below, and refuse on any change. Raising rolls the batch back:
+            # nothing saved, the wrap stays open.
+            if store.saved_pattern_levels() != saved_levels:
+                # A ValueError, which every transport surfaces as a refused save.
+                raise ValueError(
+                    "validated_save_continuity: the store's saved pattern levels "
+                    "changed while this save ran (a sever, rename or another save "
+                    "committed). Nothing was saved and the wrap is still open; save "
+                    "again so the graduation bound reads the current levels."
+                )
+
             # Compost severance, in THIS transaction so it commits or rolls
             # back with the wrap row below. Inside the batch the Store method
             # defers its commit and queues its audit event until the commit.
@@ -3183,6 +3470,10 @@ def validated_save_continuity(
                     name, today=today_str
                 )
 
+            # The [supersedes:] links accepted above decided what was citable:
+            # recompute that decision under the lock, before this save records any
+            # link, and refuse below (after the narrower checks) if it moved.
+            _supersedes_moved = _accepted_supersedes() != accepted_supersedes
             supersessions_recorded, supersessions_rejected = \
                 _record_wrap_supersessions(store, grad_result.text, valid_ids)
             # Re-read under the batch's write lock (codex L3, reproduced: a link
@@ -3200,6 +3491,52 @@ def validated_save_continuity(
                     f"saved and the wrap is still open; save again (cite the replacing "
                     f"episode instead)."
                 )
+            # The same re-read for the grounds (codex r1 #4; CAP-08 D3 R4): per
+            # cited id, whether it exists, its removal marks and its effective
+            # trust. Another writer moving any of them after validation read them
+            # would let the save commit a graduation judged on the old state (a
+            # deleted external ground read the same class before and after, so
+            # comparing trust alone missed it). Raising rolls the batch back.
+            _cited = set(grad_result.citation_counts) | _marker_ids | _grounding_ids
+            _, _state_now = _grounded_trust(
+                store, set(grad_result.citation_counts) | _grounding_ids, _marker_ids)
+            _gone_now = _gone_marks(store.pattern_grounding())
+            _absent = (False, DEFAULT_TRUST)
+            _trust_moved = sorted(
+                cid for cid in _cited
+                if (_state_now.get(cid, _absent), _gone_now.get(cid, ()))
+                != (window_state.get(cid, _absent), window_gone.get(cid, ()))
+            )
+            if _trust_moved:
+                raise StoreError(
+                    f"validated_save_continuity: cited episode(s) "
+                    f"{', '.join(_trust_moved)} were removed or changed trust class "
+                    f"while this save ran. Nothing was saved and the wrap is still "
+                    f"open; save again.",
+                    operation="save_continuity",
+                )
+            if _supersedes_moved:
+                raise ValueError(
+                    "validated_save_continuity: the [supersedes:] links this text "
+                    "proposes changed while this save ran (a trust change or another "
+                    "writer's link). Nothing was saved and the wrap is still open; "
+                    "save again so citability reads the current links."
+                )
+
+            # The bound's next prior, recorded in this transaction so it commits
+            # with the wrap or not at all, with the episodes that grounded each
+            # rung validated today (CAP-08 D2).
+            store._record_pattern_grounding(
+                grad_result.pattern_grounding, today_str, wrap_id=snapshot["token"])
+            # A composted name's level row was deleted with its edges above; the
+            # first save's tombstone seed must not bring it back (codex L3 r1 HIGH 2).
+            _prior_line_levels = pattern_line_levels(prior_continuity or "", grad_headings)
+            store._record_pattern_levels(
+                pattern_line_levels(grad_result.text, grad_headings), today_str,
+                lower_to=_prior_line_levels,
+                first_tombstones={k: v for k, v in _prior_line_levels.items()
+                                  if not (k[0] == "name" and k[1] in composted)},
+            )
 
             wrap_result = store.wrap_completed(
                 episodes_compressed=len(episodes),
@@ -3227,6 +3564,13 @@ def validated_save_continuity(
                 content_hash=content_hash,
                 pair_id=tmp_pair_id,
             )
+            # CAP-06: the operator's drift probes, read and checked INSIDE this batch
+            # (L3 1007, codex: a probe added between a pre-batch read and the commit
+            # had no result) against the exact text being saved; never a gate.
+            drift_results = _evaluate_drift_probes(
+                store, section_schema, grad_result.text, crystal_levels, drift_warnings
+            )
+            store._record_drift_results(drift_results)
 
 
             # Update cross-session pattern history. Scan the
@@ -3270,6 +3614,12 @@ def validated_save_continuity(
             # _NAMED_PATTERN_RE still polluted the pattern_history DB
             # via the upsert loop. The section guard closes that gap.
             in_patterns_section = False
+            # The review worklist is the validator's own records (name, level and
+            # explanation from the marker it validated and bound to the name), never a
+            # re-parse of the line by name (L3 r3, codex: a second line with the same
+            # name overwrote the validated row).
+            wrap_graduations: list[tuple[str, int, str]] = list(
+                grad_result.graduated_records)
             for line in grad_result.text.split("\n"):
                 if line.startswith("## "):
                     in_patterns_section = _is_graduating_heading(line, grad_headings)
@@ -3305,11 +3655,12 @@ def validated_save_continuity(
                 if line_date != today_str:
                     continue
                 explanation = ev_match.group(5)
-                if not explanation:
+                # A level of 10 or more digits is a malformed marker (bounded before
+                # int(), so a huge run can neither raise nor overflow the history).
+                if len(ev_match.group(2)) > 9:
                     continue
-                try:
-                    pattern_level = int(ev_match.group(2))
-                except ValueError:
+                pattern_level = int(ev_match.group(2))
+                if not explanation:
                     continue
                 store.upsert_pattern_history(
                     pattern_name=ev_match.group(1),
@@ -3322,6 +3673,7 @@ def validated_save_continuity(
                     # coherent on deterministic/backdated runs.
                     seen_at=today_str,
                 )
+            store._record_wrap_graduations(wrap_graduations)
 
             # flow spore-1169: the authoritative consolidate-gate check, deliberately the LAST
             # statement in the batch. wrap_completed's DML above means this connection holds
@@ -3529,6 +3881,9 @@ def validated_save_continuity(
                 # durable recovery oracle are guaranteed identical.
                 "content_hash": content_hash,
             }
+            audit_payload["allow_shrink"] = shrink_override
+            if drift_results:
+                audit_payload["drift"] = _drift_summary(drift_results)
             # Capture Proven-tier pattern omissions in the audit chain.
             # detect_pattern_omissions returns an empty list for the
             # common case (first wrap, or all prior Proven-tier patterns
@@ -3539,6 +3894,10 @@ def validated_save_continuity(
             # wrap — operators and downstream review (Diogenes,
             # consultation, audit-chain queries) can see what was
             # dropped without re-reading prior continuity files.
+            if grad_result.level_capped:
+                audit_payload["level_capped"] = [
+                    asdict(cap) for cap in grad_result.level_capped
+                ]
             if grad_result.omitted_patterns:
                 audit_payload["omitted_patterns"] = [
                     {"name": op.name, "prior_level": op.prior_level}
@@ -3572,6 +3931,21 @@ def validated_save_continuity(
                     {"name": p.name, "level": p.level}
                     for p in proven_without_declaration
                 ]
+            # CAP-08: graduations held back for tool/external-only grounding,
+            # and any graduation grounded above the default trust. Lean when
+            # empty, like the keys above.
+            if grad_result.uncorroborated:
+                audit_payload["uncorroborated"] = [
+                    {"name": u.name, "level": u.level, "trust": u.trust,
+                     "citations": list(u.citations)}
+                    for u in grad_result.uncorroborated
+                ]
+            raised_trust = {
+                name: t for name, t in grad_result.pattern_trust.items()
+                if t != DEFAULT_TRUST
+            }
+            if raised_trust:
+                audit_payload["pattern_trust"] = raised_trust
             # Durable facts (B1): a drop by marker is recorded here, and only
             # here, so the hash-chained audit log is the trail of every durable
             # line that left the store. Re-insertions ride along, lean when
@@ -3689,6 +4063,9 @@ def validated_save_continuity(
             # no citation (v0.5.0 path). Lets operators reconcile AM-WARN's
             # cited_graduations count against the held set.
             "cited": cf.cited,
+            # spore-676 ruling (A): True = a bare line held COLD (not grounded within
+            # carryforward_cold_days), dated back to its last grounding and flagged.
+            "cold": cf.cold,
             # AM-PROVENANCE (Slice A): True = the held line carried a
             # ``[provenance: id, ...]`` grounding-audit marker (a deliberately-
             # grounded mature pattern) → excluded from the graduate-OUT notice.
@@ -3738,7 +4115,8 @@ def validated_save_continuity(
     # signal (no citation = nothing to resolve to zero).
     cited_carried = sum(1 for cf in grad_result.carried_forward if cf.cited)
     cited_graduations = (
-        grad_result.validated + grad_result.demoted + cited_carried
+        grad_result.validated + grad_result.demoted - grad_result.atom_capped
+        + cited_carried
     )
     # Read the GATE-INDEPENDENT resolution signal, NOT any(all_validated_ids):
     # all_validated_ids is suppressed on a cross-session-overlap demote (the
@@ -3838,9 +4216,21 @@ def validated_save_continuity(
         {
             cf.name
             for cf in grad_result.carried_forward
-            if cf.max_level_reached >= 3 and not cf.provenance
+            if cf.max_level_reached >= 3 and not cf.provenance and not cf.cold
         }
     )
+    # spore-676 ruling (A): every bare line held COLD, at any level, reaches the human.
+    # The age in days changes every wrap, so a repeat notice still carries news (L2 1007).
+    cold_held = sorted({f"{cf.name} ({cf.days_since_grounded} days)"
+                        for cf in grad_result.carried_forward if cf.cold})
+    if cold_held:
+        _warn_after_commit(
+            f"{len(cold_held)} pattern(s) were re-dated to today with no evidence but "
+            f"have not been grounded in more than {carryforward_cold_days} days: "
+            f"{', '.join(cold_held)}. They were HELD at their earned level and dated "
+            f"back to their last grounding, not demoted. Decide for each: re-exercise "
+            f"it with fresh evidence, graduate it OUT to a stable home, or retire it."
+        )
     if graduate_out:
         _warn_after_commit(
             f"{len(graduate_out)} pattern(s) at 3x or higher were carried forward "
@@ -3867,7 +4257,37 @@ def validated_save_continuity(
             f"[provenance:] — sits between them): {', '.join(malformed)}. That "
             f"evidence will NOT validate or form a Hebbian link. Move [evidence:] "
             f"immediately after the marker, OR use [provenance:] alone (never both "
-            f"on one line). The line(s) were left unchanged."
+            f"on one line). The line(s) were left unchanged unless they claimed "
+            f"a level above their prior one (then see the level-capped warning)."
+        )
+
+    # The prior-state bound cut a line the composer wrote above what the stored
+    # prior continuity entitles it to. Loud for the same reason as the line
+    # above: the saved text differs from what the composer wrote.
+    if grad_result.level_capped:
+        _warn_after_commit(
+            f"{len(grad_result.level_capped)} pattern line(s) claimed a level "
+            f"the prior continuity does not support and were cut "
+            f"(a new pattern enters at 1x; a validated Nx becomes (N+1)x): "
+            + ", ".join(
+                f"{cap.name} {cap.written_level}x->{cap.capped_to}x"
+                + (f" ({cap.reason})" if cap.reason == CAP_REASON_REVOKED else "")
+                for cap in grad_result.level_capped
+            )
+            + ". Each is marked (level-capped)."
+            + (" A revoked one lost a rung whose grounding episodes were since "
+               "lowered to tool/external (CAP-08)."
+               if any(c.reason == CAP_REASON_REVOKED for c in grad_result.level_capped)
+               else "")
+        )
+
+    if grad_result.uncorroborated:
+        held_back = sorted({u.name for u in grad_result.uncorroborated})
+        _warn_after_commit(
+            f"{len(held_back)} graduation(s) did not climb because every citation "
+            f"grounding them is a tool or external episode (content relayed, not "
+            f"observed): {', '.join(held_back)}. They climb once an agent or "
+            f"operator episode also grounds them (CAP-08)."
         )
 
     result = SaveContinuityResult(
@@ -3885,6 +4305,8 @@ def validated_save_continuity(
         cross_session_collisions=cross_session_collisions_payload,
         proven_without_contradicts_declaration=proven_without_declaration_payload,
         carried_forward=carried_forward_payload,
+        uncorroborated=[asdict(u) for u in grad_result.uncorroborated],
+        pattern_trust=dict(grad_result.pattern_trust),
         # Both 0 on a wrap that graduated patterns is the former AM-WARN
         # Signal C case, which went quiet in 0.9.26: these counts are its record.
         associations_formed=assoc_formed,
@@ -3908,8 +4330,14 @@ def validated_save_continuity(
     )
     if compost_names is not None:
         result["composted"] = composted
+    if drift_results:
+        result["drift"] = _drift_summary(drift_results)
+    for message in drift_warnings:
+        _warn_after_commit(message)
     if durable_report is not None:
         result["durable_warnings"] = durable_messages
+    if grad_result.level_capped:
+        result["level_capped"] = [asdict(cap) for cap in grad_result.level_capped]
     if stale_state:
         result["stale_state"] = stale_state
         _warn_after_commit("State lines that do not hold at save: " + "; ".join(stale_state))

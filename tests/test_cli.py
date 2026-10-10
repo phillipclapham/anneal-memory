@@ -3021,7 +3021,6 @@ class TestTextExportsNeverOverwrite:
 
 
     @pytest.mark.skipif(os.name != "posix", reason="/dev/stdout is POSIX")
-    @pytest.mark.skipif(os.name != "posix", reason="/dev/stdout is POSIX")
     @pytest.mark.parametrize("cmd,fmt", WRITERS)
     def test_dev_stdout_is_a_pipe_sink_and_a_redirected_file_is_refused(self, db, tmp_path, cmd, fmt):
         """L2 r1: -o /dev/stdout must still write to a pipe. Redirected to a file it

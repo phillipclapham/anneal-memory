@@ -2993,11 +2993,17 @@ class TestTextExportsNeverOverwrite:
         assert devnull.is_symlink()
         assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
 
+    @pytest.mark.parametrize("nolink", [False, True])
     @pytest.mark.parametrize("cmd,fmt", WRITERS)
     def test_an_output_that_appears_during_the_write_is_not_overwritten(
-        self, db, tmp_path, monkeypatch, capsys, cmd, fmt
+        self, db, tmp_path, monkeypatch, capsys, cmd, fmt, nolink
     ):
+        import errno
         from anneal_memory import cli
+        if nolink:  # the claim path's exclusive create meets the other file
+            def _nolink(*a, **k):
+                raise OSError(errno.ENOTSUP, "no hard links here")
+            monkeypatch.setattr(cli.os, "link", _nolink)
         out = tmp_path / "race.out"
         real_publish = cli._publish_no_clobber
 
@@ -3012,6 +3018,76 @@ class TestTextExportsNeverOverwrite:
         assert "appeared during the export" in capsys.readouterr().err
         assert out.read_bytes() == b"theirs"
         assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
+
+
+    @pytest.mark.skipif(os.name != "posix", reason="/dev/stdout is POSIX")
+    @pytest.mark.parametrize("cmd,fmt", WRITERS)
+    def test_dev_stdout_redirected_to_a_file_is_written_and_appends(self, db, tmp_path, cmd, fmt):
+        """L3 r1 (run): -o /dev/stdout > file was refused (the reopen saw a regular
+        file); written through fd 1 it keeps a >> redirect's earlier content."""
+        target = tmp_path / "redirected.out"
+        target.write_bytes(b"PRE\n")
+        with open(target, "ab") as fh:
+            result = subprocess.run(
+                [sys.executable, "-m", "anneal_memory.cli", "--db", db, cmd, "--format", fmt, "--output", "/dev/stdout"],
+                stdout=fh, stderr=subprocess.PIPE, text=True,
+            )
+        assert result.returncode == 0, result.stderr
+        body = target.read_bytes()
+        assert body.startswith(b"PRE\n")
+        assert b"Episode one" in body
+
+    @pytest.mark.parametrize("fmt", ["json", "dot"])
+    @pytest.mark.parametrize("min_strength", [0.0, 99.0])
+    def test_an_empty_graph_still_refuses_an_existing_output(self, tmp_path, capsys, fmt, min_strength):
+        """L3 r1 (codex): an empty store, or a threshold above every edge, returned
+        before the writer, so an existing --output was not refused."""
+        db = str(tmp_path / "g.db")
+        with Store(db, project_name="Agent") as store:
+            if min_strength:
+                a, b = store.record("one", episode_type="observation"), store.record("two", episode_type="decision")
+                store.record_associations(direct_pairs={(a.id, b.id)})
+        out = tmp_path / "keep.out"
+        out.write_bytes(b"previous")
+        args = Namespace(db=db, project_name="Agent", json=False, format=fmt, output=str(out), min_strength=min_strength)
+        with pytest.raises(SystemExit) as exc:
+            cmd_graph(args)
+        assert exc.value.code == 1
+        assert out.read_bytes() == b"previous"
+        new = tmp_path / "new.out"
+        args.output = str(new)
+        cmd_graph(args)
+        text = new.read_text(encoding="utf-8")
+        if fmt == "json":
+            assert json.loads(text) == {"nodes": [], "edges": []}
+        else:
+            assert text.startswith("graph associations {")
+
+    @pytest.mark.skipif(os.name != "posix", reason="directory symlinks need privileges on Windows")
+    @pytest.mark.parametrize("cmd,fmt", WRITERS + [("export", "sqlite")])
+    def test_a_parent_symlink_retargeted_mid_export_publishes_in_one_directory(
+        self, db, tmp_path, monkeypatch, cmd, fmt
+    ):
+        """L3 r1 (codex): the temp was made through the symlink and cleaned up
+        through it after a retarget, leaking a full copy in the old directory."""
+        from anneal_memory import cli
+        first, second = tmp_path / "first", tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+        current = tmp_path / "current"
+        current.symlink_to(first)
+        real_publish = cli._publish_no_clobber
+
+        def _retarget(tmp, dst):
+            current.unlink()
+            current.symlink_to(second)
+            real_publish(tmp, dst)
+
+        monkeypatch.setattr(cli, "_publish_no_clobber", _retarget)
+        self._run(cmd, fmt, db, current / "out.x")
+        assert (first / "out.x").exists()
+        assert not (second / "out.x").exists()
+        assert not [p for d in (first, second) for p in d.iterdir() if ".export-tmp" in p.name]
 
 
 # -- cmd_prepare_wrap tests --

@@ -2100,21 +2100,29 @@ class _ExportBusyError(Exception):
     """The database being exported stayed locked past the export's deadline."""
 
 
-def _backup_sqlite(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection) -> None:
-    """Back an open SQLite connection up into another.
+def _backup_sqlite(
+    src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection, deadline: float
+) -> None:
+    """Back an open SQLite connection up into another, finished as one file.
 
     ``Connection.backup`` retries a BUSY or LOCKED status forever, so the
-    progress callback raises once such a status is seen past the deadline. The
-    caller sets the source's ``busy_timeout`` to 0 first, so SQLite's own wait
-    does not run inside each step and this callback is the bound.
+    progress callback raises once such a status is seen past ``deadline`` (a
+    ``time.monotonic()`` value). SQLite's own busy wait is switched off first, so
+    it cannot run inside a step and this callback is the bound. The copy is then
+    put in rollback-journal mode: that checkpoints a WAL copy into the main file,
+    so the copy is one file with nothing left in a ``-wal`` (a Store opened on it
+    switches it back to WAL).
     """
-    deadline = time.monotonic() + _EXPORT_BUSY_DEADLINE_S
+    src_conn.execute("PRAGMA busy_timeout = 0")
 
     def _progress(status: int, remaining: int, total: int) -> None:
         if status in _BACKUP_BUSY_STATUSES and time.monotonic() > deadline:
             raise _ExportBusyError
 
     src_conn.backup(dst_conn, progress=_progress)
+    mode = dst_conn.execute("PRAGMA journal_mode = DELETE").fetchone()[0]
+    if str(mode).lower() != "delete":
+        raise OSError(f"the copy could not be finished as a single file (journal mode {mode})")
 
 
 def _fold(path: str) -> str:
@@ -2129,16 +2137,26 @@ def _publish_no_clobber(tmp: Path, out: Path) -> None:
     exclusive create and the finished copy renamed over that claim (git's
     lockfile, with the target as the lock), so the content appears at once and a
     concurrent creator is refused. It needs no hard links, so it is the same on
-    every filesystem (FAT, exFAT and many SMB shares have none). A crash between
-    the claim and the rename can leave an empty file.
+    every filesystem (FAT, exFAT and many SMB shares have none). The copy is
+    flushed to disk before the claim. An error or an interrupt between the claim
+    and the rename removes the claim, if it is still the empty file this call
+    created; a crash there can leave it.
     """
+    fd = os.open(tmp, os.O_RDWR | getattr(os, "O_BINARY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
     fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666)
+    claim = os.fstat(fd)
     os.close(fd)
     try:
         os.replace(tmp, out)
-    except OSError:
+    except BaseException:
         with contextlib.suppress(OSError):
-            os.unlink(out)  # the empty claim this call created
+            now = os.stat(out)
+            if (now.st_dev, now.st_ino, now.st_size) == (claim.st_dev, claim.st_ino, 0):
+                os.unlink(out)
         raise
     _fsync_dir(out.parent)
 
@@ -2165,22 +2183,29 @@ def cmd_export(args: argparse.Namespace) -> None:
         # backup all see the one file SQLite opened (walopen r15: a retargeted
         # symlink or a deleted source must not export a different or empty DB).
         try:
+            deadline = time.monotonic() + _EXPORT_BUSY_DEADLINE_S
             src_conn = sqlite_connect(src_target, timeout=_EXPORT_BUSY_DEADLINE_S)
         except (sqlite3.Error, OSError) as exc:
             print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
             sys.exit(1)
         try:
             try:
-                # SQLite's busy wait (the connection's timeout) bounds these reads;
-                # from here on the backup's progress callback is the bound.
+                # One read transaction: SQLite's busy wait (the connection's
+                # timeout) bounds its first read; the backup gets what is left of
+                # the same deadline.
+                src_conn.execute("BEGIN")
                 page_count = src_conn.execute("PRAGMA page_count").fetchone()[0]
                 canon = src_conn.execute("PRAGMA database_list").fetchone()[2] or ""
-                src_conn.execute("PRAGMA busy_timeout = 0")
+                src_conn.execute("COMMIT")
             except sqlite3.Error as exc:
                 print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
                 sys.exit(1)
             if page_count == 0:
-                print(f"Error: {db_path} is empty or was removed during the export", file=sys.stderr)
+                print(
+                    f"Error: {db_path} is empty or was removed during the export (if it was "
+                    "removed, opening it left an empty file at that path)",
+                    file=sys.stderr,
+                )
                 sys.exit(1)
             # The output may not be the database or any file SQLite keeps for it,
             # named as given or resolved (a backup over a live -wal/-shm/-journal
@@ -2190,6 +2215,7 @@ def cmd_export(args: argparse.Namespace) -> None:
                 guarded = {
                     _fold(os.path.realpath(base + suffix))
                     for base in (os.path.abspath(db_path), os.path.realpath(db_path), canon)
+                    if base
                     for suffix in ("", "-wal", "-shm", "-journal")
                 }
                 if _fold(os.path.realpath(out)) in guarded:
@@ -2212,15 +2238,13 @@ def cmd_export(args: argparse.Namespace) -> None:
                 sys.exit(1)
             # The copy is built in a private temp in --output's directory and
             # published without replacing a file, so a failed export leaves nothing
-            # at --output and deletes only its own temp. The output mirrors the
-            # source's journal mode (the backup copies its header), which keeps it
-            # openable as a store.
+            # at --output and deletes only its own temp.
             tmp = out.parent / f".{os.getpid()}-{uuid.uuid4().hex}.export-tmp"
             size = 0
             try:
                 tmp_conn = sqlite_connect(sqlite_path(tmp))
                 try:
-                    _backup_sqlite(src_conn, tmp_conn)
+                    _backup_sqlite(src_conn, tmp_conn, deadline)
                 finally:
                     tmp_conn.close()
                 size = tmp.stat().st_size

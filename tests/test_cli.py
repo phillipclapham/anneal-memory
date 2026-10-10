@@ -1489,16 +1489,44 @@ class TestCmdExport:
     def test_export_sqlite_of_a_locked_source_errors_after_the_deadline(
         self, base_args_with_data, tmp_path, capsys, monkeypatch
     ):
-        """walopen L2: a backup from a source another connection holds locked
-        spun forever; it now errors once the deadline passes."""
+        """walopen L2 (run: a backup from a locked source spun forever). The lock
+        is taken after the source's identity reads, as the backup starts, so the
+        bound under test is the backup's own progress callback (L1 r15)."""
         import sqlite3
         import time
         from anneal_memory import cli
-        out = tmp_path / "copy.db"
-        hold = sqlite3.connect(base_args_with_data.db, isolation_level=None)
-        hold.execute("pragma journal_mode=delete")  # a WAL source never blocks its readers
-        hold.execute("BEGIN EXCLUSIVE")
+        db = base_args_with_data.db
+        w = sqlite3.connect(db, isolation_level=None)
+        w.execute("pragma journal_mode=delete")  # a WAL source never blocks its readers
+        w.close()
+        held: list[sqlite3.Connection] = []
+        real_connect = cli.sqlite_connect
+
+        class _Src:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def execute(self, sql, *a):
+                result = self._conn.execute(sql, *a)
+                if "busy_timeout" in sql and not held:
+                    h = sqlite3.connect(db, isolation_level=None)
+                    h.execute("BEGIN EXCLUSIVE")
+                    held.append(h)
+                return result
+
+            def backup(self, dst, **kw):
+                return self._conn.backup(dst, **kw)
+
+        def _connect(target, **kw):
+            conn = real_connect(target, **kw)
+            return _Src(conn) if str(target) == str(db) else conn
+
+        monkeypatch.setattr(cli, "sqlite_connect", _connect)
         monkeypatch.setattr(cli, "_EXPORT_BUSY_DEADLINE_S", 0.5)
+        out = tmp_path / "copy.db"
         base_args_with_data.format = "sqlite"
         base_args_with_data.output = str(out)
         t0 = time.monotonic()
@@ -1506,13 +1534,48 @@ class TestCmdExport:
             with pytest.raises(SystemExit) as exc:
                 cmd_export(base_args_with_data)
         finally:
-            hold.execute("ROLLBACK")
-            hold.close()
+            for h in held:
+                h.execute("ROLLBACK")
+                h.close()
+        assert held, "the lock was never taken: the bound under test did not run"
         assert exc.value.code == 1
-        assert "locked" in capsys.readouterr().err
+        assert "stayed locked" in capsys.readouterr().err
         assert time.monotonic() - t0 < 3
         assert not out.exists()
         assert not [p for p in tmp_path.iterdir() if p.name.endswith(".export-tmp")]
+
+    def test_export_sqlite_interrupted_at_publication_removes_its_claim(
+        self, base_args_with_data, tmp_path, monkeypatch
+    ):
+        """walopen L1 r15 (run: Ctrl-C between the claim and the rename left a
+        0-byte file at --output, which every later export then refused)."""
+        from anneal_memory import cli
+
+        def _interrupt(src, dst):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(cli.os, "replace", _interrupt)
+        out = tmp_path / "copy.db"
+        base_args_with_data.format = "sqlite"
+        base_args_with_data.output = str(out)
+        with pytest.raises(KeyboardInterrupt):
+            cmd_export(base_args_with_data)
+        assert not out.exists()
+        assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
+
+    def test_export_sqlite_of_an_empty_source_is_refused(self, tmp_path, capsys):
+        """walopen L1 r15 (run: a source removed after the existence check was
+        recreated empty by the open and exported as an empty database)."""
+        empty = tmp_path / "empty.db"
+        empty.write_bytes(b"")
+        out = tmp_path / "copy.db"
+        import argparse
+        args = argparse.Namespace(db=str(empty), json=False, format="sqlite", output=str(out))
+        with pytest.raises(SystemExit) as exc:
+            cmd_export(args)
+        assert exc.value.code == 1
+        assert "is empty or was removed" in capsys.readouterr().err
+        assert not out.exists()
 
     def test_export_sqlite_json(self, base_args_with_data, tmp_path, capsys):
         out = str(tmp_path / "copy.db")

@@ -18,11 +18,16 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   `--output` or remove the file first.
 ### Fixed — a failed `export --format sqlite` no longer leaves a file at `--output`
 - A failed backup (a source that is not a database, a full disk) left an empty or partial file at the output path
-  that looked like an export. The copy is now built in a private temp in the output's directory and published
-  by claiming the output with an exclusive create and renaming the finished copy over that claim, which never replaces a file and needs no hard links (FAT, exFAT). Export refuses the database or any of its `-wal`, `-shm` or `-journal` files by name,
-  as given or resolved. A bad `--output` prints
-  `Error: …` instead of a traceback, and a source another connection holds locked errors after a deadline instead
-  of waiting forever. The output mirrors the source's journal mode.
+  that looked like an export. The copy is now built in a private temp in the output's directory, finished as one
+  file in rollback-journal mode and flushed to disk, then published by claiming the output with an exclusive create
+  and renaming the copy over that claim: no pre-existing file is replaced, and no hard links are needed (FAT,
+  exFAT). An error or Ctrl-C at that step removes the claim; a crash there can leave an empty file.
+- Export refuses the database or any of its `-wal`, `-shm` or `-journal` files by name, as given, resolved, or as
+  SQLite names the file it opened (compared case- and Unicode-folded). The source is opened once, before these
+  checks, so the copy is of the file they checked; an empty source is refused.
+- A bad `--output` prints `Error: …` instead of a traceback, and a source another connection holds locked errors
+  after one deadline instead of waiting forever.
+
 ### Fixed — a database error names the operation the caller called
 - A `StoreDatabaseError` raised inside a nested store boundary now carries the OUTER
   method's `operation`, with the same SQLite `__cause__` and `cause_type_name`. A team

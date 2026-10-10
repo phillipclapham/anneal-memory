@@ -1603,6 +1603,55 @@ class TestCmdExport:
         assert out.read_bytes() == b"someone else's file"
         assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
 
+    def test_export_sqlite_link_refused_for_another_reason_still_never_replaces(
+        self, base_args_with_data, tmp_path, capsys, monkeypatch
+    ):
+        """walopen L1 r16: a link that fails with EPERM while a file exists at
+        --output falls to the claim, whose exclusive create refuses it too."""
+        import errno
+        from anneal_memory import cli
+
+        def _eperm(src, dst, *a, **k):
+            with open(dst, "wb") as f:
+                f.write(b"someone else's file")
+            raise OSError(errno.EPERM, "operation not permitted")
+
+        monkeypatch.setattr(cli.os, "link", _eperm)
+        out = tmp_path / "copy.db"
+        base_args_with_data.format = "sqlite"
+        base_args_with_data.output = str(out)
+        with pytest.raises(SystemExit) as exc:
+            cmd_export(base_args_with_data)
+        assert exc.value.code == 1
+        assert "appeared during the export" in capsys.readouterr().err
+        assert out.read_bytes() == b"someone else's file"
+
+    def test_export_sqlite_link_that_reports_exists_for_its_own_file_is_published(
+        self, base_args_with_data, tmp_path, monkeypatch
+    ):
+        """walopen L2 r16 (NFS, open(2)): a retransmitted LINK can answer EEXIST
+        after the first one succeeded; our own inode at --output is a publish."""
+        import errno
+        import sqlite3
+        from anneal_memory import cli
+        real_link = cli.os.link
+
+        def _nfs(src, dst, *a, **k):
+            real_link(src, dst, *a, **k)
+            raise FileExistsError(errno.EEXIST, "File exists")
+
+        monkeypatch.setattr(cli.os, "link", _nfs)
+        out = tmp_path / "copy.db"
+        base_args_with_data.format = "sqlite"
+        base_args_with_data.output = str(out)
+        cmd_export(base_args_with_data)
+        conn = sqlite3.connect(out)
+        try:
+            assert conn.execute("pragma integrity_check").fetchone()[0] == "ok"
+        finally:
+            conn.close()
+        assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
+
     def test_export_sqlite_without_hard_links_claims_then_renames(
         self, base_args_with_data, tmp_path, capsys, monkeypatch
     ):

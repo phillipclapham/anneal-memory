@@ -4516,6 +4516,20 @@ def test_connect_must_exist_never_creates_the_file(tmp_path):
         c.close()
 
 
+@pytest.mark.parametrize("abs_path, windows, uri", [
+    ("/a b/x%?#.db", False, "file:///a%20b/x%25%3F%23.db?mode=rw"),
+    ("C:\\Users\\x y\\a.db", True, "file:///C:/Users/x%20y/a.db?mode=rw"),
+    ("\\\\srv\\share\\a.db", True, "file:////srv/share/a.db?mode=rw"),
+    ("\\\\?\\C:\\long\\a.db", True, "file:///C:/long/a.db?mode=rw"),
+    ("\\\\?\\UNC\\srv\\share\\a.db", True, "file:////srv/share/a.db?mode=rw"),
+])
+def test_existing_file_uri_has_an_empty_authority(abs_path, windows, uri):
+    """walopen L1+L2 r16: Path.as_uri() put a UNC server in the authority, which
+    SQLite refuses ("invalid uri authority")."""
+    from anneal_memory.store import _existing_file_uri
+    assert _existing_file_uri(abs_path, windows=windows) == uri
+
+
 def test_every_sqlite_connect_goes_through_the_one_opener():
     """walopen bound: the only sqlite3 opener in the package is the module-level
     store.connect; any other way to reach sqlite3.connect or sqlite3.Connection

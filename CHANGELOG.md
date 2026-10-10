@@ -23,7 +23,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   Where the filesystem has no hard links (FAT, exFAT, many SMB shares) the output is claimed with an exclusive
   create and the copy renamed over that claim: that refuses concurrent exclusive creators, but a process that
   deletes the claim and writes its own file in that window is overwritten. An error or Ctrl-C at that step removes
-  the claim; a crash or SIGTERM there can leave an empty file. The published file keeps the permissions SQLite
+  the claim; a crash, a SIGTERM, or a Ctrl-C in the same instant as the claim's create can leave an empty file. The published file keeps the permissions SQLite
   gave the temp it was built in.
 - A source removed between the existence check and the export is an error; it is no longer recreated as an empty
   database at its path.

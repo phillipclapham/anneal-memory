@@ -17,6 +17,7 @@ import hashlib
 import logging
 import json
 import os
+import urllib.parse
 import re
 import sqlite3
 import time
@@ -2170,8 +2171,28 @@ def connect(path: str | Path, *, must_exist: bool = False, **kwargs: Any) -> sql
     if must_exist:
         if target == ":memory:":
             raise StorePathError("':memory:' is not an existing database file")
-        return sqlite3.connect(Path(os.path.abspath(target)).as_uri() + "?mode=rw", uri=True, **kwargs)
+        uri = _existing_file_uri(os.path.abspath(target), windows=os.name == "nt")
+        return sqlite3.connect(uri, uri=True, **kwargs)
     return sqlite3.connect(target, **kwargs)
+
+
+def _existing_file_uri(abs_path: str, *, windows: bool) -> str:
+    """An SQLite ``mode=rw`` URI for an absolute path, with an EMPTY authority.
+
+    ``Path.as_uri()`` puts a Windows UNC server in the authority
+    (``file://srv/share/x.db``), which SQLite refuses (walopen L1+L2 r16), so the
+    URI is built here: ``/a/b`` -> ``file:///a/b``, ``C:\\x`` -> ``file:///C:/x``,
+    ``\\\\srv\\share\\x`` -> ``file:////srv/share/x``; ``%``, ``?`` and ``#`` are escaped."""
+    p = abs_path
+    if windows:
+        if p.startswith("\\\\?\\UNC\\"):
+            p = "\\\\" + p[8:]
+        elif p.startswith("\\\\?\\"):
+            p = p[4:]
+        p = p.replace("\\", "/")
+    if not p.startswith("/"):
+        p = "/" + p
+    return "file://" + urllib.parse.quote(p, safe="/:") + "?mode=rw"
 
 
 class StorePathError(ValueError):

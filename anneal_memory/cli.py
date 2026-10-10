@@ -2152,7 +2152,11 @@ def _publish_no_clobber(tmp: Path, out: Path) -> None:
     try:
         os.link(tmp, out)
     except FileExistsError:
-        raise
+        # NFS may answer a retransmitted LINK with EEXIST after the first one
+        # succeeded (open(2)): if ``out`` is our own inode, it was published.
+        mine, there = os.stat(tmp), os.lstat(out)
+        if (mine.st_dev, mine.st_ino) != (there.st_dev, there.st_ino):
+            raise
     except OSError:
         _publish_by_claim(tmp, out)
     _fsync_dir(out.parent)

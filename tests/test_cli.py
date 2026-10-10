@@ -2986,6 +2986,7 @@ class TestTextExportsNeverOverwrite:
         reader.start()
         self._run(cmd, fmt, db, fifo)
         reader.join(10)
+        assert got, f"the FIFO reader got nothing in 10 s (alive={reader.is_alive()})"
         assert b"Episode one" in got[0]
         devnull = tmp_path / "null.out"
         devnull.symlink_to(os.devnull)

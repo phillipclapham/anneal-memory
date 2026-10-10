@@ -518,8 +518,16 @@ def test_fold_surfaced_never_moves_the_mark_past_receipts_it_did_not_read(tmp_pa
 
     monkeypatch.setattr(worth, "_read_regular", vanished)
     before = store.path.read_bytes()
-    with pytest.raises(FileNotFoundError, match="could actually be read"):
+    with pytest.raises(FileNotFoundError, match="disappeared during the fold"):
         worth.fold_surfaced(store, [rec])
+    assert store.path.read_bytes() == before
+    # L3 r5 (codex MED): one source vanishing while another reads fine also
+    # refuses; the mark never moves past the vanished one.
+    rec.write_text("", encoding="utf-8")
+    other = tmp_path / "other.jsonl"
+    other.write_text("", encoding="utf-8")
+    with pytest.raises(FileNotFoundError, match="disappeared during the fold"):
+        worth.fold_surfaced(store, [other, rec])
     assert store.path.read_bytes() == before
 
 

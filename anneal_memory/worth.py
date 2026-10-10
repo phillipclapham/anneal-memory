@@ -845,16 +845,18 @@ def fold_surfaced(
         counts: dict[str, int] = {}
         last_on: dict[str, str] = {}
         seen_events: set[str] = set()
-        read_any = False
         for path in paths:
             with _read_regular(Path(path), what="a receipt file") as f:
                 if f is None:
-                    # Gone since the preflight: reported, and never silently
-                    # skipped under a mark that moves past it (L3 r4, codex).
-                    if str(path) not in result.paths_missing:
-                        result.paths_missing.append(str(path))
-                    continue
-                read_any = True
+                    if str(path) in missing:
+                        continue  # absent at the preflight: reported as missing
+                    # Present at the preflight and gone now (a rotation mid-fold):
+                    # refuse, so the mark never moves past receipts this fold did
+                    # not read; the next fold reads them (L3 r4-r5, codex).
+                    raise FileNotFoundError(
+                        f"receipt file {path} disappeared during the fold; the fold mark "
+                        f"was not moved. Run it again."
+                    )
                 for line in f:
                     if not line.strip():
                         continue
@@ -895,12 +897,6 @@ def fold_surfaced(
                         counts[name] = counts.get(name, 0) + 1
                         if day > last_on.get(name, ""):
                             last_on[name] = day
-        if not read_any:
-            # Raising here skips the transaction's save: the mark does not move.
-            raise FileNotFoundError(
-                f"none of the receipt paths could actually be read ({', '.join(result.paths_missing)}); "
-                f"the fold mark was not moved."
-            )
         for name, n in counts.items():
             row = live[name]
             prior = row.get("surfaced_count")

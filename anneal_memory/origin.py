@@ -80,10 +80,11 @@ def canonical_section_markdown(text: str) -> str:
     then ``canonical_continuity_text``; then trailing whitespace on each line and at
     the end; then NFC. The removals run before the continuity grammar, so a marker
     that a removal joins is canonicalised in the same pass. The section's trailing
-    newline is stripped: splicing sections is the writer's job.
+    newline and any leading blank lines are stripped: splicing sections
+    is the writer's job.
     """
     v = _LINE_TERMINATORS_RE.sub("\n", text.replace("\r\n", "\n"))
     v = strip_hidden_controls(v)
     v = canonical_continuity_text(v)
-    v = "\n".join(line.rstrip() for line in v.split("\n")).rstrip()
+    v = "\n".join(line.rstrip() for line in v.split("\n")).rstrip().lstrip("\n")
     return unicodedata.normalize("NFC", v)

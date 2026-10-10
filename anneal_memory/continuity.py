@@ -24,6 +24,9 @@ import inspect
 import json
 import dataclasses
 import re
+import os
+import sqlite3
+import tempfile
 import uuid
 import logging
 import warnings
@@ -100,6 +103,8 @@ from .store import (
     SupersessionError,
     WrapSchemaMovedError,
     WrapWindowMovedError,
+    WrapContinuityMovedError,
+    SectionError,
     _fsync_dir,
     _safe_unlink,
 )
@@ -110,6 +115,7 @@ from .types import (
     FeltCurrency,
     PrepareWrapResult,
     SaveContinuityResult,
+    SectionWriteResult,
     StalePatternDict,
     WrapPackageDict,
 )
@@ -2148,6 +2154,10 @@ def prepare_wrap(
             token=wrap_token,
             episode_ids=episode_ids,
             section_schema=schema,
+            # The text this wrap composes from: a replace_section that landed
+            # since refuses the start (design r6 §12.3).
+            expect_continuity_sha256=hashlib.sha256(
+                (existing or "").encode("utf-8")).hexdigest(),
             gated_session_id=session_id,
             expect_last_wrap_id=window_last_wrap_id,
             derive_roots=frozen_identities,
@@ -2159,6 +2169,14 @@ def prepare_wrap(
             "another wrap completed while this call was preparing, so its "
             "episodes and continuity are out of date and no wrap was opened. "
             "Retry. Capture (afferent) is unaffected.",
+            episode_count=_pending_count(store),
+        )
+    except WrapContinuityMovedError:
+        return _downgraded_empty(
+            "Consolidate downgraded to capture-only (downgraded-continuity-changed): "
+            "a section of the continuity file was edited while this call was "
+            "preparing, so its package was built from the old text and no wrap was "
+            "opened. Retry. Capture (afferent) is unaffected.",
             episode_count=_pending_count(store),
         )
     except WrapSchemaMovedError:
@@ -4359,3 +4377,210 @@ def validated_save_continuity(
             "checked at this save (pass require_rederive to refuse such a save)."
         )
     return result
+
+
+# --- Section reads and writes (P(2), design episode_origin_key_design_1010.md r6 §4, §11.3-§11.4, §13) ---
+
+
+def _has_terminator(line: str) -> bool:
+    """Whether a ``splitlines(keepends=True)`` element ends with a line break."""
+    return line.splitlines()[0] != line if line else False
+
+
+def _section_text(lines: list[str]) -> str:
+    """Section body lines joined, leading and trailing blank lines removed."""
+    start, end = 0, len(lines)
+    while start < end and not lines[start].strip():
+        start += 1
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+    return "\n".join(lines[start:end])
+
+
+def _locate_section(
+    raw: str, schema: list[SectionSpec], heading: str
+) -> tuple[SectionSpec, list[str], int, int, str] | tuple[str, str]:
+    """Find ``heading``'s one section in the raw continuity text.
+
+    Returns ``(spec, raw_lines, header_index, end_index, text)``: ``raw_lines``
+    keep their terminators, the section's lines are ``header_index + 1 ..
+    end_index - 1``, and ``text`` is the section as :meth:`Store.load_continuity`
+    shows it (:func:`_section_text` of the canonical lines). Or ``(reason,
+    message)`` when it cannot: ``no_such_section``, ``section_absent``,
+    ``ambiguous_heading``.
+
+    Header lines are matched as the gate matches them (``## `` lines, through
+    :func:`_header_matches`), on canonical lines. ``str.splitlines`` breaks on
+    exactly ``\\n`` plus the characters ``canonical_continuity_text`` turns into
+    ``\\n`` (``tests/test_section_edit.py`` holds that by an exhaustive scan), so
+    raw line i and canonical line i are the same line.
+    """
+    want = heading.strip().lower()
+    spec = next((sp for sp in schema if sp["heading"].lower() == want), None)
+    if spec is None:
+        return ("no_such_section", f"{heading!r} is not a section of this store's schema")
+    raw_lines = raw.splitlines(keepends=True)
+    # Line i of the load_continuity form, by construction (see the docstring).
+    canon = [canonical_continuity_text(line.splitlines()[0]) for line in raw_lines]
+    target = spec["heading"].lower()
+    hits: list[int] = []
+    for i, line in enumerate(canon):
+        if not line.startswith("## "):
+            continue
+        matched = _header_matches(line.lower(), schema)
+        if target in matched:
+            if len(matched) > 1:
+                return ("ambiguous_heading", f"header line {i + 1} matches more than one section")
+            hits.append(i)
+    if not hits:
+        return ("section_absent", f"no ## {spec['heading']} section in the continuity file")
+    if len(hits) > 1:
+        return ("ambiguous_heading", f"{len(hits)} header lines claim ## {spec['heading']}")
+    start = hits[0]
+    end = next((j for j in range(start + 1, len(canon)) if canon[j].startswith("## ")), len(canon))
+    return spec, raw_lines, start, end, _section_text(canon[start + 1:end])
+
+
+def _read_raw_continuity(store: "Store") -> str | None:
+    try:
+        with open(store.continuity_path, encoding="utf-8", newline="") as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
+
+
+def _section_version(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def read_section(store: "Store", heading: str) -> tuple[str, str] | None:
+    """:meth:`Store.read_section`."""
+    raw = _read_raw_continuity(store)
+    if raw is None:
+        return None
+    found = _locate_section(raw, store.section_schema, heading)
+    if len(found) == 2:
+        reason, message = found  # type: ignore[misc]
+        if reason == "section_absent":
+            return None
+        raise SectionError(reason, message)
+    text = found[4]  # type: ignore[misc]
+    return text, _section_version(text)
+
+
+def _pipeline_tmp_present(store: "Store") -> bool:
+    parent = store.continuity_path.parent
+    return parent.exists() and any(parent.glob(f"{store.continuity_path.stem}.*.md.tmp"))
+
+
+def replace_section(
+    store: "Store", heading: str, body: str, *, expected_version: str
+) -> SectionWriteResult:
+    """:meth:`Store.replace_section`."""
+    from .origin import canonical_section_markdown
+
+    if not isinstance(heading, str) or not isinstance(body, str):
+        raise TypeError("replace_section: heading and body must be str")
+    if not isinstance(expected_version, str):
+        raise TypeError("replace_section: expected_version must be str")
+    schema = store.section_schema
+
+    def refused(reason: str, version: str | None = None) -> SectionWriteResult:
+        return SectionWriteResult(outcome="refused", heading=heading, reason=reason, version=version)
+
+    spec = next((sp for sp in schema if sp["heading"].lower() == heading.strip().lower()), None)
+    if spec is None:
+        return refused("no_such_section")
+    if spec["role"] == "graduating":
+        return refused("graduating")
+    new_body = canonical_section_markdown(body)
+    # The span parser's own header test, on the canonical body: a body line it
+    # reads as a header would split the section for every reader.
+    if any(line.startswith("## ") for line in new_body.split("\n")):
+        return refused("invalid_body")
+
+    result: SectionWriteResult
+    old_version: str | None = None
+    with store.continuity_lock(require=True):
+        conn = store._conn
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc) or "busy" in str(exc):
+                return refused("store_busy")
+            raise
+        try:
+            if store.get_wrap_started_at():
+                result = refused("wrap_in_progress")
+            elif _pipeline_tmp_present(store):
+                result = refused("pipeline_tmp_present")
+            else:
+                raw = _read_raw_continuity(store)
+                found = _locate_section(raw, schema, heading) if raw is not None else (
+                    "section_absent", "no continuity file")
+                if len(found) == 2:
+                    result = refused(found[0])  # type: ignore[index]
+                else:
+                    _, raw_lines, start, end, text = found  # type: ignore[misc]
+                    old_version = _section_version(text)
+                    if old_version != expected_version:
+                        result = SectionWriteResult(
+                            outcome="version_mismatch", heading=heading, version=old_version)
+                    else:
+                        header = raw_lines[start]
+                        if not _has_terminator(header):  # the file ended at the header
+                            header += "\n"
+                        middle: list[str] = []
+                        if new_body:
+                            middle = ["\n"] + [line + "\n" for line in new_body.split("\n")]
+                        if end < len(raw_lines):
+                            middle.append("\n")
+                        new_raw = "".join(raw_lines[:start] + [header] + middle + raw_lines[end:])
+                        after = _locate_section(new_raw, schema, heading)
+                        new_canon = canonical_continuity_text(
+                            new_raw.replace("\r\n", "\n").replace("\r", "\n"))
+                        if (len(after) == 2 or after[4] != new_body  # type: ignore[misc]
+                                or not validate_structure(new_canon, schema)):
+                            result = refused("invalid_body")
+                        else:
+                            _write_continuity_in_place(store, new_raw)
+                            result = SectionWriteResult(
+                                outcome="written", heading=heading,
+                                version=_section_version(new_body))
+            conn.commit()
+        except BaseException:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            raise
+    if result.outcome == "written":
+        store._audit_log_after_commit("section_replaced", {
+            "heading": spec["heading"],
+            "old_version": old_version,
+            "new_version": result.version,
+        }, method="replace_section", committed="the section edit")
+    return result
+
+
+def _write_continuity_in_place(store: "Store", text: str) -> None:
+    """Atomically replace the continuity file with ``text``: a tmp in the same
+    directory (named so the wrap-orphan scan never matches it), the original's
+    mode, fsync, ``os.replace``, then the directory fsync."""
+    path = store.continuity_path
+    try:
+        mode = os.stat(path).st_mode & 0o7777
+    except FileNotFoundError:
+        mode = 0o644
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix="." + path.name + ".", suffix=".section-edit")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            os.fchmod(f.fileno(), mode) if hasattr(os, "fchmod") else None
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        _safe_unlink(Path(tmp_name))
+        raise
+    _fsync_dir(path.parent)

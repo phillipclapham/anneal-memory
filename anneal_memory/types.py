@@ -103,6 +103,23 @@ class DeleteResult:
 
 
 @dataclass(frozen=True)
+class SectionWriteResult:
+    """The outcome of :meth:`Store.replace_section`.
+
+    ``outcome``: ``"written"`` (``version`` is the new section version) ·
+    ``"version_mismatch"`` (nothing written; ``version`` is the current one) ·
+    ``"refused"`` (nothing written; ``reason`` says why: ``wrap_in_progress``,
+    ``pipeline_tmp_present``, ``graduating``, ``no_such_section``,
+    ``section_absent``, ``ambiguous_heading``, ``invalid_body``,
+    ``store_busy``)."""
+
+    outcome: str
+    heading: str
+    version: str | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
 class Tombstone:
     """Audit trail for a pruned episode."""
 

@@ -255,6 +255,7 @@ from .types import (
     DEFAULT_TRUST,
     DeleteResult,
     OriginKeyStatus,
+    SectionWriteResult,
     TRUST_LEVELS,
     Episode,
     EpisodeType,
@@ -986,6 +987,22 @@ class WrapSchemaMovedError(AnnealMemoryError):
         super().__init__(message)
 
 
+class WrapContinuityMovedError(AnnealMemoryError):
+    """Raised by ``wrap_started(expect_continuity_sha256=...)`` when the
+    continuity file changed between ``prepare_wrap``'s read and the wrap's start
+    (a :meth:`Store.replace_section` landed in between). Nothing is written;
+    :func:`~anneal_memory.prepare_wrap` turns it into a "retry" result."""
+
+    def __init__(
+        self,
+        message: str = (
+            "wrap_started: the continuity file changed since prepare_wrap read it. "
+            "Re-run prepare_wrap."
+        ),
+    ) -> None:
+        super().__init__(message)
+
+
 class WrapOwnershipError(AnnealMemoryError):
     """Raised when ``wrap_cancelled(expect_token=...)`` is called and the store's
     current wrap token is not the one the caller claims to own.
@@ -1279,6 +1296,20 @@ class OriginKeyConflict(AnnealMemoryError, ValueError):
     whose ``content``, ``type`` or ``source`` differ from the call's. A key names
     one payload, as an idempotency key does: a retry returns the stored episode,
     a different payload is refused. Nothing was written."""
+
+
+class SectionError(AnnealMemoryError, ValueError):
+    """Raised by :meth:`Store.read_section` when the continuity file cannot be
+    read as one section under that heading: the heading is not in the schema,
+    two header lines claim it, or a header line is ambiguous between sections.
+    ``reason`` names which."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        self.reason = reason
+        super().__init__(message)
+
+    def __reduce__(self) -> tuple:
+        return (type(self), (self.reason, str(self)))
 
 
 class SupersessionError(AnnealMemoryError, ValueError):
@@ -5895,6 +5926,43 @@ class Store:
             }, method="delete_by_origin_key", committed="the deletion")
         return result
 
+    def read_section(self, heading: str) -> tuple[str, str] | None:
+        """One continuity section's text, as :meth:`load_continuity` shows it,
+        and its ``section_version`` (SHA-256 of that text), or ``None`` when the
+        file or the section is absent. The text has its leading and trailing
+        blank lines removed. Pass the version to :meth:`replace_section`.
+
+        Raises:
+            SectionError: the heading is not in the store's schema, or the file
+                does not hold exactly one unambiguous section under it.
+        """
+        from .continuity import read_section as _read_section
+
+        return _read_section(self, heading)
+
+    def replace_section(
+        self, heading: str, body: str, *, expected_version: str
+    ) -> SectionWriteResult:
+        """Replace one non-graduating continuity section if its version is still
+        ``expected_version`` (from :meth:`read_section`).
+
+        The body is stored as :func:`~anneal_memory.origin.canonical_section_markdown`
+        returns it; every line outside the section, the header line included,
+        is kept byte for byte. Refused while a wrap is open or a wrap's pipeline
+        tmp sits beside the file (a committed wrap not yet renamed). Holds
+        :meth:`continuity_lock` (``require=True``: it raises
+        :class:`ContinuityLockUnavailable` where no lock exists, as on Windows)
+        and the store's write lock across the read, the check and the replace.
+
+        ⚠ An anneal older than this one prepares a wrap with no check against
+        this edit: an edit landing in the few milliseconds between that wrap's
+        read and its start is overwritten by its save. Run every process that
+        wraps the store on this version before relying on this method.
+        """
+        from .continuity import replace_section as _replace_section
+
+        return _replace_section(self, heading, body, expected_version=expected_version)
+
     def recall(
         self,
         since: str | None = None,
@@ -6410,6 +6478,7 @@ class Store:
         derive_roots: dict[str | None, str] | None = None,
         token_bound: bool = False,
         today: str | None = None,
+        expect_continuity_sha256: str | None = None,
     ) -> None:
         """Mark that a wrap has been initiated (prepare_wrap called).
 
@@ -6483,6 +6552,12 @@ class Store:
                 meanwhile (spore-1282; read back with :meth:`wrap_derive_roots`).
                 ``prepare_wrap`` freezes :func:`anneal_memory.rederive.root_identities`.
                 ``None`` freezes nothing.
+            expect_continuity_sha256: SHA-256 of the continuity text the caller
+                composed from (:meth:`load_continuity`, ``""`` for no file).
+                Compared under this call's write lock, which
+                :meth:`replace_section` also holds while it writes, so an edit
+                that landed after the caller's read refuses the start
+                (:class:`WrapContinuityMovedError`). ``None`` skips the check.
             token_bound: The token was supplied by the caller
                 (``prepare_wrap(wrap_token=...)``), so :meth:`wrap_cancelled`
                 refuses to end this wrap without ``expect_token`` or ``force``
@@ -6684,6 +6759,10 @@ class Store:
             live_schema = self._load_section_schema(strict=True)
             if passed_schema is not None and live_schema != passed_schema:
                 raise WrapSchemaMovedError()
+            if expect_continuity_sha256 is not None:
+                now_text = self.load_continuity() or ""
+                if hashlib.sha256(now_text.encode("utf-8")).hexdigest() != expect_continuity_sha256:
+                    raise WrapContinuityMovedError()
             frozen_schema = live_schema
             frozen_schema_json = json.dumps(frozen_schema)
             self._conn.execute(

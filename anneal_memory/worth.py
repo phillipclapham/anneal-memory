@@ -40,6 +40,7 @@ provenance edges.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import json
 import os
@@ -48,7 +49,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator, TextIO
 
 from .crystal import CrystalError, CrystalStore
 
@@ -95,8 +96,11 @@ _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
-def _open_log(path: Path, *, write: bool) -> int:
-    """The one way the outcome log is opened: a descriptor on a REGULAR file.
+def _open_log(path: Path, *, write: bool, what: str = "the outcome log") -> int:
+    """The one way the outcome log, and a receipt file (``what``), is opened: a
+    descriptor on a REGULAR file. A receipt must be a file, not a pipe:
+    ``fold_surfaced`` reads it under the crystal store's lock, where a FIFO with
+    no writer blocked every crystal write (outcomes-open L3 r2, codex).
 
     The open is non-blocking and the check is ``fstat`` on that descriptor, so a
     FIFO at the log's name refuses at once instead of hanging a reader or a
@@ -123,20 +127,31 @@ def _open_log(path: Path, *, write: bool) -> int:
         if write and exc.errno in (errno.ELOOP, errno.EMLINK):
             raise OSError(
                 exc.errno,
-                "the outcome log is a symlink and is written only as a regular file; point the store at "
+                f"{what} is a symlink and is written only as a regular file; point the store at "
                 "the link's target or replace the link with the file",
                 str(path),
             ) from exc
         raise
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(errno.EINVAL, "the outcome log is not a regular file", str(path))
+            raise OSError(errno.EINVAL, f"{what} is not a regular file", str(path))
         if _O_NONBLOCK:
             os.set_blocking(fd, True)
     except BaseException:
         os.close(fd)
         raise
     return fd
+
+
+@contextlib.contextmanager
+def _owned_reader(fd: int) -> Iterator[TextIO]:
+    """A text reader over ``fd`` that closes ``fd`` itself, so nothing can leak
+    it between the open and a reader adopting it (outcomes-open L3 r1)."""
+    try:
+        with open(fd, "r", encoding="utf-8", errors="replace", closefd=False) as f:
+            yield f
+    finally:
+        os.close(fd)
 
 
 def outcome_log_path(db_path: str | os.PathLike[str]) -> Path:
@@ -398,11 +413,8 @@ class OutcomeLog:
             fd = _open_log(self.path, write=False)
         except FileNotFoundError:
             return [], 0
-        try:  # this frame owns fd (L3 r1: no gap before a reader adopts it)
-            with open(fd, "r", encoding="utf-8", errors="replace", closefd=False) as f:
-                return _parse_entries(f)
-        finally:
-            os.close(fd)
+        with _owned_reader(fd) as f:
+            return _parse_entries(f)
 
     def _snapshot(self) -> tuple[dict[str, dict[str, Any]], int, LogBinding]:
         """The merged records this log counts, the skipped-line count and the
@@ -817,10 +829,10 @@ def fold_surfaced(
         seen_events: set[str] = set()
         for path in paths:
             try:
-                f = open(path, "r", encoding="utf-8", errors="replace")
+                fd = _open_log(Path(path), write=False, what="a receipt file")
             except FileNotFoundError:
                 continue
-            with f:
+            with _owned_reader(fd) as f:
                 for line in f:
                     if not line.strip():
                         continue
@@ -1018,11 +1030,11 @@ def load_receipts(
     missing: list[str] = []
     for path in ps:
         try:
-            f = open(path, "r", encoding="utf-8", errors="replace")
+            fd = _open_log(Path(path), write=False, what="a receipt file")
         except FileNotFoundError:
             missing.append(str(path))
             continue
-        with f:
+        with _owned_reader(fd) as f:
             for line in f:
                 if not line.strip():
                     continue

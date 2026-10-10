@@ -414,3 +414,188 @@ def test_released_v1_outcome_records_stay_readable(tmp_path):
     assert latest["x1"]["items"] == [{"kind": "crystal", "ref": "p", "followed": "followed"}]
     assert latest["x2"]["outcome"] == "failure"
     assert latest["x2"]["items"] == [{"kind": "episode", "ref": "e9", "followed": "ignored"}]
+
+
+_NO_FIFO = not hasattr(__import__("os"), "mkfifo")
+
+
+@pytest.mark.skipif(_NO_FIFO, reason="no FIFOs on this platform")
+@pytest.mark.parametrize("act", ["read", "record", "record_if_missing", "adopt"])
+def test_a_fifo_at_the_outcome_log_refuses_instead_of_hanging(tmp_path, act):
+    """c-pull-label L3 r1 (codex HIGH), reproduced on main 0655b72: `worth` on a
+    FIFO outcome log hung until killed. Every open checks the descriptor."""
+    import os
+    path = tmp_path / "mem.outcomes.jsonl"
+    os.mkfifo(path)
+    log = OutcomeLog(path, store_id="s1", bind=True)
+    calls = {
+        "read": lambda: log.binding(),
+        "record": lambda: log.record("e1", [], outcome="success"),
+        "record_if_missing": lambda: log.record_if_missing("e1", [], outcome="success"),
+        "adopt": lambda: log.adopt_unbound(),
+    }
+    with pytest.raises(OSError, match="not a regular file"):
+        calls[act]()
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "O_NOFOLLOW"), reason="no O_NOFOLLOW")
+@pytest.mark.parametrize("act", ["record", "record_if_missing", "adopt"])
+def test_a_write_never_follows_a_symlinked_outcome_log(tmp_path, act):
+    """c-pull-label L3 r1 (codex HIGH), reproduced on main 0655b72: `outcome`
+    appended through a symlink into the file it named (a 7-byte canary grew to
+    147 bytes)."""
+    canary = tmp_path / "canary.txt"
+    canary.write_bytes(b"CANARY\n")
+    path = tmp_path / "mem.outcomes.jsonl"
+    path.symlink_to(canary)
+    log = OutcomeLog(path, store_id="s1", bind=True)
+    calls = {
+        "record": lambda: log.record("e1", [], outcome="success"),
+        "record_if_missing": lambda: log.record_if_missing("e1", [], outcome="success"),
+        "adopt": lambda: log.adopt_unbound(),
+    }
+    with pytest.raises(OSError, match="symlink"):
+        calls[act]()
+    assert canary.read_bytes() == b"CANARY\n"
+
+
+def test_a_symlinked_outcome_log_is_still_read(tmp_path):
+    """Reading follows a symlink: it writes nothing, and a log kept elsewhere
+    still reports."""
+    real = tmp_path / "real.outcomes.jsonl"
+    OutcomeLog(real).record("e1", [], outcome="success")
+    link = tmp_path / "mem.outcomes.jsonl"
+    try:
+        link.symlink_to(real)
+    except OSError:
+        pytest.skip("cannot create a symlink here")
+    assert "e1" in OutcomeLog(link).latest()[0]
+
+
+
+@pytest.mark.skipif(_NO_FIFO, reason="no FIFOs on this platform")
+def test_a_fifo_receipt_file_refuses_instead_of_hanging(tmp_path):
+    """outcomes-open L3 r2 (codex HIGH): a receipt read under the crystal
+    store's lock blocked every crystal write when the receipt was a FIFO."""
+    import os
+    from anneal_memory.worth import load_receipts
+    fifo = tmp_path / "receipts.jsonl"
+    os.mkfifo(fifo)
+    with pytest.raises(OSError, match="receipt file is not a regular file"):
+        load_receipts([fifo])
+
+
+@pytest.mark.skipif(_NO_FIFO, reason="no FIFOs on this platform")
+def test_fold_surfaced_refuses_a_fifo_receipt_before_anything_else(tmp_path):
+    """outcomes-open L3 r3 (codex + complement LOW): the preflight called a FIFO
+    "missing", so a lone FIFO read as "none exists" and a mixed list could
+    return early without the FIFO ever being checked."""
+    import os
+    from anneal_memory.worth import fold_surfaced
+    good = tmp_path / "good.jsonl"
+    good.write_text("", encoding="utf-8")
+    fifo = tmp_path / "r.jsonl"
+    os.mkfifo(fifo)
+    store = CrystalStore(tmp_path / "c.crystal.json")
+    for paths in ([fifo], [good, fifo]):
+        with pytest.raises(OSError, match="receipt file is not a regular file"):
+            fold_surfaced(store, paths)
+
+
+def test_fold_surfaced_never_moves_the_mark_past_receipts_it_did_not_read(tmp_path, monkeypatch):
+    """outcomes-open L3 r4 (codex MED): a receipt gone between the preflight and
+    the locked read was skipped while the mark moved past it."""
+    import anneal_memory.worth as worth
+    rec = tmp_path / "r.jsonl"
+    rec.write_text("", encoding="utf-8")
+    store = CrystalStore(tmp_path / "c.crystal.json")
+    store.crystallize(name="p", level=3, explanation="x", evidence=["e1"])
+    real = worth._read_regular
+
+    def vanished(path, *, what):
+        rec.unlink(missing_ok=True)
+        return real(path, what=what)
+
+    monkeypatch.setattr(worth, "_read_regular", vanished)
+    before = store.path.read_bytes()
+    with pytest.raises(FileNotFoundError, match="disappeared during the fold"):
+        worth.fold_surfaced(store, [rec])
+    assert store.path.read_bytes() == before
+    # L3 r5 (codex MED): one source vanishing while another reads fine also
+    # refuses; the mark never moves past the vanished one.
+    rec.write_text("", encoding="utf-8")
+    other = tmp_path / "other.jsonl"
+    other.write_text("", encoding="utf-8")
+    with pytest.raises(FileNotFoundError, match="disappeared during the fold"):
+        worth.fold_surfaced(store, [other, rec])
+    assert store.path.read_bytes() == before
+
+
+def test_fold_surfaced_calls_a_dangling_symlink_missing(tmp_path):
+    """outcomes-open L3 r4 (complement): the preflight called a dangling symlink
+    "not a regular file"; one stat makes it missing, as the read would."""
+    from anneal_memory.worth import fold_surfaced
+    good = tmp_path / "good.jsonl"
+    good.write_text("", encoding="utf-8")
+    dangling = tmp_path / "gone.jsonl"
+    try:
+        dangling.symlink_to(tmp_path / "nowhere.jsonl")
+    except OSError:
+        pytest.skip("cannot create a symlink here")
+    store = CrystalStore(tmp_path / "c.crystal.json")
+    store.crystallize(name="p", level=3, explanation="x", evidence=["e1"])
+    result = fold_surfaced(store, [good, dangling])
+    assert str(dangling) in result.paths_missing
+
+
+def test_fold_surfaced_tracks_the_preflight_per_entry_not_per_name(tmp_path, monkeypatch):
+    """outcomes-open L3 r6 (codex MED): with [rec, rec], rec missing at the first
+    stat, present at the second, gone at the read, both entries matched "was
+    missing" by name and the mark moved having read nothing."""
+    import os
+    import anneal_memory.worth as worth
+    rec = tmp_path / "r.jsonl"
+    store = CrystalStore(tmp_path / "c.crystal.json")
+    store.crystallize(name="p", level=3, explanation="x", evidence=["e1"])
+    real_stat = worth.os.stat
+    calls = []
+
+    def flicker(p, *a, **k):
+        if str(p) == str(rec):
+            calls.append(p)
+            if len(calls) == 2:
+                rec.write_text("", encoding="utf-8")
+                st = real_stat(p, *a, **k)
+                rec.unlink()
+                return st
+            raise FileNotFoundError(2, "No such file", str(p))
+        return real_stat(p, *a, **k)
+
+    monkeypatch.setattr(worth.os, "stat", flicker)
+    before = store.path.read_bytes()
+    # r8: a repeated path is one entry, so the flicker between two stats of one
+    # name can no longer happen: one stat, an honest "none exists", no mark move.
+    with pytest.raises(FileNotFoundError, match="none of the receipt paths exists"):
+        worth.fold_surfaced(store, [rec, rec])
+    assert len(calls) == 1
+    assert store.path.read_bytes() == before
+
+
+def test_fold_surfaced_reads_a_repeated_path_once(tmp_path):
+    """outcomes-open L3 r8 (codex LOW): duplicate path arguments were the race
+    surface of r6-r8; a path named twice is one entry."""
+    import json
+    from anneal_memory.worth import fold_surfaced
+    rec = tmp_path / "r.jsonl"
+    rec.write_text(json.dumps({"event_id": "e", "ts": "2026-10-01T00:00:00Z",
+                               "exposed": [{"pattern": "p"}]}) + "\n", encoding="utf-8")
+    store = CrystalStore(tmp_path / "c.crystal.json")
+    store.crystallize(name="p", level=3, explanation="x", evidence=["e1"])
+    import os
+    entry = next(e for e in os.scandir(tmp_path) if e.name == "r.jsonl")
+    # L3 r9 (codex): a path-like (DirEntry) dedupes by its path, not its repr.
+    result = fold_surfaced(store, [rec, str(rec), entry, rec],
+                           now=datetime(2026, 10, 2, tzinfo=timezone.utc))
+    assert result.receipts_folded == 1
+    assert result.duplicates_skipped == 0  # read once: no event seen twice
+    assert result.paths_missing == []

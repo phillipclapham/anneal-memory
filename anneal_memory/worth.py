@@ -95,9 +95,8 @@ _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
-def _open_log(path: Path, *, write: bool, what: str = "the outcome log") -> int:
-    """The one way the outcome log (and a receipt file, named by ``what``) is
-    opened: a descriptor on a REGULAR file.
+def _open_log(path: Path, *, write: bool) -> int:
+    """The one way the outcome log is opened: a descriptor on a REGULAR file.
 
     The open is non-blocking and the check is ``fstat`` on that descriptor, so a
     FIFO at the log's name refuses at once instead of hanging a reader or a
@@ -114,6 +113,9 @@ def _open_log(path: Path, *, write: bool, what: str = "the outcome log") -> int:
         flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | _O_NOFOLLOW
     else:
         flags = os.O_RDONLY
+    # O_BINARY (Windows; 0 elsewhere): a CRT text-mode descriptor rewrites CR LF
+    # and stops a read at 0x1A (L3 r1, codex).
+    flags |= getattr(os, "O_BINARY", 0)
     try:
         fd = os.open(path, flags | _O_NONBLOCK, 0o644)
     except OSError as exc:
@@ -121,14 +123,14 @@ def _open_log(path: Path, *, write: bool, what: str = "the outcome log") -> int:
         if write and exc.errno in (errno.ELOOP, errno.EMLINK):
             raise OSError(
                 exc.errno,
-                f"{what} is a symlink and is written only as a regular file; point the store at "
+                "the outcome log is a symlink and is written only as a regular file; point the store at "
                 "the link's target or replace the link with the file",
                 str(path),
             ) from exc
         raise
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(errno.EINVAL, f"{what} is not a regular file", str(path))
+            raise OSError(errno.EINVAL, "the outcome log is not a regular file", str(path))
         if _O_NONBLOCK:
             os.set_blocking(fd, True)
     except BaseException:
@@ -396,10 +398,11 @@ class OutcomeLog:
             fd = _open_log(self.path, write=False)
         except FileNotFoundError:
             return [], 0
-        # fdopen owns fd from here and closes it if it cannot build the reader.
-        f = open(fd, "r", encoding="utf-8", errors="replace")
-        with f:
-            return _parse_entries(f)
+        try:  # this frame owns fd (L3 r1: no gap before a reader adopts it)
+            with open(fd, "r", encoding="utf-8", errors="replace", closefd=False) as f:
+                return _parse_entries(f)
+        finally:
+            os.close(fd)
 
     def _snapshot(self) -> tuple[dict[str, dict[str, Any]], int, LogBinding]:
         """The merged records this log counts, the skipped-line count and the
@@ -814,10 +817,9 @@ def fold_surfaced(
         seen_events: set[str] = set()
         for path in paths:
             try:
-                fd = _open_log(Path(path), write=False, what="a receipt file")
+                f = open(path, "r", encoding="utf-8", errors="replace")
             except FileNotFoundError:
                 continue
-            f = open(fd, "r", encoding="utf-8", errors="replace")
             with f:
                 for line in f:
                     if not line.strip():
@@ -1016,11 +1018,10 @@ def load_receipts(
     missing: list[str] = []
     for path in ps:
         try:
-            fd = _open_log(Path(path), write=False, what="a receipt file")
+            f = open(path, "r", encoding="utf-8", errors="replace")
         except FileNotFoundError:
             missing.append(str(path))
             continue
-        f = open(fd, "r", encoding="utf-8", errors="replace")
         with f:
             for line in f:
                 if not line.strip():

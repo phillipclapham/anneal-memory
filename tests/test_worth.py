@@ -500,3 +500,41 @@ def test_fold_surfaced_refuses_a_fifo_receipt_before_anything_else(tmp_path):
     for paths in ([fifo], [good, fifo]):
         with pytest.raises(OSError, match="receipt file is not a regular file"):
             fold_surfaced(store, paths)
+
+
+def test_fold_surfaced_never_moves_the_mark_past_receipts_it_did_not_read(tmp_path, monkeypatch):
+    """outcomes-open L3 r4 (codex MED): a receipt gone between the preflight and
+    the locked read was skipped while the mark moved past it."""
+    import anneal_memory.worth as worth
+    rec = tmp_path / "r.jsonl"
+    rec.write_text("", encoding="utf-8")
+    store = CrystalStore(tmp_path / "c.crystal.json")
+    store.crystallize(name="p", level=3, explanation="x", evidence=["e1"])
+    real = worth._read_regular
+
+    def vanished(path, *, what):
+        rec.unlink(missing_ok=True)
+        return real(path, what=what)
+
+    monkeypatch.setattr(worth, "_read_regular", vanished)
+    before = store.path.read_bytes()
+    with pytest.raises(FileNotFoundError, match="could actually be read"):
+        worth.fold_surfaced(store, [rec])
+    assert store.path.read_bytes() == before
+
+
+def test_fold_surfaced_calls_a_dangling_symlink_missing(tmp_path):
+    """outcomes-open L3 r4 (complement): the preflight called a dangling symlink
+    "not a regular file"; one stat makes it missing, as the read would."""
+    from anneal_memory.worth import fold_surfaced
+    good = tmp_path / "good.jsonl"
+    good.write_text("", encoding="utf-8")
+    dangling = tmp_path / "gone.jsonl"
+    try:
+        dangling.symlink_to(tmp_path / "nowhere.jsonl")
+    except OSError:
+        pytest.skip("cannot create a symlink here")
+    store = CrystalStore(tmp_path / "c.crystal.json")
+    store.crystallize(name="p", level=3, explanation="x", evidence=["e1"])
+    result = fold_surfaced(store, [good, dangling])
+    assert str(dangling) in result.paths_missing

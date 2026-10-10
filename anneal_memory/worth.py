@@ -796,9 +796,17 @@ def fold_surfaced(
     # Missing means absent; a path that is there but not a regular file is
     # refused here, before the lock, the watermark or any early return
     # (outcomes-open L3 r3). The read's descriptor check stays the authority.
-    missing = [str(p) for p in paths if not os.path.lexists(p)]
+    # One stat per path (L3 r4: an lexists then is_file pair raced, and called a
+    # dangling symlink "not a regular file"): absent, a dangling link included,
+    # is missing; anything else that is not a regular file is refused.
+    missing: list[str] = []
     for p in paths:
-        if str(p) not in missing and not p.is_file():
+        try:
+            st = os.stat(p)
+        except FileNotFoundError:
+            missing.append(str(p))
+            continue
+        if not stat.S_ISREG(st.st_mode):
             raise OSError(errno.EINVAL, "a receipt file is not a regular file", str(p))
     if len(missing) == len(paths):
         raise FileNotFoundError(
@@ -837,10 +845,16 @@ def fold_surfaced(
         counts: dict[str, int] = {}
         last_on: dict[str, str] = {}
         seen_events: set[str] = set()
+        read_any = False
         for path in paths:
             with _read_regular(Path(path), what="a receipt file") as f:
                 if f is None:
+                    # Gone since the preflight: reported, and never silently
+                    # skipped under a mark that moves past it (L3 r4, codex).
+                    if str(path) not in result.paths_missing:
+                        result.paths_missing.append(str(path))
                     continue
+                read_any = True
                 for line in f:
                     if not line.strip():
                         continue
@@ -881,6 +895,12 @@ def fold_surfaced(
                         counts[name] = counts.get(name, 0) + 1
                         if day > last_on.get(name, ""):
                             last_on[name] = day
+        if not read_any:
+            # Raising here skips the transaction's save: the mark does not move.
+            raise FileNotFoundError(
+                f"none of the receipt paths could actually be read ({', '.join(result.paths_missing)}); "
+                f"the fold mark was not moved."
+            )
         for name, n in counts.items():
             row = live[name]
             prior = row.get("surfaced_count")

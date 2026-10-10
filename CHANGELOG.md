@@ -4,6 +4,11 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Missed in the 0.9.42 notes — `parse_crystal_decisions` reads only graduating sections
+- Since 0.9.42 (`3367a55`), `parse_crystal_decisions` takes a pattern's level and explanation only from lines under a
+  graduating heading (default `## Patterns`; pass `graduating_headings` for a custom schema). Pattern lines passed
+  without their heading parse with level `None`, so pass the wrap text with its section headings.
+
 ### Added — every spore has an immutable `origin_key`, and its stored text has an exported normaliser
 - `SporeStore.add` assigns each new spore an `origin_key` (a fresh UUID, or the one the caller passes). Planting with
   a key a stored spore already carries, open or resolved, writes nothing and returns that spore, so a retried create

@@ -9,6 +9,7 @@ load-bearing store invariant: a corrupt store NEVER silently re-inits.
 from __future__ import annotations
 
 import json
+import os
 import multiprocessing as mp
 from datetime import date, datetime, timedelta, timezone
 
@@ -1036,14 +1037,62 @@ class TestOriginKey:
         for item in data["spores"] + data["resolved"]:
             del item["origin_key"]
         store.path.write_text(json.dumps(data))
-        before = spore_version(store.get("spore-001"))
+        before = spore_version(data["spores"][0])
+        # A read meeting keyless rows keys them and persists that (design r6 §11.2).
         assert store.get_by_origin_key("anything") is None
-        assert store.backfill_origin_keys() == 2
+        on_disk = json.loads(store.path.read_text())
+        assert all(i.get("origin_key") for i in on_disk["spores"] + on_disk["resolved"])
         assert store.backfill_origin_keys() == 0
         a, b = store.get("spore-001"), store.get("spore-002")
         assert a["origin_key"] and b["origin_key"] and a["origin_key"] != b["origin_key"]
         assert spore_version(a) == before
         assert store.get_by_origin_key(b["origin_key"])["id"] == "spore-002"
+
+    def test_every_reader_keys_an_older_writers_append(self, store):
+        store.add(type="task", text="a", today=T0)
+        for read in (lambda: store.get("spore-002"), lambda: store.list_open(),
+                     lambda: store.surface(), lambda: store.get_by_origin_key("x")):
+            data = json.loads(store.path.read_text())
+            # 0.9.42's add: a raw dict appended with no key, the others kept.
+            data["spores"].append({**data["spores"][0], "id": "spore-002"})
+            del data["spores"][-1]["origin_key"]
+            store.path.write_text(json.dumps(data))
+            read()
+            on_disk = json.loads(store.path.read_text())
+            assert all(i.get("origin_key") for i in on_disk["spores"])
+            assert len({i["origin_key"] for i in on_disk["spores"]}) == len(on_disk["spores"])
+            on_disk["spores"] = on_disk["spores"][:1]
+            store.path.write_text(json.dumps(on_disk))
+
+    @pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs POSIX permissions")
+    def test_a_read_only_directory_returns_rows_unkeyed(self, store):
+        store.add(type="task", text="a", today=T0)
+        data = json.loads(store.path.read_text())
+        del data["spores"][0]["origin_key"]
+        store.path.write_text(json.dumps(data))
+        # The lock file exists, so the lock is taken; the save's mkstemp then
+        # fails in the read-only directory (codex r5 MED 2).
+        store.path.with_name(store.path.name + ".lock").touch()
+        os.chmod(store.path.parent, 0o555)
+        try:
+            row = store.get("spore-001")
+        finally:
+            os.chmod(store.path.parent, 0o755)
+        assert row is not None and "origin_key" not in row
+        assert store.get_by_origin_key("anything") is None  # writable again: keys now
+
+    def test_a_wide_key_stored_earlier_is_found_but_new_keys_meet_the_grammar(self, store):
+        import uuid as _uuid
+        store.add(type="task", text="a", today=T0)
+        data = json.loads(store.path.read_text())
+        data["spores"][0]["origin_key"] = "hello world"  # accepted by 0.9.42's rule
+        store.path.write_text(json.dumps(data))
+        assert store.get_by_origin_key("hello world")["id"] == "spore-001"
+        assert store.add(type="task", text="retry", origin_key="hello world", today=T0)["id"] == "spore-001"
+        with pytest.raises(ValueError, match="origin_key"):
+            store.add(type="task", text="new", origin_key="hello again", today=T0)
+        flow_key = _uuid.uuid4().hex  # flow's spores.py add stamps this form
+        assert store.add(type="task", text="flow", origin_key=flow_key, today=T0)["origin_key"] == flow_key
 
     def test_any_write_backfills(self, store):
         store.add(type="task", text="a", today=T0)

@@ -63,6 +63,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import errno
 import os
 import tempfile
 import unicodedata
@@ -78,6 +79,7 @@ except ImportError:  # pragma: no cover - exercised only on non-POSIX platforms
     fcntl = None  # type: ignore[assignment]
 
 from .origin import _BIDI_CONTROLS, strip_hidden_controls  # noqa: F401 (re-exported)
+from .origin import validate_origin_key as _validate_narrow_origin_key
 from .store import AnnealMemoryError
 
 SPORE_SCHEMA_VERSION = 1
@@ -536,14 +538,42 @@ class SporeStore:
                 os.close(lock_fd)
 
     @staticmethod
+    def _needs_key(item: object) -> bool:
+        key = item.get("origin_key") if isinstance(item, dict) else None
+        return isinstance(item, dict) and (not isinstance(key, str) or not key)
+
+    def _load_keyed(self) -> dict:
+        """The document as the lock-free readers return it, with every spore keyed.
+
+        A spore an older anneal appended (0.9.42 edits the document as raw dicts,
+        so it keeps every other row's key and only its own new rows lack one) is
+        keyed here: the read takes the write transaction, which backfills and
+        saves, then reloads. Only when the store cannot be written (a read-only
+        directory or file: ``EACCES``, ``EPERM``, ``EROFS``) does it return the
+        rows as stored, the unkeyed ones with no ``origin_key``; a caller treats
+        that as "no label resource yet" and never invents a key. Any other error
+        propagates (design r6 §11.2, §12.4)."""
+        data = self._load()
+        if not any(self._needs_key(i) for i in data.get("spores", []) + data.get("resolved", [])):
+            return data
+        try:
+            with self._transaction():
+                pass
+        except OSError as exc:
+            if not isinstance(exc, PermissionError) and exc.errno not in (
+                errno.EACCES, errno.EPERM, errno.EROFS
+            ):
+                raise
+        return self._load()
+
+    @staticmethod
     def _backfill_origin_keys(data: dict) -> int:
         """Give every stored spore (open and resolved) without an ``origin_key`` a
         fresh one. Runs inside each write transaction, so the first write after an
         upgrade persists them all; returns how many were assigned."""
         n = 0
         for item in list(data.get("spores", [])) + list(data.get("resolved", [])):
-            key = item.get("origin_key") if isinstance(item, dict) else None
-            if isinstance(item, dict) and (not isinstance(key, str) or not key):
+            if SporeStore._needs_key(item):
                 item["origin_key"] = uuid.uuid4().hex
                 n += 1
         return n
@@ -653,8 +683,10 @@ class SporeStore:
         assigned. Planting with a key some stored spore (open or resolved) already
         carries writes nothing and returns that spore, so a retried create lands
         once: the key alone decides, so the earlier spore is returned even if this
-        call's fields differ. ``text``, ``domain`` and ``disposition`` are stored as
-        :func:`normalize_spore_field` returns them."""
+        call's fields differ. A key for a NEW spore must meet the origin-key grammar
+        (:mod:`anneal_memory.origin`); a retry of a key stored before the grammar
+        still returns its spore. ``text``, ``domain`` and ``disposition`` are
+        stored as :func:`normalize_spore_field` returns them."""
         if type not in VALID_TYPES:
             raise ValueError(f"type must be one of {VALID_TYPES} (got {type!r}).")
         if tier not in VALID_TIERS:
@@ -688,6 +720,9 @@ class SporeStore:
                 existing = self._find_by_origin_key(data, origin_key)
                 if existing is not None:
                     return existing
+                # A stored key the wider rule accepted still answers its retry
+                # (above); a NEW spore's key must meet the grammar (design r6 §2).
+                _validate_narrow_origin_key(origin_key)
             item: SporeDict = {
                 "id": self._next_id(data),
                 "type": type,
@@ -717,18 +752,19 @@ class SporeStore:
     def get(self, spore_id: str) -> SporeDict | None:
         """Fetch a spore by id, searching the open set first then the resolved
         set (open takes precedence if an id somehow appears in both), or None."""
-        data = self._load()
+        data = self._load_keyed()
         for item in data.get("spores", []) + data.get("resolved", []):
             if item.get("id") == spore_id:
                 return cast("SporeDict", item)
         return None
 
     def get_by_origin_key(self, origin_key: str) -> SporeDict | None:
-        """The spore (open or resolved) carrying ``origin_key``, or None. A spore
-        stored before keys existed is found only after a write has backfilled it
-        (:meth:`backfill_origin_keys`)."""
+        """The spore (open or resolved) carrying ``origin_key``, or None. Takes the
+        stored-key rule, wider than the grammar new keys must meet: a key stored
+        under the wider rule is found, though it cannot serve where the grammar is
+        required (:func:`anneal_memory.origin.origin_key_usable` says which)."""
         _validate_origin_key(origin_key)
-        return self._find_by_origin_key(self._load(), origin_key)
+        return self._find_by_origin_key(self._load_keyed(), origin_key)
 
     def list_open(
         self,
@@ -745,7 +781,7 @@ class SporeStore:
         stored); call :func:`germination_tier` on a row to annotate it.
         """
         today = today or date.today()
-        items = list(self._load().get("spores", []))
+        items = list(self._load_keyed().get("spores", []))
         if type is not None:
             items = [s for s in items if s.get("type") == type]
         if tier is not None:
@@ -779,7 +815,7 @@ class SporeStore:
         spores, ranked. The downstream consumer composes the full Top of Mind
         from this × Active Threads × recent ships."""
         today = today or date.today()
-        open_items = list(self._load().get("spores", []))
+        open_items = list(self._load_keyed().get("spores", []))
         if top_of_mind:
             pool = [
                 s for s in open_items

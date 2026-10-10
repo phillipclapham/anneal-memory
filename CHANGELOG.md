@@ -12,6 +12,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   the refusal; a test fails on any other `sqlite3.connect` call. The CLI and `python -m anneal_memory.server` print
   `Error: …` and exit 1 instead of a traceback.
 
+### Changed — `export --format sqlite` refuses an existing `--output`
+- `anneal-memory export --format sqlite --output PATH` now refuses a `PATH` that already exists (a file, a directory
+  or a dangling symlink) and exits 1; earlier releases overwrote it. The error names the path: choose another
+  `--output` or remove the file first.
 ### Fixed — a failed `export --format sqlite` no longer leaves a file at `--output`
 - A failed backup (a source that is not a database, a full disk) left an empty or partial file at the output path
   that looked like an export. The copy is now built in a private temp in the output's directory and published

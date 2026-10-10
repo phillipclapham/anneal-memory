@@ -42,6 +42,11 @@ def _hold_lock_and_edit(path_str: str, held, release) -> None:
         release.wait(timeout=30)
 
 
+# A guarded write (expected_version / expect_disposition) is refused without a file
+# lock; those cases are tested in TestExpectedVersion with fcntl patched out.
+_NEEDS_LOCK = pytest.mark.skipif(_spores.fcntl is None, reason="a guarded write needs a file lock")
+
+
 @pytest.fixture
 def store(tmp_path):
     return SporeStore(tmp_path / "spores.json")
@@ -640,17 +645,20 @@ class TestDisposition:
             store.update("spore-001", disposition=[])  # type: ignore[arg-type]
 
     # -- expect_disposition: the optimistic compare-and-set (TOCTOU guard) --------
+    @_NEEDS_LOCK
     def test_update_expect_disposition_matches_applies(self, store):
         store.add(type="thought", text="x", disposition="seed", today=T0)
         s = store.update("spore-001", disposition="handoff", expect_disposition="seed")
         assert s["disposition"] == "handoff"
 
+    @_NEEDS_LOCK
     def test_update_expect_disposition_none_matches_a_keyfree_loop(self, store):
         # a plain loop's raw disposition is ABSENT → expect None must match it
         store.add(type="thought", text="x", today=T0)
         s = store.update("spore-001", disposition="seed", expect_disposition=None)
         assert s["disposition"] == "seed"
 
+    @_NEEDS_LOCK
     def test_update_expect_disposition_mismatch_raises_and_writes_nothing(self, store):
         store.add(type="thought", text="x", disposition="seed", today=T0)
         # a concurrent writer would have changed it; we expected "agenda" but it's "seed"
@@ -659,6 +667,7 @@ class TestDisposition:
         # nothing written — the disposition is untouched
         assert SporeStore(store.path).get("spore-001")["disposition"] == "seed"
 
+    @_NEEDS_LOCK
     def test_update_expect_disposition_none_mismatches_a_tagged_spore(self, store):
         # caller expected a key-free loop but it's actually a seed → reject
         store.add(type="thought", text="x", disposition="seed", today=T0)
@@ -674,11 +683,13 @@ class TestDisposition:
     # -- ascend expect_disposition CAS: the read-then-resolve TOCTOU guard (codex L3 HIGH, --
     # -- 2026-06-23). A host enforcing "a Keep note can't ascend" reads the disposition in a -
     # -- separate step; the CAS makes a concurrent flip between that read and the resolve fail.
+    @_NEEDS_LOCK
     def test_ascend_expect_disposition_matches_resolves(self, store):
         store.add(type="thought", text="x", today=T0)  # a key-free loop → expect None
         s = store.ascend("spore-001", kind="pattern", ref="r", expect_disposition=None, today=T0)
         assert s["status"] == "resolved" and s["resolution"]["direction"] == "ascend"
 
+    @_NEEDS_LOCK
     def test_ascend_expect_disposition_mismatch_raises_and_resolves_nothing(self, store):
         # THE TOCTOU: a host read the spore as a loop (None) and guard-passed, but a concurrent
         # writer flipped it to a note. The CAS must refuse — nothing resolved, the note stays open.
@@ -689,6 +700,7 @@ class TestDisposition:
         assert "spore-001" in [s["id"] for s in fresh.list_open()]  # NOT resolved
         assert fresh.get("spore-001")["disposition"] == "note"      # untouched
 
+    @_NEEDS_LOCK
     def test_ascend_expect_disposition_none_mismatches_a_tagged_spore(self, store):
         # caller expected a key-free loop but it's a seed → reject (symmetry with update's CAS)
         store.add(type="thought", text="x", disposition="seed", today=T0)
@@ -705,16 +717,19 @@ class TestDisposition:
     # -- on spore-170, spore-173). A control surface picks the resolve KIND ("remove" for a Keep --
     # -- note / "compost" for a loop) off a RENDERED snapshot; the CAS makes a concurrent re-route -
     # -- between that snapshot and this resolve fail closed (parity with ascend's CAS).
+    @_NEEDS_LOCK
     def test_descend_expect_disposition_matches_resolves(self, store):
         store.add(type="thought", text="x", today=T0)  # a key-free loop → expect None
         s = store.descend("spore-001", kind="composted", expect_disposition=None, today=T0)
         assert s["status"] == "resolved" and s["resolution"]["direction"] == "descend"
 
+    @_NEEDS_LOCK
     def test_descend_expect_disposition_tag_matches_resolves(self, store):
         store.add(type="thought", text="x", disposition="note", today=T0)  # a Keep note → "remove"
         s = store.descend("spore-001", kind="composted", expect_disposition="note", today=T0)
         assert s["status"] == "resolved"
 
+    @_NEEDS_LOCK
     def test_descend_expect_disposition_mismatch_raises_and_resolves_nothing(self, store):
         # THE TOCTOU: a surface rendered this as a Keep note and chose "remove" (expect "note"),
         # but a concurrent writer promoted it to a live loop. The CAS must refuse — nothing
@@ -726,12 +741,14 @@ class TestDisposition:
         assert "spore-001" in [s["id"] for s in fresh.list_open()]  # NOT resolved
         assert fresh.get("spore-001").get("disposition") is None      # still a key-free loop
 
+    @_NEEDS_LOCK
     def test_descend_expect_disposition_none_mismatches_a_tagged_spore(self, store):
         # caller expected a key-free loop but it's a note → reject (symmetry with ascend's CAS)
         store.add(type="thought", text="x", disposition="note", today=T0)
         with pytest.raises(SporeError, match="disposition changed since read"):
             store.descend("spore-001", kind="composted", expect_disposition=None, today=T0)
 
+    @_NEEDS_LOCK
     def test_descend_cas_runs_before_kind_validation(self, store):
         # a stale snapshot must fail on the CAS (re-read the spore) before a kind error — the
         # operator's fix is "re-read", not "your kind is wrong for a type you no longer see".
@@ -787,11 +804,6 @@ class TestRetype:
 
 
 # -- expected_version: the whole-spore compare-and-set (cockpit slice P) --------
-
-
-_NEEDS_LOCK = pytest.mark.skipif(
-    _spores.fcntl is None, reason="a versioned write is refused without a file lock (tested below)"
-)
 
 
 class TestExpectedVersion:
@@ -887,14 +899,30 @@ class TestExpectedVersion:
         saved = SporeStore(store.path).get("spore-001")
         assert saved["text"] == "x" and saved["seen"] == T0.isoformat() and saved["tier"] == "hot"
 
-    def test_without_a_file_lock_a_versioned_write_is_refused(self, store, monkeypatch):
-        s = store.add(type="task", text="x", today=T0)
+    @pytest.mark.parametrize("guard", ["expected_version", "expect_disposition"])
+    @pytest.mark.parametrize("op", ["update", "descend", "ascend", "touch"])
+    def test_without_a_file_lock_a_guarded_write_is_refused(self, store, monkeypatch, op, guard):
+        if op == "touch" and guard == "expect_disposition":
+            pytest.skip("touch takes no expect_disposition")
+        s = store.add(type="question", text="x", today=T0)
         monkeypatch.setattr(_spores, "fcntl", None)
         before = store.path.read_bytes()
+        kw = {"expected_version": spore_version(s)} if guard == "expected_version" else {"expect_disposition": None}
+        call = {
+            "update": lambda: store.update("spore-001", text="y", **kw),
+            "touch": lambda: store.touch("spore-001", today=T0, **kw),
+            "descend": lambda: store.descend("spore-001", kind="answered", today=T0, **kw),
+            "ascend": lambda: store.ascend("spore-001", kind="pattern", ref="r", today=T0, **kw),
+        }[op]
         with pytest.raises(SporeError, match="needs a file lock"):
-            store.update("spore-001", text="y", expected_version=spore_version(s))
+            call()
         assert store.path.read_bytes() == before
-        store.update("spore-001", text="y")  # an unversioned write is unchanged
+        store.update("spore-001", text="y")  # an unguarded write is unchanged
+
+    def test_an_explicit_default_version_of_without_expected_version_is_a_value_error(self, store):
+        store.add(type="task", text="x", today=T0)
+        with pytest.raises(ValueError, match="without expected_version"):
+            store.update("spore-001", text="y", version_of=spore_version)
 
     def test_a_lone_surrogate_in_the_store_still_versions(self, store):
         store.add(type="task", text="x", today=T0)

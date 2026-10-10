@@ -9,9 +9,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   spore under the store's lock, after any concurrent writer's commit, and a mismatch raises `SporeError` and
   writes nothing. The default version is `spore_version(spore)` (exported), a SHA-256 over every stored field
   except `seen`: a touch changes it only when it clears an elapsed `next`. A caller that versions a spore its own way
-  passes that function as `version_of` (it gets a copy of the record). Where there is no file lock (Windows) a
-  versioned write is refused, since the compare could not be held through the write. `expect_disposition` is
-  unchanged.
+  passes that function as `version_of` (it gets a copy of the record).
+- Where there is no file lock (Windows), a guarded write, one carrying `expected_version` or `expect_disposition`,
+  now raises `SporeError` instead of running unlocked: the compare could not be held through the write, so two
+  writers could both pass it and the later one overwrite the other. Unguarded writes are unchanged.
 
 ### Changed — a Store path is never an SQLite URI
 - `Store("file:...")` now raises `ValueError`. Whether SQLite reads `file:` as a URI depends on how it was built, so

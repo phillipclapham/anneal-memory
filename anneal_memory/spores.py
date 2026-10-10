@@ -281,7 +281,7 @@ VersionOf = Callable[[SporeDict], str]
 
 
 def _check_expected_version(
-    item: SporeDict, expected_version: str | None, version_of: VersionOf
+    item: SporeDict, expected_version: str | None, version_of: VersionOf | None
 ) -> None:
     """Raise :class:`SporeError` unless the spore's current version equals
     ``expected_version``. Called inside :meth:`SporeStore._transaction`, after the
@@ -290,7 +290,7 @@ def _check_expected_version(
     if expected_version is None:
         return
     # A copy: the callback must not be able to change what this transaction saves.
-    found = version_of(copy.deepcopy(item))
+    found = (version_of or spore_version)(copy.deepcopy(item))
     if not isinstance(found, str):
         raise TypeError(f"version_of must return a str (got {type(found).__name__}).")
     if found != expected_version:
@@ -300,23 +300,25 @@ def _check_expected_version(
         )
 
 
-def _validate_expected_version(expected_version: object, version_of: object) -> None:
-    """Refuse a malformed compare before the lock is taken. Where there is no file
-    lock (no ``fcntl``: Windows), a compare cannot be made atomic with the write, so
-    a versioned write is refused rather than checked against a state another
-    process may replace."""
+def _validate_guards(
+    expected_version: object, version_of: object, expect_disposition: object = _UNSET
+) -> None:
+    """Refuse a malformed or unholdable compare before the lock is taken. Where
+    there is no file lock (no ``fcntl``: Windows), neither compare (``expected_version``
+    or ``expect_disposition``) can be made atomic with the write, so a guarded write
+    is refused rather than checked against a state another process may replace."""
     if expected_version is None:
-        if version_of is not spore_version:
+        if version_of is not None:
             raise ValueError("version_of was passed without expected_version; nothing would be compared.")
-        return
-    if not isinstance(expected_version, str) or not expected_version:
+    elif not isinstance(expected_version, str) or not expected_version:
         raise ValueError(
             f"expected_version must be a non-empty string or None (got {expected_version!r})."
         )
-    if fcntl is None:
+    guarded = expected_version is not None or not isinstance(expect_disposition, _Unset)
+    if guarded and fcntl is None:
         raise SporeError(
-            "expected_version needs a file lock, which this platform does not have; "
-            "the compare could not be held through the write."
+            "a guarded write (expected_version or expect_disposition) needs a file lock, "
+            "which this platform does not have; the compare could not be held through the write."
         )
 
 
@@ -673,7 +675,7 @@ class SporeStore:
         *,
         today: date | None = None,
         expected_version: str | None = None,
-        version_of: VersionOf = spore_version,
+        version_of: VersionOf | None = None,
     ) -> SporeDict:
         """Engage a spore: ``seen`` → today, AND clear an elapsed ``next:`` alarm
         (we're looking at it now, so it has fired) — returning the spore to
@@ -681,7 +683,7 @@ class SporeStore:
         ``parked`` spore stays parked: parked is *deliberate* dormancy, changed via
         ``update(tier=...)``, not by touching.)
         """
-        _validate_expected_version(expected_version, version_of)
+        _validate_guards(expected_version, version_of, _UNSET)
         today = today or date.today()
         with self._transaction() as data:
             item = self._require_open(data, spore_id)
@@ -708,7 +710,7 @@ class SporeStore:
         add_note: str | None = None,
         today: date | None = None,
         expected_version: str | None = None,
-        version_of: VersionOf = spore_version,
+        version_of: VersionOf | None = None,
     ) -> SporeDict:
         """Metadata surgery on an open spore. Omitted arguments are left
         unchanged; passing ``None``/``''`` to ``next``/``pointer``/``domain``/
@@ -746,11 +748,11 @@ class SporeStore:
         take it too. A caller whose version is its own hash of the record passes
         that hash function as ``version_of``; it gets a copy of the record, runs
         while the lock is held, and must not touch the store. Without ``fcntl``
-        (Windows) a versioned write is refused; on a network filesystem whose
+        (Windows) a guarded write (this or ``expect_disposition``) is refused; on a network filesystem whose
         ``flock`` silently does nothing the compare is not atomic (see
         :meth:`_transaction`).
         """
-        _validate_expected_version(expected_version, version_of)
+        _validate_guards(expected_version, version_of, expect_disposition)
         with self._transaction() as data:
             item = self._require_open(data, spore_id)
             _check_expected_version(item, expected_version, version_of)
@@ -821,7 +823,7 @@ class SporeStore:
         today: date | None = None,
         now: datetime | None = None,
         expected_version: str | None = None,
-        version_of: VersionOf = spore_version,
+        version_of: VersionOf | None = None,
     ) -> SporeDict:
         """Resolve a spore downward (compost / self-clean). ``kind`` must fit the
         spore's type (e.g. a ``task`` descends done/dropped/composted, never
@@ -838,7 +840,7 @@ class SporeStore:
         expect key-absent / a plain loop; a string = expect that exact value). Blind: a raw
         value compare, never an interpretation of the tag. ``expected_version``
         compares the whole spore the same way (see :meth:`update`)."""
-        _validate_expected_version(expected_version, version_of)
+        _validate_guards(expected_version, version_of, expect_disposition)
         with self._transaction() as data:
             item = self._require_open(data, spore_id)
             _check_expected_version(item, expected_version, version_of)
@@ -868,7 +870,7 @@ class SporeStore:
         today: date | None = None,
         now: datetime | None = None,
         expected_version: str | None = None,
-        version_of: VersionOf = spore_version,
+        version_of: VersionOf | None = None,
     ) -> SporeDict:
         """Resolve a spore upward (transmute into memory/project — the membrane).
         ``kind`` must fit the spore's type. ``ref`` records WHAT the spore became
@@ -889,7 +891,7 @@ class SporeStore:
         compares the whole spore the same way (see :meth:`update`)."""
         if not ref or not ref.strip():
             raise ValueError("ascend requires a ref (what the spore became).")
-        _validate_expected_version(expected_version, version_of)
+        _validate_guards(expected_version, version_of, expect_disposition)
         with self._transaction() as data:
             item = self._require_open(data, spore_id)
             _check_expected_version(item, expected_version, version_of)

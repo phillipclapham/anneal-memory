@@ -16,7 +16,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   `\n`, bidi controls, lone surrogates, the tag block (it can spell hidden text; a subdivision flag becomes a plain
   black flag) and other control characters except tab and newline removed (other invisible characters, such as
   zero-width ones, are stored as given: a display shows them), trailing whitespace stripped per
-  line and at the end, then NFC. Text with nothing visible after normalising is refused, and such a disposition clears it.
+  line and at the end, then NFC. Text that normalises to nothing is refused, and such a disposition clears it; text of
+  invisible characters only is stored as given, like any other invisible character.
   A key hand-edited into the file outside these rules is kept, but cannot be looked up.
 
 ### Added — a spore write can require the version its caller read

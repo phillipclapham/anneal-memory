@@ -309,11 +309,6 @@ def _is_valid_origin_key(origin_key: object) -> bool:
     )
 
 
-def _has_visible_text(value: str) -> bool:
-    """Whether ``value`` shows anything: format characters alone render blank."""
-    return any(not ch.isspace() and unicodedata.category(ch) != "Cf" for ch in value)
-
-
 def _validate_origin_key(origin_key: object) -> None:
     """A key is compared exactly, so one a copy could alter unseen (padding,
     control or format characters) is refused rather than stored."""
@@ -675,13 +670,11 @@ class SporeStore:
         if origin_key is not None:
             _validate_origin_key(origin_key)
         text = normalize_spore_field(text)
-        if not _has_visible_text(text):
+        if not text:
             raise ValueError("text is required and must be a non-empty string (the open loop).")
         domain = normalize_spore_field(domain)
         if disposition is not None:
             disposition = normalize_spore_field(disposition)
-            if not _has_visible_text(disposition):
-                disposition = None
         next_validated = _validate_date(next, "next")
         now = (today or date.today()).isoformat()
         with self._transaction() as data:
@@ -903,7 +896,7 @@ class SporeStore:
             if not isinstance(next, _Unset):
                 item["next"] = _validate_date(next, "next")
             if not isinstance(text, _Unset):
-                if not isinstance(text, str) or not _has_visible_text(normalize_spore_field(text)):
+                if not isinstance(text, str) or not normalize_spore_field(text):
                     raise ValueError("text must be a non-empty string (cannot clear to empty).")
                 item["text"] = normalize_spore_field(text)
             if not isinstance(salience, _Unset):
@@ -925,7 +918,7 @@ class SporeStore:
                     raise ValueError(f"disposition must be a string or None (got {disposition!r}).")
                 _view = cast("dict[str, object]", item)
                 stored = normalize_spore_field(disposition) if disposition else ""
-                if _has_visible_text(stored):
+                if stored:
                     _view["disposition"] = stored
                 else:  # None / "" → metabolize back to a plain (key-free) loop
                     _view.pop("disposition", None)

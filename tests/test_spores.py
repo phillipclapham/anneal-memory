@@ -1144,12 +1144,9 @@ class TestOriginR2:
         assert normalize_spore_field("fix" + hidden) == "fix"
         assert normalize_spore_field("go " + flag + hidden + "\U000e007f") == "go \U0001f3f4"
 
-    @pytest.mark.parametrize("blank", ["\u200b", "\ufeff\u2060 ", "\u200d"])
-    def test_text_of_format_characters_only_is_refused(self, store, blank):
-        with pytest.raises(ValueError, match="text"):
-            store.add(type="task", text=blank, today=T0)
-        s = store.add(type="task", text="x", disposition=blank, today=T0)
-        assert "disposition" not in SporeStore(store.path).get(s["id"])
+    def test_text_of_invisible_characters_only_is_stored_as_given(self, store):
+        s = store.add(type="task", text="\u200b", today=T0)
+        assert SporeStore(store.path).get(s["id"])["text"] == "\u200b"
 
     def test_a_type_only_change_is_still_saved(self, store):
         store.add(type="task", text="a", today=T0)

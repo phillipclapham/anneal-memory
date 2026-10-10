@@ -1596,8 +1596,12 @@ class TestCmdExport:
         assert "publishing over the claim failed" in err
         assert "appeared during the export" not in err
 
+    @pytest.mark.parametrize("close_error", [
+        OSError(5, "close failed"),
+        FileExistsError(17, "File exists"),  # L3 r22 (codex): never "appeared during"
+    ])
     def test_export_sqlite_claim_close_failure_still_gets_the_note(
-        self, base_args_with_data, tmp_path, capsys, monkeypatch
+        self, base_args_with_data, tmp_path, capsys, monkeypatch, close_error
     ):
         """walopen L3 r21 (codex MED + complement LOW): a close that raised after
         the exclusive create had made the claim bypassed the note."""
@@ -1620,7 +1624,7 @@ class TestCmdExport:
 
             def __exit__(self, *exc):
                 self._f.close()
-                raise OSError(errno.EIO, "close failed")
+                raise close_error
 
         def _open(file, mode="r", *a, **k):
             f = real_open(file, mode, *a, **k)

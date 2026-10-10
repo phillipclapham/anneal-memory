@@ -2185,7 +2185,7 @@ def _publish_by_claim(tmp: Path, out: Path) -> None:
     stage = "claim"
     try:
         with open(out, "xb"):
-            pass
+            stage = "created"  # only the create itself is "claim" (L3 r22)
         stage = "replace"
         os.replace(tmp, out)
     except BaseException as exc:

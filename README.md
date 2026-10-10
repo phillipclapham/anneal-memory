@@ -281,6 +281,14 @@ operator's instruments are `anneal-memory state` (each key's current holder and 
 replaced), `search --include-superseded`, `state --unset` to take a wrongly keyed episode out of
 its slot, and `unsupersede` to undo a wrong explicit link.
 
+**Origin keys and section edits are contracts with anneal's own code.** Every anneal version
+that writes a store keeps its episode keys right: triggers key an older version's inserts
+and retire its deletes. A raw SQLite writer (a shell, a script, a dropped trigger,
+`PRAGMA ignore_check_constraints`) is outside that contract, as any hand edit of the
+database is. `replace_section` is safe against wraps run by this version or later; a wrap
+prepared by an older anneal can overwrite an edit that lands in the few milliseconds before
+it starts, so upgrade every process that wraps a store before editing sections in it.
+
 **Drift probes.** Declare what must survive consolidation, a Proven pattern at a level (its
 current level by default) or a fact whose words must stay in one sentence or bullet:
 `anneal-memory probe add --pattern NAME` / `--fact TEXT [--section HEADING]`. Every save

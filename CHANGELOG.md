@@ -4,6 +4,36 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added — every episode has an immutable `origin_key`; delete by key with a version check
+- A new `episodes.origin_key` column: every episode carries one from creation (a fresh 32-hex key, or the one passed
+  to `record(origin_key=...)`), existing rows get one at the first write-capable open (a copy of a 14,549-episode
+  store: 0.2 s), and it never changes or comes back: a deleted episode's key is retired. The key grammar is
+  `anneal_memory.origin`: 1-128 ASCII letters, digits or `._:-`, also a column CHECK. No schema bump: an older anneal
+  keeps reading and writing the store, and triggers key its inserts and retire its deletes.
+- `record(origin_key=k)` with a stored `k` returns that episode and writes nothing when content, type and source
+  match, and raises `OriginKeyConflict` when they differ; a retired `k` is refused.
+- `get_by_origin_key`, `origin_key_status`, `read_episode_versioned` (the episode and its version from one snapshot)
+  and `delete_by_origin_key(key, expected_version=, effect_id=, team_operator=False)`. The version covers the episode
+  and every row that names it; the delete's cascade (links carried past it, links the trust re-check drops) is not
+  versioned and is reported in `DeleteResult`. Outcomes: `deleted`, `already_applied`, `deleted_by_other`,
+  `version_mismatch`, `unknown`. CLI JSON output carries `origin_key`. A JSON export imported mints new keys; a
+  SQLite export keeps them.
+- **The contract covers anneal's own writers, of any version.** A raw SQLite writer (a shell, a script, a dropped
+  trigger, `PRAGMA ignore_check_constraints`) is outside it, as other hand edits are (README, *Honest scope*).
+
+### Added — `read_section` and `replace_section`: edit one continuity section with a version check
+- `Store.read_section(heading)` returns a section as every reader sees it and its `section_version`;
+  `Store.replace_section(heading, body, expected_version=)` writes it back if unchanged. The body is stored as
+  `canonical_section_markdown` returns it; every other line of the file is kept byte for byte. Refused: graduating
+  sections (`## Patterns`), an open wrap, a committed wrap not yet renamed, a body line starting `## `, an ambiguous or
+  duplicate heading. It holds the continuity lock and the store's write lock, so on Windows (no lock) it raises
+  `ContinuityLockUnavailable`.
+- `prepare_wrap` now refuses to start a wrap, with a "retry" result, when the continuity file changed between its read
+  and the wrap's start (`WrapContinuityMovedError`).
+- ⚠ **Mixed versions:** an anneal before this one starts a wrap with no such check, so an edit landing in the
+  milliseconds between that wrap's read and its start (4-6 ms measured on a 14,549-episode store) is overwritten by
+  its save. Run every process that wraps a store on this version before editing sections in it.
+
 ### Missed in the 0.9.42 notes — `parse_crystal_decisions` reads only graduating sections
 - Since 0.9.42 (`3367a55`), `parse_crystal_decisions` takes a pattern's level and explanation only from lines under a
   graduating heading (default `## Patterns`; pass `graduating_headings` for a custom schema). Pattern lines passed
@@ -18,10 +48,12 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 ### Added — every spore has an immutable `origin_key`, and its stored text has an exported normaliser
 - `SporeStore.add` assigns each new spore an `origin_key` (a fresh UUID, or the one the caller passes). Planting with
   a key a stored spore already carries, open or resolved, writes nothing and returns that spore, so a retried create
-  lands once. A key must be printable with no surrounding spaces. The key alone decides: a retried create returns
-  the earlier spore even if its fields differ. A write transaction that changes nothing no longer rewrites the file
-  (or creates a missing one). `get_by_origin_key` finds a spore by it; no write changes it. Spores stored without one are given one
-  by the next write transaction, or now by `backfill_origin_keys()`. It is not part of `spore_version`, so the
+  lands once. A key for a new spore must be 1-128 ASCII letters, digits or `._:-` (the origin-key grammar below); a key
+  stored under the wider rule of an earlier build is still found, and its retry still returns that spore. The key
+  alone decides: a retried create returns the earlier spore even if its fields differ. A write transaction that changes nothing no longer rewrites the file
+  (or creates a missing one). `get_by_origin_key` finds a spore by it; no write changes it. A spore stored without one
+  (an older anneal appends spores without keys) is given one by the next write transaction or the next read, or by
+  `backfill_origin_keys()`; a read that cannot write the store (a read-only directory) returns it without a key. It is not part of `spore_version`, so the
   backfill does not stale a caller's read.
 - `text`, `domain` and `disposition` are stored as `normalize_spore_field` (exported) returns them: line endings as
   `\n`, bidi controls, lone surrogates, the tag block (it can spell hidden text; a subdivision flag becomes a plain

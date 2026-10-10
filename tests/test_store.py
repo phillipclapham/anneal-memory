@@ -4,6 +4,7 @@ from tests.prior_seed import seed_prior_levels
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -4476,3 +4477,170 @@ def test_an_in_memory_store_still_opens(tmp_path):
         assert s._conn.execute("PRAGMA journal_mode").fetchone()[0] == "memory"
     finally:
         s.close()
+
+
+@pytest.mark.parametrize("uri", [
+    "file::memory:?cache=shared", "file:x.db?mode=rwc",
+    # r6 codex HIGH (reproduced): Path() strips "./", so SQLite saw the URI
+    "./file::memory:?cache=shared", "./file:x.db?mode=rwc", Path("file:x.db"),
+])
+def test_an_sqlite_uri_is_refused_as_a_store_path(uri, tmp_path, monkeypatch):
+    """walopen L3 r4 (codex, reproduced): a shared-cache memory URI opened, and
+    two Stores on it hit SQLITE_LOCKED that busy_timeout cannot wait out. Whether
+    ``file:`` is a URI at all depends on the SQLite build, so it is refused."""
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match="SQLite URI"):
+        Store(uri, audit=False)
+    assert list(tmp_path.iterdir()) == []  # refused before any side effect
+
+
+
+def test_connect_must_exist_never_creates_the_file(tmp_path):
+    """walopen L3 r15 (codex MED): must_exist opens an existing database only."""
+    import sqlite3
+    from anneal_memory.store import StorePathError, connect
+    odd = "x?y#z.db" if sys.platform != "win32" else "x y#z.db"  # ? is illegal on Windows
+    missing = tmp_path / "gone dir %3F" / odd
+    missing.parent.mkdir()
+    with pytest.raises(sqlite3.OperationalError):
+        connect(missing, must_exist=True)
+    assert not missing.exists()
+    with pytest.raises(StorePathError):
+        connect(":memory:", must_exist=True)
+    real = tmp_path / ("odd %20 name?#.db" if sys.platform != "win32" else "odd %20 name#.db")
+    c = connect(real)
+    c.execute("create table t(x)")
+    c.close()
+    c = connect(real, must_exist=True)
+    try:
+        assert c.execute("select name from sqlite_master").fetchone()[0] == "t"
+    finally:
+        c.close()
+
+
+@pytest.mark.parametrize("abs_path", [
+    "/a b/x%?#.db",
+    "C:\\Users\\x y\\a.db",
+    "\\\\srv\\share\\a.db",
+    "\\\\?\\C:\\data\\store.",
+    "\\\\?\\Volume{0b6f}\\a.db",
+    "/caf\udce9.db",  # a non-UTF-8 POSIX name, surrogate-escaped
+])
+def test_existing_file_uri_names_exactly_the_path(abs_path):
+    """walopen L3 r16 (codex + complement): rewriting a path into a URI lost or
+    changed verbatim, volume and non-UTF-8 names. The URI has no authority and
+    decodes back to the path's exact bytes."""
+    import os
+    import urllib.parse
+    from anneal_memory.store import _existing_file_uri
+    uri = _existing_file_uri(abs_path)
+    assert uri.startswith("file:") and uri.endswith("?mode=rw")
+    body = uri[len("file:"):-len("?mode=rw")]
+    assert "/" not in body and "?" not in body and "#" not in body
+    assert urllib.parse.unquote_to_bytes(body) == os.fsencode(abs_path)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Win32 resolves link/.. by text, as abspath does")
+def test_connect_must_exist_does_not_collapse_dotdot(tmp_path, monkeypatch):
+    """walopen L3 r17 (complement): abspath collapsed link/.. by text, naming a
+    different file than the OS resolves."""
+    from anneal_memory.store import connect
+    real_dir = tmp_path / "real"
+    (real_dir / "sub").mkdir(parents=True)
+    c = connect(tmp_path / "x.db")  # what a textual collapse of link/../x.db names
+    c.execute("create table wrong(x)")
+    c.close()
+    c = connect(real_dir / "x.db")  # what the OS resolves link/../x.db to
+    c.execute("create table right(x)")
+    c.close()
+    try:
+        (tmp_path / "link").symlink_to(real_dir / "sub")
+    except OSError:
+        pytest.skip("cannot create a symlink here")
+    monkeypatch.chdir(tmp_path)
+    c = connect("link/../x.db", must_exist=True)
+    try:
+        assert c.execute("select name from sqlite_master").fetchone()[0] == "right"
+    finally:
+        c.close()
+
+
+def test_connect_must_exist_refuses_a_non_utf8_name(monkeypatch):
+    """walopen L3 r17-r20 (codex): SQLite leaves a URI that decodes to invalid
+    UTF-8 undefined, and a check-then-open fallback can recreate a removed file,
+    so such a name is refused and nothing is opened."""
+    import anneal_memory.store as store_mod
+    seen = []
+    monkeypatch.setattr(store_mod.sqlite3, "connect", lambda *a, **k: seen.append((a, k)))
+    with pytest.raises(store_mod.StorePathError, match="not valid UTF-8"):
+        store_mod.connect("/tmp/caf\udce9.db", must_exist=True)
+    assert seen == []
+
+def test_existing_file_uri_refuses_a_nul():
+    """walopen L3 r16 (codex + complement): SQLite ends the name at a NUL, so
+    'real.db\\0x' would have opened real.db."""
+    from anneal_memory.store import StorePathError, _existing_file_uri
+    with pytest.raises(StorePathError):
+        _existing_file_uri("/tmp/real.db\0missing")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="verbatim paths are Windows-only")
+def test_connect_must_exist_opens_a_verbatim_windows_path(tmp_path):
+    """walopen L3 r16: a \\\\?\\ path reaches SQLite unchanged and opens."""
+    from anneal_memory.store import connect
+    real = tmp_path / "v.db"
+    c = connect(real)
+    c.execute("create table t(x)")
+    c.close()
+    c = connect("\\\\?\\" + str(real), must_exist=True)
+    try:
+        assert c.execute("select name from sqlite_master").fetchone()[0] == "t"
+    finally:
+        c.close()
+
+
+def test_every_sqlite_connect_goes_through_the_one_opener():
+    """walopen bound: the only sqlite3 opener in the package is the module-level
+    store.connect; any other way to reach sqlite3.connect or sqlite3.Connection
+    (attribute call, aliased module, from-import) bypasses the URI refusal."""
+    import ast
+    import anneal_memory
+    pkg = Path(anneal_memory.__file__).parent
+    offenders = []
+    for f in sorted(pkg.rglob("*.py")):
+        tree = ast.parse(f.read_text(encoding="utf-8"))
+        allowed = set()
+        if f.name == "store.py" and f.parent == pkg:
+            for node in tree.body:
+                if isinstance(node, ast.FunctionDef) and node.name == "connect":
+                    allowed.update(id(n) for n in ast.walk(node))
+        aliases = {"sqlite3"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                aliases.update(a.asname for a in node.names if a.name in ("sqlite3", "sqlite3.dbapi2") and a.asname)
+            elif isinstance(node, ast.ImportFrom) and node.module in ("sqlite3", "sqlite3.dbapi2"):
+                if any(a.name in ("connect", "Connection", "dbapi2", "*") for a in node.names):
+                    offenders.append(f"{f.name}:{node.lineno} from-import")
+        annotations = set()  # `x: sqlite3.Connection` names a type, it opens nothing
+        for node in ast.walk(tree):
+            notes = []
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                notes.append(node.returns)
+            elif isinstance(node, ast.arg):
+                notes.append(node.annotation)
+            elif isinstance(node, ast.AnnAssign):
+                notes.append(node.annotation)
+            for note in notes:
+                if note is not None:
+                    annotations.update(id(n) for n in ast.walk(note))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Attribute) and node.attr in ("connect", "Connection")):
+                continue
+            if id(node) in annotations:
+                continue
+            root = node.value
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id in aliases and id(node) not in allowed:
+                offenders.append(f"{f.name}:{node.lineno}")
+    assert offenders == [], offenders

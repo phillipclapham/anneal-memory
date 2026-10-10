@@ -40,15 +40,18 @@ provenance edges.
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import json
 import math
 import os
+import stat
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator, TextIO
 
 from .crystal import CrystalError, CrystalStore
 
@@ -96,6 +99,76 @@ def adopt_supported() -> bool:
     that would WRITE anything before adopting (the CLI mints the store id) checks this
     first, so the refusal really writes nothing."""
     return fcntl is not None
+
+
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def _open_log(path: Path, *, write: bool, what: str) -> int:
+    """The one way the outcome log, and a receipt file (``what``), is opened: a
+    descriptor on a REGULAR file. A receipt must be a file, not a pipe:
+    ``fold_surfaced`` reads it under the crystal store's lock, where a FIFO with
+    no writer blocked every crystal write (outcomes-open L3 r2, codex).
+
+    The open is non-blocking and the check is ``fstat`` on that descriptor, so a
+    FIFO at the log's name refuses at once instead of hanging a reader or a
+    ``crystal get`` (c-pull-label L3 r1, codex HIGH; the audit trail's
+    ``_open_regular`` is the same construct). A write also refuses a symlink as
+    the final component (``O_NOFOLLOW``), so an append never lands in whatever
+    file the link names (same review, codex HIGH). Windows has neither flag: it
+    has no FIFOs, and a symlink there is followed. Only the final component is
+    checked: a symlinked parent directory is followed, as for any path the user
+    names. Anything refused raises ``OSError``; a missing file raises
+    ``FileNotFoundError`` unless ``write`` creates it.
+    """
+    if write:
+        flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | _O_NOFOLLOW
+    else:
+        flags = os.O_RDONLY
+    # O_BINARY (Windows; 0 elsewhere): a CRT text-mode descriptor rewrites CR LF
+    # and stops a read at 0x1A (L3 r1, codex).
+    flags |= getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(path, flags | _O_NONBLOCK, 0o644)
+    except OSError as exc:
+        # ELOOP on Linux and macOS, EMLINK on FreeBSD (L2 r1).
+        if write and exc.errno in (errno.ELOOP, errno.EMLINK):
+            raise OSError(
+                exc.errno,
+                f"{what} is a symlink and is written only as a regular file; point the store at "
+                "the link's target or replace the link with the file",
+                str(path),
+            ) from exc
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, f"{what} is not a regular file", str(path))
+        if _O_NONBLOCK:
+            os.set_blocking(fd, True)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+@contextlib.contextmanager
+def _read_regular(path: Path, *, what: str) -> Iterator[TextIO | None]:
+    """A text reader over the regular file at ``path`` (:func:`_open_log`), or
+    ``None`` when nothing is there. The descriptor is acquired and closed inside
+    this one ``try``, so no caller ever holds a bare one (outcomes-open L3 r1-r3)."""
+    fd = -1
+    try:
+        try:
+            fd = _open_log(path, write=False, what=what)
+        except FileNotFoundError:
+            yield None
+            return
+        with open(fd, "r", encoding="utf-8", errors="replace", closefd=False) as f:
+            yield f
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def outcome_log_path(db_path: str | os.PathLike[str]) -> Path:
@@ -243,7 +316,7 @@ class OutcomeLog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # Read-write, not write-only: the append reads the last byte to repair a
         # torn final line, so a write-only (0200) log now refuses.
-        fd = os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+        fd = _open_log(self.path, write=True, what="the outcome log")
         try:
             _lock_exclusive(fd, timeout)
             if self.bound:
@@ -289,7 +362,7 @@ class OutcomeLog:
         self._writable_id()
         rec = _build_record(exposure_id, items, outcome, exposed, ts, self.store_id)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+        fd = _open_log(self.path, write=True, what="the outcome log")
         try:
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_EX)
@@ -336,7 +409,7 @@ class OutcomeLog:
             "ts": when.strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+        fd = _open_log(self.path, write=True, what="the outcome log")
         try:
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_EX)
@@ -372,12 +445,8 @@ class OutcomeLog:
         return self._snapshot()[2]
 
     def _entries(self) -> tuple[list[dict[str, Any]], int]:
-        try:
-            f = open(self.path, "r", encoding="utf-8", errors="replace")
-        except FileNotFoundError:
-            return [], 0
-        with f:
-            return _parse_entries(f)
+        with _read_regular(self.path, what="the outcome log") as f:
+            return ([], 0) if f is None else _parse_entries(f)
 
     def _snapshot(self) -> tuple[dict[str, dict[str, Any]], int, LogBinding]:
         """The merged records this log counts, the skipped-line count and the
@@ -811,14 +880,35 @@ def fold_surfaced(
     """
     if skew_seconds < 0:
         raise ValueError("skew_seconds must be >= 0.")
-    paths = [Path(p) for p in receipt_paths]
+    # One entry per path: the same file named twice adds nothing (event ids
+    # dedupe), and duplicate entries were the race surface of L3 r6-r8.
+    # os.fspath, not str: a path-like (an os.DirEntry) names its path, and a
+    # non-path entry still raises (L3 r9).
+    paths = list(dict.fromkeys(Path(os.fspath(p)) for p in receipt_paths))
     if not paths:
         raise ValueError("fold_surfaced needs at least one receipt path.")
     cutoff = (now or datetime.now(timezone.utc)).astimezone(timezone.utc) - timedelta(
         seconds=skew_seconds
     )
     cutoff = cutoff.replace(microsecond=0)
-    missing = [str(p) for p in paths if not p.is_file()]
+    # Missing means absent; a path that is there but not a regular file is
+    # refused here, before the lock, the watermark or any early return
+    # (outcomes-open L3 r3). The read's descriptor check stays the authority.
+    # One stat per path (L3 r4: an lexists then is_file pair raced, and called a
+    # dangling symlink "not a regular file"): absent, a dangling link included,
+    # is missing; anything else that is not a regular file is refused.
+    missing: list[str] = []
+    was_missing: list[bool] = []  # per entry (L3 r6)
+    for p in paths:
+        try:
+            st = os.stat(p)
+        except FileNotFoundError:
+            missing.append(str(p))
+            was_missing.append(True)
+            continue
+        was_missing.append(False)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(errno.EINVAL, "a receipt file is not a regular file", str(p))
     if len(missing) == len(paths):
         raise FileNotFoundError(
             f"none of the receipt paths exists ({', '.join(missing)}); the fold "
@@ -856,12 +946,20 @@ def fold_surfaced(
         counts: dict[str, int] = {}
         last_on: dict[str, str] = {}
         seen_events: set[str] = set()
-        for path in paths:
-            try:
-                f = open(path, "r", encoding="utf-8", errors="replace")
-            except FileNotFoundError:
-                continue
-            with f:
+        for path, absent_before in zip(paths, was_missing):
+            with _read_regular(Path(path), what="a receipt file") as f:
+                if f is None:
+                    if absent_before:
+                        continue  # absent at the preflight: reported as missing
+                    # Present at the preflight and gone now (a rotation mid-fold):
+                    # refuse, so the mark never moves past receipts this fold did
+                    # not read; the next fold reads them (L3 r4-r5, codex).
+                    raise FileNotFoundError(
+                        f"receipt file {path} disappeared during the fold; the fold mark "
+                        f"was not moved. Run it again."
+                    )
+                if str(path) in result.paths_missing:
+                    result.paths_missing.remove(str(path))  # read now, so not missing (L3 r6-r7)
                 for line in f:
                     if not line.strip():
                         continue
@@ -1065,12 +1163,10 @@ def load_receipts(
     bad = 0
     missing: list[str] = []
     for path in ps:
-        try:
-            f = open(path, "r", encoding="utf-8", errors="replace")
-        except FileNotFoundError:
-            missing.append(str(path))
-            continue
-        with f:
+        with _read_regular(Path(path), what="a receipt file") as f:
+            if f is None:
+                missing.append(str(path))
+                continue
             for line in f:
                 if not line.strip():
                     continue

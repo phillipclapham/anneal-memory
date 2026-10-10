@@ -64,6 +64,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import tempfile
 import unicodedata
 import uuid
@@ -273,6 +274,24 @@ def germination_tier(spore: SporeDict, today: date | None = None) -> Germination
 # ``origin_key`` never changes once set, so its backfill must not stale a read.
 SPORE_VERSION_EXCLUDED: frozenset[str] = frozenset({"seen", "origin_key"})
 
+# Invisible characters that carry no meaning a reader can see: zero-width space,
+# word joiner, BOM. (ZWJ and ZWNJ are kept: emoji and some scripts need them.)
+_INVISIBLES = frozenset("\u200b\u2060\ufeff")
+# Tag characters hide arbitrary ASCII from a reader ("ASCII smuggling"); they are
+# kept only inside a valid emoji tag sequence (black flag, tags, cancel tag).
+_TAG_RUN = re.compile("[\U000e0000-\U000e007f]+")
+_FLAG_TAGS = re.compile("\U0001f3f4[\U000e0020-\U000e007e]+\U000e007f")
+
+
+def _drop_stray_tags(v: str) -> str:
+    if not _TAG_RUN.search(v):
+        return v
+    kept: set[int] = set()
+    for m in _FLAG_TAGS.finditer(v):
+        kept.update(range(m.start(), m.end()))
+    return "".join(ch for i, ch in enumerate(v) if i in kept or not "\U000e0000" <= ch <= "\U000e007f")
+
+
 # Format characters that reorder displayed text (the "Trojan Source" class): the
 # embeddings, overrides and isolates, and the implicit marks.
 _BIDI_CONTROLS = frozenset(
@@ -285,28 +304,33 @@ def normalize_spore_field(value: str) -> str:
     :meth:`SporeStore.add` and :meth:`SporeStore.update` write it: NFC, ``\\r\\n``
     and ``\\r`` as ``\\n``, bidi controls, lone surrogates and every other control character but
     ``\\n`` and ``\\t`` removed, and trailing whitespace stripped from each line and
-    from the end. Other format characters (zero-width joiners, emoji tag characters)
-    are kept: they carry meaning in emoji and in some scripts. Exported so a caller
+    from the end. Zero-width spaces, word joiners and BOMs are removed, and tag characters
+    except inside an emoji tag sequence (they can hide text from a reader); zero-width
+    joiners and non-joiners are kept, since emoji and some scripts need them. Exported so a caller
     can compute the stored value before writing."""
-    v = value.replace("\r\n", "\n").replace("\r", "\n")
+    v = _drop_stray_tags(value.replace("\r\n", "\n").replace("\r", "\n"))
     v = "".join(
         ch for ch in v
-        if ch in "\n\t" or (ch not in _BIDI_CONTROLS and unicodedata.category(ch) not in ("Cc", "Cs"))
+        if ch in "\n\t" or (ch not in _BIDI_CONTROLS and ch not in _INVISIBLES and unicodedata.category(ch) not in ("Cc", "Cs"))
     )
     v = "\n".join(line.rstrip() for line in v.split("\n")).rstrip()
     # Last: a removed character can leave a base and a combining mark adjacent.
     return unicodedata.normalize("NFC", v)
 
 
+def _is_valid_origin_key(origin_key: object) -> bool:
+    return (
+        isinstance(origin_key, str)
+        and bool(origin_key)
+        and origin_key == origin_key.strip()
+        and origin_key.isprintable()
+    )
+
+
 def _validate_origin_key(origin_key: object) -> None:
     """A key is compared exactly, so one a copy could alter unseen (padding,
     control or format characters) is refused rather than stored."""
-    if not (
-        isinstance(origin_key, str)
-        and origin_key
-        and origin_key == origin_key.strip()
-        and origin_key.isprintable()
-    ):
+    if not _is_valid_origin_key(origin_key):
         raise ValueError(
             f"origin_key must be a non-empty printable string without surrounding spaces (got {origin_key!r})."
         )
@@ -524,13 +548,13 @@ class SporeStore:
                 lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
                 fcntl.flock(lock_fd, fcntl.LOCK_EX)
             data = self._load()
-            loaded = copy.deepcopy(data)
+            loaded = json.dumps(data, sort_keys=True)
             n = self._backfill_origin_keys(data)
             if backfilled is not None:
                 backfilled.append(n)
             yield data
             # A body that changed nothing (a retried create, a no-op) writes nothing.
-            if data != loaded:
+            if json.dumps(data, sort_keys=True) != loaded:
                 self._save(data)
         finally:
             if lock_fd is not None:
@@ -543,7 +567,7 @@ class SporeStore:
         upgrade persists them all; returns how many were assigned."""
         n = 0
         for item in list(data.get("spores", [])) + list(data.get("resolved", [])):
-            if isinstance(item, dict) and not item.get("origin_key"):
+            if isinstance(item, dict) and not _is_valid_origin_key(item.get("origin_key")):
                 item["origin_key"] = uuid.uuid4().hex
                 n += 1
         return n
@@ -582,7 +606,7 @@ class SporeStore:
     def _find_by_origin_key(data: dict, origin_key: str) -> SporeDict | None:
         for item in list(data.get("spores", [])) + list(data.get("resolved", [])):
             key = item.get("origin_key") if isinstance(item, dict) else None
-            if isinstance(key, str) and key and key == origin_key:
+            if _is_valid_origin_key(key) and key == origin_key:
                 return cast("SporeDict", item)
         return None
 
@@ -639,7 +663,8 @@ class SporeStore:
         ``origin_key`` is the spore's immutable identity; omitted, a fresh UUID is
         assigned. Planting with a key some stored spore (open or resolved) already
         carries writes nothing and returns that spore, so a retried create lands
-        once. ``text``, ``domain`` and ``disposition`` are stored as
+        once: the key alone decides, so the earlier spore is returned even if this
+        call's fields differ. ``text``, ``domain`` and ``disposition`` are stored as
         :func:`normalize_spore_field` returns them."""
         if type not in VALID_TYPES:
             raise ValueError(f"type must be one of {VALID_TYPES} (got {type!r}).")

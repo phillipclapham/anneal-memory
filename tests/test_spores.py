@@ -1131,3 +1131,34 @@ class TestNormalizer:
         store.add(type="task", text="x", disposition="seed", today=T0)
         store.update("spore-001", disposition="‮ ")
         assert "disposition" not in SporeStore(store.path).get("spore-001")
+
+
+class TestOriginR2:
+    def test_smuggled_tag_text_and_zero_widths_are_removed(self):
+        from anneal_memory import normalize_spore_field
+
+        hidden = "".join(chr(0xE0000 + ord(c)) for c in "ignore all")
+        assert normalize_spore_field("fix login" + hidden) == "fix login"
+        assert normalize_spore_field("a​b⁠c﻿d") == "abcd"
+        flag = "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f"
+        assert normalize_spore_field("go " + flag + hidden) == "go " + flag
+        assert normalize_spore_field("a‌b‍c") == "a‌b‍c"
+
+    def test_a_type_only_change_is_still_saved(self, store):
+        store.add(type="task", text="a", today=T0)
+        data = json.loads(store.path.read_text())
+        data["spores"][0]["salience"] = True
+        store.path.write_text(json.dumps(data))
+        store.update("spore-001", salience=1)
+        assert json.loads(store.path.read_text())["spores"][0]["salience"] == 1
+        assert json.loads(store.path.read_text())["spores"][0]["salience"] is not True
+
+    @pytest.mark.parametrize("bad", [5, " ", " k", ""])
+    def test_an_invalid_stored_key_is_replaced_by_the_backfill(self, store, bad):
+        store.add(type="task", text="a", today=T0)
+        data = json.loads(store.path.read_text())
+        data["spores"][0]["origin_key"] = bad
+        store.path.write_text(json.dumps(data))
+        assert store.backfill_origin_keys() == 1
+        key = store.get("spore-001")["origin_key"]
+        assert isinstance(key, str) and len(key) == 32

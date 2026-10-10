@@ -7,13 +7,15 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 ### Added — every spore has an immutable `origin_key`, and its stored text has an exported normaliser
 - `SporeStore.add` assigns each new spore an `origin_key` (a fresh UUID, or the one the caller passes). Planting with
   a key a stored spore already carries, open or resolved, writes nothing and returns that spore, so a retried create
-  lands once. A key must be printable with no surrounding spaces. A write transaction that changes nothing no longer
-  rewrites the file. `get_by_origin_key` finds a spore by it; no write changes it. Spores stored without one are given one
+  lands once. A key must be printable with no surrounding spaces. The key alone decides: a retried create returns
+  the earlier spore even if its fields differ. A write transaction that changes nothing no longer rewrites the file
+  (or creates a missing one). `get_by_origin_key` finds a spore by it; no write changes it. Spores stored without one are given one
   by the next write transaction, or now by `backfill_origin_keys()`. It is not part of `spore_version`, so the
   backfill does not stale a caller's read.
 - `text`, `domain` and `disposition` are stored as `normalize_spore_field` (exported) returns them: line endings as
-  `\n`, bidi controls, lone surrogates and other control characters except tab and newline removed (zero-width
-  joiners and emoji tag characters are kept), trailing whitespace stripped per
+  `\n`, bidi controls, lone surrogates, zero-width spaces, word joiners, BOMs and other control characters except
+  tab and newline removed, and tag characters except inside an emoji tag sequence (they can hide text from a
+  reader; zero-width joiners and non-joiners are kept), trailing whitespace stripped per
   line and at the end, then NFC. Text that normalises to nothing is refused, and a disposition that does clears it.
 
 ### Added — a spore write can require the version its caller read

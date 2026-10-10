@@ -204,3 +204,34 @@ class TestKeyedRecord(_StoreCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExportImport(unittest.TestCase):
+    """Run 10: a SQLite export copies keys; a JSON export imported mints fresh ones
+    (a rebuilt store is a new resource)."""
+
+    def test_keys_across_export(self) -> None:
+        import subprocess
+        import sys
+
+        with tempfile.TemporaryDirectory() as d:
+            a, b, c, j = (str(Path(d) / n) for n in ("a.db", "b.db", "c.db", "a.json"))
+            s = Store(a)
+            s.record("exported fact", "observation", origin_key="ex:1")
+            s.close()
+
+            def cli(*args: str) -> None:
+                subprocess.run([sys.executable, "-m", "anneal_memory", *args],
+                               check=True, capture_output=True)
+
+            cli("--db", a, "export", "--format", "json", "--output", j)
+            self.assertIn('"origin_key": "ex:1"', Path(j).read_text())
+            cli("--db", b, "init")
+            cli("--db", b, "import", j)
+            cli("--db", a, "export", "--format", "sqlite", "--output", c)
+            imported = sqlite3.connect(b).execute("SELECT origin_key FROM episodes").fetchall()
+            copied = sqlite3.connect(c).execute("SELECT origin_key FROM episodes").fetchall()
+            self.assertEqual(len(imported), 1)
+            self.assertNotEqual(imported[0][0], "ex:1")
+            self.assertTrue(origin_key_usable(imported[0][0]))
+            self.assertEqual(copied, [("ex:1",)])

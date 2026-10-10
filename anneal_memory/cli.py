@@ -415,6 +415,7 @@ def _episode_dict(ep: Any) -> dict[str, Any]:
         "source": ep.source,
         "session_id": ep.session_id,
         "metadata": ep.metadata,
+        **({"origin_key": ep.origin_key} if getattr(ep, "origin_key", None) else {}),
         # Only when recall was asked for superseded episodes and this is one, so
         # the shape every existing consumer reads is unchanged.
         **({"superseded_by": ep.superseded_by} if getattr(ep, "superseded_by", None) else {}),

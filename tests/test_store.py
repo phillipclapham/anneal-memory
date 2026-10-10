@@ -4513,13 +4513,29 @@ def test_every_sqlite_connect_goes_through_the_one_opener():
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 aliases.update(a.asname for a in node.names if a.name == "sqlite3" and a.asname)
-            elif (isinstance(node, ast.ImportFrom) and node.module == "sqlite3"
-                    and any(a.name in ("connect", "Connection") for a in node.names)):
-                offenders.append(f"{f.name}:{node.lineno} from-import")
+            elif isinstance(node, ast.ImportFrom) and node.module in ("sqlite3", "sqlite3.dbapi2"):
+                if any(a.name in ("connect", "Connection", "dbapi2", "*") for a in node.names):
+                    offenders.append(f"{f.name}:{node.lineno} from-import")
+        annotations = set()  # `x: sqlite3.Connection` names a type, it opens nothing
         for node in ast.walk(tree):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr in ("connect", "Connection")
-                    and isinstance(node.func.value, ast.Name)
-                    and node.func.value.id in aliases and id(node) not in allowed):
+            notes = []
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                notes.append(node.returns)
+            elif isinstance(node, ast.arg):
+                notes.append(node.annotation)
+            elif isinstance(node, ast.AnnAssign):
+                notes.append(node.annotation)
+            for note in notes:
+                if note is not None:
+                    annotations.update(id(n) for n in ast.walk(note))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Attribute) and node.attr in ("connect", "Connection")):
+                continue
+            if id(node) in annotations:
+                continue
+            root = node.value
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id in aliases and id(node) not in allowed:
                 offenders.append(f"{f.name}:{node.lineno}")
     assert offenders == [], offenders

@@ -48,6 +48,7 @@ import re
 import shlex
 import sqlite3
 import stat
+import time
 import uuid
 import sys
 from dataclasses import asdict
@@ -151,6 +152,7 @@ from .store import (
     _SCHEMA_VERSION,
     _parse_format_version,
     normalize_state_key,
+    _fsync_dir,
 )
 from .types import (
     DEFAULT_TRUST,
@@ -2089,15 +2091,29 @@ def cmd_wrap_token_current(args: argparse.Namespace) -> None:
         print(snapshot["token"])
 
 
-def _backup_sqlite(src_target: str, dst_target: str) -> None:
-    """Back one SQLite database up into another through the one opener."""
+_EXPORT_BUSY_DEADLINE_S = 30.0
+_BACKUP_BUSY_STATUSES = (5, 6)  # SQLITE_BUSY, SQLITE_LOCKED
+
+
+class _ExportBusyError(Exception):
+    """The output database stayed locked past the export's deadline."""
+
+
+def _backup_sqlite(src_target: str, dst_conn: sqlite3.Connection) -> None:
+    """Back a SQLite database up into an open connection.
+
+    ``Connection.backup`` retries a BUSY or LOCKED destination forever, so the
+    progress callback raises once such a status is seen past the deadline.
+    """
+    deadline = time.monotonic() + _EXPORT_BUSY_DEADLINE_S
+
+    def _progress(status: int, remaining: int, total: int) -> None:
+        if status in _BACKUP_BUSY_STATUSES and time.monotonic() > deadline:
+            raise _ExportBusyError
+
     src_conn = sqlite_connect(src_target)
     try:
-        dst_conn = sqlite_connect(dst_target)
-        try:
-            src_conn.backup(dst_conn)
-        finally:
-            dst_conn.close()
+        src_conn.backup(dst_conn, progress=_progress)
     finally:
         src_conn.close()
 
@@ -2111,6 +2127,7 @@ def _publish_no_clobber(tmp: Path, out: Path) -> None:
     """
     try:
         os.link(tmp, out)
+        _fsync_dir(out.parent)
         return
     except FileExistsError:
         raise
@@ -2123,6 +2140,7 @@ def _publish_no_clobber(tmp: Path, out: Path) -> None:
                 dst.write(chunk)
             dst.flush()
             os.fsync(dst.fileno())
+        _fsync_dir(out.parent)
     except BaseException:
         with contextlib.suppress(OSError):
             out.unlink()
@@ -2147,11 +2165,22 @@ def cmd_export(args: argparse.Namespace) -> None:
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
+        # The output may not be the database or any file SQLite keeps for it:
+        # a backup written over a live -wal/-shm/-journal corrupts the store.
         try:
-            if out.exists() and os.path.samefile(db_path, out):
-                print("Error: --output is the database being exported", file=sys.stderr)
+            guarded = {
+                os.path.normcase(os.path.realpath(str(db_path) + suffix))
+                for suffix in ("", "-wal", "-shm", "-journal")
+            }
+            if os.path.normcase(os.path.realpath(out)) in guarded or (
+                out.exists() and os.path.samefile(db_path, out)
+            ):
+                print(
+                    "Error: --output is the database being exported or one of its files",
+                    file=sys.stderr,
+                )
                 sys.exit(1)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
             sys.exit(1)
         # An existing --output is written in place through SQLite's own backup
@@ -2159,17 +2188,50 @@ def cmd_export(args: argparse.Namespace) -> None:
         # and a failed backup leaves it as it was. An absent --output is built in
         # a temp file this process owns, in the destination's directory, and
         # published with a no-clobber link, so a failed export leaves nothing at
-        # --output and deletes only its own temp.
+        # --output and deletes only its own temp. The output mirrors the source's
+        # journal mode (the backup copies its header), which keeps it openable as
+        # a store.
         tmp: Path | None = None
         try:
             if out.exists():
-                _backup_sqlite(src_target, dst_target)
+                before = out.stat()
+                dst_conn = sqlite_connect(dst_target)
+                try:
+                    try:
+                        after = out.stat()
+                        changed = (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+                    except FileNotFoundError:
+                        after, changed = None, True
+                    if changed:
+                        # The path changed between the stat and the connect;
+                        # sqlite_connect may have just created an empty file.
+                        dst_conn.close()
+                        if after is not None and after.st_size == 0:
+                            with contextlib.suppress(OSError):
+                                out.unlink()
+                        print(f"Error: {out} changed during the export; nothing was written", file=sys.stderr)
+                        sys.exit(1)
+                    _backup_sqlite(src_target, dst_conn)
+                finally:
+                    dst_conn.close()
+                _fsync_dir(out.parent)
             else:
                 tmp = out.parent / f".{os.getpid()}-{uuid.uuid4().hex[:8]}.export-tmp"
-                _backup_sqlite(src_target, sqlite_path(tmp))
+                tmp_conn = sqlite_connect(sqlite_path(tmp))
+                try:
+                    _backup_sqlite(src_target, tmp_conn)
+                finally:
+                    tmp_conn.close()
                 _publish_no_clobber(tmp, out)
         except FileExistsError:
             print(f"Error: {out} appeared during the export; nothing was overwritten", file=sys.stderr)
+            sys.exit(1)
+        except _ExportBusyError:
+            print(
+                f"Error: export to {out} failed: the output database stayed locked for "
+                f"{_EXPORT_BUSY_DEADLINE_S:g}s",
+                file=sys.stderr,
+            )
             sys.exit(1)
         except (ValueError, OSError, sqlite3.Error) as exc:  # NUL in a path, unwritable dir…
             print(f"Error: export to {out} failed: {exc}", file=sys.stderr)

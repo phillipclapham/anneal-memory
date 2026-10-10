@@ -1440,6 +1440,54 @@ class TestCmdExport:
         err = capsys.readouterr().err
         assert err.startswith("Error:") and "Traceback" not in err
 
+    def test_export_sqlite_refuses_the_sources_wal_file(self, base_args_with_data, tmp_path, capsys):
+        """walopen L1: --output naming <db>-wal (absent or not) exited 0 and left a
+        database image beside a live store; every file of the source is refused."""
+        base_args_with_data.format = "sqlite"
+        base_args_with_data.output = str(base_args_with_data.db) + "-wal"
+        wal = Path(base_args_with_data.output)
+        existed = wal.exists()
+        before = wal.read_bytes() if existed else None
+        with pytest.raises(SystemExit) as exc:
+            cmd_export(base_args_with_data)
+        assert exc.value.code == 1
+        assert "one of its files" in capsys.readouterr().err
+        assert wal.exists() == existed
+        if existed:
+            assert wal.read_bytes() == before
+
+    def test_export_sqlite_to_a_locked_output_errors_after_the_deadline(
+        self, base_args_with_data, tmp_path, capsys, monkeypatch
+    ):
+        """walopen L2: a backup into an output another connection holds locked
+        spun forever; it now errors once the deadline passes."""
+        import sqlite3
+        import time
+        from anneal_memory import cli
+        out = tmp_path / "locked.db"
+        hold = sqlite3.connect(out, isolation_level=None)
+        hold.execute("pragma journal_mode=wal")
+        hold.execute("create table u(y)")
+        hold.execute("BEGIN IMMEDIATE")
+        hold.execute("insert into u values(1)")
+        monkeypatch.setattr(cli, "_EXPORT_BUSY_DEADLINE_S", 0.5)
+        base_args_with_data.format = "sqlite"
+        base_args_with_data.output = str(out)
+        t0 = time.monotonic()
+        try:
+            with pytest.raises(SystemExit) as exc:
+                cmd_export(base_args_with_data)
+        finally:
+            hold.execute("ROLLBACK")
+            hold.close()
+        assert exc.value.code == 1
+        assert capsys.readouterr().err.startswith("Error:")
+        assert time.monotonic() - t0 < 10
+        check = sqlite3.connect(out)
+        assert check.execute("select count(*) from u").fetchone() == (0,)
+        assert check.execute("select count(*) from sqlite_master").fetchone() == (1,)
+        check.close()
+
     def test_export_sqlite_json(self, base_args_with_data, tmp_path, capsys):
         out = str(tmp_path / "copy.db")
         base_args_with_data.json = True

@@ -3090,6 +3090,38 @@ class TestTextExportsNeverOverwrite:
         assert not [p for d in (first, second) for p in d.iterdir() if ".export-tmp" in p.name]
 
 
+    @pytest.mark.parametrize("cmd,fmt", WRITERS)
+    def test_a_block_device_at_output_is_refused(self, db, tmp_path, monkeypatch, capsys, cmd, fmt):
+        """L3 r2 (complement): a block device is a disk; only a character device
+        or a FIFO is written in place. No unprivileged test can make a block
+        node, so the existing file reports one through fstat."""
+        import stat as stat_mod
+        from anneal_memory import cli
+        out = tmp_path / "disk"
+        out.write_bytes(b"sectors")
+        real_fstat = cli.os.fstat
+
+        def _blk(fd):
+            st = real_fstat(fd)
+            return os.stat_result((stat_mod.S_IFBLK | 0o660,) + tuple(st)[1:])
+
+        monkeypatch.setattr(cli.os, "fstat", _blk)
+        with pytest.raises(SystemExit) as exc:
+            self._run(cmd, fmt, db, out)
+        assert exc.value.code == 1
+        assert "never overwrites" in capsys.readouterr().err
+        assert out.read_bytes() == b"sectors"
+
+    @pytest.mark.skipif(os.name != "posix", reason="/dev/fd is POSIX")
+    @pytest.mark.parametrize("name", ["/dev/fd/2147483648", "/dev/fd/99999999999999999999"])
+    def test_an_out_of_range_fd_name_is_a_clean_error(self, db, capsys, name):
+        """L3 r2 (complement + codex): os.dup raised OverflowError, a traceback."""
+        with pytest.raises(SystemExit) as exc:
+            self._run("export", "json", db, Path(name))
+        assert exc.value.code == 1
+        assert "Error:" in capsys.readouterr().err
+
+
 # -- cmd_prepare_wrap tests --
 
 class TestCmdPrepareWrap:

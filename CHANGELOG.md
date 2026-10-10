@@ -19,7 +19,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   remove the file first. The text formats are written to a private temp beside `--output` and published the way the
   sqlite copy is (below), so a failed write never leaves a partial file at `--output` (on a filesystem without
   hard links an interrupted publish can leave the empty claim, as below).
-  An existing device or named pipe (`/dev/null`, a FIFO) is still written in place for the text formats, as the
+  An existing character device or named pipe (`/dev/null`, a FIFO) is still written in place for the text formats, as the
   shell's noclobber allows: it is not a file that can be overwritten. `--output /dev/stdout` (or `/dev/stderr`,
   `/dev/fd/N`) writes through that descriptor, so `-o /dev/stdout >> file` appends. `export --format sqlite` refuses
   all of these. `graph --output` on a store with no associations above `--min-strength` now writes an empty graph

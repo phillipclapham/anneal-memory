@@ -2207,7 +2207,8 @@ def _publish_by_claim(tmp: Path, out: Path) -> None:
         raise
 
 
-_OWN_FD_NAME = re.compile(r"/dev/(?:stdout|stderr|fd/(\d+))|/proc/self/fd/(\d+)")
+# At most 9 digits: always a C int, so os.dup answers EBADF, never OverflowError (L3 r2).
+_OWN_FD_NAME = re.compile(r"/dev/(?:stdout|stderr|fd/(\d{1,9}))|/proc/self/fd/(\d{1,9})")
 
 
 def _own_fd_alias(out: Path) -> int | None:
@@ -2249,7 +2250,7 @@ def _write_text_no_clobber(text: str, out: Path) -> None:
     ``out`` (without hard links, an interrupted publish can leave its empty claim).
     Text mode, as ``Path.write_text`` was: platform newlines, UTF-8.
 
-    An existing device or FIFO (``/dev/null``, a named pipe) holds no file to
+    An existing character device or FIFO (``/dev/null``, a named pipe) holds no file to
     clobber, so it is written in place, as the shell's noclobber (``set -C``)
     allows ``>/dev/stdout`` (L2 r1: the refusal had broken ``-o /dev/stdout``).
     It is opened without create or truncate and checked on the open descriptor,
@@ -2289,7 +2290,9 @@ def _write_text_no_clobber(text: str, out: Path) -> None:
         try:
             with fh:  # owns the descriptor from here
                 mode = os.fstat(fh.fileno()).st_mode
-                is_file = stat.S_ISREG(mode) or stat.S_ISDIR(mode)
+                # Only a character device or a FIFO: a block device is a disk
+                # (L3 r2), and anything else holds data to clobber.
+                is_file = not (stat.S_ISCHR(mode) or stat.S_ISFIFO(mode))
                 if not is_file:
                     fh.write(text)
         except (ValueError, OSError) as exc:

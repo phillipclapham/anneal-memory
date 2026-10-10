@@ -2207,8 +2207,7 @@ def _publish_by_claim(tmp: Path, out: Path) -> None:
         raise
 
 
-# At most 9 digits: always a C int, so os.dup answers EBADF, never OverflowError (L3 r2).
-_OWN_FD_NAME = re.compile(r"/dev/(?:stdout|stderr|fd/(\d{1,9}))|/proc/self/fd/(\d{1,9})")
+_OWN_FD_NAME = re.compile(r"/dev/(?:stdout|stderr|fd/(\d+))|/proc/self/fd/(\d+)")
 
 
 def _own_fd_alias(out: Path) -> int | None:
@@ -2219,9 +2218,31 @@ def _own_fd_alias(out: Path) -> int | None:
     m = _OWN_FD_NAME.fullmatch(str(out))
     if m is None:
         return None
-    if m.group(1) or m.group(2):
-        return int(m.group(1) or m.group(2))
-    return 1 if str(out).endswith("stdout") else 2
+    digits = m.group(1) or m.group(2)
+    if digits is None:
+        return 1 if str(out).endswith("stdout") else 2
+    # Leading zeros name the same descriptor; a value past a C int names none,
+    # and os.dup would raise OverflowError (L3 r2, r3).
+    value = int(digits)
+    return value if value <= 0x7FFFFFFF else None
+
+
+def _is_named_sink(fd: int) -> bool:
+    """True when ``fd`` is a FIFO, the null device or a terminal: the only
+    existing outputs written in place. A device class is not enough: a block
+    device is a disk (L3 r2) and so is a macOS raw disk, a character device (L3 r3)."""
+    st = os.fstat(fd)
+    if stat.S_ISFIFO(st.st_mode):
+        return True
+    if not stat.S_ISCHR(st.st_mode):
+        return False
+    if os.isatty(fd):
+        return True
+    try:
+        null = os.stat(os.devnull)
+    except OSError:
+        return False
+    return stat.S_ISCHR(null.st_mode) and st.st_rdev == null.st_rdev
 
 
 def _pin_parent(out: Path) -> Path:
@@ -2250,9 +2271,9 @@ def _write_text_no_clobber(text: str, out: Path) -> None:
     ``out`` (without hard links, an interrupted publish can leave its empty claim).
     Text mode, as ``Path.write_text`` was: platform newlines, UTF-8.
 
-    An existing character device or FIFO (``/dev/null``, a named pipe) holds no file to
-    clobber, so it is written in place, as the shell's noclobber (``set -C``)
-    allows ``>/dev/stdout`` (L2 r1: the refusal had broken ``-o /dev/stdout``).
+    An existing FIFO, null device or terminal (see :func:`_is_named_sink`) holds no
+    file to clobber, so it is written in place, as the shell's noclobber (``set -C``)
+    allows ``>/dev/null`` (L2 r1: the refusal had broken ``-o /dev/stdout`` and pipes).
     It is opened without create or truncate and checked on the open descriptor,
     so a regular file put there in between is refused, never truncated. A name
     for one of this process's own descriptors (``/dev/stdout``, ``/dev/fd/1``)
@@ -2289,16 +2310,13 @@ def _write_text_no_clobber(text: str, out: Path) -> None:
             raise
         try:
             with fh:  # owns the descriptor from here
-                mode = os.fstat(fh.fileno()).st_mode
-                # Only a character device or a FIFO: a block device is a disk
-                # (L3 r2), and anything else holds data to clobber.
-                is_file = not (stat.S_ISCHR(mode) or stat.S_ISFIFO(mode))
-                if not is_file:
+                refuse = not _is_named_sink(fh.fileno())
+                if not refuse:
                     fh.write(text)
         except (ValueError, OSError) as exc:
             print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
             sys.exit(1)
-        if is_file:
+        if refuse:
             _refuse_existing_output(out)
         return
     tmp = dest.parent / f".{os.getpid()}-{uuid.uuid4().hex}.export-tmp"

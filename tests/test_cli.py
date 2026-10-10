@@ -3021,15 +3021,16 @@ class TestTextExportsNeverOverwrite:
 
 
     @pytest.mark.skipif(os.name != "posix", reason="/dev/stdout is POSIX")
+    @pytest.mark.parametrize("name", ["/dev/stdout", "/dev/fd/1", "/dev/fd/0000000001"])
     @pytest.mark.parametrize("cmd,fmt", WRITERS)
-    def test_dev_stdout_redirected_to_a_file_is_written_and_appends(self, db, tmp_path, cmd, fmt):
+    def test_dev_stdout_redirected_to_a_file_is_written_and_appends(self, db, tmp_path, cmd, fmt, name):
         """L3 r1 (run): -o /dev/stdout > file was refused (the reopen saw a regular
         file); written through fd 1 it keeps a >> redirect's earlier content."""
         target = tmp_path / "redirected.out"
         target.write_bytes(b"PRE\n")
         with open(target, "ab") as fh:
             result = subprocess.run(
-                [sys.executable, "-m", "anneal_memory.cli", "--db", db, cmd, "--format", fmt, "--output", "/dev/stdout"],
+                [sys.executable, "-m", "anneal_memory.cli", "--db", db, cmd, "--format", fmt, "--output", name],
                 stdout=fh, stderr=subprocess.PIPE, text=True,
             )
         assert result.returncode == 0, result.stderr
@@ -3090,22 +3091,30 @@ class TestTextExportsNeverOverwrite:
         assert not [p for d in (first, second) for p in d.iterdir() if ".export-tmp" in p.name]
 
 
+    @pytest.mark.parametrize("kind", ["block", "raw-char"])
     @pytest.mark.parametrize("cmd,fmt", WRITERS)
-    def test_a_block_device_at_output_is_refused(self, db, tmp_path, monkeypatch, capsys, cmd, fmt):
-        """L3 r2 (complement): a block device is a disk; only a character device
-        or a FIFO is written in place. No unprivileged test can make a block
-        node, so the existing file reports one through fstat."""
+    def test_a_disk_at_output_is_refused(self, db, tmp_path, monkeypatch, capsys, cmd, fmt, kind):
+        """L3 r2 (complement): a block device is a disk; L3 r3 (codex HIGH): so is
+        a macOS raw disk, a character device. Only a FIFO, the null device or a
+        terminal is written in place. No unprivileged test can make a device
+        node, so the existing file reports one through fstat (for its inode only)."""
         import stat as stat_mod
         from anneal_memory import cli
         out = tmp_path / "disk"
         out.write_bytes(b"sectors")
+        ino = out.stat().st_ino
         real_fstat = cli.os.fstat
+        fake_mode = stat_mod.S_IFBLK if kind == "block" else stat_mod.S_IFCHR
 
-        def _blk(fd):
+        def _disk(fd):
             st = real_fstat(fd)
-            return os.stat_result((stat_mod.S_IFBLK | 0o660,) + tuple(st)[1:])
+            if st.st_ino != ino:
+                return st
+            fields = list(st)
+            fields[0] = fake_mode | 0o660
+            return os.stat_result(fields, {"st_rdev": 0xDEAD})
 
-        monkeypatch.setattr(cli.os, "fstat", _blk)
+        monkeypatch.setattr(cli.os, "fstat", _disk)
         with pytest.raises(SystemExit) as exc:
             self._run(cmd, fmt, db, out)
         assert exc.value.code == 1
@@ -3119,7 +3128,8 @@ class TestTextExportsNeverOverwrite:
         with pytest.raises(SystemExit) as exc:
             self._run("export", "json", db, Path(name))
         assert exc.value.code == 1
-        assert "Error:" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "Error: export to" in err and "Traceback" not in err
 
 
 # -- cmd_prepare_wrap tests --

@@ -1106,13 +1106,13 @@ class TestNormalizer:
         s = store.add(type="task", text="a\ud800b", today=T0)
         assert SporeStore(store.path).get(s["id"])["text"] == "ab"
 
-    def test_joiners_and_emoji_tags_are_kept(self):
+    def test_joiners_are_kept_and_subdivision_tags_are_not(self):
         from anneal_memory import normalize_spore_field
 
         family = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
         england = "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f"
         assert normalize_spore_field(family) == family
-        assert normalize_spore_field(england) == england
+        assert normalize_spore_field(england) == "\U0001f3f4"  # the tag block is removed
 
     def test_it_is_idempotent(self):
         from anneal_memory import normalize_spore_field
@@ -1137,9 +1137,19 @@ class TestOriginR2:
     def test_invisible_format_characters_are_stored_as_given(self):
         from anneal_memory import normalize_spore_field
 
-        hidden = "".join(chr(0xE0000 + ord(c)) for c in "ignore all")
-        for v in ("fix" + hidden, "a\u200bb\u2060c\ufeffd", "a\u200cb\u200dc", "x\ufe0f"):
+        for v in ("a\u200bb\u2060c\ufeffd", "a\u200cb\u200dc", "x\ufe0f"):
             assert normalize_spore_field(v) == v
+        hidden = "".join(chr(0xE0000 + ord(c)) for c in "ignore all")
+        flag = "\U0001f3f4" + "".join(chr(0xE0000 + ord(c)) for c in "gbeng") + "\U000e007f"
+        assert normalize_spore_field("fix" + hidden) == "fix"
+        assert normalize_spore_field("go " + flag + hidden + "\U000e007f") == "go \U0001f3f4"
+
+    @pytest.mark.parametrize("blank", ["\u200b", "\ufeff\u2060 ", "\u200d"])
+    def test_text_of_format_characters_only_is_refused(self, store, blank):
+        with pytest.raises(ValueError, match="text"):
+            store.add(type="task", text=blank, today=T0)
+        s = store.add(type="task", text="x", disposition=blank, today=T0)
+        assert "disposition" not in SporeStore(store.path).get(s["id"])
 
     def test_a_type_only_change_is_still_saved(self, store):
         store.add(type="task", text="a", today=T0)

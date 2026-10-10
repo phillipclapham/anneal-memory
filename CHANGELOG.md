@@ -13,9 +13,11 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   by the next write transaction, or now by `backfill_origin_keys()`. It is not part of `spore_version`, so the
   backfill does not stale a caller's read.
 - `text`, `domain` and `disposition` are stored as `normalize_spore_field` (exported) returns them: line endings as
-  `\n`, bidi controls, lone surrogates and other control characters except tab and newline removed (other
-  invisible characters, such as zero-width and tag characters, are stored as given: a display shows them), trailing whitespace stripped per
-  line and at the end, then NFC. Text that normalises to nothing is refused, and a disposition that does clears it.
+  `\n`, bidi controls, lone surrogates, the tag block (it can spell hidden text; a subdivision flag becomes a plain
+  black flag) and other control characters except tab and newline removed (other invisible characters, such as
+  zero-width ones, are stored as given: a display shows them), trailing whitespace stripped per
+  line and at the end, then NFC. Text with nothing visible after normalising is refused, and such a disposition clears it.
+  A key hand-edited into the file outside these rules is kept, but cannot be looked up.
 
 ### Added — a spore write can require the version its caller read
 - `SporeStore.update`, `touch`, `descend` and `ascend` take `expected_version`. It is compared with the stored

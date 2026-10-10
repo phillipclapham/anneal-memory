@@ -285,14 +285,15 @@ def normalize_spore_field(value: str) -> str:
     :meth:`SporeStore.add` and :meth:`SporeStore.update` write it: NFC, ``\\r\\n``
     and ``\\r`` as ``\\n``, bidi controls, lone surrogates and every other control character but
     ``\\n`` and ``\\t`` removed, and trailing whitespace stripped from each line and
-    from the end. Other invisible characters (zero-width, tag, variation selectors) are
-    stored as given: no finite list removes every one, so showing them is the
-    display's job. Exported so a caller
+    from the end. The tag block (U+E0000-E007F, which can spell hidden ASCII; a
+    subdivision flag becomes a plain black flag) is removed. Other invisible
+    characters (zero-width, variation selectors) are stored as given: no finite
+    list removes every one, so showing them is the display's job. Exported so a caller
     can compute the stored value before writing."""
     v = value.replace("\r\n", "\n").replace("\r", "\n")
     v = "".join(
         ch for ch in v
-        if ch in "\n\t" or (ch not in _BIDI_CONTROLS and unicodedata.category(ch) not in ("Cc", "Cs"))
+        if ch in "\n\t" or (ch not in _BIDI_CONTROLS and not "\U000e0000" <= ch <= "\U000e007f" and unicodedata.category(ch) not in ("Cc", "Cs"))
     )
     v = "\n".join(line.rstrip() for line in v.split("\n")).rstrip()
     # Last: a removed character can leave a base and a combining mark adjacent.
@@ -306,6 +307,11 @@ def _is_valid_origin_key(origin_key: object) -> bool:
         and origin_key == origin_key.strip()
         and origin_key.isprintable()
     )
+
+
+def _has_visible_text(value: str) -> bool:
+    """Whether ``value`` shows anything: format characters alone render blank."""
+    return any(not ch.isspace() and unicodedata.category(ch) != "Cf" for ch in value)
 
 
 def _validate_origin_key(origin_key: object) -> None:
@@ -669,11 +675,13 @@ class SporeStore:
         if origin_key is not None:
             _validate_origin_key(origin_key)
         text = normalize_spore_field(text)
-        if not text:
+        if not _has_visible_text(text):
             raise ValueError("text is required and must be a non-empty string (the open loop).")
         domain = normalize_spore_field(domain)
         if disposition is not None:
             disposition = normalize_spore_field(disposition)
+            if not _has_visible_text(disposition):
+                disposition = None
         next_validated = _validate_date(next, "next")
         now = (today or date.today()).isoformat()
         with self._transaction() as data:
@@ -895,7 +903,7 @@ class SporeStore:
             if not isinstance(next, _Unset):
                 item["next"] = _validate_date(next, "next")
             if not isinstance(text, _Unset):
-                if not isinstance(text, str) or not normalize_spore_field(text):
+                if not isinstance(text, str) or not _has_visible_text(normalize_spore_field(text)):
                     raise ValueError("text must be a non-empty string (cannot clear to empty).")
                 item["text"] = normalize_spore_field(text)
             if not isinstance(salience, _Unset):
@@ -917,7 +925,7 @@ class SporeStore:
                     raise ValueError(f"disposition must be a string or None (got {disposition!r}).")
                 _view = cast("dict[str, object]", item)
                 stored = normalize_spore_field(disposition) if disposition else ""
-                if stored:
+                if _has_visible_text(stored):
                     _view["disposition"] = stored
                 else:  # None / "" → metabolize back to a plain (key-free) loop
                     _view.pop("disposition", None)

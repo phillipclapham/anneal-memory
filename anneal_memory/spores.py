@@ -60,6 +60,7 @@ the Levain-generalization notes:
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -272,7 +273,7 @@ def spore_version(spore: SporeDict) -> str:
     a versioned field changes it; a caller that read a spore passes the version it
     saw as ``expected_version`` to a mutator, which refuses if it no longer matches."""
     payload = {k: v for k, v in spore.items() if k not in SPORE_VERSION_EXCLUDED}
-    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -288,7 +289,10 @@ def _check_expected_version(
     lands between a caller's read and this one is refused, never overwritten."""
     if expected_version is None:
         return
-    found = version_of(item)
+    # A copy: the callback must not be able to change what this transaction saves.
+    found = version_of(cast("SporeDict", copy.deepcopy(item)))
+    if not isinstance(found, str):
+        raise TypeError(f"version_of must return a str (got {type(found).__name__}).")
     if found != expected_version:
         raise SporeError(
             f"spore '{item.get('id')}' changed since read (expected version "
@@ -296,12 +300,23 @@ def _check_expected_version(
         )
 
 
-def _validate_expected_version(expected_version: object) -> None:
-    if expected_version is not None and (
-        not isinstance(expected_version, str) or not expected_version
-    ):
+def _validate_expected_version(expected_version: object, version_of: object) -> None:
+    """Refuse a malformed compare before the lock is taken. Where there is no file
+    lock (no ``fcntl``: Windows), a compare cannot be made atomic with the write, so
+    a versioned write is refused rather than checked against a state another
+    process may replace."""
+    if expected_version is None:
+        if version_of is not spore_version:
+            raise ValueError("version_of was passed without expected_version; nothing would be compared.")
+        return
+    if not isinstance(expected_version, str) or not expected_version:
         raise ValueError(
             f"expected_version must be a non-empty string or None (got {expected_version!r})."
+        )
+    if fcntl is None:
+        raise SporeError(
+            "expected_version needs a file lock, which this platform does not have; "
+            "the compare could not be held through the write."
         )
 
 
@@ -666,7 +681,7 @@ class SporeStore:
         ``parked`` spore stays parked: parked is *deliberate* dormancy, changed via
         ``update(tier=...)``, not by touching.)
         """
-        _validate_expected_version(expected_version)
+        _validate_expected_version(expected_version, version_of)
         today = today or date.today()
         with self._transaction() as data:
             item = self._require_open(data, spore_id)
@@ -729,9 +744,13 @@ class SporeStore:
         be current, checked under this transaction's lock, or :class:`SporeError`
         is raised and nothing is written. ``touch``, ``descend`` and ``ascend``
         take it too. A caller whose version is its own hash of the record passes
-        that hash function as ``version_of``.
+        that hash function as ``version_of``; it gets a copy of the record, runs
+        while the lock is held, and must not touch the store. Without ``fcntl``
+        (Windows) a versioned write is refused; on a network filesystem whose
+        ``flock`` silently does nothing the compare is not atomic (see
+        :meth:`_transaction`).
         """
-        _validate_expected_version(expected_version)
+        _validate_expected_version(expected_version, version_of)
         with self._transaction() as data:
             item = self._require_open(data, spore_id)
             _check_expected_version(item, expected_version, version_of)
@@ -819,7 +838,7 @@ class SporeStore:
         expect key-absent / a plain loop; a string = expect that exact value). Blind: a raw
         value compare, never an interpretation of the tag. ``expected_version``
         compares the whole spore the same way (see :meth:`update`)."""
-        _validate_expected_version(expected_version)
+        _validate_expected_version(expected_version, version_of)
         with self._transaction() as data:
             item = self._require_open(data, spore_id)
             _check_expected_version(item, expected_version, version_of)
@@ -870,7 +889,7 @@ class SporeStore:
         compares the whole spore the same way (see :meth:`update`)."""
         if not ref or not ref.strip():
             raise ValueError("ascend requires a ref (what the spore became).")
-        _validate_expected_version(expected_version)
+        _validate_expected_version(expected_version, version_of)
         with self._transaction() as data:
             item = self._require_open(data, spore_id)
             _check_expected_version(item, expected_version, version_of)

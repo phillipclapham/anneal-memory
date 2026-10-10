@@ -789,6 +789,11 @@ class TestRetype:
 # -- expected_version: the whole-spore compare-and-set (cockpit slice P) --------
 
 
+_NEEDS_LOCK = pytest.mark.skipif(
+    _spores.fcntl is None, reason="a versioned write is refused without a file lock (tested below)"
+)
+
+
 class TestExpectedVersion:
     def test_version_ignores_seen_and_tracks_every_other_field(self, store):
         s = store.add(type="task", text="x", today=T0)
@@ -804,18 +809,26 @@ class TestExpectedVersion:
         assert cleared["next"] is None
         assert spore_version(cleared) != spore_version(s)
 
+    @_NEEDS_LOCK
     @pytest.mark.parametrize("op", ["update", "touch", "descend", "ascend"])
     def test_a_current_version_applies(self, store, op):
         s = store.add(type="question", text="x", today=T0)
         v = spore_version(s)
-        call = {
-            "update": lambda: store.update("spore-001", text="y", expected_version=v),
-            "touch": lambda: store.touch("spore-001", today=T0, expected_version=v),
-            "descend": lambda: store.descend("spore-001", kind="answered", today=T0, expected_version=v),
-            "ascend": lambda: store.ascend("spore-001", kind="pattern", ref="r", today=T0, expected_version=v),
+        later = T0 + timedelta(days=1)
+        call, landed = {
+            "update": (lambda: store.update("spore-001", text="y", expected_version=v),
+                       lambda sp: sp["text"] == "y"),
+            "touch": (lambda: store.touch("spore-001", today=later, expected_version=v),
+                      lambda sp: sp["seen"] == later.isoformat()),
+            "descend": (lambda: store.descend("spore-001", kind="answered", today=T0, expected_version=v),
+                        lambda sp: sp["status"] == "resolved"),
+            "ascend": (lambda: store.ascend("spore-001", kind="pattern", ref="r", today=T0, expected_version=v),
+                       lambda sp: sp["status"] == "resolved"),
         }[op]
         call()
+        assert landed(SporeStore(store.path).get("spore-001"))
 
+    @_NEEDS_LOCK
     @pytest.mark.parametrize("op", ["update", "touch", "descend", "ascend"])
     def test_a_stale_version_is_refused_and_nothing_is_written(self, store, op):
         s = store.add(type="question", text="x", today=T0)
@@ -832,6 +845,7 @@ class TestExpectedVersion:
             call()
         assert store.path.read_bytes() == before
 
+    @_NEEDS_LOCK
     def test_version_of_lets_a_caller_bind_its_own_hash(self, store):
         store.add(type="task", text="x", today=T0)
 
@@ -847,6 +861,48 @@ class TestExpectedVersion:
         store.add(type="task", text="x", today=T0)
         with pytest.raises(ValueError, match="expected_version"):
             store.update("spore-001", text="y", expected_version=bad)  # type: ignore[arg-type]
+
+    def test_version_of_without_expected_version_is_a_value_error(self, store):
+        store.add(type="task", text="x", today=T0)
+        with pytest.raises(ValueError, match="without expected_version"):
+            store.update("spore-001", text="y", version_of=lambda sp: "v")
+        assert SporeStore(store.path).get("spore-001")["text"] == "x"
+
+    @_NEEDS_LOCK
+    def test_a_version_of_returning_a_non_str_is_a_type_error(self, store):
+        store.add(type="task", text="x", today=T0)
+        with pytest.raises(TypeError, match="must return a str"):
+            store.update("spore-001", text="y", expected_version="1", version_of=lambda sp: 1)  # type: ignore[arg-type,return-value]
+
+    @_NEEDS_LOCK
+    def test_version_of_cannot_change_what_is_saved(self, store):
+        store.add(type="task", text="x", today=T0)
+
+        def meddling(sp):
+            sp.pop("seen")
+            sp["text"] = "meddled"
+            return "v"
+
+        store.update("spore-001", tier="hot", expected_version="v", version_of=meddling)
+        saved = SporeStore(store.path).get("spore-001")
+        assert saved["text"] == "x" and saved["seen"] == T0.isoformat() and saved["tier"] == "hot"
+
+    def test_without_a_file_lock_a_versioned_write_is_refused(self, store, monkeypatch):
+        s = store.add(type="task", text="x", today=T0)
+        monkeypatch.setattr(_spores, "fcntl", None)
+        before = store.path.read_bytes()
+        with pytest.raises(SporeError, match="needs a file lock"):
+            store.update("spore-001", text="y", expected_version=spore_version(s))
+        assert store.path.read_bytes() == before
+        store.update("spore-001", text="y")  # an unversioned write is unchanged
+
+    def test_a_lone_surrogate_in_the_store_still_versions(self, store):
+        store.add(type="task", text="x", today=T0)
+        raw = store.path.read_text(encoding="utf-8").replace('"text": "x"', '"text": "\\ud800"')
+        store.path.write_text(raw, encoding="utf-8")
+        sp = SporeStore(store.path).get("spore-001")
+        assert sp["text"] == "\ud800"
+        assert len(spore_version(sp)) == 64
 
     @pytest.mark.skipif(_spores.fcntl is None, reason="the cross-process lock is POSIX fcntl")
     @pytest.mark.parametrize("with_version", [True, False])
@@ -866,9 +922,9 @@ class TestExpectedVersion:
         proc.start()
         try:
             assert held.wait(timeout=30)
+            t0 = time.monotonic()
             timer = __import__("threading").Timer(0.5, release.set)
             timer.start()
-            t0 = time.monotonic()
             kwargs = {"expected_version": spore_version(read)} if with_version else {}
             if with_version:
                 with pytest.raises(SporeError, match="changed since read"):
@@ -880,6 +936,6 @@ class TestExpectedVersion:
             release.set()
             proc.join(timeout=30)
         assert proc.exitcode == 0
-        assert waited >= 0.4  # the update really queued behind the held lock
+        assert waited >= 0.45  # the update really queued behind the held lock
         expected_text = "edited by the other writer" if with_version else "late write"
         assert SporeStore(path).get("spore-001")["text"] == expected_text

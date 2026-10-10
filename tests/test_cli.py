@@ -4743,7 +4743,8 @@ def test_a_uri_db_refuses_cleanly_for_a_command_that_builds_a_store_directly(tmp
 def test_a_failed_sqlite_export_leaves_the_output_untouched(tmp_path, monkeypatch, capsys):
     """walopen L3 r11 (both seats; reproduced 1008+11 with the real CLI): a non-db
     source left a 0-byte --output that looked like an export. The export writes its
-    own temp and publishes it with os.replace only on success."""
+    own temp for an absent --output (published with a no-clobber link) and backs up
+    in place for an existing one, so a failure leaves --output as it was."""
     import argparse
     from anneal_memory.cli import cmd_export
     monkeypatch.chdir(tmp_path)
@@ -4757,3 +4758,14 @@ def test_a_failed_sqlite_export_leaves_the_output_untouched(tmp_path, monkeypatc
         target = tmp_path / output
         assert (target.read_bytes() if target.exists() else None) == before
     assert not [p for p in tmp_path.iterdir() if p.name.endswith(".export-tmp")]
+
+
+def test_an_export_output_that_is_a_directory_exits_cleanly(tmp_path, capsys):
+    db = tmp_path / "m.db"
+    Store(db).close()
+    args = Namespace(db=str(db), format="sqlite", output=str(tmp_path),
+                     json=False, project_name="P")
+    with pytest.raises(SystemExit) as exc:
+        cmd_export(args)
+    assert exc.value.code == 1
+    assert capsys.readouterr().err.startswith("Error:")

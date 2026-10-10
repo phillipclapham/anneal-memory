@@ -4495,8 +4495,9 @@ def test_an_sqlite_uri_is_refused_as_a_store_path(uri, tmp_path, monkeypatch):
 
 
 def test_every_sqlite_connect_goes_through_the_one_opener():
-    """walopen bound (desk 1008+12): any sqlite3.connect call in the package other
-    than inside store.connect bypasses the URI refusal; r6-r11 each found one."""
+    """walopen bound: the only sqlite3 opener in the package is the module-level
+    store.connect; any other way to reach sqlite3.connect or sqlite3.Connection
+    (attribute call, aliased module, from-import) bypasses the URI refusal."""
     import ast
     import anneal_memory
     pkg = Path(anneal_memory.__file__).parent
@@ -4504,12 +4505,21 @@ def test_every_sqlite_connect_goes_through_the_one_opener():
     for f in sorted(pkg.rglob("*.py")):
         tree = ast.parse(f.read_text(encoding="utf-8"))
         allowed = set()
+        if f.name == "store.py" and f.parent == pkg:
+            for node in tree.body:
+                if isinstance(node, ast.FunctionDef) and node.name == "connect":
+                    allowed.update(id(n) for n in ast.walk(node))
+        aliases = {"sqlite3"}
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "connect" and f.name == "store.py":
-                allowed.update(id(n) for n in ast.walk(node))
+            if isinstance(node, ast.Import):
+                aliases.update(a.asname for a in node.names if a.name == "sqlite3" and a.asname)
+            elif (isinstance(node, ast.ImportFrom) and node.module == "sqlite3"
+                    and any(a.name in ("connect", "Connection") for a in node.names)):
+                offenders.append(f"{f.name}:{node.lineno} from-import")
         for node in ast.walk(tree):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "connect" and isinstance(node.func.value, ast.Name)
-                    and node.func.value.id == "sqlite3" and id(node) not in allowed):
+                    and node.func.attr in ("connect", "Connection")
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in aliases and id(node) not in allowed):
                 offenders.append(f"{f.name}:{node.lineno}")
     assert offenders == [], offenders

@@ -2089,6 +2089,46 @@ def cmd_wrap_token_current(args: argparse.Namespace) -> None:
         print(snapshot["token"])
 
 
+def _backup_sqlite(src_target: str, dst_target: str) -> None:
+    """Back one SQLite database up into another through the one opener."""
+    src_conn = sqlite_connect(src_target)
+    try:
+        dst_conn = sqlite_connect(dst_target)
+        try:
+            src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+    finally:
+        src_conn.close()
+
+
+def _publish_no_clobber(tmp: Path, out: Path) -> None:
+    """Move ``tmp`` to the absent ``out`` without ever replacing a file.
+
+    Raises FileExistsError when ``out`` exists. On a filesystem without hard
+    links the bytes are copied into an O_EXCL-created ``out``, which is removed
+    again if the copy fails (this call created it).
+    """
+    try:
+        os.link(tmp, out)
+        return
+    except FileExistsError:
+        raise
+    except OSError:
+        pass
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666)
+    try:
+        with os.fdopen(fd, "wb") as dst, open(tmp, "rb") as src:
+            while chunk := src.read(1 << 20):
+                dst.write(chunk)
+            dst.flush()
+            os.fsync(dst.fileno())
+    except BaseException:
+        with contextlib.suppress(OSError):
+            out.unlink()
+        raise
+
+
 def cmd_export(args: argparse.Namespace) -> None:
     """Export store data."""
     fmt = args.format
@@ -2107,28 +2147,37 @@ def cmd_export(args: argparse.Namespace) -> None:
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
-        # Write a temp file only THIS process owns, in the destination's directory,
-        # and publish it with os.replace only after the backup succeeded: a failed
-        # export leaves --output untouched (absent, or the previous file) and
-        # deletes nothing but its own temp (walopen L3 r11; r10's cleanup decided
-        # ownership by exists() and could delete a peer's export).
-        tmp = out.with_name(f".{out.name}.{os.getpid()}-{uuid.uuid4().hex[:8]}.export-tmp")
         try:
-            src_conn = sqlite_connect(src_target)
-            try:
-                dst_conn = sqlite_connect(tmp)
-                try:
-                    src_conn.backup(dst_conn)
-                finally:
-                    dst_conn.close()
-            finally:
-                src_conn.close()
-            os.replace(tmp, out)
-        except (ValueError, OSError, sqlite3.Error) as exc:  # NUL in a path, unwritable dir…
-            with contextlib.suppress(OSError, ValueError):
-                tmp.unlink()
+            if out.exists() and os.path.samefile(db_path, out):
+                print("Error: --output is the database being exported", file=sys.stderr)
+                sys.exit(1)
+        except OSError as exc:
             print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
             sys.exit(1)
+        # An existing --output is written in place through SQLite's own backup
+        # transaction, so its inode, mode, symlink and locking stay as they were
+        # and a failed backup leaves it as it was. An absent --output is built in
+        # a temp file this process owns, in the destination's directory, and
+        # published with a no-clobber link, so a failed export leaves nothing at
+        # --output and deletes only its own temp.
+        tmp: Path | None = None
+        try:
+            if out.exists():
+                _backup_sqlite(src_target, dst_target)
+            else:
+                tmp = out.parent / f".{os.getpid()}-{uuid.uuid4().hex[:8]}.export-tmp"
+                _backup_sqlite(src_target, sqlite_path(tmp))
+                _publish_no_clobber(tmp, out)
+        except FileExistsError:
+            print(f"Error: {out} appeared during the export; nothing was overwritten", file=sys.stderr)
+            sys.exit(1)
+        except (ValueError, OSError, sqlite3.Error) as exc:  # NUL in a path, unwritable dir…
+            print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+        finally:
+            if tmp is not None:
+                with contextlib.suppress(OSError):
+                    tmp.unlink()
         try:
             size = out.stat().st_size
         except OSError as exc:

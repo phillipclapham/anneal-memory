@@ -14,8 +14,10 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ### Fixed — a failed `export --format sqlite` no longer leaves a file at `--output`
 - A failed backup (a source that is not a database, a full disk) left an empty or partial file at the output path
-  that looked like an export. The export now writes a temp file of its own in the destination directory and moves it
-  into place only on success; on failure `--output` is untouched (absent, or the previous file).
+  that looked like an export. An existing `--output` is now written in place through SQLite's backup transaction
+  (inode, mode and symlink kept, left as it was on failure); an absent one is built in a temp file of the export's
+  own and published with a no-clobber link. `--output` equal to `--db` is refused, and a bad `--output` prints
+  `Error: …` instead of a traceback.
 
 ### Added — current-state recall: state keys and the recall redirect (CAP-04)
 - **Redirect.** When the store has supersession links, `retrieve_relevant` keeps its live hits

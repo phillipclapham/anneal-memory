@@ -4512,7 +4512,7 @@ def test_every_sqlite_connect_goes_through_the_one_opener():
         aliases = {"sqlite3"}
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                aliases.update(a.asname for a in node.names if a.name == "sqlite3" and a.asname)
+                aliases.update(a.asname for a in node.names if a.name in ("sqlite3", "sqlite3.dbapi2") and a.asname)
             elif isinstance(node, ast.ImportFrom) and node.module in ("sqlite3", "sqlite3.dbapi2"):
                 if any(a.name in ("connect", "Connection", "dbapi2", "*") for a in node.names):
                     offenders.append(f"{f.name}:{node.lineno} from-import")

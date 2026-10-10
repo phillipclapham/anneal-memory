@@ -2119,32 +2119,23 @@ def _backup_sqlite(src_target: str, dst_conn: sqlite3.Connection) -> None:
 
 
 def _publish_no_clobber(tmp: Path, out: Path) -> None:
-    """Move ``tmp`` to the absent ``out`` without ever replacing a file.
+    """Publish the finished ``tmp`` at the absent ``out`` without replacing a file.
 
-    Raises FileExistsError when ``out`` exists. On a filesystem without hard
-    links the bytes are copied into an O_EXCL-created ``out``, which is removed
-    again if the copy fails (this call created it).
+    Raises FileExistsError when ``out`` exists. A hard link is atomic and
+    create-only; on a filesystem without hard links the temp is renamed into
+    place after a last existence check (git's lockfile publication).
     """
     try:
         os.link(tmp, out)
-        _fsync_dir(out.parent)
-        return
     except FileExistsError:
         raise
     except OSError:
-        pass
-    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666)
-    try:
-        with os.fdopen(fd, "wb") as dst, open(tmp, "rb") as src:
-            while chunk := src.read(1 << 20):
-                dst.write(chunk)
-            dst.flush()
-            os.fsync(dst.fileno())
-        _fsync_dir(out.parent)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            out.unlink()
-        raise
+        if os.path.lexists(out):
+            raise FileExistsError(str(out)) from None
+        # [judged by 1010+14, 2026-10-10, against SQLite VACUUM INTO and git lockfile semantics]
+        # The only window is a creator racing in between the re-check and the rename.
+        os.replace(tmp, out)
+    _fsync_dir(out.parent)
 
 
 def cmd_export(args: argparse.Namespace) -> None:
@@ -2165,16 +2156,17 @@ def cmd_export(args: argparse.Namespace) -> None:
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
-        # The output may not be the database or any file SQLite keeps for it:
-        # a backup written over a live -wal/-shm/-journal corrupts the store.
+        # The output may not be the database or any file SQLite keeps for it,
+        # named as given or resolved (a backup over a live -wal/-shm/-journal
+        # corrupts the store). Compared case-folded: a false refusal of a
+        # case-variant name is acceptable.
         try:
             guarded = {
-                os.path.normcase(os.path.realpath(str(db_path) + suffix))
+                os.path.realpath(base + suffix).casefold()
+                for base in (os.path.abspath(db_path), os.path.realpath(db_path))
                 for suffix in ("", "-wal", "-shm", "-journal")
             }
-            if os.path.normcase(os.path.realpath(out)) in guarded or (
-                out.exists() and os.path.samefile(db_path, out)
-            ):
+            if os.path.realpath(out).casefold() in guarded:
                 print(
                     "Error: --output is the database being exported or one of its files",
                     file=sys.stderr,
@@ -2183,52 +2175,38 @@ def cmd_export(args: argparse.Namespace) -> None:
         except (OSError, ValueError) as exc:
             print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
             sys.exit(1)
-        # An existing --output is written in place through SQLite's own backup
-        # transaction, so its inode, mode, symlink and locking stay as they were
-        # and a failed backup leaves it as it was. An absent --output is built in
-        # a temp file this process owns, in the destination's directory, and
-        # published with a no-clobber link, so a failed export leaves nothing at
-        # --output and deletes only its own temp. The output mirrors the source's
-        # journal mode (the backup copies its header), which keeps it openable as
-        # a store.
-        tmp: Path | None = None
+        # Export never writes into an existing path (as SQLite's VACUUM INTO
+        # refuses a non-empty target): lexists also catches a dangling symlink.
+        if os.path.lexists(out):
+            print(
+                f"Error: {out} exists; export never overwrites a file. "
+                "Remove it or choose another --output.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        # The copy is built in a private temp in --output's directory and
+        # published without replacing a file, so a failed export leaves nothing
+        # at --output and deletes only its own temp. The output mirrors the
+        # source's journal mode (the backup copies its header), which keeps it
+        # openable as a store.
+        tmp = out.parent / f".{os.getpid()}-{uuid.uuid4().hex[:8]}.export-tmp"
+        tmp_id: tuple[int, int] | None = None
+        tmp_size = 0
         try:
-            if out.exists():
-                before = out.stat()
-                dst_conn = sqlite_connect(dst_target)
-                try:
-                    try:
-                        after = out.stat()
-                        changed = (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
-                    except FileNotFoundError:
-                        after, changed = None, True
-                    if changed:
-                        # The path changed between the stat and the connect;
-                        # sqlite_connect may have just created an empty file.
-                        dst_conn.close()
-                        if after is not None and after.st_size == 0:
-                            with contextlib.suppress(OSError):
-                                out.unlink()
-                        print(f"Error: {out} changed during the export; nothing was written", file=sys.stderr)
-                        sys.exit(1)
-                    _backup_sqlite(src_target, dst_conn)
-                finally:
-                    dst_conn.close()
-                _fsync_dir(out.parent)
-            else:
-                tmp = out.parent / f".{os.getpid()}-{uuid.uuid4().hex[:8]}.export-tmp"
-                tmp_conn = sqlite_connect(sqlite_path(tmp))
-                try:
-                    _backup_sqlite(src_target, tmp_conn)
-                finally:
-                    tmp_conn.close()
-                _publish_no_clobber(tmp, out)
+            tmp_conn = sqlite_connect(sqlite_path(tmp))
+            try:
+                _backup_sqlite(src_target, tmp_conn)
+            finally:
+                tmp_conn.close()
+            tmp_stat = tmp.stat()
+            tmp_id, tmp_size = (tmp_stat.st_dev, tmp_stat.st_ino), tmp_stat.st_size
+            _publish_no_clobber(tmp, out)
         except FileExistsError:
             print(f"Error: {out} appeared during the export; nothing was overwritten", file=sys.stderr)
             sys.exit(1)
         except _ExportBusyError:
             print(
-                f"Error: export to {out} failed: the output database stayed locked for "
+                f"Error: export to {out} failed: the database being exported stayed locked for "
                 f"{_EXPORT_BUSY_DEADLINE_S:g}s",
                 file=sys.stderr,
             )
@@ -2237,11 +2215,12 @@ def cmd_export(args: argparse.Namespace) -> None:
             print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
             sys.exit(1)
         finally:
-            if tmp is not None:
-                with contextlib.suppress(OSError):
-                    tmp.unlink()
+            with contextlib.suppress(OSError):
+                tmp.unlink()
         try:
-            size = out.stat().st_size
+            out_stat = os.stat(out)
+            # No claim about a file we did not write: a swapped inode reports the temp's size.
+            size = out_stat.st_size if (out_stat.st_dev, out_stat.st_ino) == tmp_id else tmp_size
         except OSError as exc:
             print(f"Error: exported to {out}, but cannot read it back: {exc}", file=sys.stderr)
             sys.exit(1)

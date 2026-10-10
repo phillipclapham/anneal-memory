@@ -14,12 +14,11 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ### Fixed — a failed `export --format sqlite` no longer leaves a file at `--output`
 - A failed backup (a source that is not a database, a full disk) left an empty or partial file at the output path
-  that looked like an export. An existing `--output` is now written in place through SQLite's backup transaction
-  (inode, mode and symlink kept, left as it was on failure); an absent one is built in a temp file of the export's
-  own and published with a no-clobber link. `--output` naming the database or one of its `-wal`, `-shm` or
-  `-journal` files is refused, a bad `--output` prints `Error: …` instead of a traceback, and an output another
-  connection holds locked errors after a deadline instead of waiting forever. The output mirrors the source's
-  journal mode.
+  that looked like an export. The copy is now built in a private temp in the output's directory and published
+  without replacing a file. Export refuses an existing `--output` (as SQLite's `VACUUM INTO` does) and refuses the
+  database or any of its `-wal`, `-shm` or `-journal` files by name, as given or resolved. A bad `--output` prints
+  `Error: …` instead of a traceback, and a source another connection holds locked errors after a deadline instead
+  of waiting forever. The output mirrors the source's journal mode.
 ### Fixed — a database error names the operation the caller called
 - A `StoreDatabaseError` raised inside a nested store boundary now carries the OUTER
   method's `operation`, with the same SQLite `__cause__` and `cause_type_name`. A team

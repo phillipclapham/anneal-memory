@@ -1456,20 +1456,48 @@ class TestCmdExport:
         if existed:
             assert wal.read_bytes() == before
 
-    def test_export_sqlite_to_a_locked_output_errors_after_the_deadline(
+    def test_export_sqlite_refuses_the_wal_of_a_symlinked_source(self, base_args_with_data, tmp_path):
+        """walopen L3 r13: --db through a symlink and --output the real file's absent
+        -wal passed the guard and created a database image beside a live store."""
+        real = Path(base_args_with_data.db)
+        link = tmp_path / "current.db"
+        try:
+            os.symlink(real, link)
+        except OSError:
+            pytest.skip("symlinks need privilege here")
+        wal = Path(str(real) + "-wal")
+        wal.unlink(missing_ok=True)
+        base_args_with_data.db = str(link)
+        base_args_with_data.format = "sqlite"
+        base_args_with_data.output = str(wal)
+        with pytest.raises(SystemExit) as exc:
+            cmd_export(base_args_with_data)
+        assert exc.value.code == 1
+        assert not wal.exists()
+
+    def test_export_sqlite_refuses_an_existing_output_and_leaves_it(self, base_args_with_data, tmp_path, capsys):
+        out = tmp_path / "keep.db"
+        out.write_bytes(b"previous export")
+        base_args_with_data.format = "sqlite"
+        base_args_with_data.output = str(out)
+        with pytest.raises(SystemExit) as exc:
+            cmd_export(base_args_with_data)
+        assert exc.value.code == 1
+        assert "never overwrites" in capsys.readouterr().err
+        assert out.read_bytes() == b"previous export"
+
+    def test_export_sqlite_of_a_locked_source_errors_after_the_deadline(
         self, base_args_with_data, tmp_path, capsys, monkeypatch
     ):
-        """walopen L2: a backup into an output another connection holds locked
+        """walopen L2: a backup from a source another connection holds locked
         spun forever; it now errors once the deadline passes."""
         import sqlite3
         import time
         from anneal_memory import cli
-        out = tmp_path / "locked.db"
-        hold = sqlite3.connect(out, isolation_level=None)
-        hold.execute("pragma journal_mode=wal")
-        hold.execute("create table u(y)")
-        hold.execute("BEGIN IMMEDIATE")
-        hold.execute("insert into u values(1)")
+        out = tmp_path / "copy.db"
+        hold = sqlite3.connect(base_args_with_data.db, isolation_level=None)
+        hold.execute("pragma journal_mode=delete")  # a WAL source never blocks its readers
+        hold.execute("BEGIN EXCLUSIVE")
         monkeypatch.setattr(cli, "_EXPORT_BUSY_DEADLINE_S", 0.5)
         base_args_with_data.format = "sqlite"
         base_args_with_data.output = str(out)
@@ -1481,12 +1509,10 @@ class TestCmdExport:
             hold.execute("ROLLBACK")
             hold.close()
         assert exc.value.code == 1
-        assert capsys.readouterr().err.startswith("Error:")
+        assert "stayed locked" in capsys.readouterr().err
         assert time.monotonic() - t0 < 10
-        check = sqlite3.connect(out)
-        assert check.execute("select count(*) from u").fetchone() == (0,)
-        assert check.execute("select count(*) from sqlite_master").fetchone() == (1,)
-        check.close()
+        assert not out.exists()
+        assert not [p for p in tmp_path.iterdir() if p.name.endswith(".export-tmp")]
 
     def test_export_sqlite_json(self, base_args_with_data, tmp_path, capsys):
         out = str(tmp_path / "copy.db")
@@ -4791,14 +4817,14 @@ def test_a_uri_db_refuses_cleanly_for_a_command_that_builds_a_store_directly(tmp
 def test_a_failed_sqlite_export_leaves_the_output_untouched(tmp_path, monkeypatch, capsys):
     """walopen L3 r11 (both seats; reproduced 1008+11 with the real CLI): a non-db
     source left a 0-byte --output that looked like an export. The export writes its
-    own temp for an absent --output (published with a no-clobber link) and backs up
-    in place for an existing one, so a failure leaves --output as it was."""
+    own temp and publishes it with a no-clobber link, so a failure leaves nothing at
+    --output; an existing --output is refused and left as it was."""
     import argparse
     from anneal_memory.cli import cmd_export
     monkeypatch.chdir(tmp_path)
     (tmp_path / "bad.db").write_text("not a database")
     (tmp_path / "keep.db").write_bytes(b"previous export")
-    for output, before in (("out.db", None), ("keep.db", b"previous export")):
+    for output, before in (("out.db", None), ("keep.db", b"previous export")):  # keep.db: refused
         args = argparse.Namespace(db=str(tmp_path / "bad.db"), format="sqlite",
                                   output=output, json=False, project_name="P")
         with pytest.raises(SystemExit):

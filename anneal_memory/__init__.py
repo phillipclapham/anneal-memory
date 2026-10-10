@@ -22,10 +22,14 @@ from .store import (
     WrapWindowMovedError,
     continuity_lock,
 )
+from .origin import canonical_section_markdown, origin_key_usable
 from .types import (
     DEFAULT_TRUST,
     TRUST_LEVELS,
     AffectiveState,
+    DeleteResult,
+    OriginKeyStatus,
+    SectionWriteResult,
     AssociationPair,
     AssociationStats,
     Episode,
@@ -183,6 +187,11 @@ __all__ = [
     "PrepareWrapResult",
     "RecallResult",
     "SaveContinuityResult",
+    "DeleteResult",
+    "OriginKeyStatus",
+    "SectionWriteResult",
+    "canonical_section_markdown",
+    "origin_key_usable",
     "StalePatternDict",
     "StoreStatus",
     "Tombstone",

@@ -4476,6 +4476,23 @@ def read_section(store: "Store", heading: str) -> tuple[str, str] | None:
     return text, _section_version(text)
 
 
+_REFUSAL_MESSAGES: dict[str, str] = {
+    "wrap_in_progress": "a wrap is open on this store; edit after it saves, or its "
+                        "owner ends it (anneal-memory wrap-cancel --wrap-token TOKEN)",
+    "pipeline_tmp_present": "a wrap's continuity tmp sits beside the file (a wrap "
+                            "committed and not yet renamed, or one that crashed); if no "
+                            "wrap is running, recover it as the store's orphan-tmp "
+                            "warning at open describes",
+    "graduating": "graduating sections change only through a wrap",
+    "no_such_section": "the heading is not a section of this store's schema",
+    "section_absent": "the continuity file has no such section",
+    "ambiguous_heading": "more than one header line claims this section",
+    "invalid_body": "a body line starting '## ' would start a new section",
+    "unreadable": "the continuity file is not UTF-8",
+    "store_busy": "another writer holds the store; retry",
+}
+
+
 def _pipeline_tmp_present(store: "Store") -> bool:
     parent = store.continuity_path.parent
     return parent.exists() and any(parent.glob(f"{glob.escape(store.continuity_path.stem)}.*.md.tmp"))
@@ -4491,16 +4508,11 @@ def replace_section(
         raise TypeError("replace_section: heading and body must be str")
     if not isinstance(expected_version, str):
         raise TypeError("replace_section: expected_version must be str")
-    schema = store.section_schema
 
     def refused(reason: str, version: str | None = None) -> SectionWriteResult:
-        return SectionWriteResult(outcome="refused", heading=heading, reason=reason, version=version)
+        return SectionWriteResult(outcome="refused", heading=heading, reason=reason,
+                                  version=version, message=_REFUSAL_MESSAGES.get(reason))
 
-    spec = next((sp for sp in schema if sp["heading"].lower() == heading.strip().lower()), None)
-    if spec is None:
-        return refused("no_such_section")
-    if spec["role"] == "graduating":
-        return refused("graduating")
     new_body = canonical_section_markdown(body)
     # The span parser's own header test, on the canonical body: a body line it
     # reads as a header would split the section for every reader.
@@ -4509,6 +4521,7 @@ def replace_section(
 
     result: SectionWriteResult
     old_version: str | None = None
+    spec: SectionSpec | None = None
     with store.continuity_lock(require=True):
         conn = store._conn
         try:
@@ -4518,7 +4531,15 @@ def replace_section(
                 return refused("store_busy")
             raise
         try:
-            if store.get_wrap_started_at():
+            # Read under the locks, fail-closed like the wrap: a corrupt schema
+            # raises instead of falling back to the default one (L1 #4).
+            schema = store.section_schema_for_wrap()
+            spec = next((sp for sp in schema if sp["heading"].lower() == heading.strip().lower()), None)
+            if spec is None:
+                result = refused("no_such_section")
+            elif spec["role"] == "graduating":
+                result = refused("graduating")
+            elif store.get_wrap_started_at():
                 result = refused("wrap_in_progress")
             elif _pipeline_tmp_present(store):
                 result = refused("pipeline_tmp_present")
@@ -4544,7 +4565,11 @@ def replace_section(
                             header += "\n"
                         middle: list[str] = []
                         if new_body:
-                            middle = ["\n"] + [line + "\n" for line in new_body.split("\n")]
+                            # Keep the file's own style: a blank line after the
+                            # header where the section had one, or had no lines (L1 #6).
+                            blank_after_header = start + 1 >= end or not raw_lines[start + 1].strip()
+                            middle = (["\n"] if blank_after_header else []) + [
+                                line + "\n" for line in new_body.split("\n")]
                         if end < len(raw_lines):
                             middle.append("\n")
                         new_raw = "".join(raw_lines[:start] + [header] + middle + raw_lines[end:])
@@ -4566,7 +4591,7 @@ def replace_section(
             except sqlite3.Error:
                 pass
             raise
-    if result.outcome == "written":
+    if result.outcome == "written" and spec is not None:
         store._audit_log_after_commit("section_replaced", {
             "heading": spec["heading"],
             "old_version": old_version,

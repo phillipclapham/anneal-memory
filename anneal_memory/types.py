@@ -71,7 +71,9 @@ class OriginKeyStatus:
     """What an episode origin key names now (:meth:`Store.origin_key_status`).
     ``state`` is ``"live"``, ``"retired"`` (its episode was deleted; the key is
     never reused) or ``"unknown"``. ``retired_at`` and ``effect_id`` are set only
-    when retired; ``effect_id`` is ``None`` for a delete that did not name one."""
+    when retired; ``effect_id`` is ``None`` for a delete that did not name one.
+    For a retired key ``episode_id`` is historical: a re-recorded episode can
+    carry the same id, so never look an episode up by it."""
 
     state: str
     episode_id: str | None = None
@@ -91,7 +93,8 @@ class DeleteResult:
     ``rewires`` names each link carried past it (``outcome`` ``"created"``,
     ``"joined"`` or ``"kept"``, an existing operator row left as it was);
     ``trust_removed`` and ``team_left`` are the descendants' links the trust
-    re-check removed or left to the team ledger."""
+    re-check removed or left to the team ledger. For ``already_applied`` and
+    ``deleted_by_other`` ``episode_id`` is historical (see :class:`OriginKeyStatus`)."""
 
     outcome: str
     episode_id: str | None = None
@@ -117,6 +120,8 @@ class SectionWriteResult:
     heading: str
     version: str | None = None
     reason: str | None = None
+    # On a refusal: what it means and, where one exists, how to clear it.
+    message: str | None = None
 
 
 @dataclass(frozen=True)

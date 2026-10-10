@@ -160,6 +160,37 @@ class TestReplace(_Case):
         r = self.replace("State", "x")
         self.assertEqual((r.outcome, r.reason), ("refused", "pipeline_tmp_present"))
 
+    def test_refusals_say_how_to_clear_them(self) -> None:
+        stem = self.store.continuity_path.stem
+        (self.store.continuity_path.parent / f"{stem}.abcdef123456-0a1b2c3d.md.tmp").write_text("x")
+        r = self.replace("State", "x")
+        self.assertIn("orphan", r.message)
+        r = self.store.replace_section("Patterns", "x", expected_version="0" * 64)
+        self.assertIn("wrap", r.message)
+
+    def test_the_files_own_blank_line_style_is_kept(self) -> None:
+        tight = DOC.replace("## State\n\nold", "## State\nold")
+        self.write(tight)
+        self.replace("State", "old state line")  # a no-op edit
+        self.assertEqual(self.raw(), tight)
+        self.write(DOC)
+        self.replace("State", "old state line")
+        self.assertEqual(self.raw(), DOC)
+
+    def test_a_corrupt_schema_refuses_instead_of_falling_back(self) -> None:
+        _, v = self.store.read_section("State")
+        self.store._conn.execute(
+            "UPDATE metadata SET value = '{not json' WHERE key = 'section_schema'")
+        if self.store._conn.execute(
+                "SELECT changes()").fetchone()[0] == 0:
+            self.store._conn.execute(
+                "INSERT INTO metadata (key, value) VALUES ('section_schema', '{not json')")
+        self.store._conn.commit()
+        with self.assertRaises(Exception) as cm:
+            self.store.replace_section("State", "x", expected_version=v)
+        self.assertIn("schema", str(cm.exception).lower())
+        self.assertIn("old state line", self.raw())
+
     def test_a_glob_character_in_the_store_name_still_sees_the_tmp(self) -> None:
         store = Store(Path(self._tmp.name) / "my[ab].db")  # L2 #4, run
         try:

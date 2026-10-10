@@ -280,6 +280,16 @@ _BIDI_CONTROLS = frozenset(
 )
 
 
+def strip_hidden_controls(value: str) -> str:
+    """Remove bidi controls, lone surrogates, the tag block (U+E0000-E007F) and
+    every control character but ``\n`` and ``\t``. The one filter the spore
+    fields and :func:`anneal_memory.origin.canonical_section_markdown` share."""
+    return "".join(
+        ch for ch in value
+        if ch in "\n\t" or (ch not in _BIDI_CONTROLS and not "\U000e0000" <= ch <= "\U000e007f" and unicodedata.category(ch) not in ("Cc", "Cs"))
+    )
+
+
 def normalize_spore_field(value: str) -> str:
     """The text a spore stores for ``text``, ``domain`` and ``disposition``, as
     :meth:`SporeStore.add` and :meth:`SporeStore.update` write it: NFC, ``\\r\\n``
@@ -290,11 +300,7 @@ def normalize_spore_field(value: str) -> str:
     characters (zero-width, variation selectors) are stored as given: no finite
     list removes every one, so showing them is the display's job. Exported so a caller
     can compute the stored value before writing."""
-    v = value.replace("\r\n", "\n").replace("\r", "\n")
-    v = "".join(
-        ch for ch in v
-        if ch in "\n\t" or (ch not in _BIDI_CONTROLS and not "\U000e0000" <= ch <= "\U000e007f" and unicodedata.category(ch) not in ("Cc", "Cs"))
-    )
+    v = strip_hidden_controls(value.replace("\r\n", "\n").replace("\r", "\n"))
     v = "\n".join(line.rstrip() for line in v.split("\n")).rstrip()
     # Last: a removed character can leave a base and a combining mark adjacent.
     return unicodedata.normalize("NFC", v)

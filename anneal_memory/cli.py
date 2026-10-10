@@ -40,6 +40,7 @@ Zero dependencies beyond Python stdlib.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import errno
 import json
 import os
@@ -47,6 +48,8 @@ import re
 import shlex
 import sqlite3
 import stat
+import time
+import unicodedata
 import uuid
 import sys
 from dataclasses import asdict
@@ -133,6 +136,9 @@ from .crystal import (
 )
 from .retrieval import retrieve_patterns, retrieve_relevant, MAX_PATTERNS
 from .store import (
+    StorePathError,
+    connect as sqlite_connect,
+    sqlite_path,
     register_writer_schema,
     Store,
     StoreDatabaseError,
@@ -147,6 +153,7 @@ from .store import (
     _SCHEMA_VERSION,
     _parse_format_version,
     normalize_state_key,
+    _fsync_dir,
 )
 from .types import (
     DEFAULT_TRUST,
@@ -350,6 +357,11 @@ def _existing_db_path(args: argparse.Namespace, *, require_file: bool = False) -
         sys.exit(1)
     if require_file and not is_file:
         print(f"Error: not a database file: {db_path}", file=sys.stderr)
+        sys.exit(1)
+    try:  # every --db command passes here: an SQLite URI refuses once, cleanly
+        sqlite_path(db_path)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
     return db_path
 
@@ -2080,6 +2092,121 @@ def cmd_wrap_token_current(args: argparse.Namespace) -> None:
         print(snapshot["token"])
 
 
+_EXPORT_BUSY_DEADLINE_S = 30.0
+_BACKUP_BUSY_STATUSES = (5, 6)  # SQLITE_BUSY, SQLITE_LOCKED
+
+
+class _ExportBusyError(Exception):
+    """The database being exported stayed locked past the export's deadline."""
+
+
+def _backup_sqlite(
+    src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection, deadline: float
+) -> None:
+    """Back an open SQLite connection up into another, finished as one file.
+
+    ``Connection.backup`` retries a BUSY or LOCKED status forever, so the
+    progress callback raises once such a status is seen past ``deadline`` (a
+    ``time.monotonic()`` value). SQLite's own busy wait is switched off first, so
+    it cannot run inside a step and this callback is the bound. The copy is then
+    put in rollback-journal mode: that checkpoints a WAL copy into the main file,
+    so the copy is one file with nothing left in a ``-wal`` (a Store opened on it
+    switches it back to WAL).
+    """
+    src_conn.execute("PRAGMA busy_timeout = 0")
+
+    def _progress(status: int, remaining: int, total: int) -> None:
+        if status in _BACKUP_BUSY_STATUSES and time.monotonic() > deadline:
+            raise _ExportBusyError
+
+    src_conn.backup(dst_conn, progress=_progress)
+    mode = dst_conn.execute("PRAGMA journal_mode = DELETE").fetchone()[0]
+    if str(mode).lower() != "delete":
+        raise OSError(f"the copy could not be finished as a single file (journal mode {mode})")
+
+
+def _fold(path: str) -> str:
+    """Case- and Unicode-normalised form for comparing file names (NFC, then casefold)."""
+    return unicodedata.normalize("NFC", path).casefold()
+
+
+def _publish_no_clobber(tmp: Path, out: Path) -> None:
+    """Publish the finished ``tmp`` at the absent ``out`` without replacing a file.
+
+    Raises FileExistsError when ``out`` exists. The copy is flushed to disk
+    first. A hard link is atomic and create-only, so where the filesystem has
+    them nothing that appears at ``out`` is ever replaced. Only when the link
+    fails for another reason (FAT, exFAT and many SMB shares have no hard links)
+    is the target claimed with an exclusive create and the copy renamed over that
+    claim (git's lockfile, with the target as the lock): a concurrent creator is
+    still refused, but a process that deletes the claim and writes its own file
+    before the rename is overwritten (walopen L3 r15). A failure or interrupt
+    after the claim leaves it as an empty file (see :func:`_publish_by_claim`).
+    """
+    fd = os.open(tmp, os.O_RDWR | getattr(os, "O_BINARY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        os.link(tmp, out)
+    except FileExistsError:
+        # NFS may answer a retransmitted LINK with EEXIST after the first one
+        # succeeded (open(2)): if ``out`` is our own inode, it was published. An
+        # inode number of 0 identifies nothing (some Windows/SMB stat results),
+        # so it never counts as ours (walopen L3 r16, codex).
+        try:
+            mine, there = os.stat(tmp), os.lstat(out)
+            ours = bool(mine.st_ino) and (mine.st_dev, mine.st_ino) == (there.st_dev, there.st_ino)
+        except OSError:
+            ours = False
+        if not ours:
+            raise
+    except OSError:
+        _publish_by_claim(tmp, out)
+    _fsync_dir(out.parent)
+
+
+def _publish_by_claim(tmp: Path, out: Path) -> None:
+    """The no-hard-link publish of :func:`_publish_no_clobber`.
+
+    A failure or an interrupt after the claim LEAVES whatever is at ``out``
+    and says to inspect it: removing the claim is a check and then an unlink by name,
+    which removes whatever another process put there in between, and on
+    filesystems that report inode 0 cannot even tell the claim from another
+    empty file (walopen L3 r17, codex HIGH + glm HIGH + complement MED). So
+    nothing here deletes a file at ``out``.
+    """
+    # Staged (walopen L3 r21): a FileExistsError from the exclusive create is
+    # another process's file and passes through untouched; any other failure,
+    # from the create on (a close that raises after creating, an interrupt before
+    # the rename), gets the note. The claim is an owning file object, so no bare
+    # descriptor is ever stranded, and its one close is never retried.
+    stage = "claim"
+    try:
+        with open(out, "xb"):
+            stage = "created"  # only the create itself is "claim" (L3 r22)
+        stage = "replace"
+        os.replace(tmp, out)
+    except BaseException as exc:
+        if stage == "claim" and isinstance(exc, FileExistsError):
+            raise
+        # State-neutral: what sits at ``out`` cannot be known here (another
+        # process may have replaced the claim), so the note asserts nothing about
+        # it (walopen L3 r18).
+        with contextlib.suppress(Exception):
+            print(
+                f"Note: the export stopped while publishing {out}; if a file is there, "
+                "inspect it before removing anything.",
+                file=sys.stderr,
+            )
+        if isinstance(exc, FileExistsError):
+            # Not "someone created --output": the claim was ours (L3 r18). No
+            # errno: OSError(EEXIST, ...) would construct a FileExistsError.
+            raise OSError(f"publishing over the claim failed: {exc}") from exc
+        raise
+
+
 def cmd_export(args: argparse.Namespace) -> None:
     """Export store data."""
     fmt = args.format
@@ -2091,19 +2218,108 @@ def cmd_export(args: argparse.Namespace) -> None:
             print(f"Error: database not found: {db_path}", file=sys.stderr)
             sys.exit(1)
         out = Path(args.output) if args.output else Path(f"anneal-export-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db")
-        src_conn = sqlite3.connect(str(db_path))
+        try:  # both paths checked before either connection opens (walopen L3 r7)
+            src_target, dst_target = sqlite_path(db_path), sqlite_path(out)
+            if dst_target == ":memory:":
+                raise ValueError("an export needs a file to write; ':memory:' is not one")
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        # The source is opened once, first: the guard, the emptiness check and the
+        # backup all see the one file SQLite opened (walopen r15: a retargeted
+        # symlink or a deleted source must not export a different or empty DB).
         try:
-            dst_conn = sqlite3.connect(str(out))
+            deadline = time.monotonic() + _EXPORT_BUSY_DEADLINE_S
+            # must_exist: a source removed since the check above is an error, never
+            # recreated empty at the user's path (walopen L3 r15, codex).
+            src_conn = sqlite_connect(src_target, must_exist=True, timeout=_EXPORT_BUSY_DEADLINE_S)
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+        try:
             try:
-                src_conn.backup(dst_conn)
+                # One read transaction: SQLite's busy wait (the connection's
+                # timeout) bounds its first read; the backup gets what is left of
+                # the same deadline.
+                src_conn.execute("BEGIN")
+                page_count = src_conn.execute("PRAGMA page_count").fetchone()[0]
+                canon = src_conn.execute("PRAGMA database_list").fetchone()[2] or ""
+                src_conn.execute("COMMIT")
+            except sqlite3.Error as exc:
+                print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
+                sys.exit(1)
+            if page_count == 0:
+                print(
+                    f"Error: {db_path} is empty; there is nothing to export",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            # The output may not be the database or any file SQLite keeps for it,
+            # named as given or resolved (a backup over a live -wal/-shm/-journal
+            # corrupts the store). Compared case-folded: a false refusal of a
+            # case-variant name is acceptable.
+            try:
+                guarded = {
+                    _fold(os.path.realpath(base + suffix))
+                    for base in (os.path.abspath(db_path), os.path.realpath(db_path), canon)
+                    if base
+                    for suffix in ("", "-wal", "-shm", "-journal")
+                }
+                if _fold(os.path.realpath(out)) in guarded:
+                    print(
+                        "Error: --output is the database being exported or one of its files",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+            except (OSError, ValueError) as exc:
+                print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
+                sys.exit(1)
+            # Export never writes into an existing path (as SQLite's VACUUM INTO
+            # refuses a non-empty target): lexists also catches a dangling symlink.
+            if os.path.lexists(out):
+                print(
+                    f"Error: {out} exists; export never overwrites a file. "
+                    "Remove it or choose another --output.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            # The copy is built in a private temp in --output's directory and
+            # published without replacing a file, so a failed export leaves nothing
+            # at --output and deletes only its own temp.
+            tmp = out.parent / f".{os.getpid()}-{uuid.uuid4().hex}.export-tmp"
+            size = 0
+            try:
+                tmp_conn = sqlite_connect(sqlite_path(tmp))
+                try:
+                    _backup_sqlite(src_conn, tmp_conn, deadline)
+                finally:
+                    tmp_conn.close()
+                size = tmp.stat().st_size
+                _publish_no_clobber(tmp, out)
+            except FileExistsError:
+                print(f"Error: {out} appeared during the export; nothing was overwritten", file=sys.stderr)
+                sys.exit(1)
+            except _ExportBusyError:
+                print(
+                    f"Error: export to {out} failed: the database being exported stayed locked for "
+                    f"{_EXPORT_BUSY_DEADLINE_S:g}s",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            except (ValueError, OSError, sqlite3.Error) as exc:  # NUL in a path, unwritable dir…
+                print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
+                sys.exit(1)
             finally:
-                dst_conn.close()
+                # The temp and any sidecar SQLite left beside it are this export's own.
+                for leftover in ("", "-wal", "-shm", "-journal"):
+                    with contextlib.suppress(OSError):
+                        os.unlink(f"{tmp}{leftover}")
         finally:
             src_conn.close()
         if args.json:
-            _print_json({"format": "sqlite", "path": str(out), "size_bytes": out.stat().st_size})
+            _print_json({"format": "sqlite", "path": str(out), "size_bytes": size})
         else:
-            print(f"Exported SQLite database to {out} ({out.stat().st_size:,} bytes)", file=sys.stderr)
+            print(f"Exported SQLite database to {out} ({size:,} bytes)", file=sys.stderr)
         return
 
     with _open_store(args) as store:
@@ -3868,13 +4084,13 @@ def _outcome_store_id(db_path: Path, *, mint: bool) -> str | None:
             if not _is_anneal_schema(store._conn):
                 refuse(not_anneal)
             sid = store.store_id
-    except (StoreError, OSError, sqlite3.Error) as exc:
+    except (StoreError, OSError, sqlite3.Error, ValueError) as exc:
         refuse(exc)
     if sid is not None or not mint:
         return sid
     try:
-        conn = sqlite3.connect(str(db_path), timeout=30.0, isolation_level=None)
-    except (OSError, sqlite3.Error) as exc:
+        conn = sqlite_connect(db_path, timeout=30.0, isolation_level=None)
+    except (OSError, sqlite3.Error, ValueError) as exc:  # ValueError: a URI path
         refuse(exc)
     try:
         register_writer_schema(conn)  # inside the try whose finally closes conn
@@ -5157,7 +5373,7 @@ def main() -> None:
         # server-specific flags (--no-audit, --skip-integrity, etc.). Its own
         # stdin/stdout reconfigure above is now a harmless no-op re-assertion.
         from .server import main as server_main
-        server_main()
+        server_main()  # refuses a URI path itself (server.start_server)
         return
 
     # CLI subcommand present — reject any unrecognized arguments
@@ -5181,6 +5397,12 @@ def main() -> None:
     # written. One boundary, all subcommands.
     try:
         args.func(args)
+    except StorePathError as exc:
+        # Any subcommand that reaches Store/sqlite_path with a URI-shaped path
+        # (crystal recall, init, serve build a Store directly): one clean refusal
+        # here, not one handler per call site (walopen L3 r9, codex, reproduced).
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     except StoreDatabaseError as exc:
         if not _is_write_lock_contention(exc):
             raise

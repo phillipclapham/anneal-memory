@@ -4,6 +4,38 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Changed — a Store path is never an SQLite URI
+- `Store("file:...")` now raises `ValueError`. Whether SQLite reads `file:` as a URI depends on how it was built, so
+  the same string was a file on one machine and a shared in-memory database on another; shared-cache in-memory use
+  also failed `database table is locked` with no busy wait. Pass a filesystem path, or `":memory:"`.
+- Every SQLite connection in the package goes through one opener (`anneal_memory.store.connect`), which applies
+  the refusal; a test fails on any other `sqlite3.connect` call. The CLI and `python -m anneal_memory.server` print
+  `Error: …` and exit 1 instead of a traceback.
+
+### Changed — `export --format sqlite` refuses an existing `--output`
+- `anneal-memory export --format sqlite --output PATH` now refuses a `PATH` that already exists (a file, a directory
+  or a dangling symlink) and exits 1; earlier releases overwrote it. The error names the path: choose another
+  `--output` or remove the file first.
+### Fixed — a failed `export --format sqlite` no longer leaves a file at `--output`
+- A failed backup (a source that is not a database, a full disk) left an empty or partial file at the output path
+  that looked like an export. The copy is now built in a private temp in the output's directory, finished as one
+  file in rollback-journal mode and flushed to disk, then published with a hard link, which never replaces a file.
+  Where the filesystem has no hard links (FAT, exFAT, many SMB shares) the output is claimed with an exclusive
+  create and the copy renamed over that claim: that refuses concurrent exclusive creators, but a process that
+  deletes the claim and writes its own file in that window is overwritten. If that step fails or is interrupted,
+  nothing at `--output` is removed (removing the claim by name could remove another process's file) and the export
+  says to inspect that path; a crash or SIGTERM can leave the empty claim too. The published file keeps the permissions SQLite
+  gave the temp it was built in.
+- A source removed between the existence check and the export is an error; it is no longer recreated as an empty
+  database at its path. A source whose path is not valid UTF-8 is refused with a message to rename it: SQLite
+  leaves such a name undefined in the existing-only form, and opening it any other way could recreate a source
+  removed mid-export.
+- Export refuses the database or any of its `-wal`, `-shm` or `-journal` files by name, as given, resolved, or as
+  SQLite names the file it opened (compared case- and Unicode-folded). The source is opened once, before these
+  checks, so the copy is of the file they checked; an empty source is refused.
+- A bad `--output` prints `Error: …` instead of a traceback, and a source another connection holds locked errors
+  after one deadline instead of waiting forever.
+
 ### Fixed — the outcome log opens only as a regular file
 - A FIFO at `<stem>.outcomes.jsonl` made `anneal-memory worth` hang until killed and `outcome` fail with an
   unrelated error; every open of the log now checks the descriptor and refuses anything but a regular file at once.

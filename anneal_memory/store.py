@@ -17,6 +17,7 @@ import hashlib
 import logging
 import json
 import os
+import urllib.parse
 import re
 import sqlite3
 import time
@@ -2154,6 +2155,89 @@ _PROTECTED_TEAM_EPISODES = (
 )
 
 
+def connect(path: str | Path, *, must_exist: bool = False, **kwargs: Any) -> sqlite3.Connection:
+    """THE way this package opens SQLite: :func:`sqlite_path` first, then
+    ``sqlite3.connect``. ``tests/test_store.py::test_every_sqlite_connect_goes_
+    through_the_one_opener`` fails on any other ``sqlite3.connect`` call in the
+    package, so a new call site cannot bypass the URI refusal (walopen L3 r6-r11:
+    each round found a caller that did).
+
+    ``must_exist=True`` opens an existing file only: a missing one raises
+    ``sqlite3.OperationalError`` instead of being created empty at ``path``
+    (walopen L3 r15, codex: an export whose source was removed recreated it). The
+    URI is built here, from the path :func:`sqlite_path` already accepted, so a
+    caller still cannot hand SQLite a URI of its own."""
+    target = sqlite_path(path)
+    if must_exist:
+        if target == ":memory:":
+            raise StorePathError("':memory:' is not an existing database file")
+        # Joined, never normalised: abspath collapses ``link/..`` by text, which
+        # can name a different file than the OS resolves (walopen L3 r17).
+        # Windows resolves a path by text (Win32 normalisation), so abspath
+        # matches it there, drive-relative forms included (L3 r18).
+        if os.name == "nt":
+            full = os.path.abspath(target)
+        elif os.path.isabs(target):
+            full = target
+        else:
+            full = os.path.join(os.getcwd(), target)
+        try:
+            os.fsencode(full).decode("utf-8")
+        except UnicodeDecodeError:
+            # SQLite leaves a URI that decodes to invalid UTF-8 undefined
+            # (sqlite.org/c3ref/open.html), and every non-URI way to keep
+            # must-exist was a check then an open that a removal in between
+            # defeats (walopen L3 r17-r20, codex): refused, never weakened.
+            raise StorePathError(
+                f"Database path {target!r} is not valid UTF-8; it cannot be opened as an "
+                "existing-only database. Rename it to a UTF-8 name."
+            ) from None
+        return sqlite3.connect(_existing_file_uri(full), uri=True, **kwargs)
+    return sqlite3.connect(target, **kwargs)
+
+
+def _existing_file_uri(abs_path: str) -> str:
+    """An SQLite ``mode=rw`` URI that names exactly ``abs_path``.
+
+    Every byte of the filesystem-encoded path is percent-escaped, ``/`` and
+    ``\\`` included, so the URI has no authority and SQLite decodes the very
+    string it was given, on every platform: no drive-letter, UNC or verbatim
+    (``\\\\?\\``) rewriting, which lost or changed paths (walopen L3 r16, codex
+    + complement). A NUL, which SQLite would read as the end of the name, is
+    refused."""
+    if "\0" in abs_path:
+        raise StorePathError(f"Database path {abs_path!r} contains a NUL character")
+    return "file:" + urllib.parse.quote_from_bytes(os.fsencode(abs_path), safe="") + "?mode=rw"
+
+
+class StorePathError(ValueError):
+    """A database path that reaches SQLite as a URI (see :func:`sqlite_path`).
+    A ``ValueError``, so existing callers are unchanged; its own class so the CLI
+    boundary can turn it into one clean refusal for every subcommand."""
+
+
+def sqlite_path(path: str | Path) -> str:
+    """The exact string handed to ``sqlite3.connect`` for a database path; refuses
+    an SQLite URI.
+
+    A database path is a filesystem path (or ``:memory:``), never a URI. Whether
+    SQLite reads ``file:`` as a URI depends on how it was built (measured 1008+11
+    on Homebrew Python 3.13: honoured without ``uri=True``), so one string meant a
+    file on one machine and a shared in-memory database on another, and
+    shared-cache memory use fails SQLITE_LOCKED with no busy wait. The check runs
+    on the NORMALISED string, the one SQLite receives: ``./file::memory:`` became
+    ``file::memory:`` after ``Path()`` (walopen L3 r6, codex, reproduced). Every
+    ``sqlite3.connect`` in the package goes through here.
+    """
+    final = str(Path(path))
+    if final.startswith("file:"):
+        raise StorePathError(
+            f"Database path {str(path)!r} reaches SQLite as {final!r}, an SQLite URI; "
+            "pass a filesystem path (or ':memory:'). URIs are not supported."
+        )
+    return final
+
+
 class Store:
     """SQLite-backed episodic store.
 
@@ -2232,7 +2316,7 @@ class Store:
         read_only: bool = False,
         trust_ceiling: str = DEFAULT_TRUST,
     ) -> None:
-        self._path = Path(path)
+        self._path = Path(sqlite_path(path))
         # CAP-08 (C#11): the highest trust class any write through this instance
         # may carry. The code that constructs the Store is the host, so the host
         # sets it; no call argument moves it (record, set_trust and the CLI's JSON
@@ -2416,7 +2500,7 @@ class Store:
         self._closed: bool = False
         try:
             with self._db_boundary("schema_init"):
-                self._conn = sqlite3.connect(str(self._path))
+                self._conn = connect(self._path)
                 self._conn.row_factory = sqlite3.Row
                 register_writer_schema(self._conn)
                 # ⛔ FIRST, BEFORE EVERY PERSISTENT WRITE — INCLUDING THE

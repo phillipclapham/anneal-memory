@@ -24,7 +24,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   be a block or, on macOS, a character device). The rule is the name's, as the shells' noclobber has it:
   `--output /dev/stdout` writes to a terminal or a pipe, and is refused when stdout is redirected to a file (bash
   `set -C` and zsh refuse `>/dev/stdout` there too); leave out `--output` to write to stdout. `export --format sqlite`
-  refuses all of these. `graph --output` on a store with no associations above `--min-strength` now writes an empty graph
+  refuses all of these. A refusal's message goes to stderr wherever it points: if stderr is the `--output` file
+  itself (`2<>F` with `-o F`), the message is written into `F`, as the shell's own noclobber error is; the export
+  never writes `--output`. `graph --output` on a store with no associations above `--min-strength` now writes an empty graph
   (and refuses an existing file) instead of writing nothing.
 - Named limit (ruled 10-10): export works by pathname, as git's lockfile and `cp` do. If another process renames
   the output's directory while an export runs, the copy can end up in the renamed directory. Renamed before

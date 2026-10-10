@@ -1510,8 +1510,40 @@ class TestCmdExport:
             hold.close()
         assert exc.value.code == 1
         assert "stayed locked" in capsys.readouterr().err
-        assert time.monotonic() - t0 < 10
+        assert time.monotonic() - t0 < 3
         assert not out.exists()
+        assert not [p for p in tmp_path.iterdir() if p.name.endswith(".export-tmp")]
+
+    def test_export_sqlite_without_hard_links_claims_then_renames(
+        self, base_args_with_data, tmp_path, capsys, monkeypatch
+    ):
+        """walopen r15: FAT/exFAT have no hard links; the export claims the target
+        with an exclusive create and renames the finished copy over the claim."""
+        import errno
+        import sqlite3
+        from anneal_memory import cli
+
+        def _nolink(*a, **k):
+            raise OSError(errno.ENOTSUP, "no hard links here")
+
+        monkeypatch.setattr(cli.os, "link", _nolink)
+        out = tmp_path / "copy.db"
+        base_args_with_data.format = "sqlite"
+        base_args_with_data.output = str(out)
+        cmd_export(base_args_with_data)
+        conn = sqlite3.connect(out)
+        try:
+            assert conn.execute("pragma integrity_check").fetchone()[0] == "ok"
+        finally:
+            conn.close()
+        assert not [p for p in tmp_path.iterdir() if p.name.endswith(".export-tmp")]
+        # an existing output is refused and left unchanged
+        before = out.read_bytes()
+        with pytest.raises(SystemExit) as exc:
+            cmd_export(base_args_with_data)
+        assert exc.value.code == 1
+        assert "never overwrites" in capsys.readouterr().err
+        assert out.read_bytes() == before
         assert not [p for p in tmp_path.iterdir() if p.name.endswith(".export-tmp")]
 
     def test_export_sqlite_json(self, base_args_with_data, tmp_path, capsys):

@@ -4386,7 +4386,7 @@ def validated_save_continuity(
     return result
 
 
-# --- Section reads and writes (P(2), design episode_origin_key_design_1010.md r6 §4, §11.3-§11.4, §13) ---
+# --- Section reads and writes (P(2), design project_memory/episode_origin_key_design_1010.md r6 §4, §11.3-§11.4, §13) ---
 
 
 def _has_terminator(line: str) -> bool:

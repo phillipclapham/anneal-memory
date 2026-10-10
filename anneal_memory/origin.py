@@ -1,5 +1,5 @@
 """Origin keys and section canonical form (P(2), design
-``episode_origin_key_design_1010.md`` r5).
+``project_memory/episode_origin_key_design_1010.md`` r6).
 
 An origin key is an opaque, immutable id a row carries from creation and never
 reuses. One grammar holds for every origin key anneal stores or accepts as an

@@ -337,7 +337,7 @@ class AnnealMemoryError(Exception):
 # MUST add their identifier to the Literal before raising. If growth
 # makes the alias brittle, promote it to an ``Enum``.
 StoreOperation = Literal[
-    # Episode origin keys (P(2), 0.9.43)
+    # Episode origin keys (P(2))
     "get_by_origin_key",
     "read_episode_versioned",
     "origin_key_status",
@@ -444,7 +444,7 @@ _PHASE_OPERATIONS: frozenset[str] = frozenset(
 
 
 
-# P(2) origin keys (design ``episode_origin_key_design_1010.md`` r5 §2, §11.5 item 8).
+# P(2) origin keys (design ``project_memory/episode_origin_key_design_1010.md`` r6 §2, §11.5 item 8).
 # Bump the generation when any body below changes; see
 # ``Store._migrate_episode_origin_key``.
 _ORIGIN_TRIGGER_GEN = 1
@@ -3039,7 +3039,7 @@ class Store:
 
     def _migrate_episode_origin_key(self, *, commit: bool = True) -> None:
         """Give every episode an immutable ``origin_key`` (P(2), design
-        ``episode_origin_key_design_1010.md`` r5). Additive, no schema bump: the
+        ``project_memory/episode_origin_key_design_1010.md`` r6). Additive, no schema bump: the
         mint and retire triggers keep an older anneal's inserts and deletes keyed.
         The column check is re-read here, under :meth:`_init_schema`'s lock.
 
@@ -3243,7 +3243,7 @@ class Store:
             session_id = self._current_session_id()
             # The key decides first, before the source and supersession checks: a
             # retry of a keyed record whose first call already linked ``old_ids``
-            # must get that episode back, not a SupersessionError (design r5 §11.5 4).
+            # must get that episode back, not a SupersessionError (design r6 §11.5 item 4).
             # The key alone decides: the caller compares the returned episode with
             # what it meant to record.
             keyed_row = None
@@ -5792,7 +5792,7 @@ class Store:
             outcome="deleted", episode_id=row["id"], links_removed=links_removed,
             rewires=rewires, trust_removed=trust_removed, team_left=team_left)
 
-    # -- Origin keys (P(2), design episode_origin_key_design_1010.md r6) --
+    # -- Origin keys (P(2), design project_memory/episode_origin_key_design_1010.md r6) --
 
     def _require_origin_key_column(self, operation: str) -> None:
         # Checked per call, never cached: a read-only handle opened before the
@@ -5801,7 +5801,7 @@ class Store:
         if "origin_key" not in cols:
             raise StoreError(
                 "this store has no episode origin keys yet: open it once with a "
-                "write-capable handle of anneal-memory 0.9.43 or later",
+                "write-capable handle of this anneal-memory version or later",
                 operation=operation, path=str(self._path))
 
     def _episode_version_locked(self, episode_id: str) -> str:

@@ -10,7 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from anneal_memory import SectionError, Store, WrapContinuityMovedError
+import anneal_memory.store as _store_mod
+from anneal_memory import ContinuityLockUnavailable, SectionError, Store, WrapContinuityMovedError
 from anneal_memory.continuity import prepare_wrap
 from anneal_memory.graduation import _LINE_TERMINATORS_RE
 from anneal_memory.origin import canonical_section_markdown
@@ -19,6 +20,10 @@ DOC = (
     "# Memory\n\n## State\n\nold state line\n\n## Durable Facts\n\n- fact one\n\n"
     "## Patterns\n\n- p | 1x\n\n## Decisions\n\nd\n\n## Context\n\nctx line\n"
 )
+
+
+# replace_section takes continuity_lock(require=True): with no lock (Windows) it raises.
+_NEEDS_LOCK = unittest.skipIf(_store_mod.fcntl is None, "replace_section needs a file lock")
 
 
 def sha(text: str) -> str:
@@ -77,6 +82,7 @@ class TestRead(_Case):
             self.store.read_section("State")
         self.assertEqual(cm.exception.reason, "ambiguous_heading")
 
+    @_NEEDS_LOCK
     def test_extended_heading_is_the_section(self) -> None:
         self.write(DOC.replace("## State\n", "## State of Mind\n"))
         self.assertEqual(self.store.read_section("State")[0], "old state line")
@@ -89,6 +95,7 @@ class TestRead(_Case):
         self.assertIsNone(self.store.read_section("State"))
 
 
+@_NEEDS_LOCK
 class TestReplace(_Case):
     def test_round_trip_version_is_the_canonical_body(self) -> None:
         for heading, body in (("State", "a line  \r\nnext ‮| ١x\n\n"),
@@ -162,6 +169,7 @@ class TestReplace(_Case):
         self.assertEqual((r.outcome, r.reason), ("refused", "wrap_in_progress"))
 
 
+@_NEEDS_LOCK
 class TestWrapStartSeesAnEdit(_Case):
     """§12.3: an edit landing after prepare's read refuses the wrap's start."""
 
@@ -196,6 +204,14 @@ class TestWrapStartSeesAnEdit(_Case):
         self.assertIn("downgraded-continuity-changed", str(prep))
         self.assertIsNone(self.store.get_wrap_started_at())
         self.assertEqual(prepare_wrap(self.store)["status"], "ready")
+
+
+@unittest.skipIf(_store_mod.fcntl is not None, "this platform has a file lock")
+class TestNoLockRefuses(_Case):
+    def test_replace_section_raises_without_a_lock(self) -> None:
+        _, v = self.store.read_section("State")
+        with self.assertRaises(ContinuityLockUnavailable):
+            self.store.replace_section("State", "x", expected_version=v)
 
 
 if __name__ == "__main__":

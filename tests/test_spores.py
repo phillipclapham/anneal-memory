@@ -1230,7 +1230,7 @@ class TestDuplicateOpenId:
         s.update(other["id"], text="other edited")
         assert SporeStore(store.path).get(other["id"])["text"] == "other edited"
 
-    @pytest.mark.parametrize("call", ["touch", "update"])
+    @pytest.mark.parametrize("call", ["touch", "update", "descend", "ascend"])
     def test_an_id_both_open_and_resolved_is_refused(self, store, call):
         store.add(type="task", text="a", today=T0)
         data = json.loads(store.path.read_text())
@@ -1243,5 +1243,10 @@ class TestDuplicateOpenId:
         s = SporeStore(store.path)
         before = store.path.read_text()
         with pytest.raises(SporeError, match="both open and resolved"):
-            s.touch("spore-001") if call == "touch" else s.update("spore-001", text="x")
+            {
+                "touch": lambda: s.touch("spore-001"),
+                "update": lambda: s.update("spore-001", text="x"),
+                "descend": lambda: s.descend("spore-001", kind="done", today=T0),
+                "ascend": lambda: s.ascend("spore-001", kind="pattern", ref="p", today=T0),
+            }[call]()
         assert store.path.read_text() == before

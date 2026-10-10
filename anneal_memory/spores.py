@@ -1058,6 +1058,8 @@ class SporeStore:
         would silently nuke the dup). ``at`` is a precise UTC instant so a wrap can
         later consume "what ascended THIS session", not merely this date."""
         spore_id = item["id"]
+        # Defence in depth: every public caller already passed _find_open, which
+        # refuses both drift shapes below; kept for any future direct caller.
         matches = [s for s in data["spores"] if s.get("id") == spore_id]
         if len(matches) != 1:
             raise SporeError(

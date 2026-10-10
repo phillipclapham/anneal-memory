@@ -1181,3 +1181,39 @@ class TestOriginR2:
         assert store.backfill_origin_keys() == 1
         key = store.get("spore-001")["origin_key"]
         assert isinstance(key, str) and len(key) == 32
+
+
+class TestDuplicateOpenId:
+    """Two open spores sharing an id (store drift): every mutator refuses rather
+    than writing to one copy, whatever version the caller read (levain K2a r3)."""
+
+    def _drifted(self, store):
+        store.add(type="task", text="first", today=T0)
+        data = json.loads(store.path.read_text())
+        dup = dict(data["spores"][0])
+        dup["text"] = "second copy"
+        dup["origin_key"] = "f" * 32
+        data["spores"].append(dup)
+        store.path.write_text(json.dumps(data))
+        return SporeStore(store.path), data
+
+    def test_a_guarded_update_matching_one_copy_is_refused(self, store):
+        s, data = self._drifted(store)
+        before = store.path.read_text()
+        for copy in data["spores"]:
+            with pytest.raises(SporeError, match="ambiguous"):
+                s.update("spore-001", text="edited", expected_version=spore_version(copy))
+        assert store.path.read_text() == before
+
+    def test_every_mutator_is_refused(self, store):
+        s, _ = self._drifted(store)
+        before = store.path.read_text()
+        for call in (
+            lambda: s.touch("spore-001"),
+            lambda: s.update("spore-001", text="x"),
+            lambda: s.descend("spore-001", kind="done", today=T0),
+            lambda: s.ascend("spore-001", kind="pattern", ref="my_pattern", today=T0),
+        ):
+            with pytest.raises(SporeError, match="ambiguous"):
+                call()
+        assert store.path.read_text() == before

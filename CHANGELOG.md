@@ -4,6 +4,11 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — a spore write refuses an id that two open spores share
+- `touch`, `update`, `descend` and `ascend` raise `SporeError` when two open spores carry the same id (store drift),
+  instead of writing to the first copy. A write guarded by `expected_version` could otherwise succeed against one
+  copy while the caller had read the other. Only `descend` and `ascend` refused before, and only at resolve time.
+
 ### Added — every spore has an immutable `origin_key`, and its stored text has an exported normaliser
 - `SporeStore.add` assigns each new spore an `origin_key` (a fresh UUID, or the one the caller passes). Planting with
   a key a stored spore already carries, open or resolved, writes nothing and returns that spore, so a retried create

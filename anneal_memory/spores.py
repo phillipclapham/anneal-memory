@@ -581,10 +581,17 @@ class SporeStore:
 
     @staticmethod
     def _find_open(data: dict, spore_id: str) -> SporeDict | None:
-        for item in data.get("spores", []):
-            if item.get("id") == spore_id:
-                return cast("SporeDict", item)
-        return None
+        """The one open spore with ``spore_id``. Two open spores sharing an id is
+        store drift: a write would land on one copy while a caller's
+        ``expected_version`` may describe the other, so it is refused here, the
+        lookup every mutator goes through."""
+        matches = [item for item in data.get("spores", []) if item.get("id") == spore_id]
+        if len(matches) > 1:
+            raise SporeError(
+                f"{len(matches)} open spores share id {spore_id!r}; refusing to "
+                f"write to an ambiguous id (store drift — repair by hand)."
+            )
+        return cast("SporeDict", matches[0]) if matches else None
 
     @staticmethod
     def _find_by_origin_key(data: dict, origin_key: str) -> SporeDict | None:

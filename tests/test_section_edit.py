@@ -205,6 +205,19 @@ class TestReplace(_Case):
             self.store.replace_section("State", "x", expected_version=v)
         self.assertEqual(self.raw(), before)
 
+    def test_a_caught_refusal_inside_a_batch_keeps_the_batch(self) -> None:
+        # L3 r2 (codex), reproduced: raised inside _db_boundary, the refusal's
+        # rollback dropped a write staged before it and the batch still committed.
+        from anneal_memory.store import StoreError
+        with self.store._batch():
+            self.store.record("staged before the refusal", "observation")
+            with self.assertRaises(StoreError):
+                self.store.replace_section("State", "x", expected_version="v")
+            self.assertTrue(self.store._conn.in_transaction)
+            self.store.record("staged after the refusal", "observation")
+        got = {r[0] for r in self.store._conn.execute("SELECT content FROM episodes")}
+        self.assertTrue({"staged before the refusal", "staged after the refusal"} <= got)
+
     def test_a_write_error_is_a_store_error_and_the_file_is_unchanged(self) -> None:
         import errno
         from unittest import mock

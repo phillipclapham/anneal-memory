@@ -4537,12 +4537,6 @@ def replace_section(
     result: SectionWriteResult
     old_version: str | None = None
     spec: SectionSpec | None = None
-    if store._conn.in_transaction:
-        # Its lock order is the file lock, then the store's: inside a batch the
-        # store's lock is already held, so it cannot run there (L3 r1).
-        raise StoreError(
-            "replace_section cannot run inside a batch or an open transaction",
-            operation="replace_section", path=str(store.continuity_path))
     with store.continuity_lock(require=True):
         conn = store._conn
         try:

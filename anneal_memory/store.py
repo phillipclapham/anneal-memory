@@ -5972,6 +5972,14 @@ class Store:
         """
         from .continuity import replace_section as _replace_section
 
+        if self._conn.in_transaction:
+            # Its lock order is the file lock, then the store's: inside a batch the
+            # store's lock is already held, so it cannot run there (L3 r1). Raised
+            # before _db_boundary, whose rollback would discard the caller's
+            # staged writes (L3 r2, codex).
+            raise StoreError(
+                "replace_section cannot run inside a batch or an open transaction",
+                operation="replace_section", path=str(self.continuity_path))
         # SQLite failures inside reach the caller as StoreDatabaseError, like
         # every other store operation.
         with self._db_boundary("replace_section"):

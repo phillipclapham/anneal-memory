@@ -4644,3 +4644,34 @@ def test_every_sqlite_connect_goes_through_the_one_opener():
             if isinstance(root, ast.Name) and root.id in aliases and id(node) not in allowed:
                 offenders.append(f"{f.name}:{node.lineno}")
     assert offenders == [], offenders
+
+
+def test_connect_read_only_opens_an_existing_file_and_refuses_writes(tmp_path):
+    """c-pull-label: the pull's store-id read moved onto the one opener."""
+    import sqlite3
+
+    from anneal_memory.store import connect
+
+    # URI-special characters, escaped by the opener; "?" is not a legal Windows name
+    db = tmp_path / ("ro #%.db" if os.name == "nt" else "ro #?%.db")
+    with Store(db, audit=False):
+        pass
+    conn = connect(db, read_only=True)
+    try:
+        assert conn.execute("SELECT count(*) FROM episodes").fetchone()[0] == 0
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            conn.execute("INSERT INTO metadata (key, value) VALUES ('x', 'y')")
+    finally:
+        conn.close()
+    with pytest.raises(sqlite3.OperationalError):
+        connect(tmp_path / "absent.db", read_only=True)
+    assert not (tmp_path / "absent.db").exists()
+
+
+def test_connect_refuses_a_caller_uri_flag(tmp_path):
+    """c-pull-label L3 r2 (codex): uri= collided with the opener's own."""
+    from anneal_memory.store import connect
+
+    with pytest.raises(TypeError, match="builds its own URI"):
+        connect(tmp_path / "x.db", uri=False)
+    assert not (tmp_path / "x.db").exists()

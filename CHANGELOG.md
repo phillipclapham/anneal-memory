@@ -14,6 +14,48 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   now raises `SporeError` instead of running unlocked: the compare could not be held through the write, so two
   writers could both pass it and the later one overwrite the other. Unguarded writes are unchanged.
 
+### Added — `crystal get` records a pull, and `worth` counts it in its own column
+
+- `anneal-memory crystal get NAME` now appends one record to the outcome log beside the episodic
+  db (`<stem>.outcomes.jsonl`) when the pattern is found AND live: exposure id `pull:<uuid4 hex>`,
+  one item `crystal:NAME=followed`, no outcome, stamped with the store's id and with
+  `"pull": true`. A pull by name from
+  the always-loaded cue index is the one production signal that is not a guess. A retired
+  pattern is still printed but not recorded (the cue index lists live patterns only). The record
+  is a valid version-1 record with no new label value; released readers ignore the extra field
+  (0.9.26 was run against one) and count the label as `followed`, as they always counted a label.
+- `worth` counts these in a NEW per-pattern column, `pulled` (`pull` in the text table, last
+  column; `"pulled"` in `--json`). An exposure whose records all carry `"pull": true` moves
+  `pulled` and nothing else (the field decides, never the id: an ordinary record you named
+  `pull:x` keeps its counts): not `fol`, not any `followed` / `succ` / `fail` / unlabelled cell, and it
+  credits no episode through the pattern's evidence, so `fol` keeps its judged meaning. The
+  `exposures` total still counts the record. `WorthRow.pulled` is the last field, so positional construction is unchanged.
+- The read never fails because of the label. It is recorded only after the text was flushed to
+  stdout (a closed pipe records nothing). A read command never mints a store id: a store with
+  none gets one stderr line and no record (run `outcome` once to mint it). A crystal-only
+  deployment (no episodic db file) records nothing and says nothing. A not-found name records
+  nothing and exits as before. Each wait is bounded: the db read at most 0.5 seconds
+  (`store busy`), the log's write lock at most 2 seconds (`outcome log busy`); either is one
+  stderr line, exit 0, the pattern still printed. The store id is read again under the log
+  lock just before the append, and a store replaced in between records nothing. Any other write
+  failure, of any kind, is the same one line. The stderr line is best effort: a missing or closed stderr
+  changes nothing, and it never goes to stdout. The label write reads the outcome log once
+  (to check the log belongs to this store), so its cost grows with the log.
+- New flag `--no-record` for scripted callers that read patterns without meaning to use them.
+- `OutcomeLog.record` takes an optional `lock_timeout` (seconds; default `None` waits as before;
+  anything but `None` or a finite, non-negative number is a `ValueError` before any file is
+  touched) and raises the new `OutcomeLogBusy` (an `OSError`) when the lock is not free in time.
+  It also takes `pull=` (stamps `"pull": true`) and `before_append=` (a callable run under the
+  lock just before the append; what it raises aborts the write).
+
+- Known and not fixed: (a) after the bounded lock, the label write reads the whole outcome log,
+  parses it and fsyncs, with no time bound; its cost grows with the log (a pull adds one line),
+  so scripted callers should pass `--no-record`. (b) A store replaced in the instant between
+  the under-lock id re-check and the append can still receive one pull stamped with the old
+  store id; closing it needs the replacement to take the outcome-log lock. (c) A pull skipped
+  after the outcome log was opened can leave a new empty log file (harmless; removing it safely
+  needs every writer to open the log under one namespace lock).
+
 ### Changed — a Store path is never an SQLite URI
 - `Store("file:...")` now raises `ValueError`. Whether SQLite reads `file:` as a URI depends on how it was built, so
   the same string was a file on one machine and a shared in-memory database on another; shared-cache in-memory use
@@ -22,10 +64,28 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   the refusal; a test fails on any other `sqlite3.connect` call. The CLI and `python -m anneal_memory.server` print
   `Error: …` and exit 1 instead of a traceback.
 
-### Changed — `export --format sqlite` refuses an existing `--output`
-- `anneal-memory export --format sqlite --output PATH` now refuses a `PATH` that already exists (a file, a directory
-  or a dangling symlink) and exits 1; earlier releases overwrote it. The error names the path: choose another
-  `--output` or remove the file first.
+### Changed — `export` and `graph` refuse an existing `--output`
+- `anneal-memory export --output PATH` (every `--format`) and `anneal-memory graph --output PATH` (`json` and `dot`)
+  now refuse a `PATH` that already exists (a file, a directory or a dangling symlink) and exit 1; earlier releases
+  overwrote it, and wrote through a symlink to its target. The error names the path: choose another `--output` or
+  remove the file first. The text formats are written to a private temp beside `--output` and published the way the
+  sqlite copy is (below), so a failed write never leaves a partial file at `--output` (on a filesystem without
+  hard links an interrupted publish can leave the empty claim, as below).
+  An existing named pipe, the null device or a terminal is still written in place for the text formats, as the
+  shell's noclobber allows: none is a file that can be overwritten. Any other existing device is refused (a disk can
+  be a block or, on macOS, a character device). Where Python reports no device number (Windows), a character
+  device is written in place only when it reports as a terminal; any other is refused. The rule is the name's, as the shells' noclobber has it:
+  `--output /dev/stdout` writes to a terminal or a pipe, and is refused when stdout is redirected to a file (bash
+  `set -C` and zsh refuse `>/dev/stdout` there too); leave out `--output` to write to stdout. `export --format sqlite`
+  refuses all of these. A refusal's message goes to stderr wherever it points: if stderr is the `--output` file
+  itself (`2<>F` with `-o F`), the message is written into `F`, as the shell's own noclobber error is; the export
+  never writes `--output`. `graph --output` on a store with no associations above `--min-strength` now writes an empty graph
+  (and refuses an existing file) instead of writing nothing.
+- Named limit (ruled 10-10): export works by pathname, as git's lockfile and `cp` do. If another process renames
+  the output's directory while an export runs, the copy can end up in the renamed directory. Renamed before
+  publishing (measured for `json` and `sqlite`, renaming and recreating the directory just before the publish): the
+  export fails, and its temp copy, a hidden `.*.export-tmp` file holding the whole export, is left there to remove.
+  Renamed after publishing (reasoned, not run): the export reports success and the file is in the renamed directory.
 ### Fixed — a failed `export --format sqlite` no longer leaves a file at `--output`
 - A failed backup (a source that is not a database, a full disk) left an empty or partial file at the output path
   that looked like an export. The copy is now built in a private temp in the output's directory, finished as one
@@ -55,7 +115,6 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - A receipt file (`worth --receipts`, `fold_surfaced`) must be a regular file. A FIFO there hung the command,
   and `fold_surfaced` reads receipts under the crystal store's lock, so it blocked every crystal write too. A
   pipe such as `--receipts <(...)` is now refused: write the receipts to a file first.
-
 ### Fixed — a database error names the operation the caller called
 - A `StoreDatabaseError` raised inside a nested store boundary now carries the OUTER
   method's `operation`, with the same SQLite `__cause__` and `cause_type_name`. A team

@@ -169,10 +169,12 @@ from .worth import (
     FOLLOWED_VALUES,
     ITEM_KINDS,
     OUTCOME_VALUES,
+    PULL_EXPOSURE_PREFIX,
     ExposedRef,
     ExposureLabel,
     ADOPT_UNSUPPORTED,
     OutcomeLog,
+    OutcomeLogBusy,
     _build_record as _build_worth_record,
     adopt_supported,
     compute_worth,
@@ -2207,6 +2209,107 @@ def _publish_by_claim(tmp: Path, out: Path) -> None:
         raise
 
 
+def _is_named_sink(fd: int) -> bool:
+    """True when ``fd`` is a FIFO, the null device or a terminal: the only
+    existing outputs written in place. A device class is not enough: a block
+    device is a disk (L3 r2) and so is a macOS raw disk, a character device (L3 r3)."""
+    st = os.fstat(fd)
+    if stat.S_ISFIFO(st.st_mode):
+        return True
+    if not stat.S_ISCHR(st.st_mode):
+        return False
+    if os.isatty(fd):
+        return True
+    try:
+        null = os.stat(os.devnull)
+    except OSError:
+        return False
+    # Windows stat results carry no st_rdev; without a device number to match,
+    # the device is not known to be the null device, so it is refused (L3 r9).
+    rdev = getattr(st, "st_rdev", None)
+    null_rdev = getattr(null, "st_rdev", None)
+    return rdev is not None and stat.S_ISCHR(null.st_mode) and rdev == null_rdev
+
+
+def _pin_parent(out: Path) -> Path:
+    """``out`` with its directory resolved once, so the temp, the publish and the
+    cleanup all happen in one directory even if a symlink in the path is
+    retargeted mid-export (L3 r1, codex: the temp leaked in the old one)."""
+    return Path(os.path.realpath(out.parent)) / out.name
+
+
+def _refuse_existing_output(out: Path) -> NoReturn:
+    """Exit 1: every export format refuses an existing --output the same way."""
+    print(
+        f"Error: {out} exists; export never overwrites a file. "
+        "Remove it or choose another --output.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _write_text_no_clobber(text: str, out: Path) -> None:
+    """Write ``text`` at ``out`` as the sqlite export publishes its copy.
+
+    Refuses an existing file, directory or dangling symlink at ``out``; the text
+    goes to a private temp beside ``out`` and is published by
+    :func:`_publish_no_clobber`, so a failed write never leaves a partial file at
+    ``out`` (without hard links, an interrupted publish can leave its empty claim).
+    Text mode, as ``Path.write_text`` was: platform newlines, UTF-8.
+
+    An existing FIFO, null device or terminal (see :func:`_is_named_sink`) holds no
+    file to clobber, so it is written in place, as the shell's noclobber (``set -C``)
+    allows ``>/dev/null`` (L2 r1: the refusal had broken ``-o /dev/stdout`` and pipes).
+    It is opened without create or truncate and checked on the open descriptor,
+    so a regular file put there in between is refused, never truncated. The rule
+    is the name's, as the shells' noclobber has it (bash ``set -C`` and zsh both
+    refuse ``>/dev/stdout`` when stdout is redirected to a file, measured 10-10):
+    ``-o /dev/stdout`` writes to a terminal or pipe and is refused when stdout is a
+    file. An exception for our own streams was beaten a new way in L3 r2-r6 and is
+    deleted (spore-813).
+    """
+    try:
+        dest = _pin_parent(out)
+    except (ValueError, OSError) as exc:
+        print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if os.path.lexists(dest):
+        try:
+            fd = os.open(dest, os.O_WRONLY | getattr(os, "O_NOCTTY", 0))
+        except (ValueError, OSError):
+            _refuse_existing_output(out)  # a directory, a dangling symlink…
+        try:
+            fh = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            os.close(fd)
+            raise
+        try:
+            with fh:  # owns the descriptor from here
+                refuse = not _is_named_sink(fh.fileno())
+                if not refuse:
+                    fh.write(text)
+        except (ValueError, OSError) as exc:
+            print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if refuse:
+            _refuse_existing_output(out)
+        return
+    tmp = dest.parent / f".{os.getpid()}-{uuid.uuid4().hex}.export-tmp"
+    try:
+        with open(tmp, "x", encoding="utf-8") as fh:
+            fh.write(text)
+        _publish_no_clobber(tmp, dest)
+    except FileExistsError:
+        print(f"Error: {out} appeared during the export; nothing was overwritten", file=sys.stderr)
+        sys.exit(1)
+    except (ValueError, OSError) as exc:  # NUL in a path, unwritable dir…
+        print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+
+
 def cmd_export(args: argparse.Namespace) -> None:
     """Export store data."""
     fmt = args.format
@@ -2271,22 +2374,18 @@ def cmd_export(args: argparse.Namespace) -> None:
                         file=sys.stderr,
                     )
                     sys.exit(1)
+                dest = _pin_parent(out)
             except (OSError, ValueError) as exc:
                 print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
                 sys.exit(1)
             # Export never writes into an existing path (as SQLite's VACUUM INTO
             # refuses a non-empty target): lexists also catches a dangling symlink.
-            if os.path.lexists(out):
-                print(
-                    f"Error: {out} exists; export never overwrites a file. "
-                    "Remove it or choose another --output.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+            if os.path.lexists(dest):
+                _refuse_existing_output(out)
             # The copy is built in a private temp in --output's directory and
             # published without replacing a file, so a failed export leaves nothing
             # at --output and deletes only its own temp.
-            tmp = out.parent / f".{os.getpid()}-{uuid.uuid4().hex}.export-tmp"
+            tmp = dest.parent / f".{os.getpid()}-{uuid.uuid4().hex}.export-tmp"
             size = 0
             try:
                 tmp_conn = sqlite_connect(sqlite_path(tmp))
@@ -2295,7 +2394,7 @@ def cmd_export(args: argparse.Namespace) -> None:
                 finally:
                     tmp_conn.close()
                 size = tmp.stat().st_size
-                _publish_no_clobber(tmp, out)
+                _publish_no_clobber(tmp, dest)
             except FileExistsError:
                 print(f"Error: {out} appeared during the export; nothing was overwritten", file=sys.stderr)
                 sys.exit(1)
@@ -2390,7 +2489,7 @@ def cmd_export(args: argparse.Namespace) -> None:
             }
             if args.output:
                 out = Path(args.output)
-                out.write_text(json.dumps(export_data, indent=2, default=str), encoding="utf-8")
+                _write_text_no_clobber(json.dumps(export_data, indent=2, default=str), out)
                 if args.json:
                     _print_json({"format": "json", "path": str(out), "episodes": len(episodes)})
                 else:
@@ -2438,7 +2537,7 @@ def cmd_export(args: argparse.Namespace) -> None:
             text = "\n".join(lines)
             if args.output:
                 out = Path(args.output)
-                out.write_text(text, encoding="utf-8")
+                _write_text_no_clobber(text, out)
                 if args.json:
                     _print_json({"format": "markdown", "path": str(out), "episodes": len(episodes)})
                 else:
@@ -3156,16 +3255,18 @@ def cmd_graph(args: argparse.Namespace) -> None:
         result = store.recall(limit=100000, include_superseded=True)
         all_ids = [ep.id for ep in result.episodes]
 
-        if not all_ids:
+        if not all_ids and not args.output:
             if args.json:
                 _print_json({"nodes": [], "edges": []})
             else:
                 print("No episodes in store.")
             return
 
-        pairs = store.get_associations(all_ids, min_strength=args.min_strength, limit=100000)
+        pairs = store.get_associations(all_ids, min_strength=args.min_strength, limit=100000) if all_ids else []
 
-        if not pairs:
+        # With --output an empty graph is still written (and an existing file
+        # still refused) through the same writer (L3 r1, codex).
+        if not pairs and not args.output:
             if args.json:
                 _print_json({"nodes": [], "edges": [], "message": "No associations above threshold"})
             else:
@@ -3207,7 +3308,7 @@ def cmd_graph(args: argparse.Namespace) -> None:
             }
             if args.output:
                 out = Path(args.output)
-                out.write_text(json.dumps(graph_data, indent=2), encoding="utf-8")
+                _write_text_no_clobber(json.dumps(graph_data, indent=2), out)
                 if args.json:
                     _print_json({"format": "json", "path": str(out), "nodes": len(nodes), "edges": len(pairs)})
                 else:
@@ -3250,7 +3351,7 @@ def cmd_graph(args: argparse.Namespace) -> None:
 
             if args.output:
                 out = Path(args.output)
-                out.write_text(text, encoding="utf-8")
+                _write_text_no_clobber(text, out)
                 if args.json:
                     _print_json({"format": "dot", "path": str(out), "nodes": len(nodes), "edges": len(pairs)})
                 else:
@@ -3799,14 +3900,100 @@ def cmd_crystal_crystallize(args: argparse.Namespace) -> None:
           f"{item['activation_mode']}) {_truncate(item['explanation'], 70)}")
 
 
-def cmd_crystal_get(args: argparse.Namespace) -> None:
-    """Show a single crystallized pattern by name (searches live then retired)."""
-    store = _open_crystal_store(args)
-    item = store.get(args.name)
-    if item is None:
-        print(f"Crystallized pattern {args.name!r} not found.", file=sys.stderr)
-        sys.exit(1)
-    if args.json:
+# How long a pull waits for the outcome log's write lock, and for the db to be
+# readable, before giving the label up. Each wait is bounded on its own.
+_PULL_LOCK_TIMEOUT_SECONDS = 2.0
+_PULL_DB_TIMEOUT_SECONDS = 0.5
+
+
+class _PullSkipped(Exception):
+    """The pull is not recorded; the message is the one stderr line."""
+
+
+def _pull_note(why: str) -> None:
+    """The pull's one stderr line. Best effort: no stderr, or one that cannot be
+    written, changes nothing (never falls back to stdout, never alters the exit)."""
+    err = sys.stderr
+    if err is None:
+        return
+    try:
+        # One physical line: a reason carrying CR or LF (an OS error text, a path)
+        # must not forge a second line.
+        why = " ".join(why.split())
+        err.write(f"crystal get: pull not recorded ({why})\n")
+        err.flush()
+    except (OSError, ValueError):
+        # The unwritten text stays buffered in the dead stream, and the interpreter
+        # flushes sys.stderr at exit and turns a failure there into exit status 120.
+        # The pull is the last thing this command does, so point it at nowhere.
+        try:
+            sys.stderr = open(os.devnull, "w")
+        except OSError:
+            pass
+
+
+def _pull_store_id(db_path: Path) -> str | None:
+    """The store id for a pull, bounded; ``None`` when the store has none. A
+    refusal is a :class:`_PullSkipped` carrying its reason, never a captured
+    print-and-exit (c-pull-label L3 r1, codex: redirecting the process-global
+    ``sys.stderr`` to capture one was not thread-safe)."""
+    try:
+        sid, why = _read_store_id_bounded(db_path, _PULL_DB_TIMEOUT_SECONDS)
+    except _StoreBusy:
+        raise _PullSkipped("store busy") from None
+    except (OSError, StorePathError, sqlite3.Error) as exc:  # StorePathError: a NUL or non-UTF-8 path
+        raise _PullSkipped(f"cannot read the store id of {db_path}: {exc}") from None
+    if why is not None:
+        raise _PullSkipped(f"cannot read the store id of {db_path}: {why}")
+    return sid
+
+
+def _record_pull_label(args: argparse.Namespace, name: str) -> None:
+    """Append one ``followed`` pull record for a crystal pulled by name, to the
+    outcome log beside the episodic db. A pull is the one production signal that
+    is not a guess: the reader asked for this pattern from the index by name.
+
+    Never fails the read and never mints a store id (``mint=False``): a store
+    with no id gets one stderr line and no record. A crystal-only deployment (no
+    episodic db file) skips quietly. The db read, the log lock and the append
+    are each bounded; a store replaced between the id read and the append (the
+    id re-read under the log lock no longer matches) records nothing. Any other
+    failure is one stderr line."""
+    try:
+        try:
+            db_path = Path(args.db).expanduser()
+            if not db_path.is_file():
+                return
+        except (OSError, ValueError, RuntimeError):
+            return
+        sid = _pull_store_id(db_path)
+        if sid is None:
+            raise _PullSkipped(
+                "the store has no store id yet; a read does not mint one, "
+                "run 'anneal-memory outcome' once"
+            )
+
+        def still_this_store() -> None:
+            if _pull_store_id(db_path) != sid:
+                raise _PullSkipped("the store changed while the label was being written")
+
+        OutcomeLog(outcome_log_path(db_path), store_id=sid).record(
+            PULL_EXPOSURE_PREFIX + uuid.uuid4().hex,
+            [ExposureLabel("crystal", name, "followed")],
+            lock_timeout=_PULL_LOCK_TIMEOUT_SECONDS,
+            pull=True,
+            before_append=still_this_store,
+        )
+    except _PullSkipped as skip:
+        _pull_note(str(skip))
+    except OutcomeLogBusy:
+        _pull_note("outcome log busy")
+    except Exception as exc:  # the read already succeeded: nothing here may fail it
+        _pull_note(str(exc) or type(exc).__name__)
+
+
+def _print_crystal_item(item: CrystalDict, as_json: bool) -> None:
+    if as_json:
         _print_json(item)
         return
     print(f"{item['name']} ({item.get('level')}x, status={item.get('status')}, "
@@ -3826,6 +4013,25 @@ def cmd_crystal_get(args: argparse.Namespace) -> None:
         print(f"  retired: {ret.get('kind')} on {ret.get('on')}{tail}")
     for note in item.get("notes", []):
         print(f"  note: {note}")
+
+
+def cmd_crystal_get(args: argparse.Namespace) -> None:
+    """Show a single crystallized pattern by name (searches live then retired).
+    A found pattern also records a ``followed`` label (see
+    :func:`_record_pull_label`) when the pattern is live (the cue index lists
+    live patterns only, so a retired pull is not that signal) and its text
+    reached stdout, unless ``--no-record`` is passed."""
+    store = _open_crystal_store(args)
+    item = store.get(args.name)
+    if item is None:
+        print(f"Crystallized pattern {args.name!r} not found.", file=sys.stderr)
+        sys.exit(1)
+    _print_crystal_item(item, args.json)
+    # A pull the reader did not receive is not a pull: a failed flush raises here
+    # and records nothing.
+    sys.stdout.flush()
+    if not args.no_record and item.get("status") == "crystallized":
+        _record_pull_label(args, item["name"])
 
 
 def cmd_crystal_index(args: argparse.Namespace) -> None:
@@ -4058,6 +4264,41 @@ def _is_anneal_schema(conn: sqlite3.Connection) -> bool:
     return tables == {"episodes", "metadata"} and conn.execute(
         "SELECT 1 FROM metadata WHERE key = 'format_version'"
     ).fetchone() is not None
+
+
+class _StoreBusy(Exception):
+    """The db could not be read within a caller's short ``busy_timeout``."""
+
+
+def _read_store_id_bounded(db_path: Path, timeout: float) -> tuple[str | None, str | None]:
+    """``(store id or None, refusal or None)`` read through a read-only connection
+    that waits at most ``timeout`` seconds for a lock (the library's own open waits
+    its default busy timeout, several seconds). Applies the same refusals as the
+    library open: not an anneal store, written by a newer anneal. Raises
+    :class:`_StoreBusy` when the db stays locked."""
+    conn: sqlite3.Connection | None = None
+    try:
+        # The package's one opener (every byte of the path percent-escaped, NUL
+        # and non-UTF-8 names refused), read-only: no hand-built URI here.
+        conn = sqlite_connect(db_path, read_only=True, timeout=timeout)
+        if not _is_anneal_schema(conn):
+            return None, "not an anneal store (no episodes table or no format_version); nothing written"
+        found = _parse_format_version(conn.execute(
+            "SELECT value FROM metadata WHERE key = 'format_version'"
+        ).fetchone()[0])
+        if found is not None and found > _SCHEMA_VERSION:
+            return None, (f"written by a newer anneal-memory schema (format_version {found} > "
+                          f"{_SCHEMA_VERSION}); nothing written")
+        row = conn.execute("SELECT value FROM metadata WHERE key = 'store_id'").fetchone()
+    except sqlite3.OperationalError as exc:
+        if "locked" in str(exc) or "busy" in str(exc):
+            raise _StoreBusy(str(exc)) from None
+        raise
+    finally:
+        if conn is not None:
+            conn.close()
+    value = row[0] if row else None
+    return (value if isinstance(value, str) and value else None), None
 
 
 def _outcome_store_id(db_path: Path, *, mint: bool) -> str | None:
@@ -4300,6 +4541,8 @@ def cmd_worth(args: argparse.Namespace) -> None:
     print("surf = recall-surfaced (receipt fold); the other columns come from the outcome")
     print("log and are not joined to it. succ/fail = retrieved with that outcome, any label.")
     print("unl+s/unl+f = exposed with that outcome and never labelled (not in succ/fail).")
+    print("pull = fetched by name (crystal get); a pull is not a judged label, so it is in")
+    print("no other column.")
     if receipts is not None:
         print("unrec = receipts that exposed it with no record in the outcome log at all "
               f"({report.receipts_read} exposing receipt(s) read"
@@ -4307,7 +4550,7 @@ def cmd_worth(args: argparse.Namespace) -> None:
               + (f", {receipt_bad} unreadable line(s)" if receipt_bad else "") + ").")
     print(f"{'crystal':<52} {'surf':>5} {'fol':>4} {'ign':>4} {'n/a':>4} "
           f"{'succ':>5} {'fail':>5} {'fol+s':>6} {'fol+f':>6} {'unl+s':>6} {'unl+f':>6}"
-          + (f" {'unrec':>6}" if receipts is not None else ""))
+          + (f" {'unrec':>6}" if receipts is not None else "") + f" {'pull':>5}")
     for r in report.crystals:
         name = r.ref if r.live else f"{r.ref} (not live)"
         surf = "-" if r.surfaced_count is None else str(r.surfaced_count)
@@ -4318,7 +4561,8 @@ def cmd_worth(args: argparse.Namespace) -> None:
               f"{r.not_applicable:>4} {r.success:>5} {r.failure:>5} "
               f"{fol['success']:>6} {fol['failure']:>6} "
               f"{r.unlabelled_success:>6} {r.unlabelled_failure:>6}"
-              + (f" {r.exposed_unrecorded:>6}" if r.exposed_unrecorded is not None else ""))
+              + (f" {r.exposed_unrecorded:>6}" if r.exposed_unrecorded is not None else "")
+              + f" {r.pulled:>5}")
     if args.episodes:
         print(f"\n{'episode':<20} {'succ':>5} {'fail':>5} {'only via citation':>18} "
               f"{'unl+s':>6} {'unl+f':>6}")
@@ -5139,6 +5383,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     cp = crystal_sub.add_parser("get", help="Show a crystallized pattern by name", parents=[json_parent])
     cp.add_argument("name", help="Pattern slug")
+    cp.add_argument("--no-record", action="store_true", dest="no_record",
+                    help="Do not record a 'followed' label for this pull in the outcome log")
     cp.set_defaults(func=cmd_crystal_get)
 
     cp = crystal_sub.add_parser("list", help="List live crystallized patterns", parents=[json_parent])

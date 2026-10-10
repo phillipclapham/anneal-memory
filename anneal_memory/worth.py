@@ -43,9 +43,11 @@ from __future__ import annotations
 import contextlib
 import errno
 import json
+import math
 import os
 import stat
-from collections.abc import Iterable, Mapping, Sequence
+import time
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -63,6 +65,13 @@ OUTCOME_LOG_VERSION = 1
 FOLLOWED_VALUES: tuple[str, ...] = ("followed", "ignored", "not_applicable")
 OUTCOME_VALUES: tuple[str, ...] = ("success", "failure")
 ITEM_KINDS: tuple[str, ...] = ("crystal", "episode")
+
+# A PULL (a reader fetched one pattern by name, ``crystal get``) is a version-1
+# record that carries ``"pull": true`` beside the ordinary ``followed`` label.
+# Only that field marks one: an exposure id is caller-chosen and never decides.
+# Readers that do not know the field ignore it and count the label as ever.
+# The ``pull:`` id prefix on the records ``crystal get`` writes is cosmetic.
+PULL_EXPOSURE_PREFIX = "pull:"
 
 # Bounds on caller-supplied identifiers: a line of the log must stay one line.
 _MAX_ID_LEN = 256
@@ -268,6 +277,9 @@ class OutcomeLog:
         outcome: str | None = None,
         exposed: Sequence[ExposedRef] = (),
         ts: datetime | None = None,
+        lock_timeout: float | None = None,
+        pull: bool = False,
+        before_append: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Append the outcome for one exposure and return the stored record.
 
@@ -283,18 +295,34 @@ class OutcomeLog:
         With a ``store_id`` the log is read under the lock first and a log whose
         records all belong to another store refuses
         (:class:`ForeignOutcomeLogError`).
+
+        ``lock_timeout`` (seconds) bounds the wait for the write lock: when it is
+        not free in time, :class:`OutcomeLogBusy` (an ``OSError``) is raised and
+        nothing is written. ``None`` waits as long as it takes; anything else that
+        is not a finite, non-negative number raises ``ValueError`` before the log
+        is touched.
+
+        ``pull`` stamps the record ``"pull": true`` (see
+        :data:`PULL_EXPOSURE_PREFIX`); only ``crystal get`` passes it.
+        ``before_append``, when given, is called once with the lock held and the
+        foreign-store check passed, immediately before the append; whatever it
+        raises propagates and nothing is written. ``None`` changes nothing.
         """
+        timeout = _check_lock_timeout(lock_timeout)
+        if not isinstance(pull, bool):
+            raise ValueError(f"pull must be a bool (got {pull!r}).")
         self._writable_id()
-        rec = _build_record(exposure_id, items, outcome, exposed, ts, self.store_id)
+        rec = _build_record(exposure_id, items, outcome, exposed, ts, self.store_id, pull)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # Read-write, not write-only: the append reads the last byte to repair a
         # torn final line, so a write-only (0200) log now refuses.
         fd = _open_log(self.path, write=True, what="the outcome log")
         try:
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_EX)
+            _lock_exclusive(fd, timeout)
             if self.bound:
                 self._refuse_foreign(_bind(_parse_entries(_read_fd(fd))[0], self.store_id)[1])
+            if before_append is not None:
+                before_append()
             _append(fd, rec)
         finally:
             os.close(fd)
@@ -445,6 +473,42 @@ class ForeignOutcomeLogError(ValueError):
     """Writing to an outcome log whose records all belong to another store."""
 
 
+class OutcomeLogBusy(OSError):
+    """The log's write lock was not free within a ``lock_timeout``."""
+
+
+def _check_lock_timeout(timeout: object) -> float | None:
+    """``None``, or a finite, non-negative real number of seconds."""
+    if timeout is None:
+        return None
+    if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout) or timeout < 0):
+        raise ValueError(
+            f"lock_timeout must be None or a finite, non-negative number of seconds "
+            f"(got {timeout!r})."
+        )
+    return float(timeout)
+
+
+def _lock_exclusive(fd: int, timeout: float | None) -> None:
+    """Take the exclusive lock on ``fd``: block when ``timeout`` is None, else poll
+    without blocking until the deadline and raise :class:`OutcomeLogBusy`."""
+    if fcntl is None:
+        return
+    if timeout is None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise OutcomeLogBusy("outcome log busy") from None
+            time.sleep(0.02)
+
+
 @dataclass
 class LogBinding:
     """How an outcome log's records sort against one store id, counted in
@@ -540,6 +604,7 @@ def _build_record(
     exposed: Sequence[ExposedRef],
     ts: datetime | None,
     store_id: str | None = None,
+    pull: bool = False,
 ) -> dict[str, Any]:
     """Validate one record's arguments and return the record :meth:`OutcomeLog.record`
     would store. Raises ``ValueError`` before anything is written."""
@@ -575,7 +640,31 @@ def _build_record(
         rec["exposed"] = [{"kind": e.kind, "ref": e.ref} for e in seen.values()]
     if store_id is not None:
         rec["store"] = store_id
+    if not isinstance(pull, bool):
+        raise ValueError(f"pull must be a bool (got {pull!r}).")
+    if pull:
+        if not _is_pull_shape(rec):
+            # A pull is one crystal fetched by name and nothing else; any other
+            # content would be silently dropped by compute_worth (L3 r1, codex).
+            raise ValueError(
+                "pull=True takes exactly one crystal item labelled 'followed', "
+                "no outcome and no exposed refs."
+            )
+        rec["pull"] = True
     return rec
+
+
+def _is_pull_shape(rec: Mapping[str, Any]) -> bool:
+    """The one record shape a pull may carry: a single crystal ``followed``
+    item, no outcome, nothing exposed."""
+    items = rec.get("items") or []
+    return (
+        len(items) == 1
+        and items[0].get("kind") == "crystal"
+        and items[0].get("followed") == "followed"
+        and rec.get("outcome") is None
+        and not rec.get("exposed")
+    )
 
 
 def _append(fd: int, rec: dict[str, Any]) -> None:
@@ -603,8 +692,11 @@ def _merge_records(records: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any
         cur = out.setdefault(
             rec["exposure_id"],
             {"exposure_id": rec["exposure_id"], "outcome": None, "_items": {},
-             "_exposed": {}},
+             "_exposed": {}, "_pull": True},
         )
+        # A pull only while EVERY record for the id is one: a record anyone else
+        # adds under the same id is a judgement and makes the exposure ordinary.
+        cur["_pull"] = cur["_pull"] and rec.get("pull") is True
         for i in rec["items"]:
             cur["_items"][(i["kind"], i["ref"])] = i
         for e in rec.get("exposed") or ():
@@ -614,6 +706,8 @@ def _merge_records(records: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any
     for cur in out.values():
         cur["items"] = list(cur.pop("_items").values())
         cur["exposed"] = list(cur.pop("_exposed").values())
+        if cur.pop("_pull"):
+            cur["pull"] = True
     return out
 
 
@@ -950,6 +1044,12 @@ class WorthRow:
     only that it was surfaced. An unlabelled crystal credits nothing to the
     episodes it cites.
 
+    ``pulled`` (crystals only) counts the exposures whose records all carry
+    ``"pull": true`` (a reader fetched this crystal by name). A pull
+    moves ``pulled`` and nothing else: it is not a judged label, so it is in no
+    ``followed`` / ``table`` / ``success`` / ``failure`` / ``unlabelled_*`` cell,
+    and it credits no episode through the crystal's evidence.
+
     ``exposed_unrecorded`` (crystals only) counts the receipts passed to
     :func:`compute_worth` that exposed this crystal under an ``event_id`` with NO
     record in the outcome log at all. ``None`` when no receipts were passed, and
@@ -978,6 +1078,7 @@ class WorthRow:
     last_surfaced_on: str | None = None
     last_activated_on: str | None = None
     live: bool = True
+    pulled: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         d = dict(self.__dict__)
@@ -1152,6 +1253,14 @@ def compute_worth(
         crow(name)
 
     for rec in latest.values():
+        # Only the pull shape counts as a pull: a hand-made record that says
+        # "pull" beside a label, an outcome or exposed refs is counted as what
+        # it carries (L3 r1, codex).
+        if rec.get("pull") is True and _is_pull_shape(rec):
+            for item in rec["items"]:
+                if item["kind"] == "crystal":
+                    crow(item["ref"]).pulled += 1
+            continue
         outcome = rec.get("outcome")
         direct: dict[str, str] = {}
         cited: set[str] = set()

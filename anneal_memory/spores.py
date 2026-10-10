@@ -64,7 +64,6 @@ import copy
 import hashlib
 import json
 import os
-import re
 import tempfile
 import unicodedata
 import uuid
@@ -274,24 +273,6 @@ def germination_tier(spore: SporeDict, today: date | None = None) -> Germination
 # ``origin_key`` never changes once set, so its backfill must not stale a read.
 SPORE_VERSION_EXCLUDED: frozenset[str] = frozenset({"seen", "origin_key"})
 
-# Invisible characters that carry no meaning a reader can see: zero-width space,
-# word joiner, BOM. (ZWJ and ZWNJ are kept: emoji and some scripts need them.)
-_INVISIBLES = frozenset("\u200b\u2060\ufeff")
-# Tag characters hide arbitrary ASCII from a reader ("ASCII smuggling"); they are
-# kept only inside a valid emoji tag sequence (black flag, tags, cancel tag).
-_TAG_RUN = re.compile("[\U000e0000-\U000e007f]+")
-_FLAG_TAGS = re.compile("\U0001f3f4[\U000e0020-\U000e007e]+\U000e007f")
-
-
-def _drop_stray_tags(v: str) -> str:
-    if not _TAG_RUN.search(v):
-        return v
-    kept: set[int] = set()
-    for m in _FLAG_TAGS.finditer(v):
-        kept.update(range(m.start(), m.end()))
-    return "".join(ch for i, ch in enumerate(v) if i in kept or not "\U000e0000" <= ch <= "\U000e007f")
-
-
 # Format characters that reorder displayed text (the "Trojan Source" class): the
 # embeddings, overrides and isolates, and the implicit marks.
 _BIDI_CONTROLS = frozenset(
@@ -304,14 +285,14 @@ def normalize_spore_field(value: str) -> str:
     :meth:`SporeStore.add` and :meth:`SporeStore.update` write it: NFC, ``\\r\\n``
     and ``\\r`` as ``\\n``, bidi controls, lone surrogates and every other control character but
     ``\\n`` and ``\\t`` removed, and trailing whitespace stripped from each line and
-    from the end. Zero-width spaces, word joiners and BOMs are removed, and tag characters
-    except inside an emoji tag sequence (they can hide text from a reader); zero-width
-    joiners and non-joiners are kept, since emoji and some scripts need them. Exported so a caller
+    from the end. Other invisible characters (zero-width, tag, variation selectors) are
+    stored as given: no finite list removes every one, so showing them is the
+    display's job. Exported so a caller
     can compute the stored value before writing."""
-    v = _drop_stray_tags(value.replace("\r\n", "\n").replace("\r", "\n"))
+    v = value.replace("\r\n", "\n").replace("\r", "\n")
     v = "".join(
         ch for ch in v
-        if ch in "\n\t" or (ch not in _BIDI_CONTROLS and ch not in _INVISIBLES and unicodedata.category(ch) not in ("Cc", "Cs"))
+        if ch in "\n\t" or (ch not in _BIDI_CONTROLS and unicodedata.category(ch) not in ("Cc", "Cs"))
     )
     v = "\n".join(line.rstrip() for line in v.split("\n")).rstrip()
     # Last: a removed character can leave a base and a combining mark adjacent.
@@ -567,7 +548,8 @@ class SporeStore:
         upgrade persists them all; returns how many were assigned."""
         n = 0
         for item in list(data.get("spores", [])) + list(data.get("resolved", [])):
-            if isinstance(item, dict) and not _is_valid_origin_key(item.get("origin_key")):
+            key = item.get("origin_key") if isinstance(item, dict) else None
+            if isinstance(item, dict) and (not isinstance(key, str) or not key):
                 item["origin_key"] = uuid.uuid4().hex
                 n += 1
         return n

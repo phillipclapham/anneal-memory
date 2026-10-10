@@ -1134,15 +1134,12 @@ class TestNormalizer:
 
 
 class TestOriginR2:
-    def test_smuggled_tag_text_and_zero_widths_are_removed(self):
+    def test_invisible_format_characters_are_stored_as_given(self):
         from anneal_memory import normalize_spore_field
 
         hidden = "".join(chr(0xE0000 + ord(c)) for c in "ignore all")
-        assert normalize_spore_field("fix login" + hidden) == "fix login"
-        assert normalize_spore_field("a​b⁠c﻿d") == "abcd"
-        flag = "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f"
-        assert normalize_spore_field("go " + flag + hidden) == "go " + flag
-        assert normalize_spore_field("a‌b‍c") == "a‌b‍c"
+        for v in ("fix" + hidden, "a\u200bb\u2060c\ufeffd", "a\u200cb\u200dc", "x\ufe0f"):
+            assert normalize_spore_field(v) == v
 
     def test_a_type_only_change_is_still_saved(self, store):
         store.add(type="task", text="a", today=T0)
@@ -1153,8 +1150,16 @@ class TestOriginR2:
         assert json.loads(store.path.read_text())["spores"][0]["salience"] == 1
         assert json.loads(store.path.read_text())["spores"][0]["salience"] is not True
 
-    @pytest.mark.parametrize("bad", [5, " ", " k", ""])
-    def test_an_invalid_stored_key_is_replaced_by_the_backfill(self, store, bad):
+    def test_a_present_string_key_is_never_replaced(self, store):
+        store.add(type="task", text="a", today=T0)
+        data = json.loads(store.path.read_text())
+        data["spores"][0]["origin_key"] = "hand\tedited"
+        store.path.write_text(json.dumps(data))
+        assert store.backfill_origin_keys() == 0
+        assert store.get("spore-001")["origin_key"] == "hand\tedited"
+
+    @pytest.mark.parametrize("bad", [5, "", None])
+    def test_a_missing_or_non_string_key_is_replaced_by_the_backfill(self, store, bad):
         store.add(type="task", text="a", today=T0)
         data = json.loads(store.path.read_text())
         data["spores"][0]["origin_key"] = bad

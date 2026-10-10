@@ -2220,14 +2220,40 @@ def _refuse_existing_output(out: Path) -> NoReturn:
 def _write_text_no_clobber(text: str, out: Path) -> None:
     """Write ``text`` at ``out`` as the sqlite export publishes its copy.
 
-    Refuses an existing ``out`` (lexists, so a dangling symlink too); the text
+    Refuses an existing file, directory or dangling symlink at ``out``; the text
     goes to a private temp beside ``out`` and is published by
     :func:`_publish_no_clobber`, so a failed write never leaves a partial file at
     ``out`` (without hard links, an interrupted publish can leave its empty claim).
     Text mode, as ``Path.write_text`` was: platform newlines, UTF-8.
+
+    An existing device or FIFO (``/dev/stdout``, a named pipe) holds no file to
+    clobber, so it is written in place, as the shell's noclobber (``set -C``)
+    allows ``>/dev/stdout`` (L2 r1: the refusal had broken ``-o /dev/stdout``).
+    It is opened without create or truncate and checked on the open descriptor,
+    so a regular file put there in between is refused, never truncated.
     """
     if os.path.lexists(out):
-        _refuse_existing_output(out)
+        try:
+            fd = os.open(out, os.O_WRONLY | getattr(os, "O_NOCTTY", 0))
+        except (ValueError, OSError):
+            _refuse_existing_output(out)  # a directory, a dangling symlink…
+        try:
+            fh = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            os.close(fd)
+            raise
+        try:
+            with fh:  # owns the descriptor from here
+                mode = os.fstat(fh.fileno()).st_mode
+                is_file = stat.S_ISREG(mode) or stat.S_ISDIR(mode)
+                if not is_file:
+                    fh.write(text)
+        except (ValueError, OSError) as exc:
+            print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if is_file:
+            _refuse_existing_output(out)
+        return
     tmp = out.parent / f".{os.getpid()}-{uuid.uuid4().hex}.export-tmp"
     try:
         with open(tmp, "x", encoding="utf-8") as fh:

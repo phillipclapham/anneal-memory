@@ -19,6 +19,8 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   remove the file first. The text formats are written to a private temp beside `--output` and published the way the
   sqlite copy is (below), so a failed write never leaves a partial file at `--output` (on a filesystem without
   hard links an interrupted publish can leave the empty claim, as below).
+  An existing device or named pipe (`--output /dev/stdout`, a FIFO) is still written in place for the text formats,
+  as the shell's noclobber allows: it is not a file that can be overwritten. `export --format sqlite` refuses it.
 ### Fixed — a failed `export --format sqlite` no longer leaves a file at `--output`
 - A failed backup (a source that is not a database, a full disk) left an empty or partial file at the output path
   that looked like an export. The copy is now built in a private temp in the output's directory, finished as one

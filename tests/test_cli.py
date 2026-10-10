@@ -2895,7 +2895,6 @@ class TestGraphJsonOutput:
         assert len(graph["nodes"]) == 2
 
 
-
 class TestTextExportsNeverOverwrite:
     """Ruled 10-10 (Phill, via the desk): export json/markdown and graph json/dot
     refuse an existing --output exactly as export --format sqlite does."""
@@ -2954,6 +2953,44 @@ class TestTextExportsNeverOverwrite:
         assert "Episode one" in text
         if fmt == "json":
             json.loads(text)
+        assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
+
+    @pytest.mark.parametrize("cmd,fmt", WRITERS)
+    def test_a_missing_directory_is_an_error_and_leaves_nothing(self, db, tmp_path, capsys, cmd, fmt):
+        out = tmp_path / "absent" / "new.out"
+        with pytest.raises(SystemExit) as exc:
+            self._run(cmd, fmt, db, out)
+        assert exc.value.code == 1
+        assert "failed" in capsys.readouterr().err
+        assert not out.parent.exists()
+        assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
+
+    @pytest.mark.parametrize("cmd,fmt", WRITERS)
+    def test_json_mode_reports_the_written_path(self, db, tmp_path, capsys, cmd, fmt):
+        out = tmp_path / "meta.out"
+        args = Namespace(db=db, project_name="Agent", json=True, format=fmt, output=str(out), min_strength=0.0)
+        (cmd_export if cmd == "export" else cmd_graph)(args)
+        meta = json.loads(capsys.readouterr().out)
+        assert meta["path"] == str(out) and meta["format"] == fmt
+        assert out.exists()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="no FIFOs or /dev/null symlinks on Windows")
+    @pytest.mark.parametrize("cmd,fmt", WRITERS)
+    def test_a_fifo_or_device_is_written_in_place(self, db, tmp_path, cmd, fmt):
+        """L2 r1 (run): -o /dev/stdout and a named pipe worked before the refusal."""
+        import threading
+        fifo = tmp_path / "pipe"
+        os.mkfifo(fifo)
+        got = []
+        reader = threading.Thread(target=lambda: got.append(fifo.read_bytes()), daemon=True)
+        reader.start()
+        self._run(cmd, fmt, db, fifo)
+        reader.join(10)
+        assert b"Episode one" in got[0]
+        devnull = tmp_path / "null.out"
+        devnull.symlink_to(os.devnull)
+        self._run(cmd, fmt, db, devnull)
+        assert devnull.is_symlink()
         assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
 
     @pytest.mark.parametrize("cmd,fmt", WRITERS)

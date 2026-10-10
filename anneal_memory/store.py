@@ -9876,6 +9876,13 @@ class Store:
         raise ``sqlite3.OperationalError`` ("unable to commit") so it
         must sit inside the boundary, not after.
 
+        **Nesting.** A boundary entered inside another one (a public method
+        calling another) raises under the OUTERMOST operation, the method the
+        caller called, with the inner name kept in the message and the same
+        SQLite ``__cause__``. The phase names in :data:`_PHASE_OPERATIONS` are
+        the exception: they keep their own name at any depth. A non-database
+        :class:`StoreError` keeps the name it was raised with.
+
         **Identifier naming.** Most operation values match the public
         method name verbatim (``record``, ``recall``, ``wrap_completed``,
         etc.) so grep lands on the raise site and the caller-facing
@@ -9928,13 +9935,15 @@ class Store:
             # phase names the docstring lists stay as raised: they name a part of
             # this call that a caller can act on.
             self._rollback_quietly()
-            if exc.operation == operation or exc.operation in _PHASE_OPERATIONS:
+            cause = exc.__cause__
+            if (exc.operation == operation or exc.operation in _PHASE_OPERATIONS
+                    or not isinstance(cause, sqlite3.DatabaseError)):
                 raise
-            cause = exc.__cause__ if isinstance(exc.__cause__, sqlite3.DatabaseError) else exc
             raise StoreDatabaseError(
-                f"SQLite {operation} failed on {self._path}: {cause}",
+                f"SQLite {operation} failed on {exc.path or self._path} "
+                f"(in {exc.operation}): {cause}",
                 operation=operation,
-                path=str(self._path),
+                path=exc.path or str(self._path),
                 cause_type_name=exc.cause_type_name,
             ) from cause
         except sqlite3.DatabaseError as exc:

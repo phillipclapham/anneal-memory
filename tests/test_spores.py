@@ -1144,6 +1144,13 @@ class TestOriginR2:
         assert normalize_spore_field("fix" + hidden) == "fix"
         assert normalize_spore_field("go " + flag + hidden + "\U000e007f") == "go \U0001f3f4"
 
+    def test_a_disposition_of_invisible_characters_only_is_stored_as_given(self, store):
+        s = store.add(type="task", text="x", disposition="\u200b", today=T0)
+        assert SporeStore(store.path).get(s["id"])["disposition"] == "\u200b"
+        store.update(s["id"], disposition="seed")
+        store.update(s["id"], disposition="\u200b")
+        assert SporeStore(store.path).get(s["id"])["disposition"] == "\u200b"
+
     def test_text_of_invisible_characters_only_is_stored_as_given(self, store):
         s = store.add(type="task", text="\u200b", today=T0)
         assert SporeStore(store.path).get(s["id"])["text"] == "\u200b"

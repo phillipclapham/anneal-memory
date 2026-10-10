@@ -311,7 +311,8 @@ def _is_valid_origin_key(origin_key: object) -> bool:
 
 def _validate_origin_key(origin_key: object) -> None:
     """A key is compared exactly, so one a copy could alter unseen (padding,
-    control or format characters) is refused rather than stored."""
+    control or format characters) is refused rather than stored. Spore text keeps
+    format characters (:func:`normalize_spore_field`); a key refuses them."""
     if not _is_valid_origin_key(origin_key):
         raise ValueError(
             f"origin_key must be a non-empty printable string without surrounding spaces (got {origin_key!r})."

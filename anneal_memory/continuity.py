@@ -425,6 +425,9 @@ def _crystallization_credit(
     # earn-credit side below stays strict-anchored.
     # One lexer (codex L3 r2 MED): a name quoted inside an explanation is text, not
     # a marker, so it neither keeps a departed pattern "present" nor counts below.
+    # So the over-detection above covers markers only: a well-formed quote no longer
+    # holds a departed pattern back (gradgate L3 r3 LOW); a malformed tag is not
+    # masked and still over-detects.
     new_present = {m.group(1) for m in _ANY_GRADUATION_MARKER_RE.finditer(
         mask_explanations_text(new_body_text))}
 

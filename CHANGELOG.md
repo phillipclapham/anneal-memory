@@ -19,7 +19,9 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 - On macOS the spore file and its directory are flushed with `F_FULLFSYNC`, and `Store` sets SQLite's `fullfsync` and
   `checkpoint_fullfsync` (a `record()` measured 0.5 ms → 4.1 ms), so a write that returned has been flushed past the
   drive's cache (measured to do the work; a power cut was not tested). A flush that fails for any reason but an
-  unsupported call now raises.
+  unsupported call now raises; a directory that cannot be opened fails the write before it commits. Known edge: a
+  directory flush that fails with a real I/O error after the rename raises with the spore written, so an unkeyed
+  `add` retried after it plants a second one (an `apply` retry finds `already`).
 
 ### Added — every episode has an immutable `origin_key`; delete by key with a version check
 - A new `episodes.origin_key` column: every episode carries one from creation (a fresh 32-hex key, or the one passed

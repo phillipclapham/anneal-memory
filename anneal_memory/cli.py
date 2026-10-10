@@ -2170,8 +2170,8 @@ def _publish_no_clobber(tmp: Path, out: Path) -> None:
 def _publish_by_claim(tmp: Path, out: Path) -> None:
     """The no-hard-link publish of :func:`_publish_no_clobber`.
 
-    A failure or an interrupt after the claim LEAVES the empty claim at
-    ``out`` and says so: removing it is a check and then an unlink by name,
+    A failure or an interrupt after the claim LEAVES whatever is at ``out``
+    and says to inspect it: removing the claim is a check and then an unlink by name,
     which removes whatever another process put there in between, and on
     filesystems that report inode 0 cannot even tell the claim from another
     empty file (walopen L3 r17, codex HIGH + glm HIGH + complement MED). So
@@ -2180,13 +2180,25 @@ def _publish_by_claim(tmp: Path, out: Path) -> None:
     fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666)
     try:
         os.close(fd)
+        fd = -1
         os.replace(tmp, out)
-    except BaseException:
-        print(
-            f"Note: the export was not published; {out} was left as an empty file. Remove it "
-            "before exporting there again.",
-            file=sys.stderr,
-        )
+    except BaseException as exc:
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        # State-neutral: after the claim, what sits at ``out`` cannot be known
+        # here (another process may have replaced it), so the note never says it
+        # is empty or ours (walopen L3 r18).
+        with contextlib.suppress(Exception):
+            print(
+                f"Note: the export was interrupted after claiming {out}; inspect that path "
+                "before removing anything there.",
+                file=sys.stderr,
+            )
+        if isinstance(exc, FileExistsError):
+            # Not "someone created --output": the claim was ours (L3 r18).
+            # No errno: OSError(EEXIST, ...) would itself construct a FileExistsError.
+            raise OSError(f"publishing over the claim failed: {exc}") from exc
         raise
 
 

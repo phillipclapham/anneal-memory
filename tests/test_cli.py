@@ -1567,8 +1567,34 @@ class TestCmdExport:
         with pytest.raises(KeyboardInterrupt):
             cmd_export(base_args_with_data)
         assert out.exists() and out.stat().st_size == 0
-        assert "left as an empty file" in capsys.readouterr().err
+        assert "inspect that path" in capsys.readouterr().err
         assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
+
+    def test_export_sqlite_claim_replace_exists_error_is_not_reported_as_a_new_file(
+        self, base_args_with_data, tmp_path, capsys, monkeypatch
+    ):
+        """walopen L3 r18 (complement): a FileExistsError from the replace over
+        our own claim was reported as "--output appeared during the export"."""
+        import errno
+        from anneal_memory import cli
+
+        def _nolink(*a, **k):
+            raise OSError(errno.ENOTSUP, "no hard links here")
+
+        def _exists(src, dst):
+            raise FileExistsError(errno.EEXIST, "File exists")
+
+        monkeypatch.setattr(cli.os, "link", _nolink)
+        monkeypatch.setattr(cli.os, "replace", _exists)
+        out = tmp_path / "copy.db"
+        base_args_with_data.format = "sqlite"
+        base_args_with_data.output = str(out)
+        with pytest.raises(SystemExit) as exc:
+            cmd_export(base_args_with_data)
+        err = capsys.readouterr().err
+        assert exc.value.code == 1
+        assert "publishing over the claim failed" in err
+        assert "appeared during the export" not in err
 
     def test_export_sqlite_publishes_by_hard_link(self, base_args_with_data, tmp_path):
         """walopen r16: where hard links exist the copy is published by os.link,

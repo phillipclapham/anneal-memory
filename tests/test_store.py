@@ -4565,13 +4565,19 @@ def test_connect_must_exist_does_not_collapse_dotdot(tmp_path, monkeypatch):
 
 
 def test_connect_must_exist_opens_a_non_utf8_name_without_a_uri(monkeypatch):
-    """walopen L3 r17 (codex): SQLite leaves a URI that decodes to invalid
-    UTF-8 undefined, so such a name takes the plain open."""
+    """walopen L3 r17-r18 (codex, glm, complement): SQLite leaves a URI that
+    decodes to invalid UTF-8 undefined, so such a name is checked and opened
+    plain by its anchored path; a missing one is never created."""
+    import sqlite3
     import anneal_memory.store as store_mod
     seen = []
     monkeypatch.setattr(store_mod.sqlite3, "connect", lambda *a, **k: seen.append((a, k)))
+    monkeypatch.setattr(store_mod.os.path, "lexists", lambda p: p == "/tmp/caf\udce9.db")
     store_mod.connect("/tmp/caf\udce9.db", must_exist=True)
     assert seen == [(("/tmp/caf\udce9.db",), {})]
+    with pytest.raises(sqlite3.OperationalError):
+        store_mod.connect("/tmp/gone\udce9.db", must_exist=True)
+    assert len(seen) == 1
 
 
 def test_existing_file_uri_refuses_a_nul():

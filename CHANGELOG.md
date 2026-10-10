@@ -23,12 +23,13 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
   Where the filesystem has no hard links (FAT, exFAT, many SMB shares) the output is claimed with an exclusive
   create and the copy renamed over that claim: that refuses concurrent exclusive creators, but a process that
   deletes the claim and writes its own file in that window is overwritten. If that step fails or is interrupted,
-  the empty claim is left at `--output` and the export says so (removing it could remove another process's file);
-  a crash or SIGTERM can leave it too. The published file keeps the permissions SQLite
+  nothing at `--output` is removed (removing the claim by name could remove another process's file) and the export
+  says to inspect that path; a crash or SIGTERM can leave the empty claim too. The published file keeps the permissions SQLite
   gave the temp it was built in.
 - A source removed between the existence check and the export is an error; it is no longer recreated as an empty
-  database at its path. (A source whose path is not valid UTF-8 is opened as before, without this check: SQLite
-  leaves such a name undefined in the URI form the check needs.)
+  database at its path. (A source whose path is not valid UTF-8 cannot use the URI form that makes this exact, as
+  SQLite leaves such a name undefined; it is checked and then opened, so only a removal in the instant between the
+  two recreates it.)
 - Export refuses the database or any of its `-wal`, `-shm` or `-journal` files by name, as given, resolved, or as
   SQLite names the file it opened (compared case- and Unicode-folded). The source is opened once, before these
   checks, so the copy is of the file they checked; an empty source is refused.

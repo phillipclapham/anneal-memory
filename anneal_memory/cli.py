@@ -3842,7 +3842,7 @@ def _pull_store_id(db_path: Path) -> str | None:
         sid, why = _read_store_id_bounded(db_path, _PULL_DB_TIMEOUT_SECONDS)
     except _StoreBusy:
         raise _PullSkipped("store busy") from None
-    except (OSError, ValueError, sqlite3.Error) as exc:  # ValueError: a NUL or non-UTF-8 path
+    except (OSError, StorePathError, sqlite3.Error) as exc:  # StorePathError: a NUL or non-UTF-8 path
         raise _PullSkipped(f"cannot read the store id of {db_path}: {exc}") from None
     if why is not None:
         raise _PullSkipped(f"cannot read the store id of {db_path}: {why}")

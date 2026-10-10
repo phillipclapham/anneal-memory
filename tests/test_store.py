@@ -4652,7 +4652,8 @@ def test_connect_read_only_opens_an_existing_file_and_refuses_writes(tmp_path):
 
     from anneal_memory.store import connect
 
-    db = tmp_path / "ro #?%.db"  # URI-special characters, escaped by the opener
+    # URI-special characters, escaped by the opener; "?" is not a legal Windows name
+    db = tmp_path / ("ro #%.db" if os.name == "nt" else "ro #?%.db")
     with Store(db, audit=False):
         pass
     conn = connect(db, read_only=True)
@@ -4665,3 +4666,12 @@ def test_connect_read_only_opens_an_existing_file_and_refuses_writes(tmp_path):
     with pytest.raises(sqlite3.OperationalError):
         connect(tmp_path / "absent.db", read_only=True)
     assert not (tmp_path / "absent.db").exists()
+
+
+def test_connect_refuses_a_caller_uri_flag(tmp_path):
+    """c-pull-label L3 r2 (codex): uri= collided with the opener's own."""
+    from anneal_memory.store import connect
+
+    with pytest.raises(TypeError, match="builds its own URI"):
+        connect(tmp_path / "x.db", uri=False)
+    assert not (tmp_path / "x.db").exists()

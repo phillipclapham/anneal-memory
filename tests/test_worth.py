@@ -1080,10 +1080,11 @@ def test_fold_surfaced_reads_a_repeated_path_once(tmp_path):
     assert result.paths_missing == []
 
 
-
 def test_crystal_get_records_a_pull_for_a_store_path_with_uri_characters(tmp_path):
     """c-pull-label: the store id is read through store.connect's escaped URI."""
-    sub = tmp_path / "a #?% b"
+    import os
+
+    sub = tmp_path / ("a #% b" if os.name == "nt" else "a #?% b")  # "?" is not a legal Windows name
     sub.mkdir()
     db, sid = _pull_store(sub)
     got = _pull_cli(db, "crystal", "get", "derive_dont_invent")

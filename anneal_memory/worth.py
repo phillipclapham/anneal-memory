@@ -860,8 +860,8 @@ def fold_surfaced(
                         f"receipt file {path} disappeared during the fold; the fold mark "
                         f"was not moved. Run it again."
                     )
-                if absent_before and str(path) in result.paths_missing:
-                    result.paths_missing.remove(str(path))  # it appeared and is read (L3 r6)
+                if str(path) in result.paths_missing:
+                    result.paths_missing.remove(str(path))  # read now, so not missing (L3 r6-r7)
                 for line in f:
                     if not line.strip():
                         continue

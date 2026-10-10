@@ -2154,13 +2154,24 @@ _PROTECTED_TEAM_EPISODES = (
 )
 
 
-def connect(path: str | Path, **kwargs: Any) -> sqlite3.Connection:
+def connect(path: str | Path, *, must_exist: bool = False, **kwargs: Any) -> sqlite3.Connection:
     """THE way this package opens SQLite: :func:`sqlite_path` first, then
     ``sqlite3.connect``. ``tests/test_store.py::test_every_sqlite_connect_goes_
     through_the_one_opener`` fails on any other ``sqlite3.connect`` call in the
     package, so a new call site cannot bypass the URI refusal (walopen L3 r6-r11:
-    each round found a caller that did)."""
-    return sqlite3.connect(sqlite_path(path), **kwargs)
+    each round found a caller that did).
+
+    ``must_exist=True`` opens an existing file only: a missing one raises
+    ``sqlite3.OperationalError`` instead of being created empty at ``path``
+    (walopen L3 r15, codex: an export whose source was removed recreated it). The
+    URI is built here, from the path :func:`sqlite_path` already accepted, so a
+    caller still cannot hand SQLite a URI of its own."""
+    target = sqlite_path(path)
+    if must_exist:
+        if target == ":memory:":
+            raise StorePathError("':memory:' is not an existing database file")
+        return sqlite3.connect(Path(os.path.abspath(target)).as_uri() + "?mode=rw", uri=True, **kwargs)
+    return sqlite3.connect(target, **kwargs)
 
 
 class StorePathError(ValueError):

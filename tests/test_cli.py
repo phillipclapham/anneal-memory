@@ -1549,11 +1549,16 @@ class TestCmdExport:
     ):
         """walopen L1 r15 (run: Ctrl-C between the claim and the rename left a
         0-byte file at --output, which every later export then refused)."""
+        import errno
         from anneal_memory import cli
 
         def _interrupt(src, dst):
             raise KeyboardInterrupt
 
+        def _nolink(*a, **k):
+            raise OSError(errno.ENOTSUP, "no hard links here")
+
+        monkeypatch.setattr(cli.os, "link", _nolink)  # the claim path is the one interrupted
         monkeypatch.setattr(cli.os, "replace", _interrupt)
         out = tmp_path / "copy.db"
         base_args_with_data.format = "sqlite"
@@ -1562,6 +1567,129 @@ class TestCmdExport:
             cmd_export(base_args_with_data)
         assert not out.exists()
         assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
+
+    def test_export_sqlite_publishes_by_hard_link(self, base_args_with_data, tmp_path):
+        """walopen r16: where hard links exist the copy is published by os.link,
+        which never replaces a file; the temp name is gone afterwards."""
+        import os
+        out = tmp_path / "copy.db"
+        base_args_with_data.format = "sqlite"
+        base_args_with_data.output = str(out)
+        cmd_export(base_args_with_data)
+        assert os.stat(out).st_nlink == 1
+        assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
+
+    def test_export_sqlite_never_replaces_a_file_that_appears_at_publication(
+        self, base_args_with_data, tmp_path, capsys, monkeypatch
+    ):
+        """walopen L3 r15 (codex + glm HIGH): a file created at --output while the
+        copy is built is refused at publication and left as it was."""
+        from anneal_memory import cli
+        real_link = cli.os.link
+
+        def _race(src, dst, *a, **k):
+            with open(dst, "wb") as f:
+                f.write(b"someone else's file")
+            return real_link(src, dst, *a, **k)
+
+        monkeypatch.setattr(cli.os, "link", _race)
+        out = tmp_path / "copy.db"
+        base_args_with_data.format = "sqlite"
+        base_args_with_data.output = str(out)
+        with pytest.raises(SystemExit) as exc:
+            cmd_export(base_args_with_data)
+        assert exc.value.code == 1
+        assert "appeared during the export" in capsys.readouterr().err
+        assert out.read_bytes() == b"someone else's file"
+        assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
+
+    def test_export_sqlite_without_hard_links_claims_then_renames(
+        self, base_args_with_data, tmp_path, capsys, monkeypatch
+    ):
+        """walopen r16: FAT/exFAT have no hard links; only then is the target
+        claimed with an exclusive create and the finished copy renamed over it."""
+        import errno
+        import sqlite3
+        from anneal_memory import cli
+
+        def _nolink(*a, **k):
+            raise OSError(errno.ENOTSUP, "no hard links here")
+
+        monkeypatch.setattr(cli.os, "link", _nolink)
+        out = tmp_path / "copy.db"
+        base_args_with_data.format = "sqlite"
+        base_args_with_data.output = str(out)
+        cmd_export(base_args_with_data)
+        conn = sqlite3.connect(out)
+        try:
+            assert conn.execute("pragma integrity_check").fetchone()[0] == "ok"
+        finally:
+            conn.close()
+        assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
+        before = out.read_bytes()
+        with pytest.raises(SystemExit) as exc:
+            cmd_export(base_args_with_data)
+        assert exc.value.code == 1
+        assert "never overwrites" in capsys.readouterr().err
+        assert out.read_bytes() == before
+
+    def test_export_sqlite_interrupted_inside_the_claim_removes_it(
+        self, base_args_with_data, tmp_path, monkeypatch
+    ):
+        """walopen L3 r15 (codex LOW): an interrupt after the exclusive create and
+        before the rename must not leave the claim behind."""
+        import errno
+        from anneal_memory import cli
+        real_fstat = cli.os.fstat
+        calls = []
+
+        def _nolink(*a, **k):
+            raise OSError(errno.ENOTSUP, "no hard links here")
+
+        def _fstat(fd):
+            calls.append(fd)
+            if len(calls) == 1:
+                raise KeyboardInterrupt
+            return real_fstat(fd)
+
+        monkeypatch.setattr(cli.os, "link", _nolink)
+        monkeypatch.setattr(cli.os, "fstat", _fstat)
+        out = tmp_path / "copy.db"
+        base_args_with_data.format = "sqlite"
+        base_args_with_data.output = str(out)
+        with pytest.raises(KeyboardInterrupt):
+            cmd_export(base_args_with_data)
+        assert calls, "the claim's fstat never ran: the window under test was not reached"
+        assert not out.exists()
+        assert not [p for p in tmp_path.iterdir() if ".export-tmp" in p.name]
+
+    def test_export_sqlite_of_a_removed_source_does_not_recreate_it(
+        self, base_args_with_data, tmp_path, capsys, monkeypatch
+    ):
+        """walopen L3 r15 (codex MED): a source removed after the existence check
+        is an error, never created empty at the user's path."""
+        import os
+        from anneal_memory import cli
+        db = base_args_with_data.db
+        real_connect = cli.sqlite_connect
+
+        def _connect(target, **kw):
+            if str(target) == str(db):
+                for suffix in ("", "-wal", "-shm"):
+                    if os.path.exists(db + suffix):
+                        os.unlink(db + suffix)
+            return real_connect(target, **kw)
+
+        monkeypatch.setattr(cli, "sqlite_connect", _connect)
+        out = tmp_path / "copy.db"
+        base_args_with_data.format = "sqlite"
+        base_args_with_data.output = str(out)
+        with pytest.raises(SystemExit) as exc:
+            cmd_export(base_args_with_data)
+        assert exc.value.code == 1
+        assert "failed" in capsys.readouterr().err
+        assert not os.path.exists(db)
+        assert not out.exists()
 
     def test_export_sqlite_of_an_empty_source_is_refused(self, tmp_path, capsys):
         """walopen L1 r15 (run: a source removed after the existence check was
@@ -1574,7 +1702,7 @@ class TestCmdExport:
         with pytest.raises(SystemExit) as exc:
             cmd_export(args)
         assert exc.value.code == 1
-        assert "is empty or was removed" in capsys.readouterr().err
+        assert "is empty; there is nothing to export" in capsys.readouterr().err
         assert not out.exists()
 
     def test_export_sqlite_json(self, base_args_with_data, tmp_path, capsys):

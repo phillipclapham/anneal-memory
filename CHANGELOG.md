@@ -19,9 +19,14 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 ### Fixed — a failed `export --format sqlite` no longer leaves a file at `--output`
 - A failed backup (a source that is not a database, a full disk) left an empty or partial file at the output path
   that looked like an export. The copy is now built in a private temp in the output's directory, finished as one
-  file in rollback-journal mode and flushed to disk, then published by claiming the output with an exclusive create
-  and renaming the copy over that claim: no pre-existing file is replaced, and no hard links are needed (FAT,
-  exFAT). An error or Ctrl-C at that step removes the claim; a crash there can leave an empty file.
+  file in rollback-journal mode and flushed to disk, then published with a hard link, which never replaces a file.
+  Where the filesystem has no hard links (FAT, exFAT, many SMB shares) the output is claimed with an exclusive
+  create and the copy renamed over that claim: that refuses concurrent exclusive creators, but a process that
+  deletes the claim and writes its own file in that window is overwritten. An error or Ctrl-C at that step removes
+  the claim; a crash or SIGTERM there can leave an empty file. The published file keeps the permissions SQLite
+  gave the temp it was built in.
+- A source removed between the existence check and the export is an error; it is no longer recreated as an empty
+  database at its path.
 - Export refuses the database or any of its `-wal`, `-shm` or `-journal` files by name, as given, resolved, or as
   SQLite names the file it opened (compared case- and Unicode-folded). The source is opened once, before these
   checks, so the copy is of the file they checked; an empty source is refused.

@@ -2133,32 +2133,54 @@ def _fold(path: str) -> str:
 def _publish_no_clobber(tmp: Path, out: Path) -> None:
     """Publish the finished ``tmp`` at the absent ``out`` without replacing a file.
 
-    Raises FileExistsError when ``out`` exists. The target is claimed with an
-    exclusive create and the finished copy renamed over that claim (git's
-    lockfile, with the target as the lock), so the content appears at once and a
-    concurrent creator is refused. It needs no hard links, so it is the same on
-    every filesystem (FAT, exFAT and many SMB shares have none). The copy is
-    flushed to disk before the claim. An error or an interrupt between the claim
-    and the rename removes the claim, if it is still the empty file this call
-    created; a crash there can leave it.
+    Raises FileExistsError when ``out`` exists. The copy is flushed to disk
+    first. A hard link is atomic and create-only, so where the filesystem has
+    them nothing that appears at ``out`` is ever replaced. Only when the link
+    fails for another reason (FAT, exFAT and many SMB shares have no hard links)
+    is the target claimed with an exclusive create and the copy renamed over that
+    claim (git's lockfile, with the target as the lock): a concurrent creator is
+    still refused, but a process that deletes the claim and writes its own file
+    before the rename is overwritten (walopen L3 r15). An error or an interrupt
+    after the claim removes it if it is still the empty file this call created;
+    a crash or SIGTERM there can leave it.
     """
     fd = os.open(tmp, os.O_RDWR | getattr(os, "O_BINARY", 0))
     try:
         os.fsync(fd)
     finally:
         os.close(fd)
-    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666)
-    claim = os.fstat(fd)
-    os.close(fd)
     try:
+        os.link(tmp, out)
+    except FileExistsError:
+        raise
+    except OSError:
+        _publish_by_claim(tmp, out)
+    _fsync_dir(out.parent)
+
+
+def _publish_by_claim(tmp: Path, out: Path) -> None:
+    """The no-hard-link publish of :func:`_publish_no_clobber`."""
+    fd = -1
+    claim = None
+    try:
+        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666)
+        claim = os.fstat(fd)
+        os.close(fd)
+        fd = -1
         os.replace(tmp, out)
     except BaseException:
-        with contextlib.suppress(OSError):
-            now = os.stat(out)
-            if (now.st_dev, now.st_ino, now.st_size) == (claim.st_dev, claim.st_ino, 0):
-                os.unlink(out)
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                if claim is None:
+                    claim = os.fstat(fd)
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if claim is not None:
+            with contextlib.suppress(OSError):
+                now = os.stat(out)
+                if (now.st_dev, now.st_ino, now.st_size) == (claim.st_dev, claim.st_ino, 0):
+                    os.unlink(out)
         raise
-    _fsync_dir(out.parent)
 
 
 def cmd_export(args: argparse.Namespace) -> None:
@@ -2184,7 +2206,9 @@ def cmd_export(args: argparse.Namespace) -> None:
         # symlink or a deleted source must not export a different or empty DB).
         try:
             deadline = time.monotonic() + _EXPORT_BUSY_DEADLINE_S
-            src_conn = sqlite_connect(src_target, timeout=_EXPORT_BUSY_DEADLINE_S)
+            # must_exist: a source removed since the check above is an error, never
+            # recreated empty at the user's path (walopen L3 r15, codex).
+            src_conn = sqlite_connect(src_target, must_exist=True, timeout=_EXPORT_BUSY_DEADLINE_S)
         except (sqlite3.Error, OSError) as exc:
             print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -2202,8 +2226,7 @@ def cmd_export(args: argparse.Namespace) -> None:
                 sys.exit(1)
             if page_count == 0:
                 print(
-                    f"Error: {db_path} is empty or was removed during the export (if it was "
-                    "removed, opening it left an empty file at that path)",
+                    f"Error: {db_path} is empty; there is nothing to export",
                     file=sys.stderr,
                 )
                 sys.exit(1)

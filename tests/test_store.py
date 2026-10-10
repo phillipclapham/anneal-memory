@@ -4494,6 +4494,28 @@ def test_an_sqlite_uri_is_refused_as_a_store_path(uri, tmp_path, monkeypatch):
 
 
 
+def test_connect_must_exist_never_creates_the_file(tmp_path):
+    """walopen L3 r15 (codex MED): must_exist opens an existing database only."""
+    import sqlite3
+    from anneal_memory.store import StorePathError, connect
+    missing = tmp_path / "gone dir %3F" / "x?y#z.db"
+    missing.parent.mkdir()
+    with pytest.raises(sqlite3.OperationalError):
+        connect(missing, must_exist=True)
+    assert not missing.exists()
+    with pytest.raises(StorePathError):
+        connect(":memory:", must_exist=True)
+    real = tmp_path / "odd %20 name?#.db"
+    c = connect(real)
+    c.execute("create table t(x)")
+    c.close()
+    c = connect(real, must_exist=True)
+    try:
+        assert c.execute("select name from sqlite_master").fetchone()[0] == "t"
+    finally:
+        c.close()
+
+
 def test_every_sqlite_connect_goes_through_the_one_opener():
     """walopen bound: the only sqlite3 opener in the package is the module-level
     store.connect; any other way to reach sqlite3.connect or sqlite3.Connection

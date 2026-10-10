@@ -42,7 +42,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import errno
-import io
 import json
 import os
 import re
@@ -3621,19 +3620,19 @@ def _pull_note(why: str) -> None:
 
 
 def _pull_store_id(db_path: Path) -> str | None:
-    """The store id for a pull, bounded; ``None`` when the store has none."""
-    refusal = io.StringIO()
+    """The store id for a pull, bounded; ``None`` when the store has none. A
+    refusal is a :class:`_PullSkipped` carrying its reason, never a captured
+    print-and-exit (c-pull-label L3 r1, codex: redirecting the process-global
+    ``sys.stderr`` to capture one was not thread-safe)."""
     try:
-        with contextlib.redirect_stderr(refusal):
-            return _outcome_store_id(
-                db_path, mint=False, busy_timeout=_PULL_DB_TIMEOUT_SECONDS)
+        sid, why = _read_store_id_bounded(db_path, _PULL_DB_TIMEOUT_SECONDS)
     except _StoreBusy:
         raise _PullSkipped("store busy") from None
-    except SystemExit:
-        why = " ".join(refusal.getvalue().split())
-        if why.startswith("Error:"):
-            why = why[len("Error:"):].strip()
-        raise _PullSkipped(why or "the store id could not be read") from None
+    except (OSError, sqlite3.Error) as exc:
+        raise _PullSkipped(f"cannot read the store id of {db_path}: {exc}") from None
+    if why is not None:
+        raise _PullSkipped(f"cannot read the store id of {db_path}: {why}")
+    return sid
 
 
 def _record_pull_label(args: argparse.Namespace, name: str) -> None:
@@ -3988,17 +3987,12 @@ def _read_store_id_bounded(db_path: Path, timeout: float) -> tuple[str | None, s
     return (value if isinstance(value, str) and value else None), None
 
 
-def _outcome_store_id(
-    db_path: Path, *, mint: bool, busy_timeout: float | None = None
-) -> str | None:
+def _outcome_store_id(db_path: Path, *, mint: bool) -> str | None:
     """The store id that binds ``<stem>.outcomes.jsonl`` to the store at ``db_path``,
     or exit 1. Read through the library's read-only open, which also refuses a
     store written by a newer anneal; a file that is not an anneal store (see
     :func:`_is_anneal_schema`) refuses too. A store with no id yet returns
     ``None`` unless ``mint`` (``outcome``; ``worth`` never mints, Phill 10-03).
-    ``busy_timeout`` (seconds, never with ``mint``) reads through
-    :func:`_read_store_id_bounded` instead and raises :class:`_StoreBusy` when the
-    db stays locked; ``None`` is the library open every other caller uses.
 
     The mint takes the writer lock only when the id is missing, and re-proves
     the schema, the version (with the store's own ``_parse_format_version`` and
@@ -4012,16 +4006,6 @@ def _outcome_store_id(
         sys.exit(1)
 
     not_anneal = "not an anneal store (no episodes table or no format_version); nothing written"
-    if busy_timeout is not None:
-        if mint:
-            raise ValueError("busy_timeout is for reads; a mint takes the writer lock.")
-        try:
-            sid, why = _read_store_id_bounded(db_path, busy_timeout)
-        except (OSError, sqlite3.Error) as exc:
-            refuse(exc)
-        if why is not None:
-            refuse(why)
-        return sid
     try:
         with Store(db_path, audit=False, read_only=True) as store:
             if not _is_anneal_schema(store._conn):

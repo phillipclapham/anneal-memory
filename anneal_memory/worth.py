@@ -574,8 +574,28 @@ def _build_record(
     if not isinstance(pull, bool):
         raise ValueError(f"pull must be a bool (got {pull!r}).")
     if pull:
+        if not _is_pull_shape(rec):
+            # A pull is one crystal fetched by name and nothing else; any other
+            # content would be silently dropped by compute_worth (L3 r1, codex).
+            raise ValueError(
+                "pull=True takes exactly one crystal item labelled 'followed', "
+                "no outcome and no exposed refs."
+            )
         rec["pull"] = True
     return rec
+
+
+def _is_pull_shape(rec: Mapping[str, Any]) -> bool:
+    """The one record shape a pull may carry: a single crystal ``followed``
+    item, no outcome, nothing exposed."""
+    items = rec.get("items") or []
+    return (
+        len(items) == 1
+        and items[0].get("kind") == "crystal"
+        and items[0].get("followed") == "followed"
+        and rec.get("outcome") is None
+        and not rec.get("exposed")
+    )
 
 
 def _append(fd: int, rec: dict[str, Any]) -> None:
@@ -1137,7 +1157,10 @@ def compute_worth(
         crow(name)
 
     for rec in latest.values():
-        if rec.get("pull") is True:
+        # Only the pull shape counts as a pull: a hand-made record that says
+        # "pull" beside a label, an outcome or exposed refs is counted as what
+        # it carries (L3 r1, codex).
+        if rec.get("pull") is True and _is_pull_shape(rec):
             for item in rec["items"]:
                 if item["kind"] == "crystal":
                     crow(item["ref"]).pulled += 1

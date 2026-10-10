@@ -680,12 +680,12 @@ def test_an_ordinary_record_named_pull_keeps_all_its_counts(tmp_path):
     crystal.crystallize(name="p", level=3, explanation="x", evidence=["e1"])
     log = OutcomeLog(tmp_path / "mem.outcomes.jsonl")
     log.record("pull:manual", [ExposureLabel("crystal", "p", "followed")], outcome="success")
-    log.record("pull:both", [ExposureLabel("crystal", "p", "ignored")], pull=True)
+    log.record("pull:both", [ExposureLabel("crystal", "p", "followed")], pull=True)
     log.record("pull:both", [], outcome="failure")  # a later judgement makes it ordinary
     rows = {r.ref: r for r in compute_worth(log, crystal).crystals}
     p = rows["p"]
     assert p.pulled == 0
-    assert p.followed == 1 and p.ignored == 1
+    assert p.followed == 2 and p.ignored == 0
     assert p.success == 1 and p.failure == 1
     assert p.table["followed"]["success"] == 1
     erows = {r.ref: r for r in compute_worth(log, crystal).episodes}
@@ -744,18 +744,18 @@ def test_a_store_replaced_before_the_append_gets_no_pull_from_the_old_one(tmp_pa
     from anneal_memory import cli
 
     db, sid = _pull_store(tmp_path)
-    real = cli._outcome_store_id
+    real = cli._read_store_id_bounded
     reads = []
 
-    def swapped(db_path, **kw):
-        reads.append(kw)
-        return real(db_path, **kw) if len(reads) == 1 else "b" * 32  # store B now
+    def swapped(db_path, timeout):
+        reads.append(timeout)
+        return real(db_path, timeout) if len(reads) == 1 else ("b" * 32, None)  # store B now
 
-    cli._outcome_store_id = swapped
+    cli._read_store_id_bounded = swapped
     try:
         cli._record_pull_label(Namespace(db=str(db)), "derive_dont_invent")
     finally:
-        cli._outcome_store_id = real
+        cli._read_store_id_bounded = real
     assert len(reads) == 2
     assert _log_lines(db) == []
     err = capsys.readouterr().err
@@ -860,3 +860,36 @@ def test_the_pull_note_is_one_physical_line_whatever_the_reason(capsys):
     err = capsys.readouterr().err
     assert err == "crystal get: pull not recorded (disk said: forged second line and a third)\n"
     assert err.count("\n") == 1 and "\r" not in err
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"items": [ExposureLabel("episode", "e", "followed")]},
+    {"items": [ExposureLabel("crystal", "p", "ignored")]},
+    {"items": [ExposureLabel("crystal", "p", "followed")], "outcome": "failure"},
+    {"items": [ExposureLabel("crystal", "p", "followed"), ExposureLabel("crystal", "q", "followed")]},
+    {"items": [ExposureLabel("crystal", "p", "followed")], "exposed": [ExposedRef("episode", "e")]},
+])
+def test_pull_refuses_anything_but_one_followed_crystal(tmp_path, kwargs):
+    """c-pull-label L3 r1 (codex + complement MED): a pull record carrying a
+    label, an outcome or exposed refs was accepted and compute_worth then
+    dropped that content."""
+    log = OutcomeLog(tmp_path / "mem.outcomes.jsonl")
+    items = kwargs.pop("items")
+    with pytest.raises(ValueError, match="pull=True takes exactly one crystal"):
+        log.record("x", items, pull=True, **kwargs)
+    assert not (tmp_path / "mem.outcomes.jsonl").exists() or log.latest()[0] == {}
+
+
+def test_a_hand_made_pull_with_an_outcome_is_counted_as_what_it_carries(tmp_path):
+    """c-pull-label L3 r1: compute_worth applies the pull rule only to the pull
+    shape, so a written outcome is never discarded."""
+    import json
+    path = tmp_path / "mem.outcomes.jsonl"
+    path.write_text(json.dumps({
+        "v": 1, "exposure_id": "x", "ts": "2026-10-10T00:00:00Z", "pull": True,
+        "outcome": "failure", "items": [{"kind": "crystal", "ref": "p", "followed": "followed"}],
+    }) + "\n", encoding="utf-8")
+    crystal = CrystalStore(tmp_path / "c.crystal.json")
+    rows = {r.ref: r for r in compute_worth(OutcomeLog(path), crystal).crystals}
+    assert rows["p"].pulled == 0
+    assert rows["p"].failure == 1

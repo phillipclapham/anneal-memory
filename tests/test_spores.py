@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from anneal_memory import SporeError, SporeStore, germination_tier
+from anneal_memory import SporeError, SporeStore, germination_tier, spore_version
 from anneal_memory import spores as _spores
 from anneal_memory.spores import SPORE_SCHEMA_VERSION
 
@@ -30,6 +30,16 @@ def _concurrent_add_worker(path_str: str, barrier, idx: int, count: int) -> None
         return
     for j in range(count):
         store.add(type="task", text=f"w{idx}-{j}", domain="concurrency", today=date(2026, 1, 1))
+
+
+# Module-level for "spawn": holds the store's lock while it rewrites the text, so a
+# caller that read before it must meet the change under the same lock.
+def _hold_lock_and_edit(path_str: str, held, release) -> None:
+    store = SporeStore(path_str)
+    with store._transaction() as data:
+        data["spores"][0]["text"] = "edited by the other writer"
+        held.set()
+        release.wait(timeout=30)
 
 
 @pytest.fixture
@@ -774,3 +784,102 @@ class TestRetype:
         store.add(type="question", text="x", today=T0)
         store.update("spore-001", tier="hot")
         assert SporeStore(store.path).get("spore-001")["type"] == "question"
+
+
+# -- expected_version: the whole-spore compare-and-set (cockpit slice P) --------
+
+
+class TestExpectedVersion:
+    def test_version_ignores_seen_and_tracks_every_other_field(self, store):
+        s = store.add(type="task", text="x", today=T0)
+        v = spore_version(s)
+        touched = store.touch("spore-001", today=T0 + timedelta(days=2))
+        assert spore_version(touched) == v
+        noted = store.update("spore-001", add_note="n", today=T0)
+        assert spore_version(noted) != v
+
+    def test_a_touch_that_clears_an_elapsed_next_changes_the_version(self, store):
+        s = store.add(type="task", text="x", next=(T0 + timedelta(days=1)).isoformat(), today=T0)
+        cleared = store.touch("spore-001", today=T0 + timedelta(days=2))
+        assert cleared["next"] is None
+        assert spore_version(cleared) != spore_version(s)
+
+    @pytest.mark.parametrize("op", ["update", "touch", "descend", "ascend"])
+    def test_a_current_version_applies(self, store, op):
+        s = store.add(type="question", text="x", today=T0)
+        v = spore_version(s)
+        call = {
+            "update": lambda: store.update("spore-001", text="y", expected_version=v),
+            "touch": lambda: store.touch("spore-001", today=T0, expected_version=v),
+            "descend": lambda: store.descend("spore-001", kind="answered", today=T0, expected_version=v),
+            "ascend": lambda: store.ascend("spore-001", kind="pattern", ref="r", today=T0, expected_version=v),
+        }[op]
+        call()
+
+    @pytest.mark.parametrize("op", ["update", "touch", "descend", "ascend"])
+    def test_a_stale_version_is_refused_and_nothing_is_written(self, store, op):
+        s = store.add(type="question", text="x", today=T0)
+        stale = spore_version(s)
+        store.update("spore-001", text="changed elsewhere")
+        before = store.path.read_bytes()
+        call = {
+            "update": lambda: store.update("spore-001", text="y", expected_version=stale),
+            "touch": lambda: store.touch("spore-001", today=T0 + timedelta(days=1), expected_version=stale),
+            "descend": lambda: store.descend("spore-001", kind="answered", today=T0, expected_version=stale),
+            "ascend": lambda: store.ascend("spore-001", kind="pattern", ref="r", today=T0, expected_version=stale),
+        }[op]
+        with pytest.raises(SporeError, match="changed since read"):
+            call()
+        assert store.path.read_bytes() == before
+
+    def test_version_of_lets_a_caller_bind_its_own_hash(self, store):
+        store.add(type="task", text="x", today=T0)
+
+        def text_only(sp):
+            return sp["text"]
+
+        store.update("spore-001", tier="hot", expected_version="x", version_of=text_only)
+        with pytest.raises(SporeError, match="changed since read"):
+            store.update("spore-001", tier="cold", expected_version="other", version_of=text_only)
+
+    @pytest.mark.parametrize("bad", ["", 7, b"v"])
+    def test_a_malformed_expected_version_is_a_value_error(self, store, bad):
+        store.add(type="task", text="x", today=T0)
+        with pytest.raises(ValueError, match="expected_version"):
+            store.update("spore-001", text="y", expected_version=bad)  # type: ignore[arg-type]
+
+    @pytest.mark.skipif(_spores.fcntl is None, reason="the cross-process lock is POSIX fcntl")
+    @pytest.mark.parametrize("with_version", [True, False])
+    def test_a_write_landing_under_the_lock_after_the_read_is_refused(self, tmp_path, with_version):
+        """A second process takes the lock and rewrites the text AFTER this caller
+        read the spore. The caller's update waits on the lock, then must see that
+        write. The control (no expected_version) shows the window is real: there
+        the late update overwrites the other writer's text."""
+        import time
+
+        path = tmp_path / "spores.json"
+        store = SporeStore(path)
+        read = store.add(type="task", text="original", today=T0)
+        ctx = mp.get_context("spawn")
+        held, release = ctx.Event(), ctx.Event()
+        proc = ctx.Process(target=_hold_lock_and_edit, args=(str(path), held, release))
+        proc.start()
+        try:
+            assert held.wait(timeout=30)
+            timer = __import__("threading").Timer(0.5, release.set)
+            timer.start()
+            t0 = time.monotonic()
+            kwargs = {"expected_version": spore_version(read)} if with_version else {}
+            if with_version:
+                with pytest.raises(SporeError, match="changed since read"):
+                    store.update("spore-001", text="late write", **kwargs)
+            else:
+                store.update("spore-001", text="late write")
+            waited = time.monotonic() - t0
+        finally:
+            release.set()
+            proc.join(timeout=30)
+        assert proc.exitcode == 0
+        assert waited >= 0.4  # the update really queued behind the held lock
+        expected_text = "edited by the other writer" if with_version else "late write"
+        assert SporeStore(path).get("spore-001")["text"] == expected_text

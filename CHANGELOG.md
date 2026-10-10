@@ -4,6 +4,13 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added — a spore write can require the version its caller read
+- `SporeStore.update`, `touch`, `descend` and `ascend` take `expected_version`. It is compared with the stored
+  spore under the store's lock, after any concurrent writer's commit, and a mismatch raises `SporeError` and
+  writes nothing. The default version is `spore_version(spore)` (exported), a SHA-256 over every stored field
+  except `seen`: a touch changes it only when it clears an elapsed `next`. A caller that versions a spore its own way
+  passes that function as `version_of`. `expect_disposition` is unchanged.
+
 ### Changed — a Store path is never an SQLite URI
 - `Store("file:...")` now raises `ValueError`. Whether SQLite reads `file:` as a URI depends on how it was built, so
   the same string was a file on one machine and a shared in-memory database on another; shared-cache in-memory use

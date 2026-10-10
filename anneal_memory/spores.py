@@ -60,13 +60,14 @@ the Levain-generalization notes:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Iterator, Literal, TypedDict, cast
+from typing import Callable, Iterator, Literal, TypedDict, cast
 
 try:  # POSIX advisory locking; absent on Windows (see SporeStore._transaction).
     import fcntl
@@ -259,6 +260,50 @@ def germination_tier(spore: SporeDict, today: date | None = None) -> Germination
 # ---------------------------------------------------------------------------
 # the store
 # ---------------------------------------------------------------------------
+
+# Stored fields a spore's version leaves out: ``seen`` records engagement, not
+# content. (A touch that clears an elapsed ``next`` still changes the version.)
+SPORE_VERSION_EXCLUDED: frozenset[str] = frozenset({"seen"})
+
+
+def spore_version(spore: SporeDict) -> str:
+    """The default version of a stored spore: a SHA-256 over every stored field
+    except :data:`SPORE_VERSION_EXCLUDED`, as sorted-key compact JSON. Any edit to
+    a versioned field changes it; a caller that read a spore passes the version it
+    saw as ``expected_version`` to a mutator, which refuses if it no longer matches."""
+    payload = {k: v for k, v in spore.items() if k not in SPORE_VERSION_EXCLUDED}
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+VersionOf = Callable[[SporeDict], str]
+
+
+def _check_expected_version(
+    item: SporeDict, expected_version: str | None, version_of: VersionOf
+) -> None:
+    """Raise :class:`SporeError` unless the spore's current version equals
+    ``expected_version``. Called inside :meth:`SporeStore._transaction`, after the
+    spore is loaded under the lock and before anything is changed, so a write that
+    lands between a caller's read and this one is refused, never overwritten."""
+    if expected_version is None:
+        return
+    found = version_of(item)
+    if found != expected_version:
+        raise SporeError(
+            f"spore '{item.get('id')}' changed since read (expected version "
+            f"{expected_version!r}, found {found!r}); re-read the spore and retry."
+        )
+
+
+def _validate_expected_version(expected_version: object) -> None:
+    if expected_version is not None and (
+        not isinstance(expected_version, str) or not expected_version
+    ):
+        raise ValueError(
+            f"expected_version must be a non-empty string or None (got {expected_version!r})."
+        )
+
 
 class SporeStore:
     """A JSON-backed store of open cognitive loops (the prospective layer).
@@ -607,16 +652,25 @@ class SporeStore:
 
     # --- public API: grow ---------------------------------------------------
 
-    def touch(self, spore_id: str, *, today: date | None = None) -> SporeDict:
+    def touch(
+        self,
+        spore_id: str,
+        *,
+        today: date | None = None,
+        expected_version: str | None = None,
+        version_of: VersionOf = spore_version,
+    ) -> SporeDict:
         """Engage a spore: ``seen`` → today, AND clear an elapsed ``next:`` alarm
         (we're looking at it now, so it has fired) — returning the spore to
         ``growing`` rather than leaving a past ``next:`` forcing dormant. (A
         ``parked`` spore stays parked: parked is *deliberate* dormancy, changed via
         ``update(tier=...)``, not by touching.)
         """
+        _validate_expected_version(expected_version)
         today = today or date.today()
         with self._transaction() as data:
             item = self._require_open(data, spore_id)
+            _check_expected_version(item, expected_version, version_of)
             item["seen"] = today.isoformat()
             nxt = _parse_date(item.get("next"))
             if nxt and today >= nxt:
@@ -638,6 +692,8 @@ class SporeStore:
         expect_disposition: str | None | _Unset = _UNSET,
         add_note: str | None = None,
         today: date | None = None,
+        expected_version: str | None = None,
+        version_of: VersionOf = spore_version,
     ) -> SporeDict:
         """Metadata surgery on an open spore. Omitted arguments are left
         unchanged; passing ``None``/``''`` to ``next``/``pointer``/``domain``/
@@ -667,9 +723,18 @@ class SporeStore:
         nothing is written. Blind like everything else here — a raw value compare,
         never an interpretation of the tag. (Mirrors the continuity write's
         ``expected``-body stale-check.)
+
+        ``expected_version`` is the same compare over the WHOLE spore: the version
+        (``version_of``, default :func:`spore_version`) the caller read must still
+        be current, checked under this transaction's lock, or :class:`SporeError`
+        is raised and nothing is written. ``touch``, ``descend`` and ``ascend``
+        take it too. A caller whose version is its own hash of the record passes
+        that hash function as ``version_of``.
         """
+        _validate_expected_version(expected_version)
         with self._transaction() as data:
             item = self._require_open(data, spore_id)
+            _check_expected_version(item, expected_version, version_of)
 
             if not isinstance(expect_disposition, _Unset):
                 # Atomic optimistic-lock: the disposition the caller saw must still be
@@ -736,6 +801,8 @@ class SporeStore:
         expect_disposition: str | None | _Unset = _UNSET,
         today: date | None = None,
         now: datetime | None = None,
+        expected_version: str | None = None,
+        version_of: VersionOf = spore_version,
     ) -> SporeDict:
         """Resolve a spore downward (compost / self-clean). ``kind`` must fit the
         spore's type (e.g. a ``task`` descends done/dropped/composted, never
@@ -750,9 +817,12 @@ class SporeStore:
         resolve, :class:`SporeError` is raised and nothing is resolved — closing the
         snapshot-then-resolve TOCTOU a separate-transaction guard otherwise has (``None`` =
         expect key-absent / a plain loop; a string = expect that exact value). Blind: a raw
-        value compare, never an interpretation of the tag."""
+        value compare, never an interpretation of the tag. ``expected_version``
+        compares the whole spore the same way (see :meth:`update`)."""
+        _validate_expected_version(expected_version)
         with self._transaction() as data:
             item = self._require_open(data, spore_id)
+            _check_expected_version(item, expected_version, version_of)
             if not isinstance(expect_disposition, _Unset):
                 found = item.get("disposition")
                 if found != expect_disposition:
@@ -778,6 +848,8 @@ class SporeStore:
         expect_disposition: str | None | _Unset = _UNSET,
         today: date | None = None,
         now: datetime | None = None,
+        expected_version: str | None = None,
+        version_of: VersionOf = spore_version,
     ) -> SporeDict:
         """Resolve a spore upward (transmute into memory/project — the membrane).
         ``kind`` must fit the spore's type. ``ref`` records WHAT the spore became
@@ -794,11 +866,14 @@ class SporeStore:
         resolve, :class:`SporeError` is raised and nothing is resolved — closing the
         read-then-resolve TOCTOU a separate-transaction guard otherwise has (``None`` =
         expect key-absent / a plain loop; a string = expect that exact value). Blind: a
-        raw value compare, never an interpretation of the tag."""
+        raw value compare, never an interpretation of the tag. ``expected_version``
+        compares the whole spore the same way (see :meth:`update`)."""
         if not ref or not ref.strip():
             raise ValueError("ascend requires a ref (what the spore became).")
+        _validate_expected_version(expected_version)
         with self._transaction() as data:
             item = self._require_open(data, spore_id)
+            _check_expected_version(item, expected_version, version_of)
             if not isinstance(expect_disposition, _Unset):
                 found = item.get("disposition")
                 if found != expect_disposition:

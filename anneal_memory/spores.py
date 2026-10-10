@@ -584,12 +584,18 @@ class SporeStore:
         """The one open spore with ``spore_id``. Two open spores sharing an id is
         store drift: a write would land on one copy while a caller's
         ``expected_version`` may describe the other, so it is refused here, the
-        lookup every mutator goes through."""
+        lookup every id-addressed mutator goes through. An id that is open and
+        also resolved is refused the same way."""
         matches = [item for item in data.get("spores", []) if item.get("id") == spore_id]
         if len(matches) > 1:
             raise SporeError(
                 f"{len(matches)} open spores share id {spore_id!r}; refusing to "
                 f"write to an ambiguous id (store drift — repair by hand)."
+            )
+        if matches and any(r.get("id") == spore_id for r in data.get("resolved", [])):
+            raise SporeError(
+                f"spore {spore_id!r} is both open and resolved; refusing to write to "
+                f"an ambiguous id (store drift — repair by hand)."
             )
         return cast("SporeDict", matches[0]) if matches else None
 

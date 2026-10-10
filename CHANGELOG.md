@@ -4,6 +4,23 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added — `SporeStore.apply`: land one decided spore effect at most once, with a typed outcome
+- `apply(SporeApply(op, origin_key, ...))` for `add`, `update`, `descend`, `ascend` and `delete`, in one locked
+  transaction, addressed by the spore's `origin_key`. It returns `already` when the effect's postcondition already holds
+  (nothing written), `precondition_lost` when the spore is unknown, deleted, resolved (for an update or a resolve) or no
+  longer at `expected_version` (nothing written), and `applied` after checking, before the save, that every postcondition
+  leaf holds and no field the effect does not name changed; otherwise it raises `PostconditionFailed` and saves nothing.
+  The postcondition must name exactly the fields the op writes, and its values compare as the fields are stored.
+- `PostconditionFailed` and `ApplyRefused` (a malformed effect or an argument the spore cannot take) are not
+  `SporeError`, which stays the error for a store that cannot be read. On Windows (no file lock) `apply` is refused.
+- `SporeStore.delete(spore_id, expected_version=, origin_key=None)` removes a spore, open or resolved; its id and key go
+  to a `deleted` registry in the file and are not used again. ⚠ **Mixed versions:** an anneal before this one does not
+  count the registry and can give a new spore a deleted spore's id; `apply` goes by key, so it never confuses the two.
+- On macOS the spore file and its directory are flushed with `F_FULLFSYNC`, and `Store` sets SQLite's `fullfsync` and
+  `checkpoint_fullfsync` (a `record()` measured 0.5 ms → 4.1 ms), so a write that returned has been flushed past the
+  drive's cache (measured to do the work; a power cut was not tested). A flush that fails for any reason but an
+  unsupported call now raises.
+
 ### Added — every episode has an immutable `origin_key`; delete by key with a version check
 - A new `episodes.origin_key` column: every episode carries one from creation (a fresh 32-hex key, or the one passed
   to `record(origin_key=...)`), existing rows get one at the first write-capable open (a copy of a 14,549-episode

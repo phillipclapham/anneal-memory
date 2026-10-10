@@ -19,7 +19,7 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 ### Fixed — a failed `export --format sqlite` no longer leaves a file at `--output`
 - A failed backup (a source that is not a database, a full disk) left an empty or partial file at the output path
   that looked like an export. The copy is now built in a private temp in the output's directory and published
-  without replacing a file. Export refuses the database or any of its `-wal`, `-shm` or `-journal` files by name,
+  with a hard link, which never replaces a file; on a filesystem without hard links the export fails and says so. Export refuses the database or any of its `-wal`, `-shm` or `-journal` files by name,
   as given or resolved. A bad `--output` prints
   `Error: …` instead of a traceback, and a source another connection holds locked errors after a deadline instead
   of waiting forever. The output mirrors the source's journal mode.

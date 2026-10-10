@@ -2096,13 +2096,13 @@ _BACKUP_BUSY_STATUSES = (5, 6)  # SQLITE_BUSY, SQLITE_LOCKED
 
 
 class _ExportBusyError(Exception):
-    """The output database stayed locked past the export's deadline."""
+    """The database being exported stayed locked past the export's deadline."""
 
 
 def _backup_sqlite(src_target: str, dst_conn: sqlite3.Connection) -> None:
     """Back a SQLite database up into an open connection.
 
-    ``Connection.backup`` retries a BUSY or LOCKED destination forever, so the
+    ``Connection.backup`` retries a BUSY or LOCKED status forever, so the
     progress callback raises once such a status is seen past the deadline.
     """
     deadline = time.monotonic() + _EXPORT_BUSY_DEADLINE_S
@@ -2122,19 +2122,19 @@ def _publish_no_clobber(tmp: Path, out: Path) -> None:
     """Publish the finished ``tmp`` at the absent ``out`` without replacing a file.
 
     Raises FileExistsError when ``out`` exists. A hard link is atomic and
-    create-only; on a filesystem without hard links the temp is renamed into
-    place after a last existence check (git's lockfile publication).
+    create-only. Where the link fails for any other reason (a filesystem without
+    hard links), the export fails: every other way to publish can replace a file
+    another process created in the meantime (walopen L1+L2 r14).
     """
     try:
         os.link(tmp, out)
     except FileExistsError:
         raise
-    except OSError:
-        if os.path.lexists(out):
-            raise FileExistsError(str(out)) from None
-        # [judged by 1010+14, 2026-10-10, against SQLite VACUUM INTO and git lockfile semantics]
-        # The only window is a creator racing in between the re-check and the rename.
-        os.replace(tmp, out)
+    except OSError as exc:
+        raise OSError(
+            f"cannot publish the copy without risking overwriting a file ({exc}); "
+            "export to a disk that supports hard links, then copy the file"
+        ) from exc
     _fsync_dir(out.parent)
 
 
@@ -2189,17 +2189,15 @@ def cmd_export(args: argparse.Namespace) -> None:
         # at --output and deletes only its own temp. The output mirrors the
         # source's journal mode (the backup copies its header), which keeps it
         # openable as a store.
-        tmp = out.parent / f".{os.getpid()}-{uuid.uuid4().hex[:8]}.export-tmp"
-        tmp_id: tuple[int, int] | None = None
-        tmp_size = 0
+        tmp = out.parent / f".{os.getpid()}-{uuid.uuid4().hex}.export-tmp"
+        size = 0
         try:
             tmp_conn = sqlite_connect(sqlite_path(tmp))
             try:
                 _backup_sqlite(src_target, tmp_conn)
             finally:
                 tmp_conn.close()
-            tmp_stat = tmp.stat()
-            tmp_id, tmp_size = (tmp_stat.st_dev, tmp_stat.st_ino), tmp_stat.st_size
+            size = tmp.stat().st_size
             _publish_no_clobber(tmp, out)
         except FileExistsError:
             print(f"Error: {out} appeared during the export; nothing was overwritten", file=sys.stderr)
@@ -2215,15 +2213,10 @@ def cmd_export(args: argparse.Namespace) -> None:
             print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
             sys.exit(1)
         finally:
-            with contextlib.suppress(OSError):
-                tmp.unlink()
-        try:
-            out_stat = os.stat(out)
-            # No claim about a file we did not write: a swapped inode reports the temp's size.
-            size = out_stat.st_size if (out_stat.st_dev, out_stat.st_ino) == tmp_id else tmp_size
-        except OSError as exc:
-            print(f"Error: exported to {out}, but cannot read it back: {exc}", file=sys.stderr)
-            sys.exit(1)
+            # The temp and any sidecar SQLite left beside it are this export's own.
+            for leftover in ("", "-wal", "-shm", "-journal"):
+                with contextlib.suppress(OSError):
+                    os.unlink(f"{tmp}{leftover}")
         if args.json:
             _print_json({"format": "sqlite", "path": str(out), "size_bytes": size})
         else:

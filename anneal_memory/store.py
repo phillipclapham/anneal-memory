@@ -18,6 +18,7 @@ import logging
 import json
 import glob
 import os
+import sys
 import urllib.parse
 import re
 import sqlite3
@@ -2649,6 +2650,12 @@ class Store:
                 # negligible against the fsync already happening for
                 # the continuity/meta tmp writes. L2 L3.
                 self._conn.execute("PRAGMA synchronous=FULL")
+                if sys.platform == "darwin":
+                    # On macOS fsync leaves the data in the drive's cache;
+                    # fullfsync makes SQLite use F_FULLFSYNC (measured 10-10:
+                    # record() 0.5 ms -> 4.1 ms). K2b slice-P delta.
+                    self._conn.execute("PRAGMA fullfsync=ON")
+                    self._conn.execute("PRAGMA checkpoint_fullfsync=ON")
                 self._conn.execute("PRAGMA foreign_keys=ON")
                 self._init_schema()
                 self._repair_dangling_supersessions()

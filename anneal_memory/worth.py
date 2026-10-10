@@ -40,8 +40,10 @@ provenance edges.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
+import stat
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -87,6 +89,44 @@ def adopt_supported() -> bool:
     that would WRITE anything before adopting (the CLI mints the store id) checks this
     first, so the refusal really writes nothing."""
     return fcntl is not None
+
+
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def _open_log(path: Path, *, write: bool) -> int:
+    """The one way the outcome log is opened: a descriptor on a REGULAR file.
+
+    The open is non-blocking and the check is ``fstat`` on that descriptor, so a
+    FIFO at the log's name refuses at once instead of hanging a reader or a
+    ``crystal get`` (c-pull-label L3 r1, codex HIGH; the audit trail's
+    ``_open_regular`` is the same construct). A write also refuses a symlink as
+    the final component (``O_NOFOLLOW``), so an append never lands in whatever
+    file the link names (same review, codex HIGH). Windows has neither flag: it
+    has no FIFOs, and a symlink there is followed. Anything refused raises
+    ``OSError``; a missing file raises ``FileNotFoundError`` unless ``write``
+    creates it.
+    """
+    if write:
+        flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | _O_NOFOLLOW
+    else:
+        flags = os.O_RDONLY
+    try:
+        fd = os.open(path, flags | _O_NONBLOCK, 0o644)
+    except OSError as exc:
+        if write and exc.errno == errno.ELOOP:
+            raise OSError(errno.ELOOP, "the outcome log is a symlink; it is written only as a regular file", str(path)) from exc
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "the outcome log is not a regular file", str(path))
+        if _O_NONBLOCK:
+            os.set_blocking(fd, True)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def outcome_log_path(db_path: str | os.PathLike[str]) -> Path:
@@ -216,7 +256,7 @@ class OutcomeLog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # Read-write, not write-only: the append reads the last byte to repair a
         # torn final line, so a write-only (0200) log now refuses.
-        fd = os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+        fd = _open_log(self.path, write=True)
         try:
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_EX)
@@ -261,7 +301,7 @@ class OutcomeLog:
         self._writable_id()
         rec = _build_record(exposure_id, items, outcome, exposed, ts, self.store_id)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+        fd = _open_log(self.path, write=True)
         try:
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_EX)
@@ -308,7 +348,7 @@ class OutcomeLog:
             "ts": when.strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+        fd = _open_log(self.path, write=True)
         try:
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_EX)
@@ -345,9 +385,11 @@ class OutcomeLog:
 
     def _entries(self) -> tuple[list[dict[str, Any]], int]:
         try:
-            f = open(self.path, "r", encoding="utf-8", errors="replace")
+            fd = _open_log(self.path, write=False)
         except FileNotFoundError:
             return [], 0
+        # fdopen owns fd from here and closes it if it cannot build the reader.
+        f = open(fd, "r", encoding="utf-8", errors="replace")
         with f:
             return _parse_entries(f)
 

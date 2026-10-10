@@ -414,3 +414,59 @@ def test_released_v1_outcome_records_stay_readable(tmp_path):
     assert latest["x1"]["items"] == [{"kind": "crystal", "ref": "p", "followed": "followed"}]
     assert latest["x2"]["outcome"] == "failure"
     assert latest["x2"]["items"] == [{"kind": "episode", "ref": "e9", "followed": "ignored"}]
+
+
+_NO_FIFO = not hasattr(__import__("os"), "mkfifo")
+
+
+@pytest.mark.skipif(_NO_FIFO, reason="no FIFOs on this platform")
+@pytest.mark.parametrize("act", ["read", "record", "record_if_missing", "adopt"])
+def test_a_fifo_at_the_outcome_log_refuses_instead_of_hanging(tmp_path, act):
+    """c-pull-label L3 r1 (codex HIGH), reproduced on main 0655b72: `worth` on a
+    FIFO outcome log hung until killed. Every open checks the descriptor."""
+    import os
+    path = tmp_path / "mem.outcomes.jsonl"
+    os.mkfifo(path)
+    log = OutcomeLog(path, store_id="s1", bind=True)
+    calls = {
+        "read": lambda: log.binding(),
+        "record": lambda: log.record("e1", [], outcome="success"),
+        "record_if_missing": lambda: log.record_if_missing("e1", [], outcome="success"),
+        "adopt": lambda: log.adopt_unbound(),
+    }
+    with pytest.raises(OSError, match="not a regular file"):
+        calls[act]()
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "O_NOFOLLOW"), reason="no O_NOFOLLOW")
+@pytest.mark.parametrize("act", ["record", "record_if_missing", "adopt"])
+def test_a_write_never_follows_a_symlinked_outcome_log(tmp_path, act):
+    """c-pull-label L3 r1 (codex HIGH), reproduced on main 0655b72: `outcome`
+    appended through a symlink into the file it named (a 7-byte canary grew to
+    147 bytes)."""
+    canary = tmp_path / "canary.txt"
+    canary.write_bytes(b"CANARY\n")
+    path = tmp_path / "mem.outcomes.jsonl"
+    path.symlink_to(canary)
+    log = OutcomeLog(path, store_id="s1", bind=True)
+    calls = {
+        "record": lambda: log.record("e1", [], outcome="success"),
+        "record_if_missing": lambda: log.record_if_missing("e1", [], outcome="success"),
+        "adopt": lambda: log.adopt_unbound(),
+    }
+    with pytest.raises(OSError, match="symlink"):
+        calls[act]()
+    assert canary.read_bytes() == b"CANARY\n"
+
+
+def test_a_symlinked_outcome_log_is_still_read(tmp_path):
+    """Reading follows a symlink: it writes nothing, and a log kept elsewhere
+    still reports."""
+    real = tmp_path / "real.outcomes.jsonl"
+    OutcomeLog(real).record("e1", [], outcome="success")
+    link = tmp_path / "mem.outcomes.jsonl"
+    try:
+        link.symlink_to(real)
+    except OSError:
+        pytest.skip("cannot create a symlink here")
+    assert "e1" in OutcomeLog(link).latest()[0]

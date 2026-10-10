@@ -4,6 +4,13 @@ All notable changes to anneal-memory. Format is loosely [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed — the outcome log opens only as a regular file
+- A FIFO at `<stem>.outcomes.jsonl` made `anneal-memory worth` hang until killed and `outcome` fail with an
+  unrelated error; every open of the log now checks the descriptor and refuses anything but a regular file at once.
+- `outcome` (and every other append to the log) followed a symlink at the log's name and appended JSON to whatever
+  file it named. An append now refuses a symlinked log (`O_NOFOLLOW`); reading still follows one. Windows has no
+  `O_NOFOLLOW`, so a symlink there is still followed.
+
 ### Fixed — a database error names the operation the caller called
 - A `StoreDatabaseError` raised inside a nested store boundary now carries the OUTER
   method's `operation`, with the same SQLite `__cause__` and `cause_type_name`. A team

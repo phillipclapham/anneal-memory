@@ -546,3 +546,33 @@ def test_fold_surfaced_calls_a_dangling_symlink_missing(tmp_path):
     store.crystallize(name="p", level=3, explanation="x", evidence=["e1"])
     result = fold_surfaced(store, [good, dangling])
     assert str(dangling) in result.paths_missing
+
+
+def test_fold_surfaced_tracks_the_preflight_per_entry_not_per_name(tmp_path, monkeypatch):
+    """outcomes-open L3 r6 (codex MED): with [rec, rec], rec missing at the first
+    stat, present at the second, gone at the read, both entries matched "was
+    missing" by name and the mark moved having read nothing."""
+    import os
+    import anneal_memory.worth as worth
+    rec = tmp_path / "r.jsonl"
+    store = CrystalStore(tmp_path / "c.crystal.json")
+    store.crystallize(name="p", level=3, explanation="x", evidence=["e1"])
+    real_stat = worth.os.stat
+    calls = []
+
+    def flicker(p, *a, **k):
+        if str(p) == str(rec):
+            calls.append(p)
+            if len(calls) == 2:
+                rec.write_text("", encoding="utf-8")
+                st = real_stat(p, *a, **k)
+                rec.unlink()
+                return st
+            raise FileNotFoundError(2, "No such file", str(p))
+        return real_stat(p, *a, **k)
+
+    monkeypatch.setattr(worth.os, "stat", flicker)
+    before = store.path.read_bytes()
+    with pytest.raises(FileNotFoundError, match="disappeared during the fold"):
+        worth.fold_surfaced(store, [rec, rec])
+    assert store.path.read_bytes() == before

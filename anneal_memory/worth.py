@@ -800,12 +800,15 @@ def fold_surfaced(
     # dangling symlink "not a regular file"): absent, a dangling link included,
     # is missing; anything else that is not a regular file is refused.
     missing: list[str] = []
+    was_missing: list[bool] = []  # per entry, never by name: a path can repeat (L3 r6)
     for p in paths:
         try:
             st = os.stat(p)
         except FileNotFoundError:
             missing.append(str(p))
+            was_missing.append(True)
             continue
+        was_missing.append(False)
         if not stat.S_ISREG(st.st_mode):
             raise OSError(errno.EINVAL, "a receipt file is not a regular file", str(p))
     if len(missing) == len(paths):
@@ -845,10 +848,10 @@ def fold_surfaced(
         counts: dict[str, int] = {}
         last_on: dict[str, str] = {}
         seen_events: set[str] = set()
-        for path in paths:
+        for path, absent_before in zip(paths, was_missing):
             with _read_regular(Path(path), what="a receipt file") as f:
                 if f is None:
-                    if str(path) in missing:
+                    if absent_before:
                         continue  # absent at the preflight: reported as missing
                     # Present at the preflight and gone now (a rotation mid-fold):
                     # refuse, so the mark never moves past receipts this fold did
@@ -857,6 +860,8 @@ def fold_surfaced(
                         f"receipt file {path} disappeared during the fold; the fold mark "
                         f"was not moved. Run it again."
                     )
+                if absent_before and str(path) in result.paths_missing:
+                    result.paths_missing.remove(str(path))  # it appeared and is read (L3 r6)
                 for line in f:
                     if not line.strip():
                         continue

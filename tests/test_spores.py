@@ -1197,6 +1197,7 @@ class TestDuplicateOpenId:
         store.path.write_text(json.dumps(data))
         return SporeStore(store.path), data
 
+    @_NEEDS_LOCK
     def test_a_guarded_update_matching_one_copy_is_refused(self, store):
         s, data = self._drifted(store)
         before = store.path.read_text()

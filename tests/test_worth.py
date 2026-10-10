@@ -573,6 +573,24 @@ def test_fold_surfaced_tracks_the_preflight_per_entry_not_per_name(tmp_path, mon
 
     monkeypatch.setattr(worth.os, "stat", flicker)
     before = store.path.read_bytes()
-    with pytest.raises(FileNotFoundError, match="disappeared during the fold"):
+    # r8: a repeated path is one entry, so the flicker between two stats of one
+    # name can no longer happen: one stat, an honest "none exists", no mark move.
+    with pytest.raises(FileNotFoundError, match="none of the receipt paths exists"):
         worth.fold_surfaced(store, [rec, rec])
+    assert len(calls) == 1
     assert store.path.read_bytes() == before
+
+
+def test_fold_surfaced_reads_a_repeated_path_once(tmp_path):
+    """outcomes-open L3 r8 (codex LOW): duplicate path arguments were the race
+    surface of r6-r8; a path named twice is one entry."""
+    import json
+    from anneal_memory.worth import fold_surfaced
+    rec = tmp_path / "r.jsonl"
+    rec.write_text(json.dumps({"event_id": "e", "ts": "2026-10-01T00:00:00Z",
+                               "surfaced": {"crystals": ["p"]}}) + "\n", encoding="utf-8")
+    store = CrystalStore(tmp_path / "c.crystal.json")
+    store.crystallize(name="p", level=3, explanation="x", evidence=["e1"])
+    result = fold_surfaced(store, [rec, str(rec), rec])
+    assert result.duplicates_skipped == 0
+    assert result.paths_missing == []

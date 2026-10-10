@@ -786,7 +786,9 @@ def fold_surfaced(
     """
     if skew_seconds < 0:
         raise ValueError("skew_seconds must be >= 0.")
-    paths = [Path(p) for p in receipt_paths]
+    # One entry per path: the same file named twice adds nothing (event ids
+    # dedupe), and duplicate entries were the race surface of L3 r6-r8.
+    paths = [Path(p) for p in dict.fromkeys(str(p) for p in receipt_paths)]
     if not paths:
         raise ValueError("fold_surfaced needs at least one receipt path.")
     cutoff = (now or datetime.now(timezone.utc)).astimezone(timezone.utc) - timedelta(
@@ -800,7 +802,7 @@ def fold_surfaced(
     # dangling symlink "not a regular file"): absent, a dangling link included,
     # is missing; anything else that is not a regular file is refused.
     missing: list[str] = []
-    was_missing: list[bool] = []  # per entry, never by name: a path can repeat (L3 r6)
+    was_missing: list[bool] = []  # per entry (L3 r6)
     for p in paths:
         try:
             st = os.stat(p)

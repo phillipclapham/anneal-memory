@@ -67,6 +67,42 @@ class Episode:
 
 
 @dataclass(frozen=True)
+class OriginKeyStatus:
+    """What an episode origin key names now (:meth:`Store.origin_key_status`).
+    ``state`` is ``"live"``, ``"retired"`` (its episode was deleted; the key is
+    never reused) or ``"unknown"``. ``retired_at`` and ``effect_id`` are set only
+    when retired; ``effect_id`` is ``None`` for a delete that did not name one."""
+
+    state: str
+    episode_id: str | None = None
+    retired_at: str | None = None
+    effect_id: str | None = None
+
+
+@dataclass(frozen=True)
+class DeleteResult:
+    """The outcome of :meth:`Store.delete_by_origin_key`, and everything it did.
+
+    ``outcome``: ``"deleted"`` · ``"already_applied"`` (retired earlier under this
+    ``effect_id``) · ``"deleted_by_other"`` (retired under another or no effect
+    id) · ``"version_mismatch"`` (nothing written; ``version`` is the current
+    one) · ``"unknown"``. On ``"deleted"`` the cascade is reported, not versioned:
+    ``links_removed`` counts the supersession rows that touched the episode;
+    ``rewires`` names each link carried past it (``outcome`` ``"created"``,
+    ``"joined"`` or ``"kept"``, an existing operator row left as it was);
+    ``trust_removed`` and ``team_left`` are the descendants' links the trust
+    re-check removed or left to the team ledger."""
+
+    outcome: str
+    episode_id: str | None = None
+    version: str | None = None
+    links_removed: int = 0
+    rewires: list[dict[str, str]] = field(default_factory=list)
+    trust_removed: list[dict[str, str]] = field(default_factory=list)
+    team_left: list[dict[str, str]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class Tombstone:
     """Audit trail for a pruned episode."""
 

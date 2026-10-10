@@ -253,6 +253,8 @@ from .types import (
     AssociationPair,
     AssociationStats,
     DEFAULT_TRUST,
+    DeleteResult,
+    OriginKeyStatus,
     TRUST_LEVELS,
     Episode,
     EpisodeType,
@@ -440,6 +442,31 @@ _PHASE_OPERATIONS: frozenset[str] = frozenset(
 # Bump the generation when any body below changes; see
 # ``Store._migrate_episode_origin_key``.
 _ORIGIN_TRIGGER_GEN = 1
+
+# The episode version (design r6 §11.1, §12.1): every table with a row that names
+# an episode, as ``table: (id columns matched against the episode id, value columns
+# hashed)``. Left out of the hashed columns: wrap bookkeeping (``session_id``) and
+# timestamps of rows whose content is hashed. ``tests/test_episode_origin_delete.py``
+# classifies every table of a fresh store as covered, excluded or unrelated, so a
+# new table that names episodes fails until someone decides it.
+_EPISODE_VERSION_COVERED: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "episodes": (("id",), ("id", "content", "type", "source", "timestamp", "metadata", "origin_key")),
+    "episode_trust": (("episode_id",), ("episode_id", "trust")),
+    "episode_derived": (("episode_id", "source_id"), ("episode_id", "source_id", "gone_trust")),
+    "supersessions": (("old_id", "new_id"), ("old_id", "new_id", "source")),
+    "state_keys": (("episode_id",), ("episode_id", "key")),
+    "pattern_grounding": (("episode_id",), ("name", "level", "earned_on", "earning", "rule", "episode_id", "gone_trust")),
+    "team_entries": (("episode_id",), ("entry_id", "hash", "episode_id", "removal")),
+    "team_overrides": (("old_id", "new_id"), ("old_id", "new_id")),
+    "team_snapshot_rows": (("old_id", "new_id"), ("key", "old_id", "new_id")),
+    "rewire_origin": (("old_id", "new_id"), ("old_id", "new_id", "standin_old", "standin_new", "standin_source")),
+}
+# Tables that name episodes and are deliberately NOT versioned, with the reason.
+_EPISODE_VERSION_EXCLUDED: dict[str, str] = {
+    "associations": "Hebbian strengths every wrap changes; recall weights, not content",
+    "tombstones": "rows about episodes already deleted",
+    "retired_origin_keys": "keys of episodes already deleted",
+}
 _ORIGIN_TRIGGERS: dict[str, str] = {
     # "AND origin_key IS NULL": a second mint trigger left by another build updates
     # zero rows, so a row never gets two keys.
@@ -4974,13 +5001,16 @@ class Store:
                 "deleted by an older version", removed, len(missing),
             )
 
-    def _detach_supersessions(self, ids: list[str]) -> int:
+    def _detach_supersessions(
+        self, ids: list[str], report: list[dict[str, str]] | None = None
+    ) -> int:
         """Inside the caller's transaction, before ``ids`` are deleted: link each
         surviving episode past the removed ones to the next surviving episode
         down its chain (A -> B -> C, remove B: A -> C), then drop every link
         touching a removed id. Keeps a chain hiding what it hid, and leaves no
         row that would silently hide a later episode re-recorded under the same
-        deterministic id (complement L3). Returns the rows removed."""
+        deterministic id (complement L3). Returns the rows removed; ``report``, when
+        given, gets one entry per link carried past a removed id."""
         if not ids or not self._has_supersessions_table():
             return 0
         if self._conn.execute("SELECT 1 FROM supersessions LIMIT 1").fetchone() is None:
@@ -5005,7 +5035,10 @@ class Store:
                 [*chunk, *chunk, *chunk, *chunk],
             ).fetchall()
             for hop in hops:
-                self._rewire_one(hop["start"], hop["first"], hop["cur"])
+                outcome = self._rewire_one(hop["start"], hop["first"], hop["cur"])
+                if report is not None:
+                    report.append({"old_id": hop["start"], "past": hop["first"],
+                                   "new_id": hop["cur"], "outcome": outcome})
             removed += self._conn.execute(
                 f"DELETE FROM supersessions WHERE old_id IN ({marks}) OR new_id IN ({marks})",
                 [*chunk, *chunk],
@@ -5024,10 +5057,12 @@ class Store:
             return None
         return _team_entry_id_of(row["metadata"])
 
-    def _rewire_one(self, start: str, first: str, cur: str) -> None:
+    def _rewire_one(self, start: str, first: str, cur: str) -> str:
         """Link ``start`` past the removed ``first`` .. to ``cur`` (a 'rewired' row),
         recording the pair it stands in for and carrying the team ownership of
-        ``(start, first)``. An existing row with no owner is an operator's: untouched."""
+        ``(start, first)``. An existing row with no owner is an operator's: untouched.
+        Returns ``"created"``, ``"joined"`` (a team-owned row was already there) or
+        ``"kept"`` (an existing row left as it was)."""
         conn = self._conn
         existed = conn.execute(
             "SELECT 1 FROM supersessions WHERE old_id = ? AND new_id = ?",
@@ -5041,7 +5076,7 @@ class Store:
             # An operator's row, a non-team row, or an UNMANAGED rewired row already
             # there: untouched. A rewired row is never adopted, this way included
             # (seam doc L3 1006, complement: a later rewire made one owned).
-            return
+            return "kept"
         if not existed:
             conn.execute("INSERT INTO supersessions (old_id, new_id, source) "
                          "VALUES (?, ?, 'rewired')", (start, cur))
@@ -5060,6 +5095,7 @@ class Store:
         conn.executemany(
             "INSERT OR IGNORE INTO team_snapshot_rows (key, old_id, new_id) VALUES (?, ?, ?)",
             [(k, start, cur) for k in owners])
+        return "joined" if existed else "created"
 
     def superseded_by_map(self, episode_ids: list[str]) -> dict[str, str]:
         """For each id hidden by a supersession, the latest live episode down
@@ -5658,32 +5694,9 @@ class Store:
                     self._conn.commit()
                 return False
 
-            if self._keep_tombstones:
-                self._conn.execute(
-                    """INSERT OR IGNORE INTO tombstones
-                       (id, timestamp, type, content_hash)
-                       VALUES (?, ?, ?, ?)""",
-                    (row["id"], row["timestamp"], row["type"], _content_hash(row["content"])),
-                )
-
-            linker_of = self._conn.execute(
-                "SELECT COUNT(DISTINCT old_id) FROM team_snapshot_rows WHERE new_id = ?",
-                (row["id"],)).fetchone()[0]
-            if linker_of:
-                _LOG.warning(
-                    "anneal-memory: delete of %s removes the team link(s) it makes over "
-                    "%d entr(ies) the team ledger still hides; they show in recall again",
-                    row["id"], linker_of)
-            links_removed = self._detach_supersessions([row["id"]])
-            self._remember_team_rows([row], "operator" if team_operator else "auto")
-            # Read before the DELETE: the trigger below stops the closure walk at it.
-            descendants = self._derivation_descendants([row["id"]]) - {row["id"]}
-            # The episode_gone_marks_rows trigger marks every row that cited it
-            # external: a deletion is a failed ground (CAP-08 D3 R3).
-            self._conn.execute("DELETE FROM episodes WHERE id = ?", (episode_id,))
-            # That lowered its descendants' effective trust, so their links are
-            # re-checked after it, as set_trust does (L3 r2 1009+22).
-            trust_removed, team_left = self._drop_links_trust_invalidated(descendants)
+            effects = self._delete_row_locked(row, team_operator=team_operator)
+            links_removed = effects.links_removed
+            trust_removed, team_left = effects.trust_removed, effects.team_left
             # 10.5c.5 L4 Fix: batch-aware commit for consistency with
             # record() and the other write-path methods. No current
             # caller invokes delete() inside a _batch(), but making it
@@ -5705,6 +5718,182 @@ class Store:
         }, method="delete", committed="the deletion")
 
         return True
+
+    def _delete_row_locked(self, row: sqlite3.Row, *, team_operator: bool) -> DeleteResult:
+        """The deletion itself, inside the caller's write transaction: tombstone,
+        supersession detach (rewires reported), team removal record, the DELETE
+        (its triggers mark citing rows external and retire the origin key), then
+        the trust re-check of the descendants. Shared by :meth:`delete` and
+        :meth:`delete_by_origin_key`. Returns the effects as a ``"deleted"`` result."""
+        if self._keep_tombstones:
+            self._conn.execute(
+                """INSERT OR IGNORE INTO tombstones
+                   (id, timestamp, type, content_hash)
+                   VALUES (?, ?, ?, ?)""",
+                (row["id"], row["timestamp"], row["type"], _content_hash(row["content"])),
+            )
+
+        linker_of = self._conn.execute(
+            "SELECT COUNT(DISTINCT old_id) FROM team_snapshot_rows WHERE new_id = ?",
+            (row["id"],)).fetchone()[0]
+        if linker_of:
+            _LOG.warning(
+                "anneal-memory: delete of %s removes the team link(s) it makes over "
+                "%d entr(ies) the team ledger still hides; they show in recall again",
+                row["id"], linker_of)
+        rewires: list[dict[str, str]] = []
+        links_removed = self._detach_supersessions([row["id"]], rewires)
+        self._remember_team_rows([row], "operator" if team_operator else "auto")
+        # Read before the DELETE: the trigger below stops the closure walk at it.
+        descendants = self._derivation_descendants([row["id"]]) - {row["id"]}
+        # The episode_gone_marks_rows trigger marks every row that cited it
+        # external: a deletion is a failed ground (CAP-08 D3 R3).
+        self._conn.execute("DELETE FROM episodes WHERE id = ?", (row["id"],))
+        # That lowered its descendants' effective trust, so their links are
+        # re-checked after it, as set_trust does (L3 r2 1009+22).
+        trust_removed, team_left = self._drop_links_trust_invalidated(descendants)
+        return DeleteResult(
+            outcome="deleted", episode_id=row["id"], links_removed=links_removed,
+            rewires=rewires, trust_removed=trust_removed, team_left=team_left)
+
+    # -- Origin keys (P(2), design episode_origin_key_design_1010.md r6) --
+
+    def _require_origin_key_column(self, operation: str) -> None:
+        # Checked per call, never cached: a read-only handle opened before the
+        # migration sees the column as soon as a write-capable open adds it.
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(episodes)")}
+        if "origin_key" not in cols:
+            raise StoreError(
+                "this store has no episode origin keys yet: open it once with a "
+                "write-capable handle of anneal-memory 0.9.43 or later",
+                operation=operation, path=str(self._path))
+
+    def _episode_version_locked(self, episode_id: str) -> str:
+        """SHA-256 over the rows that name ``episode_id`` in every
+        :data:`_EPISODE_VERSION_COVERED` table, each table's rows sorted. Runs in
+        the caller's transaction or snapshot. The one computation behind
+        :meth:`read_episode_versioned` and :meth:`delete_by_origin_key`'s check."""
+        doc: dict[str, list[list[Any]]] = {}
+        for table, (id_cols, value_cols) in _EPISODE_VERSION_COVERED.items():
+            where = " OR ".join(f"{c} = ?" for c in id_cols)
+            rows = self._conn.execute(
+                f"SELECT {', '.join(value_cols)} FROM {table} WHERE {where}",
+                [episode_id] * len(id_cols)).fetchall()
+            doc[table] = sorted(
+                (list(r) for r in rows), key=lambda r: json.dumps(r, sort_keys=True))
+        blob = json.dumps(doc, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+    def get_by_origin_key(self, origin_key: str) -> Episode | None:
+        """The live episode carrying ``origin_key``, or ``None``."""
+        validate_origin_key(origin_key)
+        with self._db_boundary("get_by_origin_key"), self._read_snapshot():
+            self._require_origin_key_column("get_by_origin_key")
+            row = self._conn.execute(
+                "SELECT * FROM episodes WHERE origin_key = ?", (origin_key,)).fetchone()
+        return self._row_to_episode(row) if row else None
+
+    def read_episode_versioned(self, origin_key: str) -> tuple[Episode, str] | None:
+        """The live episode carrying ``origin_key`` and its version, read in ONE
+        snapshot, so the version describes exactly the episode returned. Pass the
+        version to :meth:`delete_by_origin_key` as ``expected_version``.
+
+        The version covers what an operator is shown: the episode's own rows and
+        every row that names it (:data:`_EPISODE_VERSION_COVERED`). It does not
+        cover a deletion's cascade (links carried past the episode, descendants'
+        links the trust re-check removes): that is the rule's, and
+        :class:`DeleteResult` reports it."""
+        validate_origin_key(origin_key)
+        with self._db_boundary("read_episode_versioned"), self._read_snapshot():
+            self._require_origin_key_column("read_episode_versioned")
+            row = self._conn.execute(
+                "SELECT * FROM episodes WHERE origin_key = ?", (origin_key,)).fetchone()
+            if row is None:
+                return None
+            version = self._episode_version_locked(row["id"])
+        return self._row_to_episode(row), version
+
+    def origin_key_status(self, origin_key: str) -> OriginKeyStatus:
+        """Whether ``origin_key`` names a live episode, a deleted one, or nothing."""
+        validate_origin_key(origin_key)
+        with self._db_boundary("origin_key_status"), self._read_snapshot():
+            self._require_origin_key_column("origin_key_status")
+            live = self._conn.execute(
+                "SELECT id FROM episodes WHERE origin_key = ?", (origin_key,)).fetchone()
+            if live:
+                return OriginKeyStatus(state="live", episode_id=live[0])
+            gone = self._conn.execute(
+                "SELECT episode_id, retired_at, effect_id FROM retired_origin_keys "
+                "WHERE origin_key = ?", (origin_key,)).fetchone()
+        if gone:
+            return OriginKeyStatus(state="retired", episode_id=gone[0],
+                                   retired_at=gone[1], effect_id=gone[2])
+        return OriginKeyStatus(state="unknown")
+
+    def delete_by_origin_key(
+        self,
+        origin_key: str,
+        *,
+        expected_version: str,
+        effect_id: str,
+        team_operator: bool = False,
+    ) -> DeleteResult:
+        """Delete the episode carrying ``origin_key`` if its version is still
+        ``expected_version`` (from :meth:`read_episode_versioned`), recording
+        ``effect_id`` on the retired key so a retry is recognised.
+
+        Idempotent per ``effect_id``: a retry after the delete committed returns
+        ``"already_applied"``. ``team_operator`` is :meth:`delete`'s: ``True``
+        records the removal as the operator's, so a team replay does not bring the
+        entry back; a caller passes it only after its own consent check.
+        The deletion is :meth:`delete`'s, and the result reports its cascade."""
+        validate_origin_key(origin_key)
+        validate_origin_key(effect_id, what="effect_id")
+        result: DeleteResult
+        row = None
+        with self._db_boundary("delete_by_origin_key"):
+            self._require_origin_key_column("delete_by_origin_key")
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                "SELECT * FROM episodes WHERE origin_key = ?", (origin_key,)).fetchone()
+            if row is None:
+                gone = self._conn.execute(
+                    "SELECT episode_id, effect_id FROM retired_origin_keys WHERE origin_key = ?",
+                    (origin_key,)).fetchone()
+                if gone is None:
+                    result = DeleteResult(outcome="unknown")
+                elif gone[1] == effect_id:
+                    result = DeleteResult(outcome="already_applied", episode_id=gone[0])
+                else:
+                    result = DeleteResult(outcome="deleted_by_other", episode_id=gone[0])
+            else:
+                current = self._episode_version_locked(row["id"])
+                if current != expected_version:
+                    result = DeleteResult(outcome="version_mismatch",
+                                          episode_id=row["id"], version=current)
+                else:
+                    result = self._delete_row_locked(row, team_operator=team_operator)
+                    self._conn.execute(
+                        "UPDATE retired_origin_keys SET effect_id = ? "
+                        "WHERE origin_key = ? AND effect_id IS NULL",
+                        (effect_id, origin_key))
+            if not self._defer_commit:
+                self._conn.commit()
+        if result.outcome == "deleted" and row is not None:
+            # ⛔ POST-COMMIT, as delete()'s: the row is gone; an audit failure warns.
+            self._audit_log_after_commit("delete", {
+                "episode_id": row["id"],
+                "type": row["type"],
+                "content_hash": _content_hash(row["content"]),
+                "origin_key": origin_key,
+                "effect_id": effect_id,
+                **({"supersession_links_removed": result.links_removed} if result.links_removed else {}),
+                **({"supersessions_rewired": result.rewires} if result.rewires else {}),
+                **({"supersessions_removed": result.trust_removed} if result.trust_removed else {}),
+                **({"team_supersessions_left": result.team_left} if result.team_left else {}),
+            }, method="delete_by_origin_key", committed="the deletion")
+        return result
 
     def recall(
         self,

@@ -2207,26 +2207,20 @@ def _publish_by_claim(tmp: Path, out: Path) -> None:
         raise
 
 
-# Any leading zeros, then at most 10 ASCII digits: int() never meets its 4300-digit
-# limit and \d would admit non-ASCII digits (L3 r4).
-_OWN_FD_NAME = re.compile(r"/dev/(?:stdout|stderr|fd/0*([0-9]{1,10}))|/proc/self/fd/0*([0-9]{1,10})")
-
-
-def _own_fd_alias(out: Path) -> int | None:
-    """The descriptor ``out`` names when it is one of this process's own
-    (``/dev/stdout``, ``/dev/stderr``, ``/dev/fd/N``, ``/proc/self/fd/N``), else None."""
-    if os.name != "posix":
+def _own_stream_fd(st: os.stat_result) -> int | None:
+    """1 or 2 when ``st`` (an opened --output) is the file this process's stdout
+    or stderr writes to, else None. Asked of the opened descriptor, never of the
+    name: a name parser was beaten a new way in each of L3 r2-r5 (spore-813), and
+    a path stat on macOS devfs reports its own device for ``/dev/fd`` nodes."""
+    if not st.st_ino:  # an inode number of 0 identifies nothing
         return None
-    m = _OWN_FD_NAME.fullmatch(str(out))
-    if m is None:
-        return None
-    digits = m.group(1) or m.group(2)
-    if digits is None:
-        return 1 if str(out).endswith("stdout") else 2
-    # Leading zeros name the same descriptor; a value past a C int names none,
-    # and os.dup would raise OverflowError (L3 r2, r3).
-    value = int(digits)
-    return value if value <= 0x7FFFFFFF else None
+    for fd in (1, 2):
+        try:
+            if os.path.samestat(st, os.fstat(fd)):
+                return fd
+        except OSError:
+            continue
+    return None
 
 
 def _is_named_sink(fd: int) -> bool:
@@ -2278,23 +2272,11 @@ def _write_text_no_clobber(text: str, out: Path) -> None:
     allows ``>/dev/null`` (L2 r1: the refusal had broken ``-o /dev/stdout`` and pipes).
     It is opened without create or truncate and checked on the open descriptor,
     so a regular file put there in between is refused, never truncated. A name
-    for one of this process's own descriptors (``/dev/stdout``, ``/dev/fd/1``)
-    is written through that descriptor, never reopened: reopening sees the
-    file a shell redirected it to (refused) and on Linux would truncate an
-    ``>>`` redirect (L3 r1, complement + codex).
+    that opens to this process's stdout or stderr (``/dev/stdout``, ``/dev/fd/1``;
+    see :func:`_own_stream_fd`), even a regular file a shell redirected it to, is
+    written through that stream's own descriptor, so a ``>>`` redirect keeps its
+    append and offset (L3 r1, complement + codex).
     """
-    fd_alias = _own_fd_alias(out)
-    if fd_alias is not None:
-        if fd_alias == 1:
-            with contextlib.suppress(Exception):
-                sys.stdout.flush()
-        try:
-            with os.fdopen(os.dup(fd_alias), "w", encoding="utf-8") as fh:
-                fh.write(text)
-        except (ValueError, OSError) as exc:
-            print(f"Error: export to {out} failed: {exc}", file=sys.stderr)
-            sys.exit(1)
-        return
     try:
         dest = _pin_parent(out)
     except (ValueError, OSError) as exc:
@@ -2312,8 +2294,16 @@ def _write_text_no_clobber(text: str, out: Path) -> None:
             raise
         try:
             with fh:  # owns the descriptor from here
-                refuse = not _is_named_sink(fh.fileno())
-                if not refuse:
+                own = _own_stream_fd(os.fstat(fh.fileno()))
+                refuse = own is None and not _is_named_sink(fh.fileno())
+                if own is not None:
+                    # Through our own descriptor: keeps a >> redirect's append
+                    # and offset, where writing the reopened one would not.
+                    with contextlib.suppress(Exception):
+                        (sys.stdout if own == 1 else sys.stderr).flush()
+                    with os.fdopen(os.dup(own), "w", encoding="utf-8") as stream:
+                        stream.write(text)
+                elif not refuse:
                     fh.write(text)
         except (ValueError, OSError) as exc:
             print(f"Error: export to {out} failed: {exc}", file=sys.stderr)

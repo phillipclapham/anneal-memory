@@ -3123,7 +3123,8 @@ class TestTextExportsNeverOverwrite:
 
     @pytest.mark.skipif(os.name != "posix", reason="/dev/fd is POSIX")
     @pytest.mark.parametrize(
-        "name", ["/dev/fd/2147483648", "/dev/fd/99999999999999999999", "/dev/fd/" + "9" * 4301, "/dev/fd/\u0661"]
+        "name", ["/dev/fd/2147483648", "/dev/fd/99999999999999999999", "/dev/fd/" + "9" * 4301, "/dev/fd/\u0661",
+                 "/dev/fd/" + "0" * 4301 + "1"]
     )
     def test_an_out_of_range_fd_name_is_a_clean_error(self, db, capsys, name):
         """L3 r2: os.dup raised OverflowError; L3 r4: 4301 digits made int() raise
@@ -3131,8 +3132,9 @@ class TestTextExportsNeverOverwrite:
         with pytest.raises(SystemExit) as exc:
             self._run("export", "json", db, Path(name))
         assert exc.value.code == 1
-        err = capsys.readouterr().err
-        assert "Error: export to" in err and "Traceback" not in err
+        captured = capsys.readouterr()
+        assert "Error: export to" in captured.err and "Traceback" not in captured.err
+        assert captured.out == ""  # L3 r5 (codex): the zero-padded name wrote to stdout
 
 
 # -- cmd_prepare_wrap tests --

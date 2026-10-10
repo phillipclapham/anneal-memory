@@ -363,3 +363,69 @@ def test_a_mutator_that_writes_a_field_the_effect_does_not_name_saves_nothing(st
         store.apply(SporeApply(op="update", origin_key=KEY, args={"text": "edited"},
                                expected_version=seeded.version, postcondition={"text": "edited"}))
     assert _raw(store) == before
+
+
+# --- code L3 r1 (complement + codex) ----------------------------------------------
+
+def test_a_delete_never_removes_another_spore_sharing_its_id(store):
+    # codex HIGH: under id drift, removal by id took both rows.
+    seeded = _seed(store)
+    doc = json.loads(_raw(store))
+    doc["resolved"].append(dict(seeded.spore, origin_key="1" * 32, status="resolved",
+                                resolution={"direction": "descend", "kind": "done", "ref": None,
+                                            "on": "2026-10-10", "at": "2026-10-10T00:00:00+00:00"}))
+    store.path.write_text(json.dumps(doc), encoding="utf-8")
+    before = _raw(store)
+    with pytest.raises(SporeError, match="drift"):
+        store.apply(SporeApply(op="delete", origin_key=KEY, expected_version=seeded.version))
+    assert _raw(store) == before
+
+
+def test_a_disposition_race_is_a_lost_precondition(store):
+    made = store.apply(SporeApply(
+        op="add", origin_key="pend.5:seed",
+        args={"type": "task", "text": "t", "disposition": "seed"},
+        postcondition={"type": "task", "text": "t", "disposition": "seed"}))
+    lost = store.apply(SporeApply(
+        op="update", origin_key="pend.5:seed", args={"text": "u", "expect_disposition": "agenda"},
+        expected_version=made.version, postcondition={"text": "u"}))
+    assert lost.outcome == "precondition_lost"
+    ok = store.apply(SporeApply(
+        op="update", origin_key="pend.5:seed", args={"text": "u", "expect_disposition": "seed"},
+        expected_version=made.version, postcondition={"text": "u"}))
+    assert ok.outcome == "applied"
+
+
+def test_a_cleared_next_matches_its_stored_form(store):
+    seeded = _seed(store)
+    v = store.apply(SporeApply(op="update", origin_key=KEY, args={"next": "2026-11-01"},
+                               expected_version=seeded.version,
+                               postcondition={"next": "2026-11-01"})).version
+    done = store.apply(SporeApply(op="update", origin_key=KEY, args={"next": ""},
+                                  expected_version=v, postcondition={"next": ""}))
+    assert done.outcome == "applied" and done.spore["next"] is None
+
+
+def test_a_store_that_is_not_utf8_is_a_store_error(store):
+    store.path.write_bytes(b'{"spores": ["\xff"]}')
+    with pytest.raises(SporeError) as caught:
+        _seed(store)
+    assert not isinstance(caught.value, ApplyRefused)
+
+
+def test_a_spore_id_is_checked_against_a_deleted_spore_too(store):
+    seeded = _seed(store)
+    store.apply(SporeApply(op="delete", origin_key=KEY, expected_version=seeded.version))
+    with pytest.raises(ApplyRefused, match="spore_id"):
+        store.apply(SporeApply(op="delete", origin_key=KEY, spore_id="spore-999",
+                               expected_version=seeded.version))
+
+
+@pytest.mark.parametrize("args", [{"kind": "done", "today": "2026-10-10"},
+                                  {"kind": "done", "now": "2026-10-10T00:00:00Z"}])
+def test_a_mistyped_clock_arg_is_refused(store, args):
+    seeded = _seed(store)
+    with pytest.raises(ApplyRefused):
+        store.apply(SporeApply(op="descend", origin_key=KEY, args=args,
+                               expected_version=seeded.version,
+                               postcondition={"status": "resolved", ("resolution", "kind"): "done"}))

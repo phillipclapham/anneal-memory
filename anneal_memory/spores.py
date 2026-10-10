@@ -252,13 +252,15 @@ def _full_fsync(fd: int) -> None:
 
 def _fsync_dir(dir_path: Path) -> None:
     """Flush the directory so the rename itself is durable (:func:`_full_fsync`).
-    A platform that cannot open a directory (Windows) or a filesystem that cannot
-    flush one is skipped; a flush that fails raises, after the rename: the write is
-    in place, so a retry finds it."""
+    Windows (which cannot open a directory) or a filesystem that cannot flush one is
+    skipped; any other failure raises, after the rename: the write is in place, so a
+    keyed retry finds it."""
     try:
         fd = os.open(dir_path, os.O_RDONLY)
     except OSError:
-        return
+        if os.name == "nt":
+            return
+        raise
     try:
         _full_fsync(fd)
     except OSError as exc:
@@ -462,7 +464,7 @@ def _stored_form(path: tuple[str, ...], value: object) -> object:
         return normalize_spore_field(value) if value else ""
     if name == "disposition" and (value is None or isinstance(value, str)):
         return (normalize_spore_field(value) if value else "") or _MISSING
-    if name == "pointer" and (value is None or isinstance(value, str)):
+    if name in ("pointer", "next") and (value is None or isinstance(value, str)):
         return value or None
     return value
 
@@ -577,6 +579,10 @@ class SporeStore:
                 "resolved": [],
                 "schema_version": SPORE_SCHEMA_VERSION,
             }
+        except UnicodeDecodeError as e:
+            raise SporeError(
+                f"{self.path} is not UTF-8 ({e}); refusing to proceed so recoverable "
+                f"open loops aren't overwritten — inspect it by hand.") from e
         except json.JSONDecodeError as e:
             raise SporeError(
                 f"{self.path} is not valid JSON ({e}); refusing to proceed so "
@@ -865,8 +871,10 @@ class SporeStore:
             raise ValueError("now must be timezone-aware (got a naive datetime).")
         spore_id = item["id"]
         registry = self._deleted(data)
-        data["spores"] = [r for r in data["spores"] if r.get("id") != spore_id]
-        data["resolved"] = [r for r in data["resolved"] if r.get("id") != spore_id]
+        # By identity, never by id: under id drift another spore can share the id
+        # (L3 r1 codex HIGH).
+        data["spores"] = [r for r in data["spores"] if r is not item]
+        data["resolved"] = [r for r in data["resolved"] if r is not item]
         registry.append({
             "id": spore_id,
             "origin_key": item.get("origin_key"),
@@ -932,6 +940,11 @@ class SporeStore:
         missing = sorted(_APPLY_REQUIRED.get(op, frozenset()) - set(args))
         if missing:
             raise ValueError(f"apply {op}: missing args {missing}.")
+        if args.get("today") is not None and (
+                not isinstance(args["today"], date) or isinstance(args["today"], datetime)):
+            raise ValueError(f"today must be a date (got {args['today']!r}).")
+        if args.get("now") is not None and not isinstance(args["now"], datetime):
+            raise ValueError(f"now must be a datetime (got {args['now']!r}).")
         _validate_origin_key(effect.origin_key)
         if effect.spore_id is not None and (not isinstance(effect.spore_id, str) or not effect.spore_id):
             raise ValueError("spore_id must be a non-empty string or None.")
@@ -1037,10 +1050,15 @@ class SporeStore:
 
         row = self._find_by_origin_key(data, key)
         gone = [r for r in self._deleted(data) if r.get("origin_key") == key]
-        if row is not None and effect.spore_id is not None and row.get("id") != effect.spore_id:
+        named = row if row is not None else (gone[0] if gone else None)
+        if named is not None and effect.spore_id is not None and named.get("id") != effect.spore_id:
             raise ValueError(
                 f"spore_id {effect.spore_id!r} is not the id of the spore carrying "
-                f"origin_key {key!r} ({row.get('id')!r}).")
+                f"origin_key {key!r} ({named.get('id')!r}).")
+        if row is not None and self._find_any(data, row["id"]) is not row:
+            # _find_any refuses a shared open id; this catches an id shared across sets.
+            raise SporeError(
+                f"spore id {row['id']!r} is shared by another spore (store drift — repair by hand).")
 
         if op == "add":
             if row is not None:
@@ -1063,8 +1081,11 @@ class SporeStore:
         if op != "delete" and not _failed_leaves(row, leaves):
             return SporeApplyResult("already", spore_id, row, version(row))
         found = version(row)
+        expect_disposition = args.pop("expect_disposition", _UNSET)
         if found != effect.expected_version or (
-                op != "delete" and row.get("status") == "resolved"):
+                op != "delete" and row.get("status") == "resolved") or (
+                not isinstance(expect_disposition, _Unset)
+                and row.get("disposition") != expect_disposition):
             return SporeApplyResult("precondition_lost", spore_id, row, found)
 
         before = copy.deepcopy(row)

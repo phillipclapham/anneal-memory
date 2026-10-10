@@ -2207,22 +2207,6 @@ def _publish_by_claim(tmp: Path, out: Path) -> None:
         raise
 
 
-def _own_stream_fd(st: os.stat_result) -> int | None:
-    """1 or 2 when ``st`` (an opened --output) is the file this process's stdout
-    or stderr writes to, else None. Asked of the opened descriptor, never of the
-    name: a name parser was beaten a new way in each of L3 r2-r5 (spore-813), and
-    a path stat on macOS devfs reports its own device for ``/dev/fd`` nodes."""
-    if not st.st_ino:  # an inode number of 0 identifies nothing
-        return None
-    for fd in (1, 2):
-        try:
-            if os.path.samestat(st, os.fstat(fd)):
-                return fd
-        except OSError:
-            continue
-    return None
-
-
 def _is_named_sink(fd: int) -> bool:
     """True when ``fd`` is a FIFO, the null device or a terminal: the only
     existing outputs written in place. A device class is not enough: a block
@@ -2271,11 +2255,12 @@ def _write_text_no_clobber(text: str, out: Path) -> None:
     file to clobber, so it is written in place, as the shell's noclobber (``set -C``)
     allows ``>/dev/null`` (L2 r1: the refusal had broken ``-o /dev/stdout`` and pipes).
     It is opened without create or truncate and checked on the open descriptor,
-    so a regular file put there in between is refused, never truncated. A name
-    that opens to this process's stdout or stderr (``/dev/stdout``, ``/dev/fd/1``;
-    see :func:`_own_stream_fd`), even a regular file a shell redirected it to, is
-    written through that stream's own descriptor, so a ``>>`` redirect keeps its
-    append and offset (L3 r1, complement + codex).
+    so a regular file put there in between is refused, never truncated. The rule
+    is the name's, as the shells' noclobber has it (bash ``set -C`` and zsh both
+    refuse ``>/dev/stdout`` when stdout is redirected to a file, measured 10-10):
+    ``-o /dev/stdout`` writes to a terminal or pipe and is refused when stdout is a
+    file. An exception for our own streams was beaten a new way in L3 r2-r6 and is
+    deleted (spore-813).
     """
     try:
         dest = _pin_parent(out)
@@ -2294,16 +2279,8 @@ def _write_text_no_clobber(text: str, out: Path) -> None:
             raise
         try:
             with fh:  # owns the descriptor from here
-                own = _own_stream_fd(os.fstat(fh.fileno()))
-                refuse = own is None and not _is_named_sink(fh.fileno())
-                if own is not None:
-                    # Through our own descriptor: keeps a >> redirect's append
-                    # and offset, where writing the reopened one would not.
-                    with contextlib.suppress(Exception):
-                        (sys.stdout if own == 1 else sys.stderr).flush()
-                    with os.fdopen(os.dup(own), "w", encoding="utf-8") as stream:
-                        stream.write(text)
-                elif not refuse:
+                refuse = not _is_named_sink(fh.fileno())
+                if not refuse:
                     fh.write(text)
         except (ValueError, OSError) as exc:
             print(f"Error: export to {out} failed: {exc}", file=sys.stderr)

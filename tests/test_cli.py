@@ -3021,22 +3021,24 @@ class TestTextExportsNeverOverwrite:
 
 
     @pytest.mark.skipif(os.name != "posix", reason="/dev/stdout is POSIX")
-    @pytest.mark.parametrize("name", ["/dev/stdout", "/dev/fd/1", "/dev/fd/0000000001"])
+    @pytest.mark.skipif(os.name != "posix", reason="/dev/stdout is POSIX")
     @pytest.mark.parametrize("cmd,fmt", WRITERS)
-    def test_dev_stdout_redirected_to_a_file_is_written_and_appends(self, db, tmp_path, cmd, fmt, name):
-        """L3 r1 (run): -o /dev/stdout > file was refused (the reopen saw a regular
-        file); written through fd 1 it keeps a >> redirect's earlier content."""
+    def test_dev_stdout_is_a_pipe_sink_and_a_redirected_file_is_refused(self, db, tmp_path, cmd, fmt):
+        """L2 r1: -o /dev/stdout must still write to a pipe. Redirected to a file it
+        is that file, refused as bash set -C and zsh noclobber refuse >/dev/stdout
+        (L3 r6: the own-stream exception it replaces clobbered through 1<> and
+        hard links)."""
+        argv = [sys.executable, "-m", "anneal_memory.cli", "--db", db, cmd, "--format", fmt, "--output", "/dev/stdout"]
+        piped = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert piped.returncode == 0, piped.stderr
+        assert "Episode one" in piped.stdout
         target = tmp_path / "redirected.out"
         target.write_bytes(b"PRE\n")
-        with open(target, "ab") as fh:
-            result = subprocess.run(
-                [sys.executable, "-m", "anneal_memory.cli", "--db", db, cmd, "--format", fmt, "--output", name],
-                stdout=fh, stderr=subprocess.PIPE, text=True,
-            )
-        assert result.returncode == 0, result.stderr
-        body = target.read_bytes()
-        assert body.startswith(b"PRE\n")
-        assert b"Episode one" in body
+        with open(target, "r+b") as fh:  # 1<> : open without truncating
+            redirected = subprocess.run(argv, stdout=fh, stderr=subprocess.PIPE, text=True)
+        assert redirected.returncode == 1
+        assert "never overwrites" in redirected.stderr
+        assert target.read_bytes() == b"PRE\n"
 
     @pytest.mark.parametrize("fmt", ["json", "dot"])
     @pytest.mark.parametrize("min_strength", [0.0, 99.0])
@@ -3134,7 +3136,7 @@ class TestTextExportsNeverOverwrite:
         assert exc.value.code == 1
         captured = capsys.readouterr()
         assert "Error: export to" in captured.err and "Traceback" not in captured.err
-        assert captured.out == ""  # L3 r5 (codex): the zero-padded name wrote to stdout
+        assert captured.out == ""  # L3 r5 (codex): a zero-padded name once wrote to stdout
 
 
 # -- cmd_prepare_wrap tests --

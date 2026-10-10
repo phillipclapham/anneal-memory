@@ -447,7 +447,7 @@ class TestResolve:
         data = json.loads(store.path.read_text())
         data["resolved"].append(dict(data["spores"][0], status="resolved"))
         store.path.write_text(json.dumps(data))
-        with pytest.raises(SporeError, match="already exists in the resolved"):
+        with pytest.raises(SporeError, match="both open and resolved"):
             store.descend("spore-001", kind="done", today=T0)
 
 
@@ -1181,3 +1181,73 @@ class TestOriginR2:
         assert store.backfill_origin_keys() == 1
         key = store.get("spore-001")["origin_key"]
         assert isinstance(key, str) and len(key) == 32
+
+
+class TestDuplicateOpenId:
+    """Two open spores sharing an id (store drift): every mutator refuses rather
+    than writing to one copy, whatever version the caller read (levain K2a r3)."""
+
+    def _drifted(self, store):
+        store.add(type="task", text="first", today=T0)
+        data = json.loads(store.path.read_text())
+        dup = dict(data["spores"][0])
+        dup["text"] = "second copy"
+        dup["origin_key"] = "f" * 32
+        data["spores"].append(dup)
+        store.path.write_text(json.dumps(data))
+        return SporeStore(store.path), data
+
+    @_NEEDS_LOCK
+    def test_a_guarded_update_matching_one_copy_is_refused(self, store):
+        s, data = self._drifted(store)
+        before = store.path.read_text()
+        for copy in data["spores"]:
+            with pytest.raises(SporeError, match="ambiguous"):
+                s.update("spore-001", text="edited", expected_version=spore_version(copy))
+        assert store.path.read_text() == before
+
+    def test_every_mutator_is_refused(self, store):
+        s, _ = self._drifted(store)
+        before = store.path.read_text()
+        for call in (
+            lambda: s.touch("spore-001"),
+            lambda: s.update("spore-001", text="x"),
+            lambda: s.descend("spore-001", kind="done", today=T0),
+            lambda: s.ascend("spore-001", kind="pattern", ref="my_pattern", today=T0),
+        ):
+            with pytest.raises(SporeError, match="ambiguous"):
+                call()
+        assert store.path.read_text() == before
+
+    def test_the_refusal_comes_before_argument_checks(self, store):
+        s, _ = self._drifted(store)
+        with pytest.raises(SporeError, match="ambiguous"):
+            s.descend("spore-001", kind="answered", today=T0)  # an invalid kind for a task
+
+    def test_a_unique_id_in_a_drifted_store_still_writes(self, store):
+        s, _ = self._drifted(store)
+        s.add(type="task", text="other", today=T0)
+        other = [x for x in json.loads(store.path.read_text())["spores"] if x["text"] == "other"][0]
+        s.update(other["id"], text="other edited")
+        assert SporeStore(store.path).get(other["id"])["text"] == "other edited"
+
+    @pytest.mark.parametrize("call", ["touch", "update", "descend", "ascend"])
+    def test_an_id_both_open_and_resolved_is_refused(self, store, call):
+        store.add(type="task", text="a", today=T0)
+        data = json.loads(store.path.read_text())
+        gone = dict(data["spores"][0])
+        gone["origin_key"] = "e" * 32
+        gone["status"] = "resolved"
+        gone["resolution"] = {"direction": "descend", "kind": "done", "ref": None, "on": "2026-01-01", "at": "2026-01-01T00:00:00+00:00"}
+        data["resolved"].append(gone)
+        store.path.write_text(json.dumps(data))
+        s = SporeStore(store.path)
+        before = store.path.read_text()
+        with pytest.raises(SporeError, match="both open and resolved"):
+            {
+                "touch": lambda: s.touch("spore-001"),
+                "update": lambda: s.update("spore-001", text="x"),
+                "descend": lambda: s.descend("spore-001", kind="done", today=T0),
+                "ascend": lambda: s.ascend("spore-001", kind="pattern", ref="p", today=T0),
+            }[call]()
+        assert store.path.read_text() == before

@@ -581,10 +581,23 @@ class SporeStore:
 
     @staticmethod
     def _find_open(data: dict, spore_id: str) -> SporeDict | None:
-        for item in data.get("spores", []):
-            if item.get("id") == spore_id:
-                return cast("SporeDict", item)
-        return None
+        """The one open spore with ``spore_id``. Two open spores sharing an id is
+        store drift: a write would land on one copy while a caller's
+        ``expected_version`` may describe the other, so it is refused here, the
+        lookup every id-addressed mutator goes through. An id that is open and
+        also resolved is refused the same way."""
+        matches = [item for item in data.get("spores", []) if item.get("id") == spore_id]
+        if len(matches) > 1:
+            raise SporeError(
+                f"{len(matches)} open spores share id {spore_id!r}; refusing to "
+                f"write to an ambiguous id (store drift — repair by hand)."
+            )
+        if matches and any(r.get("id") == spore_id for r in data.get("resolved", [])):
+            raise SporeError(
+                f"spore {spore_id!r} is both open and resolved; refusing to write to "
+                f"an ambiguous id (store drift — repair by hand)."
+            )
+        return cast("SporeDict", matches[0]) if matches else None
 
     @staticmethod
     def _find_by_origin_key(data: dict, origin_key: str) -> SporeDict | None:
@@ -1045,6 +1058,8 @@ class SporeStore:
         would silently nuke the dup). ``at`` is a precise UTC instant so a wrap can
         later consume "what ascended THIS session", not merely this date."""
         spore_id = item["id"]
+        # Defence in depth: every public caller already passed _find_open, which
+        # refuses both drift shapes below; kept for any future direct caller.
         matches = [s for s in data["spores"] if s.get("id") == spore_id]
         if len(matches) != 1:
             raise SporeError(
